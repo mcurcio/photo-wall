@@ -53,7 +53,7 @@ struct pw_screen {
     struct xdg_surface *xdg;
     struct xdg_toplevel *toplevel;
     struct wp_viewport *viewport;
-    struct wl_buffer *black;               /* attached once, by the first configure */
+    struct wl_buffer *black;               /* by the first configure, and a present with no ground */
     bool black_attached, configured, closed;
     int32_t pending_width, pending_height, width, height;
     uint32_t planes;
@@ -61,6 +61,16 @@ struct pw_screen {
     struct wl_subsurface *sub[PW_SCREEN_PLANES];
     struct wp_alpha_modifier_surface_v1 *alpha[PW_SCREEN_PLANES];
     struct pw_picture *shown[PW_SCREEN_PLANES];   /* each sub-surface's picture in the last present */
+    /* What each sub-surface was last sent, so a present sends only what changed (a stacking or
+     * position request dirties the parent's sub-surface order, which Weston answers by damaging and
+     * repainting below the planes): its position, buffer transform (-1: none yet) and multiplier
+     * (0: none yet, never a valid strength). Reset when the sub-surface is made. */
+    int32_t at_x[PW_SCREEN_PLANES], at_y[PW_SCREEN_PLANES], transform[PW_SCREEN_PLANES];
+    uint32_t multiplier[PW_SCREEN_PLANES];
+    /* The screen's ground: the picture its own surface shows (NULL: the single-pixel black) and the
+     * buffer transform it was attached with. */
+    struct pw_picture *ground;
+    int32_t ground_transform;
     struct pw_screen *next;
 };
 struct pw_frame_client {
@@ -644,8 +654,10 @@ void pw_picture_destroy(struct pw_picture *p) {
     if (!p) return;
     struct pw_frame_client *c = p->client;
     for (struct pw_picture **at = &c->imported; *at; at = &(*at)->next) if (*at == p) { *at = p->next; break; }
-    for (struct pw_screen *s = c->screens; s; s = s->next)
+    for (struct pw_screen *s = c->screens; s; s = s->next) {
         for (uint32_t i = 0; i < PW_SCREEN_PLANES; i++) if (s->shown[i] == p) s->shown[i] = NULL;
+        if (s->ground == p) { s->ground = NULL; s->ground_transform = -1; }   /* attached again next */
+    }
     wl_buffer_destroy(p->buffer);
     flushed(c);
     free(p);
@@ -658,53 +670,89 @@ static bool showing(struct pw_picture *const *pictures, uint32_t count, const st
     for (uint32_t i = 0; i < count; i++) if (pictures[i] == p) return true;
     return false;
 }
+/* Sub-surface i made: stacked above the one below it (the screen's surface for 0) once, as nothing
+ * restacks the planes later (a present adds or removes them only at the top), and nothing sent yet. */
+static void plane_make(struct pw_screen *s, uint32_t i) {
+    struct pw_frame_client *c = s->client;
+    s->plane[i] = wl_compositor_create_surface(c->compositor);
+    s->sub[i] = wl_subcompositor_get_subsurface(c->subcompositor, s->plane[i], s->surface);
+    wl_subsurface_set_sync(s->sub[i]);
+    wl_subsurface_place_above(s->sub[i], i ? s->plane[i - 1] : s->surface);
+    s->alpha[i] = wp_alpha_modifier_v1_get_surface(c->alpha, s->plane[i]);
+    s->shown[i] = NULL;
+    s->at_x[i] = s->at_y[i] = INT32_MIN;
+    s->transform[i] = -1;
+    s->multiplier[i] = 0;
+}
+/* Whether `p` is one of `now`'s first `count` pictures or the ground `ground`. */
+static bool among(struct pw_picture *const *now, uint32_t count, const struct pw_picture *ground,
+                  const struct pw_picture *p) {
+    return p == ground || showing(now, count, p);
+}
 int64_t pw_screen_present(struct pw_screen *s, const struct pw_plane_state *planes, uint32_t count,
-    int32_t buffer_transform, const char *grant_id, const char *frame_tag, const char *picture_change) {
+    struct pw_picture *ground, int32_t buffer_transform, const char *grant_id, const char *frame_tag,
+    const char *picture_change) {
     if (!s || (count && !planes) || count > PW_SCREEN_PLANES || buffer_transform < 0 || buffer_transform > 3)
         return -2;
     struct pw_frame_client *c = s->client;
     for (uint32_t i = 0; i < count; i++)
         if (!planes[i].alpha || !planes[i].picture || !owned(c, planes[i].picture)) return -2;
+    if (ground && !owned(c, ground)) return -2;
     if (!tag_valid(c, grant_id, frame_tag, picture_change)) return -2;
     /* Read first: a configure dispatched after the planes' requests would commit them untagged. */
     if (pw_frame_client_dispatch(c) < 0) return -1;
     if (!s->configured) return -3;
     int slot = feedback_slot(c, s->surface);
     uint64_t sequence = c->tagged + 1;
-    for (; s->planes < count; s->planes++) {
-        uint32_t i = s->planes;
-        s->plane[i] = wl_compositor_create_surface(c->compositor);
-        s->sub[i] = wl_subcompositor_get_subsurface(c->subcompositor, s->plane[i], s->surface);
-        wl_subsurface_set_sync(s->sub[i]);
-        s->alpha[i] = wp_alpha_modifier_v1_get_surface(c->alpha, s->plane[i]);
-    }
+    for (; s->planes < count; s->planes++) plane_make(s, s->planes);
     struct pw_picture *now[PW_SCREEN_PLANES] = {0};
     for (uint32_t i = 0; i < count; i++) {
         const struct pw_plane_state *plane = &planes[i];
-        wl_subsurface_place_above(s->sub[i], i ? s->plane[i - 1] : s->surface);
-        wl_subsurface_set_position(s->sub[i], plane->x, plane->y);
-        wl_surface_attach(s->plane[i], plane->picture->buffer, 0, 0);
-        wl_surface_set_buffer_transform(s->plane[i], buffer_transform);
-        wl_surface_damage_buffer(s->plane[i], 0, 0, INT32_MAX, INT32_MAX);
-        wp_alpha_modifier_surface_v1_set_multiplier(s->alpha[i], plane->alpha);
+        /* Only what changed is sent: a fade's present is each plane's multiplier and commit. */
+        if (s->at_x[i] != plane->x || s->at_y[i] != plane->y) {
+            wl_subsurface_set_position(s->sub[i], plane->x, plane->y);
+            s->at_x[i] = plane->x; s->at_y[i] = plane->y;
+        }
+        if (s->shown[i] != plane->picture || s->transform[i] != buffer_transform) {
+            wl_surface_attach(s->plane[i], plane->picture->buffer, 0, 0);
+            if (s->transform[i] != buffer_transform) wl_surface_set_buffer_transform(s->plane[i], buffer_transform);
+            wl_surface_damage_buffer(s->plane[i], 0, 0, INT32_MAX, INT32_MAX);
+            s->transform[i] = buffer_transform;
+        }
+        if (s->multiplier[i] != plane->alpha) {
+            wp_alpha_modifier_surface_v1_set_multiplier(s->alpha[i], plane->alpha);
+            s->multiplier[i] = plane->alpha;
+        }
         /* The answer rides on what is presented: the topmost plane, never covered by the planes
          * below it (Weston 14 answers no feedback of a surface the planes cover, such as the
-         * screen's black under a full-screen opaque Frame, and keeps it). Asked before this
+         * screen's ground under a full-screen opaque Frame, and keeps it). Asked before this
          * sub-surface's commit, which caches it for the screen's commit, as it caches the rest. */
         if (i + 1 == count && !feedback_request(c, slot, s->surface, s->plane[i], sequence)) return -1;
         wl_surface_commit(s->plane[i]);
-        /* A showing begins when the last present did not show it (one release ends it). */
-        if (!showing(now, i, plane->picture) && !showing(s->shown, PW_SCREEN_PLANES, plane->picture))
-            plane->picture->held++;
         now[i] = plane->picture;
     }
     for (uint32_t i = count; i < s->planes; i++) {     /* the rest unmapped */
         wl_surface_attach(s->plane[i], NULL, 0, 0);
         wl_surface_commit(s->plane[i]);
     }
+    /* The ground: a picture the display controller can scan out under the planes, so Weston never
+     * needs its renderer for what the planes leave uncovered; NULL, the single-pixel black. */
+    int32_t ground_transform = ground ? buffer_transform : 0;
+    if (ground != s->ground || ground_transform != s->ground_transform) {
+        wl_surface_attach(s->surface, ground ? ground->buffer : s->black, 0, 0);
+        if (ground_transform != s->ground_transform) wl_surface_set_buffer_transform(s->surface, ground_transform);
+        wl_surface_damage_buffer(s->surface, 0, 0, INT32_MAX, INT32_MAX);
+    }
+    /* A showing begins when the last present did not show the picture (one release ends it). */
+    for (uint32_t i = 0; i <= count; i++) {
+        struct pw_picture *p = i < count ? now[i] : ground;
+        if (!p || (i < count ? among(now, i, NULL, p) : showing(now, count, p))) continue;   /* counted */
+        if (!among(s->shown, PW_SCREEN_PLANES, s->ground, p)) p->held++;
+    }
     memcpy(s->shown, now, sizeof now);
+    s->ground = ground; s->ground_transform = ground_transform;
     tag_send(c, s->surface, grant_id, frame_tag, picture_change);
-    /* No plane: the black is what is presented. */
+    /* No plane: the ground is what is presented. */
     if (!count && !feedback_request(c, slot, s->surface, s->surface, sequence)) return -1;
     c->tagged = sequence;
     wl_surface_commit(s->surface);
@@ -715,6 +763,7 @@ int64_t pw_screen_present(struct pw_screen *s, const struct pw_plane_state *plan
         wp_alpha_modifier_surface_v1_destroy(s->alpha[i]);
         wl_subsurface_destroy(s->sub[i]);
         wl_surface_destroy(s->plane[i]);
+        s->shown[i] = NULL;
     }
     s->planes = count;
     if (!flushed(c)) return -1;

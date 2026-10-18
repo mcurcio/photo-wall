@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from player.gpu import LINEAR, Gpu, GpuUnavailable, sand_modifier
+from player.gpu import LIBRARIES, LINEAR, Gpu, GpuUnavailable, sand_modifier
 
 ROOT = Path(__file__).resolve().parents[1]
 BENCH_DECODER_MODIFIER = 0x0700000000000004   # bench T4: v4l2slh265dec's NV12 output
@@ -67,3 +67,22 @@ def test_importing_the_device_and_the_decode_and_refusing_loads_no_native_librar
     loaded = subprocess.run([sys.executable, "-I", "-c", probe], cwd=ROOT, capture_output=True, text=True,
                             check=True, env={"PYTHONPATH": str(ROOT)})
     assert loaded.stdout.strip() == "[]"
+
+
+# The Debian package that ships each library a Gpu loads (player/gpu.py `LIBRARIES`).
+SHIPPED_BY = {"libgbm.so.1": "libgbm1", "libEGL.so.1": "libegl1", "libGLESv2.so.2": "libgles2"}
+
+
+def _player_depends() -> set[str]:
+    """photo-wall-player's Depends in debian/control, as package names."""
+    stanza = (ROOT / "debian" / "control").read_text().split("\nPackage: photo-wall-player\n", 1)[1]
+    depends = stanza.split("\n\n", 1)[0].split("Depends:", 1)[1].split("\nDescription:", 1)[0]
+    return {entry.split()[0] for entry in depends.replace("\n", " ").split(",") if entry.strip()}
+
+
+def test_the_player_package_depends_on_every_library_the_gpu_loads():
+    """The app root is built from the Player's Depends (debian-packaging/build-root.sh), so each
+    library player/gpu.py loads must come with a package the Player depends on: a root that lacks
+    one opens no GPU (the Pi tracer's app root had no libGLESv2)."""
+    assert set(LIBRARIES) <= set(SHIPPED_BY), "name the package of each library the Gpu loads"
+    assert {SHIPPED_BY[library] for library in LIBRARIES} <= _player_depends()

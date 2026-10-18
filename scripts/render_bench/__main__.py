@@ -1,21 +1,28 @@
 """`python -m scripts.render_bench --output HDMI-A-1 --photo P1 --photo P2 --photo P3 --photo P4
---video V.mp4 --out DIR [--soak SECONDS] [--budget unlimited]`: run the tracer (bead B6) and write
-DIR/moments.jsonl and DIR/verdict.json; exit 0 when the verdict passes, 1 when it fails, 2 when the
-bench could not run. `--budget unlimited` gives the renderer a budget it never meets (the budget
-mutation probe's run).
+--video V.mp4 --out DIR [--soak SECONDS] [--budget unlimited] [--weston-log FILE]`: run the tracer
+(bead B6) and write DIR/moments.jsonl and DIR/verdict.json; exit 0 when the verdict passes, 1 when
+it fails, 2 when the bench could not run. `--budget unlimited` gives the renderer a budget it never
+meets (the budget mutation probe's run): its glitch bits stay set until a full modeset, so run it
+last, or reboot after it.
 
-Run as root on the test Pi with Weston, the shell and the health client running and
-photo-wall-display-controller.service and the Player stopped. The bench is the controller and the
-app at once: it connects the shell's control socket and Weston's socket as `--user` (pw-display;
-the shell takes a control peer only with the controller's uid and grants this process by its pid,
-start time and uid) and keeps root for /dev/mem, debugfs and the KMS properties.
+Run as root on the test Pi with Weston (started with --debug), the shell and the health client
+running and photo-wall-display-controller.service and the Player stopped. The bench freezes
+`--freeze` (photo-wall-app-broker.service: it would launch the stopped Player again, whose health
+tint would cover the screen) through systemd's D-Bus API for the run and thaws it after. The bench
+is the controller and the app at once: it connects the shell's control socket and Weston's socket
+as `--user` (pw-display; the shell takes a control peer only with the controller's uid and grants
+this process by its pid, start time and uid) and keeps root for /dev/mem, debugfs and the KMS
+properties. `--weston-log` (default DIR/weston-drm-backend.log) is Weston's drm-backend debug
+stream recorded alongside the run (`weston-debug drm-backend`), read after it: the one witness of
+which framebuffers are Weston's composites (weston_log.py).
 
-Each loop turn (every refresh, sooner on a video's new frame) it presents the tracer's layers at
-the time through the Player's new path (player/plane_renderer.py) with the real PlaneScreens, Gpu,
-FitPass, StillDecode and VideoFrames, turns the screen when the step says, and ten times a second,
-once the last commit was presented, records a Moment: the strengths that commit must show
-(timeline.py `strengths_at` at its frame time), the kernel's planes, the pixel valve's status,
-whether a picture was finished or a video played, and the GPU's busy share."""
+Each loop turn (every refresh, sooner on a video's new frame) it first records a Moment, ten times
+a second, once the compositor has answered the newest commit presented (the kernel then holds that
+commit's planes): the strengths it must show (timeline.py `strengths_at` at its frame time), the
+kernel's planes, the pixel valve's status, whether a picture was being finished or a video played,
+and the GPU's busy share. Then it presents the tracer's layers at the time through the Player's new
+path (player/plane_renderer.py) with the real PlaneScreens, Gpu, FitPass, StillDecode and
+VideoFrames, prepares the layers about to start, and turns the screen when the step says."""
 from __future__ import annotations
 
 import argparse
@@ -33,12 +40,20 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Final
 
+from contracts.display_turn import hanging
 from contracts.models import PREPARE_SECONDS
 from scripts.render_bench import timeline
 from scripts.render_bench.controller import BenchController
 from scripts.render_bench.evidence import Moment, verdict
-from scripts.render_bench.kms_state import display_controller, kms_planes, read_properties
+from scripts.render_bench.kms_state import (
+    PlaneProperties,
+    display_controller,
+    kms_planes,
+    read_properties,
+    shown_planes,
+)
 from scripts.render_bench.registers import RegisterWatch
+from scripts.render_bench.weston_log import renderer_framebuffers
 
 WAYLAND_SOCKET: Final = Path("/run/photo-wall-display-wayland/wayland-0")
 GPU_STATS: Final = Path("/sys/devices/platform/axi/1002000000.v3d/gpu_stats")   # bench T2
@@ -63,7 +78,41 @@ def _arguments(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--user", default="pw-display", help="the user the shell's sockets are connected as")
     parser.add_argument("--state", help="the display controller's debugfs state (default: found by its driver)")
     parser.add_argument("--device", help="the display controller's card node (default: found by its driver)")
+    parser.add_argument("--weston-log", type=Path,
+                        help="Weston's drm-backend debug stream recorded alongside (default OUT/weston-drm-backend.log)")
+    parser.add_argument("--freeze", action="append",
+                        help="a systemd unit frozen for the run (default photo-wall-app-broker.service)")
     return parser.parse_args(argv)
+
+
+@contextmanager
+def _frozen(units: list[str]) -> Iterator[None]:
+    """`units` frozen (systemd's FreezeUnit, over the system bus) for the block, thawed after.
+    RuntimeError("bench_freeze") when one cannot be frozen."""
+    import gi
+    gi.require_version("Gio", "2.0")
+    from gi.repository import Gio, GLib
+    bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+
+    def call(method: str, unit: str) -> None:
+        bus.call_sync("org.freedesktop.systemd1", "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
+                      method, GLib.Variant("(s)", (unit,)), None, Gio.DBusCallFlags.NONE, 10_000, None)
+
+    frozen = []
+    try:
+        for unit in units:
+            try:
+                call("FreezeUnit", unit)
+            except GLib.Error as error:
+                raise RuntimeError("bench_freeze") from error
+            frozen.append(unit)
+        yield
+    finally:
+        for unit in frozen:
+            try:
+                call("ThawUnit", unit)
+            except GLib.Error as error:
+                print(f"thaw {unit}: {error.message}", file=sys.stderr)
 
 
 @contextmanager
@@ -172,6 +221,37 @@ class _Counting:
         self.fitter.black(target)
 
 
+class _CountingDevice:
+    """The Gpu, counting the uploads of stills' rows (GPU work too: a Moment's `drawing`)."""
+
+    def __init__(self, gpu) -> None:
+        self.gpu, self.uploads = gpu, 0
+
+    def __getattr__(self, name: str):
+        return getattr(self.gpu, name)
+
+    def upload(self, *args) -> None:
+        self.uploads += 1
+        self.gpu.upload(*args)
+
+
+class _Recording:
+    """PlaneScreens, noting the newest commit's sequence: a Moment is taken only once the compositor
+    answered that very commit (the kernel then shows its planes, and no later commit was made)."""
+
+    def __init__(self, screens) -> None:
+        self.screens, self.sequence = screens, 0
+
+    def __getattr__(self, name: str):
+        return getattr(self.screens, name)
+
+    def present(self, *args, **kwargs):
+        result = self.screens.present(*args, **kwargs)
+        if isinstance(result, int):
+            self.sequence = result
+        return result
+
+
 class _NoLuts:
     """The tracer's Frame has no paper profile, so no LUT is ever asked for."""
 
@@ -202,10 +282,12 @@ class _Bench:
         self.watch = RegisterWatch()
         self.gpu_busy = _gpu_busy()
         kms_planes(Path(args.state).read_text(), read_properties(args.device))     # readable before the run
+        self.properties = PlaneProperties(args.device)
         with _as_user(args.user):
             self.controller = BenchController(args.output)
-            self.screens = PlaneScreens(socket=str(WAYLAND_SOCKET))
+            self.screens = _Recording(PlaneScreens(socket=str(WAYLAND_SOCKET)))
         self.gpu = Gpu()
+        self.device = _CountingDevice(self.gpu)
         self.fitter = _Counting(FitPass(self.gpu.gl))
         self.frames: queue.SimpleQueue[Callable[[], None]] = queue.SimpleQueue()
         self.wake_read, self.wake_write = os.pipe()
@@ -217,7 +299,7 @@ class _Bench:
             return VideoFrames(path, scheduled)
 
         budget = ControllerBudget(planes=10**6, line_pixels=10**9) if args.budget == "unlimited" else PI5
-        self.renderer = PlaneRenderer(self.screens, self.gpu, self.fitter, _NoLuts(), stills=StillDecode,
+        self.renderer = PlaneRenderer(self.screens, self.device, self.fitter, _NoLuts(), stills=StillDecode,
                                       videos=videos, budget=budget, on_change=lambda output_id: None)
         self.tracer = timeline.tracer(args.output, photos, clip, origin=time.monotonic() + LEAD, fade=args.fade,
                                       hold=args.hold, soak=args.soak)
@@ -230,7 +312,8 @@ class _Bench:
         self.handed = False
         self.shown: set[str] = set()
         self.last = None                         # the newest "presented" answer
-        self.drawn = 0
+        self.work = (0, 0)                       # the fit pass's draws and the uploads, at the last moment
+        self.worked = False                      # whether the interval before the last moment saw work
 
     def _grant(self) -> None:
         """Grant the screen again (at the start, after a turn). The last presented answer was for
@@ -274,7 +357,7 @@ class _Bench:
                     self.handed = True
                 except RuntimeError:
                     pass
-            if now >= next_sample and self._sample(now):
+            if now >= next_sample and self._sample(now):     # before the present: it reads the commit answered
                 next_sample = now + SAMPLE
             self._present(now)
             ready = select.select([self.screens.fd, self.wake_read], [], [], REFRESH)[0]
@@ -291,38 +374,45 @@ class _Bench:
         self.shown = current
         locals_ = [LocalLayer(layer, None if layer.variant is None else self.files[layer.variant.sha256],
                               layer.position(now), layer.alpha(now)) for layer in layers]
-        for local in locals_:
-            if local.layer.start > now:
-                self.renderer.prepare(local, self.frame)
         shown = tuple(local for local in locals_ if local.layer.start <= now)
         result = self.renderer.present(OutputComposition(self.tracer.binding, shown, timebase=0.0), self.frame)
         if result.status == "presented":
             self.last = result
+        for local in locals_:                    # after the present: a due commit goes first
+            if local.layer.start > now:
+                self.renderer.prepare(local, self.frame)
 
     def _sample(self, now: float) -> bool:
-        """A Moment of the last presented commit, once the compositor says it is on screen and the
-        screen hangs as the step says; whether one was taken."""
+        """A Moment of the last presented commit, once the compositor answered that very commit
+        presented (its flip done: the kernel holds its planes) and the screen hangs as the step
+        says; whether one was taken. A picture's finish counts as drawing in the interval it was
+        started and the next (its GPU work runs on past its draw call: fenced, not waited for), and
+        while the renderer is still finishing."""
         screen = self.screens.screen(self.args.output)
         word = self.screens.presentation(self.args.output, now)
         if (not self.handed or self.last is None or screen is None or word is None or word.at is None
-                or word.at < self.last.presented_at):
+                or word.sequence != self.screens.sequence or word.at < self.last.presented_at):
             return False
         at = self.last.presented_at
         step = timeline.step_at(self.tracer, at)
         if screen.turn != step.turn:
             return False
-        planes = kms_planes(Path(self.args.state).read_text(), read_properties(self.args.device))
+        state = Path(self.args.state).read_text()
+        planes = kms_planes(state, self.properties.read(shown_planes(state)))
         playing = any(local.layer.variant is not None and local.layer.variant.duration is not None
                       for local in self.last.composition.layers)
-        drawing = playing or self.fitter.draws != self.drawn
-        self.drawn = self.fitter.draws
+        work = (self.fitter.draws, self.device.uploads)
+        worked = work != self.work
+        drawing = playing or worked or self.worked or self.renderer.finishing
+        self.work, self.worked = work, worked
         self.moments.append(Moment(at, step.name, timeline.strengths_at(self.tracer, at, screen.size), planes,
-                                   self.watch.sample(), drawing, self.gpu_busy()))
+                                   self.watch.sample(), drawing, self.gpu_busy(), hanging(screen.size, screen.turn),
+                                   timeline.ground_seen(self.tracer, at, screen.size)))
         return True
 
     def close(self) -> None:
         for closing in (self.renderer.close, self.controller.close, self.screens.close, self.gpu.close,
-                        self.watch.close):
+                        self.watch.close, self.properties.close):
             try:
                 closing()
             except Exception as error:   # noqa: BLE001 - every part is closed, the first error reported
@@ -336,20 +426,35 @@ def main(argv: list[str] | None = None) -> int:
         print("render_bench: four photos at least", file=sys.stderr)
         return 2
     args.out.mkdir(parents=True, exist_ok=True)
+    if args.budget == "unlimited":
+        print("render_bench: --budget unlimited sets the glitch bits until a full modeset: reboot after this run",
+              file=sys.stderr)
     try:
-        bench = _Bench(args)
-    except Exception as error:           # noqa: BLE001 - any setup failure means the bench could not run
+        with _frozen(args.freeze or ["photo-wall-app-broker.service"]):
+            try:
+                bench = _Bench(args)
+            except Exception as error:   # noqa: BLE001 - any setup failure means the bench could not run
+                print(f"render_bench: could not start: {error!r}", file=sys.stderr)
+                return 2
+            try:
+                moments = bench.run()
+            except Exception as error:   # noqa: BLE001 - a run cut short is not a verdict
+                print(f"render_bench: stopped: {error!r}", file=sys.stderr)
+                _write(args.out, bench.first, bench.moments, None)
+                return 2
+            finally:
+                bench.close()
+    except RuntimeError as error:        # bench_freeze: the broker would relaunch the Player
         print(f"render_bench: could not start: {error!r}", file=sys.stderr)
         return 2
+    time.sleep(1.0)                      # the drm-backend stream's last repaints written
+    log = args.weston_log or args.out / "weston-drm-backend.log"
     try:
-        moments = bench.run()
-    except Exception as error:           # noqa: BLE001 - a run cut short is not a verdict
-        print(f"render_bench: stopped: {error!r}", file=sys.stderr)
-        _write(args.out, bench.first, bench.moments, None)
-        return 2
-    finally:
-        bench.close()
-    result = verdict(bench.first, moments)
+        renderer = renderer_framebuffers(log.read_text(errors="replace"))
+    except OSError as error:
+        print(f"render_bench: no drm-backend stream: {error!r}", file=sys.stderr)
+        renderer = None
+    result = verdict(bench.first, moments, renderer)
     _write(args.out, bench.first, moments, result)
     print(json.dumps(asdict(result)), flush=True)
     return 0 if result.passed else 1

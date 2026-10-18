@@ -70,3 +70,18 @@ def test_present_refuses_past_the_screens_planes_before_asking_the_library(monke
     with pytest.raises(ValueError, match="present_planes"):
         screens.present(composition, {}, grant, "tag", None)
     assert library.calls == before
+
+
+def test_present_refuses_a_ground_not_laid_out_for_the_whole_screen_before_asking_the_library(monkeypatch):
+    """The screen's ground is the whole screen's picture as it is laid out (turned with the
+    screen): any other size, or a picture the screens never imported, is refused untouched."""
+    monkeypatch.setattr(plane_screen.ctypes, "CDLL", _Library)
+    screens = plane_screen.PlaneScreens("libfake.so")
+    library = screens._lib
+    screens._pictures.add(7)
+    grant = FrameGrant(uuid4(), 1, 1, "frame", True)
+    turned = Composition(Screen("HDMI-A-1", (480, 640), 90), ())
+    before = list(library.calls)
+    for ground in (plane_screen.ScreenPicture(7, (480, 640)), plane_screen.ScreenPicture(8, (640, 480))):
+        assert screens.present(turned, {}, grant, "tag", None, ground) == "picture_refused"
+    assert library.calls == before

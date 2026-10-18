@@ -180,3 +180,16 @@ def test_drawing_ignores_the_words_draws_over_frames_in_flight():
 def test_bounds_are_positive(bounds):
     with pytest.raises(ValueError):
         FramePacer(**bounds)
+
+
+def test_free_is_the_one_in_flight_rule_alone_so_a_late_answer_holds_nothing_after_it():
+    """A commit that draws nothing (player/plane_renderer.py) waits only for the last one's word:
+    after an answer 1.2 refreshes late, `ready`'s cadence slot holds the next frame a refresh
+    longer, `free` does not."""
+    pacer = FramePacer()
+    pacer.submitted(1, 10.0)
+    assert not pacer.free(10.0 + REFRESH)
+    assert pacer.free(10.0 + OVERDUE)                       # overdue frees it, as `ready`'s rule
+    pacer.answered(Word(1, 10.0 + 1.2 * REFRESH, REFRESH), None)
+    at = 10.0 + 1.3 * REFRESH
+    assert pacer.free(at) and not pacer.ready(at)

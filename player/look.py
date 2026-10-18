@@ -45,3 +45,16 @@ def next_change(composition: OutputComposition, at: float,
                 if now <= start < end:
                     times.append(start - composition.timebase)
     return min(times, default=None)
+
+
+def fade_end(composition: OutputComposition, at: float) -> float | None:
+    """When the fades seen at `at` are over: the latest end, in plan time, of a seen layer's fade
+    under way at `at` (the layers player/visibility.py sees at `at`, as `next_change` reads them);
+    None when no seen layer fades at `at`, or for a still composition."""
+    if composition.timebase is None:
+        return None
+    now = at + composition.timebase
+    seen = {local.layer.assignment_id for local in visible_now(look(composition, at).layers)}
+    ends = [end for local in composition.layers if local.layer.assignment_id in seen
+            for start, end in local.layer.fades() if start < now < end]
+    return max(ends, default=None)

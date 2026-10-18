@@ -1,5 +1,6 @@
 """The tracer bench's pure parts (scripts/render_bench): the plan and what each moment must show,
-the kernel's state dump, the glitch bits and the verdict."""
+the kernel's state dump, Weston's composites read from its drm-backend stream, the glitch bits and
+the verdict."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -12,10 +13,12 @@ from scripts.render_bench import timeline
 from scripts.render_bench.__main__ import _Bench
 from scripts.render_bench.controller import BenchController
 from scripts.render_bench.evidence import Moment, verdict
-from scripts.render_bench.kms_state import KmsPlane, driven_by, kms_planes
+from scripts.render_bench.kms_state import KmsPlane, driven_by, kms_planes, shown_planes
 from scripts.render_bench.registers import STICKY_GLITCH, RegisterSample, glitched
+from scripts.render_bench.weston_log import renderer_framebuffers
 
 FIXTURE = Path(__file__).parent / "fixtures" / "render_bench" / "kms-state.txt"
+WESTON_LOG = Path(__file__).parent / "fixtures" / "render_bench" / "weston-drm-backend.txt"
 SCREEN = (3840, 2160)
 
 
@@ -66,6 +69,15 @@ def test_mid_dissolve_is_one_and_the_share_and_mid_dip_is_its_srgb(plan):
     assert coming == {"dip-black": pytest.approx(1.0), "photo-3": pytest.approx(encode_srgb(0.6))}
 
 
+def test_the_ground_shows_unless_the_bottom_picture_covers_the_screen_at_full(plan):
+    dissolve, dip, overload = plan.steps[1], plan.steps[3], plan.steps[-1]
+    assert not timeline.ground_seen(plan, dissolve.start + 0.6, SCREEN)        # photo 1 at full beneath
+    assert not timeline.ground_seen(plan, dip.start + 0.3, SCREEN)             # the dip's black layer
+    assert timeline.ground_seen(plan, overload.start + 1, SCREEN)              # five at half strength
+    turned = next(step for step in plan.steps if step.turn == 90)
+    assert timeline.ground_seen(plan, turned.start + 1, (2160, 3840))         # a 16:9 Frame on a turned screen
+
+
 def test_the_overload_is_cut_to_the_budget(plan):
     overload = plan.steps[-1]
     strengths = timeline.strengths_at(plan, overload.start + 1, SCREEN)
@@ -98,6 +110,19 @@ def test_an_overlay_plane_comes_above_the_primary_by_zpos():
         (83, (0, 0), (3840, 2160), 0), (107, (0, 1313), (2160, 1215), 1)]
 
 
+def test_the_planes_shown_are_those_with_a_framebuffer():
+    assert shown_planes(FIXTURE.read_text()) == (83,)
+
+
+def test_westons_composites_are_the_framebuffers_its_renderer_drew_into():
+    """A mixed repaint borrows one renderer framebuffer (685) and applies the one it drew (683) to
+    the same plane; a render-only repaint applies its own (683); a plane-only repaint shows a
+    client's buffer (686), never Weston's."""
+    assert renderer_framebuffers(WESTON_LOG.read_text()) == {683, 685}
+    cut = WESTON_LOG.read_text().split("[atomic] applying output", 1)[0]
+    assert renderer_framebuffers(cut) == {685}             # a stream cut short: what it says so far
+
+
 def test_text_that_is_not_a_state_dump_is_refused():
     with pytest.raises(ValueError, match="^kms_state$"):
         kms_planes("hello\n", {})
@@ -111,7 +136,9 @@ def test_only_a_newly_set_glitch_bit_counts():
     assert glitched(set_before, RegisterSample(1.0, 0x420 | STICKY_GLITCH))
 
 
-PRIMARY = KmsPlane(83, 94, 686, (3840, 2160), (0, 0), 0, 1, 0xFFFF, "Pre-multiplied")
+RENDERER = frozenset({686})                 # Weston's composites in these moments
+COMPOSITE = KmsPlane(83, 94, 686, (3840, 2160), (0, 0), 0, 1, 0xFFFF, "Pre-multiplied")
+GROUND = KmsPlane(83, 94, 690, (3840, 2160), (0, 0), 0, 1, 0xFFFF, "Pre-multiplied")    # the Player's black
 FIRST = RegisterSample(0.0, 0x420)
 
 
@@ -120,40 +147,70 @@ def picture(alpha: float, zpos: int = 1, blend: str = "Pre-multiplied") -> KmsPl
 
 
 def moment(*planes: KmsPlane, expected=None, step: str = "dissolve", status: int = 0x420, drawing: bool = True,
-           gpu: float = 0.5) -> Moment:
+           gpu: float = 0.5, ground: bool = False) -> Moment:
+    """A moment showing `planes`; `ground`: the screen's ground must show, and does (GROUND first)."""
     expected = {"out": 1.0, "in": 0.3} if expected is None else expected
-    return Moment(10.0, step, expected, (PRIMARY, *planes), RegisterSample(1.0, status), drawing, gpu)
+    return Moment(10.0, step, expected, ((GROUND,) if ground else ()) + planes, RegisterSample(1.0, status), drawing,
+                  gpu, SCREEN, ground)
 
 
-GOOD = moment(picture(1.0, 1), picture(0.3, 2))
-OVERLOAD = moment(picture(1.0, 1), step="overload", expected={"top": 1.0})
+GOOD = moment(picture(1.0, 0), picture(0.3, 1))         # the outgoing photo shown directly on the primary
+OVERLOAD = moment(picture(0.5, 1), step="overload", expected={"top": 0.5}, ground=True)
 
 
 def test_a_run_that_shows_every_rule_passes():
-    assert verdict(FIRST, [GOOD, OVERLOAD, moment(picture(1.0), expected={"one": 1.0}, drawing=False, gpu=0.01)
-                           ]).passed
+    assert verdict(FIRST, [GOOD, OVERLOAD, moment(picture(1.0, 0), expected={"one": 1.0}, drawing=False, gpu=0.01)
+                           ], RENDERER).passed
+
+
+def test_a_picture_shown_directly_on_the_primary_is_a_picture_not_the_compositors():
+    """Planes only, the outgoing photo on the primary itself (it covers the screen, so no ground):
+    two pictures, both checked."""
+    assert verdict(FIRST, [GOOD, OVERLOAD], RENDERER).passed
+    off = moment(picture(0.5, 0), picture(0.3, 1))
+    assert verdict(FIRST, [off, OVERLOAD], RENDERER).failures == ("alpha at 10.000",)
+
+
+def test_the_ground_shows_on_the_bottom_plane_whenever_the_pictures_leave_the_screen_uncovered():
+    """A dip over the ground: the ground, then the picture at its strength. A ground missing (the
+    compositor's black) or a picture plane missing beneath a covered ground fails."""
+    dip = moment(picture(0.6, 1), expected={"in": 0.6}, ground=True)
+    assert verdict(FIRST, [dip, OVERLOAD], RENDERER).passed
+    no_ground = Moment(10.0, "dip", {"in": 0.6}, (picture(0.6, 1),), RegisterSample(1.0, 0x420), True, 0.5, SCREEN,
+                       True)
+    assert verdict(FIRST, [no_ground, OVERLOAD], RENDERER).failures == ("ground at 10.000",)
+
+
+def test_anything_weston_composited_fails_the_run():
+    mixed = moment(COMPOSITE, picture(0.3, 1), expected={"in": 0.3})
+    assert verdict(FIRST, [GOOD, mixed, OVERLOAD], RENDERER).failures == ("composited at 10.000",)
+
+
+def test_without_westons_composites_known_no_plane_can_be_judged():
+    assert verdict(FIRST, [GOOD, OVERLOAD]).failures == ("renderer_unknown",)
 
 
 @pytest.mark.parametrize(("bad", "check"), [
-    (moment(picture(1.0, 1), picture(0.3 + 2 / 255, 2)), "alpha"),
-    (moment(picture(1.0, 1)), "plane"),
-    (moment(picture(1.0, 1), picture(0.3, 2, "Coverage")), "blend"),
-    (moment(picture(1.0, 1), picture(0.3, 2), status=0x420 | 0x800), "glitch"),
-    (moment(picture(1.0, 1), picture(0.3, 2), drawing=False, gpu=0.2), "gpu"),
+    (moment(picture(1.0, 0), picture(0.3 + 2 / 255, 1)), "alpha"),
+    (moment(picture(1.0, 0)), "plane"),
+    (moment(picture(1.0, 0), picture(0.3, 1, "Coverage")), "blend"),
+    (moment(picture(1.0, 0), picture(0.3, 1), status=0x420 | 0x800), "glitch"),
+    (moment(picture(1.0, 0), picture(0.3, 1), drawing=False, gpu=0.2), "gpu"),
 ])
 def test_each_broken_rule_fails_the_run_and_names_its_first_moment(bad, check):
-    result = verdict(FIRST, [GOOD, bad, OVERLOAD])
+    result = verdict(FIRST, [GOOD, bad, OVERLOAD], RENDERER)
     assert not result.passed and result.failures == (f"{check} at 10.000",)
 
 
 def test_one_level_off_still_passes():
-    assert verdict(FIRST, [moment(picture(1.0, 1), picture(0.3 + 1 / 255, 2)), OVERLOAD]).passed
+    assert verdict(FIRST, [moment(picture(1.0, 0), picture(0.3 + 1 / 255, 1)), OVERLOAD], RENDERER).passed
 
 
 def test_a_run_that_could_not_see_a_failure_fails():
-    assert verdict(FIRST, []).failures == ("no_moments",)
-    assert verdict(FIRST, [GOOD]).failures == ("overload_unseen",)
-    assert verdict(RegisterSample(0.0, 0x420 | STICKY_GLITCH), [GOOD, OVERLOAD]).failures == ("glitch_blind",)
+    assert verdict(FIRST, [], RENDERER).failures == ("no_moments",)
+    assert verdict(FIRST, [GOOD], RENDERER).failures == ("overload_unseen",)
+    assert verdict(RegisterSample(0.0, 0x420 | STICKY_GLITCH), [GOOD, OVERLOAD], RENDERER).failures == (
+        "glitch_blind",)
 
 
 @pytest.mark.parametrize(("key", "measured"), sorted(timeline.T3_PLANE_ALPHA.items()))

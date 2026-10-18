@@ -1,7 +1,9 @@
 """The Player's new path through fakes of its five ports (player/plane_renderer.py): each picture is
 finished once for its Frame as it is now and finished again only when something its pixels depend
-on changes; a fade is a plane strength, never a draw; the commit is paced, cut to the controller's
-budget and tagged as the screen's grant asks."""
+on changes; a fade is a plane strength, never a draw; a picture is committed only once the GPU has
+finished it, a still is finished in steps, at most one a refresh, and not during a fade it is not
+needed in; every commit shows the screen's ground; the commit is made as soon as the last is
+answered, cut to the controller's budget and tagged as the screen's grant asks."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
@@ -20,7 +22,7 @@ from player.decode import StillPicture
 from player.geometry import encode_srgb
 from player.gpu import LINEAR, NV12, XR24, DmabufFrame, Target
 from player.pacing import DEFAULT_REFRESH, Word
-from player.plane_renderer import VIDEO_TARGETS, FrameOnScreen, PlaneRenderer
+from player.plane_renderer import BAND_BYTES, VIDEO_TARGETS, FrameOnScreen, PlaneRenderer
 from player.plane_screen import ScreenPicture
 from player.planes import Composition, Screen, plane_strength
 from player.rendering import LocalLayer, OutputComposition
@@ -52,8 +54,10 @@ class FakeScreens:
     admitted: bool | None = True
     operations: object = None
     answer: bool = True
+    latency: float = 0.0            # seconds from a commit to its presentation
     busy_handles: set[int] = field(default_factory=set)
     commits: list[tuple[Composition, dict, str, int | None]] = field(default_factory=list)
+    grounds: list = field(default_factory=list)          # each commit's ground
     forgotten: list[int] = field(default_factory=list)
     imported: int = 0
     _sequence: int = 0
@@ -81,24 +85,32 @@ class FakeScreens:
     def forget(self, picture):
         self.forgotten.append(picture.handle)
 
-    def present(self, composition, pictures, grant, tag, picture_change):
+    def present(self, composition, pictures, grant, tag, picture_change, ground=None):
         self._sequence += 1
         self._committed_at = self.clock()
         self.commits.append((composition, dict(pictures), tag, picture_change))
+        self.grounds.append(ground)
         return self._sequence
 
     def presentation(self, output_id, now):
-        if not self._sequence or not self.answer:
+        if not self._sequence or not self.answer or now < self._committed_at + self.latency:
             return None
-        return Word(self._sequence, self._committed_at, DEFAULT_REFRESH)
+        return Word(self._sequence, self._committed_at + self.latency, DEFAULT_REFRESH)
 
 
 @dataclass
 class FakeDevice:
+    """The Gpu as the renderer uses it: each fence signals at once unless `hold` (then it waits for
+    `signal`)."""
     made: int = 0
     freed: list[int] = field(default_factory=list)
-    uploads: int = 0
+    textures: int = 0
+    uploads: list[tuple[int, int]] = field(default_factory=list)    # each upload's rows
     imports: list[int] = field(default_factory=list)
+    hold: bool = False
+    fences: int = 0
+    pending: set[int] = field(default_factory=set)
+    forgotten: set[int] = field(default_factory=set)
 
     def target(self, size, *, opaque):
         self.made += 1
@@ -107,9 +119,12 @@ class FakeDevice:
     def free(self, target):
         self.freed.append(target.framebuffer)
 
-    def upload(self, size, stride, pixels):
-        self.uploads += 1
-        return 500 + self.uploads
+    def texture(self, size):
+        self.textures += 1
+        return 500 + self.textures
+
+    def upload(self, texture, size, stride, pixels, rows):
+        self.uploads.append(rows)
 
     def delete_texture(self, texture):
         pass
@@ -121,8 +136,20 @@ class FakeDevice:
     def forget_frames(self, fds):
         pass
 
-    def flush(self):
-        pass
+    def fence(self):
+        self.fences += 1
+        if self.hold:
+            self.pending.add(self.fences)
+        return self.fences
+
+    def signalled(self, fence):
+        return fence not in self.pending
+
+    def forget_fence(self, fence):
+        self.forgotten.add(fence)
+
+    def signal(self):
+        self.pending.clear()
 
 
 @dataclass
@@ -137,9 +164,12 @@ class FakeFitter:
         self.blacks.append(target.framebuffer)
 
 
+@dataclass
 class FakeStill:
+    size: tuple[int, int] = (1920, 1080)
+
     def result(self):
-        return StillPicture((1920, 1080), 1920 * 4, b"", False)
+        return StillPicture(self.size, self.size[0] * 4, b"", False)
 
     def close(self):
         pass
@@ -183,10 +213,15 @@ class Rig:
         self.screens = FakeScreens(self.clock, **screens)
         self.device, self.fitter = FakeDevice(), FakeFitter()
         self.videos: list[FakeVideo] = []
+        self.stills: list[Path] = []
         self.changes: list[str] = []
         self.renderer = PlaneRenderer(self.screens, self.device, self.fitter, NoLuts(),
-                                      stills=lambda path: FakeStill(), videos=self._video,
+                                      stills=self._still, videos=self._video,
                                       on_change=self.changes.append, clock=self.clock)
+
+    def _still(self, path):
+        self.stills.append(path)
+        return FakeStill()
 
     def _video(self, path, on_frame):
         video = FakeVideo(on_frame)
@@ -196,6 +231,24 @@ class Rig:
     def present(self, *layers: LocalLayer, frame: FrameOnScreen | None = None, timebase: float = 0.0):
         frame = frame or FrameOnScreen(binding(), FULL)
         return self.renderer.present(OutputComposition(frame.binding, layers, timebase=timebase), frame)
+
+    def ready(self, *layers: LocalLayer, frame: FrameOnScreen | None = None) -> int:
+        """Prepare `layers` a refresh at a time until each is prepared: the refreshes it took."""
+        frame = frame or FrameOnScreen(binding(), FULL)
+        for refreshes in range(1, 200):
+            if all(self.renderer.prepare(local, frame).status == "prepared" for local in layers):
+                return refreshes
+            self.clock.tick()
+        raise AssertionError("never prepared")
+
+    def settle(self, *layers: LocalLayer, frame: FrameOnScreen | None = None, timebase: float = 0.0):
+        """Present `layers` a refresh at a time until a present answers "presented"."""
+        for _ in range(200):
+            result = self.present(*layers, frame=frame, timebase=timebase)
+            if result.status == "presented":
+                return result
+            self.clock.tick()
+        raise AssertionError("never presented")
 
     def strengths(self, commit: int = -1) -> list[tuple[str, float]]:
         """Each committed plane's assignment and strength, to 9 places (full strength over black is
@@ -228,7 +281,7 @@ def prepared_video(rig: Rig, clip: LocalLayer) -> FakeVideo:
     assert rig.renderer.prepare(clip, frame).status == "pending"
     decode = rig.videos[-1]
     decode.push(1)
-    assert rig.renderer.prepare(clip, frame).status == "prepared"
+    rig.ready(clip)
     return decode
 
 
@@ -237,14 +290,17 @@ def test_a_dissolve_draws_each_still_once_and_commits_the_plane_strengths():
     is its alpha (over a picture) and whose outgoing photo stays at full."""
     rig = Rig()
     outgoing, incoming = photo("out", start=0, end=200), photo("in", start=100, fade_in=1.0)
+    rig.ready(outgoing, incoming)
+    start, times = rig.clock.now, []
     for _ in range(60):
-        result = rig.present(outgoing, incoming, timebase=100.0)
+        times.append(rig.clock.now)
+        result = rig.present(outgoing, incoming, timebase=100.0 - start)
         assert result.status == "presented"
         rig.clock.tick()
     assert len(rig.fitter.draws) == 2
     assert len(rig.screens.commits) == 60
     for index, (composition, _pictures, _tag, _change) in enumerate(rig.screens.commits):
-        alpha = incoming.layer.alpha(100.0 + index * FRAME)
+        alpha = incoming.layer.alpha(100.0 + times[index] - start)
         wanted = [("out", 1.0)] + ([("in", round(plane_strength(alpha, True), 9))] if alpha else [])
         assert rig.strengths(index) == wanted
 
@@ -252,7 +308,8 @@ def test_a_dissolve_draws_each_still_once_and_commits_the_plane_strengths():
 def test_a_dip_to_black_commits_the_srgb_strength():
     rig = Rig()
     leaving = photo("leaving", start=0, end=101, fade_out=1.0)
-    rig.present(leaving, timebase=100.5)
+    rig.ready(leaving)
+    rig.present(leaving, timebase=100.5 - rig.clock.now)
     assert rig.strengths() == [("leaving", pytest.approx(encode_srgb(leaving.layer.alpha(100.5))))]
     assert rig.strengths()[0][1] != pytest.approx(0.5)
 
@@ -278,7 +335,7 @@ def test_what_a_still_depends_on_finishes_it_again_and_nothing_else_does():
         before = len(rig.fitter.draws)
         change()
         rig.clock.tick()
-        assert rig.present(still, frame=frame).status == "presented"
+        rig.settle(still, frame=frame)
         rig.clock.tick()
         rig.present(still, frame=frame)                 # nothing changed: no draw
         return len(rig.fitter.draws) - before
@@ -305,8 +362,7 @@ def test_a_covered_layer_keeps_its_picture():
     rig = Rig()
     under, over = photo("under", start=0), photo("over", start=1)
     frame = FrameOnScreen(binding(), FULL)
-    assert rig.renderer.prepare(under, frame).status == "prepared"
-    assert rig.renderer.prepare(over, frame).status == "prepared"
+    rig.ready(under, over)
     rig.present(under, over)
     assert rig.strengths() == [("over", 1.0)]
     assert rig.screens.forgotten == [] and rig.device.freed == []
@@ -317,6 +373,7 @@ def test_a_covered_layer_keeps_its_picture():
 def test_a_released_layer_is_freed_once_no_commit_shows_it():
     rig = Rig()
     gone, stays = photo("gone", start=0), photo("stays", start=1)
+    rig.ready(gone, stays)
     rig.present(gone)
     shown = rig.screens.commits[-1][1]["gone"]
     rig.renderer.release("gone")
@@ -329,6 +386,7 @@ def test_a_released_layer_is_freed_once_no_commit_shows_it():
     rig.clock.tick()
     rig.present(stays)
     assert rig.screens.forgotten == [shown.handle] and rig.device.freed == [shown.handle - 1000]
+    assert rig.screens.grounds[-1] is not None and rig.screens.grounds[-1].handle not in rig.screens.forgotten
 
 
 def test_a_video_frame_is_drawn_into_a_released_target_and_said():
@@ -342,10 +400,10 @@ def test_a_video_frame_is_drawn_into_a_released_target_and_said():
     assert rig.changes == [OUTPUT]
     assert rig.fitter.draws[-1][1] != first.handle - 1000      # not the shown one
     assert rig.fitter.draws[-1][0].source.external and rig.device.imports == [1, 2]
-    assert rig.videos[0].returned == [1]                # the older frame went back once drawn over
     rig.clock.tick()
     rig.present(clip)
     assert rig.screens.commits[-1][1]["clip"] != first
+    assert rig.videos[0].returned == [1]                # the older frame went back once replaced
 
 
 def test_a_busy_target_is_never_drawn_into():
@@ -354,20 +412,21 @@ def test_a_busy_target_is_never_drawn_into():
     prepared_video(rig, clip)
     rig.present(clip)                                   # target 1 shown
     rig.videos[0].push(2)
-    rig.videos[0].on_frame()                            # into target 2
-    rig.screens.busy_handles.add(1002)
-    rig.videos[0].push(3)
-    rig.videos[0].on_frame()                            # 1 shown, 2 busy: target 3
-    assert [target for _, target in rig.fitter.draws] == [1, 2, 3]
+    rig.videos[0].on_frame()                            # into target 3 (target 2: the ground)
     rig.screens.busy_handles.add(1003)
+    rig.videos[0].push(3)
+    rig.videos[0].on_frame()                            # 1 shown, 3 finished: target 4
+    assert [target for _, target in rig.fitter.draws] == [1, 3, 4]
+    rig.screens.busy_handles.add(1004)
     rig.videos[0].push(4)
-    rig.videos[0].on_frame()                            # every one of VIDEO_TARGETS shown or busy
-    assert len(rig.fitter.draws) == VIDEO_TARGETS and rig.changes == [OUTPUT, OUTPUT]
+    rig.videos[0].on_frame()                            # 1 shown, 3 busy, 4 finished: no target
+    assert len(rig.fitter.draws) == VIDEO_TARGETS
 
 
 def test_five_full_width_planes_are_cut_to_three_and_the_cut_are_absent():
     rig = Rig()
     layers = [photo("p0", start=0)] + [photo(f"p{index}", start=index, opacity=0.5) for index in range(1, 5)]
+    rig.ready(*layers)
     result = rig.present(*layers)
     assert result.status == "presented"
     assert [key for key, _ in rig.strengths()] == ["p2", "p3", "p4"]
@@ -404,6 +463,7 @@ def test_a_held_still_whose_play_position_moves_commits_once():
     picture, its placement and strength are the same, so nothing is committed again."""
     rig = Rig()
     still = photo("still", start=0)
+    rig.ready(still)
     for tick in range(30):
         rig.present(replace(still, position=tick * 0.043))
         rig.clock.tick()
@@ -415,16 +475,16 @@ def test_a_picture_finished_again_into_the_same_buffer_commits_again():
     the compositor gives the old handle (a freed buffer's id reused) is a new commit."""
     rig = Rig()
     still = photo("still", start=0)
-    rig.present(still)
+    rig.settle(still)
     rig.screens.import_picture = lambda target: ScreenPicture(4242, target.size)
     rig.clock.tick()
     rig.present(still)                                  # same key: no draw, no commit
     rig.screens.operations = neutral_operations(OUTPUT, 3, DisplayLight(200, .01))
     rig.clock.tick()
-    rig.present(still)
+    rig.settle(still)
     rig.screens.operations = neutral_operations(OUTPUT, 3, DisplayLight(300, .01))
     rig.clock.tick()
-    rig.present(still)
+    rig.settle(still)
     assert [commit[1]["still"].handle for commit in rig.screens.commits][1:] == [4242, 4242]
     assert len(rig.screens.commits) == 3
 
@@ -457,6 +517,7 @@ def test_a_video_no_commit_shows_finishes_no_frame():
     decode = prepared_video(rig, clip)
     rig.present(clip)
     cover = photo("cover", start=1)
+    rig.ready(cover)
     rig.clock.tick()
     rig.present(clip, cover)                            # covered: not in the commit
     assert [key for key, _ in rig.strengths()] == ["cover"]
@@ -468,6 +529,7 @@ def test_a_video_no_commit_shows_finishes_no_frame():
 def test_while_a_commit_is_in_flight_a_present_commits_nothing():
     rig = Rig(answer=False)
     outgoing, incoming = photo("out", start=0, end=200), photo("in", start=100, fade_in=1.0)
+    rig.ready(outgoing, incoming)
     first = rig.present(outgoing, incoming, timebase=100.2)
     rig.clock.tick()
     second = rig.present(outgoing, incoming, timebase=100.2)
@@ -489,7 +551,127 @@ def test_an_output_gone_or_a_refused_rectangle_fails_the_present():
 def test_presented_carries_the_drawn_composition_and_the_witness_tag():
     rig = Rig()
     still = photo("still", start=0)
+    rig.ready(still)
     result = rig.present(still)
-    assert result.presented_at == 0.0 and result.composition.layers[0].layer == still.layer
+    assert result.presented_at == rig.clock.now and result.composition.layers[0].layer == still.layer
     assert rig.screens.commits[-1][2] != f"candidate-{GRANT}"
     assert result.composition.layers[0] == replace(still, alpha=1.0)
+
+
+def test_every_commit_shows_the_screens_ground_laid_out_for_the_whole_screen():
+    """Beneath the planes the screen shows the Output's black picture of the whole screen as it is
+    laid out (turned with the screen), so the display controller can scan out what the planes leave
+    uncovered: the candidate's commit and each admitted one alike, one picture shared with a black
+    layer of the screen's size."""
+    rig = Rig(admitted=False)
+    still = photo("still", start=0)
+    rig.ready(still)
+    rig.present(still)
+    candidate = rig.screens.grounds[-1]
+    assert candidate is not None and candidate.size == (3840, 2160)
+    rig.screens.admitted = True
+    rig.clock.tick()
+    rig.present(still)
+    assert rig.screens.grounds[-1] == candidate
+    assert len(rig.fitter.blacks) == 1
+    black = LocalLayer(layer("black", presentation="black", variant=None, start=0), None, 0.0, 1.0)
+    assert rig.renderer.prepare(black, FrameOnScreen(binding(), FULL)).status == "prepared"
+    assert len(rig.fitter.blacks) == 1                  # the ground's own picture
+    rig.screens.screen_now = Screen(OUTPUT, (2160, 3840), 90)
+    rig.clock.tick()
+    rig.settle(still)
+    assert rig.screens.grounds[-1] == candidate         # laid out turned: the mode's own size
+
+
+def test_a_commit_is_made_as_soon_as_the_last_is_answered_even_after_a_late_one():
+    """A commit draws nothing, so a late answer (here 1.2 refreshes) does not push the next commit
+    to a later refresh: the next present after the answer commits."""
+    rig = Rig(latency=1.2 * FRAME)
+    outgoing, incoming = photo("out", start=0, end=200), photo("in", start=100, fade_in=1.0)
+    rig.ready(outgoing, incoming)
+    timebase = 100.2 - rig.clock.now
+    rig.present(outgoing, incoming, timebase=timebase)
+    rig.clock.now += 1.25 * FRAME                       # just after the answer
+    rig.present(outgoing, incoming, timebase=timebase)
+    assert len(rig.screens.commits) == 2
+
+
+def test_a_picture_is_committed_only_once_the_gpu_has_finished_it():
+    """A still's draw is fenced: until its fence signals the still is not prepared and nothing
+    shows it; a video's newer frame meanwhile leaves its finished one in the commits, so a fade
+    goes on."""
+    rig = Rig()
+    rig.device.hold = True
+    still = photo("still", start=0)
+    frame = FrameOnScreen(binding(), FULL)
+    for _ in range(20):
+        assert rig.renderer.prepare(still, frame).status == "pending"
+        rig.clock.tick()
+    assert len(rig.fitter.draws) == 1 and rig.renderer.finishing
+    rig.device.signal()
+    assert rig.renderer.prepare(still, frame).status == "prepared"
+    rig.device.hold = False
+    clip = video("clip", start=0, end=200)
+    over = photo("over", start=0, end=200, fade_in=10.0)
+    decode = prepared_video(rig, clip)
+    rig.ready(over)
+    rig.settle(clip)
+    first = rig.screens.commits[-1][1]["clip"]
+    rig.device.hold = True
+    decode.push(2)
+    decode.on_frame()                                   # drawn, not finished
+    for _ in range(3):
+        rig.clock.tick()
+        assert rig.present(clip, over, timebase=1.0).status == "presented"
+        assert rig.screens.commits[-1][1]["clip"] == first
+    commits = len(rig.screens.commits)
+    rig.device.signal()
+    rig.clock.tick()
+    rig.present(clip, over, timebase=1.0)
+    assert len(rig.screens.commits) == commits + 1 and rig.screens.commits[-1][1]["clip"] != first
+
+
+def test_a_still_is_finished_in_steps_at_most_one_a_refresh():
+    """A 4K still: its decode taken, its rows uploaded BAND_BYTES at a time, its draw: one step a
+    refresh over every layer, however often prepare is asked."""
+    rig = Rig()
+    rig.renderer = PlaneRenderer(rig.screens, rig.device, rig.fitter, NoLuts(), stills=lambda path: FakeStill((3840, 2160)),
+                                 videos=rig._video, clock=rig.clock)
+    first, second = photo("first", start=0), photo("second", start=1)
+    frame = FrameOnScreen(binding(), FULL)
+    bands = -(-3840 * 4 * 2160 // BAND_BYTES)
+    steps = []
+    for _ in range(2 * (bands + 2) + 2):
+        for _ in range(3):                              # asked three times a refresh
+            rig.renderer.prepare(first, frame)
+            rig.renderer.prepare(second, frame)
+        steps.append(len(rig.device.uploads) + len(rig.fitter.draws))
+        rig.clock.tick()
+    assert all(after - before <= 1 for before, after in zip([0, *steps], steps, strict=False))
+    assert len(rig.device.uploads) == 2 * bands
+    assert rig.device.uploads[:bands] == [(row, min(BAND_BYTES // (3840 * 4), 2160 - row))
+                                          for row in range(0, 2160, BAND_BYTES // (3840 * 4))]
+    assert rig.renderer.prepare(first, frame).status == "prepared"
+    assert rig.renderer.prepare(second, frame).status == "prepared"
+
+
+def test_a_still_not_needed_before_a_fade_under_way_ends_is_not_prepared_during_it():
+    """While a dissolve runs (plan 100 to 103), a still starting after it is neither decoded nor
+    finished; one starting within it is; after the fade the later one is prepared."""
+    rig = Rig()
+    outgoing, incoming = photo("out", start=0, end=200), photo("in", start=100, fade_in=3.0)
+    rig.ready(outgoing, incoming)
+    timebase = 100.1 - rig.clock.now
+    later, within_fade = photo("later", start=104), photo("within", start=102)
+    frame = FrameOnScreen(binding(), FULL)
+    decoded = len(rig.stills)
+    for _ in range(30):                                 # half a second into the fade
+        rig.present(outgoing, incoming, timebase=timebase)
+        assert rig.renderer.prepare(later, frame).status == "pending"
+        rig.renderer.prepare(within_fade, frame)
+        rig.clock.tick()
+    assert rig.stills[decoded:] == [Path("/media/within.jpg")]
+    assert rig.renderer.prepare(within_fade, frame).status == "prepared"
+    rig.clock.now += 3.0                                # the fade is over
+    rig.present(outgoing, incoming, timebase=timebase)
+    rig.ready(later)

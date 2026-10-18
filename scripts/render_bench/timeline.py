@@ -20,7 +20,7 @@ from contracts.models import FrameProfile, Layer, OutputBinding, Variant, stack_
 from contracts.photo_crop import CENTRED
 from player.controller_budget import PI5, within
 from player.look import look
-from player.planes import FrameLayers, Screen, compose
+from player.planes import Composition, FrameLayers, Screen, compose
 from player.rendering import LocalLayer, OutputComposition
 from player.visibility import visible_now
 
@@ -195,18 +195,26 @@ def layers_at(tracer: Tracer, at: float, lead: float = 0.0) -> tuple[Layer, ...]
     return tuple(layer for layer in tracer.layers if layer.start - lead <= at < layer.end)
 
 
-def strengths_at(tracer: Tracer, at: float, screen_size: tuple[int, int]) -> dict[str, float]:
-    """The plane strength each kept layer must have at plan time `at` (assignment id -> strength),
-    bottom to top: the layers player/look.py `look` and player/planes.py `compose` show on a
-    screen of `screen_size` as it hangs, cut to the Pi 5's controller budget
-    (player/controller_budget.py `within`), each at `expected_strength` of its drawn alpha over
-    what the nearest seen layer beneath it is (a media layer's picture, else black). Pure."""
+def _kept(tracer: Tracer, at: float, screen_size: tuple[int, int]) -> tuple[OutputComposition, Composition]:
+    """The tracer's layers looked at plan time `at` and the one screen's composition of them, cut
+    to the Pi 5's controller budget: the Player's own rules (player/look.py `look`,
+    player/planes.py `compose`, player/controller_budget.py `within`)."""
     shown = tuple(LocalLayer(layer, None, 0.0, 1.0) for layer in layers_at(tracer, at))
     looked = look(OutputComposition(tracer.binding, shown, timebase=0.0), at)
     profile = tracer.binding.profile
     placement = place(tracer.rectangle, screen_size, profile.width_px / profile.height_px)
     screen = Screen(tracer.binding.output_id, screen_size, step_at(tracer, at).turn)
     (kept,), _ = within(PI5, (compose(screen, [FrameLayers(FRAME_ID, placement, looked.layers)]),))
+    return looked, kept
+
+
+def strengths_at(tracer: Tracer, at: float, screen_size: tuple[int, int]) -> dict[str, float]:
+    """The plane strength each kept layer must have at plan time `at` (assignment id -> strength),
+    bottom to top: the layers player/look.py `look` and player/planes.py `compose` show on a
+    screen of `screen_size` as it hangs, cut to the Pi 5's controller budget
+    (player/controller_budget.py `within`), each at `expected_strength` of its drawn alpha over
+    what the nearest seen layer beneath it is (a media layer's picture, else black). Pure."""
+    looked, kept = _kept(tracer, at, screen_size)
     kept_ids = {plane.layer.layer.assignment_id for plane in kept.planes}
     strengths: dict[str, float] = {}
     beneath: Beneath = "black"
@@ -217,5 +225,18 @@ def strengths_at(tracer: Tracer, at: float, screen_size: tuple[int, int]) -> dic
     return strengths
 
 
+def ground_seen(tracer: Tracer, at: float, screen_size: tuple[int, int]) -> bool:
+    """Whether the screen's ground (the Player's black beneath the planes) shows at plan time `at`
+    on a screen of `screen_size` as it hangs: unless the bottom plane kept covers the whole screen
+    at full strength (the tracer's pictures are all opaque: JPEG photos, video and black), the
+    compositor shows the ground too. The bench's own rule of what covers, not the Player's. Pure."""
+    _looked, kept = _kept(tracer, at, screen_size)
+    if not kept.planes:
+        return True
+    bottom = kept.planes[0]
+    whole = (bottom.at.x, bottom.at.y, bottom.at.width, bottom.at.height) == (0, 0, *screen_size)
+    return not (whole and bottom.strength >= 1 - 1e-9)
+
+
 __all__ = ["FRAME_ID", "OVERLOAD_PICTURES", "T3_PLANE_ALPHA", "Beneath", "Media", "Step", "StepName", "Tracer",
-           "expected_strength", "layers_at", "step_at", "strengths_at", "tracer"]
+           "expected_strength", "ground_seen", "layers_at", "step_at", "strengths_at", "tracer"]

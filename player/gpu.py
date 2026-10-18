@@ -2,7 +2,8 @@
 .claude/runs/render-planes/s1-page.md): EGL on GBM over the V3D render node, one GLES 3 context
 current on the owning thread, render targets the display controller can scan out, and imports of
 the hardware video decoder's frames. Importing this module needs no native library: libgbm and
-EGL are loaded through ctypes, GLES 3 through PyOpenGL (libGLESv2), in `Gpu.__init__`.
+EGL are loaded through ctypes, GLES 3 through PyOpenGL (libGLESv2), in `Gpu.__init__`
+(`LIBRARIES` names them; the Player package depends on what ships them).
 
 Rules this module owns (one home each):
 - **The targets** (`Gpu.target`): LINEAR XR24 for an opaque picture, LINEAR AR24 (pre-multiplied
@@ -12,8 +13,12 @@ Rules this module owns (one home each):
 - **The decoder frame import** (`Gpu.import_frame`): NV12 SAND128 dmabufs as external textures,
   the column height in the modifier's parameter (`sand_modifier`; vc4_plane.c), BT.709 limited
   range; one EGLImage per decoder buffer, reused while that buffer is (bench T4).
-- **Ordering**: a draw is flushed (`flush`) before its target goes to the screen; the dmabuf's
-  implicit fences order the controller's read after the GPU's write.
+- **Ordering**: a draw is fenced (`fence`: the commands so far submitted, an EGL fence after them)
+  and its target goes to the screen only once the fence has signalled (`signalled`, which never
+  waits): a commit then never waits in the kernel on the GPU's write, so a picture still being
+  finished never holds a due commit.
+- **Uploads in rows** (`texture`, `upload`): a still's pixels reach its texture a band of rows at
+  a time, so no one call copies a whole 4K picture.
 
 Rules it does NOT own: what is drawn (player/fit_pass.py); decoding (player/decode.py); the screen
 (player/plane_screen.py).
@@ -60,6 +65,15 @@ _EGL_YUV_COLOR_SPACE_HINT_EXT: Final = 0x327B
 _EGL_SAMPLE_RANGE_HINT_EXT: Final = 0x327C
 _EGL_ITU_REC709_EXT: Final = 0x3280
 _EGL_YUV_NARROW_RANGE_EXT: Final = 0x3283
+# KHR_fence_sync
+_EGL_SYNC_FENCE_KHR: Final = 0x30F9
+_EGL_TIMEOUT_EXPIRED_KHR: Final = 0x30F5
+_EGL_CONDITION_SATISFIED_KHR: Final = 0x30F6
+
+_GBM: Final = "libgbm.so.1"
+_EGL: Final = "libEGL.so.1"
+LIBRARIES: Final = (_GBM, _EGL, "libGLESv2.so.2")
+"""The native libraries a Gpu loads: GBM and EGL through ctypes, GLES 3 through PyOpenGL."""
 
 
 class GpuUnavailable(RuntimeError):
@@ -172,7 +186,7 @@ class Gpu:
         self._ctypes = ctypes
         pointer, u32, u64 = ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint64
         try:
-            gbm = ctypes.CDLL("libgbm.so.1")
+            gbm = ctypes.CDLL(_GBM)
         except OSError as error:
             raise GpuUnavailable("gbm") from error
         for name, restype, argtypes in (
@@ -192,7 +206,7 @@ class Gpu:
             raise GpuUnavailable("gbm")
 
         try:
-            egl = ctypes.CDLL("libEGL.so.1")
+            egl = ctypes.CDLL(_EGL)
         except OSError as error:
             raise GpuUnavailable("egl") from error
         attribs = ctypes.POINTER(ctypes.c_int32)
@@ -222,6 +236,9 @@ class Gpu:
         self._create_image = extension("eglCreateImageKHR", pointer, pointer, pointer, u32, pointer,
                                        attribs)
         self._destroy_image = extension("eglDestroyImageKHR", u32, pointer, pointer)
+        self._create_sync = extension("eglCreateSyncKHR", pointer, pointer, u32, attribs)
+        self._wait_sync = extension("eglClientWaitSyncKHR", ctypes.c_int32, pointer, pointer, ctypes.c_int32, u64)
+        self._destroy_sync = extension("eglDestroySyncKHR", u32, pointer, pointer)
         self._display = platform_display(_EGL_PLATFORM_GBM_KHR, self._device, None)
         if not self._display or not egl.eglInitialize(self._display, None, None):
             self._display = None
@@ -315,26 +332,18 @@ class Gpu:
         if bo:
             self._gbm.gbm_bo_destroy(bo)
 
-    def upload(self, size: tuple[int, int], stride: int, pixels: bytes) -> int:
-        """A new GL_TEXTURE_2D RGBA8 texture of a decoded still (player/decode.py `StillPicture`),
-        `stride` bytes a row. RuntimeError("gpu_upload") on failure."""
+    def texture(self, size: tuple[int, int]) -> int:
+        """A new GL_TEXTURE_2D RGBA8 texture of `size`, its pixels undefined until `upload`.
+        RuntimeError("gpu_upload") on failure."""
         width, height = size
-        if not (_whole(width) and _whole(height) and width and height and _whole(stride)
-                and stride % 4 == 0 and stride >= width * 4
-                and len(pixels) >= stride * (height - 1) + width * 4):
+        if not (_whole(width) and _whole(height) and width and height):
             raise RuntimeError("gpu_upload")
         gl = self._gl
         texture = 0
         try:
             texture = int(gl.glGenTextures(1))
             gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
-            gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 4)
-            gl.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, stride // 4)
-            try:
-                gl.glTexImage2D(gl.GL_TEXTURE_2D, 0, gl.GL_RGBA8, width, height, 0, gl.GL_RGBA,
-                                gl.GL_UNSIGNED_BYTE, bytes(pixels))
-            finally:
-                gl.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, 0)
+            gl.glTexStorage2D(gl.GL_TEXTURE_2D, 1, gl.GL_RGBA8, width, height)
             self._sampled(gl.GL_TEXTURE_2D)
             gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
         except self._failures as error:
@@ -342,6 +351,31 @@ class Gpu:
                 delete_textures(gl, texture)
             raise RuntimeError("gpu_upload") from error
         return texture
+
+    def upload(self, texture: int, size: tuple[int, int], stride: int, pixels: bytes, rows: tuple[int, int]) -> None:
+        """Rows [first, first + count) of a decoded still (player/decode.py `StillPicture`: `size`,
+        `stride` bytes a row, RGBA) into `texture` (`texture`'s, of `size`), module rule. Only
+        those rows' bytes are copied. RuntimeError("gpu_upload") on failure."""
+        width, height = size
+        first, count = rows
+        if not (_whole(width) and _whole(height) and width and height and _whole(stride)
+                and stride % 4 == 0 and stride >= width * 4 and _whole(first) and _whole(count) and count
+                and first + count <= height and len(pixels) >= stride * (height - 1) + width * 4):
+            raise RuntimeError("gpu_upload")
+        gl = self._gl
+        band = pixels[first * stride:first * stride + stride * (count - 1) + width * 4]
+        try:
+            gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
+            gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 4)
+            gl.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, stride // 4)
+            try:
+                gl.glTexSubImage2D(gl.GL_TEXTURE_2D, 0, 0, first, width, count, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE,
+                                   bytes(band))
+            finally:
+                gl.glPixelStorei(gl.GL_UNPACK_ROW_LENGTH, 0)
+                gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+        except self._failures as error:
+            raise RuntimeError("gpu_upload") from error
 
     def delete_texture(self, texture: int) -> None:
         """Delete a texture `upload` made."""
@@ -391,9 +425,28 @@ class Gpu:
                 delete_textures(self._gl, held.texture)
                 self._destroy_image(self._display, held.image)
 
-    def flush(self) -> None:
-        """glFlush: the draws so far are submitted, so a target can go to the screen (module rule)."""
+    def fence(self) -> int:
+        """An EGL fence after every command so far, those commands submitted (module rule:
+        Ordering). RuntimeError("gpu_fence") when EGL makes none."""
+        fence = self._create_sync(self._display, _EGL_SYNC_FENCE_KHR, None)
         self._gl.glFlush()
+        if not fence:
+            raise RuntimeError("gpu_fence")
+        return int(fence)
+
+    def signalled(self, fence: int) -> bool:
+        """Whether the GPU has passed `fence`; never waits. RuntimeError("gpu_fence") when EGL
+        cannot say."""
+        answer = self._wait_sync(self._display, fence, 0, 0)
+        if answer == _EGL_CONDITION_SATISFIED_KHR:
+            return True
+        if answer == _EGL_TIMEOUT_EXPIRED_KHR:
+            return False
+        raise RuntimeError("gpu_fence")
+
+    def forget_fence(self, fence: int) -> None:
+        """Destroy `fence` (signalled or not)."""
+        self._destroy_sync(self._display, fence)
 
     def close(self) -> None:
         """Free every target and import, then the context, display, GBM device and node."""
@@ -445,7 +498,7 @@ class Gpu:
             gl.glTexParameteri(kind, name, value)
 
 
-__all__ = ["AR24", "LINEAR", "NV12", "RENDER_NODE", "XR24", "DmabufFrame", "Gpu", "GpuUnavailable", "Target",
+__all__ = ["AR24", "LIBRARIES", "LINEAR", "NV12", "RENDER_NODE", "XR24", "DmabufFrame", "Gpu", "GpuUnavailable", "Target",
            "Targets", "delete_textures", "sand_modifier"]
 
 

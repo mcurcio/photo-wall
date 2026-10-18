@@ -200,3 +200,31 @@ def test_the_program_imports_from_the_root_alone(mounted) -> None:
     report = json.loads(result.stdout)
     assert report["outside"] == []
     assert all(each.startswith("/usr/lib/photo-wall/") for each in report["path"])
+
+
+# Run in the app root (chroot): every native library the Player's GPU device loads, and PyOpenGL's
+# GLES 3 on EGL as player/gpu.py imports it (no GPU needed: nothing is drawn).
+GPU_LIBRARIES = r"""
+import ctypes, json, os, sys
+sys.path[:0] = ["/usr/lib/photo-wall/player"]
+from player.gpu import LIBRARIES
+loaded = {name: bool(ctypes.CDLL(name)) for name in LIBRARIES}
+os.environ["PYOPENGL_PLATFORM"] = "egl"
+import OpenGL.GLES3
+from OpenGL.GLES2.OES.EGL_image_external import GL_TEXTURE_EXTERNAL_OES
+print(json.dumps(loaded))
+"""
+
+
+def test_the_app_root_loads_every_library_the_gpu_device_needs(mounted) -> None:
+    """The app root is built from the Player's Depends: a library player/gpu.py loads that no
+    Depends brings is missing there and the Player opens no GPU (the Pi tracer, 2026-10-18)."""
+    role, mount = mounted
+    if role != "app":
+        return                          # the GPU device is the app root's alone
+    result = subprocess.run(
+        as_root(["unshare", "--fork", "--pid", "--kill-child", "chroot", str(mount / "rootfs"),
+                 "/usr/bin/python3", "-I", "-B", "-c", GPU_LIBRARIES]),
+        capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert all(json.loads(result.stdout.strip().splitlines()[-1]).values())

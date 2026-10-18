@@ -34,11 +34,19 @@ nothing but the app is on screen.
    `presented` with its own sequence (none overdue, none lost), the shell's `presented` names
    every tag, and the capture is the last colour. The screen's black is covered the whole time, so
    Weston answers only feedback asked on what it presents (frame-client.h `pw_screen_present`).
+7. the_ground_shows_beneath_the_planes: a present with a ground (a full-screen grey target laid out
+   as the screen hangs) and red at strength 0.5: outside the plane the capture is the ground's
+   grey, inside red mixed over grey; the next present without a ground shows the black again.
+8. a_fade_restacks_moves_and_attaches_nothing: after one present of two planes, FADE_PRESENTS more
+   with only the upper plane's strength changing send no wl_subsurface.place_above, no
+   set_position and no wl_surface.attach (the app's own WAYLAND_DEBUG log), one multiplier each:
+   Weston answers a restack or a move by damaging and repainting beneath the planes.
 """
 import json
 import mmap
 import os
 import pathlib
+import re
 import select
 import shutil
 import socket
@@ -65,6 +73,8 @@ QUADRANTS = (RED, GREEN, BLUE, WHITE)       # top-left, top-right, bottom-left, 
 TOLERANCE = 2
 SOAK_COMMITS, SOAK_CHUNK = 320, 40         # case 6; the harness drains the shell between chunks
 RECTANGLE = (40, 40, 200, 150)              # x, y, width, height of the mixed planes
+GREY = (64, 64, 64)                         # case 7's ground
+FADE_PRESENTS = 10                          # case 8
 
 
 # --- the app (child process, unprivileged) ------------------------------------------------------
@@ -118,11 +128,19 @@ def app() -> None:
         fds.append(fd)
         return Target(size, 0, 0, fd, stride, XR24, LINEAR)
 
-    def present(planes, tag):
+    def present(planes, tag, ground=None):
         screen = screens.screen(OUTPUT)
         grant = screens.grant(binding)
         if screen is None or grant is None:
             return {"result": None}
+        if ground is not None:
+            size = target_size(Placement(0, 0, *screen.size), screen.turn)
+            key = ("ground", tuple(ground), size)
+            if key not in pictures:
+                pictures[key] = screens.import_picture(target(size, target_bytes(size, screen.turn, tuple(ground)),
+                                                              size[0] * 4))
+                assert pictures[key] is not None, ("import_refused", "ground", size)
+            ground = pictures[key]
         shown = []
         for name, fill, x, y, width, height, strength in planes:
             at = Placement(x, y, width, height)
@@ -138,7 +156,7 @@ def app() -> None:
             shown.append((Plane("frame", LocalLayer(layer, None, 0.0, 1.0), at, strength), pictures[key]))
         result = screens.present(Composition(screen, tuple(plane for plane, _ in shown)),
                                  {plane.layer.layer.assignment_id: picture for plane, picture in shown},
-                                 grant, tag, None)
+                                 grant, tag, None, ground)
         return {"result": result, "busy": {plane.layer.layer.assignment_id: screens.busy(picture)
                                            for plane, picture in shown}}
 
@@ -172,10 +190,11 @@ def app() -> None:
             candidate = command["on"]
             return {}
         if op == "present":
-            return present(command["planes"], command["tag"])
+            return present(command["planes"], command["tag"], command.get("ground"))
         if op == "busy":
             screens.dispatch()
-            return {"busy": {name: screens.busy(picture) for (name, _), picture in pictures.items()}}
+            return {"busy": {key[0]: screens.busy(picture) for key, picture in pictures.items()
+                             if key[0] != "ground"}}
         if op == "screen":
             screen = screens.screen(OUTPUT)
             return {"screen": None if screen is None else [*screen.size, screen.turn]}
@@ -409,7 +428,9 @@ def main() -> None:
     try:
         channel = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
         channel.connect(str(ROOT / "control.sock"))
-        child = subprocess.Popen([sys.executable, "-B", __file__, "--app"], env={**os.environ, **APP_ENV},
+        # WAYLAND_DEBUG: the app's requests in its log, for case 8.
+        child = subprocess.Popen([sys.executable, "-B", __file__, "--app"],
+                                 env={**os.environ, **APP_ENV, "WAYLAND_DEBUG": "client"},
                                  preexec_fn=lambda: (os.setgid(APP_UID), os.setuid(APP_UID)),
                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=app_log)
         alive = lambda grant: pathlib.Path(f"/proc/{grant.surface.process.pid}").exists()  # noqa: E731
@@ -632,6 +653,60 @@ def main() -> None:
         assert answers == {"presented": SOAK_COMMITS}, answers
         assert len(set(soak_tags)) == SOAK_COMMITS, len(set(soak_tags))      # the shell's evidence of each
         print("PASS a_full_screen_frame_is_answered_past_the_feedback_table", flush=True)
+
+        # 7. the_ground_shows_beneath_the_planes
+        half_red = [["red", RED, left, top, width, height, 0.5]]
+        grounded = ask(op="present", tag="ground", planes=half_red, ground=list(GREY))
+        assert isinstance(grounded["result"], int), grounded
+
+        def red_over_grey(frame):
+            frame_width, frame_height, _ = frame
+            inside = outside = 0
+            for y in range(1, frame_height, 7):
+                for x in range(1, frame_width, 7):
+                    within = [left + d <= x < left + width - d and top + d <= y < top + height - d for d in (-3, 3)]
+                    if within[0] != within[1]:
+                        continue
+                    actual = pixel(frame, x, y)
+                    if within[1]:
+                        assert near(actual, (159.5, 32, 32)), ("inside", x, y, actual)
+                        inside += 1
+                    else:
+                        assert actual == GREY, ("outside_not_ground", x, y, actual)
+                        outside += 1
+            return inside, outside
+
+        inside, outside = await_frame(red_over_grey)
+        ungrounded = ask(op="present", tag="no-ground", planes=half_red)
+        assert isinstance(ungrounded["result"], int), ungrounded
+        await_frame(lambda frame: rectangle_check((127.5, 0, 0), frame))
+        print(f"GROUND inside={inside} outside={outside}", flush=True)
+        print("PASS the_ground_shows_beneath_the_planes", flush=True)
+
+        # 8. a_fade_restacks_moves_and_attaches_nothing
+        def fading(strength):
+            return [["red", RED, left, top, width, height, 1.0], ["green", GREEN, left, top, width, height, strength]]
+
+        assert isinstance(ask(op="present", tag="fade-0", planes=fading(0.05))["result"], int)
+        app_log.flush()
+        mark = APP_LOG.stat().st_size
+        for index in range(1, FADE_PRESENTS + 1):
+            result = ask(op="present", tag=f"fade-{index}", planes=fading(0.05 + 0.09 * index))["result"]
+            assert isinstance(result, int), result
+        with APP_LOG.open("rb") as log:
+            log.seek(mark)
+            sent = log.read().decode(errors="replace")
+        counts = {request: len(re.findall(pattern, sent)) for request, pattern in (
+            ("place_above", r"-> wl_subsurface[#@]\d+\.place_above\("),
+            ("set_position", r"-> wl_subsurface[#@]\d+\.set_position\("),
+            ("attach", r"-> wl_surface[#@]\d+\.attach\("),
+            ("set_multiplier", r"-> wp_alpha_modifier_surface_v1[#@]\d+\.set_multiplier\("),
+            ("commit", r"-> wl_surface[#@]\d+\.commit\("))}
+        print(f"FADE requests={counts}", flush=True)
+        assert counts["commit"] >= 3 * FADE_PRESENTS, ("debug_log_unread", counts)
+        assert (counts["place_above"], counts["set_position"], counts["attach"]) == (0, 0, 0), counts
+        assert counts["set_multiplier"] == FADE_PRESENTS, counts
+        print("PASS a_fade_restacks_moves_and_attaches_nothing", flush=True)
     except BaseException:
         app_log.flush()
         print("APP LOG:\n" + APP_LOG.read_text()[-4000:], flush=True)

@@ -3,7 +3,8 @@ not fire if it there is nothing to render.").
 
 PURE: no GL, Wayland, GTK or clock. The renderer tells it each tagged commit it made
 (`submitted`) and each word the compositor gave about one (`answered`: presented, on which
-refresh, or discarded); `ready` answers whether a frame may be drawn at a frame time.
+refresh, or discarded); `ready` answers whether a frame may be drawn at a frame time, `free`
+whether a commit that draws nothing may be made (the one-in-flight rule alone).
 
 Rules (docs/module-native-renderer.md, "Pacing"):
 
@@ -104,11 +105,20 @@ class FramePacer:
         self.cadence = max(1, math.ceil((latency + learn) / self.refresh - TOLERANCE))
         self._slot = word.at + self.cadence * self.refresh - latency
 
+    def free(self, at: float) -> bool:
+        """At frame time `at`, nothing is in flight, or the frame in flight is overdue: the
+        one-in-flight rule alone, for a commit that draws nothing (a renderer whose pictures are
+        finished before they are committed, player/plane_renderer.py). Such a commit's latency is
+        the compositor's alone, so it is made as soon as the last is answered: aiming it at the
+        steady cadence's slot would aim it at the moment the slowest frame of the window missed its
+        refresh, and every commit would then miss it too."""
+        return not self.in_flight or at - self._submitted_at >= self.overdue
+
     def ready(self, at: float) -> bool:
-        """May a frame be drawn at frame time `at`: nothing in flight (or it is overdue), and
-        `at` is the tick nearest its slot or later."""
+        """May a frame be drawn at frame time `at`: `free`, and, when nothing is in flight, `at` is
+        the tick nearest its slot or later."""
         if self.in_flight:
-            return at - self._submitted_at >= self.overdue
+            return self.free(at)
         return at >= self._slot - self.refresh / 2
 
 

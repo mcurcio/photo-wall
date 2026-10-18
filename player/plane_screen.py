@@ -1,7 +1,8 @@
 """The Player's screens on its own connection to Display Host's Weston (render redesign, run ledger
 .claude/runs/render-planes/s1-page.md): no GTK. Each Output's screen is an xdg toplevel
 `photo-wall-<output>` (player/output_discovery.py `output_app_id`) the shell maps full screen,
-showing opaque black, the parent of one sub-window per plane. A ctypes bridge over the frame
+showing its ground (an opaque black picture the display controller scans out beneath the planes),
+the parent of one sub-window per plane. A ctypes bridge over the frame
 client library (appliance/display_host/native/frame-client.h, the `pw_screen_*` and `pw_picture_*`
 functions); importing this module loads no library.
 
@@ -10,7 +11,8 @@ Rules this module owns (one home each):
   and strength reach the compositor in one atomic commit (synchronized sub-windows, the screen's
   commit last), tagged with the Frame's witness tag and the picture change, with presentation
   feedback: so lease, tags and Save's evidence keep their meaning (design, "presented" is that
-  commit). A refused present leaves the screen as it was.
+  commit). A refused present leaves the screen as it was. Only what changed since the last commit
+  is sent (frame-client.h `pw_screen_present`).
 - **A picture is reused only once released** (`busy`): the compositor's wl_buffer.release.
 - **The strength's wire value**: wp_alpha_modifier_v1's multiplier, round(strength * 0xffffffff).
 - **The screen's facts** (`screen`): the Output's mode and wl_output.transform as Weston reports
@@ -29,6 +31,7 @@ from typing import Final, Literal
 from uuid import UUID
 
 from contracts.display_turn import hanging, turn_of, wayland_transform
+from contracts.frame_fit import Placement
 from contracts.node_frame import (
     PICTURE_OPERATIONS_BYTES,
     PictureOperations,
@@ -43,7 +46,7 @@ from player.rendering import OutputComposition
 from player.wayland_frames import CLIENT_LIBRARY, FrameGrant
 
 PresentRefused = Literal["picture_refused", "output_gone"]
-SCREEN_PLANES: Final = 15       # frame-client.h PW_SCREEN_PLANES: one plane is each screen's black (bench T2)
+SCREEN_PLANES: Final = 15       # frame-client.h PW_SCREEN_PLANES: one plane is each screen's ground (bench T2)
 LOGGER = logging.getLogger(__name__)
 _FULL: Final = 0xFFFFFFFF       # wp_alpha_modifier_v1's opaque multiplier
 
@@ -88,7 +91,7 @@ def _declare(lib) -> None:
         ("pw_picture_import", (pointer, ctypes.c_int, u32, u32, u32, u32, u64), pointer),
         ("pw_picture_busy", (pointer,), ctypes.c_int),
         ("pw_picture_destroy", (pointer,), None),
-        ("pw_screen_present", (pointer, ctypes.POINTER(_PlaneState), u32, i32, text, text, text),
+        ("pw_screen_present", (pointer, ctypes.POINTER(_PlaneState), u32, pointer, i32, text, text, text),
          ctypes.c_int64),
         ("pw_screen_presentation", (pointer, out_u64, ctypes.POINTER(ctypes.c_int64), out_u32), ctypes.c_int),
     ):
@@ -198,15 +201,18 @@ class PlaneScreens:
             self._lib.pw_picture_destroy(picture.handle)
 
     def present(self, composition: Composition, pictures: Mapping[str, ScreenPicture], grant: FrameGrant,
-                tag: str, picture_change: int | None) -> int | PresentRefused:
+                tag: str, picture_change: int | None, ground: ScreenPicture | None = None) -> int | PresentRefused:
         """One commit of `composition`'s screen (module rule): each plane shows
         `pictures[plane.layer.layer.assignment_id]` at its placement, bottom to top, with buffer
         transform `wayland_transform(composition.screen.turn)` and its strength; sub-windows beyond
-        the planes show nothing, so a composition with no planes shows the screen's black (the
-        candidate's handoff commit, tagged "candidate-<grant id>", before admission). `grant` is a
+        the planes show nothing, so a composition with no planes shows the screen's ground (the
+        candidate's handoff commit, tagged "candidate-<grant id>", before admission). `ground` is
+        what the screen's own surface shows beneath the planes: an opaque black picture laid out
+        for the whole screen (`target_size` of the screen's full placement), or None for the
+        compositor's single-pixel black, which Weston can only composite. `grant` is a
         current one, admitted or candidate (the caller never presents without one). The tag's
         sequence (>= 1) when committed; "picture_refused" when a picture is missing, forgotten or
-        not of its plane's `target_size`; "output_gone" when the Output is not there or its screen
+        not of its plane's `target_size` (the ground likewise, of the whole screen's); "output_gone" when the Output is not there or its screen
         is not configured yet. ValueError("present_planes") past SCREEN_PLANES planes."""
         planes = composition.planes
         if len(planes) > SCREEN_PLANES:
@@ -220,6 +226,9 @@ class PlaneScreens:
                 return "picture_refused"
             state.picture, state.x, state.y = picture.handle, plane.at.x, plane.at.y
             state.alpha = multiplier(plane.strength)
+        if ground is not None and (ground.handle not in self._pictures or ground.size != target_size(
+                Placement(0, 0, *screen.size), screen.turn)):
+            return "picture_refused"
         handle = self._screens.get(screen.output_id)
         if handle is None:
             if self.screen(screen.output_id) is None:
@@ -229,7 +238,8 @@ class PlaneScreens:
                 raise RuntimeError("display_frame_protocol_lost")
             self._screens[screen.output_id] = handle
         result = self._lib.pw_screen_present(
-            handle, states, len(planes), wayland_transform(screen.turn), str(grant.grant_id).encode(),
+            handle, states, len(planes), None if ground is None else ground.handle, wayland_transform(screen.turn),
+            str(grant.grant_id).encode(),
             tag.encode(), picture_change_text(picture_change).encode())
         if result >= 1:
             return int(result)

@@ -10,7 +10,7 @@ import ctypes
 import ctypes.util
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -185,6 +185,39 @@ def read_properties(device: str) -> dict[int, tuple[int, str]]:
         os.close(fd)
 
 
+class PlaneProperties:
+    """The planes' (alpha, pixel blend mode) read as `read_properties` does, on one connection kept
+    open for the run and only for the planes asked: a moment's read costs a few ioctls, not the
+    whole controller's, so it never delays the bench's next commit past its refresh."""
+
+    def __init__(self, device: str) -> None:
+        """Open `device` as a read-only second client. OSError when it cannot be read."""
+        self._lib = _libdrm()
+        self._fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
+        if self._lib.drmSetClientCap(self._fd, _UNIVERSAL_PLANES, 1) or self._lib.drmSetClientCap(self._fd, _ATOMIC, 1):
+            os.close(self._fd)
+            raise OSError("kms_client_caps")
+
+    def read(self, planes: Collection[int]) -> dict[int, tuple[int, str]]:
+        """(alpha, pixel blend mode) of each plane in `planes`."""
+        return {plane: _plane_properties(self._lib, self._fd, plane) for plane in planes}
+
+    def close(self) -> None:
+        os.close(self._fd)
+
+
+def shown_planes(state: str) -> tuple[int, ...]:
+    """The ids of the planes `state` (the debugfs text) shows a framebuffer on. Pure."""
+    shown, plane = [], None
+    for line in state.splitlines():
+        found = _OBJECT.match(line)
+        if found:
+            plane = int(found.group(2)) if found.group(1) == "plane" else None
+        elif plane is not None and line.startswith("\tfb=") and line != "\tfb=0":
+            shown.append(plane)
+    return tuple(shown)
+
+
 def _plane_properties(lib: ctypes.CDLL, fd: int, plane: int) -> tuple[int, str]:
     properties = lib.drmModeObjectGetProperties(fd, plane, _OBJECT_PLANE)
     if not properties:
@@ -211,5 +244,5 @@ def _plane_properties(lib: ctypes.CDLL, fd: int, plane: int) -> tuple[int, str]:
     return alpha, blend
 
 
-__all__ = ["DRIVER", "OPAQUE_ALPHA", "PREMULTIPLIED", "KmsPlane", "display_controller", "driven_by", "kms_planes",
-           "read_properties"]
+__all__ = ["DRIVER", "OPAQUE_ALPHA", "PREMULTIPLIED", "KmsPlane", "PlaneProperties", "display_controller", "driven_by",
+           "kms_planes", "read_properties", "shown_planes"]
