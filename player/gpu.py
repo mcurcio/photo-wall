@@ -118,6 +118,12 @@ def sand_modifier(modifier: int, luma_stride: int) -> int:
     return (_BROADCOM << 56) | (luma_stride << 8) | _SAND128
 
 
+def delete_textures(gl: Any, *textures: int) -> None:
+    """Delete `textures` through `gl` (PyOpenGL's `OpenGL.GLES3`, whose glDeleteTextures takes
+    GLES's (n, textures) both): the one call every texture this module made goes through."""
+    gl.glDeleteTextures(len(textures), list(textures))
+
+
 def _whole(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
@@ -210,6 +216,9 @@ class Gpu:
             return ctypes.CFUNCTYPE(restype, *argtypes)(address)
 
         platform_display = extension("eglGetPlatformDisplayEXT", pointer, u32, pointer, attribs)
+        # GL_OES_EGL_image's entry point through EGL: PyOpenGL's GLES2 wrapper of it does not
+        # resolve on the Pi's Mesa (its function pointer is null, the tracer, 2026-10-18).
+        self._image_texture = extension("glEGLImageTargetTexture2DOES", None, u32, pointer)
         self._create_image = extension("eglCreateImageKHR", pointer, pointer, pointer, u32, pointer,
                                        attribs)
         self._destroy_image = extension("eglDestroyImageKHR", u32, pointer, pointer)
@@ -231,12 +240,10 @@ class Gpu:
         try:
             import OpenGL.error
             import OpenGL.GLES3 as gl
-            from OpenGL.GLES2.OES.EGL_image import glEGLImageTargetTexture2DOES
             from OpenGL.GLES2.OES.EGL_image_external import GL_TEXTURE_EXTERNAL_OES
         except (ImportError, OSError) as error:
             raise GpuUnavailable("context") from error
         self._gl = gl
-        self._image_texture = glEGLImageTargetTexture2DOES
         self._external = GL_TEXTURE_EXTERNAL_OES
         self._failures = (_Refused, OpenGL.error.Error, ctypes.ArgumentError, OSError)
 
@@ -300,7 +307,7 @@ class Gpu:
         if framebuffer:
             self._gl.glDeleteFramebuffers(1, [framebuffer])
         if texture:
-            self._gl.glDeleteTextures([texture])
+            delete_textures(self._gl, texture)
         if image:
             self._destroy_image(self._display, image)
         if fd >= 0:
@@ -332,13 +339,13 @@ class Gpu:
             gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
         except self._failures as error:
             if texture:
-                gl.glDeleteTextures([texture])
+                delete_textures(gl, texture)
             raise RuntimeError("gpu_upload") from error
         return texture
 
     def delete_texture(self, texture: int) -> None:
         """Delete a texture `upload` made."""
-        self._gl.glDeleteTextures([texture])
+        delete_textures(self._gl, texture)
 
     def import_frame(self, frame: DmabufFrame) -> int:
         """A GL_TEXTURE_EXTERNAL_OES texture showing `frame` (module rule: one EGLImage per decoder
@@ -368,7 +375,7 @@ class Gpu:
             gl.glBindTexture(self._external, 0)
         except (*self._failures, ValueError) as error:
             if texture:
-                gl.glDeleteTextures([texture])
+                delete_textures(gl, texture)
             if image:
                 self._destroy_image(self._display, image)
             raise RuntimeError("gpu_import") from error
@@ -381,7 +388,7 @@ class Gpu:
         for key, held in list(self._frames.items()):
             if held.fds & gone:
                 del self._frames[key]
-                self._gl.glDeleteTextures([held.texture])
+                delete_textures(self._gl, held.texture)
                 self._destroy_image(self._display, held.image)
 
     def flush(self) -> None:
@@ -439,6 +446,6 @@ class Gpu:
 
 
 __all__ = ["AR24", "LINEAR", "NV12", "RENDER_NODE", "XR24", "DmabufFrame", "Gpu", "GpuUnavailable", "Target",
-           "Targets", "sand_modifier"]
+           "Targets", "delete_textures", "sand_modifier"]
 
 

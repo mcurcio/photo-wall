@@ -1,7 +1,10 @@
 """The tracer's plan, pure (bead B6): the steps, the plan's layers on the one Frame and the plane
-strengths each moment must show, by the Player's own rules (player/look.py, player/planes.py,
-player/controller_budget.py), never a copy. The only I/O is `tracer` reading each media file's
-bytes once, to name its Variant (sha256 and byte size) as Central would."""
+strengths each moment must show. Which layers are seen and kept is the Player's own rule
+(player/look.py, player/visibility.py, player/planes.py `compose`, player/controller_budget.py),
+never a copy; the strength each must have is the bench's own (`expected_strength`, from bench
+T3's measured plane alphas), never player/planes.py's rule, which the alpha check holds to it.
+The only I/O is `tracer` reading each media file's bytes once, to name its Variant (sha256 and
+byte size) as Central would."""
 from __future__ import annotations
 
 import hashlib
@@ -19,6 +22,7 @@ from player.controller_budget import PI5, within
 from player.look import look
 from player.planes import FrameLayers, Screen, compose
 from player.rendering import LocalLayer, OutputComposition
+from player.visibility import visible_now
 
 StepName = Literal["hold", "dissolve", "dip", "photo_to_video", "turn", "soak", "overload"]
 
@@ -29,6 +33,25 @@ _PROFILE: Final = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55
 _LIGHTING: Final = FrameLighting(mat_depth_mm=0, lights=(), paper=Paper(whiteness=0.9, ink_density=2))
 _RECIPE: Final = hashlib.sha256(b"render-bench").hexdigest()
 _TYPES: Final = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".mp4": "video/mp4"}
+
+Beneath = Literal["picture", "black"]
+
+T3_PLANE_ALPHA: Final[dict[tuple[Beneath, float], int]] = {
+    ("picture", 0.25): 16384, ("picture", 0.5): 32768, ("picture", 0.75): 49151,
+    ("black", 0.25): 35199, ("black", 0.5): 48192, ("black", 0.75): 57725}
+"""The plane alphas (the kernel's 16-bit values) bench T3 set for a layer drawn at alpha t whose
+captures matched today's Player's mix (/Volumes/Dock/tmp/pi-render-bench/test3: rows D, a picture
+over a picture, within 1 code of the hardware model; rows Q, a picture over black, within 6
+codes): over a picture t itself, over black t's sRGB encoding."""
+
+
+def expected_strength(alpha: float, beneath: Beneath) -> float:
+    """The plane alpha the bench expects for a layer drawn at `alpha` (0..1) over `beneath`: the
+    curve through T3_PLANE_ALPHA, `alpha` over a picture and over black the sRGB transfer function
+    (IEC 61966-2-1), written here from the standard, not taken from the Player. Pure."""
+    if beneath == "picture":
+        return alpha
+    return 12.92 * alpha if alpha <= 0.0031308 else 1.055 * alpha ** (1 / 2.4) - 0.055
 
 
 @dataclass(frozen=True)
@@ -173,18 +196,26 @@ def layers_at(tracer: Tracer, at: float, lead: float = 0.0) -> tuple[Layer, ...]
 
 
 def strengths_at(tracer: Tracer, at: float, screen_size: tuple[int, int]) -> dict[str, float]:
-    """The plane strength each seen layer must have at plan time `at` (assignment id -> strength),
-    through player/look.py `look` and player/planes.py `compose` on a screen of `screen_size` as it
-    hangs, cut to the Pi 5's controller budget (player/controller_budget.py `within`), bottom to top.
-    Pure."""
+    """The plane strength each kept layer must have at plan time `at` (assignment id -> strength),
+    bottom to top: the layers player/look.py `look` and player/planes.py `compose` show on a
+    screen of `screen_size` as it hangs, cut to the Pi 5's controller budget
+    (player/controller_budget.py `within`), each at `expected_strength` of its drawn alpha over
+    what the nearest seen layer beneath it is (a media layer's picture, else black). Pure."""
     shown = tuple(LocalLayer(layer, None, 0.0, 1.0) for layer in layers_at(tracer, at))
     looked = look(OutputComposition(tracer.binding, shown, timebase=0.0), at)
     profile = tracer.binding.profile
     placement = place(tracer.rectangle, screen_size, profile.width_px / profile.height_px)
     screen = Screen(tracer.binding.output_id, screen_size, step_at(tracer, at).turn)
     (kept,), _ = within(PI5, (compose(screen, [FrameLayers(FRAME_ID, placement, looked.layers)]),))
-    return {plane.layer.layer.assignment_id: plane.strength for plane in kept.planes}
+    kept_ids = {plane.layer.layer.assignment_id for plane in kept.planes}
+    strengths: dict[str, float] = {}
+    beneath: Beneath = "black"
+    for local in visible_now(looked.layers):
+        if local.layer.assignment_id in kept_ids:
+            strengths[local.layer.assignment_id] = expected_strength(local.alpha, beneath)
+        beneath = "picture" if local.layer.presentation == "media" else "black"
+    return strengths
 
 
-__all__ = ["FRAME_ID", "OVERLOAD_PICTURES", "Media", "Step", "StepName", "Tracer", "layers_at", "step_at",
-           "strengths_at", "tracer"]
+__all__ = ["FRAME_ID", "OVERLOAD_PICTURES", "T3_PLANE_ALPHA", "Beneath", "Media", "Step", "StepName", "Tracer",
+           "expected_strength", "layers_at", "step_at", "strengths_at", "tracer"]

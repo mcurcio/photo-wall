@@ -20,6 +20,12 @@
 #include "alpha-modifier-v1-client-protocol.h"
 #include "frame-client.h"
 #define MAX_FEEDBACK 128
+/* Answers one surface's commits may wait on at once. Weston 14 answers a feedback only when the
+ * surface it rides on is seen, or when that surface gets a new buffer or is destroyed (discarded):
+ * a surface nothing shows (one another surface covers) holds its feedback unanswered. Past this
+ * many its commits go untracked (no feedback asked) until one is answered, so the table never
+ * fills, nor Weston's list for that surface: MAX_OUTPUTS * 2 words' surfaces x 4 = MAX_FEEDBACK. */
+#define FEEDBACK_PER_SURFACE 4
 #define MAX_OUTPUTS 16
 #define MAX_OPERATIONS 1024  /* contracts.node_frame.PICTURE_OPERATIONS_BYTES (picture operations v5) */
 struct grant { char output[97], id[37], frame[97], trial[4097]; uint64_t generation, revision; uint32_t state; };
@@ -361,32 +367,47 @@ static bool tag_valid(struct pw_frame_client *c, const char *grant_id, const cha
     }
     return true;
 }
-static int feedback_slot(struct pw_frame_client *c) {
-    for (int i = 0; i < MAX_FEEDBACK; i++) if (!c->feedback[i]) return i;
-    return -1;
+/* A free slot for one more answer to `key`'s commits; -1 (the commit goes untracked) when `key`
+ * already waits on FEEDBACK_PER_SURFACE answers or the table is full. Every slot is freed by its
+ * answer (presented, or discarded: a new buffer on its surface, or the surface destroyed) or with
+ * its screen (pw_screen_destroy). */
+static int feedback_slot(struct pw_frame_client *c, struct wl_surface *key) {
+    int open_slot = -1, waiting = 0;
+    for (int i = 0; i < MAX_FEEDBACK; i++) {
+        if (!c->feedback[i]) { if (open_slot < 0) open_slot = i; }
+        else if (c->feedback_surface[i] == key) waiting++;
+    }
+    return waiting < FEEDBACK_PER_SURFACE ? open_slot : -1;
 }
-/* Send the tag and ask for its presentation feedback, into the free `slot`. */
-static int tag_send(struct pw_frame_client *c, int slot, struct wl_surface *surface,
-    const char *grant_id, const char *frame_tag, const char *picture_change);
-/* The tag (v3 `tag`, or v4 `tag_picture` with `picture_change`) and its presentation feedback. */
+/* Ask for the presentation feedback of `on`'s next applied commit into `slot` (nothing when
+ * slot < 0), its answer kept as `key`'s word for the tag `sequence`. False when the request could
+ * not be made. */
+static bool feedback_request(struct pw_frame_client *c, int slot, struct wl_surface *key,
+    struct wl_surface *on, uint64_t sequence) {
+    if (slot < 0) return true;
+    struct wp_presentation_feedback *f = wp_presentation_feedback(c->presentation, on);
+    if (!f) return false;
+    c->feedback[slot] = f;
+    c->feedback_surface[slot] = key;
+    c->feedback_sequence[slot] = sequence;
+    wp_presentation_feedback_add_listener(f, &feedback_listener, c);
+    return true;
+}
+/* The tag (v3 `tag`, or v4 `tag_picture` with `picture_change`) for `surface`'s next commit. */
+static void tag_send(struct pw_frame_client *c, struct wl_surface *surface,
+    const char *grant_id, const char *frame_tag, const char *picture_change) {
+    if (picture_change) pw_frame_manager_v1_tag_picture(c->manager, surface, grant_id, frame_tag, picture_change);
+    else pw_frame_manager_v1_tag(c->manager, surface, grant_id, frame_tag);
+}
+/* The tag and its presentation feedback, both on the surface GDK commits. */
 static int tag_commit(struct pw_frame_client *c, struct wl_surface *surface,
     const char *grant_id, const char *frame_tag, const char *picture_change) {
     if (!c || !surface || !tag_valid(c, grant_id, frame_tag, picture_change) ||
         pw_frame_client_dispatch(c) < 0) return -1;
-    int slot = feedback_slot(c);
-    if (slot < 0) return -1;
-    return tag_send(c, slot, surface, grant_id, frame_tag, picture_change);
-}
-static int tag_send(struct pw_frame_client *c, int slot, struct wl_surface *surface,
-    const char *grant_id, const char *frame_tag, const char *picture_change) {
-    if (picture_change) pw_frame_manager_v1_tag_picture(c->manager, surface, grant_id, frame_tag, picture_change);
-    else pw_frame_manager_v1_tag(c->manager, surface, grant_id, frame_tag);
-    struct wp_presentation_feedback *f = wp_presentation_feedback(c->presentation, surface);
-    if (!f) return -1;
-    c->feedback[slot] = f;
-    c->feedback_surface[slot] = surface;
-    c->feedback_sequence[slot] = ++c->tagged;
-    wp_presentation_feedback_add_listener(f, &feedback_listener, c);
+    uint64_t sequence = c->tagged + 1;
+    tag_send(c, surface, grant_id, frame_tag, picture_change);
+    if (!feedback_request(c, feedback_slot(c, surface), surface, surface, sequence)) return -1;
+    c->tagged = sequence;
     return 0;
 }
 int pw_frame_client_tag_next_commit(struct pw_frame_client *c, struct wl_surface *surface,
@@ -552,7 +573,8 @@ void pw_screen_destroy(struct pw_screen *s) {
         wl_subsurface_destroy(s->sub[i]);
         wl_surface_destroy(s->plane[i]);
     }
-    /* Its words go with it: a later surface may reuse the address. */
+    /* Its answers and words go with it (those asked on its planes too: they are kept under the
+     * screen's surface): a later surface may reuse the address. */
     for (int i = 0; i < MAX_FEEDBACK; i++) if (c->feedback[i] && c->feedback_surface[i] == s->surface) {
         wp_presentation_feedback_destroy(c->feedback[i]);
         c->feedback[i] = NULL; c->feedback_surface[i] = NULL; c->feedback_sequence[i] = 0;
@@ -647,8 +669,8 @@ int64_t pw_screen_present(struct pw_screen *s, const struct pw_plane_state *plan
     /* Read first: a configure dispatched after the planes' requests would commit them untagged. */
     if (pw_frame_client_dispatch(c) < 0) return -1;
     if (!s->configured) return -3;
-    int slot = feedback_slot(c);
-    if (slot < 0) return -1;
+    int slot = feedback_slot(c, s->surface);
+    uint64_t sequence = c->tagged + 1;
     for (; s->planes < count; s->planes++) {
         uint32_t i = s->planes;
         s->plane[i] = wl_compositor_create_surface(c->compositor);
@@ -665,6 +687,11 @@ int64_t pw_screen_present(struct pw_screen *s, const struct pw_plane_state *plan
         wl_surface_set_buffer_transform(s->plane[i], buffer_transform);
         wl_surface_damage_buffer(s->plane[i], 0, 0, INT32_MAX, INT32_MAX);
         wp_alpha_modifier_surface_v1_set_multiplier(s->alpha[i], plane->alpha);
+        /* The answer rides on what is presented: the topmost plane, never covered by the planes
+         * below it (Weston 14 answers no feedback of a surface the planes cover, such as the
+         * screen's black under a full-screen opaque Frame, and keeps it). Asked before this
+         * sub-surface's commit, which caches it for the screen's commit, as it caches the rest. */
+        if (i + 1 == count && !feedback_request(c, slot, s->surface, s->plane[i], sequence)) return -1;
         wl_surface_commit(s->plane[i]);
         /* A showing begins when the last present did not show it (one release ends it). */
         if (!showing(now, i, plane->picture) && !showing(s->shown, PW_SCREEN_PLANES, plane->picture))
@@ -676,7 +703,10 @@ int64_t pw_screen_present(struct pw_screen *s, const struct pw_plane_state *plan
         wl_surface_commit(s->plane[i]);
     }
     memcpy(s->shown, now, sizeof now);
-    if (tag_send(c, slot, s->surface, grant_id, frame_tag, picture_change) < 0) return -1;
+    tag_send(c, s->surface, grant_id, frame_tag, picture_change);
+    /* No plane: the black is what is presented. */
+    if (!count && !feedback_request(c, slot, s->surface, s->surface, sequence)) return -1;
+    c->tagged = sequence;
     wl_surface_commit(s->surface);
     /* That commit unmapped the rest; destroying them now (no visible change) drops the compositor's
      * last hold on their pictures: Weston 14's GL renderer keeps an unmapped surface's buffer until

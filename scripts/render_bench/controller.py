@@ -104,8 +104,15 @@ class BenchController:
                 return
 
     def turn(self, turn: DisplayTurn, *, timeout: float) -> None:
-        """Turn the screen (`WestonBackend.turn`). RuntimeError("bench_turn") when unconfirmed."""
-        if not self._backend.turn(self._output_id, turn, timeout=timeout):
+        """Turn the screen (`WestonBackend.turn`), once the shell has announced the Output (the bench
+        may ask at its start, before the shell's first events are read). RuntimeError("bench_turn")
+        when the Output is not announced or the turn not confirmed within `timeout`."""
+        end = time.monotonic() + timeout
+        while self._key() is None or self._backend.output_powered(self._output_id) is None:
+            if time.monotonic() >= end:
+                raise RuntimeError("bench_turn")
+            self._dispatch()
+        if not self._backend.turn(self._output_id, turn, timeout=max(0.0, end - time.monotonic())):
             raise RuntimeError("bench_turn")
 
     def close(self) -> None:

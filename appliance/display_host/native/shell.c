@@ -36,6 +36,10 @@
 #define MAX_OUTPUTS 16
 #define MAX_SURFACES 32
 #define MAX_FEEDBACK 128
+/* Feedbacks one app surface may hold in the table: a newer one takes the place of its oldest, so
+ * a surface Weston does not show (its feedback unanswered until it shows again) never fills the
+ * table for the others: MAX_SURFACES x 4 = MAX_FEEDBACK. */
+#define FEEDBACK_PER_SURFACE 4
 #define MAX_PACKET 16384
 #define LEASE_MS 5000
 #define PING_MS 1000         /* how often an app holding an Output is pinged */
@@ -376,6 +380,17 @@ static struct app_surface *find_surface(struct shell *s, struct wl_resource *r) 
     for (int i = 0; i < MAX_SURFACES; i++)
         if (s->surfaces[i] && s->surfaces[i]->view->surface->resource == r) return s->surfaces[i];
     return NULL;
+}
+/* The app surface whose commit a feedback asked on `r` reports: `r`'s own, or the one its
+ * sub-surface tree hangs from. The Player's screens ask it on their topmost plane, what Weston
+ * presents when the planes cover the app surface (Weston 14 answers no feedback of a covered
+ * surface): frame-client.h pw_screen_present. The feedback is asked before that sub-surface's
+ * commit, so the app surface's next commit is the one that applies it. */
+static struct app_surface *feedback_surface(struct shell *s, struct wl_resource *r) {
+    struct app_surface *a = find_surface(s, r);
+    if (a || !r) return a;
+    struct weston_surface *root = weston_surface_get_main_surface(wl_resource_get_user_data(r));
+    return root && root->resource ? find_surface(s, root->resource) : NULL;
 }
 static bool matches_process(struct output *o, struct app_surface *a) {
     return client_matches(o, wl_resource_get_client(a->view->surface->resource));
@@ -719,13 +734,21 @@ static void protocol_log(void *data, enum wl_protocol_logger_type direction,
     struct wl_client *client = wl_resource_get_client(m->resource);
     if (direction == WL_PROTOCOL_LOGGER_REQUEST && !strcmp(class, "wp_presentation") &&
         !strcmp(name, "feedback") && m->arguments_count == 2) {
-        struct app_surface *a = find_surface(s, (struct wl_resource *)m->arguments[0].o);
+        struct app_surface *a = feedback_surface(s, (struct wl_resource *)m->arguments[0].o);
         if (!a) return;
-        for (int i = 0; i < MAX_FEEDBACK; i++) if (!s->feedbacks[i].client) {
-            s->feedbacks[i] = (struct feedback){.client = client, .id = m->arguments[1].n, .surface = a};
-            return;
+        int vacant = -1, oldest = -1, held = 0;
+        for (int i = 0; i < MAX_FEEDBACK; i++) {
+            struct feedback *f = &s->feedbacks[i];
+            if (!f->client) { if (vacant < 0) vacant = i; continue; }
+            if (f->surface != a) continue;
+            held++;
+            if (oldest < 0 || (f->commit && (!s->feedbacks[oldest].commit || f->commit < s->feedbacks[oldest].commit)))
+                oldest = i;
         }
-        return; /* bounded saturation means no presentation evidence */
+        int slot = held >= FEEDBACK_PER_SURFACE ? oldest : vacant;
+        if (slot >= 0)
+            s->feedbacks[slot] = (struct feedback){.client = client, .id = m->arguments[1].n, .surface = a};
+        return;
     }
     if (direction == WL_PROTOCOL_LOGGER_REQUEST && !strcmp(class, "wl_surface") && !strcmp(name, "commit")) {
         alpha_commit_request(m->resource);

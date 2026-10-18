@@ -14,12 +14,21 @@ Rules this module owns (one home each):
 - **When a picture is finished again**: a still when anything its pixels depend on changes (its
   decode, the placement's size, the turn, the crop, the profile's aspect, the Output's picture
   operations, the Frame's lights, its LUT's generation); a playing video on each new decoded
-  frame, into the first of its VIDEO_TARGETS targets the screen has released. Never a fade: a
-  fade is a strength.
+  frame while it is seen (in its screen's last commit), into the first of its VIDEO_TARGETS
+  targets the screen has released. Never a fade: a fade is a strength.
+- **A video starts when it is first presented**: prepared, it is ready to start, its first frame
+  finished once (later frames wait in the decoder); its first present plays it from the layer's
+  position, and from then on each new frame is finished while it is seen.
 - **Readiness**: a layer is prepared once its picture is finished for the Frame as it is now; a
   covered layer keeps its picture while it may be revealed within the executor's lead.
+- **Nothing changed**: a present commits only when the screen would show something else: a
+  plane's picture (a still finished again, a video's new frame), its placement or strength, the
+  screen, the tag, the picture change or the grant. A layer's play position alone changes nothing
+  (a still's picture does not move with it; a video's frame is its decoder's).
 - **Outcomes**: no grant: "pending", nothing committed; a candidate grant: the screen's black
-  under the candidate tag; an Output gone or a picture refused: "failed" ("decode"); over the
+  under the candidate tag, made again on every present the pacer allows (the shell completes a
+  handoff only on a presented commit after its release, which the app cannot see); an Output gone
+  or a picture refused: "failed" ("decode"); over the
   controller budget after its cut: "failed" ("capacity"); a seen layer's picture not finished yet:
   "pending", the screen keeps its last commit; else "presented" (that commit), its composition the
   layers drawn (a layer the budget cut is absent).
@@ -46,7 +55,7 @@ from player.look import look
 from player.luts import LutSource
 from player.pacing import FramePacer, Word
 from player.plane_screen import PresentRefused, ScreenPicture
-from player.planes import Composition, FrameLayers, Screen, compose
+from player.planes import Composition, FrameLayers, Plane, Screen, compose
 from player.rendering import LocalLayer, OutputComposition, PrepareResult, PresentationResult
 from player.visibility import visible_now
 from player.wayland_frames import FrameGrant, composition_tag
@@ -171,7 +180,9 @@ class _Layer:
     """One media layer's decode and its finished pictures. A still: its source uploaded once and
     one picture, finished again when its key changes. A video: up to VIDEO_TARGETS pictures, the
     newest decoded frame drawn into the first the screen has released; `held` is the frame drawn
-    last (kept, so a new key draws it again), `waiting` a newer one not drawn yet."""
+    last (kept, so a new key draws it again), `waiting` a newer one not drawn yet, `started`
+    whether a present has played it. `serial` counts the pictures finished (module rule, Nothing
+    changed)."""
     local: LocalLayer
     frame: FrameOnScreen
     still: Still | None = None
@@ -183,19 +194,20 @@ class _Layer:
     targets: list[_Picture] = field(default_factory=list)
     held: DmabufFrame | None = None
     waiting: DmabufFrame | None = None
+    started: bool = False
+    serial: int = 0
     failed: bool = False
 
 
 @dataclass
 class _Output:
-    """One screen's commits: its pacer, the last answer, the pictures its last commit shows, what
-    that commit showed (a present showing the same again commits nothing) and the grant whose
-    candidate it committed."""
+    """One screen's commits: its pacer, the last answer, the pictures and the layers its last
+    commit shows, and what that commit showed (module rule, Nothing changed)."""
     pacer: FramePacer = field(default_factory=FramePacer)
     last: PresentationResult = _PENDING
     shown: frozenset[int] = frozenset()
+    seen: frozenset[str] = frozenset()
     committed: tuple | None = None
-    candidate: object = None
 
 
 class PlaneRenderer:
@@ -250,8 +262,6 @@ class PlaneRenderer:
         word = self._screens.presentation(output_id, now)
         if word is not None:
             state.pacer.answered(word, None)
-            if word.at is None:
-                state.candidate = None          # a discarded candidate's commit is made again
         self._sweep()
         grant = self._screens.grant(composition)
         if grant is None:
@@ -273,7 +283,7 @@ class PlaneRenderer:
         planes = kept[list(self._newest).index(output_id)]
         pictures: dict[str, ScreenPicture] = {}
         for plane in planes.planes:
-            picture = self._finish(plane.layer, frame, setting)
+            picture = self._finish(plane.layer, frame, setting, live=True)
             if picture == "failed":
                 return _FAILED
             if picture == "pending":
@@ -282,8 +292,8 @@ class PlaneRenderer:
         drawn = replace(looked, layers=tuple(local for local in looked.layers
                                              if local.layer.assignment_id not in cut))
         tag = composition_tag(drawn, visible_now(drawn.layers))
-        shows = (planes, tuple(pictures[plane.layer.layer.assignment_id].handle for plane in planes.planes),
-                 tag, setting.tagged, grant.grant_id)
+        shows = (planes.screen, tuple(self._shown(plane, pictures) for plane in planes.planes), tag, setting.tagged,
+                 grant.grant_id)
         if state.committed == shows and state.last.status == "presented":
             return state.last
         sequence = self._screens.present(planes, pictures, grant, tag, setting.tagged)
@@ -291,7 +301,8 @@ class PlaneRenderer:
             return _FAILED
         state.pacer.submitted(sequence, now)
         state.shown = frozenset(picture.handle for picture in pictures.values())
-        state.committed, state.candidate = shows, None
+        state.seen = frozenset(pictures)
+        state.committed = shows
         state.last = PresentationResult("presented", composition=drawn, presented_at=now)
         self._sweep()
         return state.last
@@ -348,40 +359,53 @@ class PlaneRenderer:
                         None if operations is None else operations.picture_change, lights,
                         None if ref is None else self._luts.lut(ref), self._luts.generation())
 
+    def _shown(self, plane: Plane, pictures: Mapping[str, ScreenPicture]) -> tuple:
+        """What `plane` shows (module rule, Nothing changed): its Frame and layer, its picture and
+        that picture's finish, its placement and strength; never the layer's play position."""
+        assignment_id = plane.layer.layer.assignment_id
+        entry = self._layers.get(assignment_id)
+        return (plane.frame_id, assignment_id, pictures[assignment_id].handle, 0 if entry is None else entry.serial,
+                plane.at, plane.strength)
+
     def _candidate(self, state: _Output, screen: Screen, grant: FrameGrant, now: float) -> PresentationResult:
-        """The candidate's commit: no planes (the screen's black), tagged for its grant, once."""
-        if state.candidate != grant.grant_id:
-            sequence = self._screens.present(Composition(screen, ()), {}, grant, f"candidate-{grant.grant_id}",
-                                             None)
-            if not isinstance(sequence, int):
-                return _FAILED
-            state.pacer.submitted(sequence, now)
-            state.shown, state.committed, state.candidate = frozenset(), None, grant.grant_id
-            self._sweep()
+        """The candidate's commit: no planes (the screen's black), tagged for its grant, on every
+        present the pacer allows (module rule, Outcomes)."""
+        sequence = self._screens.present(Composition(screen, ()), {}, grant, f"candidate-{grant.grant_id}", None)
+        if not isinstance(sequence, int):
+            return _FAILED
+        state.pacer.submitted(sequence, now)
+        state.shown, state.seen, state.committed = frozenset(), frozenset(), None
+        self._sweep()
         state.last = _PENDING
         return _PENDING
 
-    def _finish(self, local: LocalLayer, frame: FrameOnScreen,
-                setting: _Setting) -> ScreenPicture | Literal["pending", "failed"]:
-        """`local`'s picture for `setting` (module rule), its decode started when it has none."""
+    def _finish(self, local: LocalLayer, frame: FrameOnScreen, setting: _Setting, *,
+                live: bool = False) -> ScreenPicture | Literal["pending", "failed"]:
+        """`local`'s picture for `setting` (module rule), its decode started when it has none.
+        `live`: for a present (a video starts, module rule), not a prepare."""
         if local.layer.presentation == "black":
             return self._black(frame.binding.output_id, setting.size)
         entry = self._layers.get(local.layer.assignment_id)
         if entry is None:
-            entry = self._layers[local.layer.assignment_id] = self._decode(local, frame)
+            entry = self._layers[local.layer.assignment_id] = self._decode(local, frame, live)
         entry.frame = frame
         if entry.failed:
             return "failed"
         try:
             if entry.video is not None:
+                if live and not entry.started:
+                    entry.started = True            # it plays from where the layer is now
+                    entry.failed = not entry.video.seek(local.position)
+                    if entry.failed:
+                        return "failed"
                 return self._finish_video(entry, setting)
             return self._finish_still(entry, setting)
         except (RuntimeError, ValueError):          # FitFailed, a Gpu refusal, VideoRefused
             entry.failed = True
             return "failed"
 
-    def _decode(self, local: LocalLayer, frame: FrameOnScreen) -> _Layer:
-        entry = _Layer(local, frame)
+    def _decode(self, local: LocalLayer, frame: FrameOnScreen, live: bool) -> _Layer:
+        entry = _Layer(local, frame, started=live)
         variant = local.layer.variant
         try:
             if local.path is None or variant is None:
@@ -426,11 +450,13 @@ class PlaneRenderer:
             if entry.picture is not None:
                 self._retired.append(entry.picture)
             entry.picture, entry.key = picture, key
+            entry.serial += 1
         return entry.picture.shown
 
     def _finish_video(self, entry: _Layer, setting: _Setting) -> ScreenPicture | Literal["pending", "failed"]:
+        """Before it started, only its first frame is taken (module rule); later ones wait."""
         video = entry.video
-        frame = video.latest()
+        frame = video.latest() if entry.started or entry.picture is None else None
         if frame is not None:
             if entry.waiting is not None:
                 video.done(entry.waiting)
@@ -451,6 +477,7 @@ class PlaneRenderer:
                     video.done(entry.held)
                 entry.held, entry.waiting = source, None
                 entry.picture, entry.key = target, key
+                entry.serial += 1
         if entry.picture is None or entry.key != key:
             return "pending"
         return entry.picture.shown
@@ -509,15 +536,19 @@ class PlaneRenderer:
         return _Picture(target, shown)
 
     def _video_frame(self, assignment_id: str) -> None:
-        """A video's new frame (on the owning thread): finish it, and say so once it is drawn."""
+        """A video's new frame (on the owning thread): finish it while the video is seen, or its
+        first (module rule), and say so once it is drawn."""
         entry = self._layers.get(assignment_id)
         if entry is None or entry.failed:
+            return
+        seen = entry.started and any(assignment_id in state.seen for state in self._outputs.values())
+        if entry.picture is not None and not seen:
             return
         setting = self._setting(entry.frame)
         if setting == "gone" or setting == "failed":
             return
         before = entry.held
-        self._finish(entry.local, entry.frame, setting)
+        self._finish(entry.local, entry.frame, setting, live=entry.started)
         if entry.held is not before:
             self._on_change(entry.frame.binding.output_id)
 

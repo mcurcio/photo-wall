@@ -37,7 +37,7 @@ from contracts.models import PREPARE_SECONDS
 from scripts.render_bench import timeline
 from scripts.render_bench.controller import BenchController
 from scripts.render_bench.evidence import Moment, verdict
-from scripts.render_bench.kms_state import KMS_DEVICE, STATE_PATH, kms_planes, read_properties
+from scripts.render_bench.kms_state import display_controller, kms_planes, read_properties
 from scripts.render_bench.registers import RegisterWatch
 
 WAYLAND_SOCKET: Final = Path("/run/photo-wall-display-wayland/wayland-0")
@@ -61,8 +61,8 @@ def _arguments(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--hold", type=float, default=10.0)
     parser.add_argument("--budget", choices=("pi5", "unlimited"), default="pi5")
     parser.add_argument("--user", default="pw-display", help="the user the shell's sockets are connected as")
-    parser.add_argument("--state", default=STATE_PATH)
-    parser.add_argument("--device", default=KMS_DEVICE)
+    parser.add_argument("--state", help="the display controller's debugfs state (default: found by its driver)")
+    parser.add_argument("--device", help="the display controller's card node (default: found by its driver)")
     return parser.parse_args(argv)
 
 
@@ -79,17 +79,56 @@ def _as_user(name: str) -> Iterator[None]:
         os.setegid(0)
 
 
-def _probe(path: Path, kind: str) -> timeline.Media:
-    """The file's pixel size (and a video's duration), through GStreamer's discoverer."""
+def _gst():
     import gi
     gi.require_version("Gst", "1.0")
-    gi.require_version("GstPbutils", "1.0")
-    from gi.repository import Gst, GstPbutils
+    from gi.repository import Gst
     Gst.init(None)
-    info = GstPbutils.Discoverer.new(10 * Gst.SECOND).discover_uri(path.resolve().as_uri())
-    stream = info.get_video_streams()[0]
-    duration = info.get_duration() / Gst.SECOND if kind == "video" else None
-    return timeline.Media(path.resolve(), kind, (stream.get_width(), stream.get_height()), duration)
+    return Gst
+
+
+def _probe_photo(path: Path) -> timeline.Media:
+    """A photo's pixel size, through GStreamer's discoverer."""
+    import gi
+    gi.require_version("GstPbutils", "1.0")
+    from gi.repository import GstPbutils
+    gst = _gst()
+    stream = GstPbutils.Discoverer.new(10 * gst.SECOND).discover_uri(path.resolve().as_uri()).get_video_streams()[0]
+    return timeline.Media(path.resolve(), "photo", (stream.get_width(), stream.get_height()), None)
+
+
+def _probe_video(path: Path) -> timeline.Media:
+    """A video's pixel size and duration from its container and stream headers (filesrc ! qtdemux !
+    h265parse ! fakesink, prerolled): never a decoder. GStreamer's discoverer would pick the
+    hardware decoder, which fails without the Player's allocation probe (player/decode.py).
+    RuntimeError("bench_video_probe") when the headers do not say."""
+    gst = _gst()
+    pipeline = gst.Pipeline.new(None)
+    source, demux, parse, sink = (gst.ElementFactory.make(name, None)
+                                  for name in ("filesrc", "qtdemux", "h265parse", "fakesink"))
+    if None in (source, demux, parse, sink):
+        raise RuntimeError("bench_video_probe")
+    source.set_property("location", str(path.resolve()))
+    for element in (source, demux, parse, sink):
+        pipeline.add(element)
+    source.link(demux)
+    parse.link(sink)
+    demux.connect("pad-added", lambda _demux, pad: pad.get_name().startswith("video")
+                  and pad.link(parse.get_static_pad("sink")))
+    try:
+        pipeline.set_state(gst.State.PAUSED)
+        reached, _, _ = pipeline.get_state(10 * gst.SECOND)
+        caps = parse.get_static_pad("src").get_current_caps()
+        if reached not in (gst.StateChangeReturn.SUCCESS, gst.StateChangeReturn.NO_PREROLL) or caps is None:
+            raise RuntimeError("bench_video_probe")
+        with caps.get_structure(0) as structure:        # GStreamer 1.26's StructureWrapper
+            (found_width, width), (found_height, height) = structure.get_int("width"), structure.get_int("height")
+        known, duration = pipeline.query_duration(gst.Format.TIME)
+    finally:
+        pipeline.set_state(gst.State.NULL)
+    if not (found_width and found_height and known and duration > 0):
+        raise RuntimeError("bench_video_probe")
+    return timeline.Media(path.resolve(), "video", (width, height), duration / gst.SECOND)
 
 
 def _gpu_busy() -> Callable[[], float]:
@@ -155,8 +194,11 @@ class _Bench:
         from player.plane_screen import PlaneScreens
 
         self.args = args
-        photos = [_probe(path, "photo") for path in args.photo]
-        clip = _probe(args.video, "video")
+        photos = [_probe_photo(path) for path in args.photo]
+        clip = _probe_video(args.video)
+        if args.state is None or args.device is None:
+            found_state, found_device = display_controller()
+            args.state, args.device = args.state or found_state, args.device or found_device
         self.watch = RegisterWatch()
         self.gpu_busy = _gpu_busy()
         kms_planes(Path(args.state).read_text(), read_properties(args.device))     # readable before the run
@@ -191,10 +233,14 @@ class _Bench:
         self.drawn = 0
 
     def _grant(self) -> None:
+        """Grant the screen again (at the start, after a turn). The last presented answer was for
+        the old grant: until the renderer presents under the new one, the screen shows the
+        candidate's black, so no moment is taken of the old answer (it would count as a miss)."""
         binding = self.tracer.binding
         self.controller.grant(binding.frame_id, binding.generation, binding.configuration_revision,
                               timeout=GRANT_TIMEOUT)
         self.handed = False
+        self.last = None
 
     def run(self) -> list[Moment]:
         for _ in range(100):                     # Weston's Output announced to the frame client

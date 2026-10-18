@@ -30,10 +30,22 @@ corners (the quadrants' colours are 0 or 1 per channel), where software GL's 8-b
    ValueError("fit_target_size") and nothing is drawn.
 7. both_passes_carry_the_one_look: the fit pass's linked programs and the frame pass's
    (player/native.py `_frame_source`, linked here) each hold LOOK_GLSL verbatim.
+
+The new path's device and decode on the same libraries the Pi runs (the container's Debian
+PyOpenGL and GStreamer 1.26; the GBM targets and the hardware decoder have no CI and are the Pi
+tracer's):
+8. textures_are_deleted_through_gles3: player/gpu.py `delete_textures` deletes two textures on
+   PyOpenGL's GLES3 (its glDeleteTextures takes GLES's (n, textures)).
+9. a_still_decodes_on_gstreamer: player/decode.py `StillDecode` decodes an opaque and a
+   transparent PNG (the quadrants, written here) to their RGBA pixels and alpha flag, through
+   GStreamer 1.26's caps structures.
 """
 import ctypes
 import os
 import sys
+import time
+import zlib
+from pathlib import Path
 
 sys.path[:0] = ["/repo", "/smoke"]
 os.environ.update(LIBGL_ALWAYS_SOFTWARE="1", PYOPENGL_PLATFORM="egl", EGL_PLATFORM="surfaceless")
@@ -361,10 +373,55 @@ def both_passes_carry_the_one_look() -> None:
         gl.glDeleteShader(shader)
 
 
+def textures_are_deleted_through_gles3() -> None:
+    from player.gpu import delete_textures
+
+    names = [int(gl.glGenTextures(1)) for _ in range(2)]
+    for name in names:                  # a name is a texture once bound
+        gl.glBindTexture(gl.GL_TEXTURE_2D, name)
+    gl.glBindTexture(gl.GL_TEXTURE_2D, 0)
+    assert all(gl.glIsTexture(name) for name in names), "textures_made"
+    delete_textures(gl, *names)
+    assert not any(gl.glIsTexture(name) for name in names), "textures_kept"
+
+
+def png(path: Path, alpha: int | None) -> None:
+    """The quadrants as an 8-bit PNG: RGB, or RGBA at `alpha`."""
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return len(data).to_bytes(4, "big") + kind + data + zlib.crc32(kind + data).to_bytes(4, "big")
+
+    channels = 3 if alpha is None else 4
+    rows = b"".join(b"\x00" + b"".join(bytes(quadrant(x, y)) + (b"" if alpha is None else bytes((alpha,)))
+                                       for x in range(WIDTH)) for y in range(HEIGHT))
+    header = WIDTH.to_bytes(4, "big") + HEIGHT.to_bytes(4, "big") + bytes((8, 2 if channels == 3 else 6, 0, 0, 0))
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(rows))
+                     + chunk(b"IEND", b""))
+
+
+def a_still_decodes_on_gstreamer() -> None:
+    from player.decode import STILL_TIMEOUT, StillDecode
+
+    for alpha in (None, 200):
+        path = Path(f"/tmp/pw-still-{alpha}.png")
+        png(path, alpha)
+        decode = StillDecode(path)
+        end = time.monotonic() + STILL_TIMEOUT + 1
+        while (result := decode.result()) == "pending" and time.monotonic() < end:
+            time.sleep(0.01)
+        decode.close()
+        assert result not in ("pending", "failed"), ("still", alpha, result)
+        assert result.size == (WIDTH, HEIGHT) and result.alpha == (alpha is not None), (result.size, result.alpha)
+        for x, y in ((8, 8), (56, 8), (8, 40), (56, 40)):
+            offset = y * result.stride + x * 4
+            wanted = (*quadrant(x, y), 255 if alpha is None else alpha)
+            assert tuple(result.pixels[offset:offset + 4]) == wanted, (alpha, x, y, result.pixels[offset:offset + 4])
+
+
 CASES = (turn_matches_the_reference(0, 0), turn_matches_the_reference(90, 1), turn_matches_the_reference(270, 2),
          crop_offset_shows_the_photos_edge(0, {0, 2}), crop_offset_shows_the_photos_edge(1, {1, 3}),
          transparency_is_stored_pre_multiplied, black_is_opaque_black, bt709_is_decoded_as_video,
-         a_wrong_target_size_is_refused, both_passes_carry_the_one_look)
+         a_wrong_target_size_is_refused, both_passes_carry_the_one_look, textures_are_deleted_through_gles3,
+         a_still_decodes_on_gstreamer)
 
 
 def main() -> None:
@@ -377,7 +434,7 @@ def main() -> None:
             try:
                 case()
                 print(f"PASS {case.__name__}", flush=True)
-            except AssertionError as error:
+            except Exception as error:   # noqa: BLE001 - a library's refusal is a failed case too
                 failed.append(case.__name__)
                 print(f"FAIL {case.__name__}: {error!r}"[:4000], flush=True)
     finally:

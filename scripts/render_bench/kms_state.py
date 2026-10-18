@@ -1,7 +1,9 @@
 """The kernel's planes (bead B6): which picture went on which plane and at what alpha, and whether
 Weston fell back to compositing (fewer planes than pictures). Placement comes from the debugfs state
-dump (/sys/kernel/debug/dri/<card>/state), which prints no alpha; each plane's `alpha` and `pixel
-blend mode` properties are read through libdrm as a second, read-only client of the KMS device."""
+dump (/sys/kernel/debug/dri/<minor>/state), which prints no alpha; each plane's `alpha` and `pixel
+blend mode` properties are read through libdrm as a second, read-only client of the KMS device.
+Both are the display controller's, found by its driver's name (`display_controller`): its card
+number follows the probe order (card0 or card1 on the Pi 5), never fixed."""
 from __future__ import annotations
 
 import ctypes
@@ -10,10 +12,12 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Final
 
-STATE_PATH: Final = "/sys/kernel/debug/dri/1/state"   # the vc4 KMS device's state on the Pi 5 (bench T2)
-KMS_DEVICE: Final = "/dev/dri/card1"                    # the same device's node (check on the Pi)
+DRIVER: Final = "vc4"                       # the Pi 5's display controller's DRM driver (bench T2)
+DRI: Final = "/dev/dri"
+DEBUGFS_DRI: Final = "/sys/kernel/debug/dri"
 OPAQUE_ALPHA: Final = 0xFFFF
 PREMULTIPLIED: Final = "Pre-multiplied"
 
@@ -102,6 +106,45 @@ class _Property(ctypes.Structure):
                 ("count_blobs", ctypes.c_int), ("blob_ids", ctypes.POINTER(ctypes.c_uint32)))
 
 
+class _Version(ctypes.Structure):
+    _fields_ = (("version_major", ctypes.c_int), ("version_minor", ctypes.c_int),
+                ("version_patchlevel", ctypes.c_int), ("name_len", ctypes.c_int), ("name", ctypes.c_char_p),
+                ("date_len", ctypes.c_int), ("date", ctypes.c_char_p), ("desc_len", ctypes.c_int),
+                ("desc", ctypes.c_char_p))
+
+
+def driven_by(names: Mapping[str, str], driver: str = DRIVER) -> str | None:
+    """The key whose text names `driver` as its first word (a card node's driver name, or a debugfs
+    directory's `name` file: "vc4 dev=axi:gpu ..."); None when none does. Pure."""
+    return next((key for key, text in sorted(names.items()) if text.split()[:1] == [driver]), None)
+
+
+def display_controller(dri: str = DRI, debugfs: str = DEBUGFS_DRI) -> tuple[str, str]:
+    """(debugfs state path, card node) of the display controller (DRIVER). OSError
+    ("kms_no_display_controller") when no card or no debugfs directory is DRIVER's."""
+    lib = _libdrm()
+    drivers = {}
+    for node in Path(dri).glob("card*"):
+        if not re.fullmatch(r"card\d+", node.name):
+            continue
+        fd = os.open(node, os.O_RDWR | os.O_CLOEXEC)
+        try:
+            version = lib.drmGetVersion(fd)
+            if version:
+                try:
+                    drivers[str(node)] = (version.contents.name or b"").decode()
+                finally:
+                    lib.drmFreeVersion(version)
+        finally:
+            os.close(fd)
+    named = {str(directory): (directory / "name").read_text() for directory in Path(debugfs).iterdir()
+             if (directory / "name").is_file() and (directory / "state").is_file()}
+    card, directory = driven_by(drivers), driven_by(named)
+    if card is None or directory is None:
+        raise OSError("kms_no_display_controller")
+    return str(Path(directory) / "state"), card
+
+
 def _libdrm() -> ctypes.CDLL:
     lib = ctypes.CDLL(ctypes.util.find_library("drm") or "libdrm.so.2")
     pointer = ctypes.c_void_p
@@ -114,13 +157,15 @@ def _libdrm() -> ctypes.CDLL:
         ("drmModeFreeObjectProperties", (pointer,), None),
         ("drmModeGetProperty", (ctypes.c_int, ctypes.c_uint32), ctypes.POINTER(_Property)),
         ("drmModeFreeProperty", (pointer,), None),
+        ("drmGetVersion", (ctypes.c_int,), ctypes.POINTER(_Version)),
+        ("drmFreeVersion", (pointer,), None),
     ):
         function = getattr(lib, name)
         function.argtypes, function.restype = argtypes, restype
     return lib
 
 
-def read_properties(device: str = KMS_DEVICE) -> dict[int, tuple[int, str]]:
+def read_properties(device: str) -> dict[int, tuple[int, str]]:
     """Every plane's (alpha, pixel blend mode) through libdrm (ctypes; universal planes and atomic
     client caps set, never master). OSError when the device cannot be read."""
     lib = _libdrm()
@@ -166,4 +211,5 @@ def _plane_properties(lib: ctypes.CDLL, fd: int, plane: int) -> tuple[int, str]:
     return alpha, blend
 
 
-__all__ = ["KMS_DEVICE", "OPAQUE_ALPHA", "PREMULTIPLIED", "STATE_PATH", "KmsPlane", "kms_planes", "read_properties"]
+__all__ = ["DRIVER", "OPAQUE_ALPHA", "PREMULTIPLIED", "KmsPlane", "display_controller", "driven_by", "kms_planes",
+           "read_properties"]

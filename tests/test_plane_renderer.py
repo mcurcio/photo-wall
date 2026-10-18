@@ -147,14 +147,19 @@ class FakeStill:
 
 @dataclass
 class FakeVideo:
+    """A video decode: `push` decodes a frame; a seek flushes the frames not taken, as GStreamer's
+    flushing seek does."""
     on_frame: object
     frames: list[DmabufFrame] = field(default_factory=list)
     returned: list[int] = field(default_factory=list)
+    seeks: list[float] = field(default_factory=list)
 
     def push(self, serial: int) -> None:
         self.frames.append(DmabufFrame(serial, (1920, 1080), NV12, 0, (0, 0), (1920, 1920), serial, serial / 30))
 
     def seek(self, position):
+        self.seeks.append(position)
+        self.frames.clear()
         return True
 
     def latest(self):
@@ -213,8 +218,18 @@ def photo(key: str, **fields) -> LocalLayer:
     return LocalLayer(layer(key, variant=jpeg, **fields), Path(f"/media/{key}.jpg"), 0.0, 1.0)
 
 
-def video(key: str) -> LocalLayer:
-    return LocalLayer(layer(key, video=True), Path(f"/media/{key}.mp4"), 0.0, 1.0)
+def video(key: str, **fields) -> LocalLayer:
+    return LocalLayer(layer(key, video=True, **fields), Path(f"/media/{key}.mp4"), 0.0, 1.0)
+
+
+def prepared_video(rig: Rig, clip: LocalLayer) -> FakeVideo:
+    """`clip` prepared on the rig's Frame: its decode started, its first frame finished."""
+    frame = FrameOnScreen(binding(), FULL)
+    assert rig.renderer.prepare(clip, frame).status == "pending"
+    decode = rig.videos[-1]
+    decode.push(1)
+    assert rig.renderer.prepare(clip, frame).status == "prepared"
+    return decode
 
 
 def test_a_dissolve_draws_each_still_once_and_commits_the_plane_strengths():
@@ -319,8 +334,7 @@ def test_a_released_layer_is_freed_once_no_commit_shows_it():
 def test_a_video_frame_is_drawn_into_a_released_target_and_said():
     rig = Rig()
     clip = video("clip")
-    assert rig.renderer.prepare(clip, FrameOnScreen(binding(), FULL)).status == "pending"
-    rig.videos[0].push(1)
+    prepared_video(rig, clip)
     assert rig.present(clip).status == "presented"
     first = rig.screens.commits[-1][1]["clip"]
     rig.videos[0].push(2)
@@ -337,8 +351,7 @@ def test_a_video_frame_is_drawn_into_a_released_target_and_said():
 def test_a_busy_target_is_never_drawn_into():
     rig = Rig()
     clip = video("clip")
-    rig.renderer.prepare(clip, FrameOnScreen(binding(), FULL))
-    rig.videos[0].push(1)
+    prepared_video(rig, clip)
     rig.present(clip)                                   # target 1 shown
     rig.videos[0].push(2)
     rig.videos[0].on_frame()                            # into target 2
@@ -368,13 +381,88 @@ def test_no_grant_is_pending_and_commits_nothing():
     assert rig.screens.commits == [] and rig.fitter.draws == []
 
 
-def test_a_candidate_grant_commits_the_screens_black_under_the_candidate_tag_once():
-    rig = Rig(admitted=False)
+def test_a_candidate_grant_commits_the_screens_black_again_on_each_present_the_pacer_allows():
+    """The shell completes a handoff only on a presented commit after its release, which the app
+    cannot see: the candidate's black is committed again whenever the last one was answered, and
+    never while it is in flight."""
+    rig = Rig(admitted=False, answer=False)
     assert rig.present(photo("p", start=0)).status == "pending"
     rig.clock.tick()
     assert rig.present(photo("p", start=0)).status == "pending"
+    assert len(rig.screens.commits) == 1                # in flight: nothing more
+    rig.screens.answer = True
+    for _ in range(2):
+        rig.clock.tick()
+        assert rig.present(photo("p", start=0)).status == "pending"
     assert [(commit[0].planes, commit[2], commit[3]) for commit in rig.screens.commits] == [
-        ((), f"candidate-{GRANT}", None)]
+        ((), f"candidate-{GRANT}", None)] * 3
+    assert rig.fitter.draws == []
+
+
+def test_a_held_still_whose_play_position_moves_commits_once():
+    """Each planning tick hands the layer at its new play position (now - media_origin): the
+    picture, its placement and strength are the same, so nothing is committed again."""
+    rig = Rig()
+    still = photo("still", start=0)
+    for tick in range(30):
+        rig.present(replace(still, position=tick * 0.043))
+        rig.clock.tick()
+    assert len(rig.screens.commits) == 1 and len(rig.fitter.draws) == 1
+
+
+def test_a_picture_finished_again_into_the_same_buffer_commits_again():
+    """A picture's finish counts, not only its buffer: a still finished again whose new target
+    the compositor gives the old handle (a freed buffer's id reused) is a new commit."""
+    rig = Rig()
+    still = photo("still", start=0)
+    rig.present(still)
+    rig.screens.import_picture = lambda target: ScreenPicture(4242, target.size)
+    rig.clock.tick()
+    rig.present(still)                                  # same key: no draw, no commit
+    rig.screens.operations = neutral_operations(OUTPUT, 3, DisplayLight(200, .01))
+    rig.clock.tick()
+    rig.present(still)
+    rig.screens.operations = neutral_operations(OUTPUT, 3, DisplayLight(300, .01))
+    rig.clock.tick()
+    rig.present(still)
+    assert [commit[1]["still"].handle for commit in rig.screens.commits][1:] == [4242, 4242]
+    assert len(rig.screens.commits) == 3
+
+
+def test_a_prepared_video_finishes_its_first_frame_once_and_starts_when_first_presented():
+    """During its lead a video is ready to start: its first frame finished once, its later
+    frames left in the decoder (no draw on their callbacks or on a prepare). Its first present
+    plays it from the layer's position; from then on each frame is finished while it is seen."""
+    rig = Rig()
+    clip = video("clip", start=100, media_origin=100)
+    decode = prepared_video(rig, clip)
+    assert decode.seeks == [0.0] and len(rig.fitter.draws) == 1
+    for serial in range(2, 30):                         # the lead: frames arrive, nothing is finished
+        decode.push(serial)
+        decode.on_frame()
+        assert rig.renderer.prepare(clip, FrameOnScreen(binding(), FULL)).status == "prepared"
+    assert len(rig.fitter.draws) == 1 and rig.changes == [] and rig.device.imports == [1]
+    started = replace(clip, position=0.02)
+    assert rig.present(started).status == "presented"
+    assert decode.seeks == [0.0, 0.02]                  # started from where the layer is
+    assert rig.screens.commits[-1][1]["clip"].handle == 1001       # the prepared frame meanwhile
+    decode.push(30)
+    decode.on_frame()
+    assert rig.device.imports == [1, 30] and rig.changes == [OUTPUT]
+
+
+def test_a_video_no_commit_shows_finishes_no_frame():
+    rig = Rig()
+    clip = video("clip", start=0)
+    decode = prepared_video(rig, clip)
+    rig.present(clip)
+    cover = photo("cover", start=1)
+    rig.clock.tick()
+    rig.present(clip, cover)                            # covered: not in the commit
+    assert [key for key, _ in rig.strengths()] == ["cover"]
+    decode.push(2)
+    decode.on_frame()
+    assert rig.device.imports == [1] and rig.changes == []
 
 
 def test_while_a_commit_is_in_flight_a_present_commits_nothing():

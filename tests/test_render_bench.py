@@ -3,13 +3,16 @@ the kernel's state dump, the glitch bits and the verdict."""
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from player.geometry import encode_srgb
 from scripts.render_bench import timeline
+from scripts.render_bench.__main__ import _Bench
+from scripts.render_bench.controller import BenchController
 from scripts.render_bench.evidence import Moment, verdict
-from scripts.render_bench.kms_state import KmsPlane, kms_planes
+from scripts.render_bench.kms_state import KmsPlane, driven_by, kms_planes
 from scripts.render_bench.registers import STICKY_GLITCH, RegisterSample, glitched
 
 FIXTURE = Path(__file__).parent / "fixtures" / "render_bench" / "kms-state.txt"
@@ -151,3 +154,74 @@ def test_a_run_that_could_not_see_a_failure_fails():
     assert verdict(FIRST, []).failures == ("no_moments",)
     assert verdict(FIRST, [GOOD]).failures == ("overload_unseen",)
     assert verdict(RegisterSample(0.0, 0x420 | STICKY_GLITCH), [GOOD, OVERLOAD]).failures == ("glitch_blind",)
+
+
+@pytest.mark.parametrize(("key", "measured"), sorted(timeline.T3_PLANE_ALPHA.items()))
+def test_the_expected_strengths_meet_bench_t3s_measured_plane_alphas(key, measured):
+    """The bench's own expectation, held to the plane alphas bench T3 measured as matching the
+    Player's mix (16-bit KMS values), not to player/planes.py's rule it checks."""
+    beneath, alpha = key
+    assert abs(round(timeline.expected_strength(alpha, beneath) * 0xFFFF) - measured) <= 1
+
+
+def test_the_display_controller_is_the_card_its_driver_names():
+    assert driven_by({"/dev/dri/card0": "v3d", "/dev/dri/card1": "vc4"}) == "/dev/dri/card1"
+    assert driven_by({"/dev/dri/card0": "vc4", "/dev/dri/card1": "v3d"}) == "/dev/dri/card0"
+    debugfs = {"/sys/kernel/debug/dri/0": "v3d dev=1002000000.v3d unique=1002000000.v3d\n",
+               "/sys/kernel/debug/dri/1": "vc4 dev=axi:gpu master=pid unique=axi:gpu\n",
+               "/sys/kernel/debug/dri/128": "v3d dev=1002000000.v3d unique=1002000000.v3d\n"}
+    assert driven_by(debugfs) == "/sys/kernel/debug/dri/1"
+    assert driven_by({"/dev/dri/card0": "v3d", "/dev/dri/card1": ""}) is None
+
+
+class _AnnouncingShell:
+    """WestonBackend and its host as BenchController uses them: the Output is announced after
+    `after` dispatches; each turn asked is recorded."""
+
+    def __init__(self, after: int) -> None:
+        self.after, self.dispatched, self.turns = after, 0, []
+
+    def dispatch(self):
+        self.dispatched += 1
+
+    def state(self, output_id):
+        if self.dispatched < self.after:
+            raise KeyError(output_id)
+        return SimpleNamespace(key="key-1", connected=True)
+
+    def output_powered(self, output_id):
+        return None if self.dispatched < self.after else "on"
+
+    def turn(self, output_id, turn, *, timeout):
+        if self.dispatched < self.after:
+            return False
+        self.turns.append((output_id, turn))
+        return True
+
+
+def bench_controller(shell: _AnnouncingShell) -> BenchController:
+    controller = BenchController.__new__(BenchController)
+    controller._output_id, controller._backend, controller._host = "HDMI-A-1", shell, shell
+    return controller
+
+
+def test_a_turn_asked_before_the_output_is_announced_waits_for_it():
+    shell = _AnnouncingShell(after=3)
+    bench_controller(shell).turn(0, timeout=1.0)
+    assert shell.turns == [("HDMI-A-1", 0)] and shell.dispatched >= 3
+
+
+def test_a_turn_for_an_output_never_announced_fails():
+    with pytest.raises(RuntimeError, match="^bench_turn$"):
+        bench_controller(_AnnouncingShell(after=10**9)).turn(0, timeout=0.05)
+
+
+def test_a_new_grant_forgets_the_last_presented_answer():
+    """After a re-grant the screen shows the candidate's black until the renderer presents under
+    the new grant: a moment of the old answer would be a miss."""
+    bench = _Bench.__new__(_Bench)
+    bench.tracer = SimpleNamespace(binding=SimpleNamespace(frame_id="f", generation=1, configuration_revision=1))
+    bench.controller = SimpleNamespace(grant=lambda *args, **kwargs: None)
+    bench.last, bench.handed = object(), True
+    bench._grant()
+    assert bench.last is None and bench.handed is False

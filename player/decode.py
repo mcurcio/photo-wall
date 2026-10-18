@@ -132,10 +132,12 @@ class StillDecode:
     def _decoded(self, _decode: Any, pad: Any, convert: Any) -> None:
         """decodebin's pad (a streaming thread): link it, and note whether its format has alpha."""
         caps = pad.get_current_caps() or pad.query_caps(None)
-        structure = caps.get_structure(0) if caps is not None and caps.get_size() else None
-        if structure is None or not structure.get_name().startswith("video/"):
+        if caps is None or not caps.get_size():
             return
-        self._alpha = _has_alpha(structure.get_string("format"))
+        with caps.get_structure(0) as structure:        # GStreamer 1.26's StructureWrapper
+            if not structure.get_name().startswith("video/"):
+                return
+            self._alpha = _has_alpha(structure.get_string("format"))
         pad.link(convert.get_static_pad("sink"))
 
     def result(self) -> StillPicture | Literal["pending", "failed"]:
@@ -180,9 +182,9 @@ def _has_alpha(format_name: str | None) -> bool:
 
 def _still_of(sample: Any, alpha: bool) -> StillPicture | None:
     """The RGBA picture of a prerolled sample; None when its layout is not whole rows."""
-    structure = sample.get_caps().get_structure(0)
-    found_width, width = structure.get_int("width")
-    found_height, height = structure.get_int("height")
+    with sample.get_caps().get_structure(0) as structure:     # GStreamer 1.26's StructureWrapper
+        found_width, width = structure.get_int("width")
+        found_height, height = structure.get_int("height")
     buffer = sample.get_buffer()
     pixels = buffer.extract_dup(0, buffer.get_size())
     if not (found_width and found_height and width > 0 and height > 0):

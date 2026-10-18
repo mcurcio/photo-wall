@@ -28,6 +28,12 @@ nothing but the app is on screen.
    turn 90 and the Output's size turned; four solid planes on the hanging quadrants and one
    full-screen target laid out turned (player/geometry.py `buffer_to_picture`) with the same four
    colours capture alike: the buffer transform shows the target upright, in any capture layout.
+6. a_full_screen_frame_is_answered_past_the_feedback_table: the screen turned back (and handed
+   off again), SOAK_COMMITS (well past the frame client's 128 feedback slots) presents of one
+   opaque full-screen plane, alternating red and blue, each waited on: every one is answered
+   `presented` with its own sequence (none overdue, none lost), the shell's `presented` names
+   every tag, and the capture is the last colour. The screen's black is covered the whole time, so
+   Weston answers only feedback asked on what it presents (frame-client.h `pw_screen_present`).
 """
 import json
 import mmap
@@ -57,6 +63,7 @@ XR24, LINEAR = 0x34325258, 0
 RED, GREEN, BLUE, WHITE, BLACK = (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255), (0, 0, 0)
 QUADRANTS = (RED, GREEN, BLUE, WHITE)       # top-left, top-right, bottom-left, bottom-right as it hangs
 TOLERANCE = 2
+SOAK_COMMITS, SOAK_CHUNK = 320, 40         # case 6; the harness drains the shell between chunks
 RECTANGLE = (40, 40, 200, 150)              # x, y, width, height of the mixed planes
 
 
@@ -135,6 +142,29 @@ def app() -> None:
         return {"result": result, "busy": {plane.layer.layer.assignment_id: screens.busy(picture)
                                            for plane, picture in shown}}
 
+    def soak(count: int, tag: str):
+        """`count` presents of one opaque full-screen plane, red and blue in turn, each waited on
+        (up to 1 s; headless Weston answers within a few refreshes) for its word: the answers'
+        kinds, by count."""
+        answers: dict[str, int] = {}
+        for index in range(count):
+            screen = screens.screen(OUTPUT)
+            width, height = screen.size
+            colour = (RED, BLUE)[index % 2]
+            result = present([[f"full-{colour}", colour, 0, 0, width, height, 1.0]], f"{tag}-{index}")["result"]
+            assert isinstance(result, int), ("soak_present", index, result)
+            end, word = time.monotonic() + 1.0, None
+            while time.monotonic() < end:
+                screens.dispatch()
+                word = screens.presentation(OUTPUT, time.monotonic())
+                if word is not None and word.sequence >= result:
+                    break
+                select.select([screens.fd], [], [], 0.01)
+            kind = ("none" if word is None or word.sequence < result else
+                    "discarded" if word.at is None else "presented")
+            answers[kind] = answers.get(kind, 0) + 1
+        return {"answers": answers}
+
     def handle(command):
         nonlocal candidate
         op = command["op"]
@@ -149,6 +179,8 @@ def app() -> None:
         if op == "screen":
             screen = screens.screen(OUTPUT)
             return {"screen": None if screen is None else [*screen.size, screen.turn]}
+        if op == "soak":
+            return soak(command["count"], command["tag"])
         if op == "short_stride":
             size = (64, 48)
             short = target(size, target_bytes(size, 0, RED), 64 * 4 - 4)
@@ -566,6 +598,40 @@ def main() -> None:
         assert compared > 5000, compared
         assert sequences == sorted(set(sequences)), sequences
         print("PASS a_turned_screen_shows_a_turned_target_upright", flush=True)
+
+        # 6. a_full_screen_frame_is_answered_past_the_feedback_table
+        known = len(keys)
+        assert backend.turn(OUTPUT, 0, timeout=5.0), "turn_back_refused"
+        hand_off(known)
+        end = time.monotonic() + 5
+        while (screen := ask(op="screen")["screen"]) != [WIDTH_PX, HEIGHT_PX, 0] and time.monotonic() < end:
+            time.sleep(0.05)
+        assert screen == [WIDTH_PX, HEIGHT_PX, 0], screen
+        answers: dict[str, int] = {}
+        for chunk in range(SOAK_COMMITS // SOAK_CHUNK):
+            soaked = ask(op="soak", count=SOAK_CHUNK, tag=f"soak{chunk}")
+            for kind, count in soaked["answers"].items():
+                answers[kind] = answers.get(kind, 0) + count
+        last = f"soak{SOAK_COMMITS // SOAK_CHUNK - 1}-{SOAK_CHUNK - 1}"
+        end = time.monotonic() + 10
+        while last not in presented_tags:       # the shell's event may have come with the last ask
+            assert time.monotonic() < end, ("soak_unpresented", last)
+            drain()
+            time.sleep(0.01)
+        last_colour = (RED, BLUE)[(SOAK_CHUNK - 1) % 2]
+
+        def all_last_colour(frame):
+            width, height, _ = frame
+            samples = [pixel(frame, x, y) for y in range(0, height, 9) for x in range(0, width, 9)]
+            assert all(colour == last_colour for colour in samples), ("not_full_screen", histogram(frame))
+            return len(samples)
+
+        samples = await_frame(all_last_colour)
+        soak_tags = [tag for tag in presented_tags if tag.startswith("soak")]
+        print(f"SOAK answers={answers} shell_presented={len(soak_tags)} samples={samples}", flush=True)
+        assert answers == {"presented": SOAK_COMMITS}, answers
+        assert len(set(soak_tags)) == SOAK_COMMITS, len(set(soak_tags))      # the shell's evidence of each
+        print("PASS a_full_screen_frame_is_answered_past_the_feedback_table", flush=True)
     except BaseException:
         app_log.flush()
         print("APP LOG:\n" + APP_LOG.read_text()[-4000:], flush=True)
