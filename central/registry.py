@@ -36,6 +36,7 @@ from central.infra.display_store import (
     frame_readiness_in,
     resolve_output,
 )
+from central.infra.output_wakes import notify_nodes_in
 from central.infra.position_history_store import record_created_in, write_position_in
 from central.infra.power_store import forget_frame_in
 from central.infra.transactions import PgTransaction
@@ -133,6 +134,13 @@ class FrameTurnChange(Model):
     generation the operator read. `turn` is exact (`ExactTurn`): a JSON false, 90.0 or "90" is refused."""
     turn: ExactTurn
     expected_generation: int = Field(ge=0)
+
+
+def _wake_nodes_of(conn, *player_ids: str | None) -> None:
+    """Wake the Output document source of each named Player's Node (None skipped), on commit: every
+    write that changes which Frame an Output carries, or a bound Frame's turn, calls it."""
+    for player_id in dict.fromkeys(player_id for player_id in player_ids if player_id is not None):
+        notify_nodes_in(conn, "SELECT device_id FROM players WHERE id=%s", (player_id,))
 
 
 def _smallest_free(conn, table: str, word: str) -> str:
@@ -581,6 +589,9 @@ class Registry:
                     raise RegistryError("binding_generation_conflict")
                 conn.execute("DELETE FROM bindings WHERE frame_id=%s", (frame_id,))
                 conn.execute("INSERT INTO bindings VALUES(%s,%s,%s)", (frame_id, player_id, output_id))
+                # The Output now carries this Frame (its timetable and turn), and the one it left
+                # carries none: wake both Nodes' document sources, on commit.
+                _wake_nodes_of(conn, player_id, None if existing is None else existing["player_id"])
                 resolve_output(conn, player_id, output_id)   # the display there, under this binding
                 row = conn.execute("UPDATE frames SET generation=generation+1,"
                                    "configuration_revision=configuration_revision+1 "
@@ -605,6 +616,7 @@ class Registry:
             if frame["generation"] != expected_generation:
                 raise RegistryError("binding_generation_conflict")
             conn.execute("DELETE FROM bindings WHERE frame_id=%s", (frame_id,))
+            _wake_nodes_of(conn, existing["player_id"])   # its Output now carries no Frame (turn 0)
             row = conn.execute("UPDATE frames SET generation=generation+1,"
                                "configuration_revision=configuration_revision+1 "
                                "WHERE id=%s RETURNING generation",
@@ -645,8 +657,25 @@ class Registry:
         readiness POSITION_NEEDED until the next Save), audits "frame_turned" {"turn", "generation"}
         and wakes the bound Player's Node's document source (`notify_nodes_in`), so its Output
         document carries the turn without waiting for a deadline; answers {..., "changed": True}.
-        Never touches the Position, the binding or the lighting. (render-planes S2 bead B1)"""
-        raise NotImplementedError("render-planes S2 bead B1")
+        Never touches the Position, the binding or the lighting."""
+        with self._equipment_write() as conn:
+            frame = conn.execute("SELECT generation, turn FROM frames WHERE id=%s FOR UPDATE",
+                                 (frame_id,)).fetchone()
+            if not frame:
+                raise RegistryError("unknown_frame", 404)
+            if frame["generation"] != expected_generation:
+                raise RegistryError("binding_generation_conflict")
+            if frame["turn"] == turn:
+                return {"frame_id": frame_id, "turn": turn, "generation": frame["generation"],
+                        "changed": False}
+            row = conn.execute("UPDATE frames SET turn=%s, generation=generation+1,"
+                               "configuration_revision=configuration_revision+1 "
+                               "WHERE id=%s RETURNING generation", (turn, frame_id)).fetchone()
+            self._audit(conn, "frame_turned", frame_id, {"turn": turn, **row})
+            bound = conn.execute("SELECT player_id FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone()
+            if bound is not None:
+                _wake_nodes_of(conn, bound["player_id"])
+            return {"frame_id": frame_id, "turn": turn, **row, "changed": True}
 
     def replace_frame_profile(self, frame_id: str, profile: FrameProfile, *,
                               expected_generation: int, conn) -> dict:
@@ -844,7 +873,7 @@ class Registry:
         outputs = conn.execute("SELECT player_id,output_id,observation FROM outputs "
                                "ORDER BY player_id,output_id").fetchall()
         frames = conn.execute("SELECT f.id,f.name,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,"  # noqa: S608
-                              "f.calibration,f.lighting,f.configuration_revision,"
+                              "f.calibration,f.lighting,f.turn,f.configuration_revision,"
                               f"b.player_id,b.output_id,{POSITION_COLUMNS} FROM frames f LEFT JOIN bindings b "
                               f"ON b.frame_id=f.id {SEEN_DISPLAY_JOIN} ORDER BY f.id").fetchall()
         bound_player_ids = {frame["player_id"] for frame in frames if frame["player_id"] is not None}

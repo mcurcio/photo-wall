@@ -6,7 +6,9 @@ input was ordered, so a digest of them is stable); and each refusal the contract
 with the type's own code. Schema 3 (Power and the week): the document's power part is a timetable of
 calendar set times with the console test on top, and the largest one still fits the bus's 4096 bytes.
 Schema 4 (decision 0022): picture has left both for its own keys (contracts/node_picture.py), so a
-document or report that still carries a picture part is refused.
+document or report that still carries a picture part is refused. Schema 9 (render redesign S2): the
+document carries the turn, how the screen hangs, checked by contracts/display_turn.py `is_turn`; a
+document without it, or with any other value, is refused.
 """
 from __future__ import annotations
 
@@ -52,7 +54,7 @@ TIMETABLE = OutputPower(Power.ON, (PowerChange("2026-10-12T22:00:00Z", Power.OFF
                                    PowerChange("2026-10-13T06:00:00Z", Power.ON)),
                         "2026-10-20T23:00:00Z", Darkness.DISPLAY_OFF, None)
 WITH_TEST = OutputPower(Power.ON, TIMETABLE.changes, TIMETABLE.until, Darkness.DISPLAY_OFF, TEST_OFF)
-DOCUMENT = OutputDocument("HDMI-A-1", 3, WITH_TEST, PowerMethod.DDC_CI, True, True)
+DOCUMENT = OutputDocument("HDMI-A-1", 3, WITH_TEST, PowerMethod.DDC_CI, True, True, 0)
 IDENTITY = DisplayIdentity("XYM", 5475, "MNN", None)
 TESTING = InForce(InForceKind.TEST, Power.OFF, "req-7", 120, None)
 REPORT = OutputReport(
@@ -64,16 +66,18 @@ CANONICAL = (b'{"change":3,"method":"ddc-ci","never_off_on_other_input":true,"ou
              b'"power":{"changes":[{"at":"2026-10-12T22:00:00Z","power":"off"},'
              b'{"at":"2026-10-13T06:00:00Z","power":"on"}],"darkness":"display-off","now":"on",'
              b'"test":{"for_seconds":300,"power":"off","request_id":"req-7"},"until":"2026-10-20T23:00:00Z"},'
-             b'"switch_input_on_power_on":true}')
+             b'"switch_input_on_power_on":true,"turn":0}')
 
 
-def test_the_display_line_is_schema_8():
-    assert SCHEMA_MAJOR == 8
+def test_the_display_line_is_schema_9():
+    assert SCHEMA_MAJOR == 9
 
 
 @pytest.mark.parametrize("value, encode, decode", [
     (DOCUMENT, encode_output_document, decode_output_document),
-    (OutputDocument("Virtual-2", 1, TIMETABLE, BEST_DETECTED, False, False),
+    (OutputDocument("Virtual-2", 1, TIMETABLE, BEST_DETECTED, False, False, 0),
+     encode_output_document, decode_output_document),
+    (OutputDocument("HDMI-A-2", 4, TIMETABLE, BEST_DETECTED, True, True, 90),
      encode_output_document, decode_output_document),
     (REPORT, encode_output_report, decode_output_report),
     (OutputReport("HDMI-A-2", False, None, (), (), None, None, None, None),
@@ -125,7 +129,7 @@ def test_the_largest_document_fits_the_bus():
                     for index in range(MAX_POWER_CHANGES))
     power = OutputPower(Power.ON, changes, encode_set_time(start + 3600 * MAX_POWER_CHANGES), Darkness.BLACK_PICTURE,
                         PowerRequest("0" * 64, Power.OFF, MAX_REQUEST_SECONDS))
-    document = OutputDocument("Virtual-1", 2**31, power, BEST_DETECTED, True, True)
+    document = OutputDocument("Virtual-1", 2**31, power, BEST_DETECTED, True, True, 270)
     raw = encode_output_document(document)
     assert len(raw) <= OUTPUT_DOCUMENT_BYTES
     assert decode_output_document(raw) == document
@@ -148,12 +152,16 @@ def _power(**changes) -> dict:
 
 
 @pytest.mark.parametrize("build", [
-    lambda: OutputDocument("HDMI-A-3", 1, TIMETABLE, BEST_DETECTED, True, True),
-    lambda: OutputDocument("HDMI-A-1", 0, TIMETABLE, BEST_DETECTED, True, True),
-    lambda: OutputDocument("HDMI-A-1", 1, (TEST_OFF,), BEST_DETECTED, True, True),
-    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, "smart-plug", True, True),
-    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, BEST_DETECTED, 1, True),
-], ids=["unknown-output", "change-0", "a-request-stack", "unknown-method", "int-switch"])
+    lambda: OutputDocument("HDMI-A-3", 1, TIMETABLE, BEST_DETECTED, True, True, 0),
+    lambda: OutputDocument("HDMI-A-1", 0, TIMETABLE, BEST_DETECTED, True, True, 0),
+    lambda: OutputDocument("HDMI-A-1", 1, (TEST_OFF,), BEST_DETECTED, True, True, 0),
+    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, "smart-plug", True, True, 0),
+    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, BEST_DETECTED, 1, True, 0),
+    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, BEST_DETECTED, True, True, False),
+    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, BEST_DETECTED, True, True, 45),
+    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, BEST_DETECTED, True, True, 90.0),
+], ids=["unknown-output", "change-0", "a-request-stack", "unknown-method", "int-switch", "bool-turn",
+        "turn-45", "float-turn"])
 def test_a_document_refuses(build):
     with pytest.raises(ValueError, match="^output_document$"):
         build()
@@ -270,6 +278,10 @@ _AT_UNTIL = _power(until=_power()["changes"][-1]["at"])
     json.dumps(_document(change="3")).encode(),
     json.dumps(_document(change=True)).encode(),
     json.dumps(_document(switch_input_on_power_on=1)).encode(),
+    json.dumps({key: value for key, value in _document().items() if key != "turn"}).encode(),   # schema 8's
+    json.dumps(_document(turn=4)).encode(),
+    json.dumps(_document(turn=False)).encode(),
+    json.dumps(_document(turn=90.0)).encode(),
     CANONICAL[:-1] + b',"change":3}',                                           # duplicate JSON key
     CANONICAL.replace(b'"change":3', b'"change":NaN'),
     CANONICAL + b" " * (OUTPUT_DOCUMENT_BYTES + 1 - len(CANONICAL)),            # past the size
@@ -280,7 +292,8 @@ _AT_UNTIL = _power(until=_power()["changes"][-1]["at"])
                                                     "contrast": {"acts_on": "display", "value": 50}})).encode(),
 ], ids=["unknown-output", "request-stack", "unsorted", "change-at-until", "bad-set-time", "untimed-test",
         "schema-2-reason", "unknown-field", "missing-field", "string-change", "bool-change", "int-switch",
-        "duplicate-key", "nan", "too-large", "not-object", "not-utf8", "schema-3-picture-part"])
+        "no-turn", "turn-4", "bool-turn", "float-turn", "duplicate-key", "nan", "too-large", "not-object",
+        "not-utf8", "schema-3-picture-part"])
 def test_decoding_a_document_refuses(raw):
     with pytest.raises(ValueError, match="^output_document$"):
         decode_output_document(raw)

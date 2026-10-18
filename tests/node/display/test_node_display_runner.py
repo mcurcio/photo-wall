@@ -523,7 +523,7 @@ def test_the_document_feed_routes_each_document_by_its_key_and_ignores_the_rest(
     feed = document_feed(SimpleNamespace(document=lambda output_id, document: got.append((output_id, document))),
                          SimpleNamespace(document=lambda output_id, document: pictures.append((output_id, document))))
     wanted = OutputDocument("HDMI-A-1", 2, OutputPower(Power.ON, (), "2099-01-01T00:00:00Z", Darkness.DISPLAY_OFF, None),
-                            BEST_DETECTED, False, False)
+                            BEST_DETECTED, False, False, 0)
     picture = PictureDocument("HDMI-A-1", 3, {"10": 46}, NEUTRAL_SOFTWARE, light=UPGRADE_DISPLAY_LIGHT)
     feed("output-HDMI-A-1", Document(encode_output_document(wanted), "central", None))
     feed("output-HDMI-A-2", Document(encode_output_document(wanted), "central", None))   # another key

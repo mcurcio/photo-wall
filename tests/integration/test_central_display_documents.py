@@ -8,8 +8,12 @@ with standing on. (2) The session's Output report is recorded and judged into `o
 (the Display recognised on the bound Frame). (3) A report from an Output Central had no row for
 gives that Output a document within 3 s, carried by the judge's wake (`changed()`), not by a
 reconcile: the link first settles (its reconcile after draining the session's `birth`), and no
-reconcile runs between the report and the document (E-1B-C3-3). Mutation probe: drop the judge's
-wake (the document waits for a reconcile, or the 3 s pass).
+reconcile runs between the report and the document (E-1B-C3-3). (4) Turning the bound Frame
+(`Registry.turn_frame`, render redesign S2) puts its Output's document with the turn and the next
+`change` on the Node within 3 s, carried by the command's wake, with no reconcile between. (5)
+Unbinding the Frame brings that Output's document back to turn 0 within 3 s, likewise (the unbind's
+wake). Mutation probes: drop the judge's wake (step 3), or the `notify_nodes_in` call in
+`turn_frame` (step 4): the document then waits for a reconcile, or the 3 s pass.
 """
 from __future__ import annotations
 
@@ -137,6 +141,26 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
             display.state.put(output_report_key("HDMI-A-2"), _report("HDMI-A-2"))
             await until(lambda: held("HDMI-A-2"), 3, "output-HDMI-A-2 on the Node after its report")
             assert len(reconciles) == reconciled   # the judge's wake carried it, not a reconcile
+
+            # (4) A turn reaches the Node through turn_frame's wake, not a reconcile.
+            before = await held("HDMI-A-1")
+            assert (before.change, before.turn) == (1, 0)
+            [kitchen] = [frame for frame in registry.inventory().frames if frame.id == "kitchen"]
+            turned = registry.turn_frame("kitchen", 90, expected_generation=kitchen.generation)
+            assert turned["changed"] is True
+
+            async def hanging(turn: int):
+                document = await held("HDMI-A-1")
+                return document if document and document.turn == turn else None
+            document = await until(lambda: hanging(90), 3, "output-HDMI-A-1 turned 90 on the Node")
+            assert document.change == 2
+            assert len(reconciles) == reconciled   # turn_frame's wake carried it, not a reconcile
+
+            # (5) Unbinding the Frame leaves its Output unturned, through the unbind's wake.
+            registry.unbind("kitchen", expected_generation=turned["generation"])
+            document = await until(lambda: hanging(0), 3, "output-HDMI-A-1 back to turn 0 on the Node")
+            assert document.change == 3
+            assert len(reconciles) == reconciled   # the unbind's wake carried it, not a reconcile
             assert not running.done()
         finally:
             stop.set()

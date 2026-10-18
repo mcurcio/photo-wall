@@ -14,15 +14,16 @@ One home each for:
   blip or an unreadable identity (None) never changes the Display recorded on an Output; only a
   readable identity with another key does.
 - **Ready** (C2; design rule 3, G5). A Frame is ready when it is bound, its latest Position
-  commit was made at its current generation (bind, unbind and a profile change raise the
-  generation), and that commit names the Display last seen on its Output, or no Display has ever
+  commit was made at its current generation (bind, unbind, a profile change and a turn raise the
+  generation: a Position made for the other hanging needs checking), and that commit names the Display last seen on its Output, or no Display has ever
   been seen there. A Display first seen on an Output (none before) is adopted by the Frame bound
   there when its Position commit names none: a Frame committed before 1b, or against a display
   with no EDID, is not made "display changed" by the first report.
 - **The Output document** (C1, C3; roadmap 2a). Its power part is the Frame's power timetable
   (central/power/timetable.py: Central's decision now, the set times it changes at, `until`, the
   darkness), with the Frame's live console test on top; method and switches come from the Display
-  last seen on the Output (defaults when none). The console's one test is Test: turn off. It
+  last seen on the Output (defaults when none); its turn is the bound Frame's (frames.turn), 0 for
+  an unbound Output, so `change` rises for a turn as for power. The console's one test is Test: turn off. It
   lasts TEST_SECONDS, "or less if you press Turn on. When the test ends, the request underneath
   takes over" (owner q1, 2026-10-10): Turn on ends the live test, so the timetable is underneath
   again. The Pi counts a test on its own clock, and Central drops it from the document at its own
@@ -44,6 +45,7 @@ from typing import Final, TypeGuard
 from uuid import UUID
 
 from central.power.timetable import Timetable
+from contracts.display_turn import DisplayTurn
 from contracts.node_output import (
     BEST_DETECTED,
     DisplayIdentity,
@@ -177,12 +179,13 @@ class PowerTest:
 
 @dataclass(frozen=True)
 class ProjectedOutput:
-    """One Output's document, all but its change number: the power part alone (picture rides its own
-    key with its own change number, central/displays/picture.py; decision 0022), so a picture edit
-    never raises `change` and never re-runs power."""
+    """One Output's document, all but its change number: the power part and the turn (picture rides
+    its own key with its own change number, central/displays/picture.py; decision 0022), so a
+    picture edit never raises `change` and never re-runs power."""
     output_id: str
     power: OutputPower
     settings: DisplaySettings
+    turn: DisplayTurn
 
     def digest(self) -> str:
         """sha256 hex of the canonical document but its change number; the projector raises `change`
@@ -195,7 +198,8 @@ class ProjectedOutput:
         settings = self.settings
         return OutputDocument(self.output_id, change, self.power,
                               BEST_DETECTED if settings.power_method is None else settings.power_method,
-                              settings.switch_input_on_power_on, settings.never_off_on_other_input)
+                              settings.switch_input_on_power_on, settings.never_off_on_other_input,
+                              self.turn)
 
 
 def _sha256(value: object) -> str:
@@ -214,11 +218,11 @@ def output_power(timetable: Timetable, test: PowerTest | None, now: float) -> Ou
 
 
 def project_output(output_id: str, *, timetable: Timetable, test: PowerTest | None,
-                   settings: DisplaySettings | None, now: float) -> ProjectedOutput:
+                   settings: DisplaySettings | None, turn: DisplayTurn, now: float) -> ProjectedOutput:
     """The Output's document body at Central's `now`: its power part (`output_power`); `settings`
-    or DEFAULT_SETTINGS."""
+    or DEFAULT_SETTINGS; `turn`, the bound Frame's (0 unbound)."""
     return ProjectedOutput(output_id, output_power(timetable, test, now),
-                           DEFAULT_SETTINGS if settings is None else settings)
+                           DEFAULT_SETTINGS if settings is None else settings, turn)
 
 
 def power_status(*, bound: bool, test: PowerTest | None, document: OutputDocument | None,

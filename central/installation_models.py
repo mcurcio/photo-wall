@@ -11,7 +11,7 @@ from central.displays.model import Readiness
 from contracts.enrollment import OutputReport
 from contracts.frame_lighting import FrameLighting
 from contracts.liveness import REPORT_INTERVAL, SILENT_AFTER_SECONDS
-from contracts.models import Calibration, FrameProfile, Identifier, Instant, Model
+from contracts.models import Calibration, ExactTurn, FrameProfile, Identifier, Instant, Model
 from contracts.node_commands import Owner
 
 
@@ -80,6 +80,7 @@ class FrameInventory(Model):
     calibration: Calibration
     lighting: FrameLighting                   # the Frame's lights, mat and paper (decision 0028), on its binding
     readiness: Readiness                      # worked out (central/displays/model.py), never stored
+    turn: ExactTurn                           # how the Frame's screen hangs (frames.turn; render redesign S2)
     configuration_revision: int = Field(ge=1)
     player_id: Identifier | None = None
     output_id: Identifier | None = None

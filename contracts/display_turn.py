@@ -8,8 +8,10 @@ The turn belongs to the spot on the wall, not to the screen (owner, gate answer 
 turns only, and every Frame on one screen shares its screen's turn.
 
 Rules this module owns (one home each):
-- **The turns** (`TURNS`): 0, 90, 180 and 270 degrees clockwise, as the screen hangs; no mirror and
-  no other angle.
+- **The turns** (`TURNS`, `is_turn`): 0, 90, 180 and 270 degrees clockwise, as the screen hangs; no
+  mirror and no other angle. `is_turn` is the one check of a turn value: an int, never a bool, a
+  float or a string; every reader of a turn (this module, the Output document, `ExactTurn`) refuses
+  by it.
 - **The Wayland transform** (`wayland_transform`, `turn_of`): a screen hung turned `turn` degrees
   clockwise shows upright pictures when Weston turns its content `turn` degrees counter-clockwise,
   which is `wl_output.transform` 90 (1) for 90, 180 (2) for 180, 270 (3) for 270 and normal (0)
@@ -27,14 +29,14 @@ TURNS: Final[tuple[DisplayTurn, ...]] = (0, 90, 180, 270)
 def is_turn(value: object) -> TypeGuard[DisplayTurn]:
     """Whether `value` is one of TURNS: an int (never a bool) of 0, 90, 180 or 270. The one check of
     a turn: `wayland_transform` and `hanging` refuse by it, and so does the Output document
-    (contracts/node_output.py `OutputDocument.turn`). Pure. (render-planes S2 bead B1)"""
-    raise NotImplementedError("render-planes S2 bead B1")
+    (contracts/node_output.py `OutputDocument.turn`). Pure."""
+    return type(value) is int and value in TURNS
 
 
 def wayland_transform(turn: DisplayTurn) -> int:
     """The `wl_output.transform` value (0 to 3) for a screen hung turned `turn` (module rule).
     ValueError("display_turn") unless `turn` is one of TURNS (an int, never a bool). Pure."""
-    if type(turn) is not int or turn not in TURNS:
+    if not is_turn(turn):
         raise ValueError("display_turn")
     return TURNS.index(turn)
 

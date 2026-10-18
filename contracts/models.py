@@ -6,7 +6,7 @@ from typing import Annotated, Final, Literal, Self
 
 from pydantic import BeforeValidator, Field, model_serializer, model_validator
 
-from contracts.display_turn import DisplayTurn
+from contracts.display_turn import DisplayTurn, is_turn
 from contracts.frame_fit import (
     FULL_SCREEN,
     FrameRectangle,
@@ -75,8 +75,10 @@ class CoverFit(Model):
 
 def _exact_turn(value: object) -> DisplayTurn:
     """`value` when `is_turn(value)`, else ValueError("display_turn"): pydantic's Literal alone would
-    take a JSON false as 0 and 90.0 as 90. (render-planes S2 bead B1)"""
-    raise NotImplementedError("render-planes S2 bead B1")
+    take a JSON false as 0 and 90.0 as 90."""
+    if not is_turn(value):
+        raise ValueError("display_turn")
+    return value
 
 
 # A Display turn as a wire model's field (render redesign S2): the one pydantic form of

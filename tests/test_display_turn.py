@@ -3,7 +3,12 @@ from __future__ import annotations
 
 import pytest
 
-from contracts.display_turn import TURNS, hanging, turn_of, wayland_transform
+from contracts.display_turn import TURNS, hanging, is_turn, turn_of, wayland_transform
+
+
+def test_a_turn_is_one_of_the_four_ints_and_nothing_that_merely_equals_one():
+    assert [is_turn(turn) for turn in (0, 90, 180, 270)] == [True] * 4
+    assert not any(is_turn(value) for value in (False, True, 90.0, "90", 45, None, 360, -90))
 
 
 def test_every_turn_round_trips_through_its_wayland_transform():

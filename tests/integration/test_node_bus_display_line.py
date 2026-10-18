@@ -5,8 +5,8 @@ the shipped `DISPLAY_SLICE`; the hub runs Fleet's generated configuration, and C
 `NodeLink` reaches the Node across the leaf, its documents from a `Projection` and its records into a
 file-backed `LinkStore`. (1) The display line applies beside the host line inside the store's stream
 count. (2) Central's Output document reaches the display session's desired view and decodes to the
-same document. (3) A changed projection reaches the Node within 3 s through `DocumentSource.changed()`
-alone: no birth, no new stream, no reconnect, so no reconcile carried it. (4) The session's Output
+same document. (3) A changed projection (a console test, and the turn: how the screen hangs, schema
+9) reaches the Node within 3 s through `DocumentSource.changed()` alone: no birth, no new stream, no reconnect, so no reconcile carried it. (4) The session's Output
 report is recorded by Central on the display line's state bucket. (5) A key the display table does
 not list is never sent and is logged as `document_refused`. (6) Picture on its own keys (decision
 0022): a picture document Central puts on `picture-HDMI-A-1` reaches the picture controller through
@@ -97,9 +97,9 @@ STATE = "KV_state_display"
 KEY = output_document_key("HDMI-A-1")
 UNLISTED = "output-HDMI-A-3"
 ALWAYS_ON = OutputPower(Power.ON, (), "2099-01-01T00:00:00Z", Darkness.DISPLAY_OFF, None)
-FIRST = OutputDocument("HDMI-A-1", 1, ALWAYS_ON, BEST_DETECTED, True, True)
+FIRST = OutputDocument("HDMI-A-1", 1, ALWAYS_ON, BEST_DETECTED, True, True, 0)
 TEST_OFF = OutputDocument("HDMI-A-1", 2, replace(ALWAYS_ON, test=PowerRequest("req-1", Power.OFF, 300)),
-                          BEST_DETECTED, True, True)
+                          BEST_DETECTED, True, True, 90)
 PICTURE_KEY = picture_document_key("HDMI-A-1")
 PICTURE_DOCUMENT = PictureDocument("HDMI-A-1", 8, {"10": 46}, SoftwarePicture(contrast_percent=114, colour_temperature_kelvin=6500, gamma_tenths=22),
                                   light=UPGRADE_DISPLAY_LIGHT)
