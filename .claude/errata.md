@@ -6777,3 +6777,21 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
 - **Stale words left in files fb-13 does not own:** `central/fleet/node_calibration.py:313`
   (docstring lists `made_for_other_profile`) and `central/infra/tuning_history_store.py:67`
   (docstring: refusal "against the Frame's profile"). Both are comments only.
+
+## frame-box fb-12 (one seed for a Frame in tests)
+
+- **fb-12's acceptance grep cannot list only fb-13's files and the exceptions.** Three groups match
+  `FrameProfile(\|width_mm=\|diagonal_inches` and build no `FrameCreate` nor post a Frame body:
+  the migration tests (`test_migration_084`, `_099`, `_102`, `_104`, `_106`) write rows in the
+  schema of their time, which has the profile JSON until 108; `test_fit_analysis_store.py`'s
+  "a draft with a profile is refused 422" and `test_display_changed_readiness.py`'s
+  `CORRECTED_PROFILE` (the profile route, fb-13) have the profile as their subject; and
+  `test_wall_demo.py` reads `scripts/demo_wall.py`'s `DEMO_FRAME_PROFILE` (fb-14 owns the script).
+  fb-14 (or fb-13 for the route) clears them. Pure tests that used `FrameProfile` only as a
+  screen holder now use `tests/support/frames.py` `Screen(width_px, height_px, inches)`.
+- **fb-12 is not assertion-free at two request lines.** `test_operator_session.py`'s orientation
+  422 now patches `height_mm: 600` (the seed is landscape), and
+  `test_frame_fit_browser.py`'s 16:9 stand-in case sets the stored profile to 1600 x 1200 by SQL so
+  its mutation probe (stand in by the profile) still bites until fb-14; `test_registry.py` and
+  `test_operator_frames.py` keep a local `_portrait` (300 x 500 mm, 1080 x 1920) for their wall
+  size, profile and orientation cases only.

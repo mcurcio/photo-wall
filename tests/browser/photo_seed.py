@@ -12,6 +12,7 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 from runtime_fakes import apply_procrastinate_schema
+from support.frames import frame_create
 
 from central.db import DatabaseTransactionClock
 from central.infra.photo_library_store import PgPhotoLibrary
@@ -182,15 +183,9 @@ def seed_varied_frames(registry) -> tuple[str, str]:
     judged for it). No Display is seen, so neither states a size."""
     from test_registry import enroll
 
-    from central.registry import FrameCreate
-    from contracts.models import FrameProfile
 
-    registry.create_frame(FrameCreate(id=TALL_FRAME, surface_id="hall", x_mm=100, y_mm=100, width_mm=400,
-                                      height_mm=710, profile=FrameProfile(width_px=1080, height_px=1920,
-                                                                          diagonal_inches=32)))
-    registry.create_frame(FrameCreate(id=WIDE_FRAME, surface_id="living", x_mm=100, y_mm=100, width_mm=1210,
-                                      height_mm=680, profile=FrameProfile(width_px=3840, height_px=2160,
-                                                                          diagonal_inches=55)))
+    registry.create_frame(frame_create(TALL_FRAME, surface_id="hall", x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(WIDE_FRAME, surface_id="living", x_mm=100, y_mm=100))
     for frame_id, screen in ((TALL_FRAME, (1080, 1920)), (WIDE_FRAME, (3840, 2160))):
         player, _, _ = enroll(registry, count=1, size=screen)
         registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)

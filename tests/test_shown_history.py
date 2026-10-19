@@ -4,16 +4,16 @@ with the Planner's projection scripted (its selections carry a Scene and a pass,
 will)."""
 
 import pytest
+from support.frames import frame_create
 from support.house_time import UTC_HOUSE, at, set_house
 from test_coordination import publish_fixture_catalog, schedule, setup_players
 
 import central.coordination as coordination
 from central.coordination import Coordinator
 from central.infra.shown_history_store import PgShownHistory
-from central.registry import FrameCreate
 from central.wall_plan.order import KeptStill, PhotoShowing
 from central.wall_plan.ports import ShownHistory
-from contracts.models import FrameProfile, Observation
+from contracts.models import Observation
 
 DAY = 86400.0
 NOW = 1_000_000_000.0
@@ -32,8 +32,7 @@ def showing(assignment: str, asset: str, *, start: float, end: float | None = No
 @pytest.fixture
 def store(registry) -> ShownHistory:
     for frame_id in ("frame-1", "frame-2"):
-        registry.create_frame(FrameCreate(id=frame_id, width_mm=500, height_mm=300, profile=(
-            FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24))))
+        registry.create_frame(frame_create(frame_id))
     return PgShownHistory()
 
 

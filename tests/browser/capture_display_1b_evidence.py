@@ -22,6 +22,7 @@ from console_tasks import connect, open_frame
 from operator_harness import operator_server
 from playwright.sync_api import expect
 from support.console_words import POWER
+from support.frames import frame_create
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -53,13 +54,8 @@ def test_before_hardware(page, registry, scheme):
     """main: a Frame bound to a Pi's HDMI-A-1 (the Hardware tab as it was; main has no Power tab)."""
     from test_registry import enroll
 
-    from central.registry import FrameCreate
-    from contracts.models import FrameProfile
-
     identity, _key, _request = enroll(registry, count=1, device_id="device-display-1b-pi")
-    registry.create_frame(FrameCreate(id="lobby", surface_id="wall", x_mm=100, y_mm=100, width_mm=500,
-                                      height_mm=300,
-                                      profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)))
+    registry.create_frame(frame_create("lobby", x_mm=100, y_mm=100))
     registry.bind("lobby", identity["player_id"], "HDMI-A-1", expected_generation=0)
     _open(page, scheme)
     with operator_server(registry.db, registry.clock) as origin:
@@ -80,14 +76,11 @@ def test_after_hardware(page, registry, scheme):
         _report,
     )
 
-    from central.registry import FrameCreate
-    from contracts.models import FrameProfile
 
     pi = enroll_pi(registry, "pi-a")
     # The ready Frame's profile matches its display (1920 x 1080), as main's `before` Frame does.
     ready = "lobby"
-    registry.create_frame(FrameCreate(id=ready, surface_id="wall", x_mm=100, y_mm=100, width_mm=500, height_mm=300,
-                                      profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)))
+    registry.create_frame(frame_create(ready, x_mm=100, y_mm=100))
     changed, no_serial = (_landscape(registry, name) for name in ("hallway", "kitchen"))
     _bind(registry, ready, pi, "HDMI-A-1")
     _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)

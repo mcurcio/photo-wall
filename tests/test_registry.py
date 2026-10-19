@@ -12,6 +12,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
+from support.frames import frame_create
 from support.position import PORTRAIT_ON_WIDE, save_position
 
 from central.app import create_app
@@ -66,6 +67,12 @@ def hello(registry, identity, capabilities=()):
 
 
 def frame(registry, frame_id="portrait"):
+    registry.create_frame(frame_create(frame_id))
+
+
+def _portrait_on_the_wall(registry, frame_id="portrait"):
+    """A 300 x 500 mm Frame with a 1080 x 1920 profile: the wall size and orientation rule's own
+    subject (fb-14 changes them), so built here rather than by the test seed."""
     registry.create_frame(FrameCreate(id=frame_id, width_mm=300, height_mm=500,
                                      profile=FrameProfile(width_px=1080, height_px=1920,
                                                           diagonal_inches=24)))
@@ -440,7 +447,7 @@ def test_typed_inventory_preserves_the_complete_operator_json_response(registry)
 
 
 def test_place_frame_merges_only_supplied_fields_and_echoes_result(registry):
-    frame(registry)
+    _portrait_on_the_wall(registry)
     result = registry.place_frame("portrait", FramePlacement(x_mm=10, y_mm=20))
     assert result == {"id": "portrait", "surface_id": "wall", "x_mm": 10, "y_mm": 20,
                       "width_mm": 300, "height_mm": 500}
@@ -449,7 +456,7 @@ def test_place_frame_merges_only_supplied_fields_and_echoes_result(registry):
 
 
 def test_place_frame_rejects_a_merged_result_that_breaks_orientation(registry):
-    frame(registry)
+    _portrait_on_the_wall(registry)
     # 300x500 portrait mm on a 1080x1920 portrait profile; widening to 600 makes
     # the physical Frame landscape while the profile stays portrait -- incoherent.
     with pytest.raises(RegistryError) as excinfo:
@@ -478,14 +485,13 @@ def test_place_frame_never_touches_generation_revision_or_calibration(registry):
 
 
 def test_frame_create_ids_follow_the_one_target_id_rule():
-    profile = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
     targets = TypeAdapter(Target)
     for usable in ("lobby-left", "a", "A.b_c-9", "x" * 96):
-        FrameCreate(id=usable, width_mm=400, height_mm=300, profile=profile)
+        frame_create(usable)
         assert targets.validate_python("frame:" + usable) == "frame:" + usable
     for unusable in ("a:b", "lobby:left", "x" * 97, "-lead", "", "sp ace"):
         with pytest.raises(ValidationError):
-            FrameCreate(id=unusable, width_mm=400, height_mm=300, profile=profile)
+            frame_create(unusable)
         with pytest.raises(ValidationError):
             targets.validate_python("frame:" + unusable)
 

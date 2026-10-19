@@ -20,10 +20,8 @@ import pytest
 from console_tasks import connect, go, hardware_list, open_frame, open_pi, player_name, visible_page
 from operator_harness import assert_fits_width, operator_server, report_readiness
 from playwright.sync_api import expect
+from support.frames import frame_create
 from test_registry import enroll
-
-from central.registry import FrameCreate
-from contracts.models import FrameProfile
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -41,9 +39,7 @@ def _players(registry, *, bound=True):
     and names."""
     bound_identity, _, bound_request = enroll(registry, count=1)
     spare_identity, _, spare_request = enroll(registry, count=1)
-    registry.create_frame(FrameCreate(id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=300,
-                                      height_mm=500, profile=FrameProfile(
-                                          width_px=1080, height_px=1920, diagonal_inches=24)))
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
     if bound:
         registry.bind(FRAME, bound_identity["player_id"], "HDMI-A-1", expected_generation=0)
     return ((bound_request.device_id, player_name(registry, bound_identity["player_id"])),
@@ -417,9 +413,7 @@ def _frames_with_players(registry, frame_ids, device_ids=None):
     boxes = []
     for index, frame_id in enumerate(frame_ids):
         identity, _, request = enroll(registry, count=1, device_id=device_ids[index] if device_ids else None)
-        registry.create_frame(FrameCreate(id=frame_id, surface_id="wall", x_mm=100 + 400 * index, y_mm=100,
-                                          width_mm=300, height_mm=500, profile=FrameProfile(
-                                              width_px=1080, height_px=1920, diagonal_inches=24)))
+        registry.create_frame(frame_create(frame_id, x_mm=100 + 400 * index, y_mm=100))
         registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0)
         boxes.append((identity["player_id"], request.device_id, player_name(registry, identity["player_id"])))
     return boxes

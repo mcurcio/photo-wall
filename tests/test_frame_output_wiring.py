@@ -10,6 +10,7 @@ assertion here fails."""
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+from support.frames import frame_create
 from support.measured_photos import measure
 from support.photo_pools import photo, seed_pool
 from support.position import save_position
@@ -20,11 +21,9 @@ from test_wall_plan_tracer import prepare
 from central.app import create_app
 from central.coordination import Coordinator
 from central.photo_fit_routes import ANALYSIS_PATH
-from central.registry import FrameCreate
 from central.runtime import Contribution, Scene
-from contracts.models import Calibration, FrameProfile, PositionBox
+from contracts.models import Calibration, PositionBox
 
-WIDE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 DISPLAY = (3840, 2160)
 OPENING = (1600, 900)
 POOL = "library:1"
@@ -32,7 +31,7 @@ POOL = "library:1"
 
 def _matted_frame(registry) -> None:
     player, _, _ = enroll(registry, count=1, size=DISPLAY)
-    registry.create_frame(FrameCreate(id="hall", width_mm=530, height_mm=300, profile=WIDE))
+    registry.create_frame(frame_create("hall"))
     registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0)
     # The opening in the Display's top-left corner: a box of its size.
     save_position(registry, "hall", Calibration(fit=PositionBox(
@@ -79,7 +78,7 @@ def test_a_bound_frame_with_no_known_screen_is_judged_for_no_photo_anywhere(regi
     no photo, the candidates route answers "frame_size_unknown", authoring onto it is refused
     "authored_frame_size_unknown" and the photo sheet lists it under no photo's Frames."""
     player, _, _ = enroll(registry, count=1, size=(0, 0))
-    registry.create_frame(FrameCreate(id="hall", width_mm=530, height_mm=300, profile=WIDE))
+    registry.create_frame(frame_create("hall"))
     registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0)
     save_position(registry, "hall")
     fitting = photo("fitting", taken_at=900, width=3840, height=2160)

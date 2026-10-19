@@ -5,6 +5,7 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
+from support.frames import frame_body
 from support.house_time import UTC_HOUSE, set_house
 from test_coordination import setup_players
 from test_registry import ADMIN, enroll, hello
@@ -131,9 +132,7 @@ def test_operator_unbind_endpoint_reverses_binding_and_updates_pending_queue(reg
     app = create_app(registry.db, registry.clock, ADMIN)
     operator = {"Authorization": "Bearer " + ADMIN}
     with TestClient(app) as client:
-        frame = {"id": "portrait", "width_mm": 300, "height_mm": 500,
-                 "profile": {"width_px": 1080, "height_px": 1920, "diagonal_inches": 24}}
-        assert client.post("/v1/operator/frames", json=frame, headers=operator).status_code == 201
+        assert client.post("/v1/operator/frames", json=frame_body("portrait"), headers=operator).status_code == 201
         binding = {"player_id": player["player_id"], "output_id": "HDMI-A-1", "expected_generation": 0}
         assert client.put("/v1/operator/frames/portrait/binding", json=binding, headers=operator).status_code == 200
         inventory = client.get("/v1/operator/inventory", headers=operator).json()

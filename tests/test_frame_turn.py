@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
+from support.frames import frame_create
 from support.position import PORTRAIT_ON_WIDE, save_position
 from test_display_identity import enroll_pi
 
@@ -22,9 +23,8 @@ from central.displays.model import DEFAULT_SETTINGS, ProjectedOutput, Readiness
 from central.fleet.position_history import PositionRestoreRefusal, restore_refusal
 from central.infra.display_store import output_documents
 from central.infra.position_history_store import frame_made_for_in, position_entries_in
-from central.registry import FrameCreate, FrameTurnChange, RegistryError
+from central.registry import FrameTurnChange, RegistryError
 from central.tuning_history.bounds import HistoryPage
-from contracts.models import FrameProfile
 from contracts.node_output import (
     Darkness,
     OutputPower,
@@ -64,8 +64,7 @@ def test_the_documents_digest_covers_the_turn():
 # Through the Registry, the route and the document source.
 
 def _frame(registry, frame_id: str = "kitchen") -> str:
-    registry.create_frame(FrameCreate(id=frame_id, width_mm=300, height_mm=500,
-                                      profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)))
+    registry.create_frame(frame_create(frame_id))
     return frame_id
 
 

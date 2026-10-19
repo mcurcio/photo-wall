@@ -21,6 +21,7 @@ from collections import defaultdict
 import pytest
 from support.frame_media import seed_variant
 from support.frame_outputs import frame_outputs_of, target_of
+from support.frames import Screen, frame_create
 from support.house_time import UTC_HOUSE
 from support.key_content_builders import face, measured
 from support.measured_photos import measure
@@ -37,7 +38,6 @@ from central.infra.key_content_store import PgKeyContent
 from central.media_queue import QueueReceipt
 from central.media_repository import MediaRepository
 from central.planner import Projection, project
-from central.registry import FrameCreate
 from central.runtime import Contribution, Runtime, Scene
 from central.wall_plan.fit import Fits, FitTarget, judge
 from central.wall_plan.fit_settings import FitSettings
@@ -45,7 +45,6 @@ from central.wall_plan.order import PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
 from contracts.models import (
     Calibration,
-    FrameProfile,
     Observation,
     OutputBinding,
     PositionBox,
@@ -55,8 +54,8 @@ from contracts.models import (
 )
 from player.geometry import fit_source_uv, placement_uv
 
-WIDE = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55)
-TALL = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
+WIDE = Screen(3840, 2160, inches=55)
+TALL = Screen(1080, 1920, inches=24)
 PROFILES = {"wide": WIDE, "tall": TALL}
 FRAMES = {"wide": FrameSetup("wide", after_end="keep_this_photo"),
           "tall": FrameSetup("tall", after_end="keep_this_photo")}
@@ -92,7 +91,7 @@ def full_screen(frame: str) -> FitTarget:
     """A Frame full screen on a Display of its profile's pixels and size: its Frame output is the
     profile's."""
     profile = PROFILES[frame]
-    return target_of(profile.width_px, profile.height_px, inches=profile.diagonal_inches)
+    return target_of(profile.width_px, profile.height_px, inches=profile.inches)
 
 
 def an_hour(instance: Runtime, photos, *, frames=FRAMES, outputs=None) -> Projection:
@@ -215,11 +214,9 @@ def wall_players(registry):
     """Two Players' 1920 x 1080 screens, each a Frame on its whole screen: the wide Frame's
     screen upright (Frame output 1920 x 1080), the tall Frame's hung a quarter turn (1080 x 1920)."""
     players = []
-    for frame_id, profile, size, turn in (("frame-wide", WIDE, (1210, 680), 0),
-                                          ("frame-tall", TALL, (300, 530), 90)):
+    for frame_id, turn in (("frame-wide", 0), ("frame-tall", 90)):
         player, _, _ = enroll(registry)
-        registry.create_frame(FrameCreate(id=frame_id, width_mm=size[0], height_mm=size[1],
-                                          profile=profile))
+        registry.create_frame(frame_create(frame_id))
         registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
         if turn:
             generation = next(frame for frame in registry.inventory().frames if frame.id == frame_id).generation

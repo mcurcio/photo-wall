@@ -17,6 +17,7 @@ from http.cookiejar import CookieJar
 
 import pytest
 from fastapi.testclient import TestClient
+from support.frames import frame_create
 
 from central.app import create_app
 from central.operator_auth import (
@@ -27,8 +28,6 @@ from central.operator_auth import (
     SESSION_PATH,
 )
 from central.operator_session import SESSION_SECONDS, SessionCodec, session_key
-from central.registry import FrameCreate
-from contracts.models import FrameProfile
 from contracts.time import ManualClock
 
 ADMIN = "test-operator-" + "x" * 40
@@ -50,9 +49,7 @@ VALUE = re.compile(r"v1\.[0-9]{10}\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{1,344}\.[A-
 
 
 def _portrait(registry):
-    registry.create_frame(FrameCreate(id="portrait", width_mm=300, height_mm=500,
-                                      profile=FrameProfile(width_px=1080, height_px=1920,
-                                                           diagonal_inches=24)))
+    registry.create_frame(frame_create("portrait"))
 
 
 @pytest.fixture
@@ -421,7 +418,7 @@ def test_every_operator_response_is_no_store(client):
         client.get(READ),                                                  # 401
         move(client, signed_in(client)),                                   # 403
         client.patch(WRITE, json={"x_mm": "left"}, headers=bearer),        # 422 (validation)
-        client.patch(WRITE, json={"width_mm": 600}, headers=bearer),       # 422 (RegistryError)
+        client.patch(WRITE, json={"height_mm": 600}, headers=bearer),      # 422 (RegistryError)
         client.get("/v1/operator/frames/nope", headers=bearer),            # 405
         client.get("/v1/operator/no-such-route", headers=bearer),          # 404
     ]

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from media_queue import RecordingMediaQueue
 from support.frame_outputs import target_of
+from support.frames import Screen, frame_create
 from support.key_content_builders import key_content
 from support.photo_pools import library_of, photo, seed_pool
 from test_media_repository import MeasureQueue
@@ -25,29 +26,26 @@ from central.kernel.types import split_media_variant_key
 from central.media_repository import MediaRepository
 from central.photo_library.model import MeasuredCopy
 from central.planner import AcquisitionRequest, MeasureRequest
-from central.registry import FrameCreate
 from central.wall_plan.fit import DoesNotFit, shape_fit
 from central.wall_plan.fit_settings import FitSettings
-from contracts.models import FrameProfile
 from media.prepare import VideoRecipe, stored_recipe
 
-P1080 = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
-P720 = FrameProfile(width_px=1280, height_px=720, diagonal_inches=24)
-P4K = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55)
+P1080 = Screen(1920, 1080, inches=24)
+P720 = Screen(1280, 720, inches=24)
+P4K = Screen(3840, 2160, inches=55)
 
 
-def add_frame(registry, frame_id: str, profile: FrameProfile) -> None:
-    """A Frame bound full screen to an Output of its profile's pixels: its Frame output is those
+def add_frame(registry, frame_id: str, screen: Screen) -> None:
+    """A Frame bound full screen to an Output of `screen`'s pixels: its Frame output is those
     pixels (frame box run fb-8: a Frame with no known screen asks no copy)."""
-    registry.create_frame(FrameCreate(id=frame_id, width_mm=profile.width_px // 4,
-                                      height_mm=profile.height_px // 4, profile=profile))
-    player, _, _ = enroll(registry, count=1, size=(profile.width_px, profile.height_px))
+    registry.create_frame(frame_create(frame_id))
+    player, _, _ = enroll(registry, count=1, size=(screen.width_px, screen.height_px))
     registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
 
 
-def wall(registry, *profiles: tuple[str, FrameProfile]) -> MediaRepository:
-    for frame_id, profile in profiles:
-        add_frame(registry, frame_id, profile)
+def wall(registry, *screens: tuple[str, Screen]) -> MediaRepository:
+    for frame_id, screen in screens:
+        add_frame(registry, frame_id, screen)
     return MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(),
                            times=ProcessTransactionClock(registry.clock))
 
@@ -169,7 +167,7 @@ def test_a_frame_with_no_known_screen_asks_no_copy(registry):
     screen (unbound here) has none and asks nothing, so a photo on a 1080p wall beside it is
     still prepared at the 1920 step."""
     repository = wall(registry, ("living", P1080))
-    registry.create_frame(FrameCreate(id="attic", width_mm=960, height_mm=540, profile=P4K))
+    registry.create_frame(frame_create("attic"))
     big = photo("big", taken_at=1, width=6000, height=4000)
     seed_pool(registry, "family:1", (big,))
     (key,) = prepared(repository, big.asset_id, "living")

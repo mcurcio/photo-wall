@@ -28,11 +28,10 @@ from power_page import (
     week,
 )
 from support.console_words import POWER, power
+from support.frames import frame_create
 from support.house_time import LONDON, at, set_house
 
 from central.house_time.model import HouseTime, Place
-from central.registry import FrameCreate
-from contracts.models import FrameProfile
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -47,8 +46,7 @@ def seed_house(registry, frame="bedroom"):
     """A London house at Wednesday noon, one Frame, Night off 23:00-07:00 on All Frames."""
     registry.clock.wall = NOON
     set_house(registry.db, LONDON)
-    registry.create_frame(FrameCreate(id=frame, width_mm=300, height_mm=500,
-                                      profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)))
+    registry.create_frame(frame_create(frame))
     with registry.db.transaction() as conn:   # the seed chose the Frames there were at deploy: none
         conn.execute("""UPDATE night_off SET settings = jsonb_set(settings, '{frames}', '{"kind": "all-frames"}')""")
 
@@ -101,8 +99,7 @@ def test_each_frames_hold_ends_at_its_own_next_change_and_the_setting_sits_besid
     -> the study's row reads 23:00; (P-banner-newest-end) title the banner by the newest view's end
     alone -> it reads "Held off until 23:00"."""
     seed_house(registry)
-    registry.create_frame(FrameCreate(id="study", width_mm=300, height_mm=500,
-                                      profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)))
+    registry.create_frame(frame_create("study"))
     with registry.db.transaction() as conn:   # Night off on the bedroom only
         conn.execute("""UPDATE night_off SET settings = jsonb_set(settings, '{frames}',
                         '{"kind": "frames", "frame_ids": ["bedroom"]}')""")

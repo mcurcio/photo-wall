@@ -1,13 +1,13 @@
 """Current-authority readiness projection against real PostgreSQL state."""
 
 from psycopg.types.json import Jsonb
+from support.frames import frame_create
 from support.position import PORTRAIT_ON_WIDE, save_position
 from test_registry import enroll
 
 from central.coordination import Coordinator
 from central.readiness_diagnostics import project_readiness_diagnostics
-from central.registry import FrameCreate
-from contracts.models import Failure, FrameProfile, Layer, Plan, Readiness
+from contracts.models import Failure, Layer, Plan, Readiness
 
 
 def _seed(registry):
@@ -15,12 +15,7 @@ def _seed(registry):
     player_id, epoch = identity["player_id"], identity["authority_epoch"]
     for index in range(2):
         frame_id = f"diagnostic-frame-{index}"
-        registry.create_frame(FrameCreate(
-            id=frame_id,
-            width_mm=300,
-            height_mm=500,
-            profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24),
-        ))
+        registry.create_frame(frame_create(frame_id))
         output_id = f"HDMI-A-{index + 1}"
         registry.bind(frame_id, player_id, output_id, expected_generation=0)
         save_position(registry, frame_id, PORTRAIT_ON_WIDE)

@@ -21,6 +21,7 @@ import pytest
 from console_tasks import connect, open_frame, open_pi, open_player, visit
 from operator_harness import operator_server, report_readiness
 from playwright.sync_api import expect
+from support.frames import frame_create
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -47,13 +48,8 @@ def _box(registry):
     """A netbooted Pi driving Frame `lobby`, with every layer reporting (test_player_page_browser)."""
     from test_player_page_browser import Box
 
-    from central.registry import FrameCreate
-    from contracts.models import FrameProfile
-
     box = Box(registry)
-    registry.create_frame(FrameCreate(id="lobby", surface_id="wall", x_mm=100, y_mm=100, width_mm=500,
-                                      height_mm=300,
-                                      profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)))
+    registry.create_frame(frame_create("lobby", x_mm=100, y_mm=100))
     registry.bind("lobby", box.player_id, "HDMI-A-1", expected_generation=0)
     report_readiness(registry, box.player_id)
     box.preparation()
@@ -75,13 +71,8 @@ def _frame(registry):
     """A Frame bound to an enrolled Player with no node admission (the 1b capture's seed)."""
     from test_registry import enroll
 
-    from central.registry import FrameCreate
-    from contracts.models import FrameProfile
-
     identity, _key, _request = enroll(registry, count=1, device_id="device-pr45-pi")
-    registry.create_frame(FrameCreate(id="lobby", surface_id="wall", x_mm=100, y_mm=100, width_mm=500,
-                                      height_mm=300,
-                                      profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)))
+    registry.create_frame(frame_create("lobby", x_mm=100, y_mm=100))
     registry.bind("lobby", identity["player_id"], "HDMI-A-1", expected_generation=0)
 
 

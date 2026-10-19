@@ -29,18 +29,15 @@ from console_tasks import (
 )
 from operator_harness import SNAPSHOT, RequestGate, operator_server, sign_in
 from playwright.sync_api import expect
+from support.frames import frame_create
 from test_operator_showrunner_browser import SCENE_ID, SOURCE, VALID_FRAME, _seed, _seed_source
 from test_registry import ADMIN, enroll
-
-from central.registry import FrameCreate
-from contracts.models import FrameProfile
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
     reason="set PHOTO_WALL_BROWSER_TESTS=1 and install Playwright Chromium",
 )
 
-PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 NARROW = {"width": 390, "height": 844}
 
 
@@ -50,9 +47,7 @@ def _heading(page, section):
 
 
 def _frame(registry, frame_id, *, x_mm=100, surface="wall"):
-    registry.create_frame(FrameCreate(
-        id=frame_id, surface_id=surface, x_mm=x_mm, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(frame_id, surface_id=surface, x_mm=x_mm, y_mm=100))
 
 
 # --- Landing (item 9: CI's race).

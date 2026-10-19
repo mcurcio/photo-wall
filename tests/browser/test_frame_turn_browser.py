@@ -14,13 +14,12 @@ import pytest
 from console_tasks import open_frame
 from operator_harness import operator_server, sign_in
 from playwright.sync_api import expect
+from support.frames import frame_create
 from support.position import PORTRAIT_ON_WIDE, save_position
 from test_console_frame_page_browser import FakeSessions
 from test_registry import enroll
 
 from central.displays.model import Readiness
-from central.registry import FrameCreate
-from contracts.models import FrameProfile
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -30,7 +29,6 @@ pytestmark = pytest.mark.skipif(
 FRAME = "hall-frame"
 OUTPUT = "HDMI-A-1"  # enroll() reports it connected at 1920 x 1080
 DEVICE = "device-frame-turn-pi"
-PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 CHANGED = "The picture turns now. Check its position on the Position tab, then press Done there."
 SAVED = re.compile(rf"^Saved at \d\d:\d\d:\d\d\. {re.escape(CHANGED)}$")
 CONFLICT = "This Frame changed while you chose. Choose again."
@@ -39,8 +37,7 @@ CONFLICT = "This Frame changed while you chose. Choose again."
 def _seed(registry):
     """A portrait Frame bound to a 1920 x 1080 Output, hung upright, its Position saved (ready)."""
     identity, _key, _request = enroll(registry, count=1, device_id=DEVICE)
-    registry.create_frame(FrameCreate(
-        id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
     registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
     save_position(registry, FRAME, PORTRAIT_ON_WIDE)
 
@@ -134,8 +131,7 @@ def test_a_choice_against_a_stale_generation_is_refused_and_changes_nothing(page
 
 
 def test_an_unbound_frame_shows_the_control_and_takes_a_turn(page, registry):
-    registry.create_frame(FrameCreate(
-        id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "hardware")

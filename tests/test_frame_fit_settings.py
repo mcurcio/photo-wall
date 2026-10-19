@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from support.frames import frame_create
 from support.position import LIGHTING, save_position
 from test_registry import ADMIN, enroll
 
@@ -22,10 +23,8 @@ from central.fleet.node_sessions import NodeControlConfig
 from central.fleet.position_history import PositionEntryKind
 from central.infra.display_store import frame_outputs_in
 from central.infra.position_history_store import latest_kept_position_in, latest_position_in
-from central.registry import FrameCreate
-from contracts.models import Calibration, FrameProfile, PositionBox
+from contracts.models import Calibration, PositionBox
 
-LANDSCAPE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 AUTH = {"Authorization": "Bearer " + ADMIN}
 LIGHTING_JSON = LIGHTING.model_dump(mode="json")
 OLD_FORMS = [
@@ -41,7 +40,7 @@ OLD_FORMS = [
 def _bound(registry, frame_id: str = "lounge") -> str:
     """A landscape Frame bound to HDMI-A-1 of a Pi whose Outputs reported 1920 x 1080; its player id."""
     player, _key, _request = enroll(registry, count=1)
-    registry.create_frame(FrameCreate(id=frame_id, width_mm=500, height_mm=300, profile=LANDSCAPE))
+    registry.create_frame(frame_create(frame_id))
     registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
     return player["player_id"]
 
@@ -90,7 +89,6 @@ def test_a_cover_or_corners_save_body_is_refused_422_before_any_write(registry, 
 
 # --- The box (frame box run, .claude/runs/frame-box/page.md, bead fb-6) ------------------------
 
-UHD_LANDSCAPE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=55)
 # A box a quarter of the screen wide and half of it high: on 1920 x 1080 a 480 x 540 Frame, never 16:9.
 TALL_BOX = PositionBox(left=0.5, top=0.25, width=0.25, height=0.5)
 
@@ -131,7 +129,7 @@ def _turned_on_uhd(registry, frame_id: str = "lounge", size=(3840, 2160)) -> str
     """A 16:9 Frame bound to HDMI-A-1 of a Pi whose Output reported `size`, turned 90 (its
     Position then saved again, so it is READY); its player id."""
     player, _key, _request = enroll(registry, count=1, size=size)
-    registry.create_frame(FrameCreate(id=frame_id, width_mm=500, height_mm=300, profile=UHD_LANDSCAPE))
+    registry.create_frame(frame_create(frame_id))
     registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
     registry.turn_frame(frame_id, 90, expected_generation=_frame(registry, frame_id).generation)
     save_position(registry, frame_id)

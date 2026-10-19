@@ -10,26 +10,26 @@ from __future__ import annotations
 
 import pytest
 from support.frame_outputs import frame_output_of
+from support.frames import Screen
 
 from central.installation_models import FrameOutput
 from central.media_repository import variant_recipe
 from central.photo_library.rendition import FrameNeed
 from central.wall_plan.fit_settings import FitSettings
-from contracts.models import FrameProfile
 from media.prepare import HouseRecipes, StillRecipe, VideoRecipe, recipe_id, stored_recipe
 
 NEED = FrameNeed(aspect=16 / 9, width=1920, height=1080)
-P1080 = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
-P4K = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55)
+P1080 = Screen(1920, 1080, inches=24)
+P4K = Screen(3840, 2160, inches=55)
 # The one recipe both kinds shared before S4 (its version 3 dump), as `media_recipes` holds it.
 PRE_S4 = {"version": 3, "image_long_edge": 1920, "jpeg_quality": 3, "video_long_edge": 1920,
           "video_max_pixels": 2_073_600, "video_fps": 30.0, "video_crf": 23,
           "video_preset": "medium", "gop_seconds": 2.0}
 
 
-def frame(frame_id: str, profile: FrameProfile) -> FrameOutput:
+def frame(frame_id: str, profile: Screen) -> FrameOutput:
     return frame_output_of(frame_id, (profile.width_px, profile.height_px),
-                           inches=profile.diagonal_inches)
+                           inches=profile.inches)
 
 
 def test_house_recipes_give_each_kind_its_own_and_refuse_any_other():

@@ -59,6 +59,7 @@ from psycopg.types.json import Jsonb
 from public_media import MediaCache, public_photo, publish_photo, request_photo
 from schedule_page import card, remove_button, remove_dialog, said
 from support.console_words import SCHEDULE, scene_words, schedule
+from support.frames import Screen, frame_create
 from support.house_time import UTC_HOUSE, set_house, window_program
 from support.photo_pools import FIXTURE_CONNECTION, fixture_connection
 from support.position import save_position
@@ -70,10 +71,8 @@ from central.kernel.job_types import PrepareMedia
 from central.media_repository import MediaRepository, prepare_lock
 from central.photo_library.model import InPool, SourceQuery, TakenBetween
 from central.photo_library.ports import CheckFailed
-from central.registry import FrameCreate
 from central.runtime import Child, Contribution, Scene
 from central.runtime_store import RuntimeStore
-from contracts.models import FrameProfile
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -82,7 +81,7 @@ pytestmark = pytest.mark.skipif(
 
 # Roadmap 5a: a photo goes only on a Frame whose pixels its kept window covers, so the Frames
 # here are as small as the public photos (108 x 192 and 120 x 200, tests/public_media.py).
-PORTRAIT = FrameProfile(width_px=108, height_px=192, diagonal_inches=24)
+PORTRAIT = Screen(108, 192)
 
 VALID_FRAME = "valid-frame"
 INVALID_FRAME = "invalid-frame"
@@ -176,12 +175,8 @@ def _seed(registry):
                      (Jsonb({"width_px": PORTRAIT.width_px, "height_px": PORTRAIT.height_px}),
                       [id_a["player_id"], id_b["player_id"]]))
 
-    registry.create_frame(FrameCreate(
-        id=VALID_FRAME, surface_id="wall", x_mm=100, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
-    registry.create_frame(FrameCreate(
-        id=INVALID_FRAME, surface_id="wall", x_mm=500, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(VALID_FRAME, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(INVALID_FRAME, x_mm=500, y_mm=100))
 
     # VALID_FRAME: bind (generation 0->1, position needed) then commit
     # (ready, revision 2).
@@ -916,9 +911,7 @@ LOBBY_FRAME = "lobby-left"
 
 
 def _add_lobby_frame(registry):
-    registry.create_frame(FrameCreate(
-        id=LOBBY_FRAME, surface_id="lobby", x_mm=100, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(LOBBY_FRAME, surface_id="lobby", x_mm=100, y_mm=100))
 
 
 def _refused_by_guard(registry):

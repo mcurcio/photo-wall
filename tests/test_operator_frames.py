@@ -18,6 +18,7 @@ from threading import Event
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
+from support.frames import frame_create
 from support.house_time import window_program
 
 from central.app import create_app
@@ -34,7 +35,13 @@ ADMIN = "test-operator-" + "x" * 40
 AUTH = {"Authorization": "Bearer " + ADMIN}
 
 
+def _frame(registry, frame_id="portrait"):
+    registry.create_frame(frame_create(frame_id))
+
+
 def _portrait(registry, frame_id="portrait"):
+    """A 300 x 500 mm Frame with a 1080 x 1920 profile: the wall size, profile and orientation
+    cases' own subject (fb-14 changes them), so built here rather than by the test seed."""
     registry.create_frame(FrameCreate(id=frame_id, width_mm=300, height_mm=500,
                                       profile=FrameProfile(width_px=1080, height_px=1920,
                                                            diagonal_inches=24)))
@@ -108,7 +115,7 @@ def test_the_profile_route_is_gone(registry):
 
 
 def test_delete_clear_frame_returns_200_deleted(registry):
-    _portrait(registry)
+    _frame(registry)
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         response = client.delete("/v1/operator/frames/portrait", headers=AUTH)
     assert response.status_code == 200
@@ -117,7 +124,7 @@ def test_delete_clear_frame_returns_200_deleted(registry):
 
 
 def test_delete_without_authorization_is_401(registry):
-    _portrait(registry)
+    _frame(registry)
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         response = client.delete("/v1/operator/frames/portrait")
     assert response.status_code == 401
@@ -136,7 +143,7 @@ def test_delete_bound_frame_is_refused_409_frame_bound(registry):
     # The bindings FK on frame_id would otherwise surface a raw 500; the explicit
     # store guard returns a clean 409 instead. (Mutation probe 1 targets this.)
     identity = enroll(registry)
-    _portrait(registry)
+    _frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         response = client.delete("/v1/operator/frames/portrait", headers=AUTH)
@@ -147,7 +154,7 @@ def test_delete_bound_frame_is_refused_409_frame_bound(registry):
 
 def test_delete_frame_a_live_run_targets_is_refused_409_frame_in_use(registry):
     # (Mutation probe 2 targets the route's runtime guard.)
-    _portrait(registry)
+    _frame(registry)
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     now = registry.clock.utc()  # ManualClock(1000)
     app.state.coordinator.runtime.command("set_scene", _scene_targeting("portrait", "live"))
@@ -165,7 +172,7 @@ def test_delete_frame_a_live_run_targets_is_refused_409_frame_in_use(registry):
 
 
 def test_delete_frame_refuses_stored_nested_outro_scene_and_names_program(registry):
-    _portrait(registry)
+    _frame(registry)
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     runtime = app.state.coordinator.runtime
     runtime.command("set_scene", Scene(
@@ -186,7 +193,7 @@ def test_delete_frame_refuses_stored_nested_outro_scene_and_names_program(regist
 
 
 def test_delete_frame_refuses_queued_snapshot_after_definition_moves_on(registry):
-    _portrait(registry)
+    _frame(registry)
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     runtime = app.state.coordinator.runtime
     now = registry.clock.utc()
@@ -206,7 +213,7 @@ def test_delete_frame_refuses_queued_snapshot_after_definition_moves_on(registry
 
 
 def test_scene_save_serializes_after_locked_frame_delete(registry):
-    _portrait(registry)
+    _frame(registry)
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     save_started = Event()
     coordinator = app.state.coordinator
@@ -234,7 +241,7 @@ def test_scene_save_serializes_after_locked_frame_delete(registry):
 def test_delete_of_unbound_frame_a_non_live_run_targets_is_benign(registry):
     # Historical terminal snapshots do not block deletion. Move the current
     # definition off the Frame so only the cancelled Run retains that target.
-    _portrait(registry)
+    _frame(registry)
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     now = registry.clock.utc()
     coordinator = app.state.coordinator

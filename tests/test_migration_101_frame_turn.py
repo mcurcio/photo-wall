@@ -16,14 +16,13 @@ from __future__ import annotations
 import json
 
 from psycopg.types.json import Jsonb
+from support.frames import frame_create
 from support.migrations import migrate_before
 from test_display_identity import enroll_pi
 
 from central.content_catalog.catalog import device_id_for_serial
 from central.displays.model import Readiness
 from central.infra.display_store import frame_readiness_in, output_documents
-from central.registry import FrameCreate
-from contracts.models import FrameProfile
 from contracts.node_output import decode_output_document
 
 SERIAL = "serial-migration-101"
@@ -55,8 +54,7 @@ def _stored(registry) -> dict[str, dict]:
 
 def test_101_hangs_every_frame_at_0_and_keeps_a_ready_frame_ready(registry):
     player = enroll_pi(registry, SERIAL)
-    registry.create_frame(FrameCreate(id="kitchen", width_mm=300, height_mm=500,
-                                      profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)))
+    registry.create_frame(frame_create("kitchen"))
     registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0)
     with registry.db.transaction() as conn:   # a saved Cover Position at 90, as 100 stored it
         conn.execute("UPDATE frames SET calibration=%s, position_generation=generation WHERE id='kitchen'",
@@ -78,8 +76,7 @@ def test_101_rewrites_every_stored_output_document_to_schema_9(registry):
     turn). Mutation probe: drop 101's `UPDATE output_documents` -> the stored documents do not
     decode (ValueError output_document) and this test fails."""
     player = enroll_pi(registry, SERIAL)
-    registry.create_frame(FrameCreate(id="kitchen", width_mm=300, height_mm=500,
-                                      profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)))
+    registry.create_frame(frame_create("kitchen"))
     registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0)
     device = device_id_for_serial(SERIAL)
     with registry.db.transaction() as conn:   # the source's read stores each Output's document

@@ -24,16 +24,16 @@ import pytest
 from console_tasks import frame_heading, frame_name, open_frame, visit
 from operator_harness import operator_server, sign_in
 from playwright.sync_api import expect
+from support.frames import frame_create
 from support.position import save_position
 from test_display_identity import MODE, NO_SERIAL, _report, enroll_pi
 from test_registry import enroll
 
 from central.displays.model import Readiness
 from central.fleet.models import TrialRefused
-from central.registry import FrameCreate
 from contracts.display_turn import hanging
 from contracts.frame_fit import place_box
-from contracts.models import Calibration, FrameProfile, PositionBox
+from contracts.models import Calibration, PositionBox
 from contracts.node_output import OutputReport, encode_output_report
 
 pytestmark = pytest.mark.skipif(
@@ -59,12 +59,6 @@ SAVED_X = 100
 ELSEWHERE_X = 300
 
 
-LANDSCAPE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
-# Distinct from the 1920 x 1080 the Player app reports, so a Frame profile fact and the Display
-# record can be told apart.
-PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
-
-
 def _box(x):
     """The saved picture's box with its left edge `x` pixels in (half the 1920 x 1080 screen wide and
     high, centred down): the Position tab's Left field shows x."""
@@ -82,24 +76,21 @@ def _centred(width, aspect, screen):
                        height=pixel_height / screen_height)
 
 
-def _seed(registry, profile=LANDSCAPE, turn=0):
+def _seed(registry, portrait=False, turn=0):
     """A Frame bound to an Output the Player app reported connected at 1920 x 1080, with a
     saved position (a box half the screen wide and high, its left edge SAVED_X pixels in, revision 2;
-    for a portrait profile a centred 9:16 box a quarter of the screen as it hangs wide); returns the
+    for a `portrait` Frame a centred 9:16 box a quarter of the screen as it hangs wide); returns the
     Player's id.
     The Frame hangs at `turn` (set before the Save, so the Frame is ready), which the Hardware tab's
     Frame size reads."""
     # A fixed device id gives a fixed Player id: the page shows its last six hex digits, and a
     # random one could hold the digits a Hardware tab check reads.
     identity, _key, _request = enroll(registry, count=1, device_id=DEVICE)
-    landscape = profile.width_px > profile.height_px
-    registry.create_frame(FrameCreate(
-        id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=500 if landscape else 300,
-        height_mm=300 if landscape else 500, profile=profile))
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
     registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
     if turn:
         registry.turn_frame(FRAME, turn, expected_generation=1)
-    if landscape:
+    if not portrait:
         position = Calibration(fit=_box(SAVED_X))
     else:
         position = Calibration(fit=_centred(0.25, 9 / 16, hanging((1920, 1080), turn)))
@@ -391,8 +382,7 @@ def test_a_pi_that_did_not_start_from_photo_wall_says_so_and_offers_no_controls(
 
 
 def test_an_unbound_frame_is_sent_to_its_hardware_tab(page, registry):
-    registry.create_frame(FrameCreate(
-        id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         for tab in ("position", "picture"):
@@ -407,7 +397,7 @@ def test_hardware_keeps_the_frames_size_apart_from_the_panel_record(page, regist
 
     Mutation: render the Frame's size inside the Pi and HDMI port section -> the
     not_to_contain_text assertion goes RED."""
-    player_id = _seed(registry, PORTRAIT)
+    player_id = _seed(registry, portrait=True)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "hardware")
@@ -430,7 +420,7 @@ def test_a_rebound_frame_keeps_its_turn_whatever_its_readiness(page, registry):
     """The turn belongs to the spot on the wall (owner, gate Q3, 2026-10-17): a Frame rebound
     (its Position to check again) still hangs as it did, so its size on screen is its box on the
     screen as it hangs there; hung upright again, the same box is another shape."""
-    player_id = _seed(registry, PORTRAIT, turn=90)
+    player_id = _seed(registry, portrait=True, turn=90)
     registry.unbind(FRAME, expected_generation=2)
     registry.bind(FRAME, player_id, OUTPUT, expected_generation=3)
     stored = next(frame for frame in registry.inventory().frames if frame.id == FRAME)
@@ -612,8 +602,7 @@ def test_the_frames_physical_size_is_its_share_of_the_displays_own_size(page, re
     """The Display states 950 x 540 mm (its EDID, on the display line's Output report): the whole
     screen is 95 x 54 cm, half its width and height 48 x 27 cm."""
     player = enroll_pi(registry, "pi-frame-size")
-    registry.create_frame(FrameCreate(
-        id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=500, height_mm=300, profile=LANDSCAPE))
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
     registry.bind(FRAME, player, OUTPUT, expected_generation=0)
     report = OutputReport(OUTPUT, True, NO_SERIAL, MODE, (), None, None, None, None, (950, 540))
     with ThreadPoolExecutor(1) as pool:  # the report's commit runs its own event loop, off Playwright's
@@ -637,8 +626,7 @@ def test_a_frame_turned_a_quarter_draws_a_portrait_screen_and_its_draft_is_in_fr
     """A Frame on a 1920 x 1080 Output hung top to the right: the screen as it hangs is 1080 x 1920,
     so a 10 px step across is 10/1080 of its width, and Fill the screen is its whole width and height."""
     identity, _key, _request = enroll(registry, count=1, device_id=DEVICE)
-    registry.create_frame(FrameCreate(
-        id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
     registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
     generation = next(frame for frame in registry.inventory().frames if frame.id == FRAME).generation
     registry.turn_frame(FRAME, 90, expected_generation=generation)
