@@ -28,6 +28,11 @@ Rules this module owns (one home each):
 - **The trial overlay** (`overlay_corners`, `present`'s `overlay`): the drawn placement's corners as
   fractions of the screen as it hangs, sent as JSON on the screen's surface under the very grant and
   tag of the present that follows, so the shell draws it only over that commit.
+- **The trial's tag** (`commit_tag`): a commit drawn under a Position trial is tagged with the trial's
+  frame tag, never the composition's, whatever the screen shows (photos, the commissioning grid over
+  a Frame with nothing to play): the shell draws the overlay only over a commit under that tag, and
+  Display Host reports that commit to Central as the trial presented (central/fleet/node_calibration.py
+  `deliver_in`), which the console's Done waits for.
 """
 from __future__ import annotations
 
@@ -97,6 +102,14 @@ def composition_tag(composition: OutputComposition, visible_layers: tuple[LocalL
                       "variant_sha256": local.layer.variant.sha256 if local.layer.variant else None}
                      for local in visible_layers),
     )
+
+
+def commit_tag(composition: OutputComposition, visible_layers: tuple[LocalLayer, ...],
+               trial: AppliedTrial | None) -> str:
+    """The tag a screen's commit carries (module rule, The trial's tag): while a Position trial is
+    drawn, the trial's own (contracts/node_calibration.py `TrialCandidate.frame_tag`, "trial-" + its
+    candidate hash), else `composition_tag` of the drawn layers. Pure."""
+    return composition_tag(composition, visible_layers) if trial is None else trial.candidate.frame_tag
 
 
 def overlay_corners(placement: Placement, screen: tuple[int, int]) -> OverlayCorners:
@@ -447,4 +460,4 @@ class PlaneScreens:
 
 
 __all__ = ["CLIENT_LIBRARY", "SCREEN_PLANES", "FrameGrant", "OverlayCorners", "PlaneScreens", "PresentRefused",
-           "ScreenPicture", "composition_tag", "multiplier", "overlay_corners"]
+           "ScreenPicture", "commit_tag", "composition_tag", "multiplier", "overlay_corners"]

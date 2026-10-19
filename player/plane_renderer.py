@@ -18,7 +18,8 @@ Rules this module owns (one home each):
   on the screen fails, "decode"). The drawn lighting is the trial's while one is
   drawn, else the binding's. Every presented answer names the drawn Position (`applied_calibration`,
   with the trial's identity while one is drawn), and a commit under a trial carries the trial
-  overlay's corners of the drawn placement.
+  overlay's corners of the drawn placement and the trial's tag (player/plane_screen.py
+  `commit_tag`), with photos or with nothing to play (the commissioning grid).
 - **When a pattern shows** (s3-page decision 2): while the Output's picture operations carry a test
   pattern, or a trial is drawn over a fallback with no layers (Position's commissioning grid), the
   commit has no planes and its ground is the pattern's: one target per Output, drawn again exactly
@@ -121,7 +122,7 @@ from player.plane_screen import (
     OverlayCorners,
     PresentRefused,
     ScreenPicture,
-    composition_tag,
+    commit_tag,
     overlay_corners,
 )
 from player.planes import Composition, FrameLayers, Plane, Screen, compose, finish_size
@@ -639,8 +640,8 @@ class PlaneRenderer:
             if picture == "pending":
                 return _PENDING                     # the screen keeps its last commit
             pictures[plane.layer.layer.assignment_id] = picture
-        tag = composition_tag(looked, visible_now(looked.layers))
         drawn = setting.drawn
+        tag = commit_tag(looked, visible_now(looked.layers), drawn.trial)
         overlay = None if drawn.trial is None else overlay_corners(setting.placement, setting.screen.size)
         shows = (composed.screen, tuple(self._shown(plane, pictures) for plane in composed.planes), tag,
                  setting.tagged, grant.grant_id, None if ground is None else ground.handle, overlay, drawn.applied)
