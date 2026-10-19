@@ -536,6 +536,83 @@ def test_dragging_the_bottom_left_corner_changes_left_and_height_and_keeps_right
         assert (placed.x, placed.x + placed.width, placed.y) == (left, right, 270), placed
 
 
+def test_the_arrows_set_to_size_change_width_and_height_by_the_step(page, registry, sessions):
+    """Width and height set apart step by step: with the arrows on Size, Wider adds a step to the
+    width and Taller to the height; the top-left stays. Mutation probe: send Size's arrows to the
+    move -> Left changes and the width stays 960 -> RED."""
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        frame = open_frame(page, FRAME, "position")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        frame.get_by_role("radio", name="Size", exact=True).click()
+        frame.get_by_role("button", name="Wider: the picture", exact=True).click()
+        frame.get_by_role("button", name="Taller: the picture", exact=True).click()
+        expect(frame.get_by_label("Height", exact=True)).to_have_value("550")
+        assert _values(frame) == (SAVED_X, 270, 970, 550)
+        frame.get_by_role("button", name="Narrower: the picture", exact=True).click()
+        expect(frame.get_by_label("Width", exact=True)).to_have_value("960")
+        placed = _wait_sent(page, sessions, lambda placed: (placed.width, placed.height) == (960, 550))
+        assert (placed.x, placed.y) == (SAVED_X, 270), placed
+
+
+def _corner_sizes(editor):
+    """Each shown corner handle's pointer area, (width, height) in CSS pixels."""
+    sizes = []
+    for corner in ("Top-left", "Top-right", "Bottom-right", "Bottom-left"):
+        area = editor.get_by_role("button", name=f"{corner} corner: Picture", exact=True).bounding_box()
+        sizes.append((area["width"], area["height"]))
+    return sizes
+
+
+def test_on_a_phone_every_handle_takes_a_fingers_44_pixels(page, registry, sessions):
+    """Design language §2: on a 390 px phone the drawing is shown smaller than its own size, yet each
+    corner's pointer area is 44 CSS pixels across (reaching into the box at most a quarter of it).
+    Mutation probe: size the pointer areas in drawing units (box-editor.tsx `hit` = HIT_CSS) -> a
+    corner takes about 30 CSS pixels -> RED."""
+    _seed(registry)
+    page.set_viewport_size({"width": 390, "height": 844})
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        frame = open_frame(page, FRAME, "position")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        editor = frame.get_by_role("group", name="Picture position", exact=True)
+        assert editor.bounding_box()["width"] < 400
+        for width, height in _corner_sizes(editor):
+            assert width >= 43.5 and height >= 43.5, _corner_sizes(editor)
+        # The help folds under the drawing on a phone, so the drawing comes first.
+        expect(frame.get_by_role("button", name="How to move and size it", exact=True)).to_be_visible()
+
+
+def test_on_a_phone_a_small_turned_box_keeps_its_corners_only_and_moves_from_its_middle(
+        page, registry, sessions):
+    """The turned 9:16 Frame a quarter of its screen wide (270 x 480 pixels) is too small on a phone
+    for eight handles: only its corners take the pointer, and a press in its middle moves it (its
+    size kept). Mutation probes: keep all eight handles (box-editor.tsx `compact` false) -> an edge
+    handle is there -> RED; let the corners reach a whole pointer area into the box (`inward` =
+    hit * 2, no quarter limit) -> the press lands on a corner and resizes -> RED."""
+    _seed(registry, portrait=True, turn=90)
+    page.set_viewport_size({"width": 390, "height": 844})
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        frame = open_frame(page, FRAME, "position")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        editor = frame.get_by_role("group", name="Picture position", exact=True)
+        expect(editor.get_by_role("button", name="Right edge: Picture", exact=True)).to_have_count(0)
+        for width, height in _corner_sizes(editor):
+            assert width >= 22 and height >= 22, _corner_sizes(editor)
+        left, top, width, height = _values(frame)
+        picture = editor.get_by_role("img", name="Picture", exact=True).bounding_box()
+        x, y = picture["x"] + picture["width"] / 2, picture["y"] + picture["height"] / 2
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.mouse.move(x, y + 30, steps=6)
+        page.mouse.up()
+        expect(frame.get_by_label("Top", exact=True)).not_to_have_value(str(top))
+        moved = _values(frame)
+        assert (moved[0], moved[2], moved[3]) == (left, width, height) and moved[1] > top, moved
+
+
 def test_a_typed_width_and_height_save_a_square_frame(page, registry, sessions):
     """Width and height are set independently: 800 x 800 on the 1,920 x 1,080 screen is a square
     Frame, said in its pixels and shape, and Done keeps exactly that box."""
@@ -613,12 +690,14 @@ def test_the_frames_physical_size_is_its_share_of_the_displays_own_size(page, re
         frame = open_frame(page, FRAME, "position")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         facts = _facts(frame)
-        expect(facts).to_contain_text("1,920 × 1,080 pixels, 16:9")
-        expect(facts).to_contain_text("95 × 54 cm, 43 in across")
+        # The Position tab says both sizes in the Hardware tab's words (one FrameSizeFacts).
+        expect(facts).to_contain_text("Size on screen: 1,920 × 1,080 pixels, 16:9")
+        expect(facts).to_contain_text("Size on the wall: 95 × 54 cm")
         frame.get_by_label("Width", exact=True).fill("960")
         frame.get_by_label("Height", exact=True).fill("540")
         expect(facts).to_contain_text("960 × 540 pixels, 16:9")
-        expect(facts).to_contain_text("48 × 27 cm, 22 in across")
+        expect(facts).to_contain_text("Size on the wall: 48 × 27 cm")
+        expect(facts).not_to_contain_text(" in across")
 
 
 def test_a_frame_turned_a_quarter_draws_a_portrait_screen_and_its_draft_is_in_fractions_of_it(

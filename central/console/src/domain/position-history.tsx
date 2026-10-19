@@ -53,37 +53,54 @@ export const WHAT: Record<PositionEntryKind, string> = {
 };
 const NOT_KEPT = new Set<PositionEntryKind>(["sent-draft", "sent-back"]);
 
-// The values a row's summary names, in the editor's words: the box's left and top edges and its size
-// (in pixels of the screen when its size is known, else as shares of it), how the screen hung, and
-// the lighting's mat and lights (the rest of the lighting under Details).
-const POSITION = ["Left and top", "Size"];
+// The values a row's summary names, in the editor's words: where the box is (its left and top
+// edges) and its size (in pixels of the screen when its size is known, else as shares of it), how
+// the screen hung, and the lighting's mat and lights (the rest of the lighting under Details).
+const PLACE = "Place";
+const SIZE = "Size";
+const POSITION = [PLACE, SIZE];
 const FIRST_LINE = [...POSITION, "Screen", "Mat depth", "Lights"];
 // Under Details only: the same box as shares of the screen (they change with the pixels).
-const SHARES = new Set(["Left and top (share of the screen)", "Size (share of the screen)"]);
+const SHARES = new Set([`${PLACE} (share of the screen)`, `${SIZE} (share of the screen)`]);
+// Under Details of a row with nothing changed from the row below it (its summary says only the position).
+const UNCHANGED: Detail = { label: "Change", value: "none: the same as the row below" };
 
 const percent = (fraction: number) => `${(fraction * 100).toFixed(1)} %`;
 type Detail = { label: string; value: string };
-const line = (details: readonly Detail[], labels: readonly string[]) =>
+/** `labels`' values in order; a place reads "Moved to left 150, top 270" (`place` its lead word). */
+const line = (details: readonly Detail[], labels: readonly string[], place = "At") =>
   labels.flatMap((label) => details.filter((detail) => detail.label === label))
-    .map(({ label, value }) => `${label} ${value}`).join(" · ");
+    .map(({ label, value }) => `${label === PLACE ? place : label} ${value}`).join(" · ");
+/** The position alone: "left 120, top 270 · 960 × 540 pixels, 16:9". */
+const positionLine = (details: readonly Detail[]) =>
+  POSITION.flatMap((label) => details.filter((detail) => detail.label === label)).map(({ value }) => value).join(" · ");
+const shown = (rows: readonly Detail[]) => rows.filter((detail) => !SHARES.has(detail.label));
+const SAME = "";
+
+/** Whether a row differs from the row below it in nothing its summary would name. */
+function unchanged(details: readonly Detail[], below: readonly Detail[]): boolean {
+  return changedSummary(shown(details), shown(below), { absent: () => null, same: SAME }) === SAME;
+}
 
 /**
  * A row's summary against the row below it (`below`; null: the oldest shown), in the editor's words:
- * a turn says the screen turned and the position it kept; the oldest row its position, how the
- * screen hung and its mat and lights; any other row what changed (the pattern's one rule,
- * `changedSummary`; a light the row below had and this one has not is said by the lights' count),
- * or "No change" with its position.
+ * a turn says the screen turned and the position it kept; the oldest row where its box is, its
+ * size, how the screen hung and its mat and lights; any other row what changed ("Moved to left 150,
+ * top 270"; the pattern's one rule, `changedSummary`; a light the row below had and this one has
+ * not is said by the lights' count), or, with nothing changed, its position alone (Details says it
+ * is the same as the row below).
  */
 export function positionSummary(kind: PositionEntryKind, details: readonly Detail[], below: readonly Detail[] | null,
   turn: PositionEntryView["made_for"]["turn"]): string {
   if (kind === "kept-turn-changed") {
-    return `Screen turned: it hangs ${HANGS[turn]}. Position kept: ${line(details, POSITION)}`;
+    return `Screen turned: it hangs ${HANGS[turn]}. Position kept: ${positionLine(details)}`;
   }
   if (below === null) return line(details, FIRST_LINE);
-  const shown = (rows: readonly Detail[]) => rows.filter((detail) => !SHARES.has(detail.label));
-  return changedSummary(shown(details), shown(below), {
-    absent: () => null, same: `No change: ${line(details, POSITION)}`,
-  });
+  if (unchanged(details, below)) return positionLine(details);
+  const changed = changedSummary(shown(details), shown(below), { absent: () => null, same: SAME });
+  const place = details.find((detail) => detail.label === PLACE);
+  // changedSummary says "Place left 150, top 270": the summary says the move in words.
+  return place === undefined ? changed : changed.replace(`${PLACE} ${place.value}`, `Moved to ${place.value}`);
 }
 
 /** Every value of an entry: the box's left and top edges and its size in pixels of the screen as it
@@ -96,14 +113,14 @@ export function positionDetails(entry: PositionEntryView, size: PixelSize | null
   const box = { left: entry.fit.left ?? 0, top: entry.fit.top ?? 0, width: entry.fit.width ?? 1, height: entry.fit.height ?? 1 };
   const screen = screenOf(size === null ? null : [size.width, size.height], entry.made_for.turn);
   const shares = [
-    { label: "Left and top", value: `${percent(box.left)} across, ${percent(box.top)} down` },
-    { label: "Size", value: `${percent(box.width)} × ${percent(box.height)} of the screen` },
+    { label: PLACE, value: `left ${percent(box.left)}, top ${percent(box.top)}` },
+    { label: SIZE, value: `${percent(box.width)} × ${percent(box.height)} of the screen` },
   ];
   const placed = screen === null ? null : boxPixels(box, screen);
   return [
     ...(placed === null ? shares : [
-      { label: "Left and top", value: `${countText(placed.x)} across, ${countText(placed.y)} down` },
-      { label: "Size", value: shapeWords(placed) },
+      { label: PLACE, value: `left ${countText(placed.x)}, top ${countText(placed.y)}` },
+      { label: SIZE, value: shapeWords(placed) },
     ]),
     { label: "Screen", value: `hung ${HANGS[entry.made_for.turn]}` },
     { label: "Mat depth", value: unitWords(lighting.mat_depth_mm, "mm") },
@@ -143,14 +160,18 @@ export function positionDays(entries: readonly PositionEntryView[], adjustment: 
     names?: Readonly<Record<string, string>>; profiles?: readonly PaperProfileChoice[];
   } = {}): HistoryDay[] {
   const details = entries.map((entry) => positionDetails(entry, size, names, profiles));
-  return daysOf(entries, (entry, index) => ({
-    what: WHAT[entry.kind],
-    notKept: NOT_KEPT.has(entry.kind),
-    summary: positionSummary(entry.kind, details[index], details[index + 1] ?? null, entry.made_for.turn),
-    details: details[index],
-    restore: restoreState(entry, adjustment, hardwareHref),
-    session: entry.session_id,
-  }));
+  return daysOf(entries, (entry, index) => {
+    const below = details[index + 1] ?? null;
+    const same = below !== null && entry.kind !== "kept-turn-changed" && unchanged(details[index], below);
+    return {
+      what: WHAT[entry.kind],
+      notKept: NOT_KEPT.has(entry.kind),
+      summary: positionSummary(entry.kind, details[index], below, entry.made_for.turn),
+      details: same ? [UNCHANGED, ...details[index]] : details[index],
+      restore: restoreState(entry, adjustment, hardwareHref),
+      session: entry.session_id,
+    };
+  });
 }
 
 export interface PositionHistoryListProps {

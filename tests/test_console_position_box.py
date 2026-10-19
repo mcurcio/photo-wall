@@ -167,8 +167,9 @@ def test_shape_words_name_the_pixels_and_their_ratio(call):
                      "1 × 1 pixels, 1:1"]
 
 
-def test_size_words_name_centimetres_and_the_diagonal_in_inches(call):
-    assert _one(call, "sizeWords", [950, 540]) == "95 × 54 cm, 43 in across"
-    assert _one(call, "sizeWords", [95, 54]) == "9.5 × 5.4 cm, 4.3 in across"
-    assert _one(call, "sizeWords", [475, 237.5]) == "48 × 24 cm, 21 in across"
+def test_size_words_name_width_and_height_in_centimetres_and_no_diagonal(call):
+    """Owner, 2026-10-19: "diagonal inches is a weird concept when we already have width and height"."""
+    assert _one(call, "sizeWords", [950, 540]) == "95 × 54 cm"
+    assert _one(call, "sizeWords", [95, 54]) == "9.5 × 5.4 cm"
+    assert _one(call, "sizeWords", [475, 237.5]) == "48 × 24 cm"
     assert _one(call, "sizeWords", None) is None

@@ -104,13 +104,11 @@ export function shapeWords(pixels: PixelRectangle): string {
 /** A length in words, whole, or to one decimal below 10. */
 const lengthWords = (value: number) => countText(value < 10 ? Math.round(value * 10) / 10 : Math.round(value)) as string;
 
-const MM_PER_INCH = 25.4;
-
-/** The Frame's physical size in words: "95 × 54 cm, 43 in across" (one decimal below 10 cm);
- * null when it is not known (placement.js `boxSizeMm` answered null). */
+/** A physical size in words, width × height in centimetres: "95 × 54 cm" (one decimal below
+ * 10 cm), never a diagonal (owner, 2026-10-19: "diagonal inches is a weird concept when we already
+ * have width and height"); null when it is not known (placement.js `boxSizeMm` answered null). */
 export function sizeWords(sizeMm: readonly [number, number] | null): string | null {
   if (sizeMm === null) return null;
   const [width, height] = sizeMm;
-  const across = Math.hypot(width, height) / MM_PER_INCH;
-  return `${lengthWords(width / 10)} × ${lengthWords(height / 10)} cm, ${lengthWords(across)} in across`;
+  return `${lengthWords(width / 10)} × ${lengthWords(height / 10)} cm`;
 }

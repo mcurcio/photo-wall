@@ -108,7 +108,7 @@ function toViewbox(svg, event) {
 /** The not-yet-known outline in viewBox px: what a new Frame is drawn as while it is placed. */
 const UNSIZED_PX = unsizedOutlinePx(VIEWPORT);
 
-/** The placement form's starting values (a Frame placed with measurements starts here). */
+/** The placement form's starting values (a Frame added by its position starts here). */
 const PLACEMENT_DEFAULTS = { x_mm: "1", y_mm: "0" };
 
 const FRAME_ID_HINT = "Letters, digits, -, _ or .; up to 96; cannot be changed later.";
@@ -459,7 +459,7 @@ export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit
 
       {edit !== null && (
         <button type="button" disabled={surfaceId == null || placementForm != null} onClick={openMeasuredCreate}>
-          Add frame with measurements
+          Add a Frame by its position
         </button>
       )}
 

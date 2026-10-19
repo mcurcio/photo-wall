@@ -97,8 +97,8 @@ def test_choosing_top_to_the_right_turns_the_frame_and_the_position_tab_follows(
         # rows made upright cannot be restored, with the way back to the Hardware tab.
         history = page.get_by_role("region", name="History", exact=True)
         turned = history.get_by_role("listitem", name=re.compile(r"Kept \(screen turned\)$"))
-        expect(turned).to_contain_text("Screen turned: it hangs with its top to the right. Position kept: Left and top")
-        expect(turned).to_contain_text("Left and top 378 across, 50 down · Size 324 × 1,820 pixels")
+        expect(turned).to_contain_text(
+            "Screen turned: it hangs with its top to the right. Position kept: left 378, top 50 · 324 × 1,820 pixels")
         upright = history.get_by_role("listitem", name=re.compile(r"Created$"))
         expect(upright.get_by_role("button", name="Restore", exact=True)).to_have_accessible_description(
             re.compile(r"^Made when the screen hung upright\. Turn the screen back on the Hardware tab to restore it\."))

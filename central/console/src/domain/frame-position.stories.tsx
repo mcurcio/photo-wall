@@ -27,7 +27,7 @@ const meta = {
   component: FramePosition,
   args: {
     adjustment: ADJUSTMENT, size: [1920, 1080], displayMm: [950, 540], turn: 0,
-    piHref: "#/players/device-a", hardwareHref: "#/wall/frames/hall/hardware",
+    bound: true, piHref: "#/players/device-a", hardwareHref: "#/wall/frames/hall/hardware",
   },
 } satisfies Meta<typeof FramePosition>;
 
@@ -60,3 +60,16 @@ export const TurnedScreen: Story = {
 export const NoStatedSize: Story = { args: { displayMm: null } };
 /** The screen's size is not known: a 16:9 stand-in, and a note that the numbers are shares of the screen. */
 export const UnknownSize: Story = { args: { size: null, displayMm: null } };
+/** The resolution is not known but the Display states its size: the stand-in takes the display's own shape. */
+export const UnknownResolutionStatedSize: Story = { args: { size: null, displayMm: [950, 540] } };
+/** A small box on a turned screen (a quarter of each side): only its corners take the pointer, and
+ * its middle moves it. */
+export const SmallTurnedBox: Story = {
+  args: {
+    turn: 90,
+    adjustment: {
+      ...ADJUSTMENT,
+      draft: { fit: { mode: "box", left: 0.375, top: 0.375, width: 0.25, height: 0.25 }, lighting: UPGRADED },
+    },
+  },
+};

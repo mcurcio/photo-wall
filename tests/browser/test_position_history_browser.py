@@ -191,11 +191,15 @@ def test_a_tried_and_a_kept_position_are_listed_and_restore_puts_the_kept_one_ba
         field = _move(page, 2)
         expect(field).to_have_value(_left(SAVED_X + 20))
         # A row says what differs from the row below it: here the moved left edge alone.
-        expect(_rows(page, TRIED).first).to_contain_text("Left and top")
+        expect(_rows(page, TRIED).first).to_contain_text("Moved to left ")
         expect(_rows(page, TRIED).first).not_to_contain_text("Size")
         expect(_rows(page, TRIED).first).not_to_contain_text("Mat depth")
         _done(page)
         expect(_rows(page, KEPT)).to_have_count(2)
+        # Kept as tried: the row says its position alone, and Details that it is the row below's
+        # (mutation probe: say "No change: " in the summary again -> RED).
+        expect(_rows(page, KEPT).first).to_contain_text(re.compile(r"left \d+, top \d+ · "))
+        expect(_rows(page, KEPT).first).not_to_contain_text("No change")
         # Read again as Done is answered, not at the next poll (CADENCE_MS 2000).
         [done] = seen["done"]
         assert any(done <= at <= done + 0.25 for at in seen["reads"]), (done, seen["reads"])
@@ -204,7 +208,7 @@ def test_a_tried_and_a_kept_position_are_listed_and_restore_puts_the_kept_one_ba
         _depth(page).fill("6")
         expect(lighting_group(page)).to_contain_text("6 mm")
         expect(_rows(page, TRIED).first).to_contain_text("Mat depth 6 mm")
-        expect(_rows(page, TRIED).first).not_to_contain_text("Left and top")
+        expect(_rows(page, TRIED).first).not_to_contain_text("Moved to")
 
         _rows(page, KEPT).last.get_by_role("button", name="Restore", exact=True).click()
         expect(_depth(page)).to_have_value("0")
