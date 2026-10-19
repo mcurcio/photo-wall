@@ -14,7 +14,7 @@ One home each for:
   blip or an unreadable identity (None) never changes the Display recorded on an Output; only a
   readable identity with another key does.
 - **Ready** (C2; design rule 3, G5). A Frame is ready when it is bound, its latest Position
-  commit was made at its current generation (bind, unbind, a profile change and a turn raise the
+  commit was made at its current generation (bind, unbind, a new screen size and a turn raise the
   generation: a Position made for the other hanging needs checking), and that commit names the Display last seen on its Output, or no Display has ever
   been seen there. A Display first seen on an Output (none before) is adopted by the Frame bound
   there when its Position commit names none: a Frame committed before 1b, or against a display
@@ -72,7 +72,7 @@ class Readiness(StrEnum):
     """Worked out, never stored. The order is the console's: the first that holds is shown."""
     UNBOUND = "unbound"                       # no Pi and HDMI port feeds this Frame
     DISPLAY_CHANGED = "display-changed"       # the Display on its Output is not the one its Position was set against
-    POSITION_NEEDED = "position-needed"       # no Position commit since the last bind or profile change
+    POSITION_NEEDED = "position-needed"       # no Position commit since the last bind, size change or turn
     READY = "ready"
 
 

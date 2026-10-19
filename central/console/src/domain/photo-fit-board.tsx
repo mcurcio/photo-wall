@@ -76,7 +76,7 @@ function unjudged(snapshot: object | null, frameId: string, words: string): Fram
   const { width, height } = boxPixels({ ...WHOLE_SCREEN, ...frame.calibration?.fit }, screen);
   return {
     key: frameId, name: frameId, aspect: width / height, ratio: ratioWords(width / height), lead: null, emptyText: "",
-    count: words, segments: [], samples: [], checked: null, unknownOutput: null, detail: null, alert: null, why: null,
+    count: words, segments: [], samples: [], checked: null, detail: null, alert: null, why: null,
     draft: null,
   };
 }

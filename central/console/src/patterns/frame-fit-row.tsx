@@ -76,10 +76,6 @@ export interface FrameFitView {
   samples: readonly CropView[];
   /** The sampled check of faces and the interesting part, in words, or null. */
   checked: string | null;
-  /** Its Frame output not reported yet, in words ("Judged at hall's planned 9:16 shape; hall
-   * hasn't reported its output yet."), shown;
-   * null once it is known. */
-  unknownOutput: string | null;
   /** The pixels it is judged at, in words ("Frame output 1,512 × 1,008 px, 3:2"), under
    * Details (pixels appear only there, design language §7); null while not known. */
   detail: string | null;
@@ -280,7 +276,6 @@ export function FrameFitRow({ frame, size, onOpen, onFocus, action, faded = fals
       )}
       {drawTile && frame.alert !== null && <FitAlertNote alert={frame.alert} />}
       {frame.checked !== null && <p className="m-0 text-xs text-muted">{frame.checked}</p>}
-      {frame.unknownOutput !== null && <p className="m-0 text-xs text-muted">{frame.unknownOutput}</p>}
       {action}
       {frame.why !== null && (
         <Disclosure summary={frame.why.summary}>

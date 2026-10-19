@@ -398,7 +398,7 @@ export function deleteFrameRequest(snapshot, frameId) {
     confirmLabel: "Confirm delete",
     body: (
       <>
-        <p>{`Frame ${frameId}: its placement, profile and calibration are removed.`}</p>
+        <p>{`Frame ${frameId}: where it hangs, its Position and its lighting are removed.`}</p>
         {isBound(frame) && (
           <p>It is bound to an output; the delete is refused until it is unbound.</p>
         )}

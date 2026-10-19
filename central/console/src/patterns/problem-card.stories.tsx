@@ -35,10 +35,10 @@ export const WithDetails: Story = {
 export const SetupCard: Story = {
   args: {
     scope: "setup",
-    subject: "Frame profile",
+    subject: "Display",
     variant: "card",
     verdict: { severity: "todo", label: "Check the Display", receipt: null },
-    what: "The Pi reported its Display at 1920 × 1080, but this Frame's profile is 1080 × 1920.",
-    action: { label: "Edit Frame profile", onAction: () => {} },
+    what: "The Pi reports another display on this port than the Position was set on.",
+    action: { label: "Check the Position", onAction: () => {} },
   },
 };

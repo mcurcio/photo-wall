@@ -309,8 +309,8 @@ class NodeCalibration:
         NodeControlError: trial_sequence_invalid 422 (not an int >= 1), trial_unknown 404,
         trial_ended 410 (the trial is not active, or its lease ran out or was invalidated here),
         unknown_entry 404 (no such entry, or trimmed), then `position_history.restore_refusal`
-        against the Frame's profile and the Display seen on its port now (other_frame,
-        made_for_other_profile, made_for_other_display, each 409), then trial_sequence_conflict 409,
+        against the Frame's turn and the Display seen on its port now (other_frame,
+        made_for_other_turn, made_for_other_display, each 409), then trial_sequence_conflict 409,
         then the entry's lighting against the house as an edit's (FrameLightingRefused)."""
         if type(expected_sequence) is not int or expected_sequence < 1:
             raise TrialRefused(TrialRefusal.SEQUENCE_INVALID)

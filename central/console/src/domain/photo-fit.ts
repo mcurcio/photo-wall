@@ -545,7 +545,6 @@ function frameView(frame: FrameFit, name: string, href: string | undefined, aler
     checked: checkedWords(frame),
     // The Frame output in pixels is a Details fact (design language §7, units); a Frame without
     // one is not judged, so it has no view (the board's `unsized` lines say it).
-    unknownOutput: null,
     detail: [output, limit].filter((part): part is string => part !== null).join(" · ") || null,
     waiting: unsized > 0 ? waitingWords(unsized) : null,
     alert,
