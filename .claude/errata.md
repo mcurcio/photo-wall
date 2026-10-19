@@ -6854,3 +6854,20 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
   `tests/test_player_service.py::test_real_central_http_media_commit_outage_rejoin_and_renewal`
   (IndexError: no job offered), `tests/browser/test_fit_board_browser.py::...one_row_per_scene...`
   (fb-10's errata above), `tests/node/apps/test_player_device_grants.py` (macOS).
+
+## PR 119 fix round (review and design review, 2026-10-19)
+
+- **docs/requirements.md required a "Frame display profile" the operator corrects**, which the
+  owner's 2026-10-19 words and 0030 removed. Restated: a Frame's shape and size come from its
+  Position box and the Display's stated size, never typed; Shows videos is the Frame's own setting.
+- **Three red tests the earlier errata called pre-existing were caused by this PR** (they passed on
+  main): `test_migration_084.py` (validated a stored binding against today's `Plan`; now validates
+  the layers 084 rewrites), `test_real_central_http_media_commit_outage_rejoin_and_renewal` (its Pi
+  reported 0 x 0, so its Frame had no Frame output; now 1920 x 1080), and the fit board's
+  no-Details row (hall is reported now; Details holds its pixels).
+- **Migration 104 read the preferred mode from the Output's own report**, while Central reads the
+  seen Display's `displays.modes`; it now reads the same column. `screen_px`'s docstring said 102
+  and 104 state the same rule: 102 (applied) reads the report.
+- **The large-Frame setting is still a diagonal in inches** (0030 decision 7, requirements :186
+  "a 40-inch Frame"). The design review asks for a width; R2 says the diagonal is "a weird
+  concept". Left for the owner: which measure the threshold uses is his call.

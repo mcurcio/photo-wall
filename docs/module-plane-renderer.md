@@ -79,7 +79,7 @@ Wayland's standard window alpha (`wp_alpha_modifier_v1`, multiplier `round(stren
 ## Composition and strengths
 
 At each frame turn the renderer looks the held composition at the frame time (`player/look.py`
-`look`), places the Frame (`place(rectangle, screen as it hangs, profile aspect)`), and composes
+`look`), places the Frame (`place_box(box, screen as it hangs)`), and composes
 the planes (`player/planes.py` `compose`): every layer `player/visibility.py` says can be seen,
 bottom to top in `stack_order`.
 
@@ -165,7 +165,7 @@ transparency (a PNG) pre-multiplied. Within one level of 256 of the reference.
   lead, never on its first frames during the fade that reveals it (about 10 ms of CPU and an import
   each, milestone 3).
 - **When a picture is finished again**: a still when anything its pixels depend on changes (its
-  decode, its finish size, the turn, the crop, the profile's aspect, the Display's picture
+  decode, its finish size, the turn, the crop, the box's shape, the Display's picture
   operations, the Frame's lights, its LUT's generation); a video on each new decoded frame while
   it is seen. Never for a fade.
 - **Finishing is off the present path.** `present`, `frame` and `prepare` never draw, upload,
