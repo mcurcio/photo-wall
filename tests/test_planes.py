@@ -1,13 +1,16 @@
 """A screen's planes and their strengths: the display controller mixes stored sRGB values, so a
-fade over a picture keeps its alpha and a dip to black takes its sRGB encoding (bench T3)."""
+fade over a picture keeps its alpha and a dip to black takes its sRGB encoding (bench T3). Each
+picture is finished at the smaller of its cropped source and its placement, and the controller
+enlarges it to the placement (owner, 2026-10-18)."""
 from __future__ import annotations
 
 import pytest
 from test_executor import layer, media
 
 from contracts.frame_fit import Placement
+from contracts.models import PhotoCrop
 from player.geometry import encode_srgb
-from player.planes import MIN_STRENGTH, FrameLayers, Screen, compose, plane_strength
+from player.planes import MIN_STRENGTH, FrameLayers, Screen, compose, finish_size, plane_strength
 from player.rendering import LocalLayer
 
 SCREEN = Screen("hdmi1", (3840, 2160), 0)
@@ -91,3 +94,37 @@ def test_a_placement_off_the_screen_is_refused(at):
 def test_a_layer_for_another_output_is_refused():
     with pytest.raises(ValueError, match="^compose_output$"):
         compose(SCREEN, [FrameLayers("frame1", FULL, (photo("p", 1.0, output="hdmi2"),))])
+
+
+def sized(key: str, width: int, height: int, *, video: bool = False, **fields) -> LocalLayer:
+    """A photo (or a video) whose prepared copy is `width` x `height`."""
+    variant = media(key.encode(), video).model_copy(update={"width": width, "height": height, **(
+        {} if video else {"media_type": "image/jpeg"})})
+    return LocalLayer(layer(key, variant=variant, video=video, **fields), None, 0.0, 1.0)
+
+
+HD = Placement(960, 540, 1920, 1080)
+
+
+@pytest.mark.parametrize(("local", "at", "size", "enlarged"), [
+    (sized("video", 1920, 1080, video=True), FULL, (1920, 1080), True),     # a 1080p video in a 4K Frame
+    (sized("large", 6000, 4000), HD, (1920, 1080), False),                  # a large photo, shown 1:1
+    (sized("small", 1280, 720), HD, (1280, 720), True),                     # a small photo, enlarged
+    (sized("tall", 1080, 1920), FULL, (1080, 608), True),                   # its crop is 1080 x 607.5
+    (sized("exact", 3840, 2160), FULL, (3840, 2160), False),
+])
+def test_a_picture_is_finished_at_the_smaller_of_its_cropped_source_and_its_placement(local, at, size, enlarged):
+    plane, = compose(SCREEN, [FrameLayers("frame1", at, (local,))]).planes
+    assert plane.size == finish_size(local.layer, at) == size
+    assert plane.at == at and plane.enlarged is enlarged
+
+
+def test_the_finish_size_keeps_the_frames_aspect_whatever_the_crop():
+    for offset in (0, 0.3, 1):
+        local = sized("wide", 4000, 1000, crop=PhotoCrop(offset=offset))       # its crop: 1778 x 1000
+        assert finish_size(local.layer, FULL) == (1778, 1000)
+        assert finish_size(local.layer, HD) == (1778, 1000)
+
+
+def test_a_black_layer_is_finished_at_its_placement():
+    assert finish_size(black("dark", 1.0).layer, HD) == (1920, 1080)

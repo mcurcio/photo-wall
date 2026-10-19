@@ -52,6 +52,11 @@ nothing but the app is on screen.
    its own connection (`PlaneScreens.trial`) and presents under the trial's tag: without an overlay
    the shell presents that tag and sends no `overlay_presented`; with the overlay of the drawn
    placement (`overlay_corners`) it sends `overlay_presented` naming that tag.
+10. an_enlarged_picture_fills_its_placement (owner, 2026-10-18: the look applied "at the minimum of
+   the asset size and the frame size"): a photo whose source is half its placement is finished at
+   half size (player/planes.py `finish_size`) and the sub-window's viewport enlarges it: the four
+   quadrants fill RECTANGLE, black outside. Mutation probe: skip `wp_viewport_set_destination` in
+   frame-client.c -> the picture shows at half size in RECTANGLE's top-left quarter.
 """
 import json
 import mmap
@@ -122,7 +127,8 @@ def target_bytes(size: tuple[int, int], turn: int, fill) -> bytes:
 
 def app() -> None:
     from contracts.frame_fit import Placement
-    from contracts.models import FrameProfile, Layer, OutputBinding
+    from contracts.models import FrameProfile, Layer, OutputBinding, Variant
+    from contracts.photo_crop import CENTRED
     from player.fit_pass import target_size
     from player.gpu import Target
     from player.plane_screen import PlaneScreens, overlay_corners
@@ -151,7 +157,7 @@ def app() -> None:
         if screen is None or grant is None:
             return {"result": None}
         if ground is not None:
-            size = target_size(Placement(0, 0, *screen.size), screen.turn)
+            size = target_size(screen.size, screen.turn)
             key = ("ground", tuple(ground), size)
             if key not in pictures:
                 pictures[key] = screens.import_picture(target(size, target_bytes(size, screen.turn, tuple(ground)),
@@ -159,18 +165,26 @@ def app() -> None:
                 assert pictures[key] is not None, ("import_refused", "ground", size)
             ground = pictures[key]
         shown = []
-        for name, fill, x, y, width, height, strength in planes:
+        for name, fill, x, y, width, height, strength, *source in planes:
             at = Placement(x, y, width, height)
-            size = target_size(at, screen.turn)
+            if source:      # a photo of that source size: finished at player/planes.py `finish_size`
+                variant = Variant(asset_id=f"asset-{name}", recipe_id="e" * 64, sha256="a" * 64, size=1,
+                                  media_type="image/jpeg", width=source[0][0], height=source[0][1])
+                layer = Layer(assignment_id=name, run_id="run", output_id=OUTPUT, frame_id="frame",
+                              binding_generation=1, start=0, end=10**9, media_origin=0, variant=variant,
+                              crop=CENTRED)
+            else:
+                layer = Layer(assignment_id=name, run_id="run", output_id=OUTPUT, frame_id="frame",
+                              binding_generation=1, start=0, end=10**9, media_origin=0, presentation="black")
+            plane = Plane("frame", LocalLayer(layer, None, 0.0, 1.0), at, strength)
+            size = target_size(plane.size, screen.turn)
             key = (name, size)
             if key not in pictures:
                 fill = fill if fill == "quadrants" else tuple(fill)
                 pictures[key] = screens.import_picture(
                     target(size, target_bytes(size, screen.turn, fill), size[0] * 4))
                 assert pictures[key] is not None, ("import_refused", name, size)
-            layer = Layer(assignment_id=name, run_id="run", output_id=OUTPUT, frame_id="frame",
-                          binding_generation=1, start=0, end=10**9, media_origin=0, presentation="black")
-            shown.append((Plane("frame", LocalLayer(layer, None, 0.0, 1.0), at, strength), pictures[key]))
+            shown.append((plane, pictures[key]))
         result = screens.present(Composition(screen, tuple(plane for plane, _ in shown)),
                                  {plane.layer.layer.assignment_id: picture for plane, picture in shown},
                                  grant, tag, None, ground, overlay)
@@ -788,6 +802,34 @@ def main() -> None:
         print(f"TRIAL tag={trial.frame_tag} overlays={overlay_tags}", flush=True)
         backend.trial(admitted.output, None)
         print("PASS a_trial_overlay_rides_the_present_that_carries_it", flush=True)
+
+        # 10. an_enlarged_picture_fills_its_placement
+        half = [["small", "quadrants", left, top, width, height, 1.0, [width // 2, height // 2]]]
+        enlarged = ask(op="present", tag="enlarged", planes=half)
+        assert isinstance(enlarged["result"], int), enlarged
+
+        def quadrants_fill_the_rectangle(frame):
+            frame_width, frame_height, _ = frame
+            inside = outside = 0
+            for y in range(1, frame_height, 5):
+                for x in range(1, frame_width, 5):
+                    u, v = (x - left) / width, (y - top) / height
+                    margin = 4 / min(width, height)
+                    if any(abs(c - edge) < margin for c in (u, v) for edge in (0, .5, 1)):
+                        continue            # an edge of the rectangle or of a quadrant
+                    actual = pixel(frame, x, y)
+                    if 0 < u < 1 and 0 < v < 1:
+                        assert near(actual, quadrant_colour(u, v)), ("enlarged", x, y, actual)
+                        inside += 1
+                    else:
+                        assert actual == BLACK, ("outside_not_black", x, y, actual)
+                        outside += 1
+            return inside, outside
+
+        inside, outside = await_frame(quadrants_fill_the_rectangle)
+        print(f"ENLARGED inside={inside} outside={outside}", flush=True)
+        assert inside > 800 and outside > 5000, (inside, outside)
+        print("PASS an_enlarged_picture_fills_its_placement", flush=True)
     except BaseException:
         app_log.flush()
         print("APP LOG:\n" + APP_LOG.read_text()[-4000:], flush=True)

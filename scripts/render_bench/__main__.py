@@ -309,7 +309,7 @@ class _Bench:
                 os.write(self.wake_write, b"f")
             return VideoFrames(path, scheduled)
 
-        budget = ControllerBudget(planes=10**6, line_pixels=10**9) if args.budget == "unlimited" else PI5
+        budget = ControllerBudget(planes=10**6, line_pixels=10**9, enlarged=10**6) if args.budget == "unlimited" else PI5
         self.renderer = PlaneRenderer(self.screens, self.device, self.fitter, PatternPass(self.gpu.gl), _NoLuts(),
                                       stills=StillDecode, videos=videos, budget=budget)
         self.tracer = timeline.tracer(args.output, photos, clip, origin=time.monotonic() + LEAD, fade=args.fade,

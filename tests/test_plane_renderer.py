@@ -410,8 +410,10 @@ def test_what_a_still_depends_on_finishes_it_again_and_nothing_else_does():
     assert draws_after(lambda: setattr(rig.screens, "operations", operations)) == 1
     assert rig.screens.commits[-1][3] == 7              # the tag names the change drawn
     frame = lit.model_copy(update={"calibration": Calibration(fit=RectangleFit(width=0.5))})
-    assert draws_after(lambda: None) == 1               # a new rectangle size
-    assert rig.fitter.draws[-1][0].placement.width == 1920
+    assert draws_after(lambda: None) == 0               # a new rectangle, the same finish size (1080p)
+    frame = lit.model_copy(update={"calibration": Calibration(fit=RectangleFit(width=0.25))})
+    assert draws_after(lambda: None) == 1               # a smaller placement than the source
+    assert rig.fitter.draws[-1][0].size == (960, 540)
     assert draws_after(lambda: setattr(rig.screens, "screen_now", Screen(OUTPUT, (2160, 3840), 90))) == 1
     request = rig.fitter.draws[-1][0]
     assert request.turn == 90 and rig.screens.commits[-1][0].screen.turn == 90
@@ -471,18 +473,14 @@ def test_a_busy_target_is_never_drawn_into():
     rig = Rig()
     clip = video("clip")
     prepared_video(rig, clip)
-    rig.settle(clip)                                    # target 1 shown (target 2: the ground)
+    rig.settle(clip)                                    # target 1 shown (targets 2, 3 made with it)
     for serial in (2, 3, 4):
-        if serial == 3:
-            rig.screens.busy_handles.add(1003)
-        if serial == 4:
-            rig.screens.busy_handles.add(1004)
+        rig.screens.busy_handles = {1003} if serial == 3 else set()
         rig.videos[0].push(serial)
         rig.videos[0].on_frame()
-        rig.renderer.finish()                           # 2 into 3; then 1 shown, 3 finished: 4;
-    assert [target for _, target in rig.fitter.draws] == [1, 3, 4]     # then 1 shown, 3 busy, 4 finished
-    assert len(rig.fitter.draws) == VIDEO_TARGETS
-    assert len(rig.fitter.draws) == VIDEO_TARGETS
+        rig.renderer.finish()                           # 2 into 2; then 1 shown, 2 finished, 3 busy:
+    assert [target for _, target in rig.fitter.draws] == [1, 2, 3]     # none; then 4 into 3
+    assert rig.device.imports == [1, 2, 4]
 
 
 def half(key: str, start: float, **fields) -> LocalLayer:
@@ -935,7 +933,7 @@ def test_a_committing_present_does_no_gpu_work_and_the_next_finish_draws_the_wai
     assert rig.present(clip, timebase=1.0).status == "presented"      # a new strength: a commit
     assert rig.log == ["commit"]
     rig.renderer.finish()
-    assert rig.log[0] == "commit" and rig.log[1:] == ["target", "import", "draw", "fence"]
+    assert rig.log[0] == "commit" and rig.log[1:] == ["import", "draw", "fence"]     # its targets made already
     assert rig.device.imports[-1] == 2 and rig.fitter.draws[-1][0].source.external
 
 
@@ -1081,3 +1079,120 @@ def test_a_composition_whose_layers_are_all_released_is_no_longer_held():
     rig.clock.tick()
     rig.renderer.frame()
     assert len(rig.screens.commits) == commits and rig.renderer.due() is None
+
+
+def sized(key: str, width: int, height: int, **fields) -> LocalLayer:
+    """A photo whose prepared copy is `width` x `height`."""
+    variant = media(key.encode()).model_copy(update={"media_type": "image/jpeg", "width": width, "height": height})
+    return LocalLayer(layer(key, variant=variant, **fields), Path(f"/media/{key}.jpg"), 0.0, 1.0)
+
+
+HALF = framed(RectangleFit(width=0.5))          # a 1920 x 1080 placement on the 4K screen
+
+
+def test_a_1080p_video_in_a_4k_placement_is_finished_at_1080p_and_shown_enlarged():
+    """The owner, 2026-10-18: the look applied "at the minimum of the asset size and the frame
+    size"; the display controller enlarges the finished picture to the Frame's placement."""
+    rig = Rig()
+    clip = video("clip")
+    prepared_video(rig, clip)
+    rig.settle(clip)
+    request, target = rig.fitter.draws[-1]
+    assert request.size == (1920, 1080)
+    plane, = rig.screens.commits[-1][0].planes
+    assert plane.at == Placement(0, 0, 3840, 2160) and plane.size == (1920, 1080) and plane.enlarged
+    assert rig.screens.commits[-1][1]["clip"].size == (1920, 1080)
+
+
+@pytest.mark.parametrize(("source", "finished", "enlarged"), [
+    ((6000, 4000), (1920, 1080), False),        # a large photo: finished at its placement, shown 1:1
+    ((1280, 720), (1280, 720), True),           # a small photo: finished at its own size, enlarged
+])
+def test_a_photo_is_finished_at_the_smaller_of_its_source_and_its_placement(source, finished, enlarged):
+    rig = Rig()
+    still = sized("still", *source, start=0)
+    rig.ready(still, frame=HALF)
+    rig.settle(still, frame=HALF)
+    assert [request.size for request, _ in rig.fitter.draws] == [finished]
+    plane, = rig.screens.commits[-1][0].planes
+    assert plane.at == Placement(960, 540, 1920, 1080) and plane.size == finished and plane.enlarged is enlarged
+    assert rig.screens.commits[-1][1]["still"].size == finished
+
+
+def test_a_turned_screen_finishes_the_picture_at_its_size_laid_out_turned():
+    rig = Rig(screen_now=Screen(OUTPUT, (2160, 3840), 90))
+    still = sized("still", 1280, 720, start=0)
+    rig.ready(still)
+    rig.settle(still)
+    assert rig.fitter.draws[-1][0].size == (1280, 720)
+    assert rig.screens.commits[-1][1]["still"].size == (720, 1280)
+
+
+def test_capacity_counts_the_enlarged_planes():
+    """Five translucent pictures over one Frame: their pixels fit the line, but the controller
+    enlarges at most four at once (bench T2); shown 1:1 the same five fit."""
+    rig = Rig()
+
+    def layers(width: int, height: int, count: int) -> tuple[LocalLayer, ...]:
+        return tuple(LocalLayer(layer(f"p{index}", start=0, opacity=0.5, variant=media(f"p{index}".encode()).model_copy(
+            update={"width": width, "height": height})), Path(f"/media/p{index}.png"), 0.0, 0.5) for index in range(count))
+
+    def fits(*local: LocalLayer) -> bool:
+        return rig.renderer.capacity((OutputComposition(HALF, local, False, 0.0),)).available
+
+    assert fits(*layers(1280, 720, 4)) is True
+    assert fits(*layers(1280, 720, 5)) is False
+    assert fits(*layers(1920, 1080, 5)) is True
+
+
+def test_a_present_while_its_last_commit_is_unanswered_does_no_other_work():
+    """Pi diagnosis (milestone 3, fix A): while a video's fence is pending the frame loop turns
+    every millisecond; a present that cannot commit returns its last answer before asking for the
+    grant or sweeping."""
+    rig = Rig(answer=False)
+    outgoing, incoming = photo("out", start=0, end=200), photo("in", start=100, fade_in=1.0)
+    rig.ready(outgoing, incoming)
+    first = rig.present(outgoing, incoming, timebase=100.2)
+    asked = []
+    grant = rig.screens.grant
+    rig.screens.grant = lambda composition: asked.append(composition) or grant(composition)
+    for _ in range(5):
+        rig.clock.tick()
+        assert rig.renderer.frame() is None and rig.present(outgoing, incoming, timebase=100.2) == first
+    assert asked == [] and len(rig.screens.commits) == 1
+
+
+def test_due_reads_the_screens_word_before_judging_a_commit_overdue():
+    """Pi diagnosis (milestone 3, fix B): an answer that arrived since the turn frees the screen, so
+    a fade's next frame is due now, not when the commit would be overdue."""
+    rig = Rig(latency=FRAME / 2)
+    outgoing, incoming = photo("out", start=0, end=200), photo("in", start=100, fade_in=10.0)
+    rig.ready(outgoing, incoming)
+    timebase = 100.2 - rig.clock.now
+    rig.settle(outgoing, incoming, timebase=timebase)
+    rig.clock.tick()
+    assert rig.present(outgoing, incoming, timebase=timebase).status == "presented"
+    rig.renderer.finish()
+    assert rig.renderer._outputs[OUTPUT].pacer.in_flight
+    rig.clock.now += FRAME
+    assert rig.renderer.due() == pytest.approx(rig.clock.now, abs=FRAME)
+    assert not rig.renderer._outputs[OUTPUT].pacer.in_flight
+
+
+def test_a_prepared_video_has_all_its_targets_before_its_first_fade_frame():
+    """Pi diagnosis (milestone 3, fix C): a video's targets are made and imported together while it
+    is prepared, at its finish size, so the fade that reveals it makes none."""
+    rig = Rig()
+    clip = video("clip", start=0, fade_in=1.0)
+    decode = prepared_video(rig, clip)
+    entry = rig.renderer._layers["clip"]
+    assert [picture.target.size for picture in entry.targets] == [(1920, 1080)] * VIDEO_TARGETS
+    rig.settle(clip, timebase=0.1)
+    rig.log.clear()
+    for serial in range(2, 8):
+        rig.clock.tick()
+        rig.present(clip, timebase=0.1)
+        decode.push(serial)
+        decode.on_frame()
+        rig.renderer.finish()
+    assert "target" not in rig.log and rig.log.count("import") >= 3

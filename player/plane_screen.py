@@ -141,7 +141,7 @@ class ScreenPicture:
 class _PlaneState(ctypes.Structure):
     """frame-client.h `struct pw_plane_state`."""
     _fields_ = (("picture", ctypes.c_void_p), ("x", ctypes.c_int32), ("y", ctypes.c_int32),
-                ("alpha", ctypes.c_uint32))
+                ("width", ctypes.c_int32), ("height", ctypes.c_int32), ("alpha", ctypes.c_uint32))
 
 
 def _declare(lib) -> None:
@@ -357,7 +357,9 @@ class PlaneScreens:
                 tag: str, picture_change: int | None, ground: ScreenPicture | None = None,
                 overlay: OverlayCorners | None = None) -> int | PresentRefused:
         """One commit of `composition`'s screen (module rule): each plane shows
-        `pictures[plane.layer.layer.assignment_id]` at its placement, bottom to top, with buffer
+        `pictures[plane.layer.layer.assignment_id]` (its finished picture, `plane.size` as it hangs)
+        over its placement (`plane.at`: the sub-window's position and viewport destination, so the
+        display controller enlarges a picture finished smaller), bottom to top, with buffer
         transform `wayland_transform(composition.screen.turn)` and its strength; sub-windows beyond
         the planes show nothing, so a composition with no planes shows the screen's ground (the
         candidate's handoff commit, tagged "candidate-<grant id>", before admission). `ground` is
@@ -366,7 +368,7 @@ class PlaneScreens:
         compositor's single-pixel black, which Weston can only composite. `grant` is a
         current one, admitted or candidate (the caller never presents without one). The tag's
         sequence (>= 1) when committed; "picture_refused" when a picture is missing, forgotten or
-        not of its plane's `target_size` (the ground likewise, of the whole screen's); "output_gone" when the Output is not there or its screen
+        not of its plane's `target_size(plane.size, turn)` (the ground likewise, of the whole screen's); "output_gone" when the Output is not there or its screen
         is not configured yet. ValueError("present_planes") past SCREEN_PLANES planes.
 
         `overlay` (a Position trial's corners, `overlay_corners`; `tag` is then the trial's) is sent
@@ -381,12 +383,13 @@ class PlaneScreens:
         for state, plane in zip(states, planes, strict=False):
             picture = pictures.get(plane.layer.layer.assignment_id)
             if (picture is None or picture.handle not in self._pictures
-                    or picture.size != target_size(plane.at, screen.turn)):
+                    or picture.size != target_size(plane.size, screen.turn)):
                 return "picture_refused"
             state.picture, state.x, state.y = picture.handle, plane.at.x, plane.at.y
+            state.width, state.height = plane.at.width, plane.at.height
             state.alpha = multiplier(plane.strength)
         if ground is not None and (ground.handle not in self._pictures or ground.size != target_size(
-                Placement(0, 0, *screen.size), screen.turn)):
+                screen.size, screen.turn)):
             return "picture_refused"
         handle = self._screens.get(screen.output_id)
         if handle is None:

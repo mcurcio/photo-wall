@@ -75,8 +75,9 @@ class FrameRectangle:
 @dataclass(frozen=True)
 class Placement:
     """A Frame's rectangle on its screen in whole pixels as the screen hangs: the top-left corner
-    (x, y) and the size; the Frame's picture is exactly width x height pixels, so the display
-    controller never scales it (bench T2: a scaled 4K picture glitches at four). Built by `place`."""
+    (x, y) and the size, which the Frame's picture fills on screen: finished no larger than this
+    (player/planes.py `finish_size`), the display controller enlarges it or shows it 1:1, never
+    shrinks it (bench T2: a shrunk 4K picture glitches at four). Built by `place`."""
     x: int
     y: int
     width: int

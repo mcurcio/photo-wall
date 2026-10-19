@@ -1,8 +1,11 @@
-"""The fit pass: one picture finished once, at its Frame's pixels, for the display controller to show
-unscaled (render redesign, run ledger .claude/runs/render-planes/s1-page.md). Photos once; a video
-once per decoded frame (owner, gate answer Q1, 2026-10-17: video carries the same look as photos).
+"""The fit pass: one picture finished once, at its finish size (player/planes.py `finish_size`: the
+smaller of its cropped source and its Frame's placement), for the display controller to show 1:1 or
+enlarged to the placement, never shrunk (render redesign, run ledger .claude/runs/render-planes/
+s1-page.md; owner, 2026-10-18: "the look-and-feel should be applied at the minimum of the asset size
+and the frame size"). Photos once; a video once per decoded frame (owner, gate answer Q1,
+2026-10-17: video carries the same look as photos).
 
-One GPU draw from the source to the target: Central's crop window, scaled to the Frame's pixels,
+One GPU draw from the source to the target: Central's crop window, scaled to the finish size,
 turned for the screen, decoded to linear light (a photo's sRGB, a video's BT.709), then the look
 (player/look_shader.py: the Frame's paper under the room's light and its mat shadow, the paper
 profile's LUT, the Display's software settings, encode, contrast, gamma, dither), written as stored
@@ -15,9 +18,11 @@ Rules this module owns (one home each):
   and never copies it (bench T5).
 - **What a draw computes**: per target pixel, player/geometry.py's scalar reference
   (`buffer_to_picture`, `fit_source_uv`, then `final_pixel` with the Frame's `picture_lights` and
-  the pixel's place in the picture as the opening's), within one level of 256.
+  the pixel's place in the picture as the opening's), within one level of 256. The look works in the
+picture's own coordinates (0..1) and the Frame's physical size, so a picture finished smaller looks
+the same, enlarged.
 
-Rules it does NOT own: the look's formulas (player/geometry.py, mirrored by player/look_shader.py);
+Rules it does NOT own: the size a picture is finished at (player/planes.py `finish_size`); the look's formulas (player/geometry.py, mirrored by player/look_shader.py);
 where the target's memory comes from (player/gpu.py `Targets`); when a picture is drawn again
 (player/plane_renderer.py).
 """
@@ -27,7 +32,6 @@ from dataclasses import dataclass
 from typing import Any, Final, Literal, Protocol
 
 from contracts.display_turn import DisplayTurn, hanging
-from contracts.frame_fit import Placement
 from contracts.models import PhotoCrop
 from contracts.node_frame import PictureOperations
 from player.geometry import FrameLights, buffer_to_picture, fit_source_uv
@@ -55,14 +59,14 @@ class FitSource:
 @dataclass(frozen=True)
 class FitRequest:
     """One picture to finish: its `source`; Central's `crop` (contracts/photo_crop.py; None only for
-    a source with exactly the Frame's aspect); the Frame profile's `aspect`; the Frame's `placement`
-    on its screen (the picture is placement.width x placement.height as it hangs); the screen's
+    a source with exactly the Frame's aspect); the Frame profile's `aspect`; the picture's `size`
+    (width, height) as it hangs (player/planes.py `finish_size`); the screen's
     `turn`; the Output's picture `operations`; the Frame's `lights` (player/geometry.py
     `picture_lights`); the paper profile's `lut` body (None: no LUT step)."""
     source: FitSource
     crop: PhotoCrop | None
     aspect: float
-    placement: Placement
+    size: tuple[int, int]
     turn: DisplayTurn
     operations: PictureOperations
     lights: FrameLights
@@ -80,14 +84,13 @@ class DrawTarget(Protocol):
     def size(self) -> tuple[int, int]: ...
 
 
-def target_size(placement: Placement, turn: DisplayTurn) -> tuple[int, int]:
-    """The target's (width, height) for a picture at `placement` on a screen turned `turn` (module
-    rule). ValueError("display_turn") for any other turn. Pure.
+def target_size(size: tuple[int, int], turn: DisplayTurn) -> tuple[int, int]:
+    """The target's (width, height) for a picture `size` = (width, height) as it hangs on a screen
+    turned `turn` (module rule). ValueError("display_turn") for any other turn. Pure.
 
-    The swap is the screen's own (contracts/display_turn.py `hanging`): a picture placement.width
-    x placement.height as it hangs is laid out the other way round on a screen hung a quarter
-    turned, as the screen's mode is."""
-    return hanging((placement.width, placement.height), turn)
+    The swap is the screen's own (contracts/display_turn.py `hanging`): a picture as it hangs is
+    laid out the other way round on a screen hung a quarter turned, as the screen's mode is."""
+    return hanging(size, turn)
 
 
 GL_TEXTURE_EXTERNAL_OES: Final = 0x8D65     # OES_EGL_image_external, not in every PyOpenGL module
@@ -211,12 +214,12 @@ class FitPass:
         return program
 
     def draw(self, request: FitRequest, target: DrawTarget) -> None:
-        """Finish `request`'s picture into `target`, whose size must be `target_size(request.
-        placement, request.turn)` (ValueError("fit_target_size") otherwise). Submits the draw;
+        """Finish `request`'s picture into `target`, whose size must be `target_size(request.size,
+        request.turn)` (ValueError("fit_target_size") otherwise). Submits the draw;
         the caller flushes before the target goes to the screen. FitFailed("gpu_error") when GL
         reports an error."""
         size = target.size
-        if tuple(size) != target_size(request.placement, request.turn):
+        if tuple(size) != target_size(request.size, request.turn):
             raise ValueError("fit_target_size")
         source = request.source
         origin, per_x, per_y = _picture_axes(size, request.turn)

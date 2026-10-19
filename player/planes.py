@@ -18,6 +18,13 @@ Rules this module owns (one home each):
   player/visibility.py `visible_now`'s, never a second rule.
 - **Removed, never transparent**: a plane under MIN_STRENGTH is left out of the composition (bench
   T3: an opaque picture at alpha 0 is not black; the plane is removed instead).
+- **The finish size** (`finish_size`, `Plane.size`): a picture (a still photo or a video's frame) is
+  finished (fit, crop, look, LUT) at the smaller of its source's cropped size and its Frame's
+  placement, scaled down evenly so the Frame's aspect is kept, and the display controller enlarges
+  it to the placement (owner, 2026-10-18: "the look-and-feel should be applied at the minimum of the
+  asset size and the frame size"). So the controller only ever enlarges or shows a picture 1:1,
+  never shrinks it (bench T2: shrinking large sources glitches), and no picture is shown from a
+  buffer larger than it appears. A black layer's picture is the placement's size.
 
 Rules it does NOT own: the fade curve (contracts/models.py `fade_share`); a layer's alpha at a frame
 time (player/look.py `look`); the controller's limits (player/controller_budget.py); pixels and
@@ -32,6 +39,8 @@ from typing import Final
 
 from contracts.display_turn import DisplayTurn
 from contracts.frame_fit import Placement
+from contracts.models import Layer
+from contracts.photo_crop import CENTRED, crop_window
 from player.geometry import encode_srgb
 from player.rendering import LocalLayer
 from player.visibility import visible_now
@@ -60,15 +69,42 @@ class FrameLayers:
     layers: tuple[LocalLayer, ...]
 
 
+def finish_size(layer: Layer, at: Placement) -> tuple[int, int]:
+    """The (width, height), as it hangs, at which `layer`'s picture is finished for a Frame placed
+    at `at` (module rule): for a media layer, the placement scaled by
+    s = min(1, cropped width / at.width, cropped height / at.height), each side rounded half up
+    (floor(v + 0.5)) and at least 1 (so never larger than the placement); the cropped size is the crop window
+    (contracts/photo_crop.py `crop_window` of the layer's crop at the placement's aspect) on the
+    variant's width x height. A black layer: the placement's size. Pure; the one home of the size a
+    picture is finished at, which the fit pass, a video's targets and the budget all ask here."""
+    if layer.presentation != "media" or layer.variant is None:
+        return at.width, at.height
+    width, height = layer.variant.width, layer.variant.height
+    left, top, right, bottom = crop_window(layer.crop or CENTRED, width, height, at.width / at.height)
+    scale = min(1.0, (right - left) * width / at.width, (bottom - top) * height / at.height)
+    return max(1, math.floor(at.width * scale + 0.5)), max(1, math.floor(at.height * scale + 0.5))
+
+
 @dataclass(frozen=True)
 class Plane:
-    """One picture the controller places: the layer it shows (a media layer's fitted picture, or a
-    black layer's black picture of the same size), at its Frame's placement, at `strength` (its
-    plane alpha), MIN_STRENGTH <= strength <= 1."""
+    """One picture the controller places: the layer it shows (a media layer's finished picture, or a
+    black layer's black picture), at its Frame's placement `at` (the plane's destination), at
+    `strength` (its plane alpha), MIN_STRENGTH <= strength <= 1. Its picture is `size` as it hangs
+    (the plane's source), which the controller enlarges to `at` when smaller (`enlarged`)."""
     frame_id: str
     layer: LocalLayer
     at: Placement
     strength: float
+
+    @property
+    def size(self) -> tuple[int, int]:
+        """The plane's picture as it hangs: `finish_size(layer, at)` (module rule)."""
+        return finish_size(self.layer.layer, self.at)
+
+    @property
+    def enlarged(self) -> bool:
+        """Whether the controller enlarges the plane's picture to its placement."""
+        return self.size != (self.at.width, self.at.height)
 
 
 @dataclass(frozen=True)
@@ -118,4 +154,4 @@ def compose(screen: Screen, frames: Sequence[FrameLayers]) -> Composition:
     return Composition(screen, tuple(planes))
 
 
-__all__ = ["MIN_STRENGTH", "Composition", "FrameLayers", "Plane", "Screen", "compose", "plane_strength"]
+__all__ = ["MIN_STRENGTH", "Composition", "FrameLayers", "Plane", "Screen", "compose", "finish_size", "plane_strength"]

@@ -9,8 +9,9 @@ draws this way, what it gave up and the measured limits are [0029](decisions/002
 
 ## The shape
 
-Each Frame's photo or video is **finished** once by the GPU at the Frame's own pixels, already
-turned for its screen, with the whole look applied. The display controller (the Pi 5's HVS, the
+Each Frame's photo or video is **finished** once by the GPU at its **finish size** (the smaller of
+its source's cropped size and the Frame's placement), already turned for its screen, with the whole
+look applied. The display controller (the Pi 5's HVS, the
 chip that builds the screen image every refresh) then shows each finished picture as its own
 **display plane** and mixes its fade by the plane's alpha. A still photo costs no GPU and no CPU
 after it is finished; a fade is a change of a number, not a redraw.
@@ -27,7 +28,7 @@ flowchart LR
 
 | Part | Module | Owns |
 |---|---|---|
-| Composition | [`player/planes.py`](../player/planes.py) (pure) | which pictures are planes, stacked how, at what strength |
+| Composition | [`player/planes.py`](../player/planes.py) (pure) | which pictures are planes, stacked how, at what strength; the finish size (`finish_size`) |
 | Controller budget | [`player/controller_budget.py`](../player/controller_budget.py) (pure) | what the controller can show without glitching; the cut |
 | Placement | [`contracts/frame_fit.py`](../contracts/frame_fit.py) `place` | a Frame's rectangle as whole pixels on its screen as it hangs |
 | The turn | [`contracts/display_turn.py`](../contracts/display_turn.py) | the four turns and their Wayland transform |
@@ -94,13 +95,40 @@ bottom to top in `stack_order`.
   linear-light mix, by up to 74 levels of 256 at worst and 8-11 on average on real photos; its
   ends are identical, and a dip to black matches within 6.
 
+## The finish size
+
+The owner, 2026-10-18: "We don't need to apply look-and-feel at 4k resolution if the content comes in at 1080p. Plus, the final output isn't a full 4k — the frame rectangle is smaller than that. So for perfect efficiency, the look-and-feel should be applied at the minimum of the asset size and the frame size."
+
+So a picture (a still photo or a video's frame) is finished at `player/planes.py` `finish_size`:
+the Frame's placement scaled by `min(1, cropped width / placement width, cropped height /
+placement height)`, each side rounded half up, where the cropped size is Central's crop window on
+the prepared copy's pixels. The Frame's aspect is kept; the picture is never larger than its
+placement and never larger than its source's crop. A black layer is the placement's size; the
+ground is the screen's. Each plane carries both (`Plane.size`, its source; `Plane.at`, its
+destination, the sub-window's `wp_viewport` destination), so the display controller enlarges a
+smaller picture or shows it 1:1 and never shrinks one (bench T2: shrinking large sources glitches).
+
+| Source | Frame placement | Finished at | Shown |
+|---|---|---|---|
+| 1080p video | 3840 x 2160 | 1920 x 1080 | enlarged |
+| 6000 x 4000 photo | 1920 x 1080 | 1920 x 1080 | 1:1 |
+| 1280 x 720 photo | 1920 x 1080 | 1280 x 720 | enlarged |
+
+The look works in the picture's own coordinates and the Frame's physical size, so a picture
+finished smaller looks the same, enlarged; its dither pattern is enlarged with it. A 1080p video
+in a 4K Frame costs about a quarter of the GPU work it took at the Frame's size (35 ms per frame on
+the test Pi, milestone 3).
+
 ## The controller budget
 
 The Pi 5's controller never refuses an overload: it glitches (bench T2). So the Player never asks
 for one. `player/controller_budget.py` `PI5` holds the measured limits, nowhere else: 16 planes for
 both HDMI ports together, and about 15,360 source pixels crossing one output line (four full-width
-4K pictures, the ground counting as one), at the controller's fixed 500 MHz. A 90 or 270 turn lays
-a picture's hanging height along the physical line. Two ports sharing the budget is an estimate:
+4K pictures, the ground counting as one), at the controller's fixed 500 MHz, and at most four
+enlarged pictures (`PI5.enlarged`: four 1080p pictures enlarged to full 4K width ran clean; each
+takes line buffer memory and the kernel refused the sixth). A picture counts its placement along
+the line, enlarged or not: five 1080p pictures enlarged to full width glitch as five 4K ones do. A
+90 or 270 turn lays a picture's hanging height along the physical line. Two ports sharing the budget is an estimate:
 the test Pi has no second screen (owner, Q6, 2026-10-18).
 
 `PlaneRenderer.capacity` judges each composition at its busiest moment (`player/look.py`
@@ -115,7 +143,7 @@ bites only when Runs stack on one Frame.
 ## Finishing
 
 A picture is **finished** by the fit pass (`player/fit_pass.py`): one GPU draw from the source
-to a target of the Frame's pixels as it hangs, turned for the screen (`target_size`: 90 and 270
+to a target of its finish size as it hangs, turned for the screen (`target_size`: 90 and 270
 swap width and height), so Weston shows it with a matching buffer transform and never copies it
 (bench T5). Per target pixel it computes `geometry.py`'s chain: `buffer_to_picture`,
 `fit_source_uv` (Central's crop window, `contracts/photo_crop.py`), the decode to linear light (a
@@ -129,9 +157,12 @@ transparency (a PNG) pre-multiplied. Within one level of 256 of the reference.
   (`player/decode.py`: `qtdemux ! h265parse ! v4l2slh265dec`, a ctypes pad probe adding
   `GstVideoMeta`), imported as external textures (`player/gpu.py` `import_frame`). Only HEVC: the
   media worker prepares one 1080p30 HEVC copy per video ([preparation](module-media-preparation.md)).
-  A playing video has `VIDEO_TARGETS` (3) targets: one shown, one in flight, one drawn.
+  A playing video has `VIDEO_TARGETS` (3) targets at its finish size: one shown, one in flight,
+  one drawn, all made and imported by the `finish` that draws its first frame during its prepare
+  lead, never on its first frames during the fade that reveals it (about 10 ms of CPU and an import
+  each, milestone 3).
 - **When a picture is finished again**: a still when anything its pixels depend on changes (its
-  decode, the placement's size, the turn, the crop, the profile's aspect, the Display's picture
+  decode, its finish size, the turn, the crop, the profile's aspect, the Display's picture
   operations, the Frame's lights, its LUT's generation); a video on each new decoded frame while
   it is seen. Never for a fade.
 - **Finishing is off the present path.** `present`, `frame` and `prepare` never draw, upload,
@@ -144,7 +175,8 @@ transparency (a PNG) pre-multiplied. Within one level of 256 of the reference.
   step during it (tracer 2's finding D: finishing five 4K stills held a fade 350-417 ms).
 - **Targets** (`player/gpu.py`): GBM buffers on the V3D render node, LINEAR (the controller scans
   them out unconverted; it costs the same to render as tiled, bench T5), XR24 for an opaque picture
-  and AR24 for one with transparency, in ordinary memory, not CMA. A 4K Frame's picture is 33 MB;
+  and AR24 for one with transparency, in ordinary memory, not CMA. A picture finished at 4K is 33 MB
+  (a 1080p one 8 MB);
   a changing still holds two, a playing video three. An Output keeps black pictures of two sizes
   at most (its ground's and its Frame's); a present retires the others.
 - **Memory.** A still's decoded pixels are handed over once (`StillDecode.result`) and dropped once
@@ -173,7 +205,10 @@ lease), presents every Output's held composition again at the frame time
   changes nothing. A still photo commits once and nothing after.
 - **One commit in flight** (`FramePacer.free`): a commit draws nothing, so it is made as soon as
   the last one is answered (presented or discarded, or overdue by `OVERDUE`, 0.25 s, for an Output
-  that says nothing). No steady-cadence slot: a commit aimed at one missed Weston's repaint deadline
+  that says nothing). A present while the last commit is unanswered returns its last answer at
+  once, before any sweep, grant or setting work, and `due` reads each such screen's word before
+  judging its commit overdue: a turn that only asks a fence costs a read, not a present (the main
+  thread was 87 % busy while a video's fence was pending, milestone 3). No steady-cadence slot: a commit aimed at one missed Weston's repaint deadline
   once and every one after it (tracer 2, finding E), so the old pacer's slot is gone.
 - **Every read wakes a turn.** Any call into the screens that reads the connection outside a turn
   (the planning tick's `prepare`, `capacity` and `present` read grants and screens) may consume
@@ -208,17 +243,19 @@ every picture on its own plane, the overload step included (the ground on the pr
 every plane's kernel alpha equal to its strength; no glitch bit in a 400 s run; Weston's GPU idle
 while pictures hold; the turned screen shown with no copy; fades at 60.0-60.4 a second with
 nothing else loading the Pi. Not yet met: a photo fading into a playing 1080p30 video, and a
-dissolve over one on a turned screen, run at 56-57 a second (a refresh missed about every quarter
-second); the traced gaps show the Player's main loop late by about 15 ms with no GPU work in
-them (errata, milestone 2 item 7). Before the redesign: about 11 fades a second at 4K, the GPU 94 %
+dissolve over one on a turned screen, ran at 56-57 a second (a refresh missed about every quarter
+second). Milestone 3 traced it to the main thread (87 %: a fence poll running the whole present),
+the look on each video frame drawn at the Frame's 4K size (about 35 ms, the GPU 90 % busy) and a
+video's targets made during the fade; the finish size and the three fixes above address each, and
+are to be measured on the Pi (the three small fixes alone gave 59.3-60 a second there). Before the redesign: about 11 fades a second at 4K, the GPU 94 %
 busy.
 
 ## Tests
 
 | Tier | What it proves |
 |---|---|
-| Unit (pure) | the turn and placement (`tests/test_display_turn.py`, `tests/test_frame_placement.py`), strengths and composition (`tests/test_planes.py`), the budget (`tests/test_controller_budget.py`), the renderer through fakes of its ports (`tests/test_plane_renderer.py`), the screens' bridge (`tests/test_plane_screen.py`), the fit and pattern passes' scalar references (`tests/test_fit_pass_reference.py`, `tests/test_pattern_pass_reference.py`), `sand_modifier` and the libraries the GPU loads (`tests/test_player_gpu.py`, `tests/test_player_decode.py`), the pacer and the main loop's sources (`tests/test_player_pacing.py`, `tests/test_player_mainloop.py`), the bench's timeline and verdict (`tests/test_render_bench.py`) |
-| Display harness (CI `node-pid1` `display-harness`, built packages, headless Weston) | the shell's window alpha, turn and amber (`tests/native_display_smoke.py`); the screens, planes, ground, only-what-changed and feedback under a fade burst (`tests/native_screen_harness.py`); the fit and pattern passes on software GL within one level of the reference (`tests/native_fit_pass_harness.py`); an Output document to Weston's pixels and back to the report through the whole path (`tests/native_picture_e2e_harness.py`, on `tests/harness_device.py`'s memfd device) |
+| Unit (pure) | the turn and placement (`tests/test_display_turn.py`, `tests/test_frame_placement.py`), strengths, composition and the finish size (`tests/test_planes.py`), the budget (`tests/test_controller_budget.py`), the renderer through fakes of its ports (`tests/test_plane_renderer.py`), the screens' bridge (`tests/test_plane_screen.py`), the fit and pattern passes' scalar references (`tests/test_fit_pass_reference.py`, `tests/test_pattern_pass_reference.py`), `sand_modifier` and the libraries the GPU loads (`tests/test_player_gpu.py`, `tests/test_player_decode.py`), the pacer and the main loop's sources (`tests/test_player_pacing.py`, `tests/test_player_mainloop.py`), the bench's timeline and verdict (`tests/test_render_bench.py`) |
+| Display harness (CI `node-pid1` `display-harness`, built packages, headless Weston) | the shell's window alpha, turn and amber (`tests/native_display_smoke.py`); the screens, planes, ground, only-what-changed, feedback under a fade burst and a picture enlarged to its placement (`tests/native_screen_harness.py`); the fit and pattern passes on software GL within one level of the reference (`tests/native_fit_pass_harness.py`); an Output document to Weston's pixels and back to the report through the whole path (`tests/native_picture_e2e_harness.py`, on `tests/harness_device.py`'s memfd device) |
 | Release roots (CI `debs`) | every library `player/gpu.py` `LIBRARIES` names loads in the built app root |
 | Pi only (render bench) | planes, plane alpha in the kernel, glitch bits, GBM targets, SAND128 import, the hardware decoder, the turn without a copy, fade cadence |
 

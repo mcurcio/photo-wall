@@ -14,7 +14,7 @@ import pytest
 import player.plane_screen as plane_screen
 from contracts.frame_fit import Placement
 from contracts.frame_lighting import FrameLighting, Paper
-from contracts.models import Calibration, FrameProfile, Layer, OutputBinding, RectangleFit
+from contracts.models import Calibration, FrameProfile, Layer, OutputBinding, RectangleFit, Variant
 from contracts.node_calibration import (
     MAX_TRIAL_BYTES,
     TrialCandidate,
@@ -24,6 +24,7 @@ from contracts.node_calibration import (
 )
 from contracts.node_display import Surface
 from contracts.node_protocol import NodeProcessIdentity, OutputKey
+from contracts.photo_crop import CENTRED
 from player.plane_screen import FrameGrant
 from player.planes import Composition, Plane, Screen
 from player.rendering import LocalLayer, OutputComposition
@@ -208,6 +209,30 @@ def test_a_present_with_an_overlay_sends_it_first_under_the_presents_grant_and_t
                            json.dumps(corners, separators=(",", ":"), allow_nan=False).encode())
     assert json.loads(overlay[4]) == [[0, 1313 / 3840], [1, 1313 / 3840], [1, 2528 / 3840], [0, 2528 / 3840]]
     assert library.named("pw_screen_present")[0][6:8] == (str(grant.grant_id).encode(), TRIAL_TAG.encode())
+
+
+def test_a_picture_finished_smaller_is_sent_with_its_placement_as_the_destination(monkeypatch):
+    """A photo whose source is half its placement: its picture is half size (player/planes.py
+    `finish_size`) and the sub-window's viewport destination is the placement, so the display
+    controller enlarges it; a picture of the placement's size is not this plane's and is refused."""
+    screens, library = _screens(monkeypatch)
+    library.answers["pw_frame_client_output"] = _output(640, 480, 0)
+    library.answers["pw_screen_create"] = 0x5C
+    library.answers["pw_screen_present"] = 7
+    screens._pictures.update({9, 10})
+    variant = Variant(asset_id="asset-small", recipe_id="e" * 64, sha256="a" * 64, size=1, media_type="image/jpeg",
+                      width=32, height=24)
+    layer = Layer(assignment_id="small", run_id="run", output_id="HDMI-A-1", frame_id="frame", binding_generation=1,
+                  start=0, end=10**9, media_origin=0, variant=variant, crop=CENTRED)
+    plane = Plane("frame", LocalLayer(layer, None, 0.0, 1.0), Placement(8, 4, 64, 48), 1.0)
+    composition = Composition(Screen("HDMI-A-1", (640, 480), 0), (plane,))
+    grant = FrameGrant(uuid4(), 1, 1, "frame", True)
+    too_large = {"small": plane_screen.ScreenPicture(10, (64, 48))}
+    assert screens.present(composition, too_large, grant, "tag", None) == "picture_refused"
+    assert screens.present(composition, {"small": plane_screen.ScreenPicture(9, (32, 24))}, grant, "tag", None) == 7
+    (call,) = library.named("pw_screen_present")
+    state = call[2][0]
+    assert (state.x, state.y, state.width, state.height) == (8, 4, 64, 48)
 
 
 def test_a_present_without_an_overlay_sends_none(monkeypatch):

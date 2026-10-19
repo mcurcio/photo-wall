@@ -23,13 +23,13 @@ PLACEMENT = Placement(x=40, y=10, width=300, height=200)
 
 @pytest.mark.parametrize("turn, size", [(0, (300, 200)), (90, (200, 300)), (180, (300, 200)), (270, (200, 300))])
 def test_the_target_is_turned_for_its_screen(turn, size):
-    assert target_size(PLACEMENT, turn) == size
+    assert target_size((PLACEMENT.width, PLACEMENT.height), turn) == size
 
 
 @pytest.mark.parametrize("turn", [45, 360, -90, True])
 def test_a_turn_that_is_not_a_quarter_is_refused(turn):
     with pytest.raises(ValueError, match="display_turn"):
-        target_size(PLACEMENT, turn)
+        target_size((PLACEMENT.width, PLACEMENT.height), turn)
     with pytest.raises(ValueError, match="display_turn"):
         buffer_to_picture(0.5, 0.5, (2, 2), turn)
 
@@ -47,7 +47,7 @@ PICTURE_CORNERS = {
 
 @pytest.mark.parametrize("turn", TURNS)
 def test_the_targets_corners_are_the_pictures_corners(turn):
-    width, height = target_size(PLACEMENT, turn)
+    width, height = target_size((PLACEMENT.width, PLACEMENT.height), turn)
     corners = ((0, 0), (width, 0), (width, height), (0, height))
     for (x, y), expected in zip(corners, PICTURE_CORNERS[turn], strict=True):
         assert buffer_to_picture(x, y, (width, height), turn) == pytest.approx(expected, abs=1e-12)
@@ -57,7 +57,7 @@ def test_the_targets_corners_are_the_pictures_corners(turn):
 def test_a_pixel_centre_lands_in_the_picture_proportionally(turn):
     """A quarter of the way along each of the target's sides is a quarter (or three quarters) of the
     way along the picture's; the picture is stretched evenly, never skewed."""
-    width, height = target_size(PLACEMENT, turn)
+    width, height = target_size((PLACEMENT.width, PLACEMENT.height), turn)
     u, v = buffer_to_picture(width / 4, height / 4, (width, height), turn)
     assert {round(u, 12), round(v, 12)} <= {0.25, 0.75}
 

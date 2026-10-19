@@ -76,7 +76,7 @@ grid (`PATTERN_COMMISSIONING_GRID`). The one home of the codes."""
 @dataclass(frozen=True)
 class PatternRequest:
     """One screen ground with a Frame's pattern: the screen's `size` as it hangs (the target is
-    player/fit_pass.py `target_size(Placement(0, 0, *size), turn)`), the Frame's `placement` on it
+    player/fit_pass.py `target_size(size, turn)`), the Frame's `placement` on it
     (contracts/frame_fit.py `place`; black outside it), the screen's `turn`, the Output's picture
     `operations` (their `test_pattern` picks the pattern: module rule), the Frame's `lights`
     (player/geometry.py `picture_lights`; the commissioning grid's look), its paper profile's `lut`
@@ -322,7 +322,7 @@ class PatternPass:
         the last drawn. Submits the draw; the caller fences it (player/gpu.py `Gpu.fence`).
         FitFailed("gpu_error") when GL reports an error."""
         size = tuple(target.size)
-        if size != target_size(Placement(0, 0, *request.size), request.turn):
+        if size != target_size(request.size, request.turn):
             raise ValueError("pattern_target_size")
         pattern = request.operations.test_pattern
         board = request.board

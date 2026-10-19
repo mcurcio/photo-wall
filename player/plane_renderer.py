@@ -1,5 +1,5 @@
 """The Player's renderer (player/rendering.py `Renderer`): each layer's picture finished once at its
-Frame's size, shown as a plane the display controller places and fades (render redesign, run ledgers
+finish size (player/planes.py `finish_size`), shown as a plane the display controller places and fades (render redesign, run ledgers
 .claude/runs/render-planes/s1-page.md and s3-page.md), the Player's only renderer.
 
 The composition root of the new path: it composes and calls, it never computes a rule. Each rule
@@ -27,10 +27,14 @@ Rules this module owns (one home each):
   once `set_player` gave an id. The composition reported and tagged stays the looked one: a
   pattern is a tuning overlay, not a change of what plays.
 - **When a picture is finished again**: a still when anything its pixels depend on changes (its
-  decode, the placement's size, the turn, the crop, the profile's aspect, the Output's picture
+  decode, its finish size (player/planes.py `finish_size`: the smaller of its cropped source and
+  the placement, which the display controller enlarges to the placement), the turn, the crop, the profile's aspect, the Output's picture
   operations, the Frame's lights, its LUT's generation); a playing video on each new decoded
   frame while it is seen (in its screen's last commit), into the first of its VIDEO_TARGETS
   targets the screen has released. Never a fade: a fade is a strength.
+- **A video's targets are made together**: all VIDEO_TARGETS, at its finish size, by the `finish`
+  that draws its first frame (during its prepare lead), never one by one on its first frames
+  during the fade that reveals it (Pi diagnosis, milestone 3: ~10 ms of CPU and an import each).
 - **Finishing is off the present path** (s3-page decision 4): `present`, `frame` and `prepare` never
   draw, upload, import or fence; they commit and report only pictures the GPU has finished (a fence
   signalled, player/gpu.py: asked, never waited for), so no GPU work sits between a due commit and
@@ -46,7 +50,11 @@ Rules this module owns (one home each):
   each pattern ground's, each layer's draw), so none waits for a present to ask for its picture
   again; a failed layer's draw is given up at once (a still's retired, a video's target and frame
   given back). While a fence is pending and nothing else is owed, `due` is FENCE_POLL away, never
-  now: a turn never spins at FRAME priority over the planning tick.
+  now: a turn never spins at FRAME priority over the planning tick. A present whose screen's last
+  commit is unanswered returns its last answer at once, before any sweep, grant or setting work,
+  and `due` reads each such screen's word before judging it overdue, so a turn polling a fence
+  costs a read, not a present (Pi diagnosis, milestone 3: the main thread at 87 % while a video's
+  fence was pending).
 - **The held composition**: each Output's newest composition given to `present` is held, and `frame`
   presents it again at each frame time (a fade's strengths, a newly finished picture, a trial's edit
   reach the screen with no planning tick) until all its layers are released or the renderer closes.
@@ -92,7 +100,7 @@ from typing import Final, Literal, Protocol
 from contracts.calibration_target import QrModules, TargetCode
 from contracts.frame_fit import Placement, place
 from contracts.frame_lighting import FrameLighting
-from contracts.models import AppliedCalibration, Calibration, OutputBinding
+from contracts.models import AppliedCalibration, Calibration, Layer, OutputBinding
 from contracts.node_frame import PictureOperations, neutral_operations
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.room_light import RoomLightsDocument
@@ -116,7 +124,7 @@ from player.plane_screen import (
     composition_tag,
     overlay_corners,
 )
-from player.planes import Composition, FrameLayers, Plane, Screen, compose
+from player.planes import Composition, FrameLayers, Plane, Screen, compose, finish_size
 from player.rendering import (
     CapacityResult,
     LocalLayer,
@@ -282,13 +290,22 @@ class _Setting:
 
     @property
     def size(self) -> tuple[int, int]:
-        """A picture's target as it is laid out on the screen (player/fit_pass.py)."""
-        return target_size(self.placement, self.screen.turn)
+        """A black layer's picture as it is laid out on the screen: the whole placement's target
+        (player/fit_pass.py)."""
+        return target_size((self.placement.width, self.placement.height), self.screen.turn)
+
+    def finish(self, layer: Layer) -> tuple[int, int]:
+        """`layer`'s finish size as it hangs (player/planes.py `finish_size` at this placement)."""
+        return finish_size(layer, self.placement)
+
+    def target(self, layer: Layer) -> tuple[int, int]:
+        """`layer`'s picture as it is laid out on the screen: its finish size's target."""
+        return target_size(self.finish(layer), self.screen.turn)
 
     @property
     def ground(self) -> tuple[int, int]:
         """The screen's ground as it is laid out: the whole screen's target."""
-        return target_size(Placement(0, 0, *self.screen.size), self.screen.turn)
+        return target_size(self.screen.size, self.screen.turn)
 
 
 @dataclass
@@ -511,7 +528,8 @@ class PlaneRenderer:
         rule); the soonest player/look.py `next_change` of a held composition (a trial's expiry
         included), though a change owed while that screen's last commit is unanswered is announced
         by the answer (the compositor speaks: the frame loop's read), so it is due only once that
-        commit is overdue; None when nothing changes until an event."""
+        commit is overdue (its word read first: an answer read since the turn frees it now); None
+        when nothing changes until an event."""
         now = self._clock()
         if self._owed() or any(self._video_owed(assignment_id, entry)
                                for assignment_id, entry in self._layers.items()):
@@ -526,6 +544,10 @@ class PlaneRenderer:
             change = next_change(composition, now, expires)
             if change is None:
                 continue
+            if state is not None and state.pacer.in_flight:
+                word = self._screens.presentation(output_id, now)      # an answer read since the turn
+                if word is not None:
+                    state.pacer.answered(word)
             if state is not None and state.pacer.in_flight:
                 change = max(change, state.submitted + state.pacer.overdue)
             times.append(max(now, change))
@@ -568,6 +590,8 @@ class PlaneRenderer:
         word = self._screens.presentation(output_id, now)
         if word is not None:
             state.pacer.answered(word)
+        if not state.pacer.free(now):
+            return state.last                       # nothing can be committed: no other work (module rule)
         self._sweep()
         grant = self._screens.grant(composition)
         if grant is None:
@@ -584,8 +608,6 @@ class PlaneRenderer:
         if ground == "failed":
             return _FAILED
         ground = None if ground == "pending" else ground        # the compositor's black meanwhile
-        if not state.pacer.free(now):
-            return state.last
         if not grant.admitted or not grant.matches(composition):
             return self._candidate(state, setting.screen, grant, ground, now)
         looked = look(composition, now)
@@ -865,13 +887,13 @@ class PlaneRenderer:
     @staticmethod
     def _key(entry: _Layer, setting: _Setting) -> tuple:
         """Everything a layer's pixels depend on besides its decode (module rule)."""
-        return (setting.size, setting.screen.turn, entry.local.layer.crop, setting.aspect, setting.operations,
-                setting.lights, setting.generation)
+        return (setting.target(entry.local.layer), setting.screen.turn, entry.local.layer.crop, setting.aspect,
+                setting.operations, setting.lights, setting.generation)
 
     @staticmethod
     def _request(entry: _Layer, source: FitSource, setting: _Setting) -> FitRequest:
-        return FitRequest(source, entry.local.layer.crop, setting.aspect, setting.placement, setting.screen.turn,
-                          setting.operations, setting.lights, setting.lut)
+        return FitRequest(source, entry.local.layer.crop, setting.aspect, setting.finish(entry.local.layer),
+                          setting.screen.turn, setting.operations, setting.lights, setting.lut)
 
     def _may_step(self) -> bool:
         """Whether a still's finishing step may be taken now: none was within STEP_GAP (module
@@ -938,8 +960,8 @@ class PlaneRenderer:
             setting = entry.want
             request = self._request(entry, FitSource(entry.texture, False, source.size, "srgb", source.alpha),
                                     setting)
-            entry.drawing = self._draw(lambda target: self._fitter.draw(request, target), setting.size,
-                                       opaque=not source.alpha)
+            entry.drawing = self._draw(lambda target: self._fitter.draw(request, target),
+                                       setting.target(entry.local.layer), opaque=not source.alpha)
             entry.drawing_key = self._key(entry, setting)
         except (RuntimeError, ValueError):          # FitFailed, a Gpu or compositor refusal
             entry.failed = True
@@ -948,7 +970,7 @@ class PlaneRenderer:
     def _video_ready(self, entry: _Layer, setting: _Setting) -> ScreenPicture | Literal["pending"]:
         """The video's newest finished frame for `setting`, its finished draw taken up (targets laid
         out for another size or turn retired); else "pending"."""
-        if any(picture.target.size != setting.size for picture in entry.targets):
+        if any(picture.target.size != setting.target(entry.local.layer) for picture in entry.targets):
             self._retired += entry.targets          # laid out for another size or turn
             entry.targets, entry.picture = [], None
             if entry.drawing is not None:
@@ -1003,7 +1025,7 @@ class PlaneRenderer:
             if entry.drawing is not None:
                 return
             source = self._video_source(assignment_id, entry)
-            target = None if source is None else self._released(entry, setting.size)
+            target = None if source is None else self._released(entry, setting.target(entry.local.layer))
             if target is None:
                 return
             texture = self._device.import_frame(source)
@@ -1030,20 +1052,20 @@ class PlaneRenderer:
 
     def _released(self, entry: _Layer, size: tuple[int, int]) -> _Picture | None:
         """The first of the video's targets the screen has released and that holds neither its
-        finished picture nor a draw (a new one while it has fewer than VIDEO_TARGETS); None when
-        every one is in use."""
+        finished picture nor a draw, its VIDEO_TARGETS targets of `size` made together first when it
+        has fewer (module rule, A video's targets are made together); None when every one is in
+        use."""
+        while len(entry.targets) < VIDEO_TARGETS:
+            target = self._device.target(size, opaque=True)
+            shown = self._screens.import_picture(target)
+            if shown is None:
+                self._device.free(target)
+                raise RuntimeError("picture_refused")
+            entry.targets.append(_Picture(target, shown))
         for picture in entry.targets:
             if picture is not entry.picture and picture is not entry.drawing and not self._showing(picture):
                 return picture
-        if len(entry.targets) >= VIDEO_TARGETS:
-            return None
-        target = self._device.target(size, opaque=True)
-        shown = self._screens.import_picture(target)
-        if shown is None:
-            self._device.free(target)
-            raise RuntimeError("picture_refused")
-        entry.targets.append(_Picture(target, shown))
-        return entry.targets[-1]
+        return None
 
     def _black(self, output_id: str, size: tuple[int, int]) -> ScreenPicture | Literal["pending", "failed"]:
         """The Output's one black picture of `size`, shared by its screen's ground and every black

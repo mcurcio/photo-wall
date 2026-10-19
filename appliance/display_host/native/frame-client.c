@@ -67,12 +67,15 @@ struct pw_screen {
     struct wl_surface *plane[PW_SCREEN_PLANES];
     struct wl_subsurface *sub[PW_SCREEN_PLANES];
     struct wp_alpha_modifier_surface_v1 *alpha[PW_SCREEN_PLANES];
+    struct wp_viewport *view[PW_SCREEN_PLANES];  /* each sub-surface's destination: its plane's place */
     struct pw_picture *shown[PW_SCREEN_PLANES];   /* each sub-surface's picture in the last present */
     /* What each sub-surface was last sent, so a present sends only what changed (a stacking or
      * position request dirties the parent's sub-surface order, which Weston answers by damaging and
      * repainting below the planes): its position, buffer transform (-1: none yet) and multiplier
-     * (0: none yet, never a valid strength). Reset when the sub-surface is made. */
+     * (0: none yet, never a valid strength), and its viewport's destination (0: none yet). Reset
+     * when the sub-surface is made. */
     int32_t at_x[PW_SCREEN_PLANES], at_y[PW_SCREEN_PLANES], transform[PW_SCREEN_PLANES];
+    int32_t to_width[PW_SCREEN_PLANES], to_height[PW_SCREEN_PLANES];
     uint32_t multiplier[PW_SCREEN_PLANES];
     /* The screen's ground: the picture its own surface shows (NULL: the single-pixel black) and the
      * buffer transform it was attached with. */
@@ -612,6 +615,7 @@ void pw_screen_destroy(struct pw_screen *s) {
     struct pw_frame_client *c = s->client;
     for (struct pw_screen **at = &c->screens; *at; at = &(*at)->next) if (*at == s) { *at = s->next; break; }
     for (uint32_t i = 0; i < s->planes; i++) {
+        wp_viewport_destroy(s->view[i]);
         wp_alpha_modifier_surface_v1_destroy(s->alpha[i]);
         wl_subsurface_destroy(s->sub[i]);
         wl_surface_destroy(s->plane[i]);
@@ -713,8 +717,10 @@ static void plane_make(struct pw_screen *s, uint32_t i) {
     wl_subsurface_set_sync(s->sub[i]);
     wl_subsurface_place_above(s->sub[i], i ? s->plane[i - 1] : s->surface);
     s->alpha[i] = wp_alpha_modifier_v1_get_surface(c->alpha, s->plane[i]);
+    s->view[i] = wp_viewporter_get_viewport(c->viewporter, s->plane[i]);
     s->shown[i] = NULL;
     s->at_x[i] = s->at_y[i] = INT32_MIN;
+    s->to_width[i] = s->to_height[i] = 0;
     s->transform[i] = -1;
     s->multiplier[i] = 0;
 }
@@ -730,7 +736,8 @@ int64_t pw_screen_present(struct pw_screen *s, const struct pw_plane_state *plan
         return -2;
     struct pw_frame_client *c = s->client;
     for (uint32_t i = 0; i < count; i++)
-        if (!planes[i].alpha || !planes[i].picture || !owned(c, planes[i].picture)) return -2;
+        if (!planes[i].alpha || planes[i].width < 1 || planes[i].height < 1 || !planes[i].picture ||
+            !owned(c, planes[i].picture)) return -2;
     if (ground && !owned(c, ground)) return -2;
     if (!tag_valid(c, grant_id, frame_tag, picture_change)) return -2;
     /* Read first: a configure dispatched after the planes' requests would commit them untagged. */
@@ -747,6 +754,12 @@ int64_t pw_screen_present(struct pw_screen *s, const struct pw_plane_state *plan
         if (s->at_x[i] != plane->x || s->at_y[i] != plane->y) {
             wl_subsurface_set_position(s->sub[i], plane->x, plane->y);
             s->at_x[i] = plane->x; s->at_y[i] = plane->y;
+        }
+        /* The picture, finished at its own size, enlarged to its place (a picture as large as its
+         * place is shown 1:1): double-buffered, applied by this commit. */
+        if (s->to_width[i] != plane->width || s->to_height[i] != plane->height) {
+            wp_viewport_set_destination(s->view[i], plane->width, plane->height);
+            s->to_width[i] = plane->width; s->to_height[i] = plane->height;
         }
         if (s->shown[i] != plane->picture || s->transform[i] != buffer_transform) {
             wl_surface_attach(s->plane[i], plane->picture->buffer, 0, 0);
@@ -795,6 +808,7 @@ int64_t pw_screen_present(struct pw_screen *s, const struct pw_plane_state *plan
      * last hold on their pictures: Weston 14's GL renderer keeps an unmapped surface's buffer until
      * the surface gets another or is destroyed, so their pictures would never be released. */
     for (uint32_t i = count; i < s->planes; i++) {
+        wp_viewport_destroy(s->view[i]);
         wp_alpha_modifier_surface_v1_destroy(s->alpha[i]);
         wl_subsurface_destroy(s->sub[i]);
         wl_surface_destroy(s->plane[i]);

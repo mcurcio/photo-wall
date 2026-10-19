@@ -167,10 +167,10 @@ def source(alpha: int = 255) -> int:
     return texture
 
 
-def request(texture: int, *, turn=0, profile=PROFILE, placement=Placement(0, 0, 128, 96), crop=None,
+def request(texture: int, *, turn=0, profile=PROFILE, size=(128, 96), crop=None,
             encoding="srgb", alpha=False, lut=LUT) -> FitRequest:
     return FitRequest(source=FitSource(texture, False, (WIDTH, HEIGHT), encoding, alpha), crop=crop,
-                      aspect=profile.width_px / profile.height_px, placement=placement, turn=turn,
+                      aspect=profile.width_px / profile.height_px, size=size, turn=turn,
                       operations=OPERATIONS, lights=picture_lights(LIGHTING, ROOM, profile, OPERATIONS.light),
                       lut=lut)
 
@@ -193,7 +193,7 @@ def reference(fit: FitRequest, size: tuple[int, int], x: int, y: int, source_alp
 
 
 def drawn(fit: FitRequest) -> tuple[PlainTarget, bytes]:
-    target = PlainTarget(target_size(fit.placement, fit.turn))
+    target = PlainTarget(target_size(fit.size, fit.turn))
     PASS.draw(fit, target)
     return target, target.read()
 
@@ -226,7 +226,7 @@ def compare(fit: FitRequest, source_alpha: int = 255) -> int:
 
 def shown_quadrant(fit: FitRequest, x: int, y: int) -> int:
     """Which quadrant (0 to 3) the reference shows at target pixel (x, y)."""
-    size = target_size(fit.placement, fit.turn)
+    size = target_size(fit.size, fit.turn)
     s, t = fit_source_uv(*buffer_to_picture(x + .5, y + .5, size, fit.turn), fit.aspect, fit.source.size, fit.crop)
     return (s >= .5) + 2 * (t >= .5)
 
@@ -234,7 +234,7 @@ def shown_quadrant(fit: FitRequest, x: int, y: int) -> int:
 def turn_matches_the_reference(turn: int, top_left: int):
     def case() -> None:
         fit = request(PHOTO, turn=turn)
-        width, height = target_size(fit.placement, fit.turn)
+        width, height = target_size(fit.size, fit.turn)
         assert (width, height) == ((128, 96) if turn % 180 == 0 else (96, 128)), (turn, width, height)
         assert shown_quadrant(fit, 2, 2) == top_left, ("reference_top_left", turn)
         print(f"  turn {turn}: {compare(fit)} samples", flush=True)
@@ -244,9 +244,9 @@ def turn_matches_the_reference(turn: int, top_left: int):
 
 def crop_offset_shows_the_photos_edge(offset: int, quadrants: set[int]):
     def case() -> None:
-        fit = request(PHOTO, profile=PORTRAIT, placement=Placement(0, 0, 45, 80), crop=PhotoCrop(offset=offset))
+        fit = request(PHOTO, profile=PORTRAIT, size=(45, 80), crop=PhotoCrop(offset=offset))
         compare(fit)
-        size = target_size(fit.placement, fit.turn)
+        size = target_size(fit.size, fit.turn)
         target, data = drawn(fit)
         target.free()
         looked = {quadrant_of(at(data, size, x, y), fit, size, x, y) for y in range(2, 80, 4) for x in range(2, 45, 4)}
@@ -416,7 +416,7 @@ def pattern_reference(request: PatternRequest, size: tuple[int, int], x: int, y:
 
 
 def pattern_drawn(request: PatternRequest) -> tuple[tuple[int, int], bytes]:
-    target = PlainTarget(target_size(Placement(0, 0, *request.size), request.turn))
+    target = PlainTarget(target_size(request.size, request.turn))
     try:
         PATTERNS.draw(request, target)
         return target.size, target.read()
@@ -453,7 +453,7 @@ def pattern_compare(request: PatternRequest, tolerance: float = ONE_LEVEL) -> by
 def pattern_matches_the_reference(name: str, pattern: TestPattern | None, turn: int, tolerance=ONE_LEVEL,
                                   **options):
     def case() -> None:
-        assert target_size(Placement(0, 0, *SCREEN), turn) == ((64, 48) if turn == 0 else (48, 64)), turn
+        assert target_size(SCREEN, turn) == ((64, 48) if turn == 0 else (48, 64)), turn
         drawn = pattern_compare(pattern_request(pattern, turn=turn, **options), tolerance)
         if pattern in TARGET_PATTERNS:      # the QR's modules reach the screen
             uncoded = pattern_compare(pattern_request(pattern, turn=turn, lut=options.get("lut")))

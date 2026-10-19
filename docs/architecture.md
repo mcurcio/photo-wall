@@ -107,11 +107,11 @@ The current Player application is one rendering process. Its session module hold
 
 Embed GStreamer through Python/PyGObject rather than launching a media-player executable. Python orchestrates; the GPU, the hardware video decoder and the display controller handle every pixel, with no Python pixel-processing loops. Nested Runs need not map to nested pipelines or processes.
 
-**Finish once, show as a plane** ([0029](decisions/0029-render-planes.md), [plane renderer](module-plane-renderer.md)). Each Frame's photo, or each decoded frame of its video, is finished once by the GPU at the Frame's own pixels, already turned for its screen, with the whole look; the Pi's display controller shows each finished picture as its own display plane and mixes its fade every refresh, with no GPU:
+**Finish once, show as a plane** ([0029](decisions/0029-render-planes.md), [plane renderer](module-plane-renderer.md)). Each Frame's photo, or each decoded frame of its video, is finished once by the GPU at the smaller of its source's cropped size and the Frame's pixels, already turned for its screen, with the whole look; the Pi's display controller shows each finished picture as its own display plane, enlarged to the Frame when smaller, and mixes its fade every refresh, with no GPU:
 
 ```text
 decode (stills once; HEVC in hardware, per frame)
-  → fit pass: the crop window, scaled to the Frame's pixels, turned for the screen,
+  → fit pass: the crop window, scaled to the finish size (never above the Frame's pixels), turned for the screen,
     the look (the paper under the room's light, the LUT, the Display's software settings)
   → composition: each seen layer a plane, bottom to top, at its strength, within the controller's budget
   → one commit per screen: the ground, then the planes → the display controller → HDMI

@@ -616,7 +616,7 @@ def dithered(encoded: float, x: int, y: int) -> float:
 
 
 # The fit pass's scalar reference (render redesign, run ledger .claude/runs/render-planes/s1-page.md):
-# one picture finished at its Frame's pixels, as it hangs and turned for its screen, the look
+# one picture finished at its finish size (player/planes.py), as it hangs and turned for its screen, the look
 # applied once (player/fit_pass.py holds its shader to these within one level).
 
 def buffer_to_picture(x: float, y: float, size: tuple[int, int], turn: DisplayTurn) -> tuple[float, float]:

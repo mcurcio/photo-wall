@@ -58,7 +58,7 @@ def operations(pattern: TestPattern | None) -> PictureOperations:
 
 def ground(pattern: TestPattern | None, x: int, y: int, turn: int = 0, board=None):
     """The module docstring's chain at target pixel (x, y) of the whole screen's target."""
-    size = target_size(Placement(0, 0, *SCREEN), turn)
+    size = target_size(SCREEN, turn)
     uv = placement_uv(*buffer_to_picture(x + .5, y + .5, size, turn), PLACEMENT, SCREEN)
     u, v = uv if uv is not None else (0.0, 0.0)
     photo = commissioning_grid(u, v) if pattern is None else (0.0, 0.0, 0.0)
@@ -112,7 +112,7 @@ def test_every_pattern_and_the_grid_has_its_own_code():
 @pytest.mark.parametrize("turn", [0, 90])
 def test_outside_the_placement_every_ground_is_black(pattern, turn):
     board = picture_board(LANDSCAPE, MODULES)
-    width, height = target_size(Placement(0, 0, *SCREEN), turn)
+    width, height = target_size(SCREEN, turn)
     inside = 0
     for y in range(height):
         for x in range(width):
@@ -177,7 +177,7 @@ def test_a_calibration_target_is_the_board_over_the_frames_picture(pattern):
 def test_a_turned_screens_target_shows_the_placement_turned():
     """At turn 90 the target is 48 x 64 and holds the screen turned counter-clockwise: the
     placement's top-left screen pixel (16, 15) lies at target column 15, row 64 - 1 - 16 = 47."""
-    assert target_size(Placement(0, 0, *SCREEN), 90) == (48, 64)
+    assert target_size(SCREEN, 90) == (48, 64)
     turned = ground(TestPattern.BLACK_LEVEL, 20, 20, 90)
     assert turned[:3] == (0.0, 0.0, 0.0)
     # The screen's (x, y) = (16 + 31, 15 + 9) (the right cell, k = 20) sits at target (24, 16).
@@ -229,7 +229,7 @@ def test_a_draw_refuses_a_wrong_target_and_a_target_without_its_board():
 def test_a_draw_maps_each_target_pixel_to_its_screen_point(turn):
     gl = recording_gl()
     patterns = PatternPass(gl)
-    size = target_size(Placement(0, 0, *SCREEN), turn)
+    size = target_size(SCREEN, turn)
     patterns.draw(request(TestPattern.GREY_RAMP, turn), Target(size))
     (origin,), (per_x,), (per_y,) = (uniforms(gl, name) for name in ("screen_origin", "screen_per_x", "screen_per_y"))
     for x, y in ((0, 0), (5, 40), (size[0] - 1, size[1] - 1)):

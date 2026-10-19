@@ -63,11 +63,14 @@ int pw_frame_client_presentation(struct pw_frame_client *client, struct wl_surfa
 #define PW_SCREEN_PLANES 15     /* the screen's ground takes the 16th plane (bench T2) */
 struct pw_screen;
 struct pw_picture;
-/* One plane of a present: its picture, its top-left in the screen's surface coordinates (pixels as
- * the screen hangs) and its strength as the wp_alpha_modifier_v1 multiplier (1..UINT32_MAX). */
+/* One plane of a present: its picture, its top-left and size in the screen's surface coordinates
+ * (pixels as the screen hangs; the size is the sub-surface's wp_viewport destination, so a picture
+ * finished smaller than its place is enlarged to it by the display controller, never shrunk:
+ * player/planes.py `finish_size`) and its strength as the wp_alpha_modifier_v1 multiplier
+ * (1..UINT32_MAX). */
 struct pw_plane_state {
     struct pw_picture *picture;
-    int32_t x, y;
+    int32_t x, y, width, height;
     uint32_t alpha;
 };
 /* Connect to `socket` (NULL: $WAYLAND_DISPLAY) and bind the frame manager (v4), xdg_wm_base,
@@ -101,20 +104,20 @@ struct pw_picture *pw_picture_import(struct pw_frame_client *client, int fd, uin
 int pw_picture_busy(struct pw_picture *picture);
 void pw_picture_destroy(struct pw_picture *picture);
 /* One atomic commit of the screen: planes[0..count) bottom to top, each sub-surface placed above the
- * one before, at (x, y), showing its picture with buffer_transform (a wl_output.transform, the
+ * one before, at (x, y) and width x height (its viewport's destination), showing its picture with buffer_transform (a wl_output.transform, the
  * screen's own) and its alpha; sub-surfaces past count attach no buffer (unmapped); the screen's
  * own surface shows `ground` (NULL: the single-pixel black) with buffer_transform; then the frame
  * manager's tag_picture (grant_id, frame_tag, picture_change) on the screen's surface and the
  * screen's commit, which applies them all; the unmapped sub-surfaces are destroyed after it, so the
  * compositor releases their pictures. Only what changed since the last present is sent (a
- * sub-surface's stacking once, when it is made; its position, buffer, transform and multiplier, and
+ * sub-surface's stacking once, when it is made; its position, destination, buffer, transform and multiplier, and
  * the ground, when they differ): Weston answers a restack or a move by repainting beneath. The
  * commit's presentation feedback rides on what it presents: the topmost plane (no plane: the
  * screen's ground), as Weston 14 answers no feedback of a
  * surface the planes cover; its answer is the screen's word (pw_screen_presentation). A screen
  * waits on at most 4 answers: past them a commit is made untracked (the pacer's overdue rule
  * covers it), so no surface the compositor does not show can exhaust the client. Returns the tag's
- * sequence (>= 1); -1 transport failure; -2 a bad argument (count above PW_SCREEN_PLANES, alpha 0, a NULL
+ * sequence (>= 1); -1 transport failure; -2 a bad argument (count above PW_SCREEN_PLANES, alpha 0, a width or height below 1, a NULL
  * or foreign picture or ground, a transform above 3); -3 the screen has no configure yet. */
 int64_t pw_screen_present(struct pw_screen *screen, const struct pw_plane_state *planes, uint32_t count,
     struct pw_picture *ground, int32_t buffer_transform, const char *grant_id, const char *frame_tag,
