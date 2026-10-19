@@ -13,9 +13,10 @@
 --
 -- Each copy converts by the screen's mode as built (Wb, Hb), the turn it was made for and the
 -- aspect a it was made at:
--- - (Wb, Hb): central/displays/model.py `screen_px`, as 102 stated it: outputs.observation of the
---   Frame's bound Output when at least 1 x 1, else the first preferred mode of its display's EDID
---   report (output_displays.report's modes); unknown when unbound or neither.
+-- - (Wb, Hb): central/displays/model.py `screen_px`, reading what Central reads at runtime
+--   (central/infra/display_store.py SCREEN_COLUMNS): outputs.observation of the Frame's bound
+--   Output when at least 1 x 1, else the first preferred mode of the Display seen on that Output
+--   (displays.modes through output_displays.display_id); unknown when unbound or neither.
 -- - The turn: a history entry's own (position_entries.turn), every other copy its Frame's.
 -- - a: a history entry's own profile_width_px / profile_height_px, every other copy its Frame's
 --   profile width_px / height_px.
@@ -48,13 +49,13 @@ CREATE TEMP TABLE box_screens ON COMMIT DROP AS
            CASE WHEN (o.observation->>'width_px')::int >= 1 AND (o.observation->>'height_px')::int >= 1
                 THEN ARRAY[(o.observation->>'width_px')::int, (o.observation->>'height_px')::int]
                 ELSE (SELECT ARRAY[(m.mode->>'width')::int, (m.mode->>'height')::int]
-                      FROM output_displays d
-                      CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(d.report->'modes') = 'array'
-                                                                   THEN d.report->'modes' ELSE '[]'::jsonb END)
+                      FROM output_displays seen
+                      JOIN displays d ON d.id = seen.display_id
+                      CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(d.modes) = 'array'
+                                                                   THEN d.modes ELSE '[]'::jsonb END)
                           WITH ORDINALITY AS m(mode, ordinal)
-                      WHERE d.player_id = b.player_id AND d.output_id = b.output_id
+                      WHERE seen.player_id = b.player_id AND seen.output_id = b.output_id
                         AND (m.mode->>'preferred')::boolean
-                        AND (m.mode->>'width')::int >= 1 AND (m.mode->>'height')::int >= 1
                       ORDER BY m.ordinal LIMIT 1) END AS screen
     FROM frames f
     LEFT JOIN bindings b ON b.frame_id = f.id

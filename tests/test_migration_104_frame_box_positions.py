@@ -101,11 +101,18 @@ def _frame(conn, frame_id: str, shape: tuple[int, int], calibration: dict, *, tu
     conn.execute("INSERT INTO bindings(frame_id, player_id, output_id) VALUES (%s, %s, %s)",
                  (frame_id, player_id, output_id))
     if preferred is not None:
+        # The Display recognised on that port keeps its modes (displays.modes, what Central reads
+        # at runtime); the Output's latest report names none, so only the Display's can say it.
         modes = [{"width": 1280, "height": 720, "refresh_millihertz": 60000, "preferred": False},
                  {"width": preferred[0], "height": preferred[1], "refresh_millihertz": 60000, "preferred": True}]
-        conn.execute("INSERT INTO output_displays(player_id, output_id, connected, report, reported_at) "
-                     "VALUES (%s, %s, true, %s, 0)",
-                     (player_id, output_id, Jsonb({"modes": modes, "size_mm": None})))
+        display_id = conn.execute(
+            "INSERT INTO displays(id, maker, product, name, serial, modes, first_seen_at, matched_lux, panel_black) "
+            "VALUES (gen_random_uuid(), 'SAM', 1, %s, %s, %s, 0, 1000.0, 0.0003) RETURNING id",
+            (frame_id, f"serial-{frame_id}", Jsonb(modes))).fetchone()["id"]
+        conn.execute("UPDATE frames SET position_display_id=%s WHERE id=%s", (display_id, frame_id))
+        conn.execute("INSERT INTO output_displays(player_id, output_id, connected, report, reported_at, display_id) "
+                     "VALUES (%s, %s, true, %s, 0, %s)",
+                     (player_id, output_id, Jsonb({"modes": [], "size_mm": None}), display_id))
 
 
 def _entries(conn, frame_id: str, entries: list[dict]) -> None:
@@ -222,7 +229,8 @@ WORKED = {
     "edge": ((1920, 1080), {"revision": 3, "fit": {"mode": "rectangle", "centre_x": 0.9, "centre_y": 0.5,
                                                    "width": 0.5}}, (1920, 1080), None,
              {"mode": "box", "left": 0.5, "top": 0.25, "width": 0.5, "height": 0.5}, True),
-    # Enrolled at 0 x 0, its display's preferred mode 1920 x 1080 is the screen: exact.
+    # Enrolled at 0 x 0, its Display's preferred mode 1920 x 1080 is the screen: exact. Read from
+    # displays.modes as Central does (mutation probe: read the Output's report's modes -> unknown).
     "enrolled-0x0": ((1920, 1080), {"revision": 3, "fit": RECTANGLE}, (0, 0), (1920, 1080),
                      {"mode": "box", "left": 0.25, "top": 0.25, "width": 0.5, "height": 0.5}, False),
     # Enrolled at 0 x 0 with no display report: no known screen.
