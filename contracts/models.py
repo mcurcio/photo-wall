@@ -14,6 +14,7 @@ from contracts.frame_fit import (
     PictureSize,
     Placement,
     ScreenMm,
+    box_size_mm,
     place,
 )
 from contracts.frame_lighting import FrameLighting
@@ -99,9 +100,16 @@ class PositionBox(Model):
     width: BoxSide = 1.0
     height: BoxSide = 1.0
 
+    @model_validator(mode="after")
+    def boxed(self) -> Self:
+        """`self.box()` (FrameBox's own check); its ValueError("frame_box") becomes the model's
+        validation error."""
+        self.box()
+        return self
+
     def box(self) -> FrameBox:
         """The contracts/frame_fit.py `FrameBox` of these four fields. Pure."""
-        ...
+        return FrameBox(left=self.left, top=self.top, width=self.width, height=self.height)
 
 
 class Calibration(Model):
@@ -178,7 +186,9 @@ def frame_size_mm(fit: PositionBox, display_mm: ScreenMm | None, turn: DisplayTu
     when `display_mm` is None (the Display states no size, or none is seen). The one home, for
     Central and the Player, of a Frame's physical size (frame box run). Pure. ValueError as
     `hanging` ("display_turn", "screen_size") for a known size."""
-    ...
+    if display_mm is None:
+        return None
+    return box_size_mm(fit.box(), hanging(display_mm, turn))
 
 
 class IdentifyOutput(Model):

@@ -97,7 +97,11 @@ class FrameBox:
 
     def __post_init__(self) -> None:
         """See the class docstring."""
-        ...
+        if not (all(_finite(value) for value in (self.left, self.top, self.width, self.height))
+                and 0 <= self.left and 0 <= self.top and 0 < self.width and 0 < self.height
+                and self.left + self.width <= 1 + BOX_SLACK
+                and self.top + self.height <= 1 + BOX_SLACK):
+            raise ValueError("frame_box")
 
 
 @dataclass(frozen=True)
@@ -116,7 +120,7 @@ class Placement:
         """width / height: the Frame's aspect (frame box run). The one home of a Frame's shape as a
         number: Central's fit rule (`FitTarget.aspect` asks its Frame output, these sides) and the
         Player's crop (player/planes.py) both read it. Pure."""
-        ...
+        return self.width / self.height
 
 
 def place(rectangle: FrameRectangle, screen: OutputSize, aspect: float) -> Placement:
@@ -154,7 +158,13 @@ def place_box(box: FrameBox, screen: OutputSize) -> Placement:
     becomes pixels: the Player's planes, Central's Frame output (contracts/models.py
     `frame_output`) and the console's mirror (central/console/src/placement.js `placeBox`) ask here.
     Pure. ValueError("placement_screen") unless both screen sides are ints (never bools) >= 1."""
-    ...
+    screen_width, screen_height = screen
+    if not (type(screen_width) is int and type(screen_height) is int
+            and screen_width >= 1 and screen_height >= 1):
+        raise ValueError("placement_screen")
+    x, width = _edges(box.left, box.width, screen_width)
+    y, height = _edges(box.top, box.height, screen_height)
+    return Placement(x=x, y=y, width=width, height=height)
 
 
 def box_size_mm(box: FrameBox, screen_mm: ScreenMm) -> tuple[float, float]:
@@ -163,7 +173,20 @@ def box_size_mm(box: FrameBox, screen_mm: ScreenMm) -> tuple[float, float]:
     The one home of a Frame's physical size (the Player's lights and mat, the wall plan, the
     Planner's large-Frame video rule); contracts/models.py `frame_size_mm` turns the Display first.
     Pure. ValueError("screen_mm") unless both sides are ints (never bools) >= 1."""
-    ...
+    screen_width, screen_height = screen_mm
+    if not (type(screen_width) is int and type(screen_height) is int
+            and screen_width >= 1 and screen_height >= 1):
+        raise ValueError("screen_mm")
+    return (box.width * screen_width, box.height * screen_height)
+
+
+def _edges(start: float, length: float, side: int) -> tuple[int, int]:
+    """One axis of `place_box`: the first pixel and the pixel count of the span `start` to
+    `start + length` (fractions) on `side` pixels, each edge rounding half up on its own and the
+    span kept on the screen and at least one pixel."""
+    first = min(side - 1, _half_up(start * side))
+    end = max(first + 1, min(side, _half_up((start + length) * side)))
+    return first, end - first
 
 
 def _finite(value: object) -> bool:
