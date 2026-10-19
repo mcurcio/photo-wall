@@ -14,6 +14,7 @@ const DELL: DisplayView = {
     { width: 3840, height: 2160, refresh_millihertz: 60000, preferred: true },
     { width: 1920, height: 1080, refresh_millihertz: 60000, preferred: false },
   ],
+  size_mm: [597, 336],
 };
 
 const PORTABLE: DisplayView = {
@@ -24,6 +25,7 @@ const PORTABLE: DisplayView = {
   serial: null,
   tied_to_frame: true,
   modes: [{ width: 1920, height: 1080, refresh_millihertz: 60000, preferred: true }],
+  size_mm: null,
 };
 
 const CHANGED: FrameDisplayView = {
@@ -40,11 +42,10 @@ const CHANGED: FrameDisplayView = {
 const meta = {
   title: "Domain/FrameDisplay",
   component: DisplayChangedCard,
-  args: { view: CHANGED, onConfirmProfile: () => {}, onRecheckPosition: () => {} },
+  args: { view: CHANGED, onRecheckPosition: () => {} },
   render: (args) => (
     <Section title="Display">
-      <DisplayChangedCard view={args.view} onConfirmProfile={args.onConfirmProfile}
-        onRecheckPosition={args.onRecheckPosition} />
+      <DisplayChangedCard view={args.view} onRecheckPosition={args.onRecheckPosition} />
     </Section>
   ),
 } satisfies Meta<typeof DisplayChangedCard>;
@@ -52,15 +53,13 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-/** Another display on the Frame's HDMI port: confirm the profile, then re-check Position. */
+/** Another display on the Frame's HDMI port: re-check the Position on it. */
 export const DisplayChanged: Story = {};
-/** The new display listed no modes: nothing to pre-fill, so the profile is checked by hand. */
-export const DisplayChangedNoModes: Story = { args: { view: { ...CHANGED, display: { ...DELL, modes: [] } } } };
-/** A display with a usable serial, as the Hardware tab shows it. */
+/** A display with a usable serial that states its size, as the Hardware tab shows it. */
 export const WithSerial: Story = {
   render: () => <Section title="Display"><DisplayFacts display={DELL} /></Section>,
 };
-/** A display with no usable serial: recognised by make and model on this Frame. */
+/** A display with no usable serial that states no size: recognised by make and model on this Frame. */
 export const RecognisedOnThisFrame: Story = {
   render: () => <Section title="Display"><DisplayFacts display={PORTABLE} /></Section>,
 };

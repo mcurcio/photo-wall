@@ -109,8 +109,9 @@ def test_the_width_typed_in_pixels_sends_its_share_of_the_screen_and_keeps_the_r
                                 "height": 0.5}, draft
 
 
-def test_a_saved_box_keeps_the_frames_own_profile(page, registry, sessions):
-    """Done saves the box; the Hardware tab still shows the Frame's own 1920 x 1080 profile."""
+def test_a_saved_box_is_the_frames_size_on_the_hardware_tab(page, registry, sessions):
+    """Done saves the box; the Hardware tab's Frame section says its pixels: half the 1920 x 1080
+    screen each way."""
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
@@ -124,11 +125,9 @@ def test_a_saved_box_keeps_the_frames_own_profile(page, registry, sessions):
         expect(position.get_by_role("alert")).to_have_count(0)
         fit = _saved(registry).fit
         assert (fit.mode, fit.left, fit.top, fit.width, fit.height) == ("box", 0.25, 0.25, 0.5, 0.5)
-        profile = page.get_by_role("region", name="Frame profile", exact=True)
+        facts = page.get_by_role("region", name="Frame", exact=True)
         open_frame(page, FRAME, "hardware")
-        expect(profile).to_contain_text("Pixel width: 1920 px")
-        expect(profile).to_contain_text("Pixel height: 1080 px")
-        expect(page.get_by_role("group", name="Check the Display", exact=True)).to_have_count(0)
+        expect(facts).to_contain_text("960 × 540 pixels, 16:9")
 
 
 def test_a_frame_to_check_again_is_kept_by_done_with_no_change(page, registry, sessions):

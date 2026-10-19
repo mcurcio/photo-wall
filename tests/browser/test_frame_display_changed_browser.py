@@ -6,8 +6,10 @@ Output report judge); bindings and Position commits go through the Registry. The
 Done flow is proven in test_console_frame_page_browser.py, so here the commit it makes is made by the
 Registry directly, after the card has sent the operator there.
 
-Mutation probes: show the card on `position-needed` too -> the unchanged-Frame case fails; save the
-Frame's old size instead of the new display's preferred mode -> the confirm assertion fails.
+The card asks for one thing: the Position checked on the new display (frame box run, fb-11: the Frame's
+shape is its Position's box, so there is no Frame profile to confirm).
+
+Mutation probe: show the card on `position-needed` too -> the unchanged-Frame case fails.
 """
 
 import os
@@ -37,10 +39,10 @@ CARD = "Display changed"
 
 
 def _landscape(registry, frame_id: str) -> str:
-    """A landscape Frame declared at 1280 x 720; the reported displays prefer 1920 x 1080."""
+    """A landscape Frame; the reported displays prefer 1920 x 1080."""
     registry.create_frame(FrameCreate(id=frame_id, surface_id="wall", x_mm=100, y_mm=100, width_mm=500,
                                       height_mm=300,
-                                      profile=FrameProfile(width_px=1280, height_px=720, diagonal_inches=24)))
+                                      profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)))
     return frame_id
 
 
@@ -63,7 +65,7 @@ def _display(frame):
     return frame.get_by_role("region", name="Display", exact=True)
 
 
-def test_a_changed_display_is_cleared_by_confirming_the_profile_then_checking_position(page, registry):
+def test_a_changed_display_is_cleared_by_checking_the_position_again(page, registry):
     pi, frame_id = enroll_pi(registry, "pi-a"), _landscape(registry, "lobby")
     _bind(registry, frame_id, pi, "HDMI-A-1")
     _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
@@ -72,26 +74,20 @@ def test_a_changed_display_is_cleared_by_confirming_the_profile_then_checking_po
     assert _row(registry, frame_id).readiness is Readiness.DISPLAY_CHANGED
 
     with operator_server(registry.db, registry.clock) as origin:
+        profile_calls: list = []
+        page.on("request", lambda request: profile_calls.append(request.url)
+                if request.url.endswith("/profile") else None)
         connect(page, origin, "wall")
         frame = open_frame(page, frame_id, "hardware")
         card = frame.get_by_role("group", name=CARD, exact=True)
         expect(card).to_contain_text("DELL U2720Q")
-        expect(card.get_by_role("group", name="Step 1: Frame profile", exact=True)).to_contain_text("1,920 × 1,080")
-        expect(card.get_by_role("group", name="Step 2: Position", exact=True)).to_be_visible()
+        expect(card).to_contain_text("check its Position on the new display")
+        # The Position check is the card's only step and its only action (beside the Details disclosure).
+        expect(card.get_by_role("button")).to_have_count(2)
+        expect(card.get_by_role("button", name="Details", exact=True)).to_have_count(1)
+        expect(card.get_by_role("button", name="Re-check Position", exact=True)).to_be_visible()
+        expect(card).not_to_contain_text(re.compile(r"Frame profile|Step 1|Step 2", re.IGNORECASE))
         expect(card).not_to_contain_text(re.compile(r"Panel|Actuator|Display Host|calibration", re.IGNORECASE))
-        # One card: the Frame profile's enrollment-size check would contradict it (the enrollment
-        # said 1920 x 1080, the profile 1280 x 720), so it waits while the display is changed.
-        expect(frame.get_by_role("group", name="Check the Display", exact=True)).to_have_count(0)
-
-        with page.expect_request(lambda request: request.url.endswith(f"/v1/operator/frames/{frame_id}/profile")
-                                 and request.method == "PUT") as captured:
-            card.get_by_role("button", name="Confirm Frame profile", exact=True).click()
-        # Pre-filled from the new display's preferred mode; the rest of the profile is kept.
-        assert captured.value.post_data_json["profile"] == {
-            "width_px": 1920, "height_px": 1080, "diagonal_inches": 24, "video": True}
-        expect(_display(frame).get_by_role("status")).to_contain_text("Frame profile set to 1,920 × 1,080")
-        assert _row(registry, frame_id).profile.width_px == 1920
-        assert _row(registry, frame_id).readiness is Readiness.DISPLAY_CHANGED   # Position still to check
 
         card.get_by_role("button", name="Re-check Position", exact=True).click()
         expect(page.get_by_role("tablist", name="Frame settings", exact=True).get_by_role(
@@ -104,6 +100,7 @@ def test_a_changed_display_is_cleared_by_confirming_the_profile_then_checking_po
         frame = open_frame(page, frame_id, "hardware")
         expect(_display(frame)).to_contain_text("CN0F1X8Z")
         expect(frame.get_by_role("group", name=CARD, exact=True)).to_have_count(0)
+        assert not profile_calls
 
 
 def test_an_unchanged_frame_shows_its_display_and_no_card(page, registry):

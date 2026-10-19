@@ -88,9 +88,9 @@ def _seed(registry, profile=LANDSCAPE, turn=0):
     for a portrait profile a centred 9:16 box a quarter of the screen as it hangs wide); returns the
     Player's id.
     The Frame hangs at `turn` (set before the Save, so the Frame is ready), which the Hardware tab's
-    Frame profile check reads."""
+    Frame size reads."""
     # A fixed device id gives a fixed Player id: the page shows its last six hex digits, and a
-    # random one held "24" about one run in fifty, which the Hardware tab's diagonal check reads.
+    # random one could hold the digits a Hardware tab check reads.
     identity, _key, _request = enroll(registry, count=1, device_id=DEVICE)
     landscape = profile.width_px > profile.height_px
     registry.create_frame(FrameCreate(
@@ -401,17 +401,17 @@ def test_an_unbound_frame_is_sent_to_its_hardware_tab(page, registry):
                 "Choose which Pi and HDMI output feed this Frame first (Hardware tab).")
 
 
-def test_hardware_keeps_the_frame_profile_apart_from_the_panel_record(page, registry):
-    """The diagonal (24 in) is a Frame profile fact: it shows under Frame profile, never in the
-    Display the Pi reported when its photo app last started (console DDD §19).
+def test_hardware_keeps_the_frames_size_apart_from_the_panel_record(page, registry):
+    """The Frame's size is a Frame fact, worked out from its Position: it shows under Frame, never
+    in the Display the Pi reported when its photo app last started (console DDD §19).
 
-    Mutation: render a Frame profile field inside the Pi and HDMI port section -> the
+    Mutation: render the Frame's size inside the Pi and HDMI port section -> the
     not_to_contain_text assertion goes RED."""
     player_id = _seed(registry, PORTRAIT)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "hardware")
-        expect(frame.get_by_role("region", name="Frame profile", exact=True)).to_contain_text("24")
+        expect(frame.get_by_role("region", name="Frame", exact=True)).to_contain_text("480 × 853 pixels, 9:16")
         port = frame.get_by_role("region", name="Pi and HDMI port", exact=True)
         expect(port.get_by_role("link", name=re.compile(r"^Pi "))).to_have_attribute(
             "href", re.compile(r"^#/players/device-"))
@@ -419,51 +419,17 @@ def test_hardware_keeps_the_frame_profile_apart_from_the_panel_record(page, regi
         expect(port).to_contain_text(f"Pi {player_id[-6:]} · HDMI 1")  # the port, not "HDMI-A-1"
         expect(port).not_to_contain_text(OUTPUT)
         expect(port).to_contain_text("Display, when the Pi last started: Connected, 1,920 × 1,080")
-        expect(port).not_to_contain_text("24")
+        expect(port).not_to_contain_text("pixels")
         # Central's own words are under Details.
         port.get_by_role("button", name="Details", exact=True).click()
         expect(port).to_contain_text(
             "Player app reported Panel connected at the Player app's last enrollment (may be stale)")
 
 
-def _mismatch(frame):
-    return frame.get_by_role("group", name="Check the Display", exact=True)
-
-
-def test_the_frame_profile_notes_a_reported_resolution_it_does_not_match(page, registry):
-    """A 1080 x 1920 profile on a screen reported at 1920 x 1080 and hung upright: the profile is the
-    Frame's own shape, set here, never by Position's Save (owner 2026-10-11). Mutation probe: compare
-    the profile with the mode as built whatever the turn -> the turned Frame's test below fails."""
-    _seed(registry, PORTRAIT)
-    with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
-        frame = open_frame(page, FRAME, "hardware")
-        problem = _mismatch(frame)
-        expect(problem).to_contain_text("Frame profile: Check the Display.")
-        expect(problem).to_contain_text(
-            "The Pi reported its Display at 1,920 × 1,080, but this Frame's profile is 1,080 × 1,920.")
-        expect(problem).to_contain_text("This screen hangs upright.")
-        # One action: edit the profile; the how-to is under Details.
-        problem.get_by_role("button", name="Edit Frame profile", exact=True).click()
-        expect(frame.get_by_role("form", name="Edit Frame profile", exact=True)).to_be_visible()
-        stored = next(frame for frame in registry.inventory().frames if frame.id == FRAME)
-        assert (stored.profile.width_px, stored.profile.height_px) == (1080, 1920)
-
-
-@pytest.mark.parametrize(("profile", "turn"), [(LANDSCAPE, 0), (PORTRAIT, 90), (PORTRAIT, 270)])
-def test_no_note_when_the_reported_resolution_matches_as_it_hangs(page, registry, profile, turn):
-    _seed(registry, profile, turn)
-    with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
-        frame = open_frame(page, FRAME, "hardware")
-        expect(frame.get_by_role("region", name="Frame profile", exact=True)).to_be_visible()
-        expect(_mismatch(frame)).to_have_count(0)
-
-
 def test_a_rebound_frame_keeps_its_turn_whatever_its_readiness(page, registry):
     """The turn belongs to the spot on the wall (owner, gate Q3, 2026-10-17): a Frame rebound
-    (its Position to check again) still hangs as it did, so the note judges the screen as it hangs
-    there; hung upright again, the note names the turn."""
+    (its Position to check again) still hangs as it did, so its size on screen is its box on the
+    screen as it hangs there; hung upright again, the same box is another shape."""
     player_id = _seed(registry, PORTRAIT, turn=90)
     registry.unbind(FRAME, expected_generation=2)
     registry.bind(FRAME, player_id, OUTPUT, expected_generation=3)
@@ -471,11 +437,10 @@ def test_a_rebound_frame_keeps_its_turn_whatever_its_readiness(page, registry):
     assert stored.readiness is not Readiness.READY
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        frame = open_frame(page, FRAME, "hardware")
-        expect(frame.get_by_role("region", name="Frame profile", exact=True)).to_be_visible()
-        expect(_mismatch(frame)).to_have_count(0)
+        facts = open_frame(page, FRAME, "hardware").get_by_role("region", name="Frame", exact=True)
+        expect(facts).to_contain_text("270 × 480 pixels, 9:16")
         registry.turn_frame(FRAME, 0, expected_generation=stored.generation)
-        expect(_mismatch(frame)).to_contain_text("This screen hangs upright.", timeout=15_000)
+        expect(facts).to_contain_text("480 × 270 pixels, 16:9", timeout=15_000)
 
 
 # --- The Position editor (render redesign S5): every assertion is on a visible value, word or
@@ -918,7 +883,7 @@ def test_leaving_the_tab_with_changes_asks_keep_or_revert(page, registry, sessio
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         tabs.get_by_role("tab", name="Hardware", exact=True).click()
         dialog.get_by_role("button", name="Keep", exact=True).click()
-        expect(page.get_by_role("region", name="Frame profile", exact=True)).to_be_visible()
+        expect(page.get_by_role("region", name="Frame", exact=True)).to_be_visible()
         assert _left_x(_saved(registry)) == SAVED_X + 20
 
 
