@@ -11,7 +11,7 @@ import pytest
 from contracts.display_turn import TURNS
 from contracts.frame_fit import Placement
 from contracts.frame_lighting import AT_FULL, CloseLight, FarLight, FrameLighting, Paper, WashLight
-from contracts.models import FrameProfile, PhotoCrop
+from contracts.models import PhotoCrop, PositionBox, frame_size_mm
 from contracts.node_picture import DisplayLight
 from contracts.photo_crop import CENTRED, crop_window
 from contracts.room_light import FixedColour, FixedEntry, RoomLightsDocument
@@ -79,7 +79,7 @@ def test_the_crop_offset_picks_the_photos_edge():
     assert fit_source_uv(0.5, 1, 16 / 9, (4000, 3000), PhotoCrop(offset=1))[1] == pytest.approx(1)
 
 
-PROFILE = FrameProfile(width_px=1600, height_px=900, diagonal_inches=27)
+QN43 = (950, 540)                   # a Display's picture area, mm, as its EDID states it
 PAPER = Paper(whiteness=0.9, ink_density=1.8)
 LIGHTING = FrameLighting(mat_depth_mm=8, paper=PAPER, lights=(
     WashLight(light="room", lux=300, reference=AT_FULL),
@@ -92,14 +92,17 @@ ROOM = RoomLightsDocument(change=1, lights={
 DISPLAY = DisplayLight(matched_lux=250, black=0.01)
 
 
-WIDTH_MM, HEIGHT_MM = 27 * 25.4 * 16 / math.hypot(16, 9), 27 * 25.4 * 9 / math.hypot(16, 9)
+BOX = PositionBox(left=.1, top=.2, width=.6, height=.5)
+WIDTH_MM, HEIGHT_MM = .6 * 950, .5 * 540   # the box's share of the Display's
+SIZE = frame_size_mm(BOX, QN43, 0)
 
 
 @pytest.mark.parametrize("document", [ROOM, None])
-def test_picture_lights_are_the_pictures_at_its_profiles_own_size(document):
-    """The lights' mat space is the picture's own rectangle at the profile's physical size, with the
-    mat, the paper, each light that adds light, and the peak over it (no light: none)."""
-    picture = picture_lights(LIGHTING, document, PROFILE, DISPLAY)
+def test_picture_lights_are_the_pictures_at_its_physical_size(document):
+    """The lights' mat space is the picture's own rectangle at its physical size (the box's share of
+    its Display's), with the mat, the paper, each light that adds light, and the peak over it (no
+    light: none)."""
+    picture = picture_lights(LIGHTING, document, SIZE, DISPLAY)
     assert picture.size_mm == pytest.approx((WIDTH_MM, HEIGHT_MM))
     assert (picture.depth_mm, picture.paper) == (8, PAPER)
     assert len(picture.lights) == (3 if document else 0)
@@ -109,7 +112,7 @@ def test_picture_lights_are_the_pictures_at_its_profiles_own_size(document):
 def test_picture_lights_take_no_quarter_turn():
     """A screen's turn turns the screen, not the wall: the far light's `toward` is its own
     from_degrees and the close light sits across and up from the picture's centre."""
-    _, far, close = picture_lights(LIGHTING, ROOM, PROFILE, DISPLAY).lights
+    _, far, close = picture_lights(LIGHTING, ROOM, SIZE, DISPLAY).lights
     turn = math.radians(20)
     assert far.toward == pytest.approx((math.sin(turn), -math.cos(turn)))
     assert close.position_mm == pytest.approx((WIDTH_MM / 2 + 40, HEIGHT_MM / 2 - 350, 250))

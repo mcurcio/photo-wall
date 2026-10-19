@@ -59,6 +59,7 @@ either side); every pixel outside is exactly opaque black.
    ValueError("pattern_target_size"), nothing drawn.
 """
 import dataclasses
+import math
 import sys
 import time
 import zlib
@@ -79,7 +80,7 @@ from contracts.frame_lighting import (  # noqa: E402
     WashLight,
 )
 from contracts.lut import LUT_BYTES, LUT_GRID, lut_offset  # noqa: E402
-from contracts.models import FrameProfile, PhotoCrop  # noqa: E402
+from contracts.models import PhotoCrop  # noqa: E402
 from contracts.node_frame import PictureOperations  # noqa: E402
 from contracts.node_picture import DisplayLight  # noqa: E402
 from contracts.room_light import FixedColour, FixedEntry, RoomLightsDocument  # noqa: E402
@@ -105,8 +106,14 @@ ONE_LEVEL = 255 / 256                       # one level of 256, in 8-bit codes
 EDGE = 1.5                                  # source pixels skipped either side of a quadrant's edge
 STEP = 3                                    # target pixels between samples
 OPERATIONS = PictureOperations("screen", 3, (.9, .95, 1.0), .8, 24 / 22, DisplayLight(250, .01))
-PROFILE = FrameProfile(width_px=1600, height_px=1200, diagonal_inches=20)        # 4:3
-PORTRAIT = FrameProfile(width_px=900, height_px=1600, diagonal_inches=20)        # 9:16
+LANDSCAPE = Placement(0, 0, 1600, 1200)     # the Frame's placement, 4:3
+PORTRAIT = Placement(0, 0, 900, 1600)       # 9:16
+
+
+def size_mm(placement: Placement) -> tuple[float, float]:
+    """A 20" picture of `placement`'s shape, mm (its Display's share; contracts/models.py frame_size_mm)."""
+    across = 20 * 25.4 / math.hypot(placement.width, placement.height)
+    return placement.width * across, placement.height * across
 LIGHTING = FrameLighting(mat_depth_mm=8, paper=Paper(whiteness=0.9, ink_density=1.8), lights=(
     WashLight(light="room", lux=200, reference=AT_FULL),
     FarLight(light="lamp", lux=600, reference=AT_FULL, from_degrees=20, steep_degrees=30, softness_degrees=20)))
@@ -167,11 +174,11 @@ def source(alpha: int = 255) -> int:
     return texture
 
 
-def request(texture: int, *, turn=0, profile=PROFILE, size=(128, 96), crop=None,
+def request(texture: int, *, turn=0, placement=LANDSCAPE, size=(128, 96), crop=None,
             encoding="srgb", alpha=False, lut=LUT) -> FitRequest:
     return FitRequest(source=FitSource(texture, False, (WIDTH, HEIGHT), encoding, alpha), crop=crop,
-                      aspect=profile.width_px / profile.height_px, size=size, turn=turn,
-                      operations=OPERATIONS, lights=picture_lights(LIGHTING, ROOM, profile, OPERATIONS.light),
+                      aspect=placement.aspect, size=size, turn=turn,
+                      operations=OPERATIONS, lights=picture_lights(LIGHTING, ROOM, size_mm(placement), OPERATIONS.light),
                       lut=lut)
 
 
@@ -244,7 +251,7 @@ def turn_matches_the_reference(turn: int, top_left: int):
 
 def crop_offset_shows_the_photos_edge(offset: int, quadrants: set[int]):
     def case() -> None:
-        fit = request(PHOTO, profile=PORTRAIT, size=(45, 80), crop=PhotoCrop(offset=offset))
+        fit = request(PHOTO, placement=PORTRAIT, size=(45, 80), crop=PhotoCrop(offset=offset))
         compare(fit)
         size = target_size(fit.size, fit.turn)
         target, data = drawn(fit)
@@ -385,7 +392,7 @@ def a_still_decodes_on_gstreamer() -> None:
 
 SCREEN = (64, 48)
 PLACEMENT = Placement(16, 15, 32, 18)
-WIDE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27)      # 16:9, as the placement
+WIDE_MM = (597.7, 336.2)                    # a 27" 16:9 picture, as the placement's shape
 PATTERN_EDGE = 0.002                        # target pixels either side of a sample's centre
 # A LUT sampled between its grid points: software GL filters it with 8-bit weights, so a sample
 # there is held to two levels (the commissioning grid's slate is no grid corner: worst seen 1.035
@@ -396,10 +403,10 @@ MODULES = target_modules(TARGET_CODE)
 
 
 def pattern_request(pattern: TestPattern | None, *, turn=0, lut=None, modules=None) -> PatternRequest:
-    board = picture_board(WIDE, modules) if pattern in TARGET_PATTERNS else None
+    board = picture_board(PLACEMENT, modules) if pattern in TARGET_PATTERNS else None
     return PatternRequest(size=SCREEN, placement=PLACEMENT, turn=turn,
                           operations=dataclasses.replace(OPERATIONS, test_pattern=pattern),
-                          lights=picture_lights(LIGHTING, ROOM, WIDE, OPERATIONS.light), lut=lut, board=board)
+                          lights=picture_lights(LIGHTING, ROOM, WIDE_MM, OPERATIONS.light), lut=lut, board=board)
 
 
 def pattern_reference(request: PatternRequest, size: tuple[int, int], x: int, y: int, dx=0.0, dy=0.0):

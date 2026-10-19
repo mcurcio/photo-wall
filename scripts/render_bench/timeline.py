@@ -18,7 +18,6 @@ from contracts.frame_fit import place_box
 from contracts.frame_lighting import FrameLighting, Paper
 from contracts.models import (
     Calibration,
-    FrameProfile,
     Layer,
     OutputBinding,
     PositionBox,
@@ -37,7 +36,7 @@ StepName = Literal["hold", "dissolve", "dip", "photo_to_video", "turn", "soak", 
 FRAME_ID: Final = "bench-frame"
 RUN_ID: Final = "render-bench"
 OVERLOAD_PICTURES: Final = 5                # full-width pictures at once in the overload step
-_PROFILE: Final = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55)     # 16:9
+_DISPLAY_MM: Final = (1218, 685)            # a 55" 16:9 Display's picture area, as its EDID states it
 _LIGHTING: Final = FrameLighting(mat_depth_mm=0, lights=(), paper=Paper(whiteness=0.9, ink_density=2))
 _RECIPE: Final = hashlib.sha256(b"render-bench").hexdigest()
 _TYPES: Final = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".mp4": "video/mp4"}
@@ -83,7 +82,7 @@ class Step:
 
 @dataclass(frozen=True)
 class Tracer:
-    """The whole tracer: its steps in order, the one Frame's binding (a 16:9 profile, no lights,
+    """The whole tracer: its steps in order, the one Frame's binding (a 55" Display, no lights,
     its Position the whole screen), and the plan's layers (contracts.models.Layer,
     each media layer's Variant named by its file's sha256 and size, its crop centred), by stack
     order."""
@@ -185,7 +184,7 @@ def tracer(output_id: str, photos: Sequence[Media], video: Media, *, origin: flo
         plan.add(f"overload-{index}", variants[index % len(variants)], at, opacity=0.5)
     step("overload", hold)
     position = Calibration(fit=PositionBox())
-    return Tracer(tuple(steps), OutputBinding(output_id=output_id, frame_id=FRAME_ID, generation=1, profile=_PROFILE,
+    return Tracer(tuple(steps), OutputBinding(output_id=output_id, frame_id=FRAME_ID, generation=1, display_mm=_DISPLAY_MM,
                                               calibration=position, lighting=_LIGHTING),
                   plan.layers(at))
 

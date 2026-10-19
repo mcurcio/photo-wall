@@ -20,7 +20,6 @@ from contracts.frame_lighting import (
     WashLight,
 )
 from contracts.lut import LUT_BYTES, LUT_GRID, lut_offset
-from contracts.models import FrameProfile
 from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
 from contracts.room_light import (
@@ -41,10 +40,10 @@ from player.geometry import (
     rolled_off,
 )
 
-SCREEN = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27)     # 27" 16:9
-PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=27)   # the same picture, hung tall
 WIDTH_MM = 27 * 25.4 * (16 / 9) / math.hypot(16 / 9, 1)
 HEIGHT_MM = 27 * 25.4 / math.hypot(16 / 9, 1)
+SCREEN = (WIDTH_MM, HEIGHT_MM)      # a 27" 16:9 picture's physical size (contracts/models.py frame_size_mm)
+PORTRAIT = (HEIGHT_MM, WIDTH_MM)    # the same picture, its screen hung turned: tall
 DISPLAY = DisplayLight(1000.0, 0.0003)
 ROOM = RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=FixedColour(kelvin=6500))})
 PAPER = Paper(whiteness=.9, ink_density=-math.log10(DISPLAY.black))
@@ -57,10 +56,10 @@ def far(from_degrees=0, steep=45, softness=0) -> FarLight:
                     steep_degrees=steep, softness_degrees=softness)
 
 
-def lit(*lights, depth=2.0, profile=SCREEN, paper=PAPER):
+def lit(*lights, depth=2.0, size=SCREEN, paper=PAPER):
     lighting = FrameLighting(mat_depth_mm=depth, paper=paper,
                              lights=(WashLight(light="room", lux=WASH, reference=AT_FULL), *lights))
-    return picture_lights(lighting, ROOM, profile, DISPLAY)
+    return picture_lights(lighting, ROOM, size, DISPLAY)
 
 
 def reached(lights, x, y) -> float:
@@ -110,9 +109,9 @@ def test_a_soft_light_eases_its_edge_between_its_steepest_and_shallowest_rays():
 
 def test_a_light_from_wall_up_shades_the_top_of_a_portrait_picture():
     """A portrait picture (its screen hung turned): the wall's up is still the picture's top, v = 0,
-    and its physical size is its profile's own, tall. Mutation probe: the picture's size as (H, W)
+    and its physical size is the turned screen's, tall. Mutation probe: the picture's size as (H, W)
     -> size_mm is wide."""
-    lights = lit(far(), profile=PORTRAIT)
+    lights = lit(far(), size=PORTRAIT)
     across, down = lights.size_mm
     assert (across, down) == pytest.approx((HEIGHT_MM, WIDTH_MM))
     assert reached(lights, .5, 1 / down) == 0.0
@@ -155,15 +154,15 @@ def spot(**place) -> CloseLight:
                          "out_mm": 250, "inner_beam_degrees": 20, "outer_beam_degrees": 40, **place})
 
 
-@pytest.mark.parametrize("profile", [SCREEN, PORTRAIT], ids=["landscape", "portrait"])
-def test_a_close_light_is_its_lux_at_the_centre_and_sits_toward_the_wall_up(profile):
+@pytest.mark.parametrize("size", [SCREEN, PORTRAIT], ids=["landscape", "portrait"])
+def test_a_close_light_is_its_lux_at_the_centre_and_sits_toward_the_wall_up(size):
     """`lux` is at the Frame's centre; the light above the Frame (up_mm) is toward the picture's top
     edge, landscape or portrait, and one across (across_mm) toward its right edge."""
-    level = lit(spot(), depth=0, profile=profile)
+    level = lit(spot(), depth=0, size=size)
     assert irradiance(level, .5, .5)[0] - WASH == pytest.approx(400.0)
     assert irradiance(level, .5, .3)[0] > irradiance(level, .5, .7)[0]
     assert irradiance(level, .3, .5)[0] == pytest.approx(irradiance(level, .7, .5)[0])
-    across = lit(spot(across_mm=350, up_mm=0), depth=0, profile=profile)
+    across = lit(spot(across_mm=350, up_mm=0), depth=0, size=size)
     assert irradiance(across, .7, .5)[0] > irradiance(across, .3, .5)[0]
 
 

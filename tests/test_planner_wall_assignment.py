@@ -95,7 +95,7 @@ def plan(instance: Runtime, frames: dict[str, FrameSetup], photos, *, now: float
         instance, now,
         bindings_by_player={"player": tuple(OutputBinding(
             output_id=f"out-{frame}", frame_id=frame, generation=1,
-            profile=PROFILES[setup.shape], lighting=LIGHTING) for frame, setup in frames.items())},
+            lighting=LIGHTING, display_mm=None) for frame, setup in frames.items())},
         lines=PoolLines({POOL: SourcePool(source_ref=POOL, ready=True,
                                           candidates=tuple(photos))}),
         authored_candidates={candidate.asset_id: candidate for candidate in authored},

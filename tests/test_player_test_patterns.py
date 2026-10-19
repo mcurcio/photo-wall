@@ -12,7 +12,6 @@ from contracts.calibration_target import TargetCode
 from contracts.frame_fit import Placement
 from contracts.frame_lighting import AT_FULL, FarLight, FrameLighting, Paper, WashLight
 from contracts.lut import LUT_BYTES
-from contracts.models import FrameProfile
 from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
 from contracts.room_light import (
@@ -35,8 +34,7 @@ from player.geometry import (
 )
 from player.pattern_pass import PATTERN_CODES, _fragment
 
-PROFILE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27)
-SMALL_PROFILE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
+SIZE_MM = (598.0, 336.0)                         # a 27" 16:9 picture's physical size
 GLOWING_TABLE = bytes([200]) * LUT_BYTES        # every colour to a bright grey: a LUT nobody misses
 ROOM = RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=FixedColour(kelvin=3000))})
 # A dim warm room with a deep mat and a dark paper: what a photo gets, and a pattern never does.
@@ -48,7 +46,7 @@ DISPLAY = DisplayLight(1000.0, 0.0003)
 
 
 def lights():
-    return picture_lights(DIM_ROOM, ROOM, PROFILE, DISPLAY)
+    return picture_lights(DIM_ROOM, ROOM, SIZE_MM, DISPLAY)
 
 
 def operations(slope=1.0, *, rgb=(1.0, 1.0, 1.0), pattern=None) -> PictureOperations:
@@ -109,7 +107,7 @@ def test_no_pattern_paints_outside_the_frame(pattern):
     placement = Placement(20, 25, 40, 30)
     lit = lights()
     # A calibration target's board, drawn across the whole picture: none of it past the Frame.
-    board = picture_board(SMALL_PROFILE, target_modules(TargetCode("p-" + "0" * 32, "HDMI-A-1", 1)))
+    board = picture_board(placement, target_modules(TargetCode("p-" + "0" * 32, "HDMI-A-1", 1)))
     lifted = operations(.5, pattern=pattern)
     inside_lit = outside = 0
     for i in range(80):

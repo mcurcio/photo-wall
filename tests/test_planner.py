@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
-from support.frame_outputs import frame_output_of, target_of
+from support.frame_outputs import frame_output_of, frame_outputs_of, target_of
 from support.house_time import UTC_HOUSE, window_program
 from support.key_content_builders import measured
 from support.position import LIGHTING
@@ -15,7 +15,7 @@ from central.runtime import Child, Contribution, RecordingActuator, Runtime, Sce
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
-from contracts.models import FrameProfile, OutputBinding, Plan, Variant, stack_order
+from contracts.models import OutputBinding, Plan, Variant, stack_order
 
 # Roadmap 5a: a photo is placed only once its key content is measured and it fills its Frame
 # (central/wall_plan/assignment.py), so these candidates are measured, with an even interest
@@ -37,11 +37,9 @@ def pool(source="holiday:1", *candidates, ready=True):
     return SourcePool(source_ref=source, ready=ready, candidates=candidates)
 
 
-def binding(frame="left", output="hdmi-1", *, width=1080, height=1920, diagonal=40,
-            generation=1, video=True):
-    return OutputBinding(output_id=output, frame_id=frame, generation=generation,
-                         profile=FrameProfile(width_px=width, height_px=height,
-                                              diagonal_inches=diagonal, video=video), lighting=LIGHTING)
+def binding(frame="left", output="hdmi-1", *, generation=1):
+    return OutputBinding(output_id=output, frame_id=frame, generation=generation, lighting=LIGHTING,
+                         display_mm=None)
 
 
 def runtime(*, cycle=10, contributions=None, children=(), order="newest_first",
@@ -60,10 +58,9 @@ def runtime(*, cycle=10, contributions=None, children=(), order="newest_first",
 
 
 def full_screen(bindings) -> dict:
-    """Each bound Frame full screen on a Display of its profile's pixels, size and videos setting
-    (its Frame output)."""
-    return {item.frame_id: frame_output_of(item.frame_id, (item.profile.width_px, item.profile.height_px),
-                                           video=item.profile.video, inches=item.profile.diagonal_inches)
+    """Each bound Frame full screen on a 40-inch Display of the default Frame's 9:16 pixels, showing
+    videos (its Frame output; Central works it out, the binding never carries it)."""
+    return {item.frame_id: frame_output_of(item.frame_id, (1080, 1920), inches=40)
             for items in bindings.values() for item in items}
 
 
@@ -135,13 +132,13 @@ def test_upscaled_720p_is_never_sent_to_large_frame_and_authored_alternative_sta
     instance = runtime(contributions=(Contribution(
         target="frame:left", asset_refs=("low", "proper"), role="left-speaker",
     ),))
-    landscape = {"player-one": (binding(width=1920, height=1080),
-                                binding("right", "hdmi-2", width=1920, height=1080))}
-    result = propose(instance, authored={"low": low, "proper": proper}, bindings=landscape)
+    landscape = {"player-one": (binding(), binding("right", "hdmi-2"))}
+    wide = frame_outputs_of({"left": (1920, 1080), "right": (1920, 1080)}, inches=40)
+    result = propose(instance, authored={"low": low, "proper": proper}, bindings=landscape, frame_outputs=wide)
     assert {layer.frame_id for layer in layers(result)} == {"left"}
     assert all(layer.variant == proper.variant for layer in layers(result))
     assert all(selection.asset_id == "proper" for selection in result.selections)
-    missing = propose(instance, authored={"low": low}, bindings=landscape)
+    missing = propose(instance, authored={"low": low}, bindings=landscape, frame_outputs=wide)
     assert layers(missing) == ()
     assert "authored_no_eligible_alternative" in {d.code for d in missing.diagnostics}
 

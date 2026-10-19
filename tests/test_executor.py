@@ -12,7 +12,6 @@ from contracts.frame_lighting import FrameLighting, Paper
 from contracts.models import (
     Calibration,
     Commit,
-    FrameProfile,
     Layer,
     LostGrant,
     OutputBinding,
@@ -211,8 +210,7 @@ LIGHTING = FrameLighting(mat_depth_mm=0, lights=(), paper=Paper(whiteness=.9, in
 
 def binding(output: str = "hdmi1", frame: str = "frame1", **kwargs) -> OutputBinding:
     return OutputBinding(output_id=output, frame_id=frame, generation=1,
-                         profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=32),
-                         **{"lighting": LIGHTING, **kwargs})
+                         **{"lighting": LIGHTING, "display_mm": None, **kwargs})
 
 
 def layer(key: str = "picture", *, output: str = "hdmi1", frame: str = "frame1",

@@ -59,7 +59,7 @@ class FitSource:
 @dataclass(frozen=True)
 class FitRequest:
     """One picture to finish: its `source`; Central's `crop` (contracts/photo_crop.py; None only for
-    a source with exactly the Frame's aspect); the Frame profile's `aspect`; the picture's `size`
+    a source with exactly the Frame's aspect); the Frame's `aspect` (its placement's); the picture's `size`
     (width, height) as it hangs (player/planes.py `finish_size`); the screen's
     `turn`; the Output's picture `operations`; the Frame's `lights` (player/geometry.py
     `picture_lights`); the paper profile's `lut` body (None: no LUT step)."""

@@ -10,7 +10,6 @@ from central.displays.model import Readiness as FrameReadiness
 from central.installation_models import FrameInventory
 from contracts.liveness import SILENT_AFTER_SECONDS
 from contracts.models import (
-    FrameProfile,
     Identifier,
     Instant,
     Model,
@@ -54,9 +53,9 @@ def _snapshot_bindings(frames: tuple[FrameInventory, ...], player_id: str):
             frame_id=frame.id,
             generation=frame.generation,
             configuration_revision=frame.configuration_revision,
-            profile=FrameProfile.model_validate(frame.profile),
             calibration=frame.calibration,
             lighting=frame.lighting,
+            display_mm=frame.display_mm,
         )
         for frame in owned
     )

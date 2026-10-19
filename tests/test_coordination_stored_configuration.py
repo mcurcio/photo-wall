@@ -7,12 +7,12 @@ import logging
 from support.position import LIGHTING
 
 from central.coordination import Coordinator
-from contracts.models import FrameProfile, OutputBinding, PlayerConfiguration
+from contracts.models import OutputBinding, PlayerConfiguration
 from contracts.time import ManualClock
 
 PLAYER = "p-" + "a" * 32
 BINDING = OutputBinding(output_id="HDMI-A-1", frame_id="frame-0", generation=1,
-                        profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24), lighting=LIGHTING)
+                        lighting=LIGHTING, display_mm=None)
 SECRET = "private-content-marker"
 
 

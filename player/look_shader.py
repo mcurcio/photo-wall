@@ -18,7 +18,7 @@ from typing import Any, Final
 from contracts.frame_lighting import FRAME_LIGHTS_MAX, SHEET_WHITENESS
 from contracts.lut import LUT_GRID
 from contracts.node_frame import PictureOperations
-from player.geometry import BAYER_4, HIGHLIGHT_KNEE, LIGHT_KINDS, FrameLights
+from player.geometry import BAYER_4, HIGHLIGHT_KNEE, LIGHT_KINDS, UNSIZED_MAT, FrameLights
 
 LUT_UNIT: Final = 1     # the LUT's texture unit; unit 0 is the picture being sampled
 
@@ -195,7 +195,7 @@ def look_uniforms(gl: Any, program: int, operations: PictureOperations, lights: 
         gl.glUniform1i(uniform("lut"), LUT_UNIT)
     present = lights.lights if lights is not None else ()
     padded = present + (None,) * (FRAME_LIGHTS_MAX - len(present))
-    gl.glUniform2f(uniform("mat_size"), *(lights.size_mm if lights is not None else (1.0, 1.0)))
+    gl.glUniform2f(uniform("mat_size"), *(lights.mat_size if lights is not None else UNSIZED_MAT))
     gl.glUniform1f(uniform("mat_depth"), lights.depth_mm if lights is not None else 0.0)
     gl.glUniform1f(uniform("paper_white"), lights.paper.whiteness if lights is not None else 1.0)
     gl.glUniform1f(uniform("paper_black"), 10 ** -lights.paper.ink_density if lights is not None else 0.0)

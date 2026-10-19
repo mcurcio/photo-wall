@@ -101,7 +101,7 @@ from typing import Final, Literal, Protocol
 from contracts.calibration_target import QrModules, TargetCode
 from contracts.frame_fit import Placement, place_box
 from contracts.frame_lighting import FrameLighting
-from contracts.models import AppliedCalibration, Calibration, Layer, OutputBinding
+from contracts.models import AppliedCalibration, Calibration, Layer, OutputBinding, frame_size_mm
 from contracts.node_frame import PictureOperations, neutral_operations
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.room_light import RoomLightsDocument
@@ -730,7 +730,8 @@ class PlaneRenderer:
         screen, placement = placed
         operations = self._screens.picture(binding.output_id)
         shown = operations or neutral_operations(binding.output_id, 1, UPGRADE_DISPLAY_LIGHT)
-        lights = picture_lights(drawn.lighting, self._room_lights, binding.profile, shown.light)
+        size_mm = frame_size_mm(drawn.calibration.fit, binding.display_mm, screen.turn)
+        lights = picture_lights(drawn.lighting, self._room_lights, size_mm, shown.light)
         ref = drawn.lighting.paper.profile
         return _Setting(drawn, screen, placement, shown,
                         None if operations is None else operations.picture_change, lights,
@@ -757,7 +758,7 @@ class PlaneRenderer:
             return None
         board = None
         if setting.operations.test_pattern in TARGET_PATTERNS:
-            board = picture_board(composition.binding.profile, self._modules(setting.operations))
+            board = picture_board(setting.placement, self._modules(setting.operations))
         return PatternRequest(setting.screen.size, setting.placement, setting.screen.turn, setting.operations,
                               setting.lights, setting.lut, board)
 

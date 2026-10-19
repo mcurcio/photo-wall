@@ -83,7 +83,7 @@ def _plan(photo: Candidate, profile: FrameProfile):
     runtime.activate("scene", "run", 0)
     return project(
         runtime, 0, bindings_by_player={"player": (OutputBinding(
-            output_id="out", frame_id="f", generation=1, profile=profile, lighting=LIGHTING),)},
+            output_id="out", frame_id="f", generation=1, lighting=LIGHTING, display_mm=None),)},
         lines=PoolLines({"pool": SourcePool(source_ref="pool", ready=True, candidates=(photo,))}),
         authored_candidates={}, locked_assignments={}, history=WallHistory(),
         horizon_seconds=300, plan_seconds=600, settings=HOUSE,

@@ -6742,3 +6742,15 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
 - **`tests/browser/test_fit_board_browser.py::test_the_frame_page_shows_one_row_per_scene_with_its_relation_to_now`
   expects no Details on hall's row**, but since fb-8's seed binds hall to a reported screen, the row
   has a Frame output and so Details (see the A/B in fb-10's report).
+## frame-box fb-9 (binding carries the Display's size)
+
+- **`central/installation_ports.py` still declares `frame_profiles_in`** on the Installation
+  protocol. fb-9 deleted the method from `PostgresInstallationRepository` (no caller used it; the
+  acceptance asks for no Frame profile in `installation_repository`), but the port file is not in
+  fb-9's owned list, so its one-line declaration stays for fb-14 (which deletes `FrameProfile`) to
+  remove. Nothing calls it, and no runtime protocol check reads it.
+- **The planner tests used `OutputBinding.profile` as their Frames' shape carrier**
+  (`tests/test_planner.py` `full_screen`). The binding never carries a shape now, so
+  `full_screen` gives every Frame the default 1080 x 1920, 40-inch output and the one landscape case
+  passes its `frame_outputs` explicitly; the other planner tests keep `FrameProfile` as a local shape
+  holder for fb-14.

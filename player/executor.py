@@ -239,7 +239,7 @@ class Executor:
             for output_id, retained in list(self._retained.items()):
                 binding = self._binding(output_id)
                 if (not binding or _binding_identity(binding) != _binding_identity(retained.binding)
-                        or binding.profile != retained.binding.profile):
+                        or binding.display_mm != retained.binding.display_mm):
                     del self._retained[output_id]
             for output_id, composition in list(self._current.items()):
                 binding = self._binding(output_id)

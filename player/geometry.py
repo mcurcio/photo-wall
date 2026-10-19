@@ -8,14 +8,15 @@ own point (u, v), each 0..1 across and down the picture as it hangs:
   turned for its screen (contracts/display_turn.py), or of the screen's ground inside the Frame's
   Placement, as the picture's (u, v). The one home of the quarter turn is `UNDO_QUARTER_TURN`.
 - **Photo fit** (`photo_rect`, `fit_source_uv`): each photo's source rectangle, the window
-  `Layer.crop` names, cut from the Frame profile's aspect (contracts/photo_crop.py, the one home of
+  `Layer.crop` names, cut from the Frame's aspect (contracts/photo_crop.py, the one home of
   the window; no trim), stretched over the picture, so the photo is never cropped twice or
   squeezed.
 - **Final pass** (`final_pixel`): contracts/node_frame.py PictureOperations in their stated order,
   then the mask LAST, so black stays black outside the Frame whatever the picture settings.
 
-The picture's physical size is its Frame profile's own (`_profile_size_mm`): a screen's turn turns
-the screen, not the wall.
+The picture's physical size is the caller's `size_mm` (contracts/models.py `frame_size_mm` of the
+drawn box, the binding's `display_mm` and the screen's turn; a screen's turn turns the screen, not
+the wall); None when the Display states no size, and then only wash lights add light.
 
 Room light is one physics path in real units, every Frame always through it: the Frame's paper
 (`paper_reflectance`, its profile's LUT first) under E(u, v), the room's light summed over the
@@ -35,7 +36,7 @@ The calibration targets v2 (decision 0027) draw the screen board (contracts/cali
 picture's short side, as many columns as fit (`screen_columns`), centred along its long side,
 turned a quarter clockwise in a portrait picture (`picture_board`, `board_point`); each point the
 raster's pixel, or a QR copy's module (`board_signal`; player/calibration_target.py
-`target_modules`). The picture's size has one home, `_profile_size_mm`, which the physics uses too.
+`target_modules`); the board's aspect is the placement's pixels' (`picture_board`).
 Pre-software is the board's signal raw everywhere in the picture; post-software runs it through the
 Display's white balance, contrast and gamma, as the look patterns.
 """
@@ -73,7 +74,7 @@ from contracts.frame_lighting import (
 )
 from contracts.kelvin import kelvin_white
 from contracts.lut import LUT_GRID, lut_offset
-from contracts.models import FrameProfile, PhotoCrop
+from contracts.models import PhotoCrop
 from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
 from contracts.photo_crop import CENTRED, crop_window
@@ -252,7 +253,7 @@ def pattern_signal(pattern: TestPattern, u: float, v: float) -> Linear:
 @dataclass(frozen=True)
 class BoardDraw:
     """What one Frame needs to draw a calibration target v2 (decision 0027). `aspect`: its
-    picture's physical long side over its short side (>= 1; `_profile_size_mm`); `portrait`: the
+    picture's long side over its short side in pixels (>= 1; `picture_board`); `portrait`: the
     picture is taller than wide, so the board is turned a quarter clockwise (its top at the
     picture's right); `modules`: the QR naming the port's picture change
     (player/calibration_target.py `target_modules`), None while there is no code (no player id
@@ -301,16 +302,6 @@ def board_signal(column: float, row: float, draw: BoardDraw) -> float:
             return 0.0 if inside and draw.modules[module_row][module_column] else 1.0
     raster = board_raster(Surface.SCREEN)
     return raster.pixels[math.floor(row * SQUARE_PX) * raster.width + math.floor(column * SQUARE_PX)] / 255
-
-
-def _profile_size_mm(profile: FrameProfile) -> tuple[float, float]:
-    """The Frame profile's own (W, H) in mm, as it hangs: diag_mm = diagonal_inches*25.4, a =
-    width_px/height_px, W = diag_mm*a/hypot(a,1), H = diag_mm/hypot(a,1). The one home of the
-    picture's physical size (a screen's turn turns the screen, not the wall): the lights' `size_mm`
-    and the board's aspect are it. Pure."""
-    diagonal = profile.diagonal_inches * 25.4
-    aspect = profile.width_px / profile.height_px
-    return diagonal * aspect / math.hypot(aspect, 1), diagonal / math.hypot(aspect, 1)
 
 
 def final_pixel(photo: Linear, operations: PictureOperations, *, inside: bool, lights: FrameLights | None,
@@ -406,19 +397,37 @@ class LitLight:
     beam: tuple[float, float] = (0.0, 0.0)      # close: half the inner and outer beam angles, radians
 
 
+# The mat space of a Frame whose physical size is not known (FrameLights.mat_size): a unit square,
+# where only wash lights are drawn, so no point of it depends on a size.
+UNSIZED_MAT: Final = (1.0, 1.0)
+
+
 @dataclass(frozen=True)
 class FrameLights:
     """One Frame's lights resolved against one room-lights document, as the final pass uses them
-    (the shader's uniforms): the picture's physical `size_mm` (`_profile_size_mm`), the
-    mat's `depth_mm`, the `paper`, each light that adds light (`lights`, at most FRAME_LIGHTS_MAX;
-    one adding none is left out) and the Frame's `peak`: its paper white's brightest signal over the
-    opening (`_brightest_white`), the same for every pixel of the Frame, so the rolloff keeps the
-    cone's shape."""
-    size_mm: tuple[float, float]
+    (the shader's uniforms): the picture's physical `size_mm` (`picture_lights`; None when the
+    Display states no size, and then every light in `lights` is a wash: the others need
+    millimetres), the mat's `depth_mm`, the `paper`, each light that adds light (`lights`, at most
+    FRAME_LIGHTS_MAX; one adding none is left out) and the Frame's `peak`: its paper white's
+    brightest signal over the opening (`_brightest_white`), the same for every pixel of the Frame,
+    so the rolloff keeps the cone's shape. ValueError("frame_lights") when `size_mm` is None and a
+    light is not a wash."""
+    size_mm: tuple[float, float] | None
     depth_mm: float
     paper: Paper
     lights: tuple[LitLight, ...]
     peak: float
+
+    def __post_init__(self) -> None:
+        """See the class docstring."""
+        if self.size_mm is None and any(lit.kind != "wash" for lit in self.lights):
+            raise ValueError("frame_lights")
+
+    @property
+    def mat_size(self) -> tuple[float, float]:
+        """The mat space's extent the physics and the shader's `mat_size` work in: `size_mm`, or
+        UNSIZED_MAT when no size is known (only washes then, which are the same everywhere)."""
+        return UNSIZED_MAT if self.size_mm is None else self.size_mm
 
 
 def light_on_frame(light: WashLight | FarLight | CloseLight, entry: RoomLightEntry | None) -> Linear:
@@ -559,8 +568,8 @@ def irradiance(lights: FrameLights, x: float, y: float) -> Linear:
     sum over the Frame's lights of light_on_frame x shape x reaches, at m = (x, y) x size_mm. Shape:
     1 for wash and far; for close, `_close_shape`. Reaches: `_reached` (the mat shadow). No floor:
     the brightness follows the room down. Pure."""
-    return _irradiance_at(lights.lights, (x * lights.size_mm[0], y * lights.size_mm[1]), lights.size_mm,
-                          lights.depth_mm)
+    size = lights.mat_size
+    return _irradiance_at(lights.lights, (x * size[0], y * size[1]), size, lights.depth_mm)
 
 
 def _irradiance_at(lights: tuple[LitLight, ...], point: tuple[float, float], size: tuple[float, float],
@@ -643,22 +652,27 @@ def fit_source_uv(u: float, v: float, aspect: float, source: tuple[int, int],
     return left + u*(right-left), top + v*(bottom-top)
 
 
-def picture_lights(lighting: FrameLighting, document: RoomLightsDocument | None, profile: FrameProfile,
-                   display: DisplayLight) -> FrameLights:
+def picture_lights(lighting: FrameLighting, document: RoomLightsDocument | None,
+                   size_mm: tuple[float, float] | None, display: DisplayLight) -> FrameLights:
     """`lighting`'s lights against `document` (None: none received yet, so every light adds none), in
-    the picture's mat space at its physical size (`_profile_size_mm`; a screen's turn turns the
+    the picture's mat space at its physical size `size_mm` (contracts/models.py `frame_size_mm` of
+    the drawn box, the binding's `display_mm` and the screen's turn; a screen's turn turns the
     screen, not the wall), each light that adds light (`_lit`), with the Frame's peak: the paper
-    white's brightest signal over the picture (`_brightest_white`). Pure."""
-    size = _profile_size_mm(profile)
+    white's brightest signal over the picture (`_brightest_white`). With `size_mm` None (the
+    Display states no size) only wash lights add light: far and close lights and the mat's shadow
+    need millimetres. Pure."""
+    mat = UNSIZED_MAT if size_mm is None else size_mm
     lights = []
     for light in lighting.lights:
+        if size_mm is None and not isinstance(light, WashLight):
+            continue
         entry = None if document is None else document.lights.get(light.light)
         rgb = light_on_frame(light, entry)
         if max(rgb) > 0:
-            lights.append(_lit(light, rgb, lighting.mat_depth_mm, size))
+            lights.append(_lit(light, rgb, lighting.mat_depth_mm, mat))
     lit = tuple(lights)
-    return FrameLights(size, lighting.mat_depth_mm, lighting.paper, lit,
-                       _brightest_white(lit, size, lighting.mat_depth_mm, lighting.paper, display))
+    return FrameLights(size_mm, lighting.mat_depth_mm, lighting.paper, lit,
+                       _brightest_white(lit, mat, lighting.mat_depth_mm, lighting.paper, display))
 
 
 # The pattern pass's scalar reference (render redesign S3, run ledger .claude/runs/render-planes/
@@ -694,8 +708,9 @@ def commissioning_grid(u: float, v: float) -> Linear:
     return GRID_SLATE
 
 
-def picture_board(profile: FrameProfile, modules: QrModules | None) -> BoardDraw:
-    """The BoardDraw of a Frame's picture: (W, H) its physical size (`_profile_size_mm`; a screen's
-    turn turns the screen, not the wall), aspect max(W, H) / min(W, H), portrait when W < H. Pure."""
-    width, height = _profile_size_mm(profile)
+def picture_board(placement: Placement, modules: QrModules | None) -> BoardDraw:
+    """The BoardDraw of a Frame's picture placed at `placement` (its pixels as it hangs): aspect
+    max(w, h) / min(w, h), portrait when w < h (frame box run decision 11: the board's squares are
+    the screen's pixels, so a mode with non-square pixels draws them non-square). Pure."""
+    width, height = placement.width, placement.height
     return BoardDraw(max(width, height) / min(width, height), width < height, modules)
