@@ -130,7 +130,7 @@ function useHouseLights(open: boolean): { rooms: RoomLightsView | null; drawn: D
  * (every kept and tried change, and Restore into the editor); Power is how the Pi turns
  * its display off and on, with Test: turn off and Turn on; Hardware is which Pi and HDMI output
  * feed it (bind, unbind, Identify), the Display the Pi reports there (with the display-changed
- * card), its Frame profile and how its screen hangs (the turn).
+ * card), whether it shows videos and how its screen hangs (the turn).
  *
  * Position and Lighting share one live session (liveAdjustment.js, kept on the Frame), Picture has
  * its own (pictureSession.js, kept on the display). Each runs while one of its tabs is shown and

@@ -57,7 +57,6 @@ export const LIVING: FrameFitView = {
   samples: [crop("l1", 3, 2, WIDE, 0.5), crop("l2", 4, 3, WIDE, 0.3, "fits", false, [0.5, 0.3]),
     crop("l3", 16, 9, WIDE), crop("l4", 3, 2, WIDE, 0.7), crop("l5", 4, 3, WIDE, 0.5), crop("l6", 3, 2, WIDE, 0.2)],
   checked: "Faces and the interesting part: checked 64 of 1,520; 61 keep them whole.",
-  unknownOutput: null,
   detail: "Frame output 1,512 × 851 px, 16:9",
   alert: null,
   why: {
@@ -84,7 +83,6 @@ export const HALL: FrameFitView = {
   ],
   samples: [],
   checked: null,
-  unknownOutput: null,
   detail: "Frame output 1,080 × 1,920 px, 9:16",
   alert: NOTHING_FITS,
   why: {
@@ -106,8 +104,7 @@ export const OFFICE: FrameFitView = {
   ],
   samples: [crop("o1", 4, 3, FOUR_THREE), crop("o2", 3, 2, FOUR_THREE, 0.6), crop("o3", 1, 1, FOUR_THREE, 0.4)],
   checked: null,
-  unknownOutput: "Judged at office's planned 4:3 shape; office hasn't reported its output yet.",
-  detail: null,
+  detail: "Frame output 1,440 × 1,080 px, 4:3",
   alert: null,
   why: { summary: "Why 88 don't fit", reasons: [{ key: "beyond_crop_limit", label: "doesn't fit this Frame's shape", countText: "88", samples: [] }] },
   draft: null,
@@ -158,7 +155,6 @@ export const STAIRS: FrameFitView = {
   ],
   samples: [crop("s0", 2, 3, 2 / 3)],
   checked: null,
-  unknownOutput: null,
   detail: "Frame output 960 × 1,440 px, 2:3",
   alert: FEW_PHOTOS,
   why: { summary: "Why 1,688 don't fit", reasons: [{ key: "beyond_crop_limit", label: "doesn't fit this Frame's shape",

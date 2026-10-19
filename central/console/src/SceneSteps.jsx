@@ -170,7 +170,7 @@ export function FramesStep({ value, problems, snapshot, onToggle, fit = null }) 
 
 /**
  * Step 3b, Media per frame (hand-picked only): ONE item per target frame from that
- * frame's candidates (the container's `useCandidates`, profile-filtered by Central),
+ * frame's candidates (the container's `useCandidates`, filtered by Central by the photo fit rule),
  * each labelled with the planner's `standing` (mediaHealth.js `candidateLabels`). A
  * failed read says so and offers Retry (`candidates.reload`); successful reads can be
  * explicitly refreshed after an unknown Source-refresh outcome.

@@ -240,8 +240,8 @@ export function frameHealth(snapshot, frameId) {
 
 /**
  * A Frame whose port shows another display than its Position was set against (readiness
- * `display-changed`): a to-do the Hardware tab's card resolves (confirm the Frame profile, then
- * Position), so it opens Hardware, not Position.
+ * `display-changed`): a to-do the Hardware tab's card resolves (confirm the new Display, then
+ * check the Position), so it opens Hardware, not Position.
  */
 export const DISPLAY_CHANGED = "Display changed";
 

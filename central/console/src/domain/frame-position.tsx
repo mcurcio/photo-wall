@@ -93,7 +93,7 @@ function PixelField({ label, value, apply }: PixelFieldProps) {
  * edge). Drag the box to move it, or any edge or corner to change its width and height apart
  * (BoxEditor); press the arrows (or the arrow keys on the drawing) in steps of 1, 10 or 50 pixels;
  * type its Left, Top, Width and Height in whole pixels; Fill the screen or Centre it. The box is
- * the Frame's shape: no Frame profile is asked for.
+ * the Frame's shape: nothing else asks for it.
  *
  * Every number is in pixels of the screen as it hangs, by the one pixel rule Central and the
  * Player use (src/placement.js `placeBox`, through domain/position-box.ts). A box always lies on
