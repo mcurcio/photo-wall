@@ -259,7 +259,7 @@ def test_r4_commissioning_unreachable_in_showrunner(page, registry):
         # assertion below is meaningful, not vacuously true).
         page.get_by_role("button", name=f"Frame {VALID_FRAME}", exact=True).click()
         page.get_by_role("tab", name="Position", exact=True).click()
-        expect(page.get_by_role("region", name="Position", exact=True)).to_be_visible()
+        expect(page.get_by_role("region", name="Where the picture sits on the screen", exact=True)).to_be_visible()
 
         # On every Show page: no Position tab and no live adjustment, not even in
         # hidden DOM — the Frame page is composed out of the show layer entirely
@@ -269,7 +269,7 @@ def test_r4_commissioning_unreachable_in_showrunner(page, registry):
             go(page, section)
             expect(page.get_by_role("tab", name="Position", exact=True,
                                     include_hidden=True)).to_have_count(0)
-            expect(page.get_by_role("region", name="Position", exact=True,
+            expect(page.get_by_role("region", name="Where the picture sits on the screen", exact=True,
                                     include_hidden=True)).to_have_count(0)
             expect(page.get_by_role("group", name="Show on the Display",
                                     include_hidden=True)).to_have_count(0)

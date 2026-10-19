@@ -58,10 +58,14 @@ export function LivePreviewEditor({
   const problemRef = React.useRef<HTMLDivElement | null>(null);
   const barRef = React.useRef<HTMLDivElement | null>(null);
   const hasProblem = problem !== undefined && problem !== null;
-  // A problem that appears is brought into view, and above the bar where the bar sticks over it (a phone).
+  // A problem that appears while the editor is open is brought into view, and above the bar where the
+  // bar sticks over it (a phone); one there when the editor opens leaves the page where it is.
+  const hadProblem = React.useRef(hasProblem);
   React.useEffect(() => {
     const card = problemRef.current;
-    if (!hasProblem || card === null) return;
+    const appeared = hasProblem && !hadProblem.current;
+    hadProblem.current = hasProblem;
+    if (!appeared || card === null) return;
     card.scrollIntoView?.({ block: "nearest" });
     const bar = barRef.current?.getBoundingClientRect();
     const below = card.getBoundingClientRect().bottom - (bar?.top ?? Infinity);
