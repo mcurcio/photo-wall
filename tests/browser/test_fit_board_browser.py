@@ -297,7 +297,8 @@ def test_the_frame_page_shows_one_row_per_scene_with_its_relation_to_now(page, r
         expect(_row(scene, HALL).get_by_role("heading", name=HALL, exact=True)).to_have_count(0)
         expect(_row(scene, HALL)).not_to_contain_text("planned")
         expect(scene).not_to_contain_text("hall is 9:16")
-        expect(_row(scene, HALL).get_by_role("button", name="Details", exact=True)).to_have_count(0)
+        # Its Pi reports hall's screen, so the pixels it is judged at are a Details fact.
+        expect(_row(scene, HALL).get_by_role("button", name="Details", exact=True)).to_have_count(1)
         expect(photos).not_to_contain_text("photos fit this Frame")
         expect(photos).not_to_contain_text("from Source")
 
