@@ -13,7 +13,7 @@ from central.fleet.node_display import NodeDisplay
 from central.fleet.node_sessions import NodeControlError
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.infra.frame_lighting_store import PgFrameLighting
-from contracts.models import Calibration, CornersFit, CoverFit
+from contracts.models import Calibration, RectangleFit
 from contracts.node_calibration import candidate_hash, canonical, parse_trial
 from contracts.node_display import (
     DisplayExchange,
@@ -25,8 +25,10 @@ from contracts.node_display import (
 from player.calibration_trial import TrialState
 from player.rendering import OutputComposition
 
-SKEWED = CornersFit(corners=((0.1, 0), (1, 0), (1, 1), (0, 1)))   # Corners, top-left moved in
-TURNED = CoverFit(rotation=7)                                      # Cover at a fine angle
+# Two Positions of the rig's 9:16 Frames on their 1920 x 1080 screens, each unlike the saved one
+# (support.position's PORTRAIT_ON_WIDE) and unlike each other.
+SKEWED = RectangleFit(centre_x=0.45, width=0.28)                   # smaller, left of centre
+SHIFTED = RectangleFit(centre_x=0.6, centre_y=0.55, width=0.2)     # smaller still, right and down
 LIGHTING_JSON = LIGHTING.model_dump(mode="json")                   # an edit carries the whole draft lighting
 
 
@@ -130,7 +132,7 @@ def test_local_terminal_expiry_rejects_delayed_trial_and_canonical_output_primit
         config = binding(conn, row["player_id"], row["authority_epoch"])["bindings"][0]
     calibration = Calibration(
         revision=config.calibration.revision,
-        fit=CornersFit(corners=((0.4, 0.1), (0.9, 0.3), (0.8, 0.9), (0.1, 0.8))),
+        fit=RectangleFit(centre_x=0.3, centre_y=0.6, width=0.2),
     )
     raw = canonical(calibration.model_dump(mode="json"))
     candidate = replace(
@@ -148,8 +150,6 @@ def test_local_terminal_expiry_rejects_delayed_trial_and_canonical_output_primit
         encode_trial(candidate), OutputComposition(config), 1500
     )
     assert applied.calibration == calibration
-    for observed, expected in zip(applied.primitives, calibration.fit.corners, strict=True):
-        assert observed == pytest.approx(expected)
     assert (
         state.apply(
             encode_trial(candidate),
@@ -280,7 +280,7 @@ def test_renew_hands_the_draft_to_the_next_trial_in_one_step(registry):
     trials, request, exchange = setup_trial(registry)
     first = begin(trials, "node-f0")
     first_id = __import__("uuid").UUID(first["trial_id"])
-    draft = Calibration.model_validate(first["calibration"]).model_copy(update={"fit": TURNED})
+    draft = Calibration.model_validate(first["calibration"]).model_copy(update={"fit": SHIFTED})
     operate(trials, "node-f0", first_id, operation="edit", expected_sequence=1,
                    calibration=draft.model_dump(mode="json"), lighting=LIGHTING_JSON)
     with pytest.raises(NodeControlError, match="trial_sequence_conflict"):
@@ -290,13 +290,13 @@ def test_renew_hands_the_draft_to_the_next_trial_in_one_step(registry):
                             calibration=draft.model_dump(mode="json"), lighting=LIGHTING_JSON)
     assert second["state"] == "active" and second["trial_id"] != first["trial_id"]
     assert second["generation"] == first["generation"] + 1 and second["sequence"] == 1
-    assert Calibration.model_validate(second["calibration"]).fit == TURNED
+    assert Calibration.model_validate(second["calibration"]).fit == SHIFTED
     assert second["calibration_revision"] == first["calibration_revision"]
     assert second["hard_expires_at"] == registry.clock.utc() + trials.hard_seconds
     assert operate(trials, "node-f0", first_id, operation="status", expected_sequence=2)["state"] == "ended"
     handed = parse_trial(exchange(replace(request, request_id=uuid4(), sampled_boottime_ms=1500)).trial)
     assert str(handed.trial_id) == second["trial_id"] and handed.generation == second["generation"]
-    assert Calibration.model_validate_json(handed.calibration_json).fit == TURNED
+    assert Calibration.model_validate_json(handed.calibration_json).fit == SHIFTED
 
     second_id = __import__("uuid").UUID(second["trial_id"])
     stale = draft.model_copy(update={"revision": draft.revision + 1})
@@ -308,7 +308,7 @@ def test_renew_hands_the_draft_to_the_next_trial_in_one_step(registry):
     with pytest.raises(NodeControlError, match="trial_baseline_revision_changed"):
         begin(trials, "node-f0", stale.model_dump(mode="json"))
     third = begin(trials, "node-f0", draft.model_dump(mode="json"))
-    assert third["state"] == "active" and Calibration.model_validate(third["calibration"]).fit == TURNED
+    assert third["state"] == "active" and Calibration.model_validate(third["calibration"]).fit == SHIFTED
 
 
 def test_the_operator_routes_begin_at_a_draft_and_renew(registry):
@@ -324,7 +324,7 @@ def test_the_operator_routes_begin_at_a_draft_and_renew(registry):
     trials, _request, _exchange = setup_trial(registry)
     saved = begin(trials, "node-f0")
     operate(trials, "node-f0", __import__("uuid").UUID(saved["trial_id"]), operation="end", expected_sequence=1)
-    draft = dict(saved["calibration"], fit=TURNED.model_dump(mode="json"))
+    draft = dict(saved["calibration"], fit=SHIFTED.model_dump(mode="json"))
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
                      node_control=NodeControlConfig("node-test"))
     path = "/v1/operator/frames/node-f0/calibration-trials"
@@ -335,7 +335,7 @@ def test_the_operator_routes_begin_at_a_draft_and_renew(registry):
         assert client.post(path, headers=headers, json={"draft": draft}).status_code == 422
         begun = client.post(path, headers=headers, json={"calibration": draft})
         assert begun.status_code == 200, begun.text
-        assert Calibration.model_validate(begun.json()["calibration"]).fit == TURNED
+        assert Calibration.model_validate(begun.json()["calibration"]).fit == SHIFTED
         renewed = client.post(f"{path}/{begun.json()['trial_id']}", headers=headers,
                               json={"operation": "renew", "expected_sequence": 1, "calibration": draft,
                                     "lighting": LIGHTING_JSON})

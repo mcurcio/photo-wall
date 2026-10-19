@@ -1,46 +1,49 @@
 """Scalar calibration/SDR reference. Production pixels are processed by shaders.
 
-The Frame fit and the final pass are each stated once here and mirrored by player/native.py's shaders:
-- **One matrix per fit** (`output_to_picture`): output fractions -> the picture's unit square.
-  Corners: the inverse perspective onto the corners with the quarter turn folded in. Cover: the
-  inverse of rotate, scale evenly and move onto contracts/frame_fit.py's cover rectangle (the
-  Frame profile's aspect), worked in output pixels so a non-square output never skews it.
-- **Per-Frame mask** (`inside_opening`): a Frame draws nothing outside its own opening (outside the
-  Frame is someone else's territory), in the position pass.
-- **Final pass** (`final_pixel`): contracts/node_frame.py PictureOperations in their stated
-  order, then the per-Output mask LAST, so black stays black outside every opening whatever
-  the picture settings.
-- **Photo fit** (`photo_rect`): each photo's source rectangle, the window `Layer.crop` names, cut
-  from the Frame profile's aspect (contracts/photo_crop.py, the one home of the window; no trim). It is the one crop in either fit: in Cover the drawn rectangle has that same aspect,
-  so the photo is never cropped twice or squeezed.
+Each rule is stated once here; the look is mirrored by player/look_shader.py, the photo fit by the
+fit pass (player/fit_pass.py), the patterns by player/pattern_pass.py. A Frame is an upright
+rectangle on its screen (its Position's `Placement`), and every rule below works on the picture's
+own point (u, v), each 0..1 across and down the picture as it hangs:
+- **The picture's point** (`buffer_to_picture`, `placement_uv`): a point of the fit pass's target,
+  turned for its screen (contracts/display_turn.py), or of the screen's ground inside the Frame's
+  Placement, as the picture's (u, v). The one home of the quarter turn is `UNDO_QUARTER_TURN`.
+- **Photo fit** (`photo_rect`, `fit_source_uv`): each photo's source rectangle, the window
+  `Layer.crop` names, cut from the Frame profile's aspect (contracts/photo_crop.py, the one home of
+  the window; no trim), stretched over the picture, so the photo is never cropped twice or
+  squeezed.
+- **Final pass** (`final_pixel`): contracts/node_frame.py PictureOperations in their stated order,
+  then the mask LAST, so black stays black outside the Frame whatever the picture settings.
 
-Room light is one physics path in real units, every Frame always through it: the Frame's paper (`paper_reflectance`, its profile's LUT first) under E(x), the room's light
-summed over the Frame's lights (`frame_lights`, `irradiance`: a wash, a far light's mat shadow, a
-close light's inverse square, cone and shadow), as a signal fitted between the panel's black and
-its white at the Display's matched lux (`paper_signal`), the one fixed highlight rolloff
-(`highlight_rolled`), then the Display's white balance, contrast and gamma, the dither
-(`dithered`) and the per-Output mask (`final_pixel`).
+The picture's physical size is its Frame profile's own (`_profile_size_mm`): a screen's turn turns
+the screen, not the wall.
 
-The test patterns (`pattern_signal`): a look pattern (White, Grey ramp) replaces the photos inside the opening and goes through white
-balance, contrast and gamma only, never the room's light, the paper or the mat (White is the TV's
-own white for the paper match); the Black level is the raw signal, through no step; the per-Output
-mask stays last.
+Room light is one physics path in real units, every Frame always through it: the Frame's paper
+(`paper_reflectance`, its profile's LUT first) under E(u, v), the room's light summed over the
+Frame's lights (`picture_lights`, `irradiance`: a wash, a far light's mat shadow, a close light's
+inverse square, cone and shadow), as a signal fitted between the panel's black and its white at the
+Display's matched lux (`paper_signal`), the one fixed highlight rolloff (`highlight_rolled`), then
+the Display's white balance, contrast and gamma, the dither (`dithered`) and the mask
+(`final_pixel`).
+
+The test patterns (`pattern_signal`): a look pattern (White, Grey ramp) replaces the photos in the
+picture and goes through white balance, contrast and gamma only, never the room's light, the paper
+or the mat (White is the TV's own white for the paper match); the Black level is the raw signal,
+through no step; the mask stays last.
 
 The calibration targets v2 (decision 0027) draw the screen board (contracts/calibration_target.py
 "v2", OpenCV's ChArUco board drawn at build time as `board_raster`): SCREEN_ROWS squares across the
-opening's short side, as many columns as fit (`screen_columns`), centred along its long side,
-turned a quarter clockwise in a portrait opening (`board_draw`, `board_point`); each point the
+picture's short side, as many columns as fit (`screen_columns`), centred along its long side,
+turned a quarter clockwise in a portrait picture (`picture_board`, `board_point`); each point the
 raster's pixel, or a QR copy's module (`board_signal`; player/calibration_target.py
-`target_modules`). The opening's size has one home, `opening_size_mm`, which the physics uses
-too. Pre-software is the board's signal raw everywhere in the opening; post-software runs it
-through the Display's white balance, contrast and gamma, as the look patterns.
+`target_modules`). The picture's size has one home, `_profile_size_mm`, which the physics uses too.
+Pre-software is the board's signal raw everywhere in the picture; post-software runs it through the
+Display's white balance, contrast and gamma, as the look patterns.
 """
 
 from __future__ import annotations
 
 import itertools
 import math
-from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal
 
@@ -56,7 +59,8 @@ from contracts.calibration_target import (
     screen_columns,
 )
 from contracts.colour import srgb_to_linear
-from contracts.frame_fit import Corners, OutputSize, cover_rectangle
+from contracts.display_turn import TURNS, DisplayTurn, wayland_transform
+from contracts.frame_fit import Placement
 from contracts.frame_lighting import (
     SHEET_WHITENESS,
     AtFull,
@@ -69,7 +73,7 @@ from contracts.frame_lighting import (
 )
 from contracts.kelvin import kelvin_white
 from contracts.lut import LUT_GRID, lut_offset
-from contracts.models import CornersFit, CoverFit, FrameProfile, PhotoCrop
+from contracts.models import FrameProfile, PhotoCrop
 from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
 from contracts.photo_crop import CENTRED, crop_window
@@ -90,43 +94,6 @@ Matrix = tuple[float, float, float, float, float, float, float, float, float]
 Linear = tuple[float, float, float]     # linear-light RGB, each 0..1
 
 
-def _solve(rows: list[list[float]]) -> tuple[float, ...]:
-    for column in range(len(rows)):
-        pivot = max(range(column, len(rows)), key=lambda i: abs(rows[i][column]))
-        rows[column], rows[pivot] = rows[pivot], rows[column]
-        scale = rows[column][column]
-        if abs(scale) < 1e-12:
-            raise ValueError("singular homography")
-        rows[column] = [v / scale for v in rows[column]]
-        for index, row in enumerate(rows):
-            if index != column:
-                factor = row[column]
-                rows[index] = [a - factor * b for a, b in zip(row, rows[column], strict=True)]
-    return tuple(row[-1] for row in rows)
-
-
-def homography(corners: Sequence[tuple[float, float]]) -> Matrix:
-    """Unit square -> TL, TR, BR, BL, both in top-left screen coordinates."""
-    if len(corners) != 4 or not all(math.isfinite(v) for p in corners for v in p):
-        raise ValueError("four finite corners required")
-    rows = []
-    for (x, y), (u, v) in zip(((0, 0), (1, 0), (1, 1), (0, 1)), corners, strict=True):
-        rows.extend(([x, y, 1, 0, 0, 0, -u*x, -u*y, u],
-                     [0, 0, 0, x, y, 1, -v*x, -v*y, v]))
-    return (*_solve(rows), 1.0)
-
-
-def inverse(matrix: Matrix) -> Matrix:
-    a, b, c, d, e, f, g, h, i = matrix
-    cofactors = (e*i-f*h, c*h-b*i, b*f-c*e,
-                 f*g-d*i, a*i-c*g, c*d-a*f,
-                 d*h-e*g, b*g-a*h, a*e-b*d)
-    determinant = a*cofactors[0] + b*cofactors[3] + c*cofactors[6]
-    if not math.isfinite(determinant) or abs(determinant) < 1e-12:
-        raise ValueError("singular homography")
-    return tuple(v / determinant for v in cofactors)
-
-
 def transform(matrix: Matrix, x: float, y: float) -> tuple[float, float]:
     divisor = matrix[6]*x + matrix[7]*y + matrix[8]
     if not math.isfinite(divisor) or abs(divisor) < 1e-12:
@@ -136,19 +103,14 @@ def transform(matrix: Matrix, x: float, y: float) -> tuple[float, float]:
 
 
 # Undo a clockwise quarter turn of the picture, as a matrix on the unit square: the one home of
-# the quarter-turn rule (Corners folds it into its matrix).
+# the quarter-turn rule (the fit pass's target is the picture turned the other way,
+# `buffer_to_picture`).
 UNDO_QUARTER_TURN: dict[int, Matrix] = {
     0: (1, 0, 0, 0, 1, 0, 0, 0, 1),
     90: (0, 1, 0, -1, 0, 1, 0, 0, 1),         # (u, v) -> (v, 1-u)
     180: (-1, 0, 1, 0, -1, 1, 0, 0, 1),       # (u, v) -> (1-u, 1-v)
     270: (0, -1, 1, 1, 0, 0, 0, 0, 1),        # (u, v) -> (1-v, u)
 }
-
-
-def multiply(left: Matrix, right: Matrix) -> Matrix:
-    """The 3x3 product left x right (row-major): apply `right`, then `left`."""
-    return tuple(sum(left[3*row + k]*right[3*k + column] for k in range(3))
-                 for row in range(3) for column in range(3))
 
 
 def decode_channel(value: float, video: bool = False) -> float:
@@ -163,59 +125,6 @@ def encode_srgb(value: float) -> float:
     return 12.92*value if value <= .0031308 else 1.055*value**(1/2.4)-.055
 
 
-def compose_pixel(samples: Iterable[tuple[tuple[float, float, float, float], float, bool]]) -> tuple[float, float, float, float]:
-    """Bottom-to-top straight encoded RGBA/effective alpha/video -> opaque sRGB, with neutral
-    picture operations (`final_pixel` is the final pass).
-
-    Empty output is opaque black. Source alpha and Layer alpha multiply in linear
-    premultiplied source-over.
-    """
-    rgb = [0.0, 0.0, 0.0]
-    for rgba, opacity, video in samples:
-        if not all(math.isfinite(v) and 0 <= v <= 1 for v in (*rgba, opacity)):
-            raise ValueError("finite normalized samples required")
-        alpha = rgba[3]*opacity
-        rgb = [decode_channel(rgba[i], video)*alpha + rgb[i]*(1-alpha) for i in range(3)]
-    return (*(encode_srgb(v) for v in rgb), 1.0)
-
-
-def _cover_matrix(fit: CoverFit, output: OutputSize, aspect: float) -> Matrix:
-    """Output fractions -> picture unit square for Cover: the inverse of "rotate `rotation`
-    clockwise, scale to the cover rectangle's width and height, move to its centre", all in
-    output pixels. With the picture axes u = (cos r, sin r), v = (-sin r, cos r) (y down) and the
-    pixel point p = (x W, y H): u = (p - centre).u_axis / width + 1/2, likewise v with height."""
-    rectangle = cover_rectangle(fit.corners, fit.rotation, output, aspect)
-    width_px, height_px = output
-    turn = math.radians(rectangle.rotation)
-    cos, sin = math.cos(turn), math.sin(turn)
-    cx, cy = rectangle.centre_x, rectangle.centre_y
-    w, h = rectangle.width, rectangle.height
-    return (cos*width_px/w, sin*height_px/w, .5 - (cx*cos + cy*sin)/w,
-            -sin*width_px/h, cos*height_px/h, .5 + (cx*sin - cy*cos)/h,
-            0.0, 0.0, 1.0)
-
-
-def output_to_picture(fit: CornersFit | CoverFit, output: OutputSize, aspect: float) -> Matrix:
-    """The one matrix of a fit: output fractions (x, y) -> the picture's unit square (u, v), origin
-    top-left, for a Frame whose profile has width-to-height `aspect` (Cover's rectangle has it;
-    Corners stretches the picture onto the corners whatever it is). Pure. ValueError("singular
-    homography") for a degenerate Corners fit; contracts/frame_fit.py's for a bad Cover one."""
-    if isinstance(fit, CoverFit):
-        return _cover_matrix(fit, output, aspect)
-    return multiply(UNDO_QUARTER_TURN[fit.rotation], inverse(homography(fit.corners)))
-
-
-def inside_opening(corners: Corners, x: float, y: float) -> bool:
-    """Whether output point (x, y) lies in the convex opening (edges included): the per-Frame mask,
-    by half-planes. Pure. The corners turn clockwise in y-down coordinates (convex_clockwise), so
-    a point is inside when it lies on the inner (non-negative cross product) side of every edge."""
-    for index, (ax, ay) in enumerate(corners):
-        bx, by = corners[(index + 1) % 4]
-        if (bx - ax)*(y - ay) - (by - ay)*(x - ax) < 0:
-            return False
-    return True
-
-
 def photo_rect(frame_aspect: float, source_width: int, source_height: int,
                crop: PhotoCrop) -> tuple[float, float, float, float]:
     """The photo's source UV rectangle (left, top, right, bottom): the window `crop` names for
@@ -224,24 +133,8 @@ def photo_rect(frame_aspect: float, source_width: int, source_height: int,
     return crop_window(crop, source_width, source_height, frame_aspect)
 
 
-def picture_source_uv(x: float, y: float, fit: CornersFit | CoverFit, output: OutputSize, profile_aspect: float,
-                      source_width: int, source_height: int,
-                      crop: PhotoCrop) -> tuple[float, float] | None:
-    """The source UV one Frame samples at output point (x, y); None outside its opening or its
-    picture. The per-Frame mask (the opening) comes first, so a Frame never
-    draws over its neighbour, then the picture's unit square. The photo is cropped to the Frame
-    profile's aspect (`profile_aspect`), in either fit, at the window `crop` names (`photo_rect`)."""
-    if not inside_opening(fit.corners, x, y):
-        return None
-    u, v = transform(output_to_picture(fit, output, profile_aspect), x, y)
-    if not (0 <= u <= 1 and 0 <= v <= 1):
-        return None
-    left, top, right, bottom = photo_rect(profile_aspect, source_width, source_height, crop)
-    return left + u*(right-left), top + v*(bottom-top)
-
-
 # -- The physics' shared rules: luminance, a light's colour, the rolloff's curve, the mat's
-# edge and the paper profile's LUT. Each is stated once here and mirrored by player/native.py's final pass.
+# edge and the paper profile's LUT. Each is stated once here and mirrored by player/look_shader.py `LOOK_GLSL`.
 
 LUMA: Final[Linear] = (0.2126, 0.7152, 0.0722)    # Rec. 709 linear luminance: a light's colour at luminance 1
 LIGHT_ELEVATION_MIN_DEGREES: Final = 1.0            # a soft far light's lower edge never reaches the wall plane
@@ -324,9 +217,9 @@ BLACK_LEVEL_PATCH: Final = 0.6    # the lit share of a Black level cell, in u an
 
 
 def pattern_signal(pattern: TestPattern, u: float, v: float) -> Linear:
-    """The pattern's ENCODED signal (0..1 per channel, equal channels) at (u, v) in the Frame's
-    opening: u, v = transform(inverse(homography(fit.corners)), x, y), the opening's own unit square
-    (the mat's `to_opening`), so the pattern turns with the Frame; u and v are clamped to 0..1.
+    """The pattern's ENCODED signal (0..1 per channel, equal channels) at the Frame's picture point
+    (u, v), 0..1 across and down the picture as it hangs, so the pattern hangs with the Frame
+    whatever its screen's turn; u and v are clamped to 0..1.
     WHITE: 1. GREY_RAMP: v < 0.5, GREY_RAMP_STEPS equal steps across u, step i = i /
     (GREY_RAMP_STEPS - 1); v >= 0.5, a smooth ramp, u. BLACK_LEVEL: 0, except in the middle third
     (1/3 <= v < 2/3) where u splits into BLACK_LEVEL_STEPS equal cells and the middle
@@ -359,9 +252,9 @@ def pattern_signal(pattern: TestPattern, u: float, v: float) -> Linear:
 @dataclass(frozen=True)
 class BoardDraw:
     """What one Frame needs to draw a calibration target v2 (decision 0027). `aspect`: its
-    opening's physical long side over its short side (>= 1; `opening_size_mm`); `portrait`: the
-    opening is taller than wide, so the board is turned a quarter clockwise (its top at the
-    opening's right); `modules`: the QR naming the port's picture change
+    picture's physical long side over its short side (>= 1; `_profile_size_mm`); `portrait`: the
+    picture is taller than wide, so the board is turned a quarter clockwise (its top at the
+    picture's right); `modules`: the QR naming the port's picture change
     (player/calibration_target.py `target_modules`), None while there is no code (no player id
     yet, or a post-software look not on screen): every QR square then draws light."""
     aspect: float
@@ -374,15 +267,8 @@ class BoardDraw:
         return screen_columns(self.aspect)
 
 
-def board_draw(fit: CornersFit | CoverFit, profile: FrameProfile, modules: QrModules | None) -> BoardDraw:
-    """The BoardDraw of a Frame's opening: (W, H) = `opening_size_mm`(fit, profile); aspect
-    max(W, H) / min(W, H); portrait when W < H. Pure."""
-    width, height = opening_size_mm(fit, profile)
-    return BoardDraw(max(width, height) / min(width, height), width < height, modules)
-
-
 def board_point(u: float, v: float, draw: BoardDraw) -> tuple[float, float]:
-    """The screen board's point (column, row), in squares, at the opening's unit-square (u, v).
+    """The screen board's point (column, row), in squares, at the picture's point (u, v).
     With n = draw.aspect * SCREEN_ROWS squares along the long side and the board's draw.columns
     centred on it (offset (n - columns) / 2): landscape, (u * n - offset, v * SCREEN_ROWS);
     portrait, turned a quarter clockwise, (v * n - offset, (1 - u) * SCREEN_ROWS). Points outside
@@ -400,8 +286,8 @@ def board_signal(column: float, row: float, draw: BoardDraw) -> float:
     of a copy of qr_copies(draw.columns), the module there (dark 0.0; light and the
     QR_QUIET_MODULES quiet zone 1.0; all 1.0 when draw.modules is None), the modules and their
     quiet zone scaled to fill QR_SQUARES; else board_raster(SCREEN)'s pixel at
-    (floor(column * SQUARE_PX), floor(row * SQUARE_PX)) over 255. Pure; the shader's
-    `board_signal` mirrors it (tests/native_renderer_pixel_harness.py)."""
+    (floor(column * SQUARE_PX), floor(row * SQUARE_PX)) over 255. Pure; player/pattern_pass.py's
+    `board_signal` mirrors it (tests/native_fit_pass_harness.py)."""
     if not (0 <= column < draw.columns and 0 <= row < SCREEN_ROWS):
         return 0.0
     for copy in qr_copies(draw.columns):
@@ -417,32 +303,31 @@ def board_signal(column: float, row: float, draw: BoardDraw) -> float:
     return raster.pixels[math.floor(row * SQUARE_PX) * raster.width + math.floor(column * SQUARE_PX)] / 255
 
 
-def opening_size_mm(fit: CornersFit | CoverFit, profile: FrameProfile) -> tuple[float, float]:
-    """The opening's physical extent along its unit square's u and v, in mm: diag_mm =
-    diagonal_inches*25.4, a = width_px/height_px, W = diag_mm*a/hypot(a,1), H = diag_mm/hypot(a,1);
-    (W, H) when the nearest quarter turn of fit.rotation (round(rotation / 90) * 90) is 0 or 180,
-    else (H, W). The one home of this rule: `mat_shadow`'s size_mm is it. Pure."""
+def _profile_size_mm(profile: FrameProfile) -> tuple[float, float]:
+    """The Frame profile's own (W, H) in mm, as it hangs: diag_mm = diagonal_inches*25.4, a =
+    width_px/height_px, W = diag_mm*a/hypot(a,1), H = diag_mm/hypot(a,1). The one home of the
+    picture's physical size (a screen's turn turns the screen, not the wall): the lights' `size_mm`
+    and the board's aspect are it. Pure."""
     diagonal = profile.diagonal_inches * 25.4
     aspect = profile.width_px / profile.height_px
-    width, height = diagonal * aspect / math.hypot(aspect, 1), diagonal / math.hypot(aspect, 1)
-    quarter = round(fit.rotation / 90) * 90
-    return (width, height) if quarter % 180 == 0 else (height, width)
+    return diagonal * aspect / math.hypot(aspect, 1), diagonal / math.hypot(aspect, 1)
 
 
 def final_pixel(photo: Linear, operations: PictureOperations, *, inside: bool, lights: FrameLights | None,
                 x: float, y: float, lut: bytes | None = None, opening_uv: tuple[float, float] | None = None,
                 board: BoardDraw | None = None,
                 dither_at: tuple[int, int] | None = None) -> tuple[float, float, float, float]:
-    """One output pixel's final pass, at output point (x, y) (output fractions) of a
-    Frame lit by `lights` (`frame_lights`; required when `inside`: ValueError("lights")):
+    """One pixel's final pass, at the Frame's picture point (x, y) (0..1 across and down the
+    picture as it hangs) of a Frame lit by `lights` (`picture_lights`; required when `inside`:
+    ValueError("lights")):
     the paper profile's LUT (`lut_applied`, the bytes of the Frame's `lighting.paper.profile`,
     fully, when held) -> `paper_reflectance` -> `irradiance` -> `paper_signal` (the Display's light:
     operations.light) -> `highlight_rolled` at
     lights.peak -> x rgb_multipliers -> sRGB encode -> contrast about 0.5 -> gamma exponent -> clamp
-    -> `dithered` at `dither_at` (an output pixel; None: no dither, for an oracle) -> the per-Output
-    mask LAST: (0, 0, 0, 1) when not `inside` any Frame's opening.
+    -> `dithered` at `dither_at` (an output pixel; None: no dither, for an oracle) -> the mask
+    LAST: (0, 0, 0, 1) when not `inside` the Frame.
 
-    Test patterns: WHITE and GREY_RAMP (`pattern_signal` at `opening_uv`, the opening's unit square)
+    Test patterns: WHITE and GREY_RAMP (`pattern_signal` at `opening_uv`, the picture's point)
     and TARGET_POST_SOFTWARE (s = board_signal(*board_point(*opening_uv, board), board)) replace
     the photo's signal with srgb_to_linear of theirs and go through white balance, contrast, gamma,
     the clamp and the dither only, never the room's light, the paper or the mat. BLACK_LEVEL and
@@ -497,33 +382,14 @@ def display_steps(signal: Linear, operations: PictureOperations) -> Linear:
     return tuple(pixel)
 
 
-def output_pixel(x: float, y: float,
-                 frames: Sequence[tuple[CornersFit | CoverFit, float, Linear, FrameLights | None]],
-                 operations: PictureOperations, output: OutputSize) -> tuple[float, float, float, float]:
-    """The reference for one Output carrying several Frames, each a fit, its profile's aspect, one
-    flat linear colour and its lights (`frame_lights`): the colour of the last Frame whose opening
-    holds (x, y), black where none does, through `final_pixel` with `inside` = some opening holds it
-    and that covering Frame's lights. Pure; the two-Frames test's oracle, for operations without a
-    test pattern (`final_pixel` needs the opening's uv for one). Each Frame's coverage is where it
-    samples its picture (`picture_source_uv`), so the per-Frame mask decides what a Frame paints;
-    the per-Output mask is the union of the openings."""
-    colour: Linear = (0.0, 0.0, 0.0)
-    lights: FrameLights | None = None
-    for fit, aspect, flat, frame_lit in frames:
-        if picture_source_uv(x, y, fit, output, aspect, 1, 1, CENTRED) is not None:
-            colour, lights = flat, frame_lit
-    inside = any(inside_opening(fit.corners, x, y) for fit, _, _, _ in frames)
-    return final_pixel(colour, operations, inside=inside, lights=lights, x=x, y=y)
-
-
-# ---- Room light: one physics path, the scalar reference player/native.py mirrors ----
+# ---- Room light: one physics path, the scalar reference player/look_shader.py mirrors ----
 
 HIGHLIGHT_KNEE: Final = 0.8         # the fixed rolloff's knee, in signal (a share of the TV's white)
 NO_LIGHT: Final[Linear] = (0.0, 0.0, 0.0)
 # The 4 x 4 ordered dither (Bayer): the threshold rank at row y % 4, column x % 4. The shader's copy
-# is written in from here (player/native.py `_FINAL_CONSTANTS`).
+# is written in from here (player/look_shader.py).
 BAYER_4: Final = (0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5)
-# The shader's light kind codes (player/native.py writes them in).
+# The shader's light kind codes (player/look_shader.py writes them in).
 LIGHT_KINDS: Final = ("wash", "far", "close")
 LightKind = Literal["wash", "far", "close"]
 
@@ -531,8 +397,7 @@ LightKind = Literal["wash", "far", "close"]
 @dataclass(frozen=True)
 class LitLight:
     """One Frame light as the final pass draws it (the shader's uniform arrays), in mat space: the
-    opening's own rectangle at its physical size, mm, x along its unit square's u, y along v (down
-    for an opening drawn level)."""
+    picture's own rectangle at its physical size, mm, x along its u, y along its v (down the wall)."""
     kind: LightKind
     rgb: Linear                                 # `light_on_frame`: rgb lux on the Frame (at its centre, close)
     toward: tuple[float, float] = (0.0, 0.0)    # far: unit vector toward the light (mat axes)
@@ -544,13 +409,11 @@ class LitLight:
 @dataclass(frozen=True)
 class FrameLights:
     """One Frame's lights resolved against one room-lights document, as the final pass uses them
-    (the shader's uniforms): `to_opening` (output fractions -> the opening's unit square,
-    inverse(homography(fit.corners))), the opening's physical `size_mm` (`opening_size_mm`), the
+    (the shader's uniforms): the picture's physical `size_mm` (`_profile_size_mm`), the
     mat's `depth_mm`, the `paper`, each light that adds light (`lights`, at most FRAME_LIGHTS_MAX;
     one adding none is left out) and the Frame's `peak`: its paper white's brightest signal over the
     opening (`_brightest_white`), the same for every pixel of the Frame, so the rolloff keeps the
     cone's shape."""
-    to_opening: Matrix
     size_mm: tuple[float, float]
     depth_mm: float
     paper: Paper
@@ -608,28 +471,19 @@ def _white(lux: float, kelvin: int) -> Linear:
     return tuple(lux * channel for channel in light_colour(kelvin))
 
 
-def _to_mat(across: float, up: float, quarter: int) -> tuple[float, float]:
-    """A wall offset (across: + right, up: + up) as a mat-space offset: the wall's up is mat space's
-    -y for an opening at quarter 0, turned clockwise by the Frame's quarter turn (as a far light's
-    `toward`)."""
-    turn = math.radians(quarter)
-    x, y = across, -up
-    return (x * math.cos(turn) - y * math.sin(turn), x * math.sin(turn) + y * math.cos(turn))
-
-
-def _lit(light: WashLight | FarLight | CloseLight, rgb: Linear, depth: float, quarter: int,
-         size: tuple[float, float]) -> LitLight:
-    """`light` in mat space."""
+def _lit(light: WashLight | FarLight | CloseLight, rgb: Linear, depth: float, size: tuple[float, float]) -> LitLight:
+    """`light` in mat space: a far light's `toward` = (sin a, -cos a), a = from_degrees, its band
+    (depth cot(min(90, steep + softness/2)), depth cot(max(LIGHT_ELEVATION_MIN_DEGREES, steep -
+    softness/2))); a close light's place from the picture's centre, the wall's up mat space's -y."""
     if isinstance(light, WashLight):
         return LitLight("wash", rgb)
     if isinstance(light, FarLight):
-        turn = math.radians(light.from_degrees + quarter)
+        turn = math.radians(light.from_degrees)
         half = light.softness_degrees / 2
         return LitLight("far", rgb, toward=(math.sin(turn), -math.cos(turn)), band_mm=(
             depth * _cot(min(90, light.steep_degrees + half)),
             depth * _cot(max(LIGHT_ELEVATION_MIN_DEGREES, light.steep_degrees - half))))
-    dx, dy = _to_mat(light.across_mm, light.up_mm, quarter)
-    return LitLight("close", rgb, position_mm=(size[0] / 2 + dx, size[1] / 2 + dy, light.out_mm),
+    return LitLight("close", rgb, position_mm=(size[0] / 2 + light.across_mm, size[1] / 2 - light.up_mm, light.out_mm),
                     beam=(math.radians(light.inner_beam_degrees) / 2, math.radians(light.outer_beam_degrees) / 2))
 
 
@@ -650,27 +504,6 @@ def _brightest_white(lights: tuple[LitLight, ...], size: tuple[float, float], de
     white = (paper.whiteness,) * 3
     return max((max(paper_signal(white, _irradiance_at(lights, point, size, depth), display)) for point in points),
                default=0.0)
-
-
-def frame_lights(lighting: FrameLighting, document: RoomLightsDocument | None,
-                 fit: CornersFit | CoverFit, profile: FrameProfile, display: DisplayLight) -> FrameLights:
-    """`lighting`'s lights against `document` (None: none received yet, so every light adds none),
-    in the opening's mat space at its physical size (`opening_size_mm`), with the Frame's peak: the
-    paper white's brightest signal over the opening (`_brightest_white`). quarter = the nearest quarter
-    turn of fit.rotation; a far light's `toward` = (sin a, -cos a), a = from_degrees + quarter, its
-    band (depth cot(min(90, steep + softness/2)), depth cot(max(LIGHT_ELEVATION_MIN_DEGREES, steep -
-    softness/2))); a close light's place `_to_mat` from the opening's centre. Pure."""
-    size = opening_size_mm(fit, profile)
-    quarter = round(fit.rotation / 90) * 90
-    lights = []
-    for light in lighting.lights:
-        entry = None if document is None else document.lights.get(light.light)
-        rgb = light_on_frame(light, entry)
-        if max(rgb) > 0:
-            lights.append(_lit(light, rgb, lighting.mat_depth_mm, quarter, size))
-    lit = tuple(lights)
-    return FrameLights(inverse(homography(fit.corners)), size, lighting.mat_depth_mm, lighting.paper, lit,
-                       _brightest_white(lit, size, lighting.mat_depth_mm, lighting.paper, display))
 
 
 def _smoothstep(t: float) -> float:
@@ -722,12 +555,11 @@ def _close_shape(lit: LitLight, point: tuple[float, float], size: tuple[float, f
 
 
 def irradiance(lights: FrameLights, x: float, y: float) -> Linear:
-    """E at output point (x, y), rgb lux: the sum over the Frame's lights of light_on_frame x shape x
-    reaches, at m = transform(to_opening, x, y) x size_mm. Shape: 1 for wash and far; for close,
-    `_close_shape`. Reaches: `_reached` (the mat shadow). No floor: the brightness follows the room
-    down. Pure."""
-    u, v = transform(lights.to_opening, x, y)
-    return _irradiance_at(lights.lights, (u * lights.size_mm[0], v * lights.size_mm[1]), lights.size_mm,
+    """E at the picture's point (x, y) (0..1 across and down the picture as it hangs), rgb lux: the
+    sum over the Frame's lights of light_on_frame x shape x reaches, at m = (x, y) x size_mm. Shape:
+    1 for wash and far; for close, `_close_shape`. Reaches: `_reached` (the mat shadow). No floor:
+    the brightness follows the room down. Pure."""
+    return _irradiance_at(lights.lights, (x * lights.size_mm[0], y * lights.size_mm[1]), lights.size_mm,
                           lights.depth_mm)
 
 
@@ -781,3 +613,89 @@ def dithered(encoded: float, x: int, y: int) -> float:
     steps): ((BAYER_4[(y % 4) * 4 + x % 4] + 0.5) / 16 - 0.5) / 255. Its mean over any 4 x 4 tile is
     `encoded`; the shader uses the same pattern. Pure."""
     return encoded + ((BAYER_4[(y % 4) * 4 + x % 4] + .5) / 16 - .5) / 255
+
+
+# The fit pass's scalar reference (render redesign, run ledger .claude/runs/render-planes/s1-page.md):
+# one picture finished at its finish size (player/planes.py), as it hangs and turned for its screen, the look
+# applied once (player/fit_pass.py holds its shader to these within one level).
+
+def buffer_to_picture(x: float, y: float, size: tuple[int, int], turn: DisplayTurn) -> tuple[float, float]:
+    """A point (x, y) of a fit pass target laid out `size` = (width, height) pixels (pixel centres at
+    +0.5, y down) as the picture's own (u, v), each 0..1 across the picture as it hangs, upright: the
+    target is the picture turned for a screen hung `turn` degrees clockwise (contracts/display_turn.py),
+    so the screen's matching buffer transform shows it upright. ValueError("display_turn") for any
+    other turn. Pure.
+
+    The target holds the picture turned `turn` degrees counter-clockwise (a screen hung turned 90
+    degrees clockwise has its top edge on the viewer's right), so this undoes a clockwise quarter
+    turn of 360 - `turn` (`UNDO_QUARTER_TURN`) on the target's fractions (x / width, y / height)."""
+    width, height = size
+    back = TURNS[-wayland_transform(turn) % len(TURNS)]
+    return transform(UNDO_QUARTER_TURN[back], x / width, y / height)
+
+
+def fit_source_uv(u: float, v: float, aspect: float, source: tuple[int, int],
+                  crop: PhotoCrop | None) -> tuple[float, float]:
+    """The picture point (u, v) as the source's texture coordinates (0..1, origin top-left): the
+    window `crop_window(crop or CENTRED, *source, aspect)` (contracts/photo_crop.py) stretched over the
+    picture. Pure."""
+    left, top, right, bottom = photo_rect(aspect, *source, crop or CENTRED)
+    return left + u*(right-left), top + v*(bottom-top)
+
+
+def picture_lights(lighting: FrameLighting, document: RoomLightsDocument | None, profile: FrameProfile,
+                   display: DisplayLight) -> FrameLights:
+    """`lighting`'s lights against `document` (None: none received yet, so every light adds none), in
+    the picture's mat space at its physical size (`_profile_size_mm`; a screen's turn turns the
+    screen, not the wall), each light that adds light (`_lit`), with the Frame's peak: the paper
+    white's brightest signal over the picture (`_brightest_white`). Pure."""
+    size = _profile_size_mm(profile)
+    lights = []
+    for light in lighting.lights:
+        entry = None if document is None else document.lights.get(light.light)
+        rgb = light_on_frame(light, entry)
+        if max(rgb) > 0:
+            lights.append(_lit(light, rgb, lighting.mat_depth_mm, size))
+    lit = tuple(lights)
+    return FrameLights(size, lighting.mat_depth_mm, lighting.paper, lit,
+                       _brightest_white(lit, size, lighting.mat_depth_mm, lighting.paper, display))
+
+
+# The pattern pass's scalar reference (render redesign S3, run ledger .claude/runs/render-planes/
+# s3-page.md, bead B2): a Frame's pattern drawn into its screen's ground, in the Frame's picture as it
+# hangs (player/pattern_pass.py holds its shader to these within one level).
+
+def placement_uv(x: float, y: float, placement: Placement, screen: tuple[int, int]) -> tuple[float, float] | None:
+    """The screen point (x, y), fractions 0..1 of a screen `screen` = (width, height) pixels as it
+    hangs, as the Frame's picture point (u, v) when it lies in `placement` (left and top edges in,
+    right and bottom out): u = (x * width - placement.x) / placement.width, v likewise down; None
+    outside. Pure."""
+    width, height = screen
+    u = (x * width - placement.x) / placement.width
+    v = (y * height - placement.y) / placement.height
+    return (u, v) if 0 <= u < 1 and 0 <= v < 1 else None
+
+
+GRID_SLATE: Final[Linear] = (0.2, 0.3, 0.45)     # the commissioning grid's ground, linear light
+GRID_LINE: Final[Linear] = (0.9, 0.9, 0.9)       # its lines
+GRID_LINES: Final = 10                           # lines across the picture, each way
+GRID_LINE_WIDTH: Final = 0.035                   # a line's share of the space between two lines
+
+
+def commissioning_grid(u: float, v: float) -> Linear:
+    """Position's commissioning grid at the Frame's picture point (u, v), in linear light: slate
+    GRID_SLATE (0.2, 0.3, 0.45) with light lines GRID_LINE (0.9, 0.9, 0.9) where fract(GRID_LINES u)
+    or fract(GRID_LINES v) < GRID_LINE_WIDTH (10 and 0.035, in the picture's unit square). The photo a commissioning ground passes through
+    `final_pixel`. Pure; player/pattern_pass.py's shader is written from these constants."""
+    def fract(value: float) -> float:
+        return value - math.floor(value)
+    if fract(u * GRID_LINES) < GRID_LINE_WIDTH or fract(v * GRID_LINES) < GRID_LINE_WIDTH:
+        return GRID_LINE
+    return GRID_SLATE
+
+
+def picture_board(profile: FrameProfile, modules: QrModules | None) -> BoardDraw:
+    """The BoardDraw of a Frame's picture: (W, H) its physical size (`_profile_size_mm`; a screen's
+    turn turns the screen, not the wall), aspect max(W, H) / min(W, H), portrait when W < H. Pure."""
+    width, height = _profile_size_mm(profile)
+    return BoardDraw(max(width, height) / min(width, height), width < height, modules)

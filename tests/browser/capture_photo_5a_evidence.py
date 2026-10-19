@@ -251,12 +251,11 @@ def _matted_living_room(registry):
     from support.position import save_position
     from test_registry import enroll
 
-    from contracts.models import Calibration, CoverFit
+    from contracts.models import Calibration, RectangleFit
 
     player, _key, _request = enroll(registry, count=1, size=(3840, 2160))
     registry.bind("living-room", player["player_id"], "HDMI-A-1", expected_generation=0)
-    save_position(registry, "living-room", Calibration(fit=CoverFit(
-        corners=((0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75)))))
+    save_position(registry, "living-room", Calibration(fit=RectangleFit(width=0.5)))
 
 
 def _board(within, name):
@@ -415,12 +414,11 @@ def test_followup_frame_position_draft(page, registry, scheme, suffix):
             expect(photos.get_by_text(re.compile(r"\d+ of \d+ fit")).locator("visible=true").first).to_be_visible()
             expect(photos.locator("[aria-busy=true]")).to_have_count(0)
             _top_shot(page, f"followup-frame-overview-bound{suffix}", scheme)
-            position = open_frame(page, BOUND, "position").get_by_role("region", name="Position", exact=True)
+            position = open_frame(page, BOUND, "position").get_by_role("region", name="Where the picture sits on the screen", exact=True)
             expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
             position.get_by_role("button", name="Exact values", exact=True).click()
-            for label, value in (("Top-left x", "480"), ("Bottom-left x", "480"), ("Top-right x", "1440"),
-                                 ("Bottom-right x", "1440"), ("Top-left y", "270"), ("Top-right y", "270"),
-                                 ("Bottom-right y", "810"), ("Bottom-left y", "810")):
+            # A centred 960 x 540 opening on the 1920 x 1080 screen.
+            for label, value in (("Centre across", "960"), ("Centre down", "540"), ("Width in pixels", "960")):
                 position.get_by_label(label, exact=True).fill(value)
             expect(position.get_by_role("button", name=re.compile(rf"^2 of 2 fit {BOUND}"))).to_be_visible()
             _top_shot(page, f"followup-frame-position-draft{suffix}", scheme)

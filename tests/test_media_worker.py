@@ -33,7 +33,7 @@ from contracts.models import FrameProfile
 from contracts.time import Clock
 from media.library_client import FaceBox, FetchedRendition, LibraryUnavailable
 from media.models import MediaError
-from media.prepare import BuildIdentity, PreparationRecipe, PreparedMedia
+from media.prepare import BuildIdentity, PreparedMedia, StillRecipe
 from media.task_queue import (
     ProcrastinateCheckQueue,
     RetryableMediaTask,
@@ -140,9 +140,9 @@ def library_store(clock):
     library = FakeLibraryStore(clock)
     library.add_connection("fixture", "https://immich.invalid/api", SECRET)
     library.outputs = (
-        FrameOutput(frame_id="hall", profile=PORTRAIT, output_px=(1080, 1920),
+        FrameOutput(frame_id="hall", profile=PORTRAIT, turn=0, output_px=(1080, 1920),
                     display_px=(1080, 1920)),
-        FrameOutput(frame_id="lounge", profile=PORTRAIT, output_px=None, display_px=None))
+        FrameOutput(frame_id="lounge", profile=PORTRAIT, turn=0, output_px=None, display_px=None))
     return library
 
 
@@ -196,7 +196,7 @@ def test_a_planned_photo_is_fetched_for_its_recipes_need_prepared_and_recorded(
     assert plan == ("preview", "original")   # a JPEG original (the copy ladder)
     assert isinstance(preparer.prepared[0], LibraryAsset)
     # One copy for the wall (follow-up S1): the 1080 x 1920 Frame's need is the 1920 step.
-    assert preparer.recipes == [PreparationRecipe(image_long_edge=1920)]
+    assert preparer.recipes == [StillRecipe(long_edge=1920)]
     assert [(copy.name, copy.width) for copy in
             instance.library.copy_sizes(picture.asset_id).values()] == [("preview", 810)]
     assert (facts.sha256, facts.size, facts.made_from) == (

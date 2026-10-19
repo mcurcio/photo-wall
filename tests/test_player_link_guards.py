@@ -27,6 +27,7 @@ from test_player_service import (
 from test_player_uplink_faults import _BrokenBody
 from uplink_fakes import FakeTransport, central, finding, located
 
+from contracts.enrollment import OutputReport
 from player.central_link import Session
 from player.service import (
     PlayerConfig,
@@ -395,8 +396,8 @@ def test_without_a_cmdline_the_saved_root_is_validated_and_used(tmp_path, monkey
 
 
 def test_main_reads_the_kernel_command_line_before_anything_else(tmp_path, monkeypatch, caplog):
-    """main()'s pre-GTK step resolves the real cmdline: an invalid photowall.central exits 1
-    before identity, outputs or GTK. A main that ignored the cmdline would go on past it."""
+    """main()'s first step resolves the real cmdline: an invalid photowall.central exits 1
+    before identity, outputs or the renderer. A main that ignored the cmdline would go on past it."""
     cmdline = tmp_path / "cmdline"
     cmdline.write_text("photowall.central=ftp://nowhere\n")
     config = tmp_path / "public.json"
@@ -442,11 +443,53 @@ def test_a_cmdline_root_wins_over_any_malformed_saved_value(tmp_path, monkeypatc
     assert (excinfo.value.cause, excinfo.value.reason) == (Cause.CONFIGURATION, "invalid")
 
 
-def _main_until_the_loop(tmp_path, monkeypatch, *, saved) -> list[str]:
+class _Screens:
+    """The renderer root's screens: Weston has announced HDMI-A-1 at 3840 x 2160."""
+
+    fd = 0
+
+    def __init__(self, *, socket=None):
+        pass
+
+    def dispatch(self):
+        pass
+
+    def mode(self, output_id):
+        return {"HDMI-A-1": (3840, 2160)}.get(output_id)
+
+    def close(self):
+        pass
+
+
+class _Part:
+    """Any other part of the renderer root (player/renderer_root.py), made and closed."""
+
+    gl = renderer = None
+
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    def close(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def wake(self):
+        pass
+
+
+DISCOVERED = (OutputReport(output_id="HDMI-A-1", width_px=0, height_px=0, connected=True),
+              OutputReport(output_id="HDMI-A-2", width_px=0, height_px=0, connected=False))
+
+
+def _main_until_the_loop(tmp_path, monkeypatch, *, saved) -> tuple[list[str], list]:
     """Runs main() with the cmdline naming Central and `saved` as central_origin, past every
-    pre-GTK step, with GLib, outputs, the boot context and the service thread stubbed. Returns
-    the order in which main started the service and ran the loop."""
+    step before the loop, with GLib, the discovered Outputs, the renderer root's parts, the boot
+    context and the service thread stubbed. Returns the order in which main started the service,
+    ran the loop and closed the renderer root, and the services it started."""
     events: list[str] = []
+    started: list = []
 
     class Loop:
         def run(self):
@@ -460,7 +503,6 @@ def _main_until_the_loop(tmp_path, monkeypatch, *, saved) -> list[str]:
     repository = types.ModuleType("gi.repository")
     repository.GLib = glib
     gi = types.ModuleType("gi")
-    gi.require_version = lambda *_: None
     gi.repository = repository
     monkeypatch.setitem(sys.modules, "gi", gi)
     monkeypatch.setitem(sys.modules, "gi.repository", repository)
@@ -468,8 +510,17 @@ def _main_until_the_loop(tmp_path, monkeypatch, *, saved) -> list[str]:
     monkeypatch.setattr("player.service.load_identity", lambda: "identity")
     monkeypatch.setattr("player.service.hardware_boot_context", lambda: None)
     monkeypatch.setattr("player.service.discover_outputs",
-                        lambda: types.SimpleNamespace(outputs=(), fault=None))
-    monkeypatch.setattr(PlayerService, "start", lambda self: events.append("start"))
+                        lambda: types.SimpleNamespace(outputs=DISCOVERED, fault=None))
+    for name in ("Gpu", "FitPass", "PatternPass", "PlaneRenderer", "FrameLoop"):
+        monkeypatch.setattr(f"player.renderer_root.{name}", _Part)
+    monkeypatch.setattr("player.renderer_root.PlaneScreens", _Screens)
+    monkeypatch.setattr("player.renderer_root.RendererRoot.close", lambda self: events.append("close"))
+
+    def start(service):
+        events.append("start")
+        started.append(service)
+
+    monkeypatch.setattr(PlayerService, "start", start)
     cmdline = tmp_path / "cmdline"
     cmdline.write_text(f"console=ttyAMA0 photowall.central={CMDLINE} quiet\n")
     monkeypatch.setattr("player.service.KERNEL_COMMAND_LINE", cmdline)
@@ -478,13 +529,24 @@ def _main_until_the_loop(tmp_path, monkeypatch, *, saved) -> list[str]:
                                   "ca_file": str(tls.write_bundle(tmp_path / "ca.pem", tls.CA))}))
     monkeypatch.setattr(sys, "argv", ["player", "--config", str(config)])
     player_main()
-    return events
+    return events, started
+
+
+def test_main_enrolls_each_output_with_its_mode_as_built(tmp_path, monkeypatch):
+    """S2's erratum: a Pi enrolled 0 x 0. main builds the renderer root before the service, and the
+    service enrolls (PlayerService.enroll sends `outputs`) with the modes Weston announced; an
+    Output not connected stays 0 x 0. The root closes once the loop ends."""
+    events, (service,) = _main_until_the_loop(tmp_path, monkeypatch, saved=None)
+    assert service.outputs == (
+        OutputReport(output_id="HDMI-A-1", width_px=3840, height_px=2160, connected=True), DISCOVERED[1])
+    assert service.last_fault is None
+    assert events == ["start", "loop", "close"]
 
 
 @pytest.mark.parametrize("saved", [MALFORMED_SAVED["list"], MALFORMED_SAVED["long-root"]],
                          ids=["list", "long-root"])
 def test_main_goes_on_past_a_malformed_saved_value_when_the_cmdline_names_central(
         tmp_path, monkeypatch, saved):
-    assert _main_until_the_loop(tmp_path, monkeypatch, saved=saved) == ["start", "loop"]
+    assert _main_until_the_loop(tmp_path, monkeypatch, saved=saved)[0] == ["start", "loop", "close"]
 
 

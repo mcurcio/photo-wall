@@ -4,6 +4,7 @@ import ast
 import asyncio
 import base64
 import contextlib
+import copy
 import functools
 import hashlib
 import itertools
@@ -24,7 +25,7 @@ import pytest
 import tls_fixture as tls
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from pydantic import ValidationError
-from support.position import save_position
+from support.position import PORTRAIT_ON_WIDE, save_position
 from test_executor import binding, layer
 from uplink_fakes import FakeReply, FakeTransport, central, finding
 from websockets.datastructures import Headers
@@ -61,7 +62,6 @@ from player.service import (
     _ChunkBridge,
     _json,
     central_finder,
-    display_serial,
     load_config,
 )
 from uplink.causes import Cause, UplinkError
@@ -112,13 +112,6 @@ def test_identity_is_fresh_signed_and_never_written(tmp_path):
     assert "_key=" not in repr(first)
 
 
-def test_display_serial_accepts_only_bounded_hex():
-    assert display_serial(b"0123456789ABCDEF\x00") == "0123456789abcdef"
-    assert display_serial(b"not-a-serial") is None
-    assert display_serial(b"ff\x00injected") is None
-    assert display_serial(None) is None
-
-
 @pytest.mark.parametrize("origin", ["https://user:secret@central", "https://central/path",
     "https://central?token=x", "https://central#x", "https://central\\evil", "file:///tmp/media",
     "https://central:bad", "https://central:0", "https://central\n"])
@@ -145,7 +138,8 @@ def test_config_is_strict_bounded_public_json(tmp_path):
                               "cache_dir": str(tmp_path), "cache_bytes": 1048576}))
     assert load_config(path).central_origin == "https://central:8443/"
     for data in ({"unexpected": True}, {"cache_bytes": "1048576"}, {"allow_http": True},
-                 {"boot_context_file": "/run/photo-wall/boot.json"}):
+                 {"boot_context_file": "/run/photo-wall/boot.json"},
+                 {"decoder_limit": 4}, {"texture_budget": 512 * 1024**2}):   # the old renderer's
         with pytest.raises(ValidationError):
             PlayerConfig.model_validate({"central_origin": "https://central", **data})
     path.write_bytes(b" " * (MAX_JSON + 1))
@@ -345,7 +339,7 @@ def test_player_negotiates_before_state_and_acknowledges_ordered_v2(tmp_path):
             if request.url.path == "/v1/player/hello":
                 self.requests.append(request)
                 return httpx.Response(200, json={"authority_epoch": self.epoch,
-                    "schema": 2, "capabilities": ["identify_output"]})
+                    "schema": 2, "capabilities": []})
             return super().__call__(request)
 
         def offer(self, **kwargs):
@@ -373,27 +367,35 @@ def test_player_negotiates_before_state_and_acknowledges_ordered_v2(tmp_path):
     asyncio.run(check())
 
 
-def test_an_identify_cue_the_session_did_not_select_is_never_shown(tmp_path):
+def test_the_player_offers_no_capability_and_an_identify_cue_changes_nothing(tmp_path):
+    """s3-page decision 1: nothing shows on an Output without a Frame, so the hello offers no
+    `identify_output` (Central then refuses the console's Identify), and a cue in a State, even
+    under a selection that names it, reaches nothing."""
     async def check():
         service, server = await rig(tmp_path)
         try:
             await service.hello_protocol()
             hello = json.loads(next(request.content for request in server.requests
                                     if request.url.path == "/v1/player/hello"))
-            assert hello["schemas"] == [2]
-            assert service._control_selection.capabilities == ()
+            assert (hello["schemas"], hello["capabilities"]) == ([2], [])
+            service._control_selection = ControlSelection(
+                authority_epoch=service.registration.authority_epoch, schema=2,
+                capabilities=("identify_output",))
             service.outputs = (OutputReport(output_id="hdmi2", width_px=1920,
                                             height_px=1080, connected=True),)
             config = PlayerConfiguration(player_id=service.registration.player_id,
                 authority_epoch=service.registration.authority_epoch,
                 configuration_revision=2, bindings=(), enabled_outputs=())
-            cue = IdentifyOutput(request_id="old-central-cue", output_id="hdmi2",
+            plain = delivered(configuration=config, plan=None, commits=(), revocations=())
+            assert service._apply_state(plain) == "applied"
+            renderer = copy.deepcopy(vars(service.renderer))
+            cue = IdentifyOutput(request_id="identify-1", output_id="hdmi2",
                 authority_epoch=service.registration.authority_epoch, remaining_seconds=10)
-            state = delivered(configuration=config, plan=None, commits=(), revocations=(),
-                              identify_output=cue,
-                              identify_expires_at=service.clock.utc() + 10)
-            assert service._apply_state(state) == "applied"
-            assert service.renderer.identify_output is None
+            cued = delivered(configuration=config, plan=None, commits=(), revocations=(),
+                             identify_output=cue, identify_expires_at=service.clock.utc() + 10)
+            assert service._apply_state(cued) == "applied"
+            service.tick_main()
+            assert vars(service.renderer) == renderer
         finally:
             await close(service)
     asyncio.run(check())
@@ -407,63 +409,6 @@ async def close(service):
     if service.cache:
         service.cache.close()
     service._worker.shutdown(wait=True, cancel_futures=True)
-
-
-def test_identify_output_deduplicates_deadline_and_clears_on_vanish_or_epoch(tmp_path):
-    asyncio.run(_identify_output_scenario(tmp_path))
-
-
-async def _identify_output_scenario(tmp_path):
-    service, _ = await rig(tmp_path)
-    try:
-        service._control_selection = ControlSelection(
-            authority_epoch=service.registration.authority_epoch, schema=2,
-            capabilities=("identify_output",))
-        service.outputs = (OutputReport(output_id="hdmi2", width_px=1920,
-                                        height_px=1080, connected=True),)
-        config = PlayerConfiguration(player_id=service.registration.player_id,
-            authority_epoch=service.registration.authority_epoch,
-            configuration_revision=2, bindings=(), enabled_outputs=())
-        cue = IdentifyOutput(request_id="identify-1", output_id="hdmi2",
-            authority_epoch=service.registration.authority_epoch, remaining_seconds=10)
-        state = delivered(configuration=config, plan=None, commits=(), revocations=(),
-                          identify_output=cue, identify_expires_at=service.clock.utc() + 10)
-        service._apply_state(state)
-        renderer = service.renderer
-        deadline = service._identify_deadline
-        assert renderer.identify_output == "hdmi2"
-        assert deadline == service.clock.monotonic() + 10
-
-        service.clock.advance(3)
-        repeated = state.model_copy(update={
-            "identify_output": cue.model_copy(update={"remaining_seconds": 15})
-        })
-        service._apply_state(repeated)
-        assert service._identify_deadline == deadline
-
-        service.clock.advance(7)
-        service.tick_main()
-        assert renderer.identify_output is None
-        assert service._identify_deadline is None
-        service._apply_state(repeated)
-        assert renderer.identify_output is None
-        assert service._identify_deadline is None
-
-        cleared = delivered(configuration=config, plan=None, commits=(), revocations=())
-        service._apply_state(cleared)
-        assert service._apply_state(state) == "superseded"
-        assert renderer.identify_output is None
-
-        new_cue = cue.model_copy(update={"request_id": "identify-2"})
-        service._apply_state(delivered(configuration=config, plan=None, commits=(),
-                                       revocations=(), identify_output=new_cue,
-                                       identify_expires_at=service.clock.utc() + 5))
-        assert renderer.identify_output == "hdmi2"
-
-        service._apply_identify_output(cue, ("hdmi2",), config.authority_epoch + 1)
-        assert renderer.identify_output is None
-    finally:
-        await close(service)
 
 
 # --- R1: the Player finds Central through find_central (design §2.3) -------------
@@ -701,8 +646,6 @@ def test_every_failed_cycle_locates_again_and_keeps_the_registration(tmp_path, m
             await asyncio.wait_for(steady.wait(), 10)
             assert find.calls == 2
             assert len(server.proofs) == 1
-            assert "retrying" in service.renderer.central_link_history
-            assert service.renderer.central_link_history[-1] == "reachable"
         finally:
             service.stop()
             await asyncio.wait_for(task, 10)
@@ -800,76 +743,6 @@ def test_exact_acquisition_readiness_commit_observation_and_absent_plan(tmp_path
             assert service.renderer.outputs["hdmi1"].layers[0].layer.assignment_id == "picture"
             assert all(request.url.host == "central" for request in server.requests)
             assert server.requests[-2].headers["authorization"] == "Bearer " + "1" * 32
-        finally:
-            await close(service)
-    asyncio.run(check())
-
-
-def test_only_connected_unbound_outputs_show_enrollment_diagnostic(tmp_path):
-    async def check():
-        directory = private_dir(tmp_path / "cache")
-        clock = ManualClock(100)
-        server = Server(clock)
-        client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
-        service = PlayerService(
-            PlayerConfig(central_origin="http://central", cache_dir=str(directory),
-                         cache_bytes=1024**2), load_identity(),
-            (OutputReport(output_id="hdmi1", width_px=0, height_px=0, connected=True),
-             OutputReport(output_id="hdmi2", width_px=0, height_px=0, connected=False)),
-            RecordingRenderer(), immediate, find_central=finding("http://central"),
-            trust=TRUST, clock=clock, client=client, time_client=client,
-            websocket_connect=False, boot_context=boot_context(), luts=PlayerLuts()
-        )
-        try:
-            assert service.central_link_state == service.renderer.central_link_state == "connecting"
-            assert service.renderer.configuration_received is False
-            await service.locate_central()
-            await service.enroll()
-            assert service.renderer.unbound_outputs == ()
-            initial = server.offer(layers=())
-            unbound_config = initial.configuration.model_copy(update={
-                "bindings": (), "enabled_outputs": (),
-            })
-            unbound_plan = initial.plan.model_copy(update={
-                "bindings": (),
-            })
-            server.state = delivered(configuration=unbound_config, plan=unbound_plan,
-                                 commits=(), revocations=())
-            await service.poll_state()
-            assert service.renderer.unbound_outputs == ("hdmi1",)
-            assert service.renderer.enrolled_player_id == server.player_id
-            assert service.central_link_state == service.renderer.central_link_state == "reachable"
-            assert service.renderer.configuration_received is True
-
-            service._set_central_link_state("retrying")
-            assert service.renderer.central_link_state == "retrying"
-            assert service.renderer.unbound_outputs == ("hdmi1",)
-            assert not any(request.url.path == "/v1/player/base-health"
-                           for request in server.requests)  # the Player posts no base-health
-            assert service.renderer.central_link_state == "retrying"
-            await service.poll_state()
-            assert service.central_link_state == service.renderer.central_link_state == "reachable"
-
-            readiness, _ = service._feedback()
-            assert readiness.prepared == readiness.secured == ()
-            assert service.renderer.presentations == []
-
-            rebound_config = initial.configuration.model_copy(update={
-                "configuration_revision": 2,
-            })
-            rebound_plan = initial.plan.model_copy(update={"revision": 2})
-            server.state = delivered(configuration=rebound_config, plan=rebound_plan,
-                                 commits=(), revocations=())
-            await service.poll_state()
-            assert service.renderer.unbound_outputs == ()
-            assert service.renderer.outputs["hdmi1"].fallback
-
-            unbound_config = unbound_config.model_copy(update={"configuration_revision": 3})
-            unbound_plan = unbound_plan.model_copy(update={"revision": 3})
-            server.state = delivered(configuration=unbound_config, plan=unbound_plan,
-                                 commits=(), revocations=())
-            await service.poll_state()
-            assert service.renderer.unbound_outputs == ("hdmi1",)
         finally:
             await close(service)
     asyncio.run(check())
@@ -2195,7 +2068,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             await service.poll_state()
             assert service._plan is None
             registry.bind("portrait", registered.player_id, "HDMI-A-1", expected_generation=0)
-            save_position(registry, "portrait")
+            save_position(registry, "portrait", PORTRAIT_ON_WIDE)
             schedule(app.state.coordinator, ["portrait"], starts=1000, media=True)
             await service.poll_state()
             service._feedback()

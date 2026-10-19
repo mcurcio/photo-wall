@@ -8,6 +8,8 @@ import { unitWords } from "../patterns/units";
 import { pixelSize } from "../timeWords.js";
 import { inkWords, lightDetails, type PaperProfileChoice, profileWords } from "./frame-lighting/model";
 import type { PixelSize } from "./frame-position";
+import { centreWords, pixelValues, screenOf, widthWords } from "./position-on-screen";
+import { HANGS } from "./turn-words";
 import type { Adjustment } from "./live-adjustment";
 import { daysOf, historyProblem, shownEntries } from "./picture-history";
 
@@ -18,8 +20,11 @@ export interface PositionHistoryProps {
   frameId: string;
   /** The tab's live adjustment: Restore is one of its edits. */
   adjustment: Adjustment;
-  /** The output's size in pixels (null: not reported), for each corner's pixels. */
+  /** The Output's mode as built, as the Pi reported it (null: none reported): each entry's pixels are
+   * of this screen as it hung then, as the editor says them. */
   size: PixelSize | null;
+  /** The Frame page's Hardware tab, where the screen is turned back to restore an entry made for another turn. */
+  hardwareHref: string;
   /** The room lights' names by id, for the lighting's rows (an id not here shows as itself). */
   roomNames?: Readonly<Record<string, string>>;
   /** The paper profiles on the list, for the paper's name. */
@@ -33,8 +38,6 @@ const UNRECORDED = "This Frame's position changed outside Photo Wall since its l
   + "The next Done records it.";
 const EMPTY = "No changes yet. They appear here when you adjust this Frame's position or press Done.";
 const OPEN_FIRST = "Open while the editor runs";
-const SAME = "Same values as the change below";
-const CORNERS = ["Top-left", "Top-right", "Bottom-right", "Bottom-left"] as const;
 // The live adjustment's phases with a session the Pi shows: Restore is offered only then.
 const LIVE = new Set(["sending", "shown"]);
 
@@ -43,38 +46,59 @@ export const WHAT: Record<PositionEntryKind, string> = {
   "kept-created": "Created",
   "kept-saved": "Kept (Done)",
   "kept-profile-changed": "Kept (screen size changed)",
+  "kept-turn-changed": "Kept (screen turned)",
   "kept-unrecorded": "Changed outside Photo Wall",
   "sent-draft": "Tried, not kept",
   "sent-back": "Put back",
 };
 const NOT_KEPT = new Set<PositionEntryKind>(["sent-draft", "sent-back"]);
 
-const percent = (fraction: number) => `${(fraction * 100).toFixed(1)} %`;
-const FITS = { cover: "Cover", corners: "Corners" } as const;
+// The values a row's summary names, in the editor's words: the picture's centre and width in pixels,
+// how the screen hung, and the lighting's mat and lights (the rest of the lighting under Details).
+const POSITION = ["Centre", "Width"];
+const FIRST_LINE = [...POSITION, "Screen", "Mat depth", "Lights"];
+// Under Details only: the same centre and width as shares of the screen (they change with the pixels).
+const SHARES = new Set(["Centre (share of the screen)", "Width (share of the screen)"]);
 
-/** The pattern's one summary rule (`changedSummary`) over two entries' details: what differs from
- * the entry below; a light the entry below had and this one has not is said by the lights' count. */
-export function positionSummary(details: readonly { label: string; value: string }[],
-  below: readonly { label: string; value: string }[] | null): string {
-  return changedSummary(details, below, { absent: () => null, same: SAME });
+const percent = (fraction: number) => `${(fraction * 100).toFixed(1)} %`;
+type Detail = { label: string; value: string };
+const line = (details: readonly Detail[], labels: readonly string[]) =>
+  labels.flatMap((label) => details.filter((detail) => detail.label === label))
+    .map(({ label, value }) => `${label} ${value}`).join(" · ");
+
+/**
+ * A row's summary against the row below it (`below`; null: the oldest shown), in the editor's words:
+ * a turn says the screen turned and the position it kept; the oldest row its position, how the
+ * screen hung and its mat and lights; any other row what changed (the pattern's one rule,
+ * `changedSummary`; a light the row below had and this one has not is said by the lights' count),
+ * or "No change" with its position.
+ */
+export function positionSummary(kind: PositionEntryKind, details: readonly Detail[], below: readonly Detail[] | null,
+  turn: PositionEntryView["made_for"]["turn"]): string {
+  if (kind === "kept-turn-changed") {
+    return `Screen turned: it hangs ${HANGS[turn]}. Position kept: ${line(details, POSITION)}`;
+  }
+  if (below === null) return line(details, FIRST_LINE);
+  const shown = (rows: readonly Detail[]) => rows.filter((detail) => !SHARES.has(detail.label));
+  return changedSummary(shown(details), shown(below), {
+    absent: () => null, same: `No change: ${line(details, POSITION)}`,
+  });
 }
 
-/** Every value of an entry: each corner as a share of the output (with its pixels when the output's
- * size is known), the rotation, the lighting (the mat's depth, each light's values, the paper), and
- * the screen size it was made for. `names`: the room lights' names by id; `profiles`: the paper
- * profiles on the list. */
-export function positionDetails(entry: PositionEntryView, size: PixelSize | null,
-  names: Readonly<Record<string, string>> = {}, profiles: readonly PaperProfileChoice[] = []): { label: string; value: string }[] {
+/** Every value of an entry: the picture's centre and width in pixels of the screen as it hung (the
+ * Pi's reported mode `size`, turned by the entry's turn), how it hung, the lighting (the mat's depth,
+ * each light's values, the paper), the screen size it was made for, then the centre and width as
+ * shares of the screen. `names`: the room lights' names by id; `profiles`: the paper profiles on the list. */
+export function positionDetails(entry: PositionEntryView, size: PixelSize | null = null,
+  names: Readonly<Record<string, string>> = {}, profiles: readonly PaperProfileChoice[] = []): Detail[] {
   const { lighting } = entry;
   const { width, height } = entry.made_for.profile_px;
+  const rectangle = { centre_x: entry.fit.centre_x ?? 0.5, centre_y: entry.fit.centre_y ?? 0.5, width: entry.fit.width ?? 1 };
+  const values = pixelValues(rectangle, screenOf(size, entry.made_for.turn));
   return [
-    { label: "Fit", value: FITS[entry.fit.mode] },
-    ...(entry.fit.corners ?? []).map(([x, y], index) => ({
-      label: CORNERS[index] ?? `Corner ${index + 1}`,
-      value: `${percent(x)} across, ${percent(y)} down`
-        + (size === null ? "" : ` (${Math.round(x * size.width)}, ${Math.round(y * size.height)} px)`),
-    })),
-    { label: "Rotation", value: `${entry.fit.rotation}°` },
+    { label: "Centre", value: centreWords(values) },
+    { label: "Width", value: widthWords(values.width) },
+    { label: "Screen", value: `hung ${HANGS[entry.made_for.turn]}` },
     { label: "Mat depth", value: unitWords(lighting.mat_depth_mm, "mm") },
     { label: "Lights", value: String(lighting.lights.length) },
     ...lighting.lights.flatMap((light, index) => lightDetails(light, index + 1, names)),
@@ -82,16 +106,25 @@ export function positionDetails(entry: PositionEntryView, size: PixelSize | null
     { label: "Ink density", value: inkWords(lighting.paper.ink_density) },
     { label: "Paper profile", value: profileWords(lighting.paper.profile, profiles) },
     { label: "Made for", value: `${pixelSize(width, height)} px` },
+    { label: "Centre (share of the screen)", value: `${percent(rectangle.centre_x)} across, ${percent(rectangle.centre_y)} down` },
+    { label: "Width (share of the screen)", value: percent(rectangle.width) },
   ];
 }
 
-/** Restore's state for one entry: refused for another screen size or display (Central's
- * `restore_refusal`, in words), else offered only while the live adjustment runs. */
-export function restoreState(entry: PositionEntryView, adjustment: Adjustment): HistoryRow["restore"] {
+/** Restore's state for one entry: refused for another screen size, a screen hung another way (with
+ * the way to turn it back) or display (Central's `restore_refusal`, in words), else offered only
+ * while the live adjustment runs. */
+export function restoreState(entry: PositionEntryView, adjustment: Adjustment, hardwareHref = ""): HistoryRow["restore"] {
   const { width, height } = entry.made_for.profile_px;
   switch (entry.restore_refusal) {
     case "made_for_other_profile":
       return { disabled: true, reason: `Made for another screen size (${pixelSize(width, height)} px).` };
+    case "made_for_other_turn":
+      return {
+        disabled: true,
+        reason: `Made when the screen hung ${HANGS[entry.made_for.turn]}. Turn the screen back on the Hardware tab to restore it.`,
+        link: { text: "Open the Hardware tab", href: hardwareHref },
+      };
     case "made_for_other_display":
       return { disabled: true, reason: refusalWords("made_for_other_display") };
     case "other_frame":
@@ -103,15 +136,17 @@ export function restoreState(entry: PositionEntryView, adjustment: Adjustment): 
 
 /** The entries as the list's days (`daysOf`), each summary against the entry below it. */
 export function positionDays(entries: readonly PositionEntryView[], adjustment: Adjustment,
-  size: PixelSize | null, names: Readonly<Record<string, string>> = {},
-  profiles: readonly PaperProfileChoice[] = []): HistoryDay[] {
+  { size = null, hardwareHref = "", names = {}, profiles = [] }: {
+    size?: PixelSize | null; hardwareHref?: string;
+    names?: Readonly<Record<string, string>>; profiles?: readonly PaperProfileChoice[];
+  } = {}): HistoryDay[] {
   const details = entries.map((entry) => positionDetails(entry, size, names, profiles));
   return daysOf(entries, (entry, index) => ({
     what: WHAT[entry.kind],
     notKept: NOT_KEPT.has(entry.kind),
-    summary: positionSummary(details[index], details[index + 1] ?? null),
+    summary: positionSummary(entry.kind, details[index], details[index + 1] ?? null, entry.made_for.turn),
     details: details[index],
-    restore: restoreState(entry, adjustment),
+    restore: restoreState(entry, adjustment, hardwareHref),
     session: entry.session_id,
   }));
 }
@@ -122,7 +157,10 @@ export interface PositionHistoryListProps {
   /** Older entries loaded by "Show older", after the read's. */
   older?: readonly PositionEntryView[];
   adjustment: Adjustment;
-  size: PixelSize | null;
+  /** The Output's mode as built (PositionHistoryProps `size`). */
+  size?: PixelSize | null;
+  /** The Frame page's Hardware tab (PositionHistoryProps `hardwareHref`). */
+  hardwareHref?: string;
   /** The room lights' names by id. */
   roomNames?: Readonly<Record<string, string>>;
   /** The paper profiles on the list. */
@@ -141,13 +179,13 @@ export interface PositionHistoryListProps {
 /** The list as read: its words, the unrecorded change's Note, a Restore's refusal and the read's
  * problem. Plain props, so its stories need no server. */
 export function PositionHistoryList({
-  history, older = [], adjustment, size, roomNames = {}, profiles = [], busy, readError = null, refused = null, restoring,
-  onRestore, onRetry, onOlder,
+  history, older = [], adjustment, size = null, hardwareHref = "", roomNames = {}, profiles = [], busy, readError = null,
+  refused = null, restoring, onRestore, onRetry, onOlder,
 }: PositionHistoryListProps) {
   const entries = shownEntries(history?.entries ?? [], older);
   return (
     <HistoryList title={TITLE} intro={INTRO} notice={history?.unrecorded_change ? UNRECORDED : undefined}
-      days={positionDays(entries, adjustment, size, roomNames, profiles)} empty={EMPTY} busy={busy}
+      days={positionDays(entries, adjustment, { size, hardwareHref, names: roomNames, profiles })} empty={EMPTY} busy={busy}
       problem={historyProblem({ readError, refused, what: "this Frame's history", words: refusalWords, onRetry })}
       restoring={restoring} onRestore={onRestore} onOlder={onOlder} />
   );
@@ -156,13 +194,15 @@ export function PositionHistoryList({
 /**
  * The Position tab's History (configuration snapshots; owner, 2026-10-13: "configuration snapshots"
  * that keep "a history of what has been done in the past", used to "View and restore"): every kept
- * and not-kept Position of the Frame (its fit, corners, rotation and lighting), newest first by
+ * and not-kept Position of the Frame (its centre, width and lighting), newest first by
  * day, read while the tab is shown (historyApi.js `useHistoryPages`) and again after a Restore, Done
  * or Revert. Restore replaces the operator's draft with an entry (liveAdjustment.js `restore`); the
- * live session shows it, Done keeps it and Revert returns to the kept Position. An entry made for
- * another screen size or display cannot be restored, and says so.
+ * live session shows it, Done keeps it and Revert returns to the kept Position. Each row says its
+ * Position in the editor's pixels (position-on-screen.ts). An entry made for another screen size, a
+ * screen hung another way or another display cannot be restored, and says so (a turn with the way to
+ * the Hardware tab).
  */
-export function PositionHistory({ frameId, adjustment, size, roomNames, profiles }: PositionHistoryProps) {
+export function PositionHistory({ frameId, adjustment, size, hardwareHref, roomNames, profiles }: PositionHistoryProps) {
   const read = useCallback((page: { before?: string; limit: number }) => readPositionHistory(frameId, page) as
     Promise<{ ok: true; history: PositionHistoryView } | { ok: false; error: string }>, [frameId]);
   const pages = useHistoryPages(read);
@@ -184,8 +224,8 @@ export function PositionHistory({ frameId, adjustment, size, roomNames, profiles
   };
 
   return (
-    <PositionHistoryList history={pages.history} older={pages.olderEntries} adjustment={adjustment} size={size}
-      roomNames={roomNames} profiles={profiles}
+    <PositionHistoryList history={pages.history} older={pages.olderEntries} adjustment={adjustment}
+      size={size} hardwareHref={hardwareHref} roomNames={roomNames} profiles={profiles}
       busy={pages.loading} readError={pages.error} refused={refused} restoring={restoring}
       onRestore={(id) => { void restore(id); }} onRetry={() => { void refresh(); }}
       onOlder={pages.more ? () => { void pages.older(); } : undefined} />

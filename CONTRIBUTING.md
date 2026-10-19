@@ -62,7 +62,7 @@ tests/         # Domain, contract, integration, qualification harnesses
 docs/          # Requirements, design, decisions, implementation, evidence
 ```
 
-Keep domain and time logic independent of GStreamer, GTK, Immich transport, and hardware APIs. The Renderer owns composition and calibration; GTK hosts presentation surfaces. Keep all Player application modules within the proposed single-process design. Record central tooling and packaging choices before treating this layout as a fixed package structure.
+Keep domain and time logic independent of GStreamer, the GPU, Wayland, Immich transport, and hardware APIs. The Renderer owns finishing and composition ([plane renderer](docs/module-plane-renderer.md)); Weston's display planes show it. Keep all Player application modules within the proposed single-process design. Record central tooling and packaging choices before treating this layout as a fixed package structure.
 
 Preserve two runtime boundaries in every implementation:
 

@@ -1,20 +1,22 @@
-"""A Frame's Position history, pure: the Frame fit (mode, corners, rotation) and the Frame's
+"""A Frame's Position history, pure: the Frame fit (its rectangle) and the Frame's
 lighting (its lights, mat depth and paper).
 
 One numbering per Frame, in commit order under the Frame's row lock, for two kinds of entry, each
 written where its state converges and never by an editor:
 
 - **Kept** entries: Registry's writes of the Frame's Position (central/registry.py: the new Frame,
-  `create_frame`; Save, `commit_calibration_trial_in`; the profile change, `replace_frame_profile`).
+  `create_frame`; Save, `commit_calibration_trial_in`; the profile change, `replace_frame_profile`;
+  the turn, `turn_frame`).
   A kept write that finds the stored values differ from the Frame's newest kept entry, or that finds
   no kept entry, first appends an unrecorded one (`unrecorded_record`).
 - **Sent** entries: what the trial owner handed the Node (central/fleet/node_calibration.py
   `deliver_in`), appended only when the handed values differ from the Frame's newest entry
   (`sent_record`): a trial's draft, or the kept values back once a draft went.
 
-Each entry says what it was made for (`MadeFor`: the profile its corners are in and the Display seen
-on the Frame's port), which is what Restore checks (`restore_refusal`): a Position made for another
-profile or another Display is refused, never adapted. An entry is a record of what was, never a
+Each entry says what it was made for (`MadeFor`: the profile whose aspect its rectangle has, the
+turn of the screen as it hung, whose fractions its rectangle is, and the Display seen on the Frame's
+port), which is what Restore checks (`restore_refusal`): a Position made for another profile,
+another turn or another Display is refused, never adapted. An entry is a record of what was, never a
 second source of current state (frames.calibration and frames.lighting stay the truth). Every `at` is
 PostgreSQL's clock at the append.
 """
@@ -27,7 +29,7 @@ from typing import Final
 from uuid import UUID
 
 from contracts.frame_lighting import FrameLighting
-from contracts.models import Calibration, CornersFit, CoverFit
+from contracts.models import Calibration, RectangleFit
 
 
 class PositionEntryKind(StrEnum):
@@ -35,6 +37,7 @@ class PositionEntryKind(StrEnum):
     KEPT_CREATED = "kept-created"                   # the Frame was created with these values
     KEPT_SAVED = "kept-saved"                       # Done (Save) kept a trial's draft
     KEPT_PROFILE_CHANGED = "kept-profile-changed"   # the Frame's profile changed; its fit and lighting are as they were
+    KEPT_TURN_CHANGED = "kept-turn-changed"         # the Frame's turn changed; its fit and lighting are as they were
     KEPT_UNRECORDED = "kept-unrecorded"             # the stored values differed from the newest kept entry when a
                                                     # kept write came: changed outside Photo Wall before `at`
     SENT_DRAFT = "sent-draft"                       # a trial's draft handed to the Node: not kept
@@ -42,7 +45,7 @@ class PositionEntryKind(StrEnum):
 
 
 KEPT_KINDS: Final = frozenset({PositionEntryKind.KEPT_CREATED, PositionEntryKind.KEPT_SAVED, PositionEntryKind.KEPT_PROFILE_CHANGED,
-                               PositionEntryKind.KEPT_UNRECORDED})
+                               PositionEntryKind.KEPT_TURN_CHANGED, PositionEntryKind.KEPT_UNRECORDED})
 SENT_KINDS: Final = frozenset({PositionEntryKind.SENT_DRAFT, PositionEntryKind.SENT_BACK})
 
 
@@ -50,16 +53,18 @@ SENT_KINDS: Final = frozenset({PositionEntryKind.SENT_DRAFT, PositionEntryKind.S
 class PositionValues:
     """What a Position entry records: the Frame fit and the Frame's lighting (the calibration's
     revision is not a value: it only orders saves)."""
-    fit: CornersFit | CoverFit
+    fit: RectangleFit
     lighting: FrameLighting
 
 
 @dataclass(frozen=True)
 class MadeFor:
-    """What an entry was made for: the Frame's profile (`profile_px`, width and height in pixels: its
-    corners are fractions of that output) and the Display seen on the Frame's bound port then (None:
+    """What an entry was made for: the Frame's profile (`profile_px`, width and height in pixels: the
+    aspect its rectangle has), the Frame's turn (`turn`, 0/90/180/270: the screen as it hung, whose
+    fractions the rectangle is) and the Display seen on the Frame's bound port then (None:
     unbound, or none seen)."""
     profile_px: tuple[int, int]
+    turn: int
     display_id: UUID | None
 
 
@@ -98,7 +103,8 @@ class TrialHanded:
 class PositionRestoreRefusal(StrEnum):
     """Why Restore refuses an entry (the routes answer each as 409)."""
     OTHER_FRAME = "other_frame"                         # another Frame's entry
-    MADE_FOR_OTHER_PROFILE = "made_for_other_profile"   # its corners are in another profile's output
+    MADE_FOR_OTHER_PROFILE = "made_for_other_profile"   # made for another profile's aspect
+    MADE_FOR_OTHER_TURN = "made_for_other_turn"         # made for the screen hung another way
     MADE_FOR_OTHER_DISPLAY = "made_for_other_display"   # made against another Display than the one seen now
 
 
@@ -131,6 +137,12 @@ def profile_changed_record(values: PositionValues) -> PositionRecord:
     return PositionRecord(PositionEntryKind.KEPT_PROFILE_CHANGED, values, None, None)
 
 
+def turn_changed_record(values: PositionValues) -> PositionRecord:
+    """The KEPT_TURN_CHANGED record of a turn: the Frame's fit and lighting, unchanged, now made for
+    the new turn."""
+    return PositionRecord(PositionEntryKind.KEPT_TURN_CHANGED, values, None, None)
+
+
 def sent_record(*, trial: TrialHanded | None, saved: PositionValues,
                 latest: PositionEntry | None) -> PositionRecord | None:
     """What an exchange appends, from what it hands the Node and the Frame's newest entry (`latest`,
@@ -149,18 +161,19 @@ def sent_record(*, trial: TrialHanded | None, saved: PositionValues,
     return PositionRecord(PositionEntryKind.SENT_BACK, saved, latest.record.session_id, None)
 
 
-def restore_refusal(entry: PositionEntry, *, frame_id: str, profile_px: tuple[int, int],
-                    seen_display_id: UUID | None) -> PositionRestoreRefusal | None:
-    """Whether Restore refuses `entry` for Frame `frame_id` whose profile is `profile_px` and on whose
-    port `seen_display_id` is seen now, in this order: OTHER_FRAME; MADE_FOR_OTHER_PROFILE when its
-    `made_for.profile_px` differs; MADE_FOR_OTHER_DISPLAY when both its `made_for.display_id` and
-    `seen_display_id` are known and differ. None: it may be restored."""
+def restore_refusal(entry: PositionEntry, *, frame_id: str, now: MadeFor) -> PositionRestoreRefusal | None:
+    """Whether Restore refuses `entry` for Frame `frame_id`, which an entry would be made for as `now`,
+    in this order: OTHER_FRAME; MADE_FOR_OTHER_PROFILE when its `made_for.profile_px` differs;
+    MADE_FOR_OTHER_TURN when its `made_for.turn` differs; MADE_FOR_OTHER_DISPLAY when both its
+    `made_for.display_id` and `now.display_id` are known and differ. None: it may be restored."""
     if entry.frame_id != frame_id:
         return PositionRestoreRefusal.OTHER_FRAME
-    if tuple(entry.made_for.profile_px) != tuple(profile_px):
+    if tuple(entry.made_for.profile_px) != tuple(now.profile_px):
         return PositionRestoreRefusal.MADE_FOR_OTHER_PROFILE
+    if entry.made_for.turn != now.turn:
+        return PositionRestoreRefusal.MADE_FOR_OTHER_TURN
     made_on = entry.made_for.display_id
-    if made_on is not None and seen_display_id is not None and made_on != seen_display_id:
+    if made_on is not None and now.display_id is not None and made_on != now.display_id:
         return PositionRestoreRefusal.MADE_FOR_OTHER_DISPLAY
     return None
 
@@ -174,4 +187,4 @@ def restored_draft(entry: PositionEntry, *, base_revision: int) -> tuple[Calibra
 __all__ = ["KEPT_KINDS", "SENT_KINDS", "MadeFor", "PositionEntry", "PositionEntryKind",
            "PositionRecord", "PositionRestoreRefusal", "PositionValues", "TrialHanded", "created_record", "position_values",
            "profile_changed_record", "restore_refusal", "restored_draft", "saved_record", "sent_record",
-           "unrecorded_record"]
+           "turn_changed_record", "unrecorded_record"]

@@ -26,7 +26,7 @@ from operator_harness import (
     tile_status,
 )
 from playwright.sync_api import expect
-from support.position import save_position
+from support.position import PORTRAIT_ON_WIDE, save_position
 from test_registry import ADMIN, enroll
 
 from central.registry import FrameCreate
@@ -49,7 +49,7 @@ def _bound_frame(registry, frame_id=FRAME, *, x_mm=100, commissioned=True):
         width_mm=300, height_mm=500, profile=PORTRAIT))
     registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0)
     if commissioned:
-        save_position(registry, frame_id)
+        save_position(registry, frame_id, PORTRAIT_ON_WIDE)
     return identity["player_id"]
 
 

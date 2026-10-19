@@ -21,13 +21,13 @@ import warnings
 from dataclasses import dataclass
 from fractions import Fraction
 from pathlib import Path
-from typing import Final, Literal
+from typing import Annotated, Final, Literal
 
 import pillow_heif
-from pydantic import Field
+from pydantic import Field, TypeAdapter, ValidationError
 
 from central.kernel.assets import MediaReady
-from central.photo_library.model import LibraryAsset
+from central.photo_library.model import Kind, LibraryAsset
 from central.photo_library.policy import STILL_MEDIA_TYPES as STILL_MEDIA_TYPES  # re-exported
 from central.photo_library.rendition import FetchStep, FrameNeed, need_step
 from contracts.models import Digest, Model, Positive
@@ -63,18 +63,72 @@ _HDR_TRANSFERS: Final = frozenset({16, 18})
 _SRGB_PRIMARIES: Final = frozenset({1, 2})
 
 
-class PreparationRecipe(Model):
+class StillRecipe(Model):
+    """How a photo's one copy is made: upright, at most `long_edge` pixels on its longer side
+    (the wall need's step, central/media_repository.py `variant_recipe`), one JPEG at
+    `jpeg_quality`. A video's encoding is not here, so changing it renames no photo's copy."""
+
+    kind: Literal["image"] = "image"
     # 2: preparation reads the photo Immich shows (roadmap 4, M3): every preparation is redone once.
     # 3: HEIC, AVIF and wide-colour photos, converted to sRGB (follow-ups 2026-10-11, A5).
     version: Literal[3] = 3
-    image_long_edge: int = Field(default=3840, ge=2, le=16384, strict=True)
+    long_edge: int = Field(default=3840, ge=2, le=16384, strict=True)
     jpeg_quality: int = Field(default=3, ge=1, le=31, strict=True)
-    video_long_edge: int = Field(default=1920, ge=2, le=1920, strict=True)
-    video_max_pixels: int = Field(default=2_073_600, ge=4, le=2_073_600, strict=True)
-    video_fps: Positive = Field(default=30, le=30)
-    video_crf: int = Field(default=23, ge=1, le=51, strict=True)
-    video_preset: Literal["medium", "fast", "slow"] = "medium"
+
+
+class VideoRecipe(Model):
+    """How a video's one copy is made (owner, gate answer Q5, 2026-10-18: "HEVC now, one 1080p
+    copy per video"; "1080p at 30 is fine"): upright, square pixels, at most `long_edge` on its
+    longer side and `max_pixels` in all, at most `fps` frames a second, SDR BT.709 limited range,
+    HEVC Main (8-bit 4:2:0) level 4.1 Main tier in an `hvc1` MP4 with `+faststart`, constant
+    quality `crf` at x265's `preset`, a key frame every `gop_seconds`, no audio, subtitles, data
+    or metadata. What the Pi 5's hardware decoder plays (player/decode.py `VIDEO_DECODER`)."""
+
+    kind: Literal["video"] = "video"
+    # 1-3 were the one recipe photos and videos shared (H.264 High 4.2).
+    # 4: HEVC Main, level 4.1, hvc1, by libx265 (render planes S4): every video is prepared again.
+    version: Literal[4] = 4
+    long_edge: int = Field(default=1920, ge=2, le=1920, strict=True)
+    max_pixels: int = Field(default=2_073_600, ge=4, le=2_073_600, strict=True)
+    fps: Positive = Field(default=30, le=30)
+    crf: int = Field(default=24, ge=1, le=51, strict=True)
+    preset: Literal["medium", "fast", "slow"] = "medium"
     gop_seconds: Positive = Field(default=2, le=10)
+
+
+@dataclass(frozen=True)
+class HouseRecipes:
+    """The recipes Photo Wall prepares by now, one per kind: what `Preparer` uses when no recipe
+    is given and what the media repository names copies by."""
+
+    still: StillRecipe = StillRecipe()
+    video: VideoRecipe = VideoRecipe()
+
+    def of(self, kind: Kind) -> StillRecipe | VideoRecipe:
+        """`still` for "image", `video` for "video"; ValueError("recipe_kind") for anything
+        else. Pure."""
+        if kind == "image":
+            return self.still
+        if kind == "video":
+            return self.video
+        raise ValueError("recipe_kind")
+
+
+# The recipe a copy is prepared by, either kind; `kind` tells them apart, so a stored recipe reads
+# back as the model it was written by (`stored_recipe`).
+PreparationRecipe = Annotated[StillRecipe | VideoRecipe, Field(discriminator="kind")]
+_STORED: Final = TypeAdapter(PreparationRecipe)
+
+
+def stored_recipe(value: object) -> StillRecipe | VideoRecipe | None:
+    """A recipe as `media_recipes.recipe` stores it (`model_dump(mode="json")`) read back by the
+    current models, or None when they refuse it (a recipe from before S4, one recipe for both
+    kinds, has no `kind`): a variant named by it cannot be re-made. The one reader of a stored
+    recipe. Pure; never raises."""
+    try:
+        return _STORED.validate_python(value)
+    except ValidationError:
+        return None
 
 
 def recipe_id(recipe: PreparationRecipe, need: FrameNeed) -> str:
@@ -105,8 +159,14 @@ class PreparationLimits(Model):
     probe_seconds: Positive = 15
     max_tool_output_bytes: int = Field(default=64 * 1024, ge=1, strict=True)
     cpu_seconds: Positive = 180
-    memory_bytes: int = Field(default=1024**3, ge=64 * 1024**2, strict=True)
+    # x265 needs more than 1 GiB of address space for a 1080p copy (malloc fails at 1 GiB, measured
+    # 2026-10-18 in the pinned media image); 2 GiB is the S4 page's sanctioned limit.
+    memory_bytes: int = Field(default=2 * 1024**3, ge=64 * 1024**2, strict=True)
     threads: int = Field(default=1, ge=1, le=4, strict=True)
+    # Render planes S4: the HEVC encoder's threads (x265's pool); its process's CPU limit is
+    # `cpu_seconds` times this. Measured 2026-10-18: x265 costs ~1.8x the H.264 encoder's CPU, and 4
+    # threads cut its wall time ~3.5x, so a video's preparation still fits `wall_seconds`.
+    video_threads: int = Field(default=4, ge=1, le=8, strict=True)
 
 
 class BuildIdentity(Model):
@@ -370,7 +430,7 @@ def _intermediate(path: Path, output: Path, limits: dict) -> dict:
 def _worker(payload: dict) -> None:
     """Set limits after a fresh exec, avoiding preexec_fn in a threaded worker."""
     limits = payload["limits"]
-    cpu = max(1, math.ceil(limits["cpu_seconds"]))
+    cpu = max(1, math.ceil(payload.get("cpu_seconds") or limits["cpu_seconds"]))
     resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
     resource.setrlimit(resource.RLIMIT_FSIZE, (payload["file_limit"], payload["file_limit"]))
     if sys.platform.startswith("linux"):
@@ -398,10 +458,15 @@ def _worker(payload: dict) -> None:
 
 
 class Preparer:
+    """Prepares one copy of a photo or a video by its kind's recipe (`HouseRecipes`, or the
+    variant's own), each tool in a fresh process bounded by `limits`: a still to one upright sRGB
+    JPEG, a video to one HEVC Main level 4.1 `hvc1` MP4 (`VideoRecipe`), checked against its
+    recipe before it is handed back."""
+
     def __init__(self, ffmpeg: str = "ffmpeg", ffprobe: str = "ffprobe", *,
-                 recipe: PreparationRecipe = PreparationRecipe(),
+                 recipes: HouseRecipes = HouseRecipes(),
                  limits: PreparationLimits = PreparationLimits(), clock: Clock | None = None) -> None:
-        self.recipe, self.limits, self.clock = recipe, limits, clock or SystemClock()
+        self.recipes, self.limits, self.clock = recipes, limits, clock or SystemClock()
         self.ffmpeg, self.ffprobe = self._executable(ffmpeg), self._executable(ffprobe)
         self._build: BuildIdentity | None = None
         self._build_key: tuple[str, str, str] | None = None
@@ -417,10 +482,13 @@ class Preparer:
             raise MediaError("preparation_tool_missing", "incompatible") from None
 
     async def _run(self, payload: dict, deadline: _Deadline, *, seconds: float | None = None,
-                   file_limit: int | None = None) -> bytes:
+                   file_limit: int | None = None, cpu_seconds: float | None = None) -> bytes:
+        """`payload` in one bounded process; its CPU limit is `cpu_seconds` when given (the
+        video encode's, for its threads), else `limits.cpu_seconds`."""
         timeout = min(deadline.remaining(), seconds or self.limits.wall_seconds)
         message = json.dumps({**payload, "limits": self.limits.model_dump(),
-                              "file_limit": file_limit or self.limits.max_video_bytes}).encode()
+                              "file_limit": file_limit or self.limits.max_video_bytes,
+                              "cpu_seconds": cpu_seconds}).encode()
         if len(message) > 64 * 1024:
             raise MediaError("preparation_limit", "incompatible")
         process = None
@@ -529,7 +597,7 @@ class Preparer:
     async def _probe(self, path: Path, deadline: _Deadline) -> dict:
         entries = ("stream=index,codec_name,codec_type,width,height,duration,avg_frame_rate,"
                    "r_frame_rate,pix_fmt,sample_aspect_ratio,color_space,color_primaries,"
-                   "color_transfer,color_range,profile,level:stream_side_data:"
+                   "color_transfer,color_range,profile,level,codec_tag_string:stream_side_data:"
                    "format=format_name,duration:stream_tags=rotate")
         return await self._json(dict(operation="exec", argv=[str(self.ffprobe), "-v", "error",
                                 *self._input_flags(), "-show_entries", entries,
@@ -596,7 +664,7 @@ class Preparer:
         if len(videos) != 1 or (output and len(streams) != 1):
             raise MediaError("unsupported_media", "incompatible")
         stream = videos[0]
-        if stream.get("codec_name") not in (("h264",) if output else ("h264", "hevc")):
+        if stream.get("codec_name") not in (("hevc",) if output else ("h264", "hevc")):
             raise MediaError("unsupported_media", "incompatible")
         width, height = stream.get("width"), stream.get("height")
         if (type(width) is not int or type(height) is not int
@@ -624,26 +692,28 @@ class Preparer:
             name = str(side.get("side_data_type", "")).lower()
             if any(marker in name for marker in ("mastering", "light level", "dovi", "dolby", "hdr")):
                 raise MediaError("unsupported_color", "incompatible")
-        if output and (stream.get("pix_fmt") != "yuv420p" or stream.get("profile") != "High"
-                       or stream.get("level") != 42 or stream.get("color_range") != "tv"):
+        # The copy the Pi's decoder takes (VideoRecipe): HEVC Main, level 4.1 (123), `hvc1`.
+        if output and (stream.get("codec_tag_string") != "hvc1" or stream.get("profile") != "Main"
+                       or stream.get("level") != 123 or stream.get("pix_fmt") != "yuv420p"
+                       or stream.get("color_range") != "tv"):
             raise MediaError("preparation_invalid", "incompatible")
         return dict(width=width, height=height, duration=duration, fps=fps, sar=sar,
                     orientation=self._orientation(stream),
                     color_range="pc" if stream.get("color_range") == "pc" else "tv")
 
-    def _size(self, width: int, height: int, *, video: bool, sar: float = 1, orientation: int = 1,
-              recipe: PreparationRecipe | None = None) -> tuple[int, int]:
-        recipe = recipe or self.recipe
+    @staticmethod
+    def _size(width: int, height: int, recipe: StillRecipe | VideoRecipe, *, sar: float = 1,
+              orientation: int = 1) -> tuple[int, int]:
+        video = isinstance(recipe, VideoRecipe)
         display_width, display_height = width * sar, float(height)
         if orientation >= 5:
             width, height = height, width
             display_width, display_height = display_height, display_width
-        edge = recipe.video_long_edge if video else recipe.image_long_edge
         # Keep display aspect while fitting the original raster's oriented bounds.
         scale = min(1, width / display_width, height / display_height,
-                    edge / max(display_width, display_height))
+                    recipe.long_edge / max(display_width, display_height))
         if video:
-            scale = min(scale, math.sqrt(recipe.video_max_pixels / (display_width * display_height)))
+            scale = min(scale, math.sqrt(recipe.max_pixels / (display_width * display_height)))
         step = 2 if video else 1
         result = (math.floor(display_width * scale / step) * step,
                   math.floor(display_height * scale / step) * step)
@@ -655,20 +725,26 @@ class Preparer:
                                 destination: Path, *,
                                 recipe: PreparationRecipe | None = None) -> PreparedMedia:
         """The photo as Immich shows it (C10): a preview, full-size copy or original of any
-        STILL_MEDIA_TYPES type, or a video's original, encoded by `recipe` (the variant's; this
-        Preparer's own when None). Integrity is the fetched file's own sha256 and size; its size
-        and orientation are the file's (a preview is upright, a JPEG full-size copy may carry
-        EXIF)."""
+        STILL_MEDIA_TYPES type, or a video's original, encoded by `recipe` (the variant's; the
+        house recipe of the asset's kind when None). A recipe of the other kind is
+        preparation_invalid before the file is read. Integrity is the fetched file's own sha256
+        and size; its size and orientation are the file's (a preview is upright, a JPEG full-size
+        copy may carry EXIF)."""
+        recipe = recipe or self.recipes.of(asset.kind)
+        if recipe.kind != asset.kind:
+            raise MediaError("preparation_invalid", "incompatible")
+
         def verify(size: int, sha1: str, sha256: str) -> None:
             if sha256 != rendition.sha256 or size != rendition.size:
                 raise MediaError("asset_integrity")
-        return await self._prepare(rendition.path, destination, video=asset.kind == "video",
-                                   verify=verify, duration=asset.duration,
-                                   made_from=rendition.rendition, recipe=recipe or self.recipe)
+        return await self._prepare(rendition.path, destination, verify=verify,
+                                   duration=asset.duration, made_from=rendition.rendition,
+                                   recipe=recipe)
 
-    async def _prepare(self, original: Path, destination: Path, *, video: bool,
-                       verify, duration: float | None, made_from: FetchStep,
-                       recipe: PreparationRecipe) -> PreparedMedia:
+    async def _prepare(self, original: Path, destination: Path, *, verify,
+                       duration: float | None, made_from: FetchStep,
+                       recipe: StillRecipe | VideoRecipe) -> PreparedMedia:
+        video = isinstance(recipe, VideoRecipe)
         original, destination = Path(original).absolute(), Path(destination).absolute()
         start = self.clock.monotonic()
         if not math.isfinite(start):
@@ -705,9 +781,8 @@ class Preparer:
                     source = intermediate
                 raw_width, raw_height, orientation = (facts["width"], facts["height"],
                                                       facts["orientation"])
-                width, height = self._size(raw_width, raw_height, video=video,
-                                           sar=facts.get("sar", 1), orientation=orientation,
-                                           recipe=recipe)
+                width, height = self._size(raw_width, raw_height, recipe,
+                                           sar=facts.get("sar", 1), orientation=orientation)
                 try:
                     fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 except FileExistsError:
@@ -724,25 +799,33 @@ class Preparer:
                     argv += ["-f", _PIPES[facts["format"]]]
                 argv += ["-i", str(source), "-map", "0:v:0", "-an", "-sn", "-dn",
                          "-map_metadata", "-1", "-map_chapters", "-1", "-metadata:s:v:0", "rotate=0"]
+                cpu_seconds = None
                 if video:
-                    fps = min(facts["fps"], recipe.video_fps)
+                    fps = min(facts["fps"], recipe.fps)
+                    threads = self.limits.video_threads
+                    # x265 runs a pool of `video_threads`, so its process may spend that many
+                    # times the CPU budget (PreparationLimits.video_threads).
+                    cpu_seconds = math.ceil(self.limits.cpu_seconds * threads)
                     filters += [f"fps={fps:.8g}",
                                 f"colorspace=iall=bt709:irange={facts['color_range']}:all=bt709:range=tv:format=yuv420p"]
-                    argv += ["-vf", ",".join(filters), "-c:v", "libx264", "-preset", recipe.video_preset,
-                             "-crf", str(recipe.video_crf), "-profile:v", "high", "-level:v", "4.2",
+                    argv += ["-vf", ",".join(filters), "-c:v", "libx265", "-preset", recipe.preset,
+                             "-crf", str(recipe.crf), "-profile:v", "main",
                              "-g", str(max(1, math.ceil(fps * recipe.gop_seconds))),
-                             "-threads", str(self.limits.threads), "-pix_fmt", "yuv420p",
+                             "-threads", str(threads), "-x265-params",
+                             f"log-level=error:pools={threads}:level-idc=4.1:high-tier=0",
+                             "-tag:v", "hvc1", "-pix_fmt", "yuv420p",
                              "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
                              "-color_range", "tv", "-movflags", "+faststart", "-f", "mp4"]
                 else:
                     argv += ["-vf", ",".join(filters), "-frames:v", "1", "-c:v", "mjpeg",
                              "-q:v", str(recipe.jpeg_quality), "-pix_fmt", "yuvj444p",
                              "-threads", str(self.limits.threads), "-f", "image2", "-update", "1"]
-                await self._run(dict(operation="exec", argv=[*argv, str(destination)]), deadline, file_limit=cap)
+                await self._run(dict(operation="exec", argv=[*argv, str(destination)]), deadline,
+                                file_limit=cap, cpu_seconds=cpu_seconds)
                 output_size, _, digest = _file_hashes(destination, cap, deadline)
                 if video:
                     verified = self._video(await self._probe(destination, deadline), output=True)
-                    if (verified["fps"] > recipe.video_fps + .01 or verified["sar"] != 1
+                    if (verified["fps"] > recipe.fps + .01 or verified["sar"] != 1
                             or abs(verified["duration"] - facts["duration"]) > 1 / fps + .05):
                         raise MediaError("preparation_invalid", "incompatible")
                     await self._run(dict(operation="exec", argv=[str(self.ffmpeg), "-nostdin", "-v", "error",

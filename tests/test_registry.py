@@ -12,7 +12,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
-from support.position import save_position
+from support.position import PORTRAIT_ON_WIDE, save_position
 
 from central.app import create_app
 from central.coordination import Coordinator
@@ -32,14 +32,15 @@ from contracts.models import (
     IDENTIFIER_PATTERN,
     TARGET_ID_PATTERN,
     Calibration,
-    CornersFit,
     FrameProfile,
+    RectangleFit,
 )
 from contracts.player_control import ControlHello
 
 ADMIN = "test-operator-" + "x" * 40
-# A Position that differs from the default one: Corners with the top-left corner moved in.
-SKEWED = Calibration(fit=CornersFit(corners=((0.1, 0), (1, 0), (1, 1), (0, 1))))
+# A Position of the portrait Frame (`frame`) on a 1920 x 1080 screen that differs from
+# support.position's PORTRAIT_ON_WIDE: a smaller rectangle left of centre.
+SKEWED = Calibration(fit=RectangleFit(centre_x=0.4, width=0.25))
 
 
 def enroll(registry, key=None, count=2, device_id=None, size=(1920, 1080)):
@@ -85,7 +86,7 @@ def test_reboot_reassociates_by_serial_preserving_frame_binding_no_duplicate(reg
     identity, _, request = enroll(registry)
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    save_position(registry, "portrait")
+    save_position(registry, "portrait", PORTRAIT_ON_WIDE)
     rebooted, _, _ = enroll(registry, device_id=request.device_id)
     assert rebooted["player_id"] == identity["player_id"]
     assert rebooted["authority_epoch"] == identity["authority_epoch"] + 1
@@ -108,7 +109,7 @@ def test_unbound_player_gets_no_execution_bindings_until_operator_binds(registry
     identity, _, _ = enroll(registry)
     bound_identity, _, _ = enroll(registry)
     registry.bind("portrait", bound_identity["player_id"], "HDMI-A-1", expected_generation=0)
-    save_position(registry, "portrait")
+    save_position(registry, "portrait", PORTRAIT_ON_WIDE)
     bound_config = registry.configuration_for(bound_identity["player_id"], bound_identity["authority_epoch"])
     assert len(bound_config["execution_bindings"]) == 1
     assert registry.bindings_for(identity["player_id"], identity["authority_epoch"]) == []
@@ -157,7 +158,7 @@ def test_stateless_player_can_be_bound_and_recovers_binding_with_a_fresh_key(reg
     assert len(inventory.outputs) == 2
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    save_position(registry, "portrait")
+    save_position(registry, "portrait", PORTRAIT_ON_WIDE)
     restarted, _, _ = enroll(registry, device_id=first.device_id)
     assert restarted["player_id"] == identity["player_id"]
     assert restarted["authority_epoch"] == 2
@@ -168,7 +169,7 @@ def test_boot_context_is_signed_and_stale_ticket_cannot_reenroll(registry):
     identity, _, request = enroll(registry)
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    save_position(registry, "portrait")
+    save_position(registry, "portrait", PORTRAIT_ON_WIDE)
     forged = request.model_copy(update={"boot_id": str(uuid.uuid4())})
     with pytest.raises(RegistryError, match="invalid_proof"):
         registry.enroll(forged)
@@ -215,7 +216,7 @@ def test_replacement_preserves_frame_rejects_retired_identity_and_revalidates(re
     assert registry.bindings_for(new["player_id"], 1) == []
     location = registry.inventory().frames[0]
     assert (location.id, location.width_mm, location.calibration.fit) == ("portrait", 300, SKEWED.fit)
-    save_position(registry, "portrait")
+    save_position(registry, "portrait", PORTRAIT_ON_WIDE)
     assert registry.bindings_for(new["player_id"], 1)[0].generation == 3
 
 
@@ -223,7 +224,7 @@ def test_unbind_withdraws_execution_binding_generation_fenced_and_allows_rebind(
     identity, _, _ = enroll(registry)
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    save_position(registry, "portrait")
+    save_position(registry, "portrait", PORTRAIT_ON_WIDE)
     assert len(registry.bindings_for(identity["player_id"], 1)) == 1
     result = registry.unbind("portrait", expected_generation=1)
     # The generation bump (mirroring bind/retire) is what a stale caller is fenced on below;

@@ -12,15 +12,21 @@ export interface SegmentedControlProps<V extends string> {
   options: readonly { value: V; label: string }[];
   onChange: (value: V) => void;
   disabled?: boolean;
+  /** `grid`: on a phone, the choices two by two filling the width (four longer labels), never a
+   * ragged second row. Default `row`. */
+  layout?: "row" | "grid";
 }
 
 /**
  * SegmentedControl (design language §4): two to five exclusive choices side by side (Base UI
  * RadioGroup: a radio group to a screen reader, arrow keys move the choice). The chosen segment
  * is drawn in the accent, as a selection. A label never breaks: where the choices are wider
- * than the screen (a phone) they wrap onto a second row, each row filling the width.
+ * than the screen (a phone) they wrap onto a second row, each row filling the width, or with
+ * `layout="grid"` sit two by two.
  */
-export function SegmentedControl<V extends string>({ label, value, options, onChange, disabled }: SegmentedControlProps<V>) {
+export function SegmentedControl<V extends string>({
+  label, value, options, onChange, disabled, layout = "row",
+}: SegmentedControlProps<V>) {
   // Inside a Field the Field's label names the group (and is the one shown), and its help
   // describes it; alone, the control shows and carries its own label.
   const { labelId, describedBy } = useFieldControl();
@@ -34,7 +40,10 @@ export function SegmentedControl<V extends string>({ label, value, options, onCh
         value={value}
         disabled={disabled}
         onValueChange={(next) => onChange(next as V)}
-        className="inline-flex w-fit max-w-full flex-wrap gap-px overflow-hidden rounded-input border border-line-input bg-line-input"
+        className={cn(
+          "inline-flex w-fit max-w-full flex-wrap gap-px overflow-hidden rounded-input border border-line-input bg-line-input",
+          layout === "grid" && "max-md:grid max-md:w-full max-md:grid-cols-2",
+        )}
       >
         {options.map((option) => (
           <Radio.Root

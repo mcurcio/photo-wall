@@ -18,6 +18,7 @@ from support.photo_pools import library_of, photo, seed_pool
 from test_media_repository import MeasureQueue
 
 from central.db import ProcessTransactionClock
+from central.infra.fit_settings_store import PgFitSettings
 from central.kernel.types import split_media_variant_key
 from central.media_repository import MediaRepository
 from central.photo_library.model import MeasuredCopy
@@ -26,6 +27,7 @@ from central.registry import FrameCreate
 from central.wall_plan.fit import DoesNotFit, FitTarget, shape_fit
 from central.wall_plan.fit_settings import FitSettings
 from contracts.models import FrameProfile
+from media.prepare import VideoRecipe, stored_recipe
 
 P1080 = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 P720 = FrameProfile(width_px=1280, height_px=720, diagonal_inches=24)
@@ -55,7 +57,7 @@ def step_of(repository: MediaRepository, key: str) -> int:
     with repository.db.transaction() as conn:
         row = conn.execute("SELECT recipe,need FROM media_recipes WHERE recipe_id=%s",
                            (recipe,)).fetchone()
-    assert row["recipe"]["image_long_edge"] == row["need"]["long_edge"]
+    assert row["recipe"]["long_edge"] == row["need"]["long_edge"]
     return row["need"]["long_edge"]
 
 
@@ -80,6 +82,28 @@ def test_the_same_photo_on_a_1080p_wall_prepares_at_the_1920_step(registry):
     seed_pool(registry, "family:1", (big,))
     (key,) = prepared(repository, big.asset_id, "living")
     assert step_of(repository, key) == 1920
+
+
+def test_a_video_is_named_once_whatever_the_wall_and_the_copy_ladder(registry):
+    """Render planes S4 (owner, gate answer Q5, 2026-10-18: "HEVC now, one 1080p copy per
+    video"): a video's copy is named by the video recipe alone, the same on a 1080p wall, a 4K
+    wall and after the photo copy ladder changes (before S4 it hashed the ladder's first step)."""
+    repository = wall(registry, ("living", P1080))
+    clip = photo("clip", taken_at=1, width=3840, height=2160, kind="video")
+    seed_pool(registry, "family:1", (clip,))
+    (key,) = prepared(repository, clip.asset_id, "living")
+    registry.create_frame(FrameCreate(id="hall", width_mm=P4K.width_px // 4,
+                                      height_mm=P4K.height_px // 4, profile=P4K))
+    assert prepared(repository, clip.asset_id, "hall") == {key}
+    PgFitSettings(registry.db, times=ProcessTransactionClock(registry.clock)).save_fit_settings(
+        FitSettings(copy_ladder_px=(2560, 3840)))
+    assert prepared(repository, clip.asset_id, "living", "hall") == {key}
+    _, recipe_name = split_media_variant_key(key)
+    with repository.db.transaction() as conn:
+        row = conn.execute("SELECT recipe,need FROM media_recipes WHERE recipe_id=%s",
+                           (recipe_name,)).fetchone()
+    assert stored_recipe(row["recipe"]) == VideoRecipe()
+    assert row["need"] == {"long_edge": 1920}
 
 
 def test_adding_a_smaller_frame_prepares_nothing_again(registry):

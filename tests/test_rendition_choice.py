@@ -78,10 +78,10 @@ def test_needs_are_each_frames_output_or_its_profile_until_reported():
     """A4 case 2: a Frame with no Frame output asks its profile's size (never too small); two
     Frames of one shape and size are one need."""
     frames = (
-        FrameOutput(frame_id="hall", profile=PORTRAIT, output_px=None, display_px=None),
-        FrameOutput(frame_id="lounge", profile=LANDSCAPE, output_px=(1536, 864),
+        FrameOutput(frame_id="hall", profile=PORTRAIT, turn=0, output_px=None, display_px=None),
+        FrameOutput(frame_id="lounge", profile=LANDSCAPE, turn=0, output_px=(1536, 864),
                     display_px=(3840, 2160)),
-        FrameOutput(frame_id="study", profile=LANDSCAPE, output_px=(1536, 864),
+        FrameOutput(frame_id="study", profile=LANDSCAPE, turn=0, output_px=(1536, 864),
                     display_px=(3840, 2160)),
     )
     assert rendition_needs(frames) == (

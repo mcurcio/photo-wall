@@ -3,18 +3,15 @@
 The migration's SQL runs on the real tables after undoing it (`before_092`), with rows as the 1c
 build stored them: 1c's picture adjustment becomes twice its value capped at 150 % (its 50 % meant no
 change; now 100 % does); a value that acted on the display is forgotten; open sessions are dropped;
-the stored Output documents and reports lose their picture part and decode under schema 4; each
+the stored Output documents and reports lose their picture part, leaving schema 4's bodies; each
 Output's picture change numbering carries into `picture_documents`.
 """
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from psycopg.types.json import Jsonb
 from test_display_identity import NO_SERIAL, _bind, _frame, _report, _sql, enroll_pi
-
-from contracts.node_output import decode_output_document, decode_output_report
 
 MIGRATION = Path(__file__).parents[1] / "central/migrations/092_picture_hardware_software.sql"
 SERIAL = "pi-092"
@@ -92,9 +89,10 @@ def test_092_doubles_picture_adjustment_capped_and_forgets_display_values(regist
 
 
 def test_092_drops_open_sessions_and_strips_the_wire_records_to_schema_4(registry):
-    """Stored power documents and reports decode under schema 4 after 092; the picture change
-    numbering carries, with a digest that makes the next read rewrite the document. Mutation probe:
-    drop the report statement -> the stored report no longer decodes."""
+    """Stored power documents and reports keep schema 4's body after 092 (their picture part gone);
+    the picture change numbering carries, with a digest that makes the next read rewrite the
+    document. Mutation probe: drop the report statement -> the stored report keeps its picture part
+    and this test fails."""
     player = enroll_pi(registry, SERIAL)
     _bind(registry, _frame(registry, "kitchen"), player, "HDMI-A-1")
     _report(registry, SERIAL, "HDMI-A-1", NO_SERIAL)
@@ -108,15 +106,19 @@ def test_092_drops_open_sessions_and_strips_the_wire_records_to_schema_4(registr
                 "picture_change": 7, "picture": _1C_PICTURE}
     _sql(registry, "INSERT INTO output_documents(player_id, output_id, change, digest, picture_change, picture_digest, "
                    "document) VALUES (%s, 'HDMI-A-1', 3, 'd', 7, 'p', %s)", (player, Jsonb(document)))
+    [reported] = [row["report"] for row in _sql(registry, "SELECT report FROM output_displays")]
     _sql(registry, "UPDATE output_displays SET report = report || %s", (Jsonb({"picture": _1C_PROBE}),))
     migrate_092(registry)
 
     assert _sql(registry, "SELECT id FROM picture_sessions") == []
     [stored] = _sql(registry, "SELECT change, digest, document FROM output_documents")
     assert (stored["change"], stored["digest"]) == (3, "d")
-    assert decode_output_document(json.dumps(stored["document"]).encode()).change == 3
+    # Each record as 092 leaves it: schema 4's body, not today's contracts (a later migration
+    # rewrites it for its own schema, e.g. 101's turn).
+    assert stored["document"] == {key: value for key, value in document.items()
+                                  if key not in ("picture_change", "picture")}
     [seen] = _sql(registry, "SELECT report FROM output_displays")
-    assert decode_output_report(json.dumps(seen["report"]).encode()).identity == NO_SERIAL
+    assert seen["report"] == reported
     assert _sql(registry, "SELECT player_id, output_id, picture_change, digest, document FROM picture_documents") == [
         {"player_id": player, "output_id": "HDMI-A-1", "picture_change": 7, "digest": "", "document": {}}]
     assert _sql(registry, "SELECT * FROM picture_reports") == []

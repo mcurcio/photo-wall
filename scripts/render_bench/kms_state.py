@@ -1,0 +1,248 @@
+"""The kernel's planes (bead B6): which picture went on which plane and at what alpha, and whether
+Weston fell back to compositing (fewer planes than pictures). Placement comes from the debugfs state
+dump (/sys/kernel/debug/dri/<minor>/state), which prints no alpha; each plane's `alpha` and `pixel
+blend mode` properties are read through libdrm as a second, read-only client of the KMS device.
+Both are the display controller's, found by its driver's name (`display_controller`): its card
+number follows the probe order (card0 or card1 on the Pi 5), never fixed."""
+from __future__ import annotations
+
+import ctypes
+import ctypes.util
+import os
+import re
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Final
+
+DRIVER: Final = "vc4"                       # the Pi 5's display controller's DRM driver (bench T2)
+DRI: Final = "/dev/dri"
+DEBUGFS_DRI: Final = "/sys/kernel/debug/dri"
+OPAQUE_ALPHA: Final = 0xFFFF
+PREMULTIPLIED: Final = "Pre-multiplied"
+
+_OBJECT: Final = re.compile(r"^(plane|crtc)\[(\d+)\]: (\S+)$")
+_CRTC_POS: Final = re.compile(r"^(\d+)x(\d+)([+-]\d+)([+-]\d+)$")
+_SRC_POS: Final = re.compile(r"^([\d.]+)x([\d.]+)\+([\d.]+)\+([\d.]+)$")
+_UNIVERSAL_PLANES: Final = 2                # DRM_CLIENT_CAP_UNIVERSAL_PLANES
+_ATOMIC: Final = 3                          # DRM_CLIENT_CAP_ATOMIC
+_OBJECT_PLANE: Final = 0xEEEEEEEE           # DRM_MODE_OBJECT_PLANE
+
+
+@dataclass(frozen=True)
+class KmsPlane:
+    """One plane with a framebuffer: its id, CRTC id, framebuffer id, the source size in pixels, its
+    place on the CRTC, its normalized zpos and rotation as the state dump prints them, and its alpha
+    (0..0xffff) and pixel blend mode from its properties."""
+    plane_id: int
+    crtc: int
+    framebuffer: int
+    source_size: tuple[int, int]
+    position: tuple[int, int]
+    zpos: int
+    rotation: int
+    alpha: int
+    blend: str
+
+
+def kms_planes(state: str, properties: Mapping[int, tuple[int, str]]) -> tuple[KmsPlane, ...]:
+    """Every plane in `state` (the debugfs text) that has a framebuffer, by zpos, with its (alpha,
+    blend mode) from `properties` (plane id -> value; a plane without an alpha property is 0xffff,
+    "Pre-multiplied"). ValueError("kms_state") for text that is not the kernel's state dump. Pure."""
+    planes: list[dict[str, str]] = []
+    crtcs: dict[str, int] = {}
+    block: dict[str, str] | None = None
+    for line in state.splitlines():
+        found = _OBJECT.match(line)
+        if found:
+            kind, number, name = found.groups()
+            block = None
+            if kind == "crtc":
+                crtcs[name] = int(number)
+            else:
+                block = {"id": number}
+                planes.append(block)
+        elif block is not None and line.startswith("\t") and not line.startswith("\t\t") and "=" in line:
+            key, _, value = line.strip().partition("=")
+            block[key] = value
+    if not planes:
+        raise ValueError("kms_state")
+    shown = []
+    try:
+        for block in planes:
+            if int(block.get("fb", "0")) == 0:
+                continue
+            crtc_pos, src_pos = _CRTC_POS.match(block["crtc-pos"]), _SRC_POS.match(block["src-pos"])
+            if crtc_pos is None or src_pos is None or block["crtc"] not in crtcs:
+                raise ValueError("kms_state")
+            plane_id = int(block["id"])
+            alpha, blend = properties.get(plane_id, (OPAQUE_ALPHA, PREMULTIPLIED))
+            shown.append(KmsPlane(
+                plane_id, crtcs[block["crtc"]], int(block["fb"]),
+                (round(float(src_pos[1])), round(float(src_pos[2]))), (int(crtc_pos[3]), int(crtc_pos[4])),
+                int(block["normalized-zpos"], 16), int(block["rotation"]), alpha, blend))
+    except (KeyError, ValueError) as error:
+        raise ValueError("kms_state") from error
+    return tuple(sorted(shown, key=lambda plane: (plane.crtc, plane.zpos)))
+
+
+class _PlaneResources(ctypes.Structure):
+    _fields_ = (("count_planes", ctypes.c_uint32), ("planes", ctypes.POINTER(ctypes.c_uint32)))
+
+
+class _ObjectProperties(ctypes.Structure):
+    _fields_ = (("count_props", ctypes.c_uint32), ("props", ctypes.POINTER(ctypes.c_uint32)),
+                ("prop_values", ctypes.POINTER(ctypes.c_uint64)))
+
+
+class _PropertyEnum(ctypes.Structure):
+    _fields_ = (("value", ctypes.c_uint64), ("name", ctypes.c_char * 32))
+
+
+class _Property(ctypes.Structure):
+    _fields_ = (("prop_id", ctypes.c_uint32), ("flags", ctypes.c_uint32), ("name", ctypes.c_char * 32),
+                ("count_values", ctypes.c_int), ("values", ctypes.POINTER(ctypes.c_uint64)),
+                ("count_enums", ctypes.c_int), ("enums", ctypes.POINTER(_PropertyEnum)),
+                ("count_blobs", ctypes.c_int), ("blob_ids", ctypes.POINTER(ctypes.c_uint32)))
+
+
+class _Version(ctypes.Structure):
+    _fields_ = (("version_major", ctypes.c_int), ("version_minor", ctypes.c_int),
+                ("version_patchlevel", ctypes.c_int), ("name_len", ctypes.c_int), ("name", ctypes.c_char_p),
+                ("date_len", ctypes.c_int), ("date", ctypes.c_char_p), ("desc_len", ctypes.c_int),
+                ("desc", ctypes.c_char_p))
+
+
+def driven_by(names: Mapping[str, str], driver: str = DRIVER) -> str | None:
+    """The key whose text names `driver` as its first word (a card node's driver name, or a debugfs
+    directory's `name` file: "vc4 dev=axi:gpu ..."); None when none does. Pure."""
+    return next((key for key, text in sorted(names.items()) if text.split()[:1] == [driver]), None)
+
+
+def display_controller(dri: str = DRI, debugfs: str = DEBUGFS_DRI) -> tuple[str, str]:
+    """(debugfs state path, card node) of the display controller (DRIVER). OSError
+    ("kms_no_display_controller") when no card or no debugfs directory is DRIVER's."""
+    lib = _libdrm()
+    drivers = {}
+    for node in Path(dri).glob("card*"):
+        if not re.fullmatch(r"card\d+", node.name):
+            continue
+        fd = os.open(node, os.O_RDWR | os.O_CLOEXEC)
+        try:
+            version = lib.drmGetVersion(fd)
+            if version:
+                try:
+                    drivers[str(node)] = (version.contents.name or b"").decode()
+                finally:
+                    lib.drmFreeVersion(version)
+        finally:
+            os.close(fd)
+    named = {str(directory): (directory / "name").read_text() for directory in Path(debugfs).iterdir()
+             if (directory / "name").is_file() and (directory / "state").is_file()}
+    card, directory = driven_by(drivers), driven_by(named)
+    if card is None or directory is None:
+        raise OSError("kms_no_display_controller")
+    return str(Path(directory) / "state"), card
+
+
+def _libdrm() -> ctypes.CDLL:
+    lib = ctypes.CDLL(ctypes.util.find_library("drm") or "libdrm.so.2")
+    pointer = ctypes.c_void_p
+    for name, argtypes, restype in (
+        ("drmSetClientCap", (ctypes.c_int, ctypes.c_uint64, ctypes.c_uint64), ctypes.c_int),
+        ("drmModeGetPlaneResources", (ctypes.c_int,), ctypes.POINTER(_PlaneResources)),
+        ("drmModeFreePlaneResources", (pointer,), None),
+        ("drmModeObjectGetProperties", (ctypes.c_int, ctypes.c_uint32, ctypes.c_uint32),
+         ctypes.POINTER(_ObjectProperties)),
+        ("drmModeFreeObjectProperties", (pointer,), None),
+        ("drmModeGetProperty", (ctypes.c_int, ctypes.c_uint32), ctypes.POINTER(_Property)),
+        ("drmModeFreeProperty", (pointer,), None),
+        ("drmGetVersion", (ctypes.c_int,), ctypes.POINTER(_Version)),
+        ("drmFreeVersion", (pointer,), None),
+    ):
+        function = getattr(lib, name)
+        function.argtypes, function.restype = argtypes, restype
+    return lib
+
+
+def read_properties(device: str) -> dict[int, tuple[int, str]]:
+    """Every plane's (alpha, pixel blend mode) through libdrm (ctypes; universal planes and atomic
+    client caps set, never master). OSError when the device cannot be read."""
+    lib = _libdrm()
+    fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)    # Weston is the master: this client only reads
+    try:
+        if lib.drmSetClientCap(fd, _UNIVERSAL_PLANES, 1) or lib.drmSetClientCap(fd, _ATOMIC, 1):
+            raise OSError("kms_client_caps")
+        resources = lib.drmModeGetPlaneResources(fd)
+        if not resources:
+            raise OSError("kms_plane_resources")
+        try:
+            ids = [resources.contents.planes[index] for index in range(resources.contents.count_planes)]
+        finally:
+            lib.drmModeFreePlaneResources(resources)
+        return {plane: _plane_properties(lib, fd, plane) for plane in ids}
+    finally:
+        os.close(fd)
+
+
+class PlaneProperties:
+    """The planes' (alpha, pixel blend mode) read as `read_properties` does, on one connection kept
+    open for the run and only for the planes asked: a moment's read costs a few ioctls, not the
+    whole controller's, so it never delays the bench's next commit past its refresh."""
+
+    def __init__(self, device: str) -> None:
+        """Open `device` as a read-only second client. OSError when it cannot be read."""
+        self._lib = _libdrm()
+        self._fd = os.open(device, os.O_RDWR | os.O_CLOEXEC)
+        if self._lib.drmSetClientCap(self._fd, _UNIVERSAL_PLANES, 1) or self._lib.drmSetClientCap(self._fd, _ATOMIC, 1):
+            os.close(self._fd)
+            raise OSError("kms_client_caps")
+
+    def read(self, planes: Collection[int]) -> dict[int, tuple[int, str]]:
+        """(alpha, pixel blend mode) of each plane in `planes`."""
+        return {plane: _plane_properties(self._lib, self._fd, plane) for plane in planes}
+
+    def close(self) -> None:
+        os.close(self._fd)
+
+
+def shown_planes(state: str) -> tuple[int, ...]:
+    """The ids of the planes `state` (the debugfs text) shows a framebuffer on. Pure."""
+    shown, plane = [], None
+    for line in state.splitlines():
+        found = _OBJECT.match(line)
+        if found:
+            plane = int(found.group(2)) if found.group(1) == "plane" else None
+        elif plane is not None and line.startswith("\tfb=") and line != "\tfb=0":
+            shown.append(plane)
+    return tuple(shown)
+
+
+def _plane_properties(lib: ctypes.CDLL, fd: int, plane: int) -> tuple[int, str]:
+    properties = lib.drmModeObjectGetProperties(fd, plane, _OBJECT_PLANE)
+    if not properties:
+        raise OSError("kms_plane_properties")
+    alpha, blend = OPAQUE_ALPHA, PREMULTIPLIED
+    try:
+        for index in range(properties.contents.count_props):
+            value = properties.contents.prop_values[index]
+            described = lib.drmModeGetProperty(fd, properties.contents.props[index])
+            if not described:
+                continue
+            try:
+                name = described.contents.name.decode()
+                if name == "alpha":
+                    alpha = int(value)
+                elif name == "pixel blend mode":
+                    enums = described.contents.enums
+                    blend = next((enums[i].name.decode() for i in range(described.contents.count_enums)
+                                  if enums[i].value == value), str(value))
+            finally:
+                lib.drmModeFreeProperty(described)
+    finally:
+        lib.drmModeFreeObjectProperties(properties)
+    return alpha, blend
+
+
+__all__ = ["DRIVER", "OPAQUE_ALPHA", "PREMULTIPLIED", "KmsPlane", "PlaneProperties", "display_controller", "driven_by",
+           "kms_planes", "read_properties", "shown_planes"]

@@ -9,7 +9,7 @@ from support.house_time import UTC_HOUSE, daily, set_house, window_program
 from support.key_content_builders import face
 from support.measured_photos import measure, measure_all
 from support.photo_pools import photo, seed_pool
-from support.position import save_position
+from support.position import PORTRAIT_ON_WIDE, save_position
 from test_registry import SKEWED, enroll, frame
 
 from central.coordination import CoordinationError, CoordinationLimits, Coordinator
@@ -27,7 +27,7 @@ def setup_players(registry, count=2):
         frame_id = f"frame-{i}"
         frame(registry, frame_id)
         registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
-        save_position(registry, frame_id)
+        save_position(registry, frame_id, PORTRAIT_ON_WIDE)
         players.append(player)
     return players
 
@@ -95,7 +95,7 @@ def test_configuration_revision_detects_independent_output_changes(registry):
     first = coordinator.configuration(player["player_id"], 1)
     assert len(first.bindings) == 2 and first.enabled_outputs == ()
     for revision in range(1, 5):
-        save_position(registry, "f0")
+        save_position(registry, "f0", PORTRAIT_ON_WIDE)
     high = coordinator.configuration(player["player_id"], 1)
     assert high.configuration_revision == first.configuration_revision + 1
     save_position(registry, "f1", SKEWED)
@@ -362,7 +362,7 @@ def test_explicit_binding_cohort_change_offers_fresh_revision_for_current_state(
     assert old["revocations"]
     frame(registry, "missing")
     registry.bind("missing", player["player_id"], "HDMI-A-2", expected_generation=0)
-    save_position(registry, "missing")
+    save_position(registry, "missing", PORTRAIT_ON_WIDE)
     registry.clock.advance(1)
     coordinator.advance()
     current = coordinator.delivery(player["player_id"], 1)
@@ -593,7 +593,7 @@ def test_a_new_binding_supersedes_the_pending_cohort_it_replaces(registry):
     before = next(g for g in cohorts(registry) if g["starts_at"] == 1100 + shift)
     frame(registry, "late")
     registry.bind("late", player["player_id"], "HDMI-A-2", expected_generation=0)
-    save_position(registry, "late")
+    save_position(registry, "late", PORTRAIT_ON_WIDE)
     registry.clock.advance(90)
     drive(registry, coordinator, [player], 1110 + shift)
     assert [d["code"] for d in group_events(registry, before["id"])] == ["superseded"]

@@ -59,10 +59,12 @@ from photo_seed import (
 )
 from playwright.sync_api import expect
 from support.measured_photos import measure_all
+from support.position import save_position
 
 from central.photo_library.model import InPool, SourceQuery
 from central.runtime import Contribution, Scene
 from central.wall_plan.selection import SceneSelection
+from contracts.models import Calibration, RectangleFit
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -310,6 +312,9 @@ def test_a_position_drafted_as_a_mat_opening_changes_what_fits_before_done(page,
     from test_console_frame_page_browser import _seed as seed_frame
 
     seed_frame(registry)
+    # _seed keeps a rectangle half the screen wide (room for the editor to move); this test's Frame
+    # output is the whole 1,920 x 1,080 screen, so its saved Position is the full-width rectangle.
+    save_position(registry, FRAME, Calibration(fit=RectangleFit()), expected_revision=2)
     sessions = FakeSessions(page, registry)
     library = library_of(registry)
     ref = connected(library)
@@ -332,7 +337,7 @@ def test_a_position_drafted_as_a_mat_opening_changes_what_fits_before_done(page,
             row.get_by_role("button", name="Details", exact=True).click()
             expect(row).to_contain_text("Frame output 1,920 × 1,080 px, 16:9")
             expect(row).not_to_contain_text("display")
-            position = open_frame(page, FRAME, "position").get_by_role("region", name="Position", exact=True)
+            position = open_frame(page, FRAME, "position").get_by_role("region", name="Where the picture sits on the screen", exact=True)
             expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
             # The line says what the Frame is judged at; its pixels are under Details (design fix
             # round 4), in the board the line opens.
@@ -341,10 +346,8 @@ def test_a_position_drafted_as_a_mat_opening_changes_what_fits_before_done(page,
                 ))).to_be_visible()
             expect(position).not_to_contain_text("1,920 × 1,080 px")
             position.get_by_role("button", name="Exact values", exact=True).click()
-            for label, value in (("Top-left x", "480"), ("Bottom-left x", "480"), ("Top-right x", "1440"),
-                                 ("Bottom-right x", "1440"), ("Top-left y", "270"), ("Top-right y", "270"),
-                                 ("Bottom-right y", "810"), ("Bottom-left y", "810")):
-                position.get_by_label(label, exact=True).fill(value)
+            # A 960 x 540 opening, centred (the centre stays where the full-screen Position put it).
+            position.get_by_label("Width in pixels", exact=True).fill("960")
             line = position.get_by_role("button", name=re.compile(
                 rf"^2 of 2 fit {FRAME} · Judged at its Frame output as you set it, 16:9$"))
             expect(line).to_be_visible()

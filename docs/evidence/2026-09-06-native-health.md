@@ -26,7 +26,7 @@ with current Player/contracts/appliance source from `bbd57b6` copied into
 `/app` and the verified `d9f656b` Player wheel closure installed offline. Those
 production paths are unchanged between these revisions. The container had
 no network or host mounts, 1 GiB memory and two CPUs. No Pi image was built.
-Native package versions are recorded in the [renderer contract](../module-native-renderer.md).
+Native package versions were recorded in the renderer document of that date (`docs/module-native-renderer.md` in the repository's history; the renderer is now the [plane renderer](../module-plane-renderer.md)).
 The optional missing-NumPy OpenGL warning was nonfatal.
 
 Executed source SHA-256 values:

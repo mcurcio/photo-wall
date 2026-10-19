@@ -1,7 +1,8 @@
 """G8: one module owns every GLib source the Player adds, and refuses a starvable priority.
 
-The real-GLib proof (control answers on a saturated loop; a static photo is not redrawn every
-tick) is tests/native_player_mainloop_harness.py, run by scripts/run_display_harness.py.
+The order is CONTROL < FRAME < TICK: control handoffs first, then the screens' frame turns, then
+the planning tick. The Player on real GLib is the picture end-to-end harness
+(tests/native_picture_e2e_harness.py, run by scripts/run_display_harness.py).
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ import pytest
 from player.mainloop import (
     BUS,
     CONTROL,
-    GDK_PRIORITY_REDRAW,
+    FRAME,
     MIN_GAP_MS,
     TICK,
     MainLoopDispatcher,
@@ -23,7 +24,7 @@ from player.mainloop import (
 
 PLAYER = Path(__file__).resolve().parents[1] / "player"
 OWNER = PLAYER / "mainloop.py"
-# Every GLib/GStreamer/GTK name that adds a main-loop source. A source added anywhere else has
+# Every GLib/GStreamer name that adds a main-loop source. A source added anywhere else has
 # a priority no one chose, which is how the control queue starved (G8). The guard flags any
 # REFERENCE to one (attribute, name, import, or a getattr string), not only a direct call, so an
 # alias (`add = GLib.idle_add`), `from GLib import timeout_add`, a source object
@@ -104,8 +105,8 @@ class FakeGLib:
         self.removed.append(source)
 
 
-@pytest.mark.parametrize("priority", [200, GDK_PRIORITY_REDRAW, TICK, 1])
-def test_a_dispatcher_below_the_tick_or_paint_is_refused_at_construction(priority):
+@pytest.mark.parametrize("priority", [200, TICK, 1, FRAME])
+def test_a_dispatcher_at_or_below_the_frame_turns_is_refused_at_construction(priority):
     # 200 is GLib.PRIORITY_DEFAULT_IDLE: the priority that starved control on origin/main.
     with pytest.raises(ValueError, match="dispatch_priority"):
         MainLoopDispatcher(FakeGLib(), priority=priority)
@@ -119,8 +120,9 @@ def test_dispatcher_and_its_lanes_post_at_control_priority():
     assert [priority for _, _, priority, _ in glib.added] == [CONTROL, CONTROL]
 
 
-@pytest.mark.parametrize("priority", [CONTROL, GDK_PRIORITY_REDRAW, 200])
-def test_a_tick_outside_control_and_paint_is_refused(priority):
+@pytest.mark.parametrize("priority", [CONTROL - 1, CONTROL, FRAME - 1, FRAME])
+def test_a_tick_at_or_above_the_frame_turns_is_refused(priority):
+    """A tick at FRAME would share an iteration with a fade's due commit and could run first."""
     with pytest.raises(ValueError, match="tick_priority"):
         Tick(FakeGLib(), 33, lambda: None, priority=priority)
 
@@ -163,9 +165,9 @@ def test_a_tick_whose_work_returns_false_or_raises_ends():
     assert len(glib.added) == 1
 
 
-def test_a_bus_watch_runs_at_tick_priority_never_below_paint():
-    """A GStreamer bus watch at the idle default (200) would sit behind continuous paint, so an
-    EOS or error would wait on the display; watch_bus pins it at BUS, beside the tick."""
+def test_a_bus_watch_runs_at_tick_priority():
+    """A GStreamer bus watch at the idle default (200) would sit behind every busier source, so an
+    EOS or error would wait; watch_bus pins it at BUS, beside the tick."""
     class Bus:
         priorities = []
 
@@ -174,3 +176,16 @@ def test_a_bus_watch_runs_at_tick_priority_never_below_paint():
     bus = Bus()
     watch_bus(bus)
     assert bus.priorities == [BUS] and BUS == TICK
+
+
+def test_the_frame_turns_run_below_control_and_above_the_tick():
+    """A fade's next commit never waits behind a planning tick ready in the same iteration, and a
+    control handoff still runs first (render redesign S3, `FrameLoop`)."""
+    assert CONTROL < FRAME < TICK
+
+
+@pytest.mark.parametrize("priority", [FRAME + 1, TICK, 200])
+def test_a_tick_below_the_frame_turns_is_accepted(priority):
+    glib = FakeGLib()
+    Tick(glib, 33, lambda: None, priority=priority)
+    assert glib.added[-1][:3] == ("timeout", 33, priority)

@@ -19,7 +19,7 @@ from central.wall_plan.fit import (
     shape_fit,
 )
 from central.wall_plan.fit_settings import FitSettings
-from contracts.models import Calibration, CoverFit, FrameProfile, frame_output
+from contracts.models import Calibration, FrameProfile, RectangleFit, frame_output
 
 UHD = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55)
 UHD_40 = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=40)
@@ -51,13 +51,13 @@ def _refused(verdict: FitVerdict) -> str:
     return verdict.reason
 
 
-def _opening(corners) -> FitTarget:
-    """UHD's Frame drawn through `corners` of the 3840 x 2160 Display (Cover fit)."""
-    calibration = Calibration(fit=CoverFit(corners=corners))
-    return FitTarget(profile=UHD, output_px=frame_output(UHD, calibration, DISPLAY))
+def _opening(width: float) -> FitTarget:
+    """UHD's Frame drawn as a centred rectangle `width` of the 3840 x 2160 Display's width."""
+    calibration = Calibration(fit=RectangleFit(width=width))
+    return FitTarget(profile=UHD, output_px=frame_output(UHD, calibration, DISPLAY, 0))
 
 
-MAT = _opening(((.3, .3), (.7, .3), (.7, .7), (.3, .7)))     # a 40 % x 40 % opening
+MAT = _opening(.4)                                           # a 40 % x 40 % opening
 
 
 def test_an_evenly_spread_four_by_three_photo_fits_sixteen_by_nine_centred() -> None:
@@ -109,23 +109,13 @@ def test_the_kept_window_needs_the_frame_output() -> None:
 # --- Follow-ups B1: the Frame output, not the Display -----------------------------------------
 
 def test_a_mat_opening_needs_only_its_own_pixels_not_the_displays() -> None:
-    """B1 case 1: a 40 % x 40 % Cover opening on a 3,840 x 2,160 Display is a 1,536 x 864
+    """B1 case 1: a 40 % x 40 % opening on a 3,840 x 2,160 Display is a 1,536 x 864
     Frame output; a 1,600 x 900 photo fills it, and judged against the Display it would not."""
     assert MAT.output_px == (1536, 864)
     photo = measured("p", 1600, 900)
     assert isinstance(_judge(photo, MAT), Fits)
     assert _refused(_judge(photo, FitTarget(profile=UHD, output_px=DISPLAY))) == \
         "below_frame_pixels"
-
-
-def test_a_frame_turned_off_axis_needs_more_than_the_display() -> None:
-    """B1 case 2: full screen turned 10 degrees, the picture is larger than the Display, so a
-    photo of exactly the Display's size is too small."""
-    turned = Calibration(fit=CoverFit(rotation=10))
-    target = FitTarget(profile=UHD, output_px=frame_output(UHD, turned, DISPLAY))
-    assert target.output_px[0] > 3840 and target.output_px[1] > 2160
-    assert _refused(_judge(measured("p", 3840, 2160), target)) == "below_frame_pixels"
-    assert isinstance(_judge(measured("p", 3840, 2160)), Fits)
 
 
 def test_a_frame_without_a_frame_output_is_judged_by_shape_only() -> None:

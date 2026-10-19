@@ -3,8 +3,8 @@
 "View and restore"; migration 096).
 
 Every trial runs on tests/test_node_calibration.py's rig (`setup_trial`): a Node Pi with node-f0 and
-node-f1 bound, both saved once by `save_position` on a Frame at its defaults (so each begins with one
-kept-saved entry). The Node's exchanges are real `NodeDisplay.exchange` calls.
+node-f1 bound, both saved once by `save_position` at support.position's PORTRAIT_ON_WIDE (so each begins
+with one kept-saved entry). The Node's exchanges are real `NodeDisplay.exchange` calls.
 (1) Save appends kept-saved; (2) a profile change; (3) a change made outside Photo Wall; (4) what
 the exchanges hand the Node; (5) Restore; (6) Restore's refusals; (7) the page and time; (8) kept and
 sent retention apart; (9) a deleted Frame's history; (10) one transaction.
@@ -17,8 +17,8 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from support.position import LIGHTING, save_position
-from test_node_calibration import LIGHTING_JSON, SKEWED, TURNED, begin, operate, setup_trial
+from support.position import LIGHTING, PORTRAIT_ON_WIDE, save_position
+from test_node_calibration import LIGHTING_JSON, SHIFTED, SKEWED, begin, operate, setup_trial
 from test_registry import ADMIN, frame
 
 from central.app import create_app
@@ -35,7 +35,7 @@ from central.infra.position_history_store import record_sent_in, write_position_
 from central.transaction_locks import acquire_runtime_locks
 from central.tuning_history import bounds as retention
 from contracts.frame_lighting import FrameLighting
-from contracts.models import Calibration, CornersFit, FrameProfile
+from contracts.models import Calibration, FrameProfile, RectangleFit
 from contracts.node_calibration import parse_trial
 
 AUTH = {"Authorization": "Bearer " + ADMIN}
@@ -121,13 +121,16 @@ def _see_display(registry, frame_id: str = "node-f0") -> UUID:
 
 
 def _entry(registry, *, frame_id: str = "node-f0", width: int = 1080, height: int = 1920,
-           display: UUID | None = None, fit=SKEWED) -> UUID:
-    """An entry Photo Wall wrote at another time (another profile, another Display), as stored."""
+           display: UUID | None = None, fit=SKEWED, turn: int | None = None) -> UUID:
+    """An entry Photo Wall wrote at another time (another profile, turn or Display), as stored; `turn`
+    None: the Frame's turn now."""
     entry = uuid4()
     _sql(registry, "INSERT INTO position_entries(id, frame_id, number, kind, at, fit, lighting, profile_width_px, "
-                   "profile_height_px, display_id) SELECT %s, %s, COALESCE(max(number), 0) + 1, 'kept-saved', "
-                   "clock_timestamp(), %s, %s, %s, %s, %s FROM position_entries WHERE frame_id=%s",
-         (entry, frame_id, fit.model_dump_json(), LIGHTING.model_dump_json(), width, height, display, frame_id))
+                   "profile_height_px, turn, display_id) SELECT %s, %s, COALESCE(max(number), 0) + 1, 'kept-saved', "
+                   "clock_timestamp(), %s, %s, %s, %s, COALESCE(%s, (SELECT turn FROM frames WHERE id=%s)), %s "
+                   "FROM position_entries WHERE frame_id=%s",
+         (entry, frame_id, fit.model_dump_json(), LIGHTING.model_dump_json(), width, height, turn, frame_id, display,
+          frame_id))
     return entry
 
 
@@ -144,8 +147,8 @@ def test_save_appends_a_kept_entry_made_for_the_profile_and_the_display_seen(reg
     assert node.save(trial)["state"] == "saved"
     newest = _history(registry)["entries"][0]
     assert (newest["kind"], newest["session_id"], newest["restored_from"]) == ("kept-saved", trial["trial_id"], None)
-    assert CornersFit.model_validate(newest["fit"]) == SKEWED and FrameLighting.model_validate(newest["lighting"]) == DEEP
-    assert newest["made_for"] == {"profile_px": PORTRAIT, "display_id": str(display)}
+    assert RectangleFit.model_validate(newest["fit"]) == SKEWED and FrameLighting.model_validate(newest["lighting"]) == DEEP
+    assert newest["made_for"] == {"profile_px": PORTRAIT, "turn": 0, "display_id": str(display)}
     assert newest["restore_refusal"] is None
 
 
@@ -181,12 +184,12 @@ def test_a_change_made_outside_photo_wall_is_recorded_before_the_next_save(regis
     node = Node(registry)
     _sql(registry, "UPDATE frames SET lighting=%s WHERE id='node-f0'", (DEEP.model_dump_json(),))
     assert _history(registry)["unrecorded_change"] is True
-    node.save(node.edit(node.begin(), TURNED))
+    node.save(node.edit(node.begin(), SHIFTED))
     history = _history(registry)
     saved, unrecorded = history["entries"][:2]
     assert (saved["kind"], unrecorded["kind"], history["unrecorded_change"]) == ("kept-saved", "kept-unrecorded", False)
     assert FrameLighting.model_validate(unrecorded["lighting"]) == DEEP and unrecorded["session_id"] is None
-    assert CornersFit.model_validate(unrecorded["fit"]) == CornersFit()           # the rig's saved fit
+    assert RectangleFit.model_validate(unrecorded["fit"]) == PORTRAIT_ON_WIDE.fit  # the rig's saved fit
     assert unrecorded["made_for"]["profile_px"] == PORTRAIT
 
 
@@ -237,7 +240,7 @@ def test_the_kept_write_takes_only_a_kept_kind_and_its_own_values(registry):
             (saved, Calibration(fit=SKEWED), portrait, "position_history_kind"),
             (profile_changed_record(PositionValues(SKEWED, DEEP)), Calibration(fit=SKEWED), None,
              "position_history_kind"),
-            (saved, Calibration(fit=TURNED), None, "position_history_values")):
+            (saved, Calibration(fit=SHIFTED), None, "position_history_values")):
         with registry.db.transaction() as conn, pytest.raises(ValueError, match=code):
             write_position_in(conn, "node-f0", record, calibration=calibration, profile=profile)
     assert _sql(registry, "SELECT calibration, lighting, generation FROM frames WHERE id='node-f0'") == before
@@ -255,7 +258,7 @@ def test_what_each_exchange_hands_the_node_is_recorded_once(registry):
     node.exchange()
     node.exchange()
     assert _kinds(registry) == ["sent-draft", "kept-saved", "kept-created"]
-    draft = Calibration(revision=trial["calibration_revision"], fit=TURNED).model_dump(mode="json")
+    draft = Calibration(revision=trial["calibration_revision"], fit=SHIFTED).model_dump(mode="json")
     renewed = operate(node.trials, "node-f0", UUID(trial["trial_id"]), operation="renew",
                       expected_sequence=trial["sequence"], calibration=draft, lighting=LIGHTING_JSON)
     node.exchange()
@@ -265,9 +268,9 @@ def test_what_each_exchange_hands_the_node_is_recorded_once(registry):
     assert [(entry["kind"], entry["session_id"]) for entry in entries] == [
         ("sent-back", trial["trial_id"]), ("sent-draft", trial["trial_id"]), ("sent-draft", trial["trial_id"]),
         ("kept-saved", None), ("kept-created", None)]
-    assert CornersFit.model_validate(entries[0]["fit"]) == CornersFit()             # the saved values back
+    assert RectangleFit.model_validate(entries[0]["fit"]) == PORTRAIT_ON_WIDE.fit   # the saved values back
 
-    lapsed = node.edit(node.begin(), TURNED)
+    lapsed = node.edit(node.begin(), SHIFTED)
     node.exchange()
     registry.clock.advance(6)                                         # past the idle deadline
     node.exchange()
@@ -287,7 +290,7 @@ def test_restore_loads_an_entry_at_the_trials_base_and_save_names_it(registry):
     node.exchange()
     skewed = _history(registry)["entries"][0]                         # the draft handed to the Node
     assert skewed["kind"] == "sent-draft"
-    trial = node.edit(trial, TURNED)
+    trial = node.edit(trial, SHIFTED)
     restored = node.restore(trial, skewed["entry_id"])
     assert restored["sequence"] == trial["sequence"] + 1
     assert restored["calibration"] == Calibration(revision=trial["calibration_revision"], fit=SKEWED).model_dump(
@@ -312,12 +315,12 @@ def test_an_edit_after_restore_keeps_what_it_was_restored_from(registry):
     trial = node.edit(node.begin(), SKEWED)
     node.exchange()
     skewed = _history(registry)["entries"][0]
-    edited = node.edit(node.restore(trial, skewed["entry_id"]), TURNED)
+    edited = node.edit(node.restore(trial, skewed["entry_id"]), SHIFTED)
     assert edited["restored_from"] == skewed["entry_id"]
     node.save(edited)
     newest = _history(registry)["entries"][0]
     assert (newest["kind"], newest["restored_from"]) == ("kept-saved", skewed["entry_id"])
-    assert newest["fit"] == TURNED.model_dump(mode="json")
+    assert newest["fit"] == SHIFTED.model_dump(mode="json")
 
 
 def test_the_restore_route_answers_the_draft_at_the_trials_base(registry):
@@ -328,7 +331,7 @@ def test_the_restore_route_answers_the_draft_at_the_trials_base(registry):
     trial = node.edit(node.begin(), SKEWED, DEEP)
     node.exchange()
     skewed = _history(registry)["entries"][0]
-    trial = node.edit(trial, TURNED)
+    trial = node.edit(trial, SHIFTED)
     with _client(registry) as client:
         answer = client.post(f"/v1/operator/frames/node-f0/calibration-trials/{trial['trial_id']}/restores",
                              headers=AUTH, json={"entry_id": skewed["entry_id"],
@@ -355,19 +358,22 @@ def test_restore_refusals_in_order(registry):
     other_frame = _history(registry, "node-f1")["entries"][0]["entry_id"]
     _sql(registry, "INSERT INTO displays(id, maker, product, name, serial, first_seen_at, matched_lux, panel_black) "
                    "VALUES (%s, 'DEL', 2, 'Dell', 'other', 0, 1000.0, 0.0003)", (dell := uuid4(),))
+    other_turn = _entry(registry, turn=180)               # made for the screen hung upside down
     other_display = _entry(registry, display=dell)
     with pytest.raises(NodeControlError) as invalid:
         node.restore(trial, own, expected=0)
     refusals = [(invalid.value.code, invalid.value.status)]
     for trial_id, entry, expected in ((uuid4(), own, 1), (UUID(trial["trial_id"]), uuid4(), 1),
                                       (UUID(trial["trial_id"]), other_frame, 1),
+                                      (UUID(trial["trial_id"]), other_turn, 1),
                                       (UUID(trial["trial_id"]), other_display, 1),
                                       (UUID(trial["trial_id"]), own, 7)):
         with pytest.raises(NodeControlError) as refused:
             node.trials.restore("node-f0", trial_id, entry_id=UUID(str(entry)), expected_sequence=expected)
         refusals.append((refused.value.code, refused.value.status))
     assert refusals == [("trial_sequence_invalid", 422), ("trial_unknown", 404), ("unknown_entry", 404),
-                        ("other_frame", 409), ("made_for_other_display", 409), ("trial_sequence_conflict", 409)]
+                        ("other_frame", 409), ("made_for_other_turn", 409), ("made_for_other_display", 409),
+                        ("trial_sequence_conflict", 409)]
     assert _history(registry)["entries"][0]["restore_refusal"] == "made_for_other_display"
     assert seen != dell
     node.end(trial)
@@ -397,8 +403,8 @@ def test_kept_and_sent_entries_are_trimmed_apart(registry, monkeypatch):
     monkeypatch.setattr(retention, "KEPT_ENTRIES", 2)
     monkeypatch.setattr(retention, "SENT_ENTRIES", 2)
     Node(registry)
-    for rotation in (90, 180, 270):
-        save_position(registry, "node-f0", Calibration(fit=CornersFit(rotation=rotation)))
+    for width in (0.2, 0.22, 0.24):
+        save_position(registry, "node-f0", Calibration(fit=RectangleFit(width=width)))
     session = uuid4()
     with registry.db.transaction() as conn:
         for depth in (1.0, 2.0, 3.0):

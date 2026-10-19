@@ -12,7 +12,7 @@ export interface AtReading {
 }
 
 export interface Calibration {
-  fit?: CornersFit | CoverFit;
+  fit?: RectangleFit;
   revision?: number;
 }
 
@@ -39,18 +39,6 @@ export interface ColourEntry {
   colour: ReportedColour;
   kind: "colour";
   state: ColourDimmer | Unavailable | NotReported;
-}
-
-export interface CornersFit {
-  corners?: [[number, number], [number, number], [number, number], [number, number]];
-  mode: "corners";
-  rotation?: 0 | 90 | 180 | 270;
-}
-
-export interface CoverFit {
-  corners?: [[number, number], [number, number], [number, number], [number, number]];
-  mode: "cover";
-  rotation?: number;
 }
 
 export interface Dimmer {
@@ -100,6 +88,11 @@ export interface FrameLighting {
 export interface FrameRefView {
   id: string;
   name: string;
+}
+
+export interface FrameTurnChange {
+  expected_generation: number;
+  turn: 0 | 90 | 180 | 270;
 }
 
 export type HeardEntityView = HeardLightView | HeardSensorView;
@@ -152,6 +145,7 @@ export type LuxOnFrame = number;
 export interface MadeForView {
   display_id: string | null;
   profile_px: ProfilePxView;
+  turn: 0 | 90 | 180 | 270;
 }
 
 export interface Measured {
@@ -211,12 +205,12 @@ export interface PlayerVersionView {
   version: ReleaseTag | null;
 }
 
-export type PositionEntryKind = "kept-created" | "kept-saved" | "kept-profile-changed" | "kept-unrecorded" | "sent-draft" | "sent-back";
+export type PositionEntryKind = "kept-created" | "kept-saved" | "kept-profile-changed" | "kept-turn-changed" | "kept-unrecorded" | "sent-draft" | "sent-back";
 
 export interface PositionEntryView {
   at: string;
   entry_id: string;
-  fit: CornersFit | CoverFit;
+  fit: RectangleFit;
   frame: FrameRefView;
   kind: PositionEntryKind;
   lighting: FrameLighting;
@@ -238,7 +232,7 @@ export interface PositionRestore {
   expected_sequence: number;
 }
 
-export type PositionRestoreRefusal = "other_frame" | "made_for_other_profile" | "made_for_other_display";
+export type PositionRestoreRefusal = "other_frame" | "made_for_other_profile" | "made_for_other_turn" | "made_for_other_display";
 
 export interface ProfilePxView {
   height: number;
@@ -246,6 +240,13 @@ export interface ProfilePxView {
 }
 
 export type Reading = Measured | Unavailable;
+
+export interface RectangleFit {
+  centre_x?: number;
+  centre_y?: number;
+  mode: "rectangle";
+  width?: number;
+}
 
 export interface RefusedReportView {
   address: string;
@@ -427,22 +428,6 @@ export const LIMITS = {
       minItems: 3,
     },
   },
-  CornersFit: {
-    corners: {
-      maxItems: 4,
-      minItems: 4,
-    },
-  },
-  CoverFit: {
-    corners: {
-      maxItems: 4,
-      minItems: 4,
-    },
-    rotation: {
-      exclusiveMaximum: 360,
-      minimum: 0,
-    },
-  },
   Dimmer: {
     brightness: {
       maximum: 1,
@@ -506,6 +491,12 @@ export const LIMITS = {
   FrameRefView: {
     id: {
       pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
+  FrameTurnChange: {
+    expected_generation: {
+      integer: true,
+      minimum: 0,
     },
   },
   HeardLightView: {
@@ -617,6 +608,20 @@ export const LIMITS = {
       integer: true,
       maximum: 16384,
       minimum: 1,
+    },
+  },
+  RectangleFit: {
+    centre_x: {
+      maximum: 1,
+      minimum: 0,
+    },
+    centre_y: {
+      maximum: 1,
+      minimum: 0,
+    },
+    width: {
+      exclusiveMinimum: 0,
+      maximum: 1,
     },
   },
   RefusedReportView: {
@@ -785,6 +790,7 @@ export const REFUSALS = {
   PositionRestoreRefusal: [
     "other_frame",
     "made_for_other_profile",
+    "made_for_other_turn",
     "made_for_other_display",
   ],
   ReportRefusal: [
@@ -819,6 +825,7 @@ export const REFUSALS = {
     "node_body_too_large",
     "calibration_revision_conflict",
     "calibration_trial_baseline_changed",
+    "position_off_screen",
   ],
 } as const;
 export type DrawnReportRefusal = (typeof REFUSALS)["DrawnReportRefusal"][number];

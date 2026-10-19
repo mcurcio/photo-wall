@@ -25,7 +25,7 @@ from playwright.sync_api import expect
 from power_page import power_line, resting_line
 from support.console_words import POWER
 from support.house_time import LONDON, at, daily, set_house
-from support.position import save_position
+from support.position import PORTRAIT_ON_WIDE, save_position
 from test_display_power_requests import _answer, _bound_frame, _projected
 from test_frame_power_browser import _off_thread
 
@@ -93,7 +93,7 @@ def test_the_overview_names_the_winner_and_resting_and_a_display_that_did_not_an
         expect(_chip(page, POWER["resting"])).to_have_count(0)
         # Once the Frame is positioned and its Pi reports, the chip says Resting from the same
         # answer (Why's `resting`).
-        _off_thread(save_position, registry, frame)
+        _off_thread(save_position, registry, frame, PORTRAIT_ON_WIDE)
         _off_thread(report_readiness, registry, player)
         why = _why(open_frame(page, frame, "overview"))
         expect(_chip(page, POWER["resting"])).to_be_visible()

@@ -18,13 +18,13 @@ from player.rendering import OutputComposition
 class AppliedTrial:
     candidate: TrialCandidate
     calibration: Calibration
-    primitives: tuple[tuple[float, float], ...]
     lighting: FrameLighting
 
 
 class TrialState:
     """Per-Output local terminal fence. A delayed envelope cannot revive expiry. The trial's
-    calibration may carry a Frame fit (1c); its primitives are that fit's corners."""
+    calibration carries the drawn Frame fit; the overlay's corners are the renderer's (render
+    redesign S3: player/plane_screen.py `overlay_corners` of the drawn placement)."""
 
     def __init__(self):
         self.scope = None
@@ -88,16 +88,11 @@ class TrialState:
         lighting = candidate.lighting
         if calibration.revision != composition.binding.calibration.revision:
             raise ValueError("trial_calibration_baseline")
-        # The overlay's primitives are the drawn fit's corners (the opening, both modes); the base
-        # never recomputes them.
-        points = tuple(
-            tuple(max(0.0, min(1.0, n)) for n in corner) for corner in calibration.fit.corners
-        )
         self.trial_id, self.generation, self.sequence = (
             candidate.trial_id,
             candidate.generation,
             candidate.sequence,
         )
         self.hard_cap, self.terminal = candidate.hard_expires_boottime_ms, False
-        self.active = AppliedTrial(candidate, calibration, points, lighting)
+        self.active = AppliedTrial(candidate, calibration, lighting)
         return self.active

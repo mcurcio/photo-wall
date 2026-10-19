@@ -57,6 +57,7 @@ from .picture import (
 )
 from .picture_list import FileOfferedCache, PictureListAsker
 from .power_methods import DdcCiAdapter, HdmiCecAdapter, SignalOffAdapter, run_tool
+from .screen_turn import ScreenTurns
 from .signal_range import DrmConnectorRanges, FileRangeRequests
 from .weston import MAX_PACKET, SurfaceGrant, WestonBackend, _pairs, _surface
 
@@ -188,24 +189,28 @@ class PowerObservations:
     modes) to the power controller, so the power controller is the one writer of each Output's
     report and the report carries both halves (roadmap 1b, D2); and the connection and identity to
     the picture controller (decision 0022: an identity whose list is not held is asked, another
-    identity carries out the picture again)."""
+    identity carries out the picture again); and the connection to the screen turns (render
+    redesign S3: the Output appearing connected asks the shell for its turn again)."""
 
-    def __init__(self, power: OutputPowerController, picture: PictureController) -> None:
+    def __init__(self, power: OutputPowerController, picture: PictureController, turns: ScreenTurns) -> None:
         self._power = power
         self._picture = picture
+        self._turns = turns
 
     def put_report(self, report: OutputReport) -> None:
         self._power.output(report.output_id, connected=report.connected, identity=report.identity,
                            modes=report.modes)
         self._picture.output(report.output_id, connected=report.connected, identity=report.identity)
+        self._turns.output(report.output_id, connected=report.connected)
 
     def emit_attempt(self, attempt: PowerAttempt) -> None:
         raise TypeError("the OutputReporter makes no power attempt")
 
 
-def document_feed(power: OutputPowerController, picture: PictureController) -> Callable[[str, Document], None]:
+def document_feed(power: OutputPowerController, picture: PictureController,
+                  turns: ScreenTurns) -> Callable[[str, Document], None]:
     """The desired view's callback, routed by key: an Output document (`output-…`), decoded, to the
-    power controller; a picture document (`picture-…`, decision 0022), decoded, to the picture
+    power controller and to the screen turns (its `turn`, render redesign S3); a picture document (`picture-…`, decision 0022), decoded, to the picture
     controller (each acts on its own change number). A document that does not decode, sits under
     another Output's key, or under a key of neither kind, is logged and ignored."""
     output_keys = {output_document_key(output_id) for output_id in OUTPUT_IDS}
@@ -218,6 +223,7 @@ def document_feed(power: OutputPowerController, picture: PictureController) -> C
                 if output_document_key(decoded.output_id) != key:
                     raise ValueError("output_document_key")
                 power.document(decoded.output_id, decoded)
+                turns.document(decoded.output_id, decoded)
             elif key in picture_keys:
                 wanted = decode_picture_document(document.value)
                 if picture_document_key(wanted.output_id) != key:
@@ -341,10 +347,12 @@ class Controller:
 
 
 class _stopping:
-    """Stops the controllers' workers and gives back the CEC addresses on the way out."""
+    """Stops the controllers' and the screen turns' workers and gives back the CEC addresses on the
+    way out."""
 
-    def __init__(self, power: OutputPowerController, picture: PictureController, cec: HdmiCecAdapter) -> None:
-        self._power, self._picture, self._cec = power, picture, cec
+    def __init__(self, power: OutputPowerController, picture: PictureController, turns: ScreenTurns,
+                 cec: HdmiCecAdapter) -> None:
+        self._power, self._picture, self._turns, self._cec = power, picture, turns, cec
 
     def __enter__(self) -> None:
         return None
@@ -352,6 +360,7 @@ class _stopping:
     def __exit__(self, *_exc: object) -> None:
         self._power.stop()
         self._picture.stop()
+        self._turns.stop()
         self._cec.close()
 
 
@@ -392,15 +401,17 @@ def main() -> None:
         ddc = DdcChannel(run_tool)
         power, cec = power_controller(backend, BusReportSink(session), ddc)
         picture = picture_controller(backend, BusPictureSink(session), ddc)
+        turns = ScreenTurns(backend)        # the shell's `turn` op (WestonBackend.turn)
         power.start()
         picture.start()
-        feed = document_feed(power, picture)
+        turns.start()
+        feed = document_feed(power, picture, turns)
         session.desired.on_change(feed)
         for output_id in OUTPUT_IDS:     # what arrived before the callback, once more (idempotent)
             for key in (output_document_key(output_id), picture_document_key(output_id)):
                 if (present := session.desired.get(key)) is not None:
                     feed(key, present)
-        controller = Controller(backend, reports=OutputReporter(PowerObservations(power, picture)))
+        controller = Controller(backend, reports=OutputReporter(PowerObservations(power, picture, turns)))
         if config:
             from .service import DisplayService
 
@@ -412,7 +423,7 @@ def main() -> None:
                 runtime=args.runtime,
             )
         with (
-            _stopping(power, picture, cec),
+            _stopping(power, picture, turns, cec),
             feed_listener(controller) as feeds,
             socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as ingress,
         ):

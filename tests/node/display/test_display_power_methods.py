@@ -234,7 +234,7 @@ def document(change: int, test: PowerRequest | None = None, *, power: OutputPowe
              method=BEST_DETECTED, never_off_on_other_input=False, switch_input_on_power_on=False) -> OutputDocument:
     """A document whose timetable is on with no set times (or `power`), `test` on top."""
     part = timetable(test=test) if power is None else power
-    return OutputDocument(OUTPUT, change, part, method, switch_input_on_power_on, never_off_on_other_input)
+    return OutputDocument(OUTPUT, change, part, method, switch_input_on_power_on, never_off_on_other_input, 0)
 
 
 def console_off(seconds: int = 300, request_id: str = "17") -> PowerRequest:

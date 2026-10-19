@@ -336,8 +336,7 @@ class NodeCalibration:
             made_for = frame_made_for_in(conn, frame_id)
             if made_for is None:
                 raise TrialRefused(TrialRefusal.UNKNOWN)
-            refusal = restore_refusal(entry, frame_id=frame_id, profile_px=made_for.profile_px,
-                                      seen_display_id=made_for.display_id)
+            refusal = restore_refusal(entry, frame_id=frame_id, now=made_for)
             if refusal is not None:
                 raise NodeControlError(refusal.value, 409)
             try:

@@ -1,4 +1,4 @@
-import type * as React from "react";
+import * as React from "react";
 
 import { Button } from "../ui/button";
 import { cn } from "../ui/cn";
@@ -28,8 +28,15 @@ export interface LivePreviewEditorProps {
   unavailable?: { reason: React.ReactNode; action?: { label: string; onAction: () => void } };
   /** Words in place of the acknowledgement while no live session shows the changes ("Connecting…"). */
   status?: string;
-  /** A problem (a ProblemCard), beside the bar. */
+  /** A problem (a ProblemCard), beside the bar; on a phone it is scrolled into view above the bar
+   * when it appears. */
   problem?: React.ReactNode;
+  /** The problem in one sentence, also said in the bar on a phone (where the bar may cover the card). */
+  problemLine?: string;
+  /** The last change was refused, so the Pi still presents the one before: the acknowledgement says so. */
+  lastRefused?: boolean;
+  /** Done cannot keep what is drafted (Central refused it): Done is not offered and these words say why. */
+  doneBlocked?: string;
   /** Plain notes above the bar ("Saved at 21:04:07."). */
   notes?: readonly string[];
 }
@@ -41,12 +48,29 @@ export interface LivePreviewEditorProps {
  * only when the acknowledged change is the latest one (`ack.revision === latestRevision`): a
  * page cannot pass an enabled flag. With no change, Done is offered only while the saved values
  * are `unconfirmed`, and keeps them as they are. When Done cannot be pressed, the bar says why. On a phone
- * the bar stays at the bottom of the screen while the controls scroll.
+ * the bar stays at the bottom of the screen while the controls scroll, says the problem's sentence,
+ * and a problem that appears is scrolled into view above it.
  */
 export function LivePreviewEditor({
   label, latestRevision, ack, dirty, unconfirmed, busy = false, onDone, onRevert, controls, unavailable, status,
-  problem, notes = [],
+  problem, problemLine, lastRefused = false, doneBlocked, notes = [],
 }: LivePreviewEditorProps) {
+  const problemRef = React.useRef<HTMLDivElement | null>(null);
+  const barRef = React.useRef<HTMLDivElement | null>(null);
+  const hasProblem = problem !== undefined && problem !== null;
+  // A problem that appears while the editor is open is brought into view, and above the bar where the
+  // bar sticks over it (a phone); one there when the editor opens leaves the page where it is.
+  const hadProblem = React.useRef(hasProblem);
+  React.useEffect(() => {
+    const card = problemRef.current;
+    const appeared = hasProblem && !hadProblem.current;
+    hadProblem.current = hasProblem;
+    if (!appeared || card === null) return;
+    card.scrollIntoView?.({ block: "nearest" });
+    const bar = barRef.current?.getBoundingClientRect();
+    const below = card.getBoundingClientRect().bottom - (bar?.top ?? Infinity);
+    if (bar !== undefined && below > 0 && bar.bottom >= window.innerHeight - 1) window.scrollBy(0, below + 8);
+  }, [hasProblem]);
   if (unavailable !== undefined) {
     return (
       <div className="flex min-w-0 flex-col items-start gap-2">
@@ -59,16 +83,18 @@ export function LivePreviewEditor({
   }
   const acknowledged = latestRevision !== null && ack !== null && ack.revision === latestRevision;
   const keeping = dirty || unconfirmed !== undefined;
-  const canDone = keeping && acknowledged && !busy;
-  const why = !keeping ? "No changes to keep."
-    : !acknowledged ? "Done is offered once the Pi presents your latest change."
-      : dirty ? null : unconfirmed ?? null;
+  const canDone = keeping && acknowledged && !busy && doneBlocked === undefined;
+  const why = doneBlocked !== undefined ? doneBlocked
+    : !keeping ? "No changes to keep."
+      : !acknowledged ? "Done is offered once the Pi presents your latest change."
+        : dirty ? null : unconfirmed ?? null;
   return (
     <div className="flex min-w-0 flex-col gap-4">
       {controls}
       {notes.map((note) => <p key={note} role="status" className="m-0 text-sm text-muted">{note}</p>)}
-      {problem}
+      {hasProblem && <div ref={problemRef} className="min-w-0">{problem}</div>}
       <div
+        ref={barRef}
         role="group"
         aria-label={label}
         className={cn(
@@ -79,9 +105,13 @@ export function LivePreviewEditor({
         {latestRevision === null ? (
           <span role="status" className="text-sm text-text">{status ?? ""}</span>
         ) : acknowledged ? (
-          <AckBadge state="acknowledged" at={ack.at} />
+          <AckBadge state="acknowledged" at={ack.at}
+            note={lastRefused ? "your last change was refused" : undefined} />
         ) : (
           <AckBadge state="requested" />
+        )}
+        {problemLine !== undefined && (
+          <span className="w-full text-sm text-text md:hidden">{problemLine}</span>
         )}
         <span className="ml-auto flex flex-wrap items-center gap-2">
           {why !== null && <span className="text-xs text-muted">{why}</span>}

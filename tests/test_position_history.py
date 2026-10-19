@@ -25,26 +25,27 @@ from central.fleet.position_history import (
     restored_draft,
     saved_record,
     sent_record,
+    turn_changed_record,
     unrecorded_record,
 )
 from contracts.frame_lighting import FarLight, FrameLighting, Paper
-from contracts.models import Calibration, CornersFit, CoverFit
+from contracts.models import Calibration, RectangleFit
 
-SKEWED = PositionValues(CornersFit(corners=((0.1, 0), (1, 0), (1, 1), (0, 1))), LIGHTING)
-MATTED = PositionValues(CoverFit(), FrameLighting(
+SKEWED = PositionValues(RectangleFit(centre_x=0.45, width=0.8), LIGHTING)
+MATTED = PositionValues(RectangleFit(), FrameLighting(
     mat_depth_mm=2.0, lights=(FarLight(light="room", lux=400.0, reference={"kind": "at-full"}, from_degrees=90,
                                        steep_degrees=30, softness_degrees=5),),
     paper=Paper(whiteness=0.9, ink_density=2.3)))
 PORTRAIT, LANDSCAPE = (1080, 1920), (1920, 1080)
 SAMSUNG, DELL = uuid4(), uuid4()
 SESSION = uuid4()
-CREATED = PositionValues(CoverFit(), LIGHTING)
+CREATED = PositionValues(RectangleFit(), LIGHTING)
 
 
 def _entry(kind: PositionEntryKind, values: PositionValues, *, frame_id: str = "kitchen", profile=PORTRAIT,
-           display=SAMSUNG, session_id=None) -> PositionEntry:
+           turn: int = 0, display=SAMSUNG, session_id=None) -> PositionEntry:
     return PositionEntry(uuid4(), frame_id, 3, datetime(2026, 10, 13, 21, 4, 7, tzinfo=UTC),
-                         MadeFor(profile, display), PositionRecord(kind, values, session_id, None))
+                         MadeFor(profile, turn, display), PositionRecord(kind, values, session_id, None))
 
 
 def test_position_values_and_kept_records():
@@ -55,6 +56,7 @@ def test_position_values_and_kept_records():
         PositionEntryKind.KEPT_SAVED, SKEWED, SESSION, restored)
     assert profile_changed_record(MATTED) == PositionRecord(PositionEntryKind.KEPT_PROFILE_CHANGED, MATTED, None, None)
     assert created_record(CREATED) == PositionRecord(PositionEntryKind.KEPT_CREATED, CREATED, None, None)
+    assert turn_changed_record(MATTED) == PositionRecord(PositionEntryKind.KEPT_TURN_CHANGED, MATTED, None, None)
 
 
 def test_an_unrecorded_record_only_for_values_no_kept_entry_says():
@@ -93,20 +95,22 @@ def test_sent_record_with_no_trial_is_back_only_after_a_differing_draft():
 
 
 def test_restore_refusal_order():
-    """Acceptance 11: other Frame, then another profile, then another Display (both known). Mutation
-    probe P3-refusal-order: test the profile first -> the other Frame's entry reads the profile."""
+    """Acceptance 11: other Frame, then another profile, then another turn (a rectangle is fractions
+    of the screen as it hangs: render planes end review), then another Display (both known).
+    Mutation probe P3-refusal-order: test the profile first -> the other Frame's entry reads the
+    profile."""
+    now = MadeFor(PORTRAIT, 270, SAMSUNG)
     everything_else = _entry(PositionEntryKind.KEPT_SAVED, SKEWED, frame_id="hall", profile=LANDSCAPE, display=DELL)
-    assert restore_refusal(everything_else, frame_id="kitchen", profile_px=PORTRAIT,
-                           seen_display_id=SAMSUNG) is PositionRestoreRefusal.OTHER_FRAME
+    assert restore_refusal(everything_else, frame_id="kitchen", now=now) is PositionRestoreRefusal.OTHER_FRAME
     other_profile = _entry(PositionEntryKind.KEPT_SAVED, SKEWED, profile=LANDSCAPE, display=DELL)
-    assert restore_refusal(other_profile, frame_id="kitchen", profile_px=PORTRAIT,
-                           seen_display_id=SAMSUNG) is PositionRestoreRefusal.MADE_FOR_OTHER_PROFILE
-    other_display = _entry(PositionEntryKind.KEPT_SAVED, SKEWED, display=DELL)
-    assert restore_refusal(other_display, frame_id="kitchen", profile_px=PORTRAIT,
-                           seen_display_id=SAMSUNG) is PositionRestoreRefusal.MADE_FOR_OTHER_DISPLAY
+    assert restore_refusal(other_profile, frame_id="kitchen", now=now) is PositionRestoreRefusal.MADE_FOR_OTHER_PROFILE
+    other_turn = _entry(PositionEntryKind.KEPT_SAVED, SKEWED, turn=0, display=DELL)
+    assert restore_refusal(other_turn, frame_id="kitchen", now=now) is PositionRestoreRefusal.MADE_FOR_OTHER_TURN
+    other_display = _entry(PositionEntryKind.KEPT_SAVED, SKEWED, turn=270, display=DELL)
+    assert restore_refusal(other_display, frame_id="kitchen", now=now) is PositionRestoreRefusal.MADE_FOR_OTHER_DISPLAY
     for display, seen in ((None, SAMSUNG), (DELL, None), (SAMSUNG, SAMSUNG)):
-        entry = _entry(PositionEntryKind.KEPT_SAVED, SKEWED, display=display)
-        assert restore_refusal(entry, frame_id="kitchen", profile_px=PORTRAIT, seen_display_id=seen) is None
+        entry = _entry(PositionEntryKind.KEPT_SAVED, SKEWED, turn=270, display=display)
+        assert restore_refusal(entry, frame_id="kitchen", now=MadeFor(PORTRAIT, 270, seen)) is None
 
 
 def test_a_restored_draft_keeps_the_trials_base_revision():

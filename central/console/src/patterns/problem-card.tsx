@@ -30,6 +30,9 @@ export type ProblemCardProps = ProblemBase & (
   | { scope: "live"; subject: string; since: string }
   | { scope: "central" }
   | { scope: "setup"; subject?: string }
+  /** A request just made was refused ("Not moved"): no button of its own when trying the control
+   * again is the fix (design language §4). */
+  | { scope: "action"; subject?: string }
 );
 
 /**
@@ -40,7 +43,8 @@ export type ProblemCardProps = ProblemBase & (
 export function ProblemCard(props: ProblemCardProps) {
   const { verdict, what, doing, action, details, variant = "card", live = false } = props;
   const lead = props.scope === "live" ? `${props.subject}: ${verdict.label} since ${props.since}.`
-    : props.scope === "setup" && props.subject ? `${props.subject}: ${verdict.label}.` : null;
+    : (props.scope === "setup" || props.scope === "action") && props.subject ? `${props.subject}: ${verdict.label}.`
+      : null;
   return (
     <div
       role={live ? "alert" : "group"}

@@ -52,22 +52,28 @@ def test_clock_uncertainty_is_not_pipeline_position():
     assert layer.position(clock.utc()) == 32
 
 
-@pytest.mark.parametrize("corners", [((0, 0), (1, 1), (1, 0), (0, 1)),
-                                     ((0, 0), (0, 0), (1, 1), (0, 1)),
-                                     ((0, 0), (2, 0), (1, 1), (0, 1))])
-@pytest.mark.parametrize("mode", ["cover", "corners"])
-def test_calibration_rejects_folded_or_invalid_aperture(corners, mode):
-    with pytest.raises(ValidationError):
-        Calibration.model_validate({"revision": 1, "fit": {"mode": mode, "corners": corners}})
-
-
-def test_a_position_is_its_fit_cover_by_default_and_the_retired_fields_are_refused():
+def test_a_position_is_its_rectangle_centred_at_full_width_by_default():
     assert Calibration().model_dump(mode="json") == {
-        "revision": 1, "fit": {"mode": "cover", "corners": [[0, 0], [1, 0], [1, 1], [0, 1]], "rotation": 0}}
-    for retired in ({"rotation": 90}, {"corners": [[0, 0], [1, 0], [1, 1], [0, 1]]},
-                    {"crop": [0, 0, 1, 1]}, {"gain": 1}):
-        with pytest.raises(ValidationError):
-            Calibration.model_validate({"revision": 1, **retired})
+        "revision": 1, "fit": {"mode": "rectangle", "centre_x": 0.5, "centre_y": 0.5, "width": 1.0}}
+
+
+@pytest.mark.parametrize("fit", [
+    {"mode": "rectangle", "rotation": 0},
+    {"mode": "rectangle", "corners": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+    {"mode": "cover"},
+    {"mode": "corners"},
+    {"mode": "cover", "corners": [[0, 0], [1, 0], [1, 1], [0, 1]], "rotation": 0},
+])
+def test_corners_rotation_and_the_old_modes_are_refused(fit):
+    with pytest.raises(ValidationError):
+        Calibration.model_validate({"revision": 1, "fit": fit})
+
+
+@pytest.mark.parametrize("retired", [{"rotation": 90}, {"corners": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+                                     {"crop": [0, 0, 1, 1]}, {"gain": 1}])
+def test_the_retired_position_fields_are_refused(retired):
+    with pytest.raises(ValidationError):
+        Calibration.model_validate({"revision": 1, **retired})
 
 
 def test_wire_rejects_upstream_fields_and_failure_text():

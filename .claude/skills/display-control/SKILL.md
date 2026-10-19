@@ -197,9 +197,9 @@ Frame bound and its Position saved, or it shows no photos). Note the values to r
    write to memory that wears; the console sends at most 2 per second while dragging.
 7. **Hot-plug after a write:** after step 3, `journalctl _PID=$(pgrep -x weston)` shows no
    `connector … disconnected`, and `photo-wall-node-player` is still running.
-8. **Cover on the test monitor:** on the Position tab, Cover at 7 degrees and at 90 degrees: the
-   picture is turned, never skewed, keeps the Frame profile's shape (still landscape at 90 degrees
-   on a landscape Frame), covers the four corners, and nothing shows outside them.
+8. **The turn on the test monitor:** on the Hardware tab set How the screen hangs to Top to the
+   right, then Done on the Position tab: the screen turns (Weston's transform), the picture keeps
+   the Frame profile's shape upright as the screen hangs, and nothing shows outside its rectangle.
 
 Afterwards put the settings back from the console (Revert, or "As the display has it" and the old
 value by hand), not only by hand: a hand write to a set code is reported as "Changed on the

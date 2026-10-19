@@ -95,6 +95,8 @@
   /* Space: Tailwind's 4 px step; a table row's density. */
   --spacing: 4px;
   --spacing-row: 8px;
+  /* The tallest a live editor's drawing is on a phone, so its sticky bar below never covers it. */
+  --spacing-drawing-phone: 45vh;
 
   /* Radius. */
   --radius-button: 12px;

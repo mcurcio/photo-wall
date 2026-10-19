@@ -807,12 +807,18 @@ LEGACY_MARKUP = {"ConfirmAction.jsx", "PlayerCommands.jsx"}
 FRAME_PAGE_IMPORTS = {
     "frame-page.tsx": {"BindingFacet.jsx", "liveAdjustment.js", "pictureSession.js", "framesApi.js", "useMutate.js"},
     # The Picture tab (1c K1): its routes, the session hook's type and a display level's words
-    # (0022 R11); Position (1c K2): the quarter turns its draft takes.
+    # (0022 R11); Position (render redesign S5): the placement rule it judges every change by.
     "frame-picture.tsx": {"pictureApi.js", "pictureSession.js", "levelWords.js"},
-    "frame-position.tsx": {"useDraft.js"},
+    "frame-position.tsx": {"placement.js"},
+    # A Position's pixels and words, the editor's and History's one home: the screen as it hangs,
+    # where a refused rectangle would lie and the nearest one that fits, by the same rule.
+    "position-on-screen.ts": {"placement.js"},
     "frame-overview.tsx": {"PrecedenceExplanation.jsx", "ReadinessNotice.jsx", "readinessRecovery.js",
                            "frameIds.js"},
-    "frame-profile.tsx": {"framesApi.js", "useMutate.js"},
+    # The Frame profile's note compares it with the screen as it hangs (render redesign S5).
+    "frame-profile.tsx": {"framesApi.js", "placement.js", "useMutate.js"},
+    # The Hardware tab's turn control (render redesign S5): its write and refresh-after-write.
+    "frame-turn.tsx": {"framesApi.js", "useMutate.js"},
     # The Hardware tab's Display (1b K1, E-1B-K1-1): its read and polling, the profile write the
     # display-changed card confirms, and the route change to Position.
     "frame-display.tsx": {"displayApi.js", "framesApi.js", "projection.js", "useMutate.js", "useRoute.js",

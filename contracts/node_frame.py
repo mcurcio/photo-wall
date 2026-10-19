@@ -28,7 +28,8 @@ opening stays black.
 
 One home each here: the operations' shape, ranges and codec; the picture change's wire text. How
 settings become operations is Display Host's (appliance/display_host/picture.py `operations_for`);
-what each operation does, in which order, is the Player's (player/geometry.py, the scalar reference, mirrored by player/native.py).
+what each operation does, in which order, is the Player's (player/geometry.py, the scalar reference
+its shaders are tested against).
 """
 from __future__ import annotations
 

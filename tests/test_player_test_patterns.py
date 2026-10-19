@@ -1,19 +1,18 @@
 """Display tuning's test patterns in the Player's scalar reference (decision 0024 as decision 0028
 amends it): a look pattern (White, Grey ramp) goes through the Display's white balance, contrast and
 gamma only, never the room's light, the paper or the mat, so White is the TV's own white for the
-paper match; the Black level is the raw signal; outside every opening stays black for all of them.
-Pure: no GL (the shader is held to this reference by tests/native_renderer_pixel_harness.py, on
-Linux CI)."""
+paper match; the Black level is the raw signal; outside the Frame stays black for all of them.
+Pure: no GL (the pattern pass's shader, player/pattern_pass.py, is held to this reference by
+tests/native_fit_pass_harness.py, on Linux CI)."""
 from __future__ import annotations
-
-import math
 
 import pytest
 
 from contracts.calibration_target import TargetCode
+from contracts.frame_fit import Placement
 from contracts.frame_lighting import AT_FULL, FarLight, FrameLighting, Paper, WashLight
 from contracts.lut import LUT_BYTES
-from contracts.models import CoverFit, FrameProfile
+from contracts.models import FrameProfile
 from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
 from contracts.room_light import (
@@ -27,17 +26,14 @@ from player.geometry import (
     BLACK_LEVEL_STEPS,
     GREY_RAMP_STEPS,
     SIGNAL_LEVELS,
-    board_draw,
     encode_srgb,
     final_pixel,
-    frame_lights,
-    homography,
-    inside_opening,
-    inverse,
     pattern_signal,
-    transform,
+    picture_board,
+    picture_lights,
+    placement_uv,
 )
-from player.native import _FINAL, _PATTERN_CODES
+from player.pattern_pass import PATTERN_CODES, _fragment
 
 PROFILE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27)
 SMALL_PROFILE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
@@ -51,20 +47,12 @@ DIM_ROOM = FrameLighting(mat_depth_mm=8, paper=Paper(whiteness=.6, ink_density=1
 DISPLAY = DisplayLight(1000.0, 0.0003)
 
 
-def lights(fit=CoverFit()):
-    return frame_lights(DIM_ROOM, ROOM, fit, PROFILE, DISPLAY)
+def lights():
+    return picture_lights(DIM_ROOM, ROOM, PROFILE, DISPLAY)
 
 
 def operations(slope=1.0, *, rgb=(1.0, 1.0, 1.0), pattern=None) -> PictureOperations:
     return PictureOperations("HDMI-A-1", 1, rgb, slope, 1.0, DISPLAY, test_pattern=pattern)
-
-
-def tilted_opening(degrees: float) -> tuple[tuple[float, float], ...]:
-    """A 0.5 x 0.3 rectangle about the output's centre turned `degrees` clockwise (y down)."""
-    turn = math.radians(degrees)
-    cos, sin = math.cos(turn), math.sin(turn)
-    return tuple((.5 + dx * cos - dy * sin, .5 + dx * sin + dy * cos)
-                 for dx, dy in ((-.25, -.15), (.25, -.15), (.25, .15), (-.25, .15)))
 
 
 def test_white_is_the_tvs_own_white_through_the_displays_steps_only():
@@ -115,36 +103,40 @@ def test_black_level_is_raw_whatever_the_settings():
 
 
 @pytest.mark.parametrize("pattern", list(TestPattern))
-def test_no_pattern_paints_outside_the_opening(pattern):
-    corners = tilted_opening(30)
-    fit = CoverFit(corners=corners, rotation=30)
-    lit = lights(fit)
-    # A calibration target's board, drawn across the whole opening: none of it past the opening.
-    board = board_draw(fit, SMALL_PROFILE, target_modules(TargetCode("p-" + "0" * 32, "HDMI-A-1", 1)))
-    to_opening = inverse(homography(corners))
+def test_no_pattern_paints_outside_the_frame(pattern):
+    """A Frame's Placement on an 80 x 80 screen: every pattern is black wherever the screen point is
+    not the Frame's picture (`placement_uv` None), whatever it would draw there."""
+    placement = Placement(20, 25, 40, 30)
+    lit = lights()
+    # A calibration target's board, drawn across the whole picture: none of it past the Frame.
+    board = picture_board(SMALL_PROFILE, target_modules(TargetCode("p-" + "0" * 32, "HDMI-A-1", 1)))
     lifted = operations(.5, pattern=pattern)
     inside_lit = outside = 0
     for i in range(80):
         for j in range(80):
-            x, y = (i + .5) / 80, (j + .5) / 80
-            inside = inside_opening(corners, x, y)
-            drawn = final_pixel((0.0, 0.0, 0.0), lifted, inside=inside, lights=lit, x=x, y=y,
-                                opening_uv=transform(to_opening, x, y), board=board, dither_at=(i, j))
+            uv = placement_uv((i + .5) / 80, (j + .5) / 80, placement, (80, 80))
+            inside = uv is not None
+            u, v = uv if inside else ((i + .5) / 80, (j + .5) / 80)
+            drawn = final_pixel((0.0, 0.0, 0.0), lifted, inside=inside, lights=lit, x=u, y=v,
+                                opening_uv=(u, v), board=board, dither_at=(i, j))
             if inside:
                 inside_lit += drawn[:3] != (0.0, 0.0, 0.0)
             else:
                 outside += 1
-                assert drawn == (0.0, 0.0, 0.0, 1.0), (pattern, x, y)
+                assert drawn == (0.0, 0.0, 0.0, 1.0), (pattern, i, j)
     assert outside > 2000 and inside_lit > 40, (outside, inside_lit)    # Black level, pre-software target: their cells alone
 
 
-def test_a_pattern_needs_the_openings_uv():
+def test_a_pattern_needs_the_pictures_uv():
     with pytest.raises(ValueError, match="opening_uv"):
         final_pixel((0.0, 0.0, 0.0), operations(pattern=TestPattern.WHITE), inside=True, lights=lights(), x=.5, y=.5)
 
 
 def test_the_shader_names_every_pattern():
-    assert set(_PATTERN_CODES) == {None, *TestPattern} and _PATTERN_CODES[None] == 0
-    assert len(set(_PATTERN_CODES.values())) == len(_PATTERN_CODES)
-    for pattern in TestPattern:
-        assert f"#define PATTERN_{pattern.name} {_PATTERN_CODES[pattern]}\n" in _FINAL
+    assert set(PATTERN_CODES) == {None, *TestPattern} and PATTERN_CODES[None] == 0
+    assert len(set(PATTERN_CODES.values())) == len(PATTERN_CODES)
+    for lut_on in (False, True):
+        source = _fragment(lut_on)
+        assert f"#define PATTERN_COMMISSIONING_GRID {PATTERN_CODES[None]}\n" in source
+        for pattern in TestPattern:
+            assert f"#define PATTERN_{pattern.name} {PATTERN_CODES[pattern]}\n" in source

@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 from support.migrations import migrate_before
 from support.photo_pools import photo, seed_pool
-from support.position import save_position
+from support.position import PORTRAIT_ON_WIDE, save_position
 from test_registry import ADMIN, enroll, frame
 
 from central.app import create_app
@@ -38,10 +38,11 @@ def test_087_names_a_secured_locks_variant_and_keeps_serving_its_bytes(empty_dat
     db = Database(empty_database)
     try:
         # Power and the week's tables (089-091), the Frame's lighting (099, over the picture
-        # tables 092-097 it rewrites) and its Position history (096), which seeding through
-        # today's code reads and writes.
+        # tables 092-097 it rewrites), its Position history (096), its turn (101) and the turn each
+        # history entry is made for (102, over no rows yet), which seeding through today's code reads
+        # and writes.
         migrate_before(db, "087", also=("089_", "090_", "091_", "092_", "093_", "094_", "096_",
-                                        "097_", "099_"))
+                                        "097_", "099_", "101_", "102_"))
         registry = Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
         frame(registry, "portrait")
         picture = photo("photo-1", taken_at=900)
@@ -49,7 +50,7 @@ def test_087_names_a_secured_locks_variant_and_keeps_serving_its_bytes(empty_dat
         player, _, _ = enroll(registry)
         other, _, _ = enroll(registry)
         registry.bind("portrait", player["player_id"], "HDMI-A-1", expected_generation=0)
-        save_position(registry, "portrait")
+        save_position(registry, "portrait", PORTRAIT_ON_WIDE)
         binding = registry.bindings_for(player["player_id"], 1)[0]
         digest = hashlib.sha256(BYTES).hexdigest()
         stored = {"sha256": digest, "size": len(BYTES), "media_type": "image/jpeg",

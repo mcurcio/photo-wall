@@ -3,6 +3,7 @@ import * as React from "react";
 import { Button } from "../ui/button";
 import { cn } from "../ui/cn";
 import { Disclosure } from "../ui/disclosure";
+import { Link } from "../ui/link";
 import { Section } from "../ui/section";
 import { Note } from "./fact-row";
 
@@ -15,7 +16,8 @@ export interface HistoryRow {
   notKept: boolean;
   summary: string;
   details: readonly { label: string; value: string }[];
-  restore: { disabled: boolean; reason?: string };
+  /** `reason`: why Restore is not offered; `link`: where that is put right (the tab that owns it). */
+  restore: { disabled: boolean; reason?: string; link?: { text: string; href: string } };
   /** The tuning session it came from (none: not from one). Consecutive rows not kept from one
    * session are grouped: the newest shows, the earlier ones open on request. */
   session?: string | null;
@@ -122,15 +124,29 @@ function Row({ row, restoring, reasonId, onRestore }: {
       aria-label={`${row.time} ${row.what}`}
       data-kept={row.notKept ? "false" : "true"}
       className={cn(
-        "flex min-w-0 items-start gap-x-3 gap-y-1 border-0 border-l-2 py-2 pl-3",
-        "max-md:flex-col",
+        "flex min-w-0 flex-col gap-1 border-0 border-l-2 py-2 pl-3",
         row.notKept ? "border-dashed border-line-input" : "border-accent",
       )}
     >
-      <span className="min-w-16 shrink-0 text-sm text-label tabular-nums">{row.time}</span>
-      <div className="flex min-w-0 flex-1 flex-col gap-1">
-        <span className={cn("text-sm", row.notKept ? "text-muted italic" : "font-medium text-text")}>{row.what}</span>
+      {/* The first line: the time, what kind of change, and Restore at its end (on a phone too). */}
+      <div className="flex min-w-0 items-center gap-x-3">
+        <span className="min-w-16 shrink-0 text-sm text-label tabular-nums">{row.time}</span>
+        <span className={cn("min-w-0 flex-1 text-sm", row.notKept ? "text-muted italic" : "font-medium text-text")}>
+          {row.what}
+        </span>
+        <Button variant="ghost" className="shrink-0 max-md:min-h-11" aria-describedby={described}
+          disabled={row.restore.disabled || restoring !== null} onClick={() => onRestore(row.id)}>
+          {restoring === row.id ? "Restoring…" : "Restore"}
+        </Button>
+      </div>
+      <div className="flex min-w-0 flex-col gap-1 md:pl-19">
         <span className="text-sm wrap-anywhere text-text">{row.summary}</span>
+        {reason !== null && reasonId === null && (
+          <span id={ownReason} className="text-sm text-muted">
+            {reason}
+            {row.restore.link !== undefined && <>{" "}<Link href={row.restore.link.href}>{row.restore.link.text}</Link></>}
+          </span>
+        )}
         <Disclosure summary="Details">
           <dl className="m-0 flex flex-col gap-0.5">
             {row.details.map((detail) => (
@@ -141,15 +157,6 @@ function Row({ row, restoring, reasonId, onRestore }: {
             ))}
           </dl>
         </Disclosure>
-      </div>
-      <div className="flex min-w-0 shrink-0 flex-col items-start gap-1">
-        <Button variant="ghost" aria-describedby={described}
-          disabled={row.restore.disabled || restoring !== null} onClick={() => onRestore(row.id)}>
-          {restoring === row.id ? "Restoring…" : "Restore"}
-        </Button>
-        {reason !== null && reasonId === null && (
-          <span id={ownReason} className="text-sm text-muted">{reason}</span>
-        )}
       </div>
     </li>
   );
@@ -179,13 +186,19 @@ export function HistoryList({
   const [onlyReason] = [...reasons];
   const shared = reasons.size === 1 && onlyReason !== null && onlyReason !== undefined && rows.length > 1
     ? onlyReason : null;
+  const sharedLink = shared === null ? undefined : rows.find((row) => row.restore.link !== undefined)?.restore.link;
   return (
     <Section title={title}>
       <div className="flex min-w-0 flex-col gap-3">
         <p className="m-0 text-sm text-muted">{intro}</p>
         {notice !== undefined && <Note live>{notice}</Note>}
         {problem}
-        {shared !== null && <p id={sharedId} className="m-0 text-sm text-muted">{shared}</p>}
+        {shared !== null && (
+          <p id={sharedId} className="m-0 text-sm text-muted">
+            {shared}
+            {sharedLink !== undefined && <>{" "}<Link href={sharedLink.href}>{sharedLink.text}</Link></>}
+          </p>
+        )}
         {shown.length === 0 ? (busy ? <Skeleton /> : <p className="m-0 text-sm text-muted">{empty}</p>) : (
           shown.map((day) => (
             <section key={day.label} aria-label={day.label} className="min-w-0">

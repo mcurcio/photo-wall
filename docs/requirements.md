@@ -272,6 +272,19 @@ On 2026-10-10 (chat, and the [1c gate page](https://claude.ai/artifact/GngF5gqPd
 | On existing Frames' rotation when they move to Cover | "Every frame should reset to 0 rotation" | Each Frame moved to Cover starts at angle 0. |
 | 2026-10-11, told that Cover at about 30 to 150 degrees turned a landscape Frame's picture portrait and Save refused it | ""landscape" and "portrait" are descriptions of the aspect ratio. whereas the angle of rotation is a quality of the way frames are hung on the wall, or possibly some unique conditions of how displays are mounted within the matte" | The Frame's orientation is its aspect alone; the angle never changes it and is never checked against it. Cover keeps the Frame's aspect at every angle. |
 
+On 2026-10-17 (chat) he asked for the Pi's graphics hardware to be used to its full advantage, and on 2026-10-17 and 2026-10-18 answered the render redesign's gate page ([Pictures on the Pi](https://claude.ai/artifact/QCAypbDziqVMxh7t5DEVHT)). His gate answers are current choices, not fixed requirements; they replace the 2026-10-10 answers above on Cover, Corners, rotation and the four corners: a Frame is now one upright rectangle and a screen turns only as a whole ([0029](decisions/0029-render-planes.md)).
+
+| Context | The owner's words | What it asks of Photo Wall |
+|---|---|---|
+| Unprompted, 2026-10-17 | "The pi hardware is very graphics oriented, and we should be using it to its full advantage. How should the node architecture change to optimize rendering?" | Use the Pi's GPU and display controller for what they do best. |
+| Unprompted, 2026-10-17 | "We should unify the concepts as much as possible. Photos and video should share the same scale and crop pipeline" | One crop and scale path for photos and video. |
+| Unprompted, 2026-10-17 | "I'm ok with simplifying how frames can be positioned on the display. We can make the position pure crop and scale. Rotation is really just for the case where a display is turned sideways, so if we can handle that via some native config (hdmi/display orientation?) then we can drop arbitrary rotation" | A Position is a rectangle (crop and scale); a display turned sideways is turned as a whole; arbitrary rotation goes. |
+| Gate Q1, 2026-10-17: must video carry the same look as photos? | Yes (his pick) | Video goes through the same look as photos. |
+| Gate Q2, 2026-10-17: the mid-fade look | The display controller mixes (his pick) | Fades are mixed by the display controller; a cross-fade is darker mid-way. |
+| Gate Q3, 2026-10-17: is "turned sideways" a fact about the spot on the wall or the screen? | The spot on the wall (his pick) | The turn is stored on the Frame and stays through a display or Pi swap. |
+| Gate Q4, 2026-10-18: several Frames per screen? | Later (his pick) | One Frame per screen for now. |
+| Gate Q5, 2026-10-18, and chat the same day | HEVC now, one 1080p copy per video (his pick); "1080p at 30 is fine" | One HEVC 1080p30 copy per video. |
+
 On 2026-10-13 (chat), on making the tuning loop readable by the agent, he chose configuration snapshots. Sending phone photos of the wall to the agent while tuning is the main loop's reading of that loop, not his words. His two answers are current choices; the design is [0025](decisions/0025-configuration-snapshots.md).
 
 | Context | The owner's words | What it asks of Photo Wall |

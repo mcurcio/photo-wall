@@ -33,10 +33,11 @@ from test_coordination import publish_fixture_catalog, setup_players
 from test_registry import ADMIN
 
 from central.app import create_app
+from contracts.frame_fit import Placement
 from contracts.time import ManualClock, TimeMapping
 from player.cache import Cache
 from player.executor import AuthorityError, Executor
-from player.geometry import compose_pixel
+from player.planes import FrameLayers, Screen, compose
 from player.rendering import RecordingRenderer
 
 AUTH = {"Authorization": "Bearer " + ADMIN}
@@ -681,10 +682,20 @@ def _cue(registry, assignment_id):
                             (assignment_id,)).fetchone()
 
 
+MID_GREY = .5            # every photo drawn is this one stored (encoded) value
+
+
 def _grey(composition):
-    """What the Frame shows when every photo drawn is the same mid grey: the layers' strengths
-    as the Player's executor drew them, composed by the compositing reference."""
-    return compose_pixel([((.5, .5, .5, 1.0), local.alpha, False) for local in composition.layers])
+    """What the Frame shows when every photo drawn is MID_GREY: the planes the Player composes of
+    the executor's layers (player/planes.py `compose`), mixed as the display controller mixes them,
+    in stored values at each plane's strength over the screen's black (bench T3)."""
+    output_id = composition.binding.output_id
+    planes = compose(Screen(output_id, (1920, 1080), 0),
+                     [FrameLayers("frame", Placement(0, 0, 1920, 1080), composition.layers)]).planes
+    value = 0.0
+    for plane in planes:
+        value = plane.strength * MID_GREY + (1 - plane.strength) * value
+    return value
 
 
 def test_a_cross_fade_dissolves_the_next_photo_over_the_current_one(registry, tmp_path):
@@ -712,7 +723,7 @@ def test_a_cross_fade_dissolves_the_next_photo_over_the_current_one(registry, tm
         assert _shown(shown) == (False, [("photo", 1.0), ("photo", 0.5)])
         assert [local.layer.assignment_id for local in shown.layers] == [
             first.assignment_id, second.assignment_id]
-        assert _grey(shown) == compose_pixel([((.5, .5, .5, 1.0), 1.0, False)])
+        assert _grey(shown) == pytest.approx(MID_GREY)
         assert _shown(frame.advance(2)) == (False, [("photo", 1.0)])  # 10.5 s: the second alone
 
 
@@ -728,7 +739,7 @@ def test_fade_out_and_in_dips_through_black_where_a_cross_fade_does_not(registry
         frame.sync()
         shown = frame.advance(9.25)
         assert _shown(shown) == (False, [("photo", 0.5)])
-        assert _grey(shown)[0] < compose_pixel([((.5, .5, .5, 1.0), 1.0, False)])[0]
+        assert _grey(shown) < MID_GREY - .1
 
 
 def test_a_finish_inside_a_dissolve_lets_that_photo_play_its_turn(registry, tmp_path):

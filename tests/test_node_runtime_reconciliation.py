@@ -4,7 +4,7 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
-from support.position import LIGHTING, save_position
+from support.position import LIGHTING, PORTRAIT_ON_WIDE, save_position
 from test_coordination import report
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_registry import enroll, frame
@@ -15,7 +15,6 @@ from central.fleet.node_ingest import NodeIngest
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
 from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from central.runtime import Contribution, Scene
-from contracts.models import Calibration, CornersFit
 from contracts.node_app_link import (
     NodeAppLinkChallengeV2,
     NodeAppLinkV2,
@@ -45,7 +44,7 @@ def rig(registry):
     for index in range(2):
         frame(registry, f"node-f{index}")
         registry.bind(f"node-f{index}", player["player_id"], f"HDMI-A-{index+1}", expected_generation=0)
-        save_position(registry, f"node-f{index}")
+        save_position(registry, f"node-f{index}", PORTRAIT_ON_WIDE)
     coordinator = Coordinator(registry.db, registry.clock)
     coordinator.runtime.command("set_scene", Scene(scene_id="node-scene", loop=True, cycle_seconds=60,
         contributions=(Contribution(target="frame:node-f0", kind="black"),
@@ -227,7 +226,7 @@ def test_equal_counter_frame_rebind_preserves_historical_loss_without_fencing_re
         registry.commit_calibration_trial_in(conn, frame_id=binding.frame_id,
             player_id=player["player_id"], authority_epoch=1, output_id=binding.output_id,
             binding_generation=binding.generation, config_revision=binding.configuration_revision,
-            calibration_revision=binding.calibration.revision, calibration=Calibration(fit=CornersFit()), lighting=LIGHTING, session_id=None, restored_from=None)
+            calibration_revision=binding.calibration.revision, calibration=PORTRAIT_ON_WIDE, lighting=LIGHTING, session_id=None, restored_from=None)
     binding = next(b for b in coordinator.configuration(player["player_id"], 1).bindings
                    if b.frame_id == "replacement-frame")
     assert (binding.generation, binding.configuration_revision) == (old.binding_generation, old.config_revision)

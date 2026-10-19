@@ -78,6 +78,26 @@ export async function updateFrameProfile(frameId, profile, expectedGeneration) {
   return { ok: false, code: result.error ?? String(result.status), status: result.status };
 }
 
+/**
+ * Set how a Frame's screen hangs (render redesign S5): PUT /v1/operator/frames/{id}/turn with
+ * `body` = contract.ts `FrameTurnChange` ({turn, expected_generation}, the generation the operator
+ * saw). Central answers {frame_id, turn, generation, changed}; a turn already set is
+ * `changed: false` with no write. Refusals: 409 `binding_generation_conflict` (the Frame changed
+ * meanwhile), 404 `unknown_frame`, 422 for a body outside the contract. Wrap in `useMutate()` at
+ * the call site so the inventory (the Frame's turn, generation and readiness) is read again.
+ *
+ * @param {string} frameId
+ * @param {import("./generated/contract").FrameTurnChange} body
+ * @returns {Promise<{ok:true, changed:boolean, generation:number}|{ok:false, code:string, status:number}>}
+ */
+export async function turnFrame(frameId, body) {
+  const result = await apiWrite(`/v1/operator/frames/${frameId}/turn`, { method: "PUT", body });
+  if (result.ok) {
+    return { ok: true, changed: result.data?.changed === true, generation: result.data?.generation };
+  }
+  return { ok: false, code: result.error ?? String(result.status), status: result.status };
+}
+
 /** Validate the shared FrameProfile contract and its orientation against a Frame. */
 export function frameProfileProblem(profile, frame) {
   const width = Number(profile.width_px);

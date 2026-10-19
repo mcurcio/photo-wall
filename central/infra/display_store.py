@@ -245,12 +245,13 @@ def frame_outputs_in(conn: Any) -> tuple[FrameOutput, ...]:
     """Every Frame's FrameOutput, ordered by frame id, in the caller's transaction (follow-ups
     2026-10-11, slice A1): frames LEFT JOIN bindings LEFT JOIN outputs on (player_id,
     output_id); `display_px` from `outputs.observation` width_px x height_px when both are >= 1
-    (the enrollment report, connected or not); `output_px` is `contracts.models.frame_output`.
+    (the enrollment report, connected or not); `turn` is `f.turn`; `output_px` is
+    `contracts.models.frame_output` at that turn.
     The one read of Frame outputs: the media worker's rendition choice (PgPhotoLibrary), the
     Planner's slots and the fit analysis (roadmap 5a) all ask here. Never raises for a Frame
     without an Output."""
     rows = conn.execute(
-        "SELECT f.id, f.profile, f.calibration, (o.observation->>'width_px')::int AS width_px, "
+        "SELECT f.id, f.profile, f.calibration, f.turn, (o.observation->>'width_px')::int AS width_px, "
         "(o.observation->>'height_px')::int AS height_px FROM frames f "
         "LEFT JOIN bindings b ON b.frame_id=f.id "
         "LEFT JOIN outputs o ON o.player_id=b.player_id AND o.output_id=b.output_id "
@@ -262,8 +263,9 @@ def frame_outputs_in(conn: Any) -> tuple[FrameOutput, ...]:
         display = (width, height) if width is not None and height is not None \
             and width >= 1 and height >= 1 else None
         frames.append(FrameOutput(
-            frame_id=row["id"], profile=profile, display_px=display,
-            output_px=frame_output(profile, Calibration.model_validate(row["calibration"]), display)))
+            frame_id=row["id"], profile=profile, turn=row["turn"], display_px=display,
+            output_px=frame_output(profile, Calibration.model_validate(row["calibration"]), display,
+                                   row["turn"])))
     return tuple(frames)
 
 
@@ -764,7 +766,8 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
     raising `picture_change` only when `picture_digest` differs (each recorded on its own row, so
     neither number moves with the other). A bound Output carries its Frame's timetable
     (`frame_timetable` over `power_policy_in` and `house_time_in`), an unbound one
-    `unbound_timetable`; an Output with no Display seen gets `default_picture()` and no test
+    `unbound_timetable`; each carries its bound Frame's turn (frames.turn), 0 unbound, so a turn
+    raises `change` like a power edit; an Output with no Display seen gets `default_picture()` and no test
     pattern, one seen carries its live session's test pattern (`picture.session_test_pattern`)."""
     player_id = _player_of(conn, device_id, "FOR SHARE")
     if player_id is None:
@@ -774,14 +777,14 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
     rows = conn.execute(
         "SELECT o.output_id, b.frame_id, d.id AS d_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
         f"{PICTURE_COLUMNS}, d.hardware_restore, {_SESSION_COLUMNS}, w.change, w.digest, pd.picture_change, "
-        f"pd.digest AS picture_digest, {_TEST_COLUMNS} FROM (SELECT output_id FROM outputs WHERE player_id=%(player)s "
+        f"pd.digest AS picture_digest, COALESCE(f.turn, 0) AS turn, {_TEST_COLUMNS} FROM (SELECT output_id FROM outputs WHERE player_id=%(player)s "
         "UNION SELECT output_id FROM output_displays WHERE player_id=%(player)s) o "
         "LEFT JOIN output_displays s ON s.player_id=%(player)s AND s.output_id=o.output_id "
         "LEFT JOIN displays d ON d.id=s.display_id LEFT JOIN picture_sessions ps ON ps.display_id=d.id "
         "LEFT JOIN output_documents w ON w.player_id=%(player)s AND w.output_id=o.output_id "
         "LEFT JOIN picture_documents pd ON pd.player_id=%(player)s AND pd.output_id=o.output_id "
         f"LEFT JOIN bindings b ON b.player_id=%(player)s AND b.output_id=o.output_id {_TEST_JOIN} "
-        "ORDER BY o.output_id", {"player": player_id}).fetchall()
+        "LEFT JOIN frames f ON f.id=b.frame_id ORDER BY o.output_id", {"player": player_id}).fetchall()
     documents: dict[str, bytes] = {}
     for row in rows:
         output_id = row["output_id"]
@@ -790,7 +793,7 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
         timetable = (unbound_timetable(house, now) if row["frame_id"] is None
                      else frame_timetable(row["frame_id"], policy, house, now))
         projected = project_output(output_id, timetable=timetable, test=_power_test(row),
-                                   settings=_settings(row), now=now)
+                                   settings=_settings(row), turn=row["turn"], now=now)
         digest = projected.digest()
         change = (row["change"] or 0) + (row["digest"] != digest)
         document = projected.at_change(change)

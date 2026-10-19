@@ -2,35 +2,50 @@
 pixels Weston shows, through the picture controller, the shell and the Player.
 
 Run only inside the display harness container (scripts/run_display_harness.py), after
-native_renderer_pixel_harness.py, with `player` and `contracts` mounted read-only at /repo and
+native_fit_pass_harness.py, with `player` and `contracts` mounted read-only at /repo and
 `tests` at /smoke. Everything on the path is the real one: a headless Weston with the installed
 photo-wall shell (`--debug`, so `weston_capture_v1` reads its framebuffer), the installed Display
 Host's WestonBackend and DisplayHost on the shell's control socket (allow, candidate, handoff, as
 the runner does), the installed PictureController on a DDC/CI channel whose ddcutil never answers
-(a fake bus, exit 1), and a child process running the real NativeRenderer with the real frame
-client (PHOTO_WALL_DISPLAY_HOST=1) as an unprivileged user, showing one flat grey Frame on a
-Cover fit whose opening is smaller than the Output. The shell's private client is the harness
-health client in its default mode: a mapped health layer (so the shell raises no fallback tint)
-that tints only the Output's bottom-right quarter, which no sample reads.
+(a fake bus, exit 1), and a child process, an unprivileged user, running the new path's Player
+(render redesign S3, bead B7, run ledger .claude/runs/render-planes/s3-page.md): the real
+player/plane_renderer.py `PlaneRenderer` with the real `PlaneScreens` on the installed frame client
+library, `FitPass`, `PatternPass`, `StillDecode` and `PlayerLuts`, drawing on tests/harness_device.py's
+`MemfdDevice` (software GL, memfd-backed LINEAR buffers: the container has no render node), and
+presenting and finishing every 50 ms on real GLib. It shows one flat grey Frame whose Position is a
+`RectangleFit` (centre (0.5, 0.5), width 0.6) on the 640 x 480 headless Output, so its placement
+(contracts/frame_fit.py `place`) is smaller than the Output. Weston runs its GL renderer on
+llvmpipe: its pixman renderer offers no zwp_linux_dmabuf_v1, which the planes' pictures need
+(native_screen_harness.py). The shell's private client is the harness health client in its default
+mode: a mapped health layer (so the shell raises no fallback tint) that tints only the Output's
+bottom-right quarter, which no sample reads.
+
+Every comparison samples the capture clear of the placement's edges: inside, the pixel equals the
+case's reference at that picture point (player/geometry.py `placement_uv`); outside, it is exactly
+black (the screen's ground).
 
 1. a_picture_document_changes_the_pixels_and_comes_back_presented: before any picture document,
-   pixels inside the opening are the neutral reference and outside are black. A document with
+   pixels inside the placement are the neutral reference and outside are black. A document with
    software contrast 25 % (100 % changes nothing; picture change 3) and no hardware value makes the
-   controller's report say `presented_change` 3, and the captured pixels inside the opening equal
-   `final_pixel` of the operations the controller computed for that document; outside every
-   opening they stay exactly black although contrast below 100 lifts black (the mask is last).
+   controller's report say `presented_change` 3, and the captured pixels inside the placement equal
+   `final_pixel` of the operations the controller computed for that document; outside it they stay
+   exactly black although contrast below 100 lifts black (the ground is the screen's black).
 2. neutral_is_todays_picture (decision 0028): a neutral document on a binding with the upgrade's
    light (one wash at the matched lux, paper that matches the TV): presented, and the pixels equal
    the 1c final pass at neutral sliders (written out here, not player/geometry.py's).
 3. tracer_matched_light_and_one_far_light: a document moving only the Display's matched lux (800
    lx, picture operations v8 through the controller and the shell), on a binding lit by a wash
    and a far light from the wall's up on a 2 mm mat: presented, and the pixels equal `final_pixel`
-   under those lights, including the point 1 mm below the picture's top edge, in the far light's
-   shadow.
+   under those lights (`picture_lights`), including the point 1 mm below the picture's top edge, in
+   the far light's shadow.
 4. the_frames_paper_profile_joins_when_held: the binding's paper names a profile (a fixture table).
    The Player has no Central here: its PlayerLuts is fed by this harness (the Player holds the
    fixture bytes once a release file appears, as the service does after its digest-checked fetch).
    Before the release the pixels are the reference without the LUT; after it, with it.
+5. a_test_pattern_shows_inside_the_placement: a document asking `TestPattern.WHITE` with
+   non-neutral software (picture change 7): the report says `presented_change` 7 and
+   `test_pattern_shown` that ask, and the pixels inside the placement equal `display_steps` of
+   white under the controller's operations; outside it they are exactly black.
 
 The Player child reads the binding's lighting from LIGHTING_FILE (absent: the upgrade's) on every
 present and draws with a room-lights document holding the room light full on, so the harness moves
@@ -61,9 +76,12 @@ PLAYER_UID = 10004
 OUTPUT = "headless"
 WIDTH_PX, HEIGHT_PX = 640, 480
 PHOTO = pathlib.Path("/tmp/pw-picture-e2e-grey.png")
+# Its crop (512 x 288) is larger than the Frame's placement (384 x 216), so the picture is finished at
+# the placement (player/planes.py `finish_size`) and every pixel is held to the look's reference;
+# a smaller source is finished smaller and enlarged, softening the mat shadow's edge.
+PHOTO_SIZE = (512, 384)
 GREY = 128
-OPENING = ((.2, .2), (.8, .25), (.75, .8), (.25, .75))
-ROTATION = 7.0
+RECTANGLE = dict(centre_x=.5, centre_y=.5, width=.6)     # the Frame's Position (a RectangleFit)
 TOLERANCE = 0.02            # the GL reference's 0.015 plus the framebuffer's 8-bit rounding
 PICTURE_CHANGE = 3
 PROFILE = dict(width_px=1600, height_px=900, diagonal_inches=10)
@@ -71,9 +89,8 @@ LIGHTING_FILE = pathlib.Path("/tmp/pw-picture-e2e-lighting.json")   # the bindin
 LUT_FILE = pathlib.Path("/tmp/pw-picture-e2e-lut.bin")              # the fixture LUT's bytes
 LUT_RELEASE = pathlib.Path("/tmp/pw-picture-e2e-lut-release")       # present: the Player holds them
 LUT_PROFILE_SHA256, LUT_RECIPE = "ef" * 32, "lut33-perceptual-relcol-bpc-1"
-PLAYER_ENV = {"XDG_RUNTIME_DIR": str(ROOT), "WAYLAND_DISPLAY": SOCKET, "GDK_BACKEND": "wayland",
-              "LIBGL_ALWAYS_SOFTWARE": "1", "PYOPENGL_PLATFORM": "egl", "GSETTINGS_BACKEND": "memory",
-              "PHOTO_WALL_DISPLAY_HOST": "1", "HOME": "/tmp/pw-picture-e2e-home"}
+PLAYER_ENV = {"XDG_RUNTIME_DIR": str(ROOT), "WAYLAND_DISPLAY": SOCKET, "LIBGL_ALWAYS_SOFTWARE": "1",
+              "PYOPENGL_PLATFORM": "egl", "HOME": "/tmp/pw-picture-e2e-home"}
 
 
 def upgrade_lighting():
@@ -89,6 +106,15 @@ def upgrade_lighting():
                                            reference=AT_FULL),))
 
 
+def placement():
+    """The Frame's placement on the Output (contracts/frame_fit.py `place`)."""
+    from contracts.frame_fit import place
+    from contracts.models import RectangleFit
+
+    return place(RectangleFit(**RECTANGLE).rectangle(), (WIDTH_PX, HEIGHT_PX),
+                 PROFILE["width_px"] / PROFILE["height_px"])
+
+
 def room():
     from contracts.room_light import (
         FixedColour,
@@ -100,13 +126,14 @@ def room():
 
 
 def grey_png(path: pathlib.Path) -> bytes:
-    """A 64x48 opaque grey RGBA PNG (stdlib zlib)."""
-    rows = b"".join(b"\x00" + bytes((GREY, GREY, GREY, 255)) * 64 for _ in range(48))
+    """A PHOTO_SIZE opaque grey RGBA PNG (stdlib zlib)."""
+    width, height = PHOTO_SIZE
+    rows = b"".join(b"\x00" + bytes((GREY, GREY, GREY, 255)) * width for _ in range(height))
 
     def chunk(kind: bytes, data: bytes) -> bytes:
         return (struct.pack(">I", len(data)) + kind + data
                 + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
-    payload = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", 64, 48, 8, 6, 0, 0, 0))
+    payload = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
                + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
     path.write_bytes(payload)
     return payload
@@ -115,8 +142,13 @@ def grey_png(path: pathlib.Path) -> bytes:
 # --- the Player (child process, unprivileged) ---------------------------------------------------
 
 def player() -> None:
-    """Show the grey Frame on a Cover fit for ever, presenting every 50 ms on real GLib."""
+    """Show the grey Frame on its rectangle for ever on the new path (module docstring), presenting
+    and finishing every 50 ms on real GLib."""
     import hashlib
+
+    from harness_device import MemfdDevice, context
+
+    gl = context()          # before any player import: PyOpenGL resolves on it
 
     from gi.repository import GLib
 
@@ -124,49 +156,58 @@ def player() -> None:
     from contracts.lut import LutRef
     from contracts.models import (
         Calibration,
-        CoverFit,
         FrameProfile,
         Layer,
         OutputBinding,
+        RectangleFit,
         Variant,
     )
     from contracts.photo_crop import CENTRED
+    from player.decode import StillDecode
+    from player.fit_pass import FitPass
     from player.luts import PlayerLuts
-    from player.native import NativeOutput, NativeRenderer
+    from player.pattern_pass import PatternPass
+    from player.plane_renderer import PlaneRenderer
+    from player.plane_screen import PlaneScreens
     from player.rendering import LocalLayer, OutputComposition
+
+    def no_video(_path, _on_frame):
+        raise RuntimeError("no video in the harness")
 
     payload = PHOTO.read_bytes()
     variant = Variant(asset_id="asset-" + hashlib.sha256(payload).hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(payload).hexdigest(), size=len(payload),
-                      media_type="image/png", width=64, height=48)
+                      media_type="image/png", width=PHOTO_SIZE[0], height=PHOTO_SIZE[1])
     binding = OutputBinding(output_id=OUTPUT, frame_id="frame", generation=1, profile=FrameProfile(**PROFILE),
                             lighting=upgrade_lighting(),
-                            calibration=Calibration(fit=CoverFit(corners=OPENING, rotation=ROTATION)))
+                            calibration=Calibration(fit=RectangleFit(**RECTANGLE)))
     layer = LocalLayer(Layer(assignment_id="grey", run_id="run", output_id=OUTPUT, frame_id="frame",
                              binding_generation=1, start=0, end=10**9, media_origin=0, variant=variant,
                              crop=CENTRED),
                        PHOTO, 0.0, 1.0)
     luts = PlayerLuts()
-    native = NativeRenderer((NativeOutput(OUTPUT, "photo-wall-headless", WIDTH_PX, HEIGHT_PX),), luts=luts)
-    native.set_unbound_outputs((), None)
-    native.set_identify_output(None)        # as player/service.py does: no identify banner
-    native.set_room_lights(room())
-    context = GLib.MainContext.default()
+    screens = PlaneScreens()
+    renderer = PlaneRenderer(screens, MemfdDevice(gl), FitPass(gl), PatternPass(gl), luts,
+                             stills=StillDecode, videos=no_video)
+    renderer.set_room_lights(room())
+    main_context = GLib.MainContext.default()
     last = None
     while True:
+        screens.dispatch()
         lighting = (FrameLighting.model_validate_json(LIGHTING_FILE.read_text()) if LIGHTING_FILE.exists()
                     else upgrade_lighting())
         shown = OutputComposition(binding.model_copy(update={"lighting": lighting}), (layer,))
         if LUT_RELEASE.exists() and luts.wanted():
             luts.hold(LutRef(LUT_PROFILE_SHA256, LUT_RECIPE), LUT_FILE.read_bytes())
             print("PLAYER lut held", flush=True)
-        native.prepare(layer, shown.binding)
-        status = native.present(shown).status
-        if status != last:
-            print(f"PLAYER {status}", flush=True)
-            last = status
+        renderer.prepare(layer, shown.binding)
+        result = renderer.present(shown)
+        renderer.finish()
+        if (result.status, result.code) != last:
+            print(f"PLAYER {result.status} {result.code}", flush=True)
+            last = (result.status, result.code)
         end = time.monotonic() + 0.05
         while time.monotonic() < end:
-            while context.iteration(False):
+            while main_context.iteration(False):
                 pass
             time.sleep(0.005)
 
@@ -245,22 +286,23 @@ def grey_linear() -> tuple[float, float, float]:
 
 
 def lights_of(operations, lighting=None):
-    """The Frame's lights (`frame_lights`) as the Player draws them with `operations`."""
-    from contracts.models import CoverFit, FrameProfile
-    from player.geometry import frame_lights
+    """The Frame's lights (`picture_lights`) as the Player draws them with `operations`."""
+    from contracts.models import FrameProfile
+    from player.geometry import picture_lights
 
-    return frame_lights(lighting or upgrade_lighting(), room(), CoverFit(corners=OPENING, rotation=ROTATION),
-                        FrameProfile(**PROFILE), operations.light)
+    return picture_lights(lighting or upgrade_lighting(), room(), FrameProfile(**PROFILE), operations.light)
 
 
 def compare(operations, *, reference=None) -> tuple[int, int]:
-    """Every sampled pixel clear of the opening's edges equals the reference: inside, the grey
-    through `final_pixel` with `operations` under the upgrade's light (or `reference(x, y)`, an
-    RGB, when given); outside, exactly black. The (inside, outside) counts; AssertionError at the
-    first that differs."""
-    from player.geometry import final_pixel, inside_opening
+    """Every sampled pixel clear of the placement's edges equals the reference: inside, the grey
+    through `final_pixel` with `operations` under the upgrade's light (or `reference(u, v)` at the
+    picture point, an RGB, when given); outside, exactly black. The (inside, outside) counts;
+    AssertionError at the first that differs."""
+    from player.geometry import final_pixel, placement_uv
 
     width, height, data = capture()
+    assert (width, height) == (WIDTH_PX, HEIGHT_PX), ("capture_size", width, height)
+    placed = placement()
     flat = (final_pixel(grey_linear(), operations, inside=True, lights=lights_of(operations), x=.5, y=.5)[:3]
             if reference is None else None)
     counts = [0, 0]
@@ -269,14 +311,15 @@ def compare(operations, *, reference=None) -> tuple[int, int]:
             if i >= width * 3 // 4 and j >= height * 3 // 4:
                 continue                # the health client's tint
             x, y = (i + .5) / width, (j + .5) / height
-            near = {inside_opening(OPENING, x + dx / width, y + dy / height)
+            near = {placement_uv(x + dx / width, y + dy / height, placed, (width, height)) is not None
                     for dx in (-3, 0, 3) for dy in (-3, 0, 3)}
             if len(near) != 1:
                 continue
             offset = (j * width + i) * 4
             blue, green, red = data[offset:offset + 3]
             if near.pop():
-                expected_inside = flat if reference is None else reference(x, y)
+                expected_inside = (flat if reference is None
+                                   else reference(*placement_uv(x, y, placed, (width, height))))
                 actual = (red / 255, green / 255, blue / 255)
                 assert max(abs(a - e) for a, e in zip(actual, expected_inside, strict=True)) <= TOLERANCE, (
                     "inside", i, j, actual, expected_inside)
@@ -380,10 +423,12 @@ def main() -> None:
     os.chown(home, PLAYER_UID, PLAYER_UID)
     grey_png(PHOTO)
     PHOTO.chmod(0o644)
-    env = {**os.environ, "XDG_RUNTIME_DIR": str(ROOT), "PHOTO_WALL_CONTROLLER_UID": "0"}
+    # The GL renderer on llvmpipe: pixman offers no zwp_linux_dmabuf_v1 (module docstring).
+    env = {**os.environ, "XDG_RUNTIME_DIR": str(ROOT), "PHOTO_WALL_CONTROLLER_UID": "0",
+           "LIBGL_ALWAYS_SOFTWARE": "1"}
     weston_log = open("/tmp/pw-weston.log", "w")
     weston = subprocess.Popen(
-        ["weston", "--backend=headless-backend.so", "--renderer=pixman",
+        ["weston", "--backend=headless-backend.so", "--renderer=gl",
          f"--shell={DISPLAY}/photo-wall-shell.so", f"--width={WIDTH_PX}", f"--height={HEIGHT_PX}",
          "--idle-time=0", f"--socket={SOCKET}", "--no-config", "--debug"],
         env=env, stdout=weston_log, stderr=weston_log)
@@ -482,10 +527,11 @@ def main() -> None:
         assert inside > 300 and outside > 1000, (inside, outside)
         print("PASS a_picture_document_changes_the_pixels_and_comes_back_presented", flush=True)
 
-        def send(change: int, software, light=UPGRADE_DISPLAY_LIGHT) -> None:
+        def send(change: int, software, light=UPGRADE_DISPLAY_LIGHT, test_pattern=None) -> None:
             """The document as it crosses the wire for HDMI-A-1, retargeted at the headless Output."""
             controller.document(OUTPUT, replace(decode_picture_document(encode_picture_document(
-                PictureDocument("HDMI-A-1", change, {}, software, light=light))), output_id=OUTPUT))
+                PictureDocument("HDMI-A-1", change, {}, software, test_pattern=test_pattern, light=light))),
+                output_id=OUTPUT))
 
         def presented(change: int, seconds: float = 15.0):
             end = time.monotonic() + seconds
@@ -498,6 +544,7 @@ def main() -> None:
                 time.sleep(0.01)
 
         room_light_cases(send, presented, drain, SoftwarePicture)
+        pattern_case(send, presented, drain, reports, SoftwarePicture, operations_for)
     except BaseException:
         player_log.flush()
         print("PLAYER LOG:\n" + pathlib.Path("/tmp/pw-picture-e2e-player.log").read_text()[-4000:], flush=True)
@@ -555,7 +602,7 @@ def room_light_cases(send, presented, drain, SoftwarePicture) -> None:
     from contracts.lut import LutRef
     from contracts.node_frame import PictureOperations
     from contracts.node_picture import UPGRADE_DISPLAY_LIGHT, DisplayLight
-    from player.geometry import final_pixel, homography, irradiance, transform
+    from player.geometry import final_pixel, irradiance, placement_uv
 
     neutral = SoftwarePicture(contrast_percent=100, colour_temperature_kelvin=6500, gamma_tenths=22)
     matched, black = UPGRADE_DISPLAY_LIGHT.matched_lux, UPGRADE_DISPLAY_LIGHT.black
@@ -583,18 +630,19 @@ def room_light_cases(send, presented, drain, SoftwarePicture) -> None:
     expected = PictureOperations(OUTPUT, 5, (1.0, 1.0, 1.0), 1.0, 1.0, DisplayLight(800.0, black))
     lights = lights_of(expected, lighting)
 
-    def lit(x: float, y: float) -> tuple[float, float, float]:
-        return final_pixel(grey_linear(), expected, inside=True, lights=lights, x=x, y=y)[:3]
+    def lit(u: float, v: float) -> tuple[float, float, float]:
+        return final_pixel(grey_linear(), expected, inside=True, lights=lights, x=u, y=v)[:3]
 
     inside, outside = await_compare(expected, drain, reference=lit)
-    # The point 1 mm below the opening's top edge (mat space), mid-width: in the far light's shadow.
-    x, y = transform(homography(OPENING), .5, 1 / lights.size_mm[1])
-    assert abs(irradiance(lights, x, y)[0] - 500) < 1e-6, irradiance(lights, x, y)
+    # The point 1 mm below the picture's top edge (mat space), mid-width: in the far light's shadow.
+    u, v = .5, 1 / lights.size_mm[1]
+    assert abs(irradiance(lights, u, v)[0] - 500) < 1e-6, irradiance(lights, u, v)
+    placed = placement()
     width, height, data = capture()
-    i, j = int(x * width), int(y * height)
+    i, j = int(placed.x + u * placed.width), int(placed.y + v * placed.height)
     offset = (j * width + i) * 4
     blue, green, red = data[offset:offset + 3]
-    want = lit((i + .5) / width, (j + .5) / height)
+    want = lit(*placement_uv((i + .5) / width, (j + .5) / height, placed, (width, height)))
     actual = (red / 255, green / 255, blue / 255)
     print(f"TRACER inside={inside} outside={outside} report={report} one_mm={actual} want={want}", flush=True)
     assert max(abs(a - e) for a, e in zip(actual, want, strict=True)) <= TOLERANCE, ("one_mm", actual, want)
@@ -623,6 +671,31 @@ def room_light_cases(send, presented, drain, SoftwarePicture) -> None:
     print(f"LUT before={inside} after={inside_after} pixel={lut_pixel}", flush=True)
     assert lut_pixel[2] < lut_pixel[0] - .1, lut_pixel          # the warm table is drawn
     print("PASS the_frames_paper_profile_joins_when_held", flush=True)
+
+
+def pattern_case(send, presented, drain, reports, SoftwarePicture, operations_for) -> None:
+    """5. a_test_pattern_shows_inside_the_placement (module docstring)."""
+    from contracts.node_picture import UPGRADE_DISPLAY_LIGHT, TestPatternAsk
+    from contracts.tuning import TestPattern
+    from player.geometry import display_steps
+
+    tuned = SoftwarePicture(contrast_percent=80, colour_temperature_kelvin=5000, gamma_tenths=24)
+    ask = TestPatternAsk(TestPattern.WHITE, 1)
+    send(7, tuned, test_pattern=ask)
+    report = presented(7)
+    end = time.monotonic() + 15
+    while report.test_pattern_shown != ask:
+        assert time.monotonic() < end, ("test_pattern_shown", report)
+        drain()
+        time.sleep(0.01)
+        report = reports.latest[OUTPUT]
+    operations = operations_for(OUTPUT, 7, tuned, UPGRADE_DISPLAY_LIGHT, TestPattern.WHITE)
+    white = display_steps((1.0, 1.0, 1.0), operations)
+    inside, outside = await_compare(operations, drain, reference=lambda _u, _v: white)
+    print(f"PATTERN inside={inside} outside={outside} white={white} report={report}", flush=True)
+    assert min(white) < max(white) - .05, white                 # the software group is drawn
+    assert inside > 300 and outside > 1000, (inside, outside)
+    print("PASS a_test_pattern_shows_inside_the_placement", flush=True)
 
 
 if __name__ == "__main__":

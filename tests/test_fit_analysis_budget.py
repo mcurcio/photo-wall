@@ -11,7 +11,7 @@ import time
 from psycopg.types.json import Jsonb
 from support.key_content_builders import key_content
 from support.photo_pools import library_of, photo, seed_pool
-from support.position import save_position
+from support.position import PORTRAIT_ON_WIDE, save_position
 from test_registry import enroll
 
 from central.db import ProcessTransactionClock
@@ -45,7 +45,7 @@ def _wall(registry) -> None:
                                               height_mm=profile.height_px // 4, profile=profile))
             registry.bind(frame_id, player["player_id"], f"HDMI-A-{output + 1}",
                           expected_generation=0)
-            save_position(registry, frame_id)
+            save_position(registry, frame_id, PORTRAIT_ON_WIDE)
 
 
 def _pool(registry) -> None:

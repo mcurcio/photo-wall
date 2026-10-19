@@ -11,7 +11,7 @@ from central.displays.model import Readiness
 from contracts.enrollment import OutputReport
 from contracts.frame_lighting import FrameLighting
 from contracts.liveness import REPORT_INTERVAL, SILENT_AFTER_SECONDS
-from contracts.models import Calibration, FrameProfile, Identifier, Instant, Model
+from contracts.models import Calibration, ExactTurn, FrameProfile, Identifier, Instant, Model
 from contracts.node_commands import Owner
 
 
@@ -80,6 +80,7 @@ class FrameInventory(Model):
     calibration: Calibration
     lighting: FrameLighting                   # the Frame's lights, mat and paper (decision 0028), on its binding
     readiness: Readiness                      # worked out (central/displays/model.py), never stored
+    turn: ExactTurn                           # how the Frame's screen hangs (frames.turn; render redesign S2)
     configuration_revision: int = Field(ge=1)
     player_id: Identifier | None = None
     output_id: Identifier | None = None
@@ -92,14 +93,16 @@ class FrameOutput(Model):
     """One Frame's Frame output and what it came from (follow-ups 2026-10-11, slice A1; owner,
     2026-10-11: compatibility "measuring against the Frame output and not the Display").
 
-    `output_px` is `contracts.models.frame_output(profile, calibration, display_px)`: the
-    Frame's picture in output pixels, (width, height) along its own axes. `display_px` is the
+    `output_px` is `contracts.models.frame_output(profile, calibration, display_px, turn)`: the
+    Frame's picture in output pixels, (width, height) along its own axes. `turn` is how the
+    Frame's screen hangs (frames.turn; render redesign S2). `display_px` is the
     size its Output last reported (`outputs.observation` width_px x height_px, kept while the
     display is unplugged). Both are None for a Frame bound to no Output, or whose Output never
     reported a size above 0 x 0. Read by `central.infra.display_store.frame_outputs_in`."""
 
     frame_id: Identifier
     profile: FrameProfile
+    turn: ExactTurn
     output_px: tuple[Pixels, Pixels] | None
     display_px: tuple[Pixels, Pixels] | None
 

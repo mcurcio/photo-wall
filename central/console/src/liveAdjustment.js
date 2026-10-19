@@ -42,7 +42,9 @@ import { useMutate } from "./useMutate.js";
  * REFUSALS. Most pass: the page keeps the session and keeps trying, and the words go away once
  * a later answer succeeds (the Pi not having shown the latest change goes once it has). A few
  * stop it until the operator answers (STOPPING: someone saved meanwhile; the Frame lost its
- * Pi): the session is ended and the page waits for Revert.
+ * Pi): the session is ended and the page waits for Revert. A refusal of the value itself
+ * (REFUSED_VALUE: a Position off the screen) is not tried again: the session keeps the change before
+ * it and the words stay until the draft changes.
  *
  * RESTORE (`restore`) loads a Position history entry (historyApi.js) into the session: it waits for a
  * loop request in flight like Done, names the session's sequence (tried once more after a
@@ -80,6 +82,10 @@ const STOPPING = new Set([
   "trial_baseline_revision_changed", "calibration_revision_conflict", "calibration_trial_baseline_changed",
   "trial_frame_unbound",
 ]);
+// The refusals of a value itself (a Position that would leave the screen): sending the same draft
+// again would be refused again, so it is not sent again; the Pi keeps the change before it, and the
+// words stay until the draft changes.
+const REFUSED_VALUE = new Set(["position_off_screen"]);
 const NOT_PRESENTED = "trial_latest_not_presented";
 // Begin is refused while another session for this Frame runs (another window, or this page's
 // own a moment ago); Central ends an abandoned one within seconds, so it is tried again.
@@ -105,7 +111,7 @@ export function useVisible() {
 }
 
 /**
- * @typedef {import("./useDraft.js").Trying} Draft   `{fit, lighting}`: the Frame fit and lighting being tried
+ * @typedef {import("./useDraft.js").Trying} Draft   `{fit, lighting}`: the Frame fit (its rectangle) and lighting being tried
  * @typedef {import("./useDraft.js").Fit} Fit
  * @typedef {import("./useDraft.js").Lighting} Lighting
  * @typedef {"checking"|"not_admitted"|"unavailable"|"unbound"|"idle"|"connecting"|"waiting"
@@ -114,8 +120,10 @@ export function useVisible() {
  *   adjustment (Central's capability `not_admitted`); `waiting`: another session for
  *   this Frame is running; `stopped`: a refusal stopped it until Revert; `sending`: the latest
  *   change is not shown yet; `shown`: the Pi has presented it.
- * @typedef {{words: string, code: string, stops: boolean}} Problem
- *   `code` is Central's, for a Details disclosure only.
+ * @typedef {{words: string, code: string, stops: boolean, refused?: string}} Problem
+ *   `code` is Central's, for a Details disclosure only. `refused`: the draft (its `draftKey`) whose
+ *   value Central refused (REFUSED_VALUE): it is not sent again, and the problem goes once the draft
+ *   is another.
  */
 
 /**
@@ -125,7 +133,10 @@ export function useVisible() {
  *            ack: {revision: number, at: number}|null, latest: number|null,
  *            done: () => Promise<boolean>, revert: () => Promise<void>, retry: () => void,
  *            restore: (entryId: string) => Promise<{ok: true}|{ok: false, error: string}>,
- *            savedAt: number|null, leftAt: number|null}}
+ *            savedAt: number|null, leftAt: number|null, refused: boolean,
+ *            sessionFit: {mode: "rectangle", centre_x: number, centre_y: number, width: number}|null}}
+ *   `refused`: Central refused the draft's value (REFUSED_VALUE), so it is not sent and the session
+ *   still shows `sessionFit`, the fit of the session as served (null with no session).
  *   `latest` is the number of the change last made (null with no session); `ack` the newest
  *   one the Pi presented and when (Central's clock, seconds), so Done is offered only when
  *   they match. `savedAt` and `leftAt` are this browser's clock (epoch seconds, shown only,
@@ -172,8 +183,11 @@ export function useFrameAdjustment({ frameId, frame, open }) {
     state.current.received = performance.now();
     setRow(next);
   }, []);
-  const fail = useCallback((code) => {
-    const problem = { words: refusalWords(code), code, stops: STOPPING.has(code) };
+  const fail = useCallback((code, sent = null) => {
+    const problem = {
+      words: refusalWords(code), code, stops: STOPPING.has(code),
+      ...(sent !== null && REFUSED_VALUE.has(code) ? { refused: sent } : {}),
+    };
     state.current.error = problem;
     setError(problem);
   }, []);
@@ -201,6 +215,8 @@ export function useFrameAdjustment({ frameId, frame, open }) {
       operation, expected_sequence: before.sequence, ...(candidate ?? {}),
     };
     const request = () => apiWrite(begin ? path : `${path}/${before.trial_id}`, { method: "POST", body });
+    // The draft this request carries, should Central refuse its value.
+    const sent = candidate === undefined ? null : draftKey(current.draft);
     let result;
     try {
       result = operation === "save" ? await mutate(request) : await request();
@@ -223,7 +239,7 @@ export function useFrameAdjustment({ frameId, frame, open }) {
         return null;
       }
       const code = result.error ?? `http_${result.status}`;
-      fail(code);
+      fail(code, sent);
       if (begin) current.waitUntil = performance.now() + RETRY_MS;
       if (STOPPING.has(code) && current.row?.state === "active") {
         end(current.row);
@@ -238,7 +254,8 @@ export function useFrameAdjustment({ frameId, frame, open }) {
     const passing = current.error;
     const shown = result.data.presented_sequence === result.data.sequence &&
       result.data.presented_sha256 === result.data.candidate_sha256;
-    if (passing !== null && !passing.stops && (passing.code !== NOT_PRESENTED || shown)) {
+    const still = passing?.refused !== undefined && passing.refused === draftKey(current.draft);
+    if (passing !== null && !passing.stops && !still && (passing.code !== NOT_PRESENTED || shown)) {
       current.error = null;
       setError(null);
     }
@@ -282,7 +299,8 @@ export function useFrameAdjustment({ frameId, frame, open }) {
         await send("renew", payload());
         return;
       }
-      if (draftKey(current.draft) !== draftKey(session.calibration, session.lighting)) {
+      const drafted = draftKey(current.draft);
+      if (drafted !== draftKey(session.calibration, session.lighting) && current.error?.refused !== drafted) {
         if (performance.now() < current.editAt) return;
         await send("edit", payload());
         return;
@@ -349,7 +367,9 @@ export function useFrameAdjustment({ frameId, frame, open }) {
   }, [fly]);
 
   const active = row?.state === "active";
-  const changed = active && draftKey(draft) !== draftKey(row.calibration, row.lighting);
+  // A draft whose value Central refused is not sent: the latest change is still the session's.
+  const refused = error?.refused !== undefined && error.refused === draftKey(draft);
+  const changed = active && !refused && draftKey(draft) !== draftKey(row.calibration, row.lighting);
   const presented = active && row.presented_sequence != null && row.presented_sha256 === row.candidate_sha256;
   const latest = active ? row.sequence + (changed ? 1 : 0) : null;
   const ack = presented ? { revision: row.presented_sequence, at: row.presented_at ?? null } : null;
@@ -409,8 +429,8 @@ export function useFrameAdjustment({ frameId, frame, open }) {
         keep(result.data);
         // The draft becomes the answer's fit and lighting; its base (the saved revision it was made
         // from) stays the draft's own.
-        const { mode, corners, rotation } = fitOf(result.data.calibration);
-        change({ mode, corners, rotation });
+        const { centre_x, centre_y, width } = fitOf(result.data.calibration);
+        change({ centre_x, centre_y, width });
         changeLighting(result.data.lighting);
         return { ok: true };
       }
@@ -428,8 +448,12 @@ export function useFrameAdjustment({ frameId, frame, open }) {
     if (capability !== "native_trial") setRetries((count) => count + 1);
   }, [capability]);
 
+  // The fit the session shows (the Pi presents it once `ack` is the latest): a refused draft's
+  // way back.
+  const sessionFit = active ? fitOf(row.calibration) : null;
+
   return {
-    draft, change, changeLighting, dirty, phase, error, busy, ack, latest, savedAt, leftAt,
+    draft, change, changeLighting, dirty, phase, error, busy, ack, latest, savedAt, leftAt, refused, sessionFit,
     done, revert, retry, restore,
   };
 }

@@ -199,6 +199,9 @@ class _Wayland:
         self.single_pixel = _Proxy(self.log, "single_pixel")
         self.solids = []
         self.single_pixel.create_u32_rgba_buffer = self._solid
+        self.display = _Proxy(self.log, "display")
+        self.display.sync = self._sync
+        self.syncs = []
         self.surfaces = 0
 
     def _surface(self):
@@ -218,13 +221,19 @@ class _Wayland:
         self.solids.append(_Proxy(self.log, "solid", ("solid", *rgba)))
         return self.solids[-1]
 
+    def _sync(self):
+        self.log.append(("display", "sync", ()))
+        self.syncs.append(_Proxy(self.log, "callback"))
+        return self.syncs[-1]
+
     def _feedback(self, surface):
         self.feedbacks.append(_Proxy(self.log, "feedback"))
         return self.feedbacks[-1]
 
     def health(self, surface="surface2"):
         """The health surface's requests, in order: ("viewport", (w, h)) for its viewport's
-        destination, ("attach", (w, h) | ("solid", r, g, b, a) | None) and "commit"."""
+        destination, ("attach", (w, h) | ("solid", r, g, b, a) | None) and "commit"; and the
+        display's "sync" (the tests drive one Output)."""
         out = []
         for kind, request, args in self.log:
             if kind == f"viewport-{surface}" and request == "set_destination":
@@ -233,6 +242,8 @@ class _Wayland:
                 out.append(("attach", args[0].args if args[0] is not None else None))
             elif kind == surface and request in ("commit", "ack"):
                 out.append(request)
+            elif kind == "display" and request == "sync":
+                out.append("sync")
         return out
 
     def shm_sizes(self):
@@ -285,18 +296,25 @@ def layer(monkeypatch, tmp_path):
     overlay = client.OverlayClient(compositor=wayland.compositor, shm=wayland.shm,
                                    presentation=wayland.presentation, manager=wayland.manager,
                                    viewporter=wayland.viewporter,
-                                   single_pixel=wayland.single_pixel,
+                                   single_pixel=wayland.single_pixel, display=wayland.display,
                                    hooks=(hook,), painter=lambda ops, surface: None)
     configure = wayland.manager.dispatcher["output"]
     return hook, overlay, wayland, link, now, painted, configure
 
 
-CLEAR = ("solid", 0, 0, 0, 0)    # the transparent single-pixel buffer
+# The shell's amber fallback tint (native/shell.c fallback_sync, RGBA 0.55, 0.35, 0, 0.5) as a
+# pre-multiplied single-pixel buffer (each channel a fraction of 0xffffffff).
+AMBER = ("solid", *(round(c * 0.5 * 0xFFFFFFFF) for c in (0.55, 0.35, 0.0)), round(0.5 * 0xFFFFFFFF))
 
 
-def cleared(width=640, height=480):
-    """A tint-off commit: the solid buffer scaled to the whole Output."""
-    return [("viewport", (width, height)), ("attach", CLEAR), "commit"]
+def cleared():
+    """A tint-off commit: no buffer (the layer unmapped), then a display sync."""
+    return [("attach", None), "commit", "sync"]
+
+
+def amber(width=640, height=480):
+    """A tint-on page that cannot be drawn: the amber solid buffer scaled to the whole Output."""
+    return [("viewport", (width, height)), ("attach", AMBER), "commit"]
 
 
 def tinted(width=640, height=480):
@@ -304,18 +322,24 @@ def tinted(width=640, height=480):
     return [("viewport", (width, height)), ("attach", (width, height)), "commit"]
 
 
-def test_the_layer_is_mapped_transparent_before_any_instruction_and_never_acked(layer):
+def test_nothing_is_committed_to_the_layer_before_any_instruction_and_it_is_never_acked(layer):
+    """No transparent base map: an unmapped layer lets the Player's pictures stay on planes, and
+    the shell's amber keys on this client being alive, not on a mapped layer.
+
+    Mutation probe: commit the transparent base buffer again -> health() is not empty."""
     hook, overlay, wayland, link, now, painted, configure = layer
     configure(wayland.manager, "Virtual-1", 640, 480, 1, "starting_new", 0)
     assert ("manager", "get_health_layer", ("surface2", "Virtual-1")) in wayland.log
-    assert wayland.health() == cleared()       # a solid buffer, scaled to the Output
+    assert wayland.health() == []
+    hook.service(1000 + V - 1)
+    assert wayland.health() == [] and not wayland.solids
     assert wayland.shm_sizes() == [(640, 480)]                  # the slate's; no health shm
     assert not painted
     assert [(args[0].kind, args[1]) for kind, request, args in wayland.log
             if request == "ack"] == [("surface1", 1)]           # the slate's configure only
 
 
-def test_tint_on_draws_the_whole_output_and_tint_off_the_scaled_solid_buffer(layer):
+def test_tint_on_draws_the_whole_output_and_tint_off_unmaps_the_layer(layer):
     hook, overlay, wayland, link, now, painted, configure = layer
     configure(wayland.manager, "Virtual-1", 640, 480, 1, "", 0)
     hook.instruction(instruction(7), 1001)
@@ -327,41 +351,60 @@ def test_tint_on_draws_the_whole_output_and_tint_off_the_scaled_solid_buffer(lay
     hook.instruction(instruction(9), 1003)
     assert wayland.health()[-3:] == tinted()                   # the viewport maps it 1:1
     assert "ack" not in wayland.health()
-    # Never an shm buffer smaller than the Output (Weston 14 DRM takes one for a cursor); one
-    # solid buffer serves every clear commit and costs no cap.
+    # Never an shm buffer smaller than the Output (Weston 14 DRM takes one for a cursor), and no
+    # solid buffer while every page draws.
     assert set(wayland.shm_sizes()) == {(640, 480)}
-    assert [solid.args for solid in wayland.solids] == [CLEAR]
+    assert wayland.solids == []
     assert (hook.surfaces["Virtual-1"].buffers, overlay.memory) == (1, 640 * 480 * 4)  # 9's
 
 
-def test_a_presented_commit_reports_its_serial_and_a_discarded_one_nothing(layer):
+def test_a_presented_tint_on_reports_its_serial_and_a_discarded_one_nothing(layer):
     hook, overlay, wayland, link, now, painted, configure = layer
     configure(wayland.manager, "Virtual-1", 640, 480, 1, "", 0)
-    base = wayland.feedbacks[-1]
-    base.dispatcher["presented"](base, 0, 0, 0, 0, 0, 0, 0)     # the base page: no serial
     hook.instruction(instruction(7), 1001)
     first = wayland.feedbacks[-1]
     first.dispatcher["discarded"](first)
     assert link.sent == []
     release(wayland)
-    hook.instruction(instruction(8, tint=False), 1002)
+    hook.instruction(instruction(9), 1002)
     second = wayland.feedbacks[-1]
     second.dispatcher["presented"](second, 0, 0, 0, 0, 0, 0, 0)
-    assert link.sent == [PresentedReport("Virtual-1", 8)]
+    assert link.sent == [PresentedReport("Virtual-1", 9)]
     assert first.destroyed and second.destroyed
 
 
-def test_a_tint_on_page_over_the_size_caps_unmaps_the_layer_for_the_fallback_tint(layer):
+def test_a_tint_off_is_reported_presented_when_the_sync_after_its_commit_is_done(layer):
+    """An unmapped layer has no presentation to wait for: the compositor has processed the NULL
+    commit when the wl_display.sync sent after it is done, and the report goes at that time.
+
+    Mutation probe: report at the commit -> link.sent is not empty before the sync is done."""
+    hook, overlay, wayland, link, now, painted, configure = layer
+    configure(wayland.manager, "Virtual-1", 640, 480, 1, "", 0)
+    feedbacks = len(wayland.feedbacks)
+    hook.instruction(instruction(8, tint=False), 1001)
+    assert wayland.health() == cleared()
+    assert len(wayland.feedbacks) == feedbacks                  # nothing presents on no buffer
+    assert link.sent == [] and hook.surfaces["Virtual-1"].commits
+    (callback,) = wayland.syncs
+    callback.dispatcher["done"](callback, 0)
+    assert link.sent == [PresentedReport("Virtual-1", 8)]
+    assert callback.destroyed and not hook.surfaces["Virtual-1"].commits
+
+
+def test_a_tint_on_page_over_the_size_caps_shows_the_amber_single_pixel_buffer(layer):
+    """The client's own fallback now that the shell's amber keys on its liveness: a tint-on page
+    it cannot draw is amber over the whole Output, never nothing.
+
+    Mutation probe: commit a NULL buffer instead -> the attach is None."""
     hook, overlay, wayland, link, now, painted, configure = layer
     configure(wayland.manager, "Virtual-1", 8192, 4096, 1, "", 0)   # over the area cap
-    assert wayland.health() == cleared(8192, 4096)                  # tint off has no size cap
     hook.instruction(instruction(7), 1001)
-    assert wayland.health()[-2:] == [("attach", None), "commit"]
+    assert wayland.health() == amber(8192, 4096)
     hook.service(1002)
-    assert wayland.health()[-2:] == [("attach", None), "commit"]    # not repeated every pass
-    assert len(wayland.health()) == 5
+    assert wayland.health() == amber(8192, 4096)                    # not repeated every pass
+    assert link.sent == []                                          # never reported presented
     hook.instruction(instruction(8, tint=False), 1003)
-    assert wayland.health()[-3:] == cleared(8192, 4096)
+    assert wayland.health()[-3:] == cleared()                       # tint off has no size cap
 
 
 def test_a_failed_paint_of_a_tint_on_page_also_shows_the_fallback(layer):
@@ -372,8 +415,12 @@ def test_a_failed_paint_of_a_tint_on_page_also_shows_the_fallback(layer):
         raise RuntimeError("cairo error")
     hook.painter = broken
     hook.instruction(instruction(7), 1001)
-    assert wayland.health()[-2:] == [("attach", None), "commit"]
+    assert wayland.health() == amber()
     assert (hook.surfaces["Virtual-1"].buffers, overlay.memory) == (0, 640 * 480 * 4)  # slate
+    hook.painter = lambda ops, surface: painted.append(ops)
+    hook.instruction(instruction(8), 1002)                      # drawn again once it can be
+    assert wayland.health()[-3:] == tinted()
+    assert [solid.args for solid in wayland.solids] == [AMBER]  # one amber buffer, made once
 
 
 def test_at_the_buffer_cap_a_tint_on_page_waits_for_a_release_and_tint_off_never_does(layer):
@@ -403,9 +450,9 @@ def test_the_stale_page_is_drawn_by_the_loop_after_v(layer):
     hook, overlay, wayland, link, now, painted, configure = layer
     configure(wayland.manager, "Virtual-1", 640, 480, 1, "", 0)
     assert hook.service(1000 + V - 1) == 1000 + V
-    assert len(wayland.health()) == 3
+    assert wayland.health() == []
     hook.service(1000 + V)
-    assert wayland.health()[-3:] == tinted()
+    assert wayland.health() == tinted()
     assert painted[-1][2].text == UNAVAILABLE_LINES[0]
     wayland.feedbacks[-1].dispatcher["presented"](wayland.feedbacks[-1], 0, 0, 0, 0, 0, 0, 0)
     assert link.sent == []

@@ -2,6 +2,9 @@
 and reads, nothing else.
 
 Writers (each in its caller's transaction, so a history write fails only with its change):
+- `write_turn_in`: the one kept turn write, called by Registry's `turn_frame`: it records a change
+  made outside Photo Wall (made for the old turn), sets the Frame's turn and appends the
+  KEPT_TURN_CHANGED entry, made for the new turn, together.
 - `record_created_in`: Registry's new Frame (central/registry.py `create_frame`) appends its
   KEPT_CREATED entry with the row it inserts.
 - `write_position_in`: the one kept Position write, called by Registry's Save
@@ -26,7 +29,6 @@ from typing import Any, Final
 from uuid import UUID
 
 from psycopg.types.json import Jsonb
-from pydantic import TypeAdapter
 
 from central.fleet.position_history import (
     KEPT_KINDS,
@@ -39,30 +41,31 @@ from central.fleet.position_history import (
     TrialHanded,
     position_values,
     sent_record,
+    turn_changed_record,
     unrecorded_record,
 )
 from central.infra.display_store import SEEN_DISPLAY_JOIN
 from central.tuning_history import bounds as retention
 from central.tuning_history.bounds import HistoryPage
 from contracts.frame_lighting import FrameLighting
-from contracts.models import Calibration, FrameFit, FrameProfile
+from contracts.models import Calibration, FrameProfile, RectangleFit
 
-_FIT: Final = TypeAdapter(FrameFit)
 _KEPT_VALUES: Final = sorted(kind.value for kind in KEPT_KINDS)
 _SENT_VALUES: Final = sorted(kind.value for kind in SENT_KINDS)
 _COLUMNS: Final = ("e.id, e.frame_id, e.number, e.kind, e.at, e.session_id, e.restored_from, e.fit, e.lighting, "
-                   "e.profile_width_px, e.profile_height_px, e.display_id")
+                   "e.profile_width_px, e.profile_height_px, e.turn, e.display_id")
 
 
 def frame_made_for_in(conn: Any, frame_id: str) -> MadeFor | None:
-    """What an entry for Frame `frame_id` is made for now: its profile in pixels and the Display seen
-    on its bound port (None: unbound, or none seen). None when there is no such Frame. The one read
-    of it: every append, Restore's refusal and the history's `restore_refusal`."""
-    row = conn.execute("SELECT f.profile, seen.display_id FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "
-                       f"{SEEN_DISPLAY_JOIN} WHERE f.id=%s", (frame_id,)).fetchone()
+    """What an entry for Frame `frame_id` is made for now: its profile in pixels, its turn and the
+    Display seen on its bound port (None: unbound, or none seen). None when there is no such Frame.
+    The one read of it: every append, Restore's refusal and the history's `restore_refusal`."""
+    row = conn.execute("SELECT f.profile, f.turn, seen.display_id FROM frames f LEFT JOIN bindings b "
+                       f"ON b.frame_id=f.id {SEEN_DISPLAY_JOIN} WHERE f.id=%s", (frame_id,)).fetchone()
     if row is None:
         return None
-    return MadeFor((int(row["profile"]["width_px"]), int(row["profile"]["height_px"])), row["display_id"])
+    return MadeFor((int(row["profile"]["width_px"]), int(row["profile"]["height_px"])), int(row["turn"]),
+                   row["display_id"])
 
 
 def write_position_in(conn: Any, frame_id: str, record: PositionRecord, *, calibration: Calibration,
@@ -98,6 +101,27 @@ def write_position_in(conn: Any, frame_id: str, record: PositionRecord, *, calib
     return generation
 
 
+def write_turn_in(conn: Any, frame_id: str, turn: int) -> int:
+    """Set Frame `frame_id`'s turn (a new generation and configuration revision) and append its
+    KEPT_TURN_CHANGED entry of the Frame's fit and lighting, made for the new turn, in the caller's
+    transaction: the one kept turn write. First, when the stored fit and lighting differ from the
+    Frame's newest kept entry, the change made outside Photo Wall is recorded, made for the old turn
+    (`position_history.unrecorded_record`). Answers the Frame's generation after the write."""
+    stored = conn.execute("SELECT calibration, lighting FROM frames WHERE id=%s FOR NO KEY UPDATE", (frame_id,)).fetchone()
+    if stored is None:
+        raise LookupError("unknown_frame")
+    values = position_values(Calibration.model_validate(stored["calibration"]),
+                             FrameLighting.model_validate(stored["lighting"]))
+    unrecorded = unrecorded_record(latest_kept_position_in(conn, frame_id), values)
+    if unrecorded is not None:
+        _append_in(conn, frame_id, unrecorded)
+    generation = conn.execute("UPDATE frames SET turn=%s, generation=generation+1, "
+                              "configuration_revision=configuration_revision+1 WHERE id=%s RETURNING generation",
+                              (turn, frame_id)).fetchone()["generation"]
+    _append_in(conn, frame_id, turn_changed_record(values))
+    return generation
+
+
 def record_created_in(conn: Any, frame_id: str, record: PositionRecord) -> None:
     """Append a new Frame's KEPT_CREATED `record`, in the caller's transaction that inserted the Frame.
     ValueError("position_history_kind") for another kind."""
@@ -116,12 +140,12 @@ def _append_in(conn: Any, frame_id: str, record: PositionRecord) -> PositionEntr
     values = record.values
     row = conn.execute(
         "INSERT INTO position_entries AS e (id, frame_id, number, kind, at, session_id, restored_from, fit, lighting, "
-        "profile_width_px, profile_height_px, display_id) SELECT %s, %s, COALESCE(max(number), 0) + 1, %s, "
-        "clock_timestamp(), %s, %s, %s, %s, %s, %s, %s FROM position_entries WHERE frame_id=%s "
+        "profile_width_px, profile_height_px, turn, display_id) SELECT %s, %s, COALESCE(max(number), 0) + 1, %s, "
+        "clock_timestamp(), %s, %s, %s, %s, %s, %s, %s, %s FROM position_entries WHERE frame_id=%s "
         f"RETURNING {_COLUMNS}",
         (uuid.uuid4(), frame_id, record.kind.value, record.session_id, record.restored_from,
          Jsonb(values.fit.model_dump(mode="json")), Jsonb(values.lighting.model_dump(mode="json")), width, height,
-         made_for.display_id, frame_id)).fetchone()
+         made_for.turn, made_for.display_id, frame_id)).fetchone()
     kinds, keep = ((_KEPT_VALUES, retention.KEPT_ENTRIES) if record.kind in KEPT_KINDS
                    else (_SENT_VALUES, retention.SENT_ENTRIES))
     conn.execute("DELETE FROM position_entries WHERE frame_id=%(frame)s AND kind = ANY(%(kinds)s) "
@@ -185,11 +209,12 @@ def _entry(row: Mapping[str, Any]) -> PositionEntry:
     """The entry of a row read under `_COLUMNS`, `at` in UTC."""
     return PositionEntry(
         row["id"], row["frame_id"], row["number"], row["at"].astimezone(UTC),
-        MadeFor((row["profile_width_px"], row["profile_height_px"]), row["display_id"]),
+        MadeFor((row["profile_width_px"], row["profile_height_px"]), row["turn"], row["display_id"]),
         PositionRecord(PositionEntryKind(row["kind"]),
-                       PositionValues(_FIT.validate_python(row["fit"]), FrameLighting.model_validate(row["lighting"])),
+                       PositionValues(RectangleFit.model_validate(row["fit"]), FrameLighting.model_validate(row["lighting"])),
                        row["session_id"], row["restored_from"]))
 
 
 __all__ = ["frame_made_for_in", "latest_kept_position_in", "latest_position_at_in", "latest_position_in",
-           "position_entries_in", "position_entry_in", "record_created_in", "record_sent_in", "write_position_in"]
+           "position_entries_in", "position_entry_in", "record_created_in", "record_sent_in", "write_position_in",
+           "write_turn_in"]

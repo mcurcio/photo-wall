@@ -5,8 +5,11 @@ Two documents ride the Node bus's `display` store line, one key per Output (HDMI
 
 - The **Output document** (Central -> Pi, the display line's desired bucket, key
   `output_document_key(output_id)`): the port's power timetable (Central's decision now, the set
-  times it changes at over the next days, and 1b's console test on top), plus the power method and the two input switches of the Display last seen on it. It explains itself, so
-  any writer (Central today, a local writer later) can produce it and the Pi needs nothing else.
+  times it changes at over the next days, and 1b's console test on top), plus the power method and the two input switches of the Display last seen on it, and the turn: how the screen
+  hangs (contracts/display_turn.py; the bound Frame's turn, 0 for an unbound Output; render
+  redesign S2, schema major 9). Its `change` rises whenever the document but `change` differs:
+  power or turn. It explains itself, so any writer (Central today, a local writer later) can
+  produce it and the Pi needs nothing else.
 - The **Output report** (Pi -> Central, the display line's state bucket, key
   `output_report_key(output_id)`): whether a display is connected, its identity and modes as its
   EDID says, which power methods answered a read-only check, the method in use, and the result of
@@ -49,6 +52,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Final, Literal
 
+from contracts.display_turn import DisplayTurn, is_turn
 from contracts.node_protocol import token
 from contracts.wire_codec import (
     decode,
@@ -61,7 +65,7 @@ from contracts.wire_codec import (
     whole,
 )
 
-SCHEMA_MAJOR: Final = 8                         # the display line's schema major (birth, envelope)
+SCHEMA_MAJOR: Final = 9                         # the display line's schema major (birth, envelope); 9 from the render redesign (the turn)
 
 # Every Output a Node can have: the Pi 5's two HDMI connectors, and the two virtual connectors the
 # software end-to-end tier runs (player/output_discovery.py's `weston_ini` iterates these).
@@ -211,23 +215,26 @@ def decode_set_time(text: str) -> int:
 
 @dataclass(frozen=True)
 class OutputDocument:
-    """What is wanted on one HDMI port. `change` rises when the power part (power, method, switches)
-    changes; the report echoes the change it acted on. `power` is the port's power timetable with
-    the console test on top."""
+    """What is wanted on one HDMI port. `change` rises when the document's body (the power part:
+    power, method, switches; or the turn) differs; the report echoes the change it acted on. `power`
+    is the port's power timetable with the console test on top. `turn` is how the screen hangs."""
     output_id: str
     change: int
     power: OutputPower
     method: MethodChoice
     switch_input_on_power_on: bool      # #117
     never_off_on_other_input: bool      # #118
+    turn: DisplayTurn                   # how the screen hangs: the bound Frame's frames.turn, 0 unbound
 
     def __post_init__(self) -> None:
         """ValueError("output_document") unless output_id is in OUTPUT_IDS, change >= 1, power is an
-        OutputPower, method is a PowerMethod or BEST_DETECTED, and the two switches are bools."""
+        OutputPower, method is a PowerMethod or BEST_DETECTED, the two switches are bools, and
+        `is_turn(turn)`."""
         require(self.output_id in OUTPUT_IDS and whole(self.change, 1)
                  and isinstance(self.power, OutputPower)
                  and (isinstance(self.method, PowerMethod) or _is_best_detected(self.method))
-                 and type(self.switch_input_on_power_on) is bool and type(self.never_off_on_other_input) is bool,
+                 and type(self.switch_input_on_power_on) is bool and type(self.never_off_on_other_input) is bool
+                 and is_turn(self.turn),
                  "output_document")
 
 

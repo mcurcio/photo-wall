@@ -15,6 +15,8 @@ import { FramePosition, type PixelSize } from "../domain/frame-position";
 import { FrameInput, FramePower } from "../domain/frame-power";
 import { useFrameWhy } from "../domain/frame-why";
 import { FrameProfile, type Readiness } from "../domain/frame-profile";
+import { FrameTurn } from "../domain/frame-turn";
+import type { Turn } from "../domain/turn-words";
 import type { HostsRead } from "../domain/hosts-read";
 import { readDrawn, readRoomLights } from "../domain/room-lights/api";
 import { DrawnLine } from "../domain/room-lights/drawn-line";
@@ -56,6 +58,8 @@ interface Frame {
   output_id?: string | null;
   profile?: { width_px?: number; height_px?: number; diagonal_inches?: number; video?: boolean };
   calibration?: { revision?: number; fit?: object };
+  /** How the Frame's screen hangs (Central's `turn`; set on the Hardware tab). */
+  turn?: Turn;
   readiness?: Readiness;
 }
 
@@ -70,6 +74,12 @@ function wholeProfile(profile: Frame["profile"] | null | undefined): WholeProfil
   return { width_px: width!, height_px: height!, diagonal_inches: diagonal!, video: profile.video ?? true };
 }
 
+/** The Frame profile's width over its height (the picture's shape on its screen); null while it is not whole. */
+function aspectOf(profile: Frame["profile"] | null | undefined): number | null {
+  const whole = wholeProfile(profile);
+  return whole === null ? null : whole.width_px / whole.height_px;
+}
+
 const TABS = [
   { value: "overview", label: "Overview" },
   { value: "position", label: "Position" },
@@ -80,10 +90,9 @@ const TABS = [
 ] as const;
 
 /**
- * The output's size in pixels, as the Pi reported it; null when it reported none. Position's
- * steps and corner pixels are pixels of the output, whatever way the picture is turned in it.
- * Never the Frame profile: that is the Frame's shape, not the output's (a Frame may fill part
- * of its output, or be hung turned in it).
+ * The output's mode as built in pixels, as the Pi reported it; null when it reported none.
+ * Position works on it as the screen hangs (the Frame's turn). Never the Frame profile: that is
+ * the Frame's shape, not the output's (a Frame may fill part of its screen).
  */
 function outputSize(snapshot: object | null, frame: Frame): PixelSize | null {
   const reported = (boundOutput(snapshot ?? {}, frame.id) as { observation?: { connected?: boolean; width_px?: number; height_px?: number } } | null)
@@ -137,14 +146,14 @@ function useHouseLights(open: boolean): { rooms: RoomLightsView | null; drawn: D
  * tab each. The header names the Frame, its way back to the Wall and its health (health.js,
  * the plan tile's words). Overview is what Central puts on it and why, and its Photos: one Fit board
  * row per Scene that shows photos here (follow-ups C1); Position is where the
- * picture sits on the Display (its fit, corners, nudges, rotation), with the Frame's Position
+ * picture sits on its screen as it hangs (one rectangle: move, size, nudges), with the Frame's Position
  * History; Lighting is the room lights that fall on it, its mat and its paper, and whether its Pi
  * draws with the house's lights as they are now, with the same History; Picture is
  * the contrast, colour temperature, gamma and matched light of the display that feeds it, with that display's History
  * (every kept and tried change, and Restore into the editor); Power is how the Pi turns
  * its display off and on, with Test: turn off and Turn on; Hardware is which Pi and HDMI output
  * feed it (bind, unbind, Identify), the Display the Pi reports there (with the display-changed
- * card) and its Frame profile.
+ * card), its Frame profile and how its screen hangs (the turn).
  *
  * Position and Lighting share one live session (liveAdjustment.js, kept on the Frame), Picture has
  * its own (pictureSession.js, kept on the display). Each runs while one of its tabs is shown and
@@ -231,6 +240,8 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
         )}
         {tab === "position" && (
           <FramePosition adjustment={adjustment} size={outputSize(snapshot, frame)} piHref={piHref}
+            turn={frame.turn ?? 0} aspect={aspectOf(frame.profile)}
+            hardwareHref={formatRoute({ section: "wall", id: frameId, tab: "hardware" })}
             readiness={frame.readiness}
             whatFits={(
               <FrameDraftFit snapshot={snapshot} frameId={frameId} profile={wholeProfile(frame.profile)}
@@ -246,6 +257,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
           // The Frame's Position history (its fit and its lighting), with Restore into the draft.
           <PositionHistory key={`${frameId}:position-history`} frameId={frameId} adjustment={adjustment}
             size={outputSize(snapshot, frame)}
+            hardwareHref={formatRoute({ section: "wall", id: frameId, tab: "hardware" })}
             roomNames={lightNames(rooms)}
             profiles={profiles ?? []} />
         )}
@@ -274,8 +286,10 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
             <FrameProfile key={`${frameId}:profile`} snapshot={snapshot} frame={frame}
               draftFit={(profile) => (
                 <FrameDraftFit snapshot={snapshot} frameId={frameId} profile={wholeProfile(profile)}
-                  calibration={{ revision: frame.calibration?.revision ?? 1, fit: frame.calibration?.fit ?? { mode: "cover" } }} />
+                  calibration={{ revision: frame.calibration?.revision ?? 1, fit: frame.calibration?.fit ?? { mode: "rectangle" } }} />
               )} />
+            <FrameTurn key={`${frameId}:turn`} frameId={frameId} turn={frame.turn ?? 0}
+              generation={frame.generation ?? 0} />
           </>
         )}
       </Tabs>

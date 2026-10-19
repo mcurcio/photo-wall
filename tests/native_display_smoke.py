@@ -41,10 +41,15 @@ from overlay.render import card_rect  # noqa: E402
 HEALTH_MARKER = "/tmp/pw-health-client-marker"  # display_harness_health_client.py MARKER_FILE
 PROBE_STILL = "/tmp/pw-probe-still"  # native_display_probe.c: while it exists, the probe commits nothing
 PROBE_UNTAGGED = "/tmp/pw-probe-untagged"  # while it exists, the probe's commits carry no tag
+PROBE_ALPHA_RESET = "/tmp/pw-probe-alpha-reset"  # native_display_probe.c ALPHA_RESET
 # The probe's protocol code, generated as the library's own build does.
 xml = "/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml"
 subprocess.run(["wayland-scanner", "client-header", xml, "/tmp/xdg-shell-client.h"], check=True)
 subprocess.run(["wayland-scanner", "private-code", xml, "/tmp/xdg-shell.c"], check=True)
+ALPHA_XML = "/usr/share/wayland-protocols/staging/alpha-modifier/alpha-modifier-v1.xml"
+subprocess.run(["wayland-scanner", "client-header", ALPHA_XML, "/tmp/alpha-modifier-v1-client-protocol.h"],
+               check=True)
+subprocess.run(["wayland-scanner", "private-code", ALPHA_XML, "/tmp/alpha-modifier-v1.c"], check=True)
 subprocess.run(["wayland-scanner", "client-header", PROTOCOL_XML,
                 "/tmp/photo-wall-frame-client.h"], check=True)
 subprocess.run(["wayland-scanner", "private-code", PROTOCOL_XML,
@@ -59,6 +64,7 @@ subprocess.run(
         "-I/current-native",
         "/smoke/native_display_probe.c",
         "/tmp/xdg-shell.c",
+        "/tmp/alpha-modifier-v1.c",
         "/tmp/photo-wall-frame-protocol.c",
         "-L" + CLIENT,
         "-Wl,-rpath," + CLIENT,
@@ -363,10 +369,10 @@ def capture(read):
         display.disconnect()
 
 
-def health_view():
-    """Weston's own record of the health layer's view: its block of the one-shot `scene-graph`
+def health_views():
+    """Weston's own record of the health layer's views: their blocks of the one-shot `scene-graph`
     debug dump (weston_debug_v1, enabled by --debug), written into a memfd so a long dump never
-    blocks the compositor. Exactly one view has the role."""
+    blocks the compositor; an unmapped surface's view is in no layer, so not in the dump."""
     display = Display(str(root / "wayland-0"))
     display.connect()
     fd = os.memfd_create("pw-scene-graph")
@@ -389,22 +395,34 @@ def health_view():
     finally:
         os.close(fd)
         display.disconnect()
-    views = [block for block in dump.split("\tView ")[1:] if "role photo-wall-health," in block]
-    assert len(views) == 1, dump
-    return views[0]
+    return [block for block in dump.split("\tView ")[1:] if "role photo-wall-health," in block]
 
 
 def assert_health_view(*lines):
-    """The health view's scene-graph block holds every one of `lines`."""
-    view = health_view()
-    assert all(line in view for line in lines), (lines, view)
-    return view
+    """The one health view's scene-graph block holds every one of `lines`."""
+    views = health_views()
+    assert len(views) == 1, views
+    assert all(line in views[0] for line in lines), (lines, views[0])
+    return views[0]
 
 
-# The production client's tint-off health view: a transparent single-pixel buffer, scaled over
-# the whole 640 x 480 Output (never a small shm buffer: Weston 14 DRM's cursor-plane path).
-HEALTH_CLEAR_VIEW = ("position: (0, 0) -> (640, 480)", "solid-colour buffer",
-                     "[R 0.000000, G 0.000000, B 0.000000, A 0.000000]")
+def assert_no_health_view():
+    """No health view is mapped (render redesign S1: the layer stays unmapped while there is
+    nothing to show, so the Player's pictures can stay on planes)."""
+    views = health_views()
+    assert not views, views
+
+
+def assert_whole_output(rgb):
+    """Every pixel of the captured 640 x 480 Output is exactly `rgb`: nothing drawn over the app."""
+    pixels = capture_box(0, 0, 640, 480)
+    wanted = bytes(reversed(rgb))
+    wrong = next((i // 4 for i in range(0, len(pixels), 4) if pixels[i:i + 3] != wanted), None)
+    assert wrong is None, ("pixel", wrong % 640, wrong // 640, tuple(reversed(pixels[wrong * 4:wrong * 4 + 3])))
+
+
+# The production client's tint-on health view: one whole-Output shm buffer, mapped 1:1 (never a
+# small shm buffer: Weston 14 DRM's cursor-plane path).
 HEALTH_TINT_VIEW = ("position: (0, 0) -> (640, 480)", "SHM buffer", "width: 640, height: 480")
 
 
@@ -524,8 +542,8 @@ OPERATIONS = ('{"contrast_slope":0.8,"gamma_exponent":1.0,"light":{"black":0.000
 NOT_JSON = "not-json!!"     # 10 bytes: the shell forwards, never parses
 
 
-def picture_lines(proc, wanted, limit=8):
-    """The v4 probe's next `PICTURE <text>` line whose text is `wanted`, within `limit` s."""
+def probe_line(proc, wanted, limit=8):
+    """A probe's next stdout line that is `wanted`, within `limit` s."""
     import selectors
 
     end = time.monotonic() + limit
@@ -535,11 +553,16 @@ def picture_lines(proc, wanted, limit=8):
             if not selector.select(end - time.monotonic()):
                 break
             line = proc.stdout.readline()
-            assert line, ("picture_probe_exited", proc.poll())
-            if line.rstrip("\n") == "PICTURE " + wanted:
+            assert line, ("probe_exited", proc.poll())
+            if line.rstrip("\n") == wanted:
                 return line
             drain()
-    raise AssertionError(("picture_line", wanted))
+    raise AssertionError(("probe_line", wanted))
+
+
+def picture_lines(proc, wanted, limit=8):
+    """The v4 probe's next `PICTURE <text>` line whose text is `wanted`, within `limit` s."""
+    return probe_line(proc, "PICTURE " + wanted, limit)
 
 
 def picture_v4():
@@ -591,6 +614,68 @@ def picture_v4():
     await_pixel(*HEALTH, health_over(SLATE), 6.0 - (time.monotonic() - killed), drained=True)
     time.sleep(0.5)
     drain()     # the respawn's own presentations: later steps wait for new ones
+
+
+def admit(args, frame_id):
+    """Start /tmp/probe with `args` as the Output's app (its stdout piped), grant it and hand the
+    Output off to it; (identity, grant id) once the handoff is presented."""
+    global app
+    app = subprocess.Popen(["/tmp/probe", *args], env=env, preexec_fn=user, stdout=subprocess.PIPE,
+                           text=True)
+    ticks = int(pathlib.Path(f"/proc/{app.pid}/stat").read_text().rpartition(") ")[2].split()[19])
+    identity = {"frame_id": frame_id, "output": output,
+                "process": {"pid": app.pid, "start_ticks": ticks, "invocation_id": str(uuid.uuid4())},
+                "app_epoch": 1, "binding_generation": 1, "config_revision": 1}
+    grant = str(uuid.uuid4())
+    assert request("candidate", identity=identity, grant_id=grant, uid=10004)["accepted"]
+    shown = read_until(lambda e: e["event"] == "presented" and e["identity"] == identity)
+    handoff = str(uuid.uuid4())
+    assert request("handoff", grant_id=grant, handoff_id=handoff, buffer_id=shown["buffer_id"])["accepted"]
+    read_until(lambda e: e["event"] == "handoff_presented" and e["handoff_id"] == handoff)
+    return identity, grant
+
+
+def window_alpha_and_turn():
+    """Render redesign S1 (bead B2). Window alpha: the probe's opaque white sub-surface at
+    multiplier 0x7fffffff over its black window is half white, and back to opaque once its
+    modifier is destroyed (mutation probe: no weston_view_set_alpha in shell.c alpha_applied ->
+    255). The turn: transform 1 is confirmed by the `turn` event, every client's wl_output says 1
+    and the Output is its mode turned; transform 4 is refused."""
+    global app, output
+    pathlib.Path(PROBE_ALPHA_RESET).unlink(missing_ok=True)
+    admit(["alpha"], "alpha-frame")
+    half = await_pixel(200, 175, (127.5, 127.5, 127.5), 3, tolerance=0.5)   # 127 or 128
+    assert_pixel(40, 40, (0, 0, 0), tolerance=0)
+    assert_pixel(99, 175, (0, 0, 0), tolerance=0)                           # just left of it
+    print("PASS window_alpha_multiplier_halves_the_sub_surface", half, flush=True)
+    pathlib.Path(PROBE_ALPHA_RESET).write_text("")
+    print("PASS window_alpha_object_destroyed_resets_to_opaque",
+          await_pixel(200, 175, (255, 255, 255), 3, tolerance=0), flush=True)
+    probe_line(app, "TRANSFORM 0")
+    sent = len(events)
+    assert not request("turn", transform=4)["accepted"]
+    assert not any(e["event"] == "turn" for e in events[sent:])
+    print("PASS turn_refuses_a_flipped_transform", flush=True)
+    assert request("turn", transform=1)["accepted"]
+    turned = [e for e in events[sent:] if e["event"] == "turn"]
+    assert turned == [{"event": "turn", "output_id": output["output_id"], "transform": 1}], turned
+    moved = [e for e in events[sent:] if e["event"] == "output"]
+    assert moved and (moved[-1]["width"], moved[-1]["height"]) == (480, 640), moved
+    lost = [e for e in events[sent:] if e["event"] == "invalidated"]
+    assert lost and lost[-1]["reason"] == "output_mode_changed", lost   # a mode change, as any
+    output = moved[-1]["output"]
+    probe_line(app, "TRANSFORM 1")
+    print("PASS turn_event_then_the_clients_output_transform", flush=True)
+    sent = len(events)
+    assert request("turn", transform=0)["accepted"]
+    back = [e for e in events[sent:] if e["event"] == "output"]
+    assert back and (back[-1]["width"], back[-1]["height"]) == (640, 480), back
+    output = back[-1]["output"]
+    probe_line(app, "TRANSFORM 0")
+    print("PASS turn_back_to_upright", flush=True)
+    app.terminate()
+    app.wait(timeout=3)
+    app = None
 
 
 def request(op, **kw):
@@ -819,20 +904,24 @@ try:
     foreign_bind_refused()
     assert time.monotonic() - killed < 1.8, "foreign bind missed the respawn window"
     print("PASS foreign_bind_refused_without_private_client_after_handoff", flush=True)
-    # The respawned client binds the manager and takes its health layer but maps no buffer: the
-    # bind alone shows nothing, so the tint stays (the rule keys on a mapped health surface).
+    # The respawned client binds the manager v3 and takes its health layer but maps no buffer: it
+    # is alive, so the tint goes (render redesign S1: the rule keys on the client's liveness, not
+    # on a mapped health surface). Mutation probe: key it on a mapped surface again -> amber stays.
     assert await_marker(6) == "bare"
-    print("PASS fallback_tint_while_bound_client_maps_no_health_surface",
-          hold_pixel(320, 240, FALLBACK, 0.5), flush=True)
-    # Mapped (and presented), then a NULL buffer unmaps it: the tint comes back.
+    await_pixel(320, 240, PROBE_APP, 1, tolerance=0, drained=True)
+    print("PASS fallback_tint_goes_when_the_respawned_client_binds_mapping_nothing",
+          hold_pixel(320, 240, PROBE_APP, 0.5, tolerance=0), flush=True)
+    # Mapped (and presented), then a NULL buffer unmaps it: the client lives, so no tint.
     pathlib.Path(HEALTH_MODE).write_text("unmap")
     kill_private_client()
     assert await_marker(6) == "presented"
-    print("PASS fallback_tint_back_when_health_surface_unmapped",
-          await_pixel(320, 240, FALLBACK, 3), flush=True)
+    await_pixel(*HEALTH, PROBE_APP, 3, tolerance=0, drained=True)
+    print("PASS unmapped_health_surface_of_a_live_client_shows_no_tint",
+          hold_pixel(320, 240, PROBE_APP, 0.5, tolerance=0), flush=True)
     drain()
-    kill_private_client()
-    print("PASS fallback_tint_dropped_when_health_surface_mapped",
+    killed = kill_private_client()
+    await_pixel(320, 240, FALLBACK, 1.0 - (time.monotonic() - killed))
+    print("PASS fallback_tint_dropped_when_the_respawned_client_binds",
           await_pixel(320, 240, PROBE_APP, 5), flush=True)
     print("PASS respawned_health_layer_above_live_app",
           await_pixel(*HEALTH, health_over(PROBE_APP), 3), flush=True)
@@ -842,15 +931,17 @@ try:
     opened = judge.opened
     killed = kill_private_client()
     await_pixel(320, 240, FALLBACK, 1.0 - (time.monotonic() - killed))
-    # (1) Mapped (transparent) before any instruction: no magenta, no amber, while the judge
-    # holds back; the shell respawns the client 2 s after it is gone.
+    # (1) Nothing to show before any instruction: no health view mapped, no amber (the client is
+    # alive), the Output exactly the app's pixels, while the judge holds back; the shell respawns
+    # the client 2 s after it is gone. Mutation probe: map the transparent base buffer again ->
+    # a health view is in the scene graph.
     await_pixel(320, 240, PROBE_APP, 5.0 - (time.monotonic() - killed), tolerance=0, drained=True)
     hold_pixel(320, 240, PROBE_APP, 1.0, tolerance=0)
-    assert_pixel(*HEALTH, PROBE_APP, tolerance=0)
     judge.await_client(opened + 1, 3, drain)
     assert not judge.reports and not judge.refused, (judge.reports, judge.refused)
-    assert_health_view(*HEALTH_CLEAR_VIEW)
-    print("PASS production_health_layer_mapped_before_instruction", flush=True)
+    assert_no_health_view()
+    assert_whole_output(PROBE_APP)
+    print("PASS production_health_layer_unmapped_with_nothing_to_show", flush=True)
     # (2) Tint on: the darkened Output and the card, above the still-live app, reported presented.
     judge.send(name, 7, True, CARD_LINES)
     judge.await_report(name, 7, 3, drain)
@@ -858,14 +949,15 @@ try:
     assert_health_view(*HEALTH_TINT_VIEW)
     print("PASS health_tint_and_card_above_live_app", tinted,
           assert_pixel(*CARD_PIXEL, SLATE), flush=True)
-    # (3) Tint off: a mapped transparent buffer, so the app shows exactly (no amber fallback).
+    # (3) Tint off: the layer unmapped (reported presented once the compositor processed it), so
+    # the app shows exactly, with no amber fallback.
     judge.send(name, 8, False, ("", ""))
     judge.await_report(name, 8, 3, drain)
     await_pixel(320, 240, PROBE_APP, 1, tolerance=0)
     hold_pixel(320, 240, PROBE_APP, 0.5, tolerance=0)
-    assert_health_view(*HEALTH_CLEAR_VIEW)
-    print("PASS health_tint_off_restores_app", assert_pixel(*CARD_PIXEL, PROBE_APP, tolerance=0),
-          flush=True)
+    assert_no_health_view()
+    assert_whole_output(PROBE_APP)
+    print("PASS health_tint_off_unmaps_and_restores_app", flush=True)
     # (4) A new connection may count from 1 again (a restarted judge): taken, drawn, reported.
     judge.drop()
     judge.await_client(opened + 2, 4, drain)
@@ -972,6 +1064,7 @@ try:
     print("PASS second_health_layer_per_output_refused", flush=True)
     print("PASS health_layer_restored_after_refusals",
           await_pixel(*HEALTH, health_over(SLATE), 5), flush=True)
+    window_alpha_and_turn()
     print(json.dumps({"events": events}, sort_keys=True), flush=True)
 finally:
     print("RECENT_EVENTS", json.dumps(events[-12:]), flush=True)

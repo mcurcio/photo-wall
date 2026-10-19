@@ -20,15 +20,26 @@ server_header = custom_target('frame-server-header', input: xml,
 protocol = custom_target('frame-code', input: xml,
   output: 'photo-wall-frame-protocol.c',
   command: [scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
+# The standard window alpha (render redesign, run ledger .claude/runs/render-planes/s1-page.md):
+# Weston 14 has no wp_alpha_modifier_v1, so the shell serves it (bead B2) and the frame client
+# uses it (bead B3); both generated from wayland-protocols' one XML.
+wayland_protocols = dependency('wayland-protocols', version: '>=1.36')
+protocols_dir = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir')
+alpha_xml = protocols_dir / 'staging/alpha-modifier/alpha-modifier-v1.xml'
+alpha_server_header = custom_target('alpha-modifier-server-header', input: alpha_xml,
+  output: 'alpha-modifier-v1-server-protocol.h',
+  command: [scanner, 'server-header', '@INPUT@', '@OUTPUT@'])
+alpha_code = custom_target('alpha-modifier-code', input: alpha_xml,
+  output: 'alpha-modifier-v1-protocol.c',
+  command: [scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
 shared_module('photo-wall-shell', 'native/shell.c', server_header, protocol,
+  alpha_server_header, alpha_code,
   dependencies: [weston, wayland, jansson], name_prefix: '',
   install: true, install_dir: display_dir)
 client_header = custom_target('frame-client-header', input: xml,
   output: 'photo-wall-frame-client.h',
   command: [scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
 wayland_client = dependency('wayland-client', version: '>=1.22')
-wayland_protocols = dependency('wayland-protocols')
-protocols_dir = wayland_protocols.get_variable(pkgconfig: 'pkgdatadir')
 presentation_xml = protocols_dir / 'stable/presentation-time/presentation-time.xml'
 presentation_header = custom_target('presentation-client-header', input: presentation_xml,
   output: 'presentation-time-client.h',
@@ -54,7 +65,24 @@ custom_target('overlay-protocol',
 install_symlink('overlay', pointing_to: 'appliance' / 'display_host' / 'overlay',
   install_dir: display_dir)
 install_data('overlay/diagnostic-client', install_dir: display_dir, install_mode: 'rwxr-xr-x')
-# The client library the Player loads in the app root (photo-wall-frame-client).
+# The client library the Player loads in the app root (photo-wall-frame-client). Its screens (render
+# redesign, bead B3) speak these standard protocols on the client's own connection.
+xdg_shell_xml = protocols_dir / 'stable/xdg-shell/xdg-shell.xml'
+dmabuf_xml = protocols_dir / 'stable/linux-dmabuf/linux-dmabuf-v1.xml'
+screen_sources = []
+foreach name, screen_xml : {'xdg-shell': xdg_shell_xml, 'linux-dmabuf-v1': dmabuf_xml,
+    'viewporter': viewporter_xml, 'single-pixel-buffer-v1': single_pixel_xml,
+    'alpha-modifier-v1': alpha_xml}
+  screen_sources += custom_target(name + '-client-header', input: screen_xml,
+    output: name + '-client-protocol.h',
+    command: [scanner, 'client-header', '@INPUT@', '@OUTPUT@'])
+  if name != 'alpha-modifier-v1'      # its code is alpha_code, shared with the shell
+    screen_sources += custom_target(name + '-client-code', input: screen_xml,
+      output: name + '-protocol.c',
+      command: [scanner, 'private-code', '@INPUT@', '@OUTPUT@'])
+  endif
+endforeach
 shared_library('photo-wall-frame-client', 'native/frame-client.c', client_header,
-  protocol, presentation_header, presentation_code, dependencies: [wayland_client],
+  protocol, presentation_header, presentation_code, screen_sources, alpha_code,
+  dependencies: [wayland_client],
   install: true, install_dir: private_dir / 'frame-client')

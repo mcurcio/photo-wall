@@ -924,14 +924,15 @@ def labelled(*labels):
 
 
 def demo_position(observation: dict):
-    """The demo Frame's Position: a Cover opening DEMO_OPENING_PX output pixels square at the
-    top left of the Output its Pi reported, so its Frame output (contracts.models.frame_output) is
-    DEMO_OPENING_PX x DEMO_OPENING_PX however large the Display is."""
-    from contracts.models import Calibration, CoverFit
-    right = DEMO_OPENING_PX / observation["width_px"]
-    bottom = DEMO_OPENING_PX / observation["height_px"]
-    return Calibration(fit=CoverFit(corners=((0.0, 0.0), (right, 0.0), (right, bottom),
-                                             (0.0, bottom))))
+    """The demo Frame's Position: a Rectangle DEMO_OPENING_PX output pixels wide at the top left
+    of the Output its Pi reported (the demo's Frames are square and hang at turn 0), so its Frame
+    output (contracts.models.frame_output) is DEMO_OPENING_PX x DEMO_OPENING_PX however large the
+    Display is."""
+    from contracts.models import Calibration, RectangleFit
+    width = DEMO_OPENING_PX / observation["width_px"]
+    return Calibration(fit=RectangleFit(centre_x=width / 2,
+                                        centre_y=(DEMO_OPENING_PX / 2) / observation["height_px"],
+                                        width=width))
 
 
 def operator_action(action: str):

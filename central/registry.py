@@ -36,7 +36,8 @@ from central.infra.display_store import (
     frame_readiness_in,
     resolve_output,
 )
-from central.infra.position_history_store import record_created_in, write_position_in
+from central.infra.output_wakes import notify_nodes_in
+from central.infra.position_history_store import record_created_in, write_position_in, write_turn_in
 from central.infra.power_store import forget_frame_in
 from central.infra.transactions import PgTransaction
 from central.installation_models import (
@@ -49,18 +50,20 @@ from central.installation_models import (
     WallNaming,
 )
 from central.transaction_locks import acquire_runtime_locks, holds_runtime_locks_in
+from contracts.display_turn import DisplayTurn
 from contracts.enrollment import Enrollment as Enrollment
 from contracts.enrollment import OutputReport as OutputReport
 from contracts.enrollment import enrollment_message as enrollment_message
 from contracts.frame_lighting import FrameLighting
 from contracts.models import (
     Calibration,
-    CoverFit,
+    ExactTurn,
     FrameProfile,
     Identifier,
     Model,
     OutputBinding,
     TargetIdentifier,
+    off_screen,
 )
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.player_control import (
@@ -123,6 +126,21 @@ class FramePlacement(Model):
 class FrameProfileReplacement(Model):
     profile: FrameProfile
     expected_generation: int = Field(ge=0)
+
+
+class FrameTurnChange(Model):
+    """PUT /v1/operator/frames/{frame_id}/turn: how the Frame's screen hangs (render redesign S2;
+    owner gate Q3, 2026-10-17: the turn belongs to the spot on the wall), against the Frame's
+    generation the operator read. `turn` is exact (`ExactTurn`): a JSON false, 90.0 or "90" is refused."""
+    turn: ExactTurn
+    expected_generation: int = Field(ge=0)
+
+
+def _wake_nodes_of(conn, *player_ids: str | None) -> None:
+    """Wake the Output document source of each named Player's Node (None skipped), on commit: every
+    write that changes which Frame an Output carries, or a bound Frame's turn, calls it."""
+    for player_id in dict.fromkeys(player_id for player_id in player_ids if player_id is not None):
+        notify_nodes_in(conn, "SELECT device_id FROM players WHERE id=%s", (player_id,))
 
 
 def _smallest_free(conn, table: str, word: str) -> str:
@@ -489,13 +507,13 @@ class Registry:
                 "expires_at": expires_at}
 
     def create_frame(self, frame: FrameCreate) -> dict:
-        """A new Frame at the cover fit and the lighting a new Frame starts with (a new Frame is bound
+        """A new Frame at the default Position (`Calibration()`: centred, the screen's full width) and the lighting a new Frame starts with (a new Frame is bound
         to no port yet, so no Display is seen: UPGRADE_DISPLAY_LIGHT), and its KEPT_CREATED Position
         entry, in one transaction."""
         try:
             with self.db.transaction() as conn:
                 name = frame.name if frame.name is not None else _smallest_free(conn, "frames", "Frame")
-                calibration = Calibration(fit=CoverFit())
+                calibration = Calibration()
                 lighting = self.lighting.new_frame_within(PgTransaction(conn), UPGRADE_DISPLAY_LIGHT)
                 conn.execute("INSERT INTO frames(id,name,surface_id,x_mm,y_mm,width_mm,height_mm,"
                              "profile,calibration,lighting) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
@@ -571,6 +589,9 @@ class Registry:
                     raise RegistryError("binding_generation_conflict")
                 conn.execute("DELETE FROM bindings WHERE frame_id=%s", (frame_id,))
                 conn.execute("INSERT INTO bindings VALUES(%s,%s,%s)", (frame_id, player_id, output_id))
+                # The Output now carries this Frame (its timetable and turn), and the one it left
+                # carries none: wake both Nodes' document sources, on commit.
+                _wake_nodes_of(conn, player_id, None if existing is None else existing["player_id"])
                 resolve_output(conn, player_id, output_id)   # the display there, under this binding
                 row = conn.execute("UPDATE frames SET generation=generation+1,"
                                    "configuration_revision=configuration_revision+1 "
@@ -595,6 +616,7 @@ class Registry:
             if frame["generation"] != expected_generation:
                 raise RegistryError("binding_generation_conflict")
             conn.execute("DELETE FROM bindings WHERE frame_id=%s", (frame_id,))
+            _wake_nodes_of(conn, existing["player_id"])   # its Output now carries no Frame (turn 0)
             row = conn.execute("UPDATE frames SET generation=generation+1,"
                                "configuration_revision=configuration_revision+1 "
                                "WHERE id=%s RETURNING generation",
@@ -625,6 +647,35 @@ class Registry:
             _ensure_wall(conn, merged["surface_id"])
             self._audit(conn, "frame_repositioned", frame_id)
             return {"id": frame_id, **merged}
+
+    def turn_frame(self, frame_id: str, turn: DisplayTurn, *, expected_generation: int) -> dict:
+        """Set how the Frame's screen hangs (frames.turn), in one equipment write: RegistryError
+        unknown_frame 404, then binding_generation_conflict 409 when `expected_generation` is not the
+        Frame's (the token before idempotency, as `replace_frame_profile`); the same turn answers
+        {"frame_id", "turn", "generation", "changed": False} with no write. A new turn raises the
+        generation and configuration_revision (a Position made for the other hanging needs checking:
+        readiness POSITION_NEEDED until the next Save) and appends the kept-turn-changed Position history
+        entry (`write_turn_in`: the Position as it is, made for the new turn, so Restore refuses the
+        entries made for the old one), audits "frame_turned" {"turn", "generation"}
+        and wakes the bound Player's Node's document source (`notify_nodes_in`), so its Output
+        document carries the turn without waiting for a deadline; answers {..., "changed": True}.
+        Never touches the Position, the binding or the lighting."""
+        with self._equipment_write() as conn:
+            frame = conn.execute("SELECT generation, turn FROM frames WHERE id=%s FOR UPDATE",
+                                 (frame_id,)).fetchone()
+            if not frame:
+                raise RegistryError("unknown_frame", 404)
+            if frame["generation"] != expected_generation:
+                raise RegistryError("binding_generation_conflict")
+            if frame["turn"] == turn:
+                return {"frame_id": frame_id, "turn": turn, "generation": frame["generation"],
+                        "changed": False}
+            row = {"generation": write_turn_in(conn, frame_id, turn)}
+            self._audit(conn, "frame_turned", frame_id, {"turn": turn, **row})
+            bound = conn.execute("SELECT player_id FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone()
+            if bound is not None:
+                _wake_nodes_of(conn, bound["player_id"])
+            return {"frame_id": frame_id, "turn": turn, **row, "changed": True}
 
     def replace_frame_profile(self, frame_id: str, profile: FrameProfile, *,
                               expected_generation: int, conn) -> dict:
@@ -760,13 +811,20 @@ class Registry:
         trial evidence. It is a kept Position write: a change made outside Photo Wall is recorded
         first, then the Save's kept-saved entry
         (the trial's `session_id`, and `restored_from` when its draft came from a Restore), in this
-        transaction.
+        transaction. A Rectangle that runs off its screen as it hangs (`contracts.models.off_screen`
+        on the bound Output's reported size, `outputs.observation` as built, and the Frame's turn)
+        is refused with POSITION_OFF_SCREEN before any write; an Output that reported no size is
+        not checked.
         """
         if not holds_runtime_locks_in(conn):
             raise RegistryError("calibration_runtime_locks_required")
-        row = conn.execute("SELECT f.*,p.authority_epoch,p.retired_at,b.player_id,b.output_id "
+        row = conn.execute("SELECT f.*,p.authority_epoch,p.retired_at,b.player_id,b.output_id,"
+                           "(o.observation->>'width_px')::int AS output_width_px,"
+                           "(o.observation->>'height_px')::int AS output_height_px "
                            "FROM frames f JOIN bindings b ON b.frame_id=f.id "
-                           "JOIN players p ON p.id=b.player_id WHERE f.id=%s FOR UPDATE OF f",
+                           "JOIN players p ON p.id=b.player_id "
+                           "LEFT JOIN outputs o ON o.player_id=b.player_id AND o.output_id=b.output_id "
+                           "WHERE f.id=%s FOR UPDATE OF f",
                            (frame_id,)).fetchone()
         if row is None or row["retired_at"] is not None or (
             row["player_id"], row["authority_epoch"], row["output_id"], row["generation"],
@@ -776,6 +834,10 @@ class Registry:
         current = Calibration.model_validate(row["calibration"])
         if current.revision != calibration_revision:
             raise TrialRefused(TrialRefusal.CALIBRATION_REVISION_CONFLICT)
+        width, height = row["output_width_px"], row["output_height_px"]
+        size = (width, height) if width is not None and height is not None else None
+        if off_screen(FrameProfile.model_validate(row["profile"]), calibration, size, row["turn"]):
+            raise TrialRefused(TrialRefusal.POSITION_OFF_SCREEN)
         committed = Calibration.model_validate(calibration.model_dump()).model_copy(
             update={"revision": current.revision + 1})
         write_position_in(conn, frame_id, saved_record(position_values(committed, lighting), session_id=session_id,
@@ -822,7 +884,7 @@ class Registry:
         outputs = conn.execute("SELECT player_id,output_id,observation FROM outputs "
                                "ORDER BY player_id,output_id").fetchall()
         frames = conn.execute("SELECT f.id,f.name,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,"  # noqa: S608
-                              "f.calibration,f.lighting,f.configuration_revision,"
+                              "f.calibration,f.lighting,f.turn,f.configuration_revision,"
                               f"b.player_id,b.output_id,{POSITION_COLUMNS} FROM frames f LEFT JOIN bindings b "
                               f"ON b.frame_id=f.id {SEEN_DISPLAY_JOIN} ORDER BY f.id").fetchall()
         bound_player_ids = {frame["player_id"] for frame in frames if frame["player_id"] is not None}

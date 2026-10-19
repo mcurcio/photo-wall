@@ -23,7 +23,14 @@ from central.photo_library.model import LibraryAsset
 from central.photo_library.rendition import FrameNeed
 from contracts.time import ManualClock
 from media.models import MediaError
-from media.prepare import PreparationLimits, PreparationRecipe, Preparer, recipe_id
+from media.prepare import (
+    HouseRecipes,
+    PreparationLimits,
+    Preparer,
+    StillRecipe,
+    VideoRecipe,
+    recipe_id,
+)
 
 NEED = FrameNeed(aspect=16 / 9, width=1920, height=1080)
 
@@ -149,7 +156,7 @@ def test_still_resize_preserves_aspect_ratio_and_does_not_upscale(tmp_path, nati
     source = tmp_path / "original.jpg"
     asset = save_jpeg(source, size=(240, 120))
     small = prepare(native_tools, asset, source, tmp_path / "small.jpg",
-                    recipe=PreparationRecipe(image_long_edge=80))
+                    recipes=HouseRecipes(still=StillRecipe(long_edge=80)))
     assert (small.ready.width, small.ready.height) == (80, 40)
     native = prepare(native_tools, asset, source, tmp_path / "native.jpg")
     assert (native.ready.width, native.ready.height) == (240, 120)
@@ -164,9 +171,8 @@ def test_recipe_identity_is_stable_and_changes_with_quality_while_the_build_is_r
     first = prepare(native_tools, asset, source, tmp_path / "first.jpg")
     same = prepare(native_tools, asset, source, tmp_path / "same.jpg")
     assert first.build == same.build
-    assert recipe_id(PreparationRecipe(), NEED) == recipe_id(PreparationRecipe(), NEED)
-    assert recipe_id(PreparationRecipe(), NEED) != recipe_id(PreparationRecipe(jpeg_quality=7),
-                                                              NEED)
+    assert recipe_id(StillRecipe(), NEED) == recipe_id(StillRecipe(), NEED)
+    assert recipe_id(StillRecipe(), NEED) != recipe_id(StillRecipe(jpeg_quality=7), NEED)
 
 
 def png_chunk(kind, data):
@@ -487,7 +493,29 @@ def first_video_frame(path, tools):
         return decoded.convert("RGB")
 
 
-def test_video_with_audio_becomes_silent_sdr_h264_and_is_fully_decodable(tmp_path, native_tools):
+def assert_hevc_copy(path, tools):
+    """The copy the Pi's hardware decoder takes (VideoRecipe): one HEVC Main level 4.1 (123)
+    `hvc1` stream, 8-bit 4:2:0, square pixels, BT.709 limited range, at most 30 frames a second,
+    `moov` before `mdat`, decodable to its last frame. Returns the stream."""
+    output = probe(path, tools)
+    assert len(output["streams"]) == 1
+    stream = output["streams"][0]
+    assert stream["codec_type"] == "video"
+    assert (stream["codec_name"], stream["codec_tag_string"]) == ("hevc", "hvc1")
+    assert (stream["profile"], stream["level"]) == ("Main", 123)
+    assert stream["pix_fmt"] == "yuv420p"
+    assert stream["sample_aspect_ratio"] == "1:1"
+    assert (stream["color_space"], stream["color_transfer"], stream["color_primaries"]) == ("bt709",) * 3
+    assert stream["color_range"] == "tv"
+    numerator, denominator = map(int, stream["avg_frame_rate"].split("/"))
+    assert numerator / denominator <= 30
+    data = path.read_bytes()
+    assert data.index(b"moov") < data.index(b"mdat")
+    run_tool([tools[0], "-nostdin", "-v", "error", "-xerror", "-i", str(path), "-f", "null", "-"])
+    return stream
+
+
+def test_video_with_audio_becomes_silent_sdr_hevc_and_is_fully_decodable(tmp_path, native_tools):
     source = tmp_path / "original.mp4"
     destination = tmp_path / "variant.mp4"
     make_video(source, native_tools)
@@ -498,23 +526,9 @@ def test_video_with_audio_becomes_silent_sdr_h264_and_is_fully_decodable(tmp_pat
     assert result.ready.media_type == "video/mp4"
     assert result.ready.duration > 0
     assert (result.ready.width, result.ready.height) == (160, 96)
-    output = probe(destination, native_tools)
-    assert len(output["streams"]) == 1
-    stream = output["streams"][0]
-    assert stream["codec_type"] == "video"
-    assert stream["codec_name"] == "h264"
-    assert stream["profile"] == "High"
-    assert stream["level"] == 42
-    assert stream["pix_fmt"] == "yuv420p"
-    assert stream["sample_aspect_ratio"] == "1:1"
-    assert (stream["color_space"], stream["color_transfer"], stream["color_primaries"]) == ("bt709",) * 3
-    numerator, denominator = map(int, stream["avg_frame_rate"].split("/"))
-    assert numerator / denominator <= 30
+    stream = assert_hevc_copy(destination, native_tools)
     assert all(side.get("rotation", 0) == 0 for side in stream.get("side_data_list", []))
     assert abs(result.ready.duration - float(stream["duration"])) < .05
-    data = destination.read_bytes()
-    assert data.index(b"moov") < data.index(b"mdat")
-    run_tool([native_tools[0], "-nostdin", "-v", "error", "-xerror", "-i", str(destination), "-f", "null", "-"])
     assert source.read_bytes() == original_bytes
 
 
@@ -538,7 +552,7 @@ def test_rotated_video_matches_the_displayed_original_without_residual_orientati
     assert (result.ready.width, result.ready.height) == (96, 160)
     assert_same_pixels(first_video_frame(result.path, native_tools), first_video_frame(source, native_tools),
                        tolerance=15)
-    output = probe(result.path, native_tools)["streams"][0]
+    output = assert_hevc_copy(result.path, native_tools)
     assert all(side.get("rotation", 0) == 0 for side in output.get("side_data_list", []))
 
 
@@ -565,18 +579,45 @@ def test_sdr_hevc_mov_normalizes_sample_aspect_ratio_to_square_pixels(tmp_path, 
     assert source_stream["sample_aspect_ratio"] == "2:1"
     result = prepare(native_tools, video_asset(source, native_tools), source, tmp_path / "variant.mp4")
     assert (result.ready.width, result.ready.height) == (160, 48)
-    output_stream = probe(result.path, native_tools)["streams"][0]
-    assert output_stream["codec_name"] == "h264"
-    assert output_stream["sample_aspect_ratio"] == "1:1"
+    output_stream = assert_hevc_copy(result.path, native_tools)
     assert float(output_stream["duration"]) == pytest.approx(.5)
 
 
-@pytest.mark.parametrize("recipe", [
-    {"image_long_edge": 0}, {"video_fps": 0}, {"video_crf": -1}, {"gop_seconds": float("nan")},
-])
-def test_invalid_recipe_settings_are_rejected_without_native_tools(recipe):
-    with pytest.raises(ValueError):
-        PreparationRecipe(**recipe)
+def test_a_1440p_h264_video_prepares_to_exactly_1080p_under_the_default_limits(
+        tmp_path, native_tools):
+    """x265 at 1080p fits the worker's limits (on Linux `RLIMIT_AS` and the threads' CPU)."""
+    source = tmp_path / "original.mp4"
+    run_tool([
+        native_tools[0], "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i",
+        "testsrc2=size=2560x1440:rate=30:duration=1", "-c:v", "libx264", "-preset", "ultrafast",
+        "-pix_fmt", "yuv420p", "-color_primaries", "bt709", "-color_trc", "bt709",
+        "-colorspace", "bt709", "-movflags", "+faststart", str(source),
+    ])
+    destination = tmp_path / "variant.mp4"
+    result = prepare(native_tools, video_asset(source, native_tools), source, destination)
+    assert (result.ready.width, result.ready.height) == (1920, 1080)
+    stream = assert_hevc_copy(destination, native_tools)
+    assert (stream["width"], stream["height"]) == (1920, 1080)
+
+
+def test_a_recipe_of_the_other_kind_is_refused_before_the_file_is_read(tmp_path, native_tools):
+    """A video given a StillRecipe, or a photo given a VideoRecipe: preparation_invalid, and
+    nothing is read or left at the destination (the source is gone, so a read would be
+    preparation_io)."""
+    video = tmp_path / "original.mp4"
+    make_video(video, native_tools)
+    still = tmp_path / "original.jpg"
+    for asset, source, recipe in ((video_asset(video, native_tools), video, StillRecipe()),
+                                  (save_jpeg(still), still, VideoRecipe())):
+        rendition = fetched(asset, source)
+        source.unlink()
+        destination = tmp_path / "variant"
+        with pytest.raises(MediaError) as caught:
+            asyncio.run(preparer(native_tools).prepare_rendition(asset, rendition, destination,
+                                                                 recipe=recipe))
+        assert caught.value.code == "preparation_invalid"
+        assert not destination.exists()
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize("limits", [
@@ -617,7 +658,8 @@ def test_a_webp_preview_prepares_to_a_jpeg_of_the_recipes_size(tmp_path, native_
     corners((800, 400)).save(source, "WEBP", quality=90)
     result = prepare_rendition(native_tools, pool_asset(width=800, height=400),
                                rendition_of(source, width=800, height=400),
-                               tmp_path / "variant", recipe=PreparationRecipe(image_long_edge=200))
+                               tmp_path / "variant",
+                               recipes=HouseRecipes(still=StillRecipe(long_edge=200)))
     assert (result.ready.media_type, result.ready.width, result.ready.height) == (
         "image/jpeg", 200, 100)
     assert result.original_sha256 == hashlib.sha256(source.read_bytes()).hexdigest()
@@ -720,7 +762,8 @@ def test_a_heic_prepares_to_a_jpeg_of_the_recipes_size_upright(tmp_path, native_
     result = prepare_rendition(native_tools, pool_asset(width=400, height=300),
                                rendition_of(source, rendition="original", width=400,
                                             height=300, media_type="image/heic"),
-                               tmp_path / "variant", recipe=PreparationRecipe(image_long_edge=200))
+                               tmp_path / "variant",
+                               recipes=HouseRecipes(still=StillRecipe(long_edge=200)))
     assert (result.ready.media_type, result.ready.width, result.ready.height) == (
         "image/jpeg", 200, 150)
     assert result.ready.made_from == "original"
@@ -795,8 +838,10 @@ def test_a_gain_map_photo_prepares_from_its_base_image(tmp_path, native_tools):
         assert_same_pixels(image, corners())
 
 
-def test_recipe_three_has_its_own_id():
-    """A5 case 5: every photo is prepared again once (F-FU-3)."""
-    two = PreparationRecipe.model_construct(**{**PreparationRecipe().model_dump(), "version": 2})
-    ids = [recipe_id(recipe, NEED) for recipe in (PreparationRecipe(), two)]
-    assert PreparationRecipe().version == 3 and ids[0] != ids[1]
+@pytest.mark.parametrize(("recipe", "version"), [(StillRecipe(), 3), (VideoRecipe(), 4)])
+def test_each_kinds_recipe_version_has_its_own_id(recipe, version):
+    """A5 case 5 (still version 3) and render planes S4 (video version 4): a kind's version bump
+    prepares every copy of that kind again once."""
+    earlier = type(recipe).model_construct(**{**recipe.model_dump(), "version": version - 1})
+    assert recipe.version == version
+    assert recipe_id(recipe, NEED) != recipe_id(earlier, NEED)

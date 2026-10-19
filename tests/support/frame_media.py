@@ -24,7 +24,7 @@ from contracts.photo_crop import CENTRED
 from media.library_client import FetchedRendition
 from media.media_maker import MediaMaker
 from media.prepare import BuildIdentity, PreparedMedia
-from support.position import save_position
+from support.position import PORTRAIT_ON_WIDE, save_position
 
 BUILD = BuildIdentity(
     preparation_sha256="a" * 64, ffmpeg_sha256="b" * 64, ffprobe_sha256="c" * 64,
@@ -49,7 +49,7 @@ def offer(registry, repository: MediaRepository, variant: Variant, player_id: st
     """Bind the enrolled `player_id`'s HDMI-A-1 to `frame_id` and offer (or, `secured`, lock) it
     one layer that shows `variant`, pinned as coordination pins it."""
     registry.bind(frame_id, player_id, "HDMI-A-1", expected_generation=0)
-    save_position(registry, frame_id)
+    save_position(registry, frame_id, PORTRAIT_ON_WIDE)
     binding = registry.bindings_for(player_id, epoch)[0]
     layer = Layer(assignment_id="assignment", run_id="run", output_id=binding.output_id,
                   frame_id=binding.frame_id, binding_generation=binding.generation,

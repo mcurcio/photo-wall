@@ -12,6 +12,7 @@ import os
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from psycopg.types.json import Jsonb
 from support.frame_media import grant, offer
 from test_frame_media_read_path import FIRST, Wall, repr_digest
 from test_player_service import TRUST, boot_context, close, immediate
@@ -26,7 +27,7 @@ from central.kernel.handling import TerminalFailure
 from central.kernel.job_types import PrepareMedia
 from central.photo_library.rendition import FrameNeed
 from contracts.enrollment import OutputReport
-from media.prepare import PreparationRecipe, recipe_id
+from media.prepare import StillRecipe, recipe_id
 from player.identity import load_identity
 from player.luts import PlayerLuts
 from player.rendering import RecordingRenderer
@@ -67,7 +68,7 @@ def test_a_deleted_file_is_re_made_and_served_under_the_same_name(wall, registry
     assert (remade.sha256, remade.size) == (hashlib.sha256(SECOND).hexdigest(), len(SECOND))
     assert remade.made_from == "preview"
     # Both made by the variant's own recipe: the wall's 1920 step (follow-up S1).
-    assert wall.preparer.recipes == [PreparationRecipe(image_long_edge=1920)] * 2
+    assert wall.preparer.recipes == [StillRecipe(long_edge=1920)] * 2
 
 
 def test_the_player_accepts_a_re_made_copy_under_the_plan_s_name(wall, registry, tmp_path):
@@ -177,8 +178,25 @@ def test_a_legacy_variant_is_served_but_never_re_made(wall):
 def test_the_recipe_id_names_the_recipe_values_and_the_need_only():
     """The owner's open choice, default "drop": the renderer build is not in the name."""
     need = FrameNeed(aspect=1080 / 1920, width=1080, height=1920)
-    assert recipe_id(PreparationRecipe(), need) == recipe_id(PreparationRecipe(), need)
-    assert recipe_id(PreparationRecipe(), need) != recipe_id(
-        PreparationRecipe(), need.model_copy(update={"width": 2160}))
-    assert recipe_id(PreparationRecipe(), need) != recipe_id(
-        PreparationRecipe(jpeg_quality=4), need)
+    assert recipe_id(StillRecipe(), need) == recipe_id(StillRecipe(), need)
+    assert recipe_id(StillRecipe(), need) != recipe_id(
+        StillRecipe(), need.model_copy(update={"width": 2160}))
+    assert recipe_id(StillRecipe(), need) != recipe_id(StillRecipe(jpeg_quality=4), need)
+
+
+def test_a_variant_named_by_a_recipe_from_before_s4_is_never_re_made(wall):
+    """Render planes S4: a recipe row the current models refuse (the one recipe both kinds
+    shared, version 3, with no `kind`) gives no inputs, and the maker's terminal
+    `variant_inputs_unknown` without fetching, where it raised pydantic's ValidationError."""
+    variant = wall.first_making()
+    CacheLayout(wall.root).path(variant_asset_key(variant.key),
+                                produced(wall, variant.key)).unlink()
+    with wall.registry.db.transaction() as conn:
+        conn.execute("UPDATE media_recipes SET recipe=%s WHERE recipe_id=%s", (Jsonb({
+            "version": 3, "image_long_edge": 1920, "jpeg_quality": 3, "video_long_edge": 1920,
+            "video_max_pixels": 2_073_600, "video_fps": 30.0, "video_crf": 23,
+            "video_preset": "medium", "gop_seconds": 2.0}), variant.recipe_id))
+    assert wall.repository.variant_inputs(variant.key) is None
+    with pytest.raises(TerminalFailure, match="variant_inputs_unknown"):
+        asyncio.run(wall.maker.handle(PrepareMedia(key=variant.key)))
+    assert wall.client.fetches == 1  # the first making only

@@ -28,7 +28,7 @@ READER_COMPONENT = "player"
 
 
 class RoomLights:
-    """The Player's latest room-lights document: fed on the WallReader's thread, read on the GTK
+    """The Player's latest room-lights document: fed on the WallReader's thread, read on the GLib
     main loop; never touches the executor, the plan or the control State."""
 
     def __init__(self, changed: Callable[[RoomLightsDocument], None]) -> None:

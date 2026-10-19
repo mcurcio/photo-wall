@@ -1,0 +1,371 @@
+[repaint] Beginning repaint (/dev/dri/card1); pending_state 0x555602530610
+Weston scene graph at 6376.114582217:
+
+Output 0 (HDMI-A-1):
+	position: (0, 0) -> (3840, 2160)
+	mode: 3840x2160@60.000Hz
+	scale: 1
+	repaint status: repaint scheduled
+	next repaint: 6376.114502666
+	Head 0 (HDMI-A-1): connected
+
+Layer 0 (pos 0xffffffff):
+	[no views]
+
+Layer 1 (pos 0xfffffffe):
+	[no views]
+
+Layer 2 (pos 0xffff0002):
+	[no views]
+
+Layer 3 (pos 0xffff0001):
+	[no views]
+
+Layer 4 (pos 0xffff0000):
+	View 0 (role (null), PID 0, surface ID 0, [no description available], 0x555602490bf0):
+		position: (0, 0) -> (3840, 2160)
+		[fully opaque]
+		outputs: 0 (HDMI-A-1) (primary)
+		solid-colour buffer
+			[R 0.040000, G 0.060000, B 0.090000, A 1.000000]
+			[2 references may use buffer content]
+			format: 0x34325258 XRGB8888
+			modifier: LINEAR (0x0)
+			width: 1, height: 1
+
+Layer 5 (pos 0xdfffffff):
+	[no views]
+
+Layer 6 (pos 0x50000000):
+	[no views]
+
+	[repaint] preparing state for output HDMI-A-1 (0)
+	[repaint] trying planes-only build state
+			[view] evaluating view 0x555602490bf0 for output HDMI-A-1 (0)
+				[view] not assigning view 0x555602490bf0 to plane (no buffer available)
+				[view] not assigning view 0x555602490bf0 to plane (solid-colour surface)
+		[view] failing state generation: placing view 0x555602490bf0 to renderer not allowed
+	[repaint] could not build planes-only state, trying mixed
+		[state] using renderer FB ID 685 for mixed mode for output HDMI-A-1 (0)
+		[state] scanout will use for zpos 0
+			[view] evaluating view 0x555602490bf0 for output HDMI-A-1 (0)
+				[view] not assigning view 0x555602490bf0 to plane (no buffer available)
+				[view] not assigning view 0x555602490bf0 to plane (solid-colour surface)
+				[view] view 0x555602490bf0 will be placed on the renderer
+		[atomic] testing output 0 (HDMI-A-1) state
+			[CRTC:94] 23 (MODE_ID) -> 684 (0x2ac)
+			[CRTC:94] 22 (ACTIVE) -> 1 (0x1)
+			[CRTC:94] 24 (VRR_ENABLED) -> 0 (0x0)
+			[CONN:35] 20 (CRTC_ID) -> 94 (0x5e)
+			[CONN:35] 7 (HDR_OUTPUT_METADATA) -> 0 (0x0)
+			[CONN:35] 36 (max bpc) -> 12 (0xc)
+			[CONN:35] 41 (Colorspace) -> 0 (0x0)
+			[PLANE:83] 17 (FB_ID) -> 685 (0x2ad)
+			[PLANE:83] 20 (CRTC_ID) -> 94 (0x5e)
+			[PLANE:83] 9 (SRC_X) -> 0 (0x0)
+			[PLANE:83] 10 (SRC_Y) -> 0 (0x0)
+			[PLANE:83] 11 (SRC_W) -> 251658240 (0xf000000)
+			[PLANE:83] 12 (SRC_H) -> 141557760 (0x8700000)
+			[PLANE:83] 13 (CRTC_X) -> 0 (0x0)
+			[PLANE:83] 14 (CRTC_Y) -> 0 (0x0)
+			[PLANE:83] 15 (CRTC_W) -> 3840 (0xf00)
+			[PLANE:83] 16 (CRTC_H) -> 2160 (0x870)
+			[PLANE:83] FORMAT: XRGB8888
+			[PLANE:83] 87 (rotation) -> 1 (0x1)
+			[PLANE:83] 85 (alpha) -> 65535 (0xffff)
+[atomic] drmModeAtomicCommit
+	[repaint] Using mixed state composition
+	[repaint] view 0x555602490bf0 using renderer composition
+		[atomic] applying output 0 (HDMI-A-1) state
+			[CRTC:94] 23 (MODE_ID) -> 684 (0x2ac)
+			[CRTC:94] 22 (ACTIVE) -> 1 (0x1)
+			[CRTC:94] 24 (VRR_ENABLED) -> 0 (0x0)
+			[CONN:35] 20 (CRTC_ID) -> 94 (0x5e)
+			[CONN:35] 7 (HDR_OUTPUT_METADATA) -> 0 (0x0)
+			[CONN:35] 36 (max bpc) -> 12 (0xc)
+			[CONN:35] 41 (Colorspace) -> 0 (0x0)
+			[PLANE:83] 17 (FB_ID) -> 683 (0x2ab)
+			[PLANE:83] 20 (CRTC_ID) -> 94 (0x5e)
+			[PLANE:83] 9 (SRC_X) -> 0 (0x0)
+			[PLANE:83] 10 (SRC_Y) -> 0 (0x0)
+			[PLANE:83] 11 (SRC_W) -> 251658240 (0xf000000)
+			[PLANE:83] 12 (SRC_H) -> 141557760 (0x8700000)
+			[PLANE:83] 13 (CRTC_X) -> 0 (0x0)
+			[PLANE:83] 14 (CRTC_Y) -> 0 (0x0)
+			[PLANE:83] 15 (CRTC_W) -> 3840 (0xf00)
+			[PLANE:83] 16 (CRTC_H) -> 2160 (0x870)
+			[PLANE:83] FORMAT: XRGB8888
+			[PLANE:83] 87 (rotation) -> 1 (0x1)
+			[PLANE:83] 85 (alpha) -> 65535 (0xffff)
+[atomic] drmModeAtomicCommit
+	[CRTC:94] setting pending flip
+[repaint] flushed (/dev/dri/card1) pending_state 0x555602530610
+[atomic][CRTC:94] flip processing started
+[atomic][CRTC:94] flip processing completed
+[repaint] Beginning repaint (/dev/dri/card1); pending_state 0x5556022d6c50
+Weston scene graph at 6379.480299900:
+
+Output 0 (HDMI-A-1):
+	position: (0, 0) -> (3840, 2160)
+	mode: 3840x2160@60.000Hz
+	scale: 1
+	repaint status: repaint scheduled
+	next repaint: 6379.481172666
+	Head 0 (HDMI-A-1): connected
+
+Layer 0 (pos 0xffffffff):
+	[no views]
+
+Layer 1 (pos 0xfffffffe):
+	[no views]
+
+Layer 2 (pos 0xffff0002):
+	[no views]
+
+Layer 3 (pos 0xffff0001):
+	[no views]
+
+Layer 4 (pos 0xffff0000):
+	[no views]
+
+Layer 5 (pos 0xdfffffff):
+	[no views]
+
+Layer 6 (pos 0x50000000):
+	View 0 (role xdg_toplevel, PID 164564, surface ID 3, [no description available], 0x555602490bf0):
+		position: (0, 0) -> (3840, 2160)
+		[fully opaque]
+		outputs: 0 (HDMI-A-1) (primary)
+		solid-colour buffer
+			[R 0.000000, G 0.000000, B 0.000000, A 1.000000]
+			[1 references may use buffer content]
+			format: 0x34325258 XRGB8888
+			modifier: LINEAR (0x0)
+			width: 1, height: 1
+	View 1 (role wl_subsurface, PID 164564, surface ID 19, sub-surface, 0x555602620800):
+	[view is not mapped!]
+	[view is under parent view layer]
+		position: (0, 0) -> (3840, 2160)
+		[fully opaque]
+		outputs: 0 (HDMI-A-1) (primary)
+		dmabuf buffer
+			[1 references may use buffer content]
+			format: 0x34325258 XRGB8888
+			modifier: LINEAR (0x0)
+			width: 3840, height: 2160
+
+	[repaint] preparing state for output HDMI-A-1 (0)
+	[repaint] trying planes-only build state
+			[view] evaluating view 0x555602620800 for output HDMI-A-1 (0)
+			[plane] started with zpos 18446744073709551615
+			[view] view 0x555602620800 format: XRGB8888
+				[plane] plane 83 picked from candidate list, type: primary
+			[view] provisionally placing view 0x555602620800 on plane 83
+				[view] view 0x555602620800 has been placed to primary plane with computed zpos 0
+			[plane] next overlay zpos to use 0, next underlay zpos to use 18446744073709551615
+			[view] evaluating view 0x555602490bf0 for output HDMI-A-1 (0)
+				[view] ignoring view 0x555602490bf0 (occluded on our output)
+		[atomic] testing output 0 (HDMI-A-1) state
+			[CRTC:94] 23 (MODE_ID) -> 684 (0x2ac)
+			[CRTC:94] 22 (ACTIVE) -> 1 (0x1)
+			[CRTC:94] 24 (VRR_ENABLED) -> 0 (0x0)
+			[CONN:35] 20 (CRTC_ID) -> 94 (0x5e)
+			[CONN:35] 7 (HDR_OUTPUT_METADATA) -> 0 (0x0)
+			[CONN:35] 36 (max bpc) -> 12 (0xc)
+			[CONN:35] 41 (Colorspace) -> 0 (0x0)
+			[PLANE:83] 17 (FB_ID) -> 686 (0x2ae)
+			[PLANE:83] 20 (CRTC_ID) -> 94 (0x5e)
+			[PLANE:83] 9 (SRC_X) -> 0 (0x0)
+			[PLANE:83] 10 (SRC_Y) -> 0 (0x0)
+			[PLANE:83] 11 (SRC_W) -> 251658240 (0xf000000)
+			[PLANE:83] 12 (SRC_H) -> 141557760 (0x8700000)
+			[PLANE:83] 13 (CRTC_X) -> 0 (0x0)
+			[PLANE:83] 14 (CRTC_Y) -> 0 (0x0)
+			[PLANE:83] 15 (CRTC_W) -> 3840 (0xf00)
+			[PLANE:83] 16 (CRTC_H) -> 2160 (0x870)
+			[PLANE:83] FORMAT: XRGB8888
+			[PLANE:83] 87 (rotation) -> 1 (0x1)
+			[PLANE:83] 85 (alpha) -> 65535 (0xffff)
+[atomic] drmModeAtomicCommit
+	[repaint] Using plane-only state composition
+	[repaint] view 0x555602620800 on primary plane 83
+	[repaint] view 0x555602490bf0 using renderer composition
+		[atomic] applying output 0 (HDMI-A-1) state
+			[CRTC:94] 23 (MODE_ID) -> 684 (0x2ac)
+			[CRTC:94] 22 (ACTIVE) -> 1 (0x1)
+			[CRTC:94] 24 (VRR_ENABLED) -> 0 (0x0)
+			[CONN:35] 20 (CRTC_ID) -> 94 (0x5e)
+			[CONN:35] 7 (HDR_OUTPUT_METADATA) -> 0 (0x0)
+			[CONN:35] 36 (max bpc) -> 12 (0xc)
+			[CONN:35] 41 (Colorspace) -> 0 (0x0)
+			[PLANE:83] 17 (FB_ID) -> 686 (0x2ae)
+			[PLANE:83] 20 (CRTC_ID) -> 94 (0x5e)
+			[PLANE:83] 9 (SRC_X) -> 0 (0x0)
+			[PLANE:83] 10 (SRC_Y) -> 0 (0x0)
+			[PLANE:83] 11 (SRC_W) -> 251658240 (0xf000000)
+			[PLANE:83] 12 (SRC_H) -> 141557760 (0x8700000)
+			[PLANE:83] 13 (CRTC_X) -> 0 (0x0)
+			[PLANE:83] 14 (CRTC_Y) -> 0 (0x0)
+			[PLANE:83] 15 (CRTC_W) -> 3840 (0xf00)
+			[PLANE:83] 16 (CRTC_H) -> 2160 (0x870)
+			[PLANE:83] FORMAT: XRGB8888
+			[PLANE:83] 87 (rotation) -> 1 (0x1)
+			[PLANE:83] 85 (alpha) -> 65535 (0xffff)
+[atomic] drmModeAtomicCommit
+	[CRTC:94] setting pending flip
+[repaint] flushed (/dev/dri/card1) pending_state 0x555602322c80
+[atomic][CRTC:94] flip processing started
+[atomic][CRTC:94] flip processing completed
+[repaint] Beginning repaint (/dev/dri/card1); pending_state 0x55560237ce60
+Weston scene graph at 7051.497565092:
+
+Output 0 (HDMI-A-1):
+	position: (0, 0) -> (3840, 2160)
+	mode: 3840x2160@60.000Hz
+	scale: 1
+	repaint status: repaint scheduled
+	next repaint: 7051.497838666
+	Head 0 (HDMI-A-1): connected
+
+Layer 0 (pos 0xffffffff):
+	[no views]
+
+Layer 1 (pos 0xfffffffe):
+	[no views]
+
+Layer 2 (pos 0xffff0002):
+	[no views]
+
+Layer 3 (pos 0xffff0001):
+	[no views]
+
+Layer 4 (pos 0xffff0000):
+	[no views]
+
+Layer 5 (pos 0xdfffffff):
+	[no views]
+
+Layer 6 (pos 0x50000000):
+	View 0 (role xdg_toplevel, PID 164564, surface ID 3, [no description available], 0x555602490bf0):
+		position: (0, 0) -> (3840, 2160)
+		[fully opaque]
+		outputs: 0 (HDMI-A-1) (primary)
+		solid-colour buffer
+			[R 0.000000, G 0.000000, B 0.000000, A 1.000000]
+			[1 references may use buffer content]
+			format: 0x34325258 XRGB8888
+			modifier: LINEAR (0x0)
+			width: 1, height: 1
+	View 1 (role wl_subsurface, PID 164564, surface ID 24, sub-surface, 0x555602496a00):
+	[view is not mapped!]
+	[view is under parent view layer]
+		position: (0, 0) -> (3840, 2160)
+		[not opaque]
+		alpha: 0.500000
+		outputs: 0 (HDMI-A-1) (primary)
+		dmabuf buffer
+			[1 references may use buffer content]
+			format: 0x34325258 XRGB8888
+			modifier: LINEAR (0x0)
+			width: 3840, height: 2160
+	View 2 (role wl_subsurface, PID 164564, surface ID 26, sub-surface, 0x555602620800):
+	[view is not mapped!]
+	[view is under parent view layer]
+		position: (0, 0) -> (3840, 2160)
+		[not opaque]
+		alpha: 0.500000
+		outputs: 0 (HDMI-A-1) (primary)
+		dmabuf buffer
+			[1 references may use buffer content]
+			format: 0x34325258 XRGB8888
+			modifier: LINEAR (0x0)
+			width: 3840, height: 2160
+	View 3 (role wl_subsurface, PID 164564, surface ID 23, sub-surface, 0x55560262b7d0):
+	[view is under parent view layer]
+		position: (0, 0) -> (3840, 2160)
+		[not opaque]
+		alpha: 0.500000
+		outputs: 0 (HDMI-A-1) (primary)
+		dmabuf buffer
+			[1 references may use buffer content]
+			format: 0x34325258 XRGB8888
+			modifier: LINEAR (0x0)
+			width: 3840, height: 2160
+
+	[repaint] preparing state for output HDMI-A-1 (0)
+	[repaint] trying planes-only build state
+			[view] evaluating view 0x555602496a00 for output HDMI-A-1 (0)
+			[plane] started with zpos 18446744073709551615
+			[view] view 0x555602496a00 format: XRGB8888
+				[plane] plane 107 picked from candidate list, type: overlay
+			[view] provisionally placing view 0x555602496a00 on plane 107
+				[view] view 0x555602496a00 has been placed to overlay plane with computed zpos 17
+			[plane] next overlay zpos to use 17, next underlay zpos to use 18446744073709551615
+			[view] evaluating view 0x555602620800 for output HDMI-A-1 (0)
+			[plane] started with zpos 17
+			[view] view 0x555602620800 format: XRGB8888
+				[plane] not trying plane 107: another view already assigned
+				[plane] plane 118 picked from candidate list, type: overlay
+			[view] provisionally placing view 0x555602620800 on plane 118
+				[view] view 0x555602620800 has been placed to overlay plane with computed zpos 16
+			[plane] next overlay zpos to use 16, next underlay zpos to use 18446744073709551615
+			[view] evaluating view 0x55560262b7d0 for output HDMI-A-1 (0)
+			[plane] started with zpos 16
+			[view] view 0x55560262b7d0 format: XRGB8888
+				[plane] not trying plane 107: another view already assigned
+				[plane] not trying plane 118: another view already assigned
+				[plane] plane 129 picked from candidate list, type: overlay
+			[view] provisionally placing view 0x55560262b7d0 on plane 129
+				[view] view 0x55560262b7d0 has been placed to overlay plane with computed zpos 15
+			[plane] next overlay zpos to use 15, next underlay zpos to use 18446744073709551615
+			[view] evaluating view 0x555602490bf0 for output HDMI-A-1 (0)
+				[view] not assigning view 0x555602490bf0 to plane (solid-colour surface)
+		[view] failing state generation: placing view 0x555602490bf0 to renderer not allowed
+	[repaint] could not build planes-only state, trying mixed
+		[state] cannot propose mixed mode: for output HDMI-A-1 (0): no previous renderer fb
+	[repaint] could not build state with planes, trying renderer-only
+			[view] evaluating view 0x555602496a00 for output HDMI-A-1 (0)
+			[plane] started with zpos 18446744073709551615
+				[view] view 0x555602496a00 will be placed on the renderer
+			[view] evaluating view 0x555602620800 for output HDMI-A-1 (0)
+				[view] not assigning view 0x555602620800 to a plane (occluded by renderer views), current lowest zpos change to 18446744073709551615
+				[view] view 0x555602620800 will be placed on the renderer
+			[view] evaluating view 0x55560262b7d0 for output HDMI-A-1 (0)
+				[view] not assigning view 0x55560262b7d0 to a plane (occluded by renderer views), current lowest zpos change to 18446744073709551615
+				[view] view 0x55560262b7d0 will be placed on the renderer
+			[view] evaluating view 0x555602490bf0 for output HDMI-A-1 (0)
+				[view] not assigning view 0x555602490bf0 to plane (solid-colour surface)
+				[view] not assigning view 0x555602490bf0 to a plane (occluded by renderer views), current lowest zpos change to 18446744073709551615
+				[view] view 0x555602490bf0 will be placed on the renderer
+	[repaint] Using render-only state composition
+	[repaint] view 0x555602496a00 using renderer composition
+	[repaint] view 0x555602620800 using renderer composition
+	[repaint] view 0x55560262b7d0 using renderer composition
+	[repaint] view 0x555602490bf0 using renderer composition
+		[atomic] applying output 0 (HDMI-A-1) state
+			[CRTC:94] 23 (MODE_ID) -> 684 (0x2ac)
+			[CRTC:94] 22 (ACTIVE) -> 1 (0x1)
+			[CRTC:94] 24 (VRR_ENABLED) -> 0 (0x0)
+			[CONN:35] 20 (CRTC_ID) -> 94 (0x5e)
+			[CONN:35] 7 (HDR_OUTPUT_METADATA) -> 0 (0x0)
+			[CONN:35] 36 (max bpc) -> 12 (0xc)
+			[CONN:35] 41 (Colorspace) -> 0 (0x0)
+			[PLANE:83] 17 (FB_ID) -> 683 (0x2ab)
+			[PLANE:83] 20 (CRTC_ID) -> 94 (0x5e)
+			[PLANE:83] 9 (SRC_X) -> 0 (0x0)
+			[PLANE:83] 10 (SRC_Y) -> 0 (0x0)
+			[PLANE:83] 11 (SRC_W) -> 251658240 (0xf000000)
+			[PLANE:83] 12 (SRC_H) -> 141557760 (0x8700000)
+			[PLANE:83] 13 (CRTC_X) -> 0 (0x0)
+			[PLANE:83] 14 (CRTC_Y) -> 0 (0x0)
+			[PLANE:83] 15 (CRTC_W) -> 3840 (0xf00)
+			[PLANE:83] 16 (CRTC_H) -> 2160 (0x870)
+			[PLANE:83] FORMAT: XRGB8888
+			[PLANE:83] 87 (rotation) -> 1 (0x1)
+			[PLANE:83] 85 (alpha) -> 65535 (0xffff)
+[atomic] drmModeAtomicCommit
+	[CRTC:94] setting pending flip
+[repaint] flushed (/dev/dri/card1) pending_state 0x5556023d7cd0
+[atomic][CRTC:94] flip processing started
+[atomic][CRTC:94] flip processing completed
+[repaint] Beginning repaint (/dev/dri/card1); pending_state 0x555602495f10

@@ -403,14 +403,16 @@ def test_power_reports_carry_what_the_output_reporter_saw():
     power = OutputPowerController({}, sink, SimpleNamespace(monotonic=lambda: 0.0, time=lambda: 0.0,
                                                           wait=lambda condition, seconds: condition.wait(seconds)),
                                   SimpleNamespace(show=lambda *args, **kwargs: True, shown=lambda output_id: False))
-    seen = []
+    seen, turned = [], []
     picture = SimpleNamespace(output=lambda output_id, **observed: seen.append((output_id, observed)))
+    turns = SimpleNamespace(output=lambda output_id, **observed: turned.append((output_id, observed)))
     backend = FakeBackend()
     backend.states = (OutputState(key(backend.host, "HDMI-A-1")),)
-    Controller(backend, reports=OutputReporter(PowerObservations(power, picture), read=lambda output_id: None))
+    Controller(backend, reports=OutputReporter(PowerObservations(power, picture, turns), read=lambda output_id: None))
     (report,) = sink.puts
     assert (report.output_id, report.connected, report.answers, report.method) == ("HDMI-A-1", True, (), None)
     assert seen == [("HDMI-A-1", {"connected": True, "identity": None})]   # the picture controller saw it too
+    assert turned == [("HDMI-A-1", {"connected": True})]                   # and the screen turns (S3)
 
 
 def test_one_ddc_channel_feeds_both_the_power_and_the_picture_adapters(tmp_path):
@@ -499,7 +501,8 @@ def test_the_backend_asks_the_shell_for_output_power_from_another_thread():
 
 
 def test_the_document_feed_routes_each_document_by_its_key_and_ignores_the_rest():
-    """`output-…` to the power controller, `picture-…` to the picture controller (decision 0022);
+    """`output-…` to the power controller and the screen turns (render redesign S3), `picture-…` to
+    the picture controller (decision 0022);
     a document under another Output's key, under a key of neither kind, or that does not decode
     reaches neither."""
     from appliance.display_host.runner import document_feed
@@ -519,11 +522,12 @@ def test_the_document_feed_routes_each_document_by_its_key_and_ignores_the_rest(
     )
     from nodeapi.documents import Document
 
-    got, pictures = [], []
+    got, pictures, turned = [], [], []
     feed = document_feed(SimpleNamespace(document=lambda output_id, document: got.append((output_id, document))),
-                         SimpleNamespace(document=lambda output_id, document: pictures.append((output_id, document))))
+                         SimpleNamespace(document=lambda output_id, document: pictures.append((output_id, document))),
+                         SimpleNamespace(document=lambda output_id, document: turned.append((output_id, document))))
     wanted = OutputDocument("HDMI-A-1", 2, OutputPower(Power.ON, (), "2099-01-01T00:00:00Z", Darkness.DISPLAY_OFF, None),
-                            BEST_DETECTED, False, False)
+                            BEST_DETECTED, False, False, 90)
     picture = PictureDocument("HDMI-A-1", 3, {"10": 46}, NEUTRAL_SOFTWARE, light=UPGRADE_DISPLAY_LIGHT)
     feed("output-HDMI-A-1", Document(encode_output_document(wanted), "central", None))
     feed("output-HDMI-A-2", Document(encode_output_document(wanted), "central", None))   # another key
@@ -533,4 +537,5 @@ def test_the_document_feed_routes_each_document_by_its_key_and_ignores_the_rest(
     feed("picture-HDMI-A-1", Document(encode_output_document(wanted), "central", None))    # not a picture
     feed("layout-HDMI-A-1", Document(encode_picture_document(picture), "central", None))   # neither kind
     assert got == [("HDMI-A-1", wanted)]
+    assert turned == [("HDMI-A-1", wanted)]                  # an Output document only, never a picture one
     assert pictures == [("HDMI-A-1", picture)]

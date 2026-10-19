@@ -66,7 +66,7 @@ def read_pi_serial(path: str = PI_SERIAL_PATH) -> str | None:
     Distinct from `player.service.read_pi_serial`, which returns raw bytes for
     the device_id hash and adds a `/proc/cpuinfo` fallback: that lives across
     the import boundary (player must not import appliance, and appliance must
-    not pull player.service's GTK/GStreamer deps), so the read cannot be
+    not pull player.service's GStreamer and GL deps), so the read cannot be
     literally shared; the byte-level normalization it does share lives in
     contracts.equipment."""
     raw = read_equipment_raw(path)

@@ -13,7 +13,7 @@ its entry; the History is read from the real route.
 
 Mutation probes (each fails the named case):
 - K2-draft-not-replaced: keep the old draft after an accepted Restore (liveAdjustment.js `restore`)
-  -> the tracer's corner and depth stay as tried.
+  -> the tracer's centre and depth stay as tried.
 - K2-refusal-ignored: offer Restore whatever `restore_refusal` says (position-history.tsx
   `restoreState`) -> the other-profile case.
 - K2-entry-revision: take the answer as the draft's origin (`adopt`) instead of keeping the draft's
@@ -39,10 +39,12 @@ from test_console_frame_page_browser import (
     OVERTAKEN,
     PRESENTED,
     SAVED_X,
+    _across,
     _bar,
+    _centre_field,
+    _left_x,
     _move,
     _seed,
-    _top_left_field,
 )
 from test_display_identity import _sql
 from test_frame_lighting_browser import LightingSessions, lighting_group, saved_lighting
@@ -108,8 +110,7 @@ class HistorySessions(LightingSessions):
         if entry is None:
             route.fulfill(status=404, json={"error": "unknown_entry"})
             return
-        refusal = restore_refusal(entry, frame_id=FRAME, profile_px=made_for.profile_px,
-                                  seen_display_id=made_for.display_id)
+        refusal = restore_refusal(entry, frame_id=FRAME, now=made_for)
         if refusal is not None:
             route.fulfill(status=409, json={"error": refusal.value})
             return
@@ -173,15 +174,11 @@ def _depth(page):
     return lighting_group(page).get_by_role("slider", name="Mat depth", exact=True)
 
 
-def _top_left(calibration):
-    return round(calibration["fit"]["corners"][0][0] * 1920)
-
-
 def test_a_tried_and_a_kept_position_are_listed_and_restore_puts_the_kept_one_back_until_done(
         page, registry, sessions):
-    """The tracer: move a corner -> Tried, not kept; Done -> Kept (Done); deepen the mat -> Tried;
+    """The tracer: move the picture -> Tried, not kept; Done -> Kept (Done); deepen the mat -> Tried;
     Restore an older kept row (the seeded Position: restoring the newest kept one is no change, so
-    Done would have nothing to keep) -> the corner and depth return to its values and the Pi is
+    Done would have nothing to keep) -> the centre and depth return to its values and the Pi is
     handed them; Done -> a new Kept (Done) row."""
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
@@ -192,9 +189,10 @@ def test_a_tried_and_a_kept_position_are_listed_and_restore_puts_the_kept_one_ba
 
         seen = _history_reads(page)
         field = _move(page, 2)
-        expect(field).to_have_value(str(SAVED_X + 20))
-        # A row says what differs from the row below it: here the moved corner alone.
-        expect(_rows(page, TRIED).first).to_contain_text("Top-left")
+        expect(field).to_have_value(_across(SAVED_X + 20))
+        # A row says what differs from the row below it: here the moved centre alone.
+        expect(_rows(page, TRIED).first).to_contain_text("Centre")
+        expect(_rows(page, TRIED).first).not_to_contain_text("Width")
         expect(_rows(page, TRIED).first).not_to_contain_text("Mat depth")
         _done(page)
         expect(_rows(page, KEPT)).to_have_count(2)
@@ -206,19 +204,19 @@ def test_a_tried_and_a_kept_position_are_listed_and_restore_puts_the_kept_one_ba
         _depth(page).fill("6")
         expect(lighting_group(page)).to_contain_text("6 mm")
         expect(_rows(page, TRIED).first).to_contain_text("Mat depth 6 mm")
-        expect(_rows(page, TRIED).first).not_to_contain_text("Top-left")
+        expect(_rows(page, TRIED).first).not_to_contain_text("Centre")
 
         _rows(page, KEPT).last.get_by_role("button", name="Restore", exact=True).click()
         expect(_depth(page)).to_have_value("0")
         open_frame(page, FRAME, "position")
-        field = _top_left_field(page)   # the tab was left: Exact values opens again
-        expect(field).to_have_value(str(SAVED_X))
+        field = _centre_field(page)   # the tab was left: Exact values opens again
+        expect(field).to_have_value(_across(SAVED_X))
         page.wait_for_timeout(600)  # the loop's next exchanges: the restored draft stays what the Pi is handed
-        assert (_top_left(sessions.row["calibration"]), sessions.row["lighting"]["mat_depth_mm"]) == (SAVED_X, 0)
+        assert (_left_x(sessions.row["calibration"]), sessions.row["lighting"]["mat_depth_mm"]) == (SAVED_X, 0)
         _done(page)
         expect(_rows(page, KEPT)).to_have_count(3)
         saved = next(frame for frame in registry.inventory().frames if frame.id == FRAME)
-        assert (round(saved.calibration.fit.corners[0][0] * 1920), saved.lighting.mat_depth_mm) == (SAVED_X, 0)
+        assert (_left_x(saved.calibration), saved.lighting.mat_depth_mm) == (SAVED_X, 0)
 
 
 def test_a_position_made_for_another_screen_size_cannot_be_restored_and_says_why(page, registry, sessions):
@@ -260,7 +258,7 @@ def test_a_restored_draft_keeps_its_base_so_a_save_made_elsewhere_still_stops_it
         expect(page.get_by_role("alert")).to_contain_text(OVERTAKEN)
         assert round(saved_lighting(registry).mat_depth_mm) == 0
         saved = next(frame for frame in registry.inventory().frames if frame.id == FRAME).calibration
-        assert round(saved.fit.corners[0][0] * 1920) == ELSEWHERE_X
+        assert _left_x(saved) == ELSEWHERE_X
 
 
 def test_restore_waits_for_the_editor_and_says_so(page, registry):

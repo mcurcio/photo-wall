@@ -9,12 +9,26 @@
 #include <sys/mman.h>
 #include <wayland-client.h>
 #include "xdg-shell-client.h"
+#include "alpha-modifier-v1-client-protocol.h"
 #include "photo-wall-frame-client.h"
 #include "frame-client.h"
 static struct wl_compositor *comp;
 static struct wl_shm *shm;
 static struct xdg_wm_base *wm;
+static struct wl_subcompositor *subcomp;
+static struct wp_alpha_modifier_v1 *alpha_manager;
 static int configured, private_probe;
+/* `alpha` (render redesign S1): the window is black, with a 200 x 150 opaque white sub-surface at
+ * (100, 100) whose multiplier is 0x7fffffff; once ALPHA_RESET exists its modifier is destroyed and
+ * the sub-surface committed (the factor back to 1). Every wl_output transform is printed
+ * ("TRANSFORM <n>"). */
+#define ALPHA_RESET "/tmp/pw-probe-alpha-reset"
+static void output_geometry(void*d,struct wl_output*o,int32_t x,int32_t y,int32_t pw,int32_t ph,int32_t sp,
+const char*make,const char*model,int32_t transform){(void)d;(void)o;(void)x;(void)y;(void)pw;(void)ph;(void)sp;
+(void)make;(void)model;printf("TRANSFORM %d\n",transform);fflush(stdout);}
+static void output_mode(void*d,struct wl_output*o,uint32_t f,int32_t w,int32_t h,int32_t r){
+(void)d;(void)o;(void)f;(void)w;(void)h;(void)r;}
+static const struct wl_output_listener output_listener={.geometry=output_geometry,.mode=output_mode};
 static void ping(void*d,struct xdg_wm_base*w,uint32_t serial){(void)d;xdg_wm_base_pong(w,serial);}
 static const struct xdg_wm_base_listener wm_listener={.ping=ping};
 static void global(void*d,struct wl_registry*r,uint32_t n,const char*i,uint32_t v){
@@ -22,6 +36,9 @@ static void global(void*d,struct wl_registry*r,uint32_t n,const char*i,uint32_t 
 if(!strcmp(i,"wl_compositor"))comp=wl_registry_bind(r,n,&wl_compositor_interface,1);
 if(!strcmp(i,"wl_shm"))shm=wl_registry_bind(r,n,&wl_shm_interface,1);
 if(!strcmp(i,"xdg_wm_base")){wm=wl_registry_bind(r,n,&xdg_wm_base_interface,1);xdg_wm_base_add_listener(wm,&wm_listener,NULL);}
+if(!strcmp(i,"wl_subcompositor"))subcomp=wl_registry_bind(r,n,&wl_subcompositor_interface,1);
+if(!strcmp(i,"wp_alpha_modifier_v1"))alpha_manager=wl_registry_bind(r,n,&wp_alpha_modifier_v1_interface,1);
+if(!private_probe&&!strcmp(i,"wl_output"))wl_output_add_listener(wl_registry_bind(r,n,&wl_output_interface,1),&output_listener,NULL);
 if(private_probe&&!strcmp(i,"pw_diagnostic_manager_v1"))wl_registry_bind(r,n,&pw_diagnostic_manager_v1_interface,1);
 }
 static void removed(void*d,struct wl_registry*r,uint32_t n){(void)d;(void)r;(void)n;}
@@ -63,9 +80,18 @@ if(argc>1&&!strcmp(argv[1],"words"))return words(d,c);
 struct wl_surface*s=wl_compositor_create_surface(comp);struct xdg_surface*xs=xdg_wm_base_get_xdg_surface(wm,s);
 xdg_surface_add_listener(xs,&surface_listener,NULL);struct xdg_toplevel*top=xdg_surface_get_toplevel(xs);
 xdg_toplevel_add_listener(top,&top_listener,NULL);xdg_toplevel_set_app_id(top,"photo-wall-headless");wl_surface_commit(s);
-int fd=memfd_create("probe",MFD_CLOEXEC);int size=640*480*4;ftruncate(fd,size);
-uint32_t*p=mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);for(int i=0;i<640*480;i++)p[i]=0xff223344;
-struct wl_shm_pool*pool=wl_shm_create_pool(shm,fd,size);struct wl_buffer*b=wl_shm_pool_create_buffer(pool,0,640,480,640*4,WL_SHM_FORMAT_XRGB8888);close(fd);
+int alpha=argc>1&&!strcmp(argv[1],"alpha");
+int fd=memfd_create("probe",MFD_CLOEXEC);int size=640*480*4+200*150*4;if(ftruncate(fd,size)<0)return 9;
+uint32_t*p=mmap(NULL,size,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);for(int i=0;i<640*480;i++)p[i]=alpha?0xff000000:0xff223344;
+for(int i=0;i<200*150;i++)p[640*480+i]=0xffffffff;
+struct wl_shm_pool*pool=wl_shm_create_pool(shm,fd,size);struct wl_buffer*b=wl_shm_pool_create_buffer(pool,0,640,480,640*4,WL_SHM_FORMAT_XRGB8888);
+struct wl_buffer*white=wl_shm_pool_create_buffer(pool,640*480*4,200,150,200*4,WL_SHM_FORMAT_XRGB8888);close(fd);
+struct wl_surface*sub=NULL;struct wp_alpha_modifier_surface_v1*modifier=NULL;
+if(alpha){if(!subcomp||!alpha_manager){fprintf(stderr,"probe: no alpha modifier\n");return 10;}
+sub=wl_compositor_create_surface(comp);struct wl_subsurface*role=wl_subcompositor_get_subsurface(subcomp,sub,s);
+wl_subsurface_set_position(role,100,100);modifier=wp_alpha_modifier_v1_get_surface(alpha_manager,sub);
+wp_alpha_modifier_surface_v1_set_multiplier(modifier,0x7fffffff);
+wl_surface_attach(sub,white,0,0);wl_surface_damage(sub,0,0,200,150);wl_surface_commit(sub);}
 for(int n=0;n<3000;n++){
 usleep(30000);
 wl_display_dispatch_pending(d);struct pollfd pollfd={.fd=wl_display_get_fd(d),.events=POLLIN};wl_display_flush(d);
@@ -77,6 +103,8 @@ uint32_t pending_state; char pending_id[37];
 if(pw_frame_client_grant_revision(c,"headless",frame,1,2,pending_id,&pending_state)==1){
 strcpy(grant,pending_id);state=pending_state;current=1;}
 
+/* The sub-surface's modifier destroyed: synchronized, so it applies with the window's next commit. */
+if(modifier&&access(ALPHA_RESET,F_OK)==0){wp_alpha_modifier_surface_v1_destroy(modifier);modifier=NULL;wl_surface_commit(sub);}
 /* A still app (the file exists): commits nothing, still answers Weston's pings above. */
 if(configured&&access("/tmp/pw-probe-still",F_OK)!=0){
 char trial[4097], trial_tag[97]; const char *tag=state?"authored-probe":"synthetic-probe";

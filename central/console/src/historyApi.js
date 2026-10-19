@@ -70,7 +70,7 @@ export function readPictureHistory(displayId, { before, limit } = {}) {
 }
 
 /**
- * One Frame's Position history (fit, corners, rotation and lighting), newest first (GET
+ * One Frame's Position history (its rectangle, the turn it was made for, and its lighting), newest first (GET
  * …/frames/{id}/position-history); `before` and `limit` as `readPictureHistory`.
  *
  * @param {string} frameId
