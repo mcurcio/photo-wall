@@ -13,9 +13,11 @@ coordination's preparation requests and the Planner's hydration both use).
 from __future__ import annotations
 
 from media_queue import RecordingMediaQueue
+from support.frame_outputs import target_of
 from support.key_content_builders import key_content
 from support.photo_pools import library_of, photo, seed_pool
 from test_media_repository import MeasureQueue
+from test_registry import enroll
 
 from central.db import ProcessTransactionClock
 from central.infra.fit_settings_store import PgFitSettings
@@ -24,7 +26,7 @@ from central.media_repository import MediaRepository
 from central.photo_library.model import MeasuredCopy
 from central.planner import AcquisitionRequest, MeasureRequest
 from central.registry import FrameCreate
-from central.wall_plan.fit import DoesNotFit, FitTarget, shape_fit
+from central.wall_plan.fit import DoesNotFit, shape_fit
 from central.wall_plan.fit_settings import FitSettings
 from contracts.models import FrameProfile
 from media.prepare import VideoRecipe, stored_recipe
@@ -34,10 +36,18 @@ P720 = FrameProfile(width_px=1280, height_px=720, diagonal_inches=24)
 P4K = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55)
 
 
+def add_frame(registry, frame_id: str, profile: FrameProfile) -> None:
+    """A Frame bound full screen to an Output of its profile's pixels: its Frame output is those
+    pixels (frame box run fb-8: a Frame with no known screen asks no copy)."""
+    registry.create_frame(FrameCreate(id=frame_id, width_mm=profile.width_px // 4,
+                                      height_mm=profile.height_px // 4, profile=profile))
+    player, _, _ = enroll(registry, count=1, size=(profile.width_px, profile.height_px))
+    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
+
+
 def wall(registry, *profiles: tuple[str, FrameProfile]) -> MediaRepository:
     for frame_id, profile in profiles:
-        registry.create_frame(FrameCreate(id=frame_id, width_mm=profile.width_px // 4,
-                                          height_mm=profile.height_px // 4, profile=profile))
+        add_frame(registry, frame_id, profile)
     return MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(),
                            times=ProcessTransactionClock(registry.clock))
 
@@ -92,8 +102,7 @@ def test_a_video_is_named_once_whatever_the_wall_and_the_copy_ladder(registry):
     clip = photo("clip", taken_at=1, width=3840, height=2160, kind="video")
     seed_pool(registry, "family:1", (clip,))
     (key,) = prepared(repository, clip.asset_id, "living")
-    registry.create_frame(FrameCreate(id="hall", width_mm=P4K.width_px // 4,
-                                      height_mm=P4K.height_px // 4, profile=P4K))
+    add_frame(registry, "hall", P4K)
     assert prepared(repository, clip.asset_id, "hall") == {key}
     PgFitSettings(registry.db, times=ProcessTransactionClock(registry.clock)).save_fit_settings(
         FitSettings(copy_ladder_px=(2560, 3840)))
@@ -112,7 +121,7 @@ def test_adding_a_smaller_frame_prepares_nothing_again(registry):
     big = photo("big", taken_at=1, width=6000, height=4000)
     seed_pool(registry, "family:1", (big,))
     before = prepared(repository, big.asset_id, "living")
-    registry.create_frame(FrameCreate(id="study", width_mm=320, height_mm=180, profile=P720))
+    add_frame(registry, "study", P720)
     assert prepared(repository, big.asset_id, "study") == before
 
 
@@ -146,11 +155,22 @@ def test_a_raw_photo_is_sized_once_its_preview_is_measured_and_asked_for_until_t
 def test_above_the_players_still_limit_a_4k_frame_refuses_the_photo():
     """Acceptance 5. Mutation probe 4 (drop the limit): the 4K Frame accepts it."""
     limited = FitSettings(max_still_edge=3000)
-    uhd = FitTarget(profile=P4K, output_px=(3840, 2160))
-    hd = FitTarget(profile=P1080, output_px=(1920, 1080))
-    assert shape_fit("image", 6000, 4000, uhd, 0.35, limited) == DoesNotFit(
+    uhd, hd = target_of(3840, 2160, inches=55), target_of(1920, 1080, inches=24)
+    assert shape_fit("image", 6000, 4000, uhd, 0.35, limited, size_known=True) == DoesNotFit(
         reason="above_player_limit")
-    assert shape_fit("image", 6000, 4000, hd, 0.35, limited) is None
-    assert shape_fit("image", 6000, 4000, uhd, 0.35, FitSettings()) is None
+    assert shape_fit("image", 6000, 4000, hd, 0.35, limited, size_known=True) is None
+    assert shape_fit("image", 6000, 4000, uhd, 0.35, FitSettings(), size_known=True) is None
     # The ladder's steps stop at the limit: no copy is longer than the Player shows.
     assert limited.copy_steps == (1920, 2560, 3000)
+
+
+def test_a_frame_with_no_known_screen_asks_no_copy(registry):
+    """Frame box run fb-8: a copy is sized to the Frame outputs only; a Frame with no known
+    screen (unbound here) has none and asks nothing, so a photo on a 1080p wall beside it is
+    still prepared at the 1920 step."""
+    repository = wall(registry, ("living", P1080))
+    registry.create_frame(FrameCreate(id="attic", width_mm=960, height_mm=540, profile=P4K))
+    big = photo("big", taken_at=1, width=6000, height=4000)
+    seed_pool(registry, "family:1", (big,))
+    (key,) = prepared(repository, big.asset_id, "living")
+    assert step_of(repository, key) == 1920

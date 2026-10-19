@@ -93,22 +93,30 @@ class FrameInventory(Model):
 
 
 
+PositiveMm = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+
+
 class FrameOutput(Model):
-    """One Frame's Frame output and what it came from (follow-ups 2026-10-11, slice A1; owner,
-    2026-10-11: compatibility "measuring against the Frame output and not the Display").
+    """One Frame as the photo fit rule and the copy choice see it (follow-ups 2026-10-11, slice A1;
+    frame box run, .claude/runs/frame-box/page.md fb-8; owner, 2026-10-19: "diagonal inches is a
+    weird concept when we already have width and height").
 
     `output_px` is `contracts.models.frame_output(calibration, display_px, turn)`: the Frame's
-    picture in output pixels, (width, height) along its own axes, its shape the Position's box. `turn` is how the
-    Frame's screen hangs (frames.turn; render redesign S2). `display_px` is the
-    size its Output last reported (`outputs.observation` width_px x height_px, kept while the
-    display is unplugged). Both are None for a Frame bound to no Output, or whose Output never
-    reported a size above 0 x 0. Read by `central.infra.display_store.frame_outputs_in`."""
+    picture in output pixels, (width, height) along its own axes, its shape the Position's box.
+    `turn` is how the Frame's screen hangs (frames.turn). `display_px` is the screen's mode as
+    built (central/displays/model.py `screen_px`). Both are None for a Frame bound to no Output, or
+    whose screen size is not known: such a Frame has no shape, so it is judged for no photo
+    (central/wall_plan/fit.py `fit_target`). `video` is the Frame's own "Shows videos"
+    (frames.video). `size_mm` is the Frame's physical size as it hangs,
+    `contracts.models.frame_size_mm` of its box and the seen Display's size; None when no Display
+    states one. Read by `central.infra.display_store.frame_outputs_in`."""
 
     frame_id: Identifier
-    profile: FrameProfile
     turn: ExactTurn
-    output_px: tuple[Pixels, Pixels] | None
+    video: bool
     display_px: tuple[Pixels, Pixels] | None
+    output_px: tuple[Pixels, Pixels] | None
+    size_mm: tuple[PositiveMm, PositiveMm] | None
 
 
 class PlayerReports(Model):

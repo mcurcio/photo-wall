@@ -9,6 +9,7 @@ encoded never renames a photo. Pure: no database, no ffmpeg.
 from __future__ import annotations
 
 import pytest
+from support.frame_outputs import frame_output_of
 
 from central.installation_models import FrameOutput
 from central.media_repository import variant_recipe
@@ -27,9 +28,8 @@ PRE_S4 = {"version": 3, "image_long_edge": 1920, "jpeg_quality": 3, "video_long_
 
 
 def frame(frame_id: str, profile: FrameProfile) -> FrameOutput:
-    size = (profile.width_px, profile.height_px)
-    return FrameOutput(frame_id=frame_id, profile=profile, turn=0, output_px=size,
-                       display_px=size)
+    return frame_output_of(frame_id, (profile.width_px, profile.height_px),
+                           inches=profile.diagonal_inches)
 
 
 def test_house_recipes_give_each_kind_its_own_and_refuse_any_other():

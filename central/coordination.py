@@ -44,7 +44,7 @@ from central.runtime import Scene
 from central.runtime import handle_execution_outcome as handle_runtime_outcome
 from central.runtime_store import RuntimeStore
 from central.transaction_locks import COORDINATION_LOCK, holds_runtime_locks_in
-from central.wall_plan.fit import FitTarget
+from central.wall_plan.fit import FitTarget, fit_target
 from central.wall_plan.order import PhotoShowing
 from central.wall_plan.ports import FitSettingsStore, ShownHistory
 from central.wall_plan.selection import crop_limit_of
@@ -156,29 +156,37 @@ class Coordinator:
             has_source_refs = has_source_refs or bool(contribution.source_refs)
         return asset_refs, has_source_refs
 
-    def _authored_scene_profiles(self, conn, scene: Scene):
+    def _authored_scene_targets(self, conn, scene: Scene) -> dict[str, FitTarget]:
+        """The `fit_target` of each Frame the Scene authors photos onto (frame box run fb-8).
+        CoordinationError("unknown_frame", 404) for a Frame that does not exist;
+        RegistryError("authored_frame_size_unknown", 409) for one without a Frame output (no
+        known screen: no shape, so no photo can be judged for it)."""
         frame_ids = {
             contribution.target.removeprefix("frame:")
             for contribution in self._scene_contributions(scene)
             if contribution.asset_refs
         }
-        profiles = self.installation.frame_profiles_in(conn, frame_ids)
-        if len(profiles) != len(frame_ids):
+        outputs = {output.frame_id: output for output in frame_outputs_in(conn)
+                   if output.frame_id in frame_ids}
+        if len(outputs) != len(frame_ids):
             raise CoordinationError("unknown_frame", 404)
-        return profiles
+        targets = {frame_id: fit_target(output) for frame_id, output in outputs.items()}
+        sized = {frame_id: target for frame_id, target in targets.items() if target is not None}
+        if len(sized) != len(targets):
+            raise RegistryError("authored_frame_size_unknown", 409)
+        return sized
 
     def _validate_authored_scene(
-        self, conn, scene: Scene, asset_ids: tuple[str, ...], profiles
+        self, conn, scene: Scene, asset_ids: tuple[str, ...], targets: dict[str, FitTarget]
     ) -> None:
         candidates = self.media.authored_candidates_in(conn, asset_ids)
         settings = self.fit.fit_settings_in(conn)
         crop_limit = crop_limit_of(scene.selection, settings)
-        outputs = {output.frame_id: output.output_px for output in frame_outputs_in(conn)}
         for contribution in self._scene_contributions(scene):
-            frame_id = contribution.target.removeprefix("frame:")
-            target = FitTarget(profile=profiles[frame_id], output_px=outputs.get(frame_id)) \
-                if contribution.asset_refs else None
-            if target is not None and not any(
+            if not contribution.asset_refs:
+                continue
+            target = targets[contribution.target.removeprefix("frame:")]
+            if not any(
                 eligible(candidates[asset_id], target, crop_limit, settings)
                 for asset_id in contribution.asset_refs
             ):
@@ -216,10 +224,10 @@ class Coordinator:
         ):
             raise RegistryError("invalid_authored_scene", 422)
         with self._transaction() as conn, self.runtime.edit(conn) as runtime:
-            # Keep the existing Runtime -> Frame profile -> Media lock order.
-            profiles = self._authored_scene_profiles(conn, scene)
+            # Keep the existing Runtime -> Frame -> Media order.
+            targets = self._authored_scene_targets(conn, scene)
             authored = self.media.author_candidates_in(conn, source_ref, requested)
-            self._validate_authored_scene(conn, scene, requested, profiles)
+            self._validate_authored_scene(conn, scene, requested, targets)
             # One Runtime command, at the post-lock cut on Central's clock (as
             # RuntimeStore.command_current).
             on_wall = getattr(runtime, command)(scene, self.clock.utc())
@@ -530,8 +538,7 @@ class Coordinator:
                 locked_assignments=locks,
                 history=history,
                 settings=self.fit.fit_settings_in(conn),
-                frame_outputs={output.frame_id: output.output_px
-                               for output in frame_outputs_in(conn)},
+                frame_outputs={output.frame_id: output for output in frame_outputs_in(conn)},
                 horizon_seconds=horizon_end - now,
                 plan_seconds=self.limits.plan_seconds,
                 max_clock_uncertainty=self.limits.max_uncertainty,

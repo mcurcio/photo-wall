@@ -319,11 +319,10 @@ export function lineWords(analysis: FitAnalysis, name: (frameId: string) => stri
 export type CopyName = "thumbnail" | "preview" | "fullsize" | "original";
 
 /** What one Frame asks of the photo's copy (central/photo_library/views.py `FrameCopy`): the
- * pixels it needs (its Frame output's, or, before it reports one, its planned size). */
+ * pixels its Frame output needs (a Frame without a Frame output asks none and is not listed). */
 export interface FrameCopy {
   frame_id: string;
   need_px: [number, number];
-  output_known: boolean;
   preview_holds: boolean | null;
 }
 
@@ -343,13 +342,13 @@ export const UNDECIDED_PLAYS_FROM = "Which copy plays is decided when a Frame sh
  * Which copy one Frame plays a photo from, in one plain clause (owner, 2026-10-09: "use Immich
  * downsampled copy only if it is at least the visible Frame size, else the original"): "Plays
  * from Immich's preview, which holds its Frame output, 1,920 × 1,080 px." or "Plays from a
- * larger copy: Immich's preview is smaller than its planned 1,080 × 1,920 px."
+ * larger copy: Immich's preview is smaller than its Frame output, 1,080 × 1,920 px."
  */
 export function playsFromWords(frame: FrameCopy, photo: { kind: MediaKind; prepared_from: CopyName | null }): string {
   if (photo.kind === "video") return VIDEO_PLAYS_FROM;
   if (photo.prepared_from !== null) return `Plays from the copy Photo Wall prepared from ${COPY_CLAUSE[photo.prepared_from]}.`;
   const pixels = `${countText(frame.need_px[0])} × ${countText(frame.need_px[1])} px`;
-  const need = frame.output_known ? `its Frame output, ${pixels}` : `its planned ${pixels}`;
+  const need = `its Frame output, ${pixels}`;
   if (frame.preview_holds === null) return `Plays from Immich's preview if it holds ${need}, else from a larger copy.`;
   return frame.preview_holds ? `Plays from Immich's preview, which holds ${need}.`
     : `Plays from a larger copy: Immich's preview is smaller than ${need}.`;

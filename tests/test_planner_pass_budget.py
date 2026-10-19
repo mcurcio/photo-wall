@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 
 from psycopg.types.json import Jsonb
+from support.frame_outputs import frame_outputs_of
 from support.house_time import UTC_HOUSE
 from support.key_content_builders import key_content
 from support.photo_pools import library_of, photo, seed_pool
@@ -74,7 +75,8 @@ def test_a_pass_over_fifty_thousand_photos_reads_only_the_top_of_its_line(regist
                              authored_candidates={}, locked_assignments={},
                              history=WallHistory(), horizon_seconds=300, plan_seconds=3600,
                              settings=FitSettings(),
-                             frame_outputs={f"f{n}": (1920, 1080) for n in range(FRAMES)})
+                             frame_outputs=frame_outputs_of({f"f{n}": (1920, 1080)
+                                                             for n in range(FRAMES)}, inches=24))
             return result, lines, time.perf_counter() - started
 
     one_pass()                                                    # a warm connection pool

@@ -1,12 +1,17 @@
 """The photo fit rule (roadmap 5a design rule 2; run ledger .claude/runs/photo-5a.md, slice R1,
-cases 1-9; follow-ups B1, cases 1-7: the Frame output and every tuning value a setting). Frames
-are 3840 x 2160 at 55 inches, full screen on a 3840 x 2160 Display, unless named."""
+cases 1-9; follow-ups B1, cases 1-7: the Frame output and every tuning value a setting; frame box
+run fb-8: a Frame is judged by its Frame output alone). Frames are 3840 x 2160 at 55 inches,
+full screen on a 3840 x 2160 Display, unless named."""
 from __future__ import annotations
 
+import math
+
 import pytest
+from support.frame_outputs import target_of
 from support.key_content_builders import banded_grid, face, key_content, measured
 
 from central.catalog import Candidate
+from central.installation_models import FrameOutput
 from central.wall_plan.fit import (
     DoesNotFit,
     Fits,
@@ -14,33 +19,28 @@ from central.wall_plan.fit import (
     FitVerdict,
     band,
     crop_share,
+    fit_target,
     interest_kept,
     judge,
+    large_frame,
     shape_fit,
 )
 from central.wall_plan.fit_settings import FitSettings
-from contracts.models import Calibration, FrameProfile, PositionBox, frame_output
+from contracts.models import Calibration, PositionBox, frame_output, frame_size_mm
 
-UHD = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55)
-UHD_40 = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=40)
-NO_VIDEO = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55, video=False)
-TALL = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=32)
-NEARLY_SQUARE = FrameProfile(width_px=950, height_px=1000, diagonal_inches=20)
-FOUR_THREE = FrameProfile(width_px=1024, height_px=768, diagonal_inches=10)
+UHD = target_of(3840, 2160, inches=55)
+UHD_40 = target_of(3840, 2160, inches=40)
+NO_VIDEO = target_of(3840, 2160, inches=55, video=False)
+TALL = target_of(1080, 1920, inches=32)
+NEARLY_SQUARE = target_of(950, 1000, inches=20)
+FOUR_THREE = target_of(1024, 768, inches=10)
 DISPLAY = (3840, 2160)
 HOUSE = FitSettings()
 LIMIT = HOUSE.crop_limit
 
 
-def full_screen(profile: FrameProfile) -> FitTarget:
-    """A Frame filling a Display of its profile's own size: its Frame output is the profile's."""
-    return FitTarget(profile=profile, output_px=(profile.width_px, profile.height_px))
-
-
-def _judge(candidate: Candidate, target: FitTarget | FrameProfile = UHD,
+def _judge(candidate: Candidate, target: FitTarget = UHD,
            crop_limit: float = LIMIT, settings: FitSettings = HOUSE) -> FitVerdict:
-    if isinstance(target, FrameProfile):
-        target = full_screen(target)
     key = candidate.analysis.key if candidate.analysis is not None else None
     return judge(candidate.kind, candidate.original_width, candidate.original_height, key,
                  target, crop_limit, settings)
@@ -55,7 +55,7 @@ def _opening(width: float) -> FitTarget:
     """UHD's Frame drawn as a centred box `width` of the 3840 x 2160 Display's width and height."""
     margin = (1 - width) / 2
     calibration = Calibration(fit=PositionBox(left=margin, top=margin, width=width, height=width))
-    return FitTarget(profile=UHD, output_px=frame_output(calibration, DISPLAY, 0))
+    return UHD.model_copy(update={"output_px": frame_output(calibration, DISPLAY, 0)})
 
 
 MAT = _opening(.4)                                           # a 40 % x 40 % opening
@@ -83,7 +83,7 @@ def test_interest_at_both_the_top_and_the_bottom_cannot_be_cropped() -> None:
 def test_the_crop_limit_is_the_backstop() -> None:
     assert _refused(_judge(measured("p", 2000, 3000))) == "beyond_crop_limit"
     assert _refused(_judge(measured("p", 4000, 4000))) == "beyond_crop_limit"
-    assert shape_fit("image", 4000, 4000, full_screen(UHD), .5, HOUSE) is None
+    assert shape_fit("image", 4000, 4000, UHD, .5, HOUSE, size_known=True) is None
     assert isinstance(_judge(measured("p", 4000, 4000), crop_limit=.5), Fits)
 
 
@@ -115,15 +115,16 @@ def test_a_mat_opening_needs_only_its_own_pixels_not_the_displays() -> None:
     assert MAT.output_px == (1536, 864)
     photo = measured("p", 1600, 900)
     assert isinstance(_judge(photo, MAT), Fits)
-    assert _refused(_judge(photo, FitTarget(profile=UHD, output_px=DISPLAY))) == \
-        "below_frame_pixels"
+    assert UHD.output_px == DISPLAY
+    assert _refused(_judge(photo, UHD)) == "below_frame_pixels"
 
 
-def test_a_frame_without_a_frame_output_is_judged_by_shape_only() -> None:
-    """B1 case 3: no Output size reported, rule 2 is skipped (the analysis says so)."""
-    unreported = FitTarget(profile=FOUR_THREE, output_px=None)
-    assert shape_fit("image", 400, 300, unreported, LIMIT, HOUSE) is None
-    assert isinstance(_judge(measured("p", 400, 300), unreported), Fits)
+def test_an_unmeasured_size_is_judged_by_shape_only() -> None:
+    """An image whose readable size is not measured yet: rule 2 is skipped (`size_known` False),
+    so nothing is refused on a size no one measured."""
+    assert shape_fit("image", 400, 300, FOUR_THREE, LIMIT, HOUSE, size_known=False) is None
+    assert shape_fit("image", 400, 300, FOUR_THREE, LIMIT, HOUSE, size_known=True) == \
+        DoesNotFit(reason="below_frame_pixels")
     assert _refused(_judge(measured("p", 400, 300), FOUR_THREE)) == "below_frame_pixels"
 
 
@@ -207,12 +208,11 @@ def test_a_band_is_the_ratios_rule_one_accepts() -> None:
     edge passes rule 1, one just outside does not."""
     low, high = band(16 / 9, .35)
     assert (low, high) == pytest.approx((16 / 9 * .65, 16 / 9 / .65))
-    unreported = FitTarget(profile=UHD, output_px=None)
     for width, height, edge in ((5200, 4500, low), (3200, 1170, high)):   # 52:45, 320:117
         assert width / height == pytest.approx(edge)
-        assert crop_share(width, height, UHD) == pytest.approx(.35)
-        assert shape_fit("image", width, height, unreported, .35, HOUSE) is None
-        assert shape_fit("image", width, height, unreported, .349, HOUSE) == \
+        assert crop_share(width, height, UHD.aspect) == pytest.approx(.35)
+        assert shape_fit("image", width, height, UHD, .35, HOUSE, size_known=False) is None
+        assert shape_fit("image", width, height, UHD, .349, HOUSE, size_known=False) == \
             DoesNotFit(reason="beyond_crop_limit")
     for aspect, limit in ((0, .35), (16 / 9, 0), (16 / 9, 1)):
         with pytest.raises(ValueError):
@@ -232,26 +232,26 @@ def test_videos_are_centred_and_judged_by_their_own_floor() -> None:
 
 def test_an_image_is_judged_only_once_measured_and_within_a_sane_limit() -> None:
     with pytest.raises(ValueError):
-        judge("image", 4000, 3000, None, full_screen(UHD), LIMIT, HOUSE)
+        judge("image", 4000, 3000, None, UHD, LIMIT, HOUSE)
     key = measured("p", 4000, 3000).analysis.key
     for limit in (0, 1, -.1, 1.5):
         with pytest.raises(ValueError):
-            judge("image", 4000, 3000, key, full_screen(UHD), limit, HOUSE)
+            judge("image", 4000, 3000, key, UHD, limit, HOUSE)
 
 
-@pytest.mark.parametrize(("kind", "width", "height", "profile", "limit"), [
+@pytest.mark.parametrize(("kind", "width", "height", "target", "limit"), [
     ("image", 2000, 3000, UHD, .35),
     ("image", 4000, 4000, UHD, .35),
     ("image", 3264, 2448, UHD, .35),
     ("video", 1920, 1080, NO_VIDEO, .35),
     ("video", 1280, 720, UHD_40, .35),
 ])
-def test_shape_fit_agrees_with_judge_on_every_size_only_refusal(kind, width, height, profile,
+def test_shape_fit_agrees_with_judge_on_every_size_only_refusal(kind, width, height, target,
                                                                  limit) -> None:
     key = measured("p", width, height).analysis.key if kind == "image" else None
-    refused = shape_fit(kind, width, height, full_screen(profile), limit, HOUSE)
+    refused = shape_fit(kind, width, height, target, limit, HOUSE, size_known=True)
     assert refused is not None
-    assert judge(kind, width, height, key, full_screen(profile), limit, HOUSE) == refused
+    assert judge(kind, width, height, key, target, limit, HOUSE) == refused
 
 
 def test_interest_kept_is_the_grid_weight_inside_the_window() -> None:
@@ -275,3 +275,66 @@ def test_interest_kept_is_the_grid_weight_inside_the_window() -> None:
     for grid in grids:
         for window in ((0, .1, 1, .85), (.2, 0, .93, 1), (0, 0, 1, 1), (.1, .2, .6, .9)):
             assert interest_kept(grid, window) == pytest.approx(cell_by_cell(grid, window))
+
+
+# --- Frame box run fb-8: the Frame output is the Frame -------------------------------------------
+
+def _frame(box: PositionBox, *, screen: tuple[int, int] | None = (1920, 1080),
+           display_mm: tuple[int, int] | None = (950, 540), video: bool = True) -> FrameOutput:
+    """A Frame whose Position is `box` on a screen of `screen` pixels (None: not known) on a
+    Display of `display_mm` (None: it states no size), hung upright, as frame_outputs_in reads it."""
+    calibration = Calibration(fit=box)
+    return FrameOutput(frame_id="hall", turn=0, video=video, display_px=screen,
+                       output_px=frame_output(calibration, screen, 0),
+                       size_mm=frame_size_mm(box, display_mm, 0))
+
+
+def _target(frame: FrameOutput) -> FitTarget:
+    target = fit_target(frame)
+    assert target is not None
+    return target
+
+
+TALL_BOX = PositionBox(left=.5, top=.25, width=.25, height=.5)
+WHOLE = PositionBox()
+HALF = PositionBox(left=.25, top=.25, width=.5, height=.5)
+
+
+def test_the_frames_shape_is_its_box_not_sixteen_by_nine() -> None:
+    """A box 0.25 x 0.5 on a 1,920 x 1,080 screen is a 480 x 540 Frame: a 16:9 photo is beyond a
+    30 % crop limit there, a 9:10 one fits."""
+    target = _target(_frame(TALL_BOX))
+    assert target.output_px == (480, 540)
+    assert target.aspect == pytest.approx(480 / 540)
+    assert shape_fit("image", 3840, 2160, target, .3, HOUSE, size_known=True) == \
+        DoesNotFit(reason="beyond_crop_limit")
+    assert shape_fit("image", 2700, 3000, target, .3, HOUSE, size_known=True) is None
+
+
+def test_a_720p_video_is_judged_by_the_frames_size_from_its_display() -> None:
+    """On a Display of 950 x 540 mm (43 inches across) with large Frames from 40 inches: refused
+    on a whole-screen Frame, accepted on a box half as wide and high (21.5 inches), refused on a
+    Frame whose Display states no size (an unknown size counts as large)."""
+    video = measured("v", 1280, 720, kind="video").model_copy(update={"analysis": None})
+    settings = _settings(large_frame_inches=40)
+    whole, half = _target(_frame(WHOLE)), _target(_frame(HALF))
+    unsized = _target(_frame(WHOLE, display_mm=None))
+    assert math.hypot(*whole.size_mm) / 25.4 == pytest.approx(43.03, abs=.01)
+    assert _refused(_judge(video, whole, settings=settings)) == "below_frame_pixels"
+    assert isinstance(_judge(video, half, settings=settings), Fits)
+    assert unsized.size_mm is None
+    assert large_frame(unsized, settings)
+    assert _refused(_judge(video, unsized, settings=settings)) == "below_frame_pixels"
+
+
+def test_a_frame_that_shows_no_videos_gets_none() -> None:
+    video = measured("v", 1920, 1080, kind="video").model_copy(update={"analysis": None})
+    assert _refused(_judge(video, _target(_frame(WHOLE, video=False)))) == "no_video_here"
+    assert isinstance(_judge(video, _target(_frame(WHOLE))), Fits)
+
+
+def test_a_frame_with_no_known_screen_has_no_target() -> None:
+    """No screen size known: no Frame output, so no shape, and nothing is judged for it."""
+    frame = _frame(WHOLE, screen=None)
+    assert frame.output_px is None
+    assert fit_target(frame) is None

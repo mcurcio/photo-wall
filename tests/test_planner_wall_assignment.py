@@ -16,6 +16,7 @@ from itertools import combinations
 
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
+from support.frame_outputs import frame_outputs_of
 from support.house_time import UTC_HOUSE
 from support.key_content_builders import face, measured
 from support.position import LIGHTING
@@ -101,8 +102,9 @@ def plan(instance: Runtime, frames: dict[str, FrameSetup], photos, *, now: float
         locked_assignments={layer.assignment_id: layer for layer in locks},
         history=history, horizon_seconds=horizon, plan_seconds=plan_seconds,
         max_clock_uncertainty=UNCERTAINTY, limits=limits, settings=fit,
-        frame_outputs={frame: (PROFILES[setup.shape].width_px, PROFILES[setup.shape].height_px)
-                       for frame, setup in frames.items()})
+        frame_outputs=frame_outputs_of({
+            frame: (PROFILES[setup.shape].width_px, PROFILES[setup.shape].height_px)
+            for frame, setup in frames.items()}, inches=24))
 
 
 def layers(projection: Projection) -> tuple[Layer, ...]:

@@ -27,6 +27,7 @@ from pydantic import Field
 from central.catalog import Candidate
 from central.house_time.calculator import house_date
 from central.house_time.model import HouseTime
+from central.installation_models import FrameOutput
 from central.runtime import Intent, Runtime, RuntimeBudgetExceeded
 from central.wall_plan.assignment import (
     FixedShowing,
@@ -42,7 +43,7 @@ from central.wall_plan.assignment import (
     useful_for,
     variant_usable,
 )
-from central.wall_plan.fit import FitTarget
+from central.wall_plan.fit import FitTarget, fit_target
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import (
     LineAnswer,
@@ -276,7 +277,7 @@ class _ProjectionBuilder:
         locks: Mapping[str, Layer],
         limits: PlannerLimits,
         settings: FitSettings,
-        frame_outputs: Mapping[str, tuple[int, int] | None],
+        frame_outputs: Mapping[str, FrameOutput],
         house: HouseTime,
     ) -> None:
         self.house = house          # On this day's date (roadmap 2b)
@@ -423,10 +424,15 @@ class _ProjectionBuilder:
             slot_id=identity, frame_id=binding.frame_id, scene_id=intent.scene_id,
             start=intent.shows_from, end=intent.interval_end,
             fade_in=intent.fade_in_seconds, after_end=intent.after_end,
-            target=FitTarget(profile=binding.profile,
-                             output_px=self.frame_outputs.get(binding.frame_id)),
+            target=self._target(binding.frame_id),
             crop_limit=crop_limit_of(intent.selection, self.settings),
             pool=pool, authored=intent.asset_refs)))
+
+    def _target(self, frame_id: str) -> FitTarget | None:
+        """The slot target of a Frame: `fit_target` of its Frame output; None when it has none
+        (or is absent from `frame_outputs`), so its slot takes no photo."""
+        output = self.frame_outputs.get(frame_id)
+        return None if output is None else fit_target(output)
 
     def _pool_keys(self, pool: str) -> frozenset[str]:
         """The photo library pool keys a slot pool's Sources name (a Source with none adds none)."""
@@ -667,7 +673,7 @@ def project(
     max_clock_uncertainty: float = 0.1,
     limits: PlannerLimits = PlannerLimits(),
     settings: FitSettings,
-    frame_outputs: Mapping[str, tuple[int, int] | None],
+    frame_outputs: Mapping[str, FrameOutput],
 ) -> Projection:
     """Build complete-cycle proposals without changing any supplied state.
 
@@ -677,8 +683,9 @@ def project(
     horizon). `history` is the shown history and the locks' photos
     (central/infra/shown_history_store.py); `max_clock_uncertainty` sets the on-screen extents'
     guard (contracts/on_screen.py). Follow-ups B1: every slot is judged with `settings` (the
-    photo fit settings) against its Frame's `FitTarget`, whose Frame output is
-    `frame_outputs[frame_id]` (None, or a Frame absent from it: judged by shape only); a Scene
+    photo fit settings) against `fit_target(frame_outputs[frame_id])` (frame box run fb-8: a
+    Frame without a Frame output, or absent from it, has no shape, so its slots take no photo and
+    keep the Frame's last still, else the fallback); a Scene
     without its own crop limit follows `settings.crop_limit`. Follow-up S3: `lines` answers the
     runtime's Source revisions and the top of each Scene's line (`_ProjectionBuilder._read_lines`);
     nothing reads a whole pool."""

@@ -6,7 +6,7 @@ only measures and the Player only draws.
 Owner, 2026-10-11: "a photo either fills the frame or it doesn't show (it's incompatible with that
 frame)"; "It's about the ratio, not strict labels"; "Smart crop sounds reasonable". So there are
 no landscape or portrait labels, no mats and no pairs: a photo fits a Frame (a `FitTarget`) when
-some window with the Frame profile's aspect, slid along the photo's free axis
+some window with the Frame's aspect (its Frame output's shape, the Position's box), slid along the photo's free axis
 (contracts/photo_crop.py):
 1. removes no more than the crop limit of the photo's area (`crop_share`; the backstop),
 2. holds at least the Frame output in the pixels of the largest copy Photo Wall can read
@@ -15,9 +15,8 @@ some window with the Frame profile's aspect, slid along the photo's free axis
    unedited RAW photo with full-size copies off is judged at its preview's size, the readable
    size of central/photo_library/rendition.py `readable_size`, never its original's), and the
    copy that Frame needs is no longer than the Player shows (`FitSettings.max_still_edge`,
-   "above_player_limit"); both skipped for a Frame whose Output never reported a size
-   (a guess would refuse photos on a guess; the copy's size, which only sizes a fetch,
-   guesses the profile's pixels instead: central/photo_library/rendition.py `frame_need`),
+   "above_player_limit"); both skipped for an image whose readable size is not measured yet
+   (`size_known` False: nothing is refused on a size no one measured),
 3. keeps every face whole (`faces_judged`: each face of at least `min_face_share` of the photo's
    area, padded by `face_padding` of its own width and height, inside the window), and
 4. cuts no key content: the share of the interest grid it removes (1 - `interest_kept`) is at
@@ -37,9 +36,12 @@ Every tuning value is a `FitSettings` field (central/wall_plan/fit_settings.py; 
 caller; faces and spread are applied here, at judge time, so a change needs no new measurement.
 
 Videos (design "Hand-placed, stacks, video"): a centred window, rule 1, and requirements :186's
-floor instead of rule 2 (a Frame of `large_frame_inches` or more refuses a video whose shorter
-side is under `large_frame_video_short_side`); a Frame whose profile has `video` off shows none.
-Key content is ignored.
+floor instead of rule 2 (a large Frame, `large_frame`, refuses a video whose shorter side is
+under `large_frame_video_short_side`); a Frame with "Shows videos" off shows none. Key content is
+ignored.
+
+A Frame whose screen size is not known has no shape (frame box run, fb-8): `fit_target` answers
+None and nothing is judged for it, so it gets no photo.
 """
 from __future__ import annotations
 
@@ -48,17 +50,18 @@ from collections.abc import Sequence
 from functools import lru_cache
 from typing import Final, Literal
 
-from central.installation_models import FrameOutput
+from central.installation_models import FrameOutput, Pixels, PositiveMm
 from central.photo_library.rendition import FrameNeed, copy_edge
 from central.wall_plan.fit_settings import FIT_SETTING_RANGES, FitSettings
 from central.wall_plan.key_content import InterestGrid, KeyContent, UnitBox
 from contracts.frame_fit import window_holds
-from contracts.models import Fraction, FrameProfile, Model, PhotoCrop
+from contracts.models import Fraction, Model, PhotoCrop
 from contracts.photo_crop import CENTRED, Window, crop_window
 
 # Float slack for the rule's comparisons: a boundary case (4:3 on 16:9 at a 25 % limit, a photo of
 # exactly the Frame's pixels) is judged as its exact arithmetic says.
 _SLACK: Final = 1e-9
+MM_PER_INCH: Final = 25.4
 
 FitRefusal = Literal[
     "beyond_crop_limit",     # "doesn't fit this Frame's shape"
@@ -72,15 +75,40 @@ MediaKind = Literal["image", "video"]
 
 
 class FitTarget(Model):
-    """A Frame as the photo fit rule judges it (follow-ups 2026-10-11, slice B1; owner,
-    2026-10-11: compatibility "measuring against the Frame output and not the Display"): its
-    profile (the shape `width_px / height_px`, `video`, `diagonal_inches`) and its Frame output
-    (`central.installation_models.FrameOutput.output_px`; None until its Output reports a size,
-    when rule 2 is skipped and the analysis says "judged by shape only"). Hashable: the rule's
-    memo is keyed by it."""
+    """A Frame as the photo fit rule judges it (follow-ups 2026-10-11, slice B1; frame box run
+    fb-8; owner, 2026-10-11: compatibility "measuring against the Frame output and not the
+    Display"): its Frame output (`output_px`, whose ratio is its shape), whether it shows videos
+    (`video`, frames.video) and its physical size as it hangs (`size_mm`; None when its Display
+    states none). Built only by `fit_target`. Hashable: the rule's memo is keyed by it."""
 
-    profile: FrameProfile
-    output_px: tuple[int, int] | None = None
+    output_px: tuple[Pixels, Pixels]
+    video: bool
+    size_mm: tuple[PositiveMm, PositiveMm] | None
+
+    @property
+    def aspect(self) -> float:
+        """output_px[0] / output_px[1]: the Frame's shape (contracts/frame_fit.py
+        `Placement.aspect` of the same sides)."""
+        return self.output_px[0] / self.output_px[1]
+
+
+def fit_target(frame: FrameOutput) -> FitTarget | None:
+    """The FitTarget of `frame`; None when its `output_px` is None (no known screen: no shape).
+    The one place a Frame becomes what the fit rule judges: the Planner, authoring, the source
+    preview and the fit analysis ask here. Pure."""
+    if frame.output_px is None:
+        return None
+    return FitTarget(output_px=frame.output_px, video=frame.video, size_mm=frame.size_mm)
+
+
+def large_frame(target: FitTarget, settings: FitSettings) -> bool:
+    """Whether `target` is a large Frame for videos (requirements :186): True when its size is
+    not known (so "A 720p video must never be assigned to a 40-inch Frame" holds on a Display
+    that states no size), else when its diagonal, `hypot(*size_mm) / 25.4` inches, is at least
+    `settings.large_frame_inches`. The one home of "a large Frame". Pure."""
+    if target.size_mm is None:
+        return True
+    return math.hypot(*target.size_mm) / MM_PER_INCH >= settings.large_frame_inches
 
 
 def band(aspect: float, crop_limit: float) -> tuple[float, float]:
@@ -109,42 +137,39 @@ class DoesNotFit(Model):
 FitVerdict = Fits | DoesNotFit
 
 
-def crop_share(width: int, height: int, profile: FrameProfile) -> float:
-    """The share of the photo's area the largest profile-aspect window removes: 1 - (the
-    smaller of the two aspects / the larger). 0 for equal aspects. Pure; ValueError for a
-    non-positive size."""
+def crop_share(width: int, height: int, aspect: float) -> float:
+    """The share of the photo's area the largest window of the Frame's `aspect` (width / height)
+    removes: 1 - (the smaller of the two aspects / the larger). 0 for equal aspects. Pure;
+    ValueError for a non-positive size."""
     if width <= 0 or height <= 0:
         raise ValueError("positive photo dimensions required")
-    photo, frame = width / height, _aspect(profile)
-    return 1 - min(photo, frame) / max(photo, frame)
+    photo = width / height
+    return 1 - min(photo, aspect) / max(photo, aspect)
 
 
 def shape_fit(kind: MediaKind, width: int, height: int, target: FitTarget, crop_limit: float,
-              settings: FitSettings) -> DoesNotFit | None:
+              settings: FitSettings, *, size_known: bool) -> DoesNotFit | None:
     """The size-only part of the rule, usable before key content is measured: `no_video_here`
-    (a video on a profile with `video` off), then `beyond_crop_limit` (rule 1), then
+    (a video on a Frame with `video` off), then `beyond_crop_limit` (rule 1), then
     `below_frame_pixels` (rule 2 for an image, against `target.output_px`; the :186 floor for a
-    video), then `above_player_limit` (an image whose copy for this Frame, `copy_edge`, is longer
-    than `settings.max_still_edge`); an image's two size tests are skipped when `output_px` is
-    None. None: the photo passes on its size alone. `width` and `height` are the size it is
-    judged at, upright: an image's readable size (`central.catalog.judged_size`), a video's
-    original. Pure."""
-    profile = target.profile
-    if kind == "video" and not profile.video:
+    video on a `large_frame`), then `above_player_limit` (an image whose copy for this Frame,
+    `copy_edge`, is longer than `settings.max_still_edge`); an image's two size tests are skipped
+    when `size_known` is False (its readable size is not measured yet). None: the photo passes on
+    its size alone. `width` and `height` are the size it is judged at, upright: an image's
+    readable size (`central.catalog.judged_size`), a video's original. Pure."""
+    if kind == "video" and not target.video:
         return DoesNotFit(reason="no_video_here")
-    if crop_share(width, height, profile) > crop_limit + _SLACK:
+    if crop_share(width, height, target.aspect) > crop_limit + _SLACK:
         return DoesNotFit(reason="beyond_crop_limit")
     if kind == "video":
-        large = profile.diagonal_inches >= settings.large_frame_inches
-        if large and min(width, height) < settings.large_frame_video_short_side:
+        if large_frame(target, settings) and min(width, height) < settings.large_frame_video_short_side:
             return DoesNotFit(reason="below_frame_pixels")
         return None
-    if target.output_px is None:
+    if not size_known:
         return None
-    if not window_holds(width, height, _aspect(profile), target.output_px):
+    if not window_holds(width, height, target.aspect, target.output_px):
         return DoesNotFit(reason="below_frame_pixels")
-    need = FrameNeed(aspect=_aspect(profile), width=target.output_px[0],
-                     height=target.output_px[1])
+    need = FrameNeed(aspect=target.aspect, width=target.output_px[0], height=target.output_px[1])
     if copy_edge((width, height), need) > settings.max_still_edge:
         return DoesNotFit(reason="above_player_limit")
     return None
@@ -154,16 +179,17 @@ def fitting_outputs(kind: MediaKind, width: int, height: int, frames: Sequence[F
                     settings: FitSettings) -> tuple[FrameOutput, ...]:
     """The Frames a photo judged at `width` x `height` could fill under any Scene: those whose
     `shape_fit` passes at the widest crop limit `FIT_SETTING_RANGES` allows. A superset of the
-    Frames any Scene places it on (a Scene's own crop limit, faces and interest only narrow it),
+    Frames any Scene places it on (a Scene's own crop limit, faces and interest only narrow it;
+    a Frame with no `fit_target` is never one),
     so the one copy sized for them (central/photo_library/rendition.py `wall_need`) holds every
     Frame it is shown on; it may be a step larger than the Scenes playing now need. A video
     fills none here: its copy's size is the recipe's, never the wall's. Pure."""
     if kind == "video":
         return ()
     widest = FIT_SETTING_RANGES["crop_limit"][1]
-    return tuple(frame for frame in frames if shape_fit(
-        kind, width, height, FitTarget(profile=frame.profile, output_px=frame.output_px),
-        widest, settings) is None)
+    return tuple(frame for frame in frames
+                 if (target := fit_target(frame)) is not None
+                 and shape_fit(kind, width, height, target, widest, settings, size_known=True) is None)
 
 
 def interest_kept(grid: InterestGrid, window: Window) -> float:
@@ -234,14 +260,13 @@ def judge(kind: MediaKind, width: int, height: int, key: KeyContent | None, targ
         raise ValueError("a crop limit inside (0, 1) is required")
     if kind == "image" and key is None:
         raise ValueError("an image is judged only once its key content is measured")
-    refused = shape_fit(kind, width, height, target, crop_limit, settings)
+    refused = shape_fit(kind, width, height, target, crop_limit, settings, size_known=True)
     if refused is not None:
         return refused
-    profile = target.profile
-    share = crop_share(width, height, profile)
+    share = crop_share(width, height, target.aspect)
     if kind == "video" or key is None:
         return Fits(crop=CENTRED, crop_share=share, interest_kept=1.0)
-    aspect = _aspect(profile)
+    aspect = target.aspect
     faces = faces_judged(key, settings)
     windows = [(offset, crop_window(PhotoCrop(offset=offset), width, height, aspect))
                for offset in _offsets(settings.window_steps)]
@@ -274,10 +299,6 @@ def _marginals(grid: InterestGrid) -> tuple[tuple[float, ...], tuple[float, ...]
 def _offsets(steps: int) -> tuple[float, ...]:
     """The window offsets tried: k / steps for k = 0..steps, plus 0.5."""
     return tuple(sorted({k / steps for k in range(steps + 1)} | {0.5}))
-
-
-def _aspect(profile: FrameProfile) -> float:
-    return profile.width_px / profile.height_px
 
 
 def _covered(low: float, high: float, cell_low: float, cell_high: float) -> float:

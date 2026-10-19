@@ -2,9 +2,11 @@
 
 import pytest
 from support.frame_media import seed_variant
+from support.frame_outputs import target_of
 from support.key_content_builders import banded_grid
 from support.measured_photos import measure, measure_all
 from test_authored_media import asset, setup_source
+from test_registry import enroll
 
 from central.coordination import Coordinator
 from central.db import ProcessTransactionClock
@@ -12,25 +14,30 @@ from central.kernel.job_types import PrepareMedia
 from central.media_repository import MediaRepository, prepare_lock
 from central.registry import FrameCreate, RegistryError
 from central.runtime import Child, Contribution, Scene
-from central.wall_plan.fit import FitTarget
 from central.wall_plan.fit_settings import FitSettings
 from contracts.models import FrameProfile, Variant
 
 HOUSE = FitSettings()
 
 
-def full_screen(profile: FrameProfile) -> FitTarget:
-    """A Frame full screen on a Display of its profile's size (its Frame output, follow-ups B1)."""
-    return FitTarget(profile=profile, output_px=(profile.width_px, profile.height_px))
+PORTRAIT = target_of(1080, 1920, inches=24)
+LANDSCAPE = target_of(1920, 1080, inches=24)
 
 
-def add_frame(registry, frame_id: str, *, portrait: bool = True):
+def add_frame(registry, frame_id: str, *, portrait: bool = True, bound: bool = True,
+              diagonal_inches: float = 24) -> None:
+    """A Frame, by default bound full screen to an Output of its own pixels (its Frame output:
+    frame box run fb-8, a Frame with no known screen has no shape and takes no photo)."""
     width_px, height_px = (1080, 1920) if portrait else (1920, 1080)
     width_mm, height_mm = (300, 500) if portrait else (500, 300)
-    return registry.create_frame(FrameCreate(
+    registry.create_frame(FrameCreate(
         id=frame_id, width_mm=width_mm, height_mm=height_mm,
-        profile=FrameProfile(width_px=width_px, height_px=height_px, diagonal_inches=24),
+        profile=FrameProfile(width_px=width_px, height_px=height_px,
+                             diagonal_inches=diagonal_inches),
     ))
+    if bound:
+        player, _, _ = enroll(registry, count=1, size=(width_px, height_px))
+        registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
 
 
 def authored_scene(*contributions, scene_id="authored-scene"):
@@ -46,16 +53,13 @@ def test_source_candidates_filters_originals_with_the_planner_policy(registry):
     landscape = asset(1, width=4000, height=2000)
     portrait = asset(2, width=2000, height=4000)
     repo, spec, _ = setup_source(registry, assets=(landscape, portrait))
-    portrait_profile = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
-    landscape_profile = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
-
     assert [c["asset_id"] for c in repo.source_candidates(
-        spec.source_ref, target=full_screen(portrait_profile), settings=HOUSE)["candidates"]] == [
+        spec.source_ref, target=PORTRAIT, settings=HOUSE)["candidates"]] == [
         portrait.asset_id]
     # Roadmap 5a: the ratio decides both ways, so a portrait photo does not fill a landscape
     # Frame either (owner, 2026-10-11: "a photo either fills the frame or it doesn't show").
     assert [c["asset_id"] for c in repo.source_candidates(
-        spec.source_ref, target=full_screen(landscape_profile), settings=HOUSE)["candidates"]] == [
+        spec.source_ref, target=LANDSCAPE, settings=HOUSE)["candidates"]] == [
         landscape.asset_id]
 
 
@@ -86,7 +90,6 @@ def test_source_candidates_serve_the_planners_standing_for_the_frame(registry):
     usable, wrong_shape, failed, retrying, waiting = (
         asset(i, width=2160, height=3840) for i in range(1, 6))
     repo, spec, _ = setup_source(registry, assets=(usable, wrong_shape, failed, retrying, waiting))
-    portrait = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
     still = dict(size=10, media_type="image/jpeg")
     add_frame(registry, "need")   # the wall's need names the recipe
     _prepared(registry, usable.asset_id,
@@ -100,7 +103,7 @@ def test_source_candidates_serve_the_planners_standing_for_the_frame(registry):
     _prepared(registry, retrying.asset_id, failure="asset_missing",
               retry_not_before=registry.clock.utc() + 60)
 
-    served = repo.source_candidates(spec.source_ref, target=full_screen(portrait),
+    served = repo.source_candidates(spec.source_ref, target=PORTRAIT,
                                     settings=HOUSE)["candidates"]
     assert {c["asset_id"]: c["standing"] for c in served} == {
         usable.asset_id: "usable",
@@ -188,8 +191,7 @@ def test_frame_filtered_api_and_atomic_save_share_original_eligibility(registry)
     portrait = asset(2, width=2000, height=4000)
     low_video = asset(3, width=1280, height=720, kind="video")
     _, spec, _ = setup_source(registry, assets=(landscape, portrait, low_video))
-    registry.create_frame(FrameCreate(id="large", width_mm=300, height_mm=500,
-        profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=55)))
+    add_frame(registry, "large", diagonal_inches=55)   # its Display states no size: large
     with client_for(registry) as client:
         headers = {"Authorization": "Bearer " + ADMIN}
         route = f"/v1/operator/sources/{spec.source_ref}/candidates"
@@ -215,7 +217,8 @@ def test_the_candidates_route_lists_what_fits_and_counts_what_it_skips(registry)
     `fit`, and counts every skipped photo by its reason; a crop limit outside 5-60 % answers
     422. Owner, 2026-10-11: "It's about the ratio, not strict labels". Follow-ups B1: the
     Frame's pixels are its Frame output (here full screen on the enrolled 1920 x 1080 Output);
-    before it is bound it has none and is judged by shape only."""
+    before it is bound it has none, so it has no shape and nothing is judged for it (frame box
+    run fb-8: "frame_size_unknown")."""
     from support.position import save_position
     from test_authored_media import ADMIN, client_for
     from test_registry import enroll
@@ -229,12 +232,12 @@ def test_the_candidates_route_lists_what_fits_and_counts_what_it_skips(registry)
     _, spec, _ = setup_source(registry, assets=(wide, tall, banded, unmeasured, small, square))
     measure_all(registry, (wide, tall, small, square))
     measure(registry, banded, grid=banded_grid(columns=16, rows=12, top=0.2, bottom=0.2))
-    add_frame(registry, "wide", portrait=False)
+    add_frame(registry, "wide", portrait=False, bound=False)
     with client_for(registry) as client:
         headers = {"Authorization": "Bearer " + ADMIN}
         route = f"/v1/operator/sources/{spec.source_ref}/candidates"
-        unbound = client.get(route, params={"frame_id": "wide"}, headers=headers).json()
-        assert small.asset_id in {c["asset_id"] for c in unbound["candidates"]}
+        unbound = client.get(route, params={"frame_id": "wide"}, headers=headers)
+        assert (unbound.status_code, unbound.json()) == (409, {"error": "frame_size_unknown"})
         player, _, _ = enroll(registry)
         registry.bind("wide", player["player_id"], "HDMI-A-1", expected_generation=0)
         save_position(registry, "wide")
@@ -255,3 +258,18 @@ def test_the_candidates_route_lists_what_fits_and_counts_what_it_skips(registry)
                               headers=headers).status_code == 422
         whole = client.get(route, headers=headers).json()
         assert whole["count"] == 6 and "skipped" not in whole
+
+
+def test_authoring_onto_a_frame_with_no_known_screen_is_refused(registry):
+    """Frame box run fb-8: a Frame whose screen size is not known has no shape, so no photo can
+    be judged for it; authoring one onto it is refused and nothing is written."""
+    portrait = asset(2, width=2000, height=4000)
+    _, spec, _ = setup_source(registry, assets=(portrait,))
+    add_frame(registry, "left", bound=False)
+    coordinator = Coordinator(registry.db, registry.clock)
+    scene = authored_scene(Contribution(target="frame:left", asset_refs=(portrait.asset_id,)))
+    with pytest.raises(RegistryError, match="authored_frame_size_unknown") as refused:
+        coordinator.configure_authored_scene(scene, spec.source_ref, (portrait.asset_id,))
+    assert refused.value.status == 409
+    assert count_authored(registry) == 0
+    assert coordinator.runtime.read().export_state()["scenes"] == {}

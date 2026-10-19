@@ -14,6 +14,7 @@ from media_queue import RecordingMediaQueue
 from PIL import Image
 from public_media import MediaCache, request_photo
 from support.frame_media import a_frame
+from support.frame_outputs import frame_output_of
 from support.library_store_fake import FakeLibraryStore, RevisionRecord
 from support.photo_pools import photo, seed_pool
 
@@ -22,14 +23,12 @@ from central.assets.store import CacheStore
 from central.db import Database, ProcessTransactionClock
 from central.infra.key_content_store import PgKeyContent
 from central.infra.transactions import PgTransactions
-from central.installation_models import FrameOutput
 from central.kernel.assets import MediaReady
 from central.kernel.handling import TerminalFailure, TransientFailure
 from central.kernel.job_types import PrepareMedia
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository, StoreLimits
 from central.photo_library.model import LibraryAsset, MeasuredCopy, Unreachable
-from contracts.models import FrameProfile
 from contracts.time import Clock
 from media.library_client import FaceBox, FetchedRendition, LibraryUnavailable
 from media.models import MediaError
@@ -42,7 +41,6 @@ from media.task_queue import (
 from media.worker import MediaWorker, WorkerLimits, _media_loop
 
 SECRET = "PUBLIC_SYNTHETIC_PRIVATE_KEY"
-PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 PREVIEW = MeasuredCopy(name="preview", media_type="image/jpeg", width=810, height=1440)
 ORIGINAL = b"public synthetic original bytes"
 VARIANT = b"public synthetic prepared bytes"
@@ -140,9 +138,8 @@ def library_store(clock):
     library = FakeLibraryStore(clock)
     library.add_connection("fixture", "https://immich.invalid/api", SECRET)
     library.outputs = (
-        FrameOutput(frame_id="hall", profile=PORTRAIT, turn=0, output_px=(1080, 1920),
-                    display_px=(1080, 1920)),
-        FrameOutput(frame_id="lounge", profile=PORTRAIT, turn=0, output_px=None, display_px=None))
+        frame_output_of("hall", (1080, 1920), inches=24),
+        frame_output_of("lounge", None))
     return library
 
 

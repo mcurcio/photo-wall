@@ -46,7 +46,7 @@ Size = tuple[int, int]
 
 class FrameNeed(Model):
     """A window of `aspect` (width / height) holding `width` x `height` pixels. One Frame's need
-    (`frame_need`): its profile's shape, the window the Player cuts, at its Frame output. The
+    (`frame_need`): its Frame output's shape, the window the Player cuts, at that output. The
     wall's need of one photo (`wall_need`): the photo's own shape at a step's long edge."""
 
     aspect: Positive
@@ -136,20 +136,21 @@ def copy_to_measure(asset: LibraryAsset, full_size_copies: bool | None,
 
 # --- What a Frame and the wall ask of a copy -------------------------------------------------
 
-def frame_need(frame: FrameOutput) -> FrameNeed:
-    """One Frame's need. A Frame whose output is unknown (unbound, or its Pi has not reported)
-    asks its profile's size here, while the fit rule judges it by shape only
-    (central/wall_plan/fit.py `shape_fit`): the two answer different questions and vary
-    independently. A copy that guesses generously costs bytes; a fit rule that guessed would
-    refuse photos on a guess. Pure."""
-    profile = frame.profile
-    width, height = frame.output_px or (profile.width_px, profile.height_px)
-    return FrameNeed(aspect=profile.width_px / profile.height_px, width=width, height=height)
+def frame_need(frame: FrameOutput) -> FrameNeed | None:
+    """One Frame's need: its Frame output, at that output's shape. None when its Frame output is
+    unknown (unbound, or no screen size known): such a Frame has no shape and is judged for no
+    photo (central/wall_plan/fit.py `fit_target`), so it asks no copy either. Pure."""
+    if frame.output_px is None:
+        return None
+    width, height = frame.output_px
+    return FrameNeed(aspect=width / height, width=width, height=height)
 
 
 def rendition_needs(frames: Sequence[FrameOutput]) -> tuple[FrameNeed, ...]:
-    """One FrameNeed per distinct (aspect, width, height) over `frames`, sorted. Pure."""
-    distinct = {(need.aspect, need.width, need.height) for need in map(frame_need, frames)}
+    """One FrameNeed per distinct (aspect, width, height) over `frames` with a Frame output
+    (`frame_need` not None), sorted. Pure."""
+    distinct = {(need.aspect, need.width, need.height) for need in map(frame_need, frames)
+                if need is not None}
     return tuple(FrameNeed(aspect=aspect, width=width, height=height)
                  for aspect, width, height in sorted(distinct))
 
@@ -194,8 +195,8 @@ def wall_need(photo_size: Size, fitting_outputs: Sequence[FrameOutput],
     Pure; ValueError for an empty ladder."""
     if not ladder:
         raise ValueError("a copy ladder needs at least one step")
-    largest = max((copy_edge(photo_size, frame_need(frame)) for frame in fitting_outputs),
-                  default=0)
+    largest = max((copy_edge(photo_size, need) for frame in fitting_outputs
+                   if (need := frame_need(frame)) is not None), default=0)
     step = next((step for step in ladder if step >= largest), ladder[-1])
     return need_at(photo_size, step)
 

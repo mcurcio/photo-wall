@@ -9,6 +9,7 @@ preview is measured nothing guesses it, the photo is not placed and a measuremen
 from __future__ import annotations
 
 import pytest
+from support.frame_outputs import frame_outputs_of, target_of
 from support.house_time import UTC_HOUSE
 from support.key_content_builders import key_content
 from support.position import LIGHTING
@@ -19,7 +20,7 @@ from central.photo_library.rendition import copy_ladder, copy_to_measure, readab
 from central.planner import project
 from central.runtime import Contribution, Runtime, Scene
 from central.wall_plan.assignment import fit_of
-from central.wall_plan.fit import DoesNotFit, Fits, FitTarget
+from central.wall_plan.fit import DoesNotFit, Fits
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import Measured
 from central.wall_plan.order import PoolLines, WallHistory
@@ -66,7 +67,7 @@ def test_an_unedited_raw_with_full_size_copies_off_is_read_at_its_preview():
 @pytest.mark.parametrize(("profile", "fits"), [(P1080, False), (P720, True)])
 def test_the_raw_preview_is_refused_on_1080p_and_accepted_on_720p(profile, fits):
     """Acceptance 1. Mutation probe 1 (judge the original's size): the 1080p case fits."""
-    target = FitTarget(profile=profile, output_px=(profile.width_px, profile.height_px))
+    target = target_of(profile.width_px, profile.height_px, inches=profile.diagonal_inches)
     verdict = fit_of(candidate((1440, 960)), target, HOUSE.crop_limit, HOUSE)
     if fits:
         assert isinstance(verdict, Fits)
@@ -86,7 +87,8 @@ def _plan(photo: Candidate, profile: FrameProfile):
         lines=PoolLines({"pool": SourcePool(source_ref="pool", ready=True, candidates=(photo,))}),
         authored_candidates={}, locked_assignments={}, history=WallHistory(),
         horizon_seconds=300, plan_seconds=600, settings=HOUSE,
-        frame_outputs={"f": (profile.width_px, profile.height_px)})
+        frame_outputs=frame_outputs_of({"f": (profile.width_px, profile.height_px)},
+                                       inches=profile.diagonal_inches))
 
 
 def test_an_unmeasured_raw_is_not_placed_and_its_measurement_is_asked_for():
