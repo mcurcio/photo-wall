@@ -95,6 +95,10 @@ export interface FrameTurnChange {
   turn: 0 | 90 | 180 | 270;
 }
 
+export interface FrameVideoChange {
+  video: boolean;
+}
+
 export type HeardEntityView = HeardLightView | HeardSensorView;
 
 export interface HeardLightView {

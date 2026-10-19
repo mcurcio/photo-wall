@@ -79,6 +79,7 @@ class FrameInventory(Model):
     width_mm: float = Field(gt=0)
     height_mm: float = Field(gt=0)
     profile: FrameProfile
+    video: bool                               # Shows videos: may the Planner put a video here (frames.video)
     generation: int = Field(ge=0)
     calibration: Calibration
     lighting: FrameLighting                   # the Frame's lights, mat and paper (decision 0028), on its binding

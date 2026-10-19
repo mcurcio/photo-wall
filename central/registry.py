@@ -13,7 +13,7 @@ from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
-from pydantic import Field, model_validator
+from pydantic import Field, StrictBool, model_validator
 
 from central.db import Database
 from central.displays.model import Readiness
@@ -131,6 +131,12 @@ class FramePlacement(Model):
 class FrameProfileReplacement(Model):
     profile: FrameProfile
     expected_generation: int = Field(ge=0)
+
+
+class FrameVideoChange(Model):
+    """PUT /v1/operator/frames/{frame_id}/video: whether the Frame shows videos (its own setting;
+    frame box run, bead fb-5). Strict: a JSON "false" or 0 is refused."""
+    video: StrictBool
 
 
 class FrameTurnChange(Model):
@@ -521,9 +527,10 @@ class Registry:
                 calibration = Calibration()
                 lighting = self.lighting.new_frame_within(PgTransaction(conn), UPGRADE_DISPLAY_LIGHT)
                 conn.execute("INSERT INTO frames(id,name,surface_id,x_mm,y_mm,width_mm,height_mm,"
-                             "profile,calibration,lighting) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                             "profile,video,calibration,lighting) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                              (frame.id, name, frame.surface_id, frame.x_mm, frame.y_mm,
                               frame.width_mm, frame.height_mm, Jsonb(frame.profile.model_dump()),
+                              frame.profile.video,   # transitional: fb-14 takes video from FrameCreate
                               Jsonb(calibration.model_dump(mode="json")), Jsonb(lighting.model_dump(mode="json"))))
                 record_created_in(conn, frame.id, created_record(position_values(calibration, lighting)))
                 _ensure_wall(conn, frame.surface_id)
@@ -544,6 +551,24 @@ class Registry:
         except UniqueViolation as exc:
             raise RegistryError(_name_or(exc, "frame_exists")) from exc
         return {"frame_id": frame_id, "name": name}
+
+    def set_frame_video(self, frame_id: str, video: bool) -> dict:
+        """Whether the Frame shows videos (frames.video): {"frame_id", "video", "changed"}.
+        RegistryError unknown_frame 404. Last write wins: no generation, configuration revision or
+        Position check (it changes planning, not the picture), so a ready Frame stays ready; audits
+        "frame_video_changed" {"video"} when it changes. The Planner reads it at its next plan, as
+        it reads a saved photo-fit setting (nothing to wake). Until fb-14 drops the Frame profile,
+        the profile's "video" is written with it (transitional)."""
+        with self.db.transaction() as conn:
+            row = conn.execute("SELECT video FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
+            if row is None:
+                raise RegistryError("unknown_frame", 404)
+            if row["video"] == video:
+                return {"frame_id": frame_id, "video": video, "changed": False}
+            conn.execute("UPDATE frames SET video=%s, profile=jsonb_set(profile, '{video}', to_jsonb(%s::boolean)) "
+                         "WHERE id=%s", (video, video, frame_id))
+            self._audit(conn, "frame_video_changed", frame_id, {"video": video})
+        return {"frame_id": frame_id, "video": video, "changed": True}
 
     def name_wall(self, surface_id: str, naming: WallNaming) -> WallInventory:
         """Name a wall and label its room (#92). RegistryError unknown_wall 404."""
@@ -716,6 +741,8 @@ class Registry:
         row = {"generation": write_position_in(
             conn, frame_id, profile_changed_record(position_values(calibration, FrameLighting.model_validate(frame["lighting"]))),
             calibration=invalidated, profile=profile)}
+        # Transitional (fb-14 deletes): the profile's video is the Frame's Shows videos too.
+        conn.execute("UPDATE frames SET video=%s WHERE id=%s", (profile.video, frame_id))
         self._audit(conn, "frame_profile_changed", frame_id,
                     {"profile": profile.model_dump(), **row})
         return {"profile": profile.model_dump(), **row, "changed": True}
@@ -888,7 +915,7 @@ class Registry:
                                "FROM players ORDER BY registered_at,id").fetchall()
         outputs = conn.execute("SELECT player_id,output_id,observation FROM outputs "
                                "ORDER BY player_id,output_id").fetchall()
-        frames = conn.execute("SELECT f.id,f.name,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,"  # noqa: S608
+        frames = conn.execute("SELECT f.id,f.name,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,f.video,"  # noqa: S608
                               "f.calibration,f.lighting,f.turn,f.configuration_revision,"
                               f"b.player_id,b.output_id,{POSITION_COLUMNS},{SCREEN_COLUMNS} FROM frames f "
                               f"LEFT JOIN bindings b ON b.frame_id=f.id {SCREEN_JOIN} ORDER BY f.id").fetchall()

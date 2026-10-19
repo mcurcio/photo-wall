@@ -81,6 +81,7 @@ from central.registry import (
     FramePlacement,
     FrameProfileReplacement,
     FrameTurnChange,
+    FrameVideoChange,
     Registry,
     RegistryError,
 )
@@ -713,6 +714,12 @@ def create_app(
         # How the Frame's screen hangs (render redesign S2): the Frame's own setting, sent in its
         # Output's document; Registry owns the write, the generation and the Node's wake.
         return registry.turn_frame(frame_id, request.turn, expected_generation=request.expected_generation)
+
+    @app.put("/v1/operator/frames/{frame_id}/video", dependencies=[Depends(admin)])
+    def set_frame_video(frame_id: Identifier, request: FrameVideoChange) -> dict:
+        # Shows videos (frame box run, fb-5): the Frame's own setting, last write wins; it changes
+        # what the Planner may put on the Frame, never its picture, so no generation is asked.
+        return registry.set_frame_video(frame_id, request.video)
 
     @app.delete("/v1/operator/frames/{frame_id}", dependencies=[Depends(admin)])
     def remove_frame(frame_id: Identifier) -> dict:
