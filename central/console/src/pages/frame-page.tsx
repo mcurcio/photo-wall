@@ -256,6 +256,8 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
         {session && (
           // The Frame's Position history (its fit and its lighting), with Restore into the draft.
           <PositionHistory key={`${frameId}:position-history`} frameId={frameId} adjustment={adjustment}
+            size={outputSize(snapshot, frame)}
+            hardwareHref={formatRoute({ section: "wall", id: frameId, tab: "hardware" })}
             roomNames={lightNames(rooms)}
             profiles={profiles ?? []} />
         )}

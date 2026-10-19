@@ -53,7 +53,7 @@ def sessions(page, registry):
 
 
 def _position(page):
-    return page.get_by_role("region", name="Position", exact=True)
+    return page.get_by_role("region", name="Where the picture sits on the screen", exact=True)
 
 
 def _sent(fake, after):
@@ -83,7 +83,7 @@ def test_the_tab_edits_one_rectangle_with_no_fit_choice_rotation_or_trim(page, r
         expect(position.get_by_role("radio", name="Corners", exact=True)).to_have_count(0)
         expect(position.get_by_role("slider", name="Angle", exact=True)).to_have_count(0)
         expect(position.get_by_role("radio", name="90°", exact=True)).to_have_count(0)
-        expect(position).to_contain_text("The screen hangs: Upright.")
+        expect(position).to_contain_text("This screen hangs upright.")
         position.get_by_role("button", name="Exact values", exact=True).click()
         expect(position).not_to_contain_text(re.compile(r"trim|rotation|corner", re.I))
         expect(position.get_by_label(re.compile(r"^Trim"))).to_have_count(0)

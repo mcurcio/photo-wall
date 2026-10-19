@@ -26,6 +26,11 @@ export interface LiveAdjustmentProps {
   unconfirmed?: string;
   /** The tab's controls. */
   children: React.ReactNode;
+  /** Central's refusals the tab says itself (in `refusal`), by code: they get no card here. */
+  ownRefusals?: ReadonlySet<string>;
+  /** A change the tab refused, or Central refused for it: its card, its sentence for the bar on a
+   * phone, and why Done is not offered while it stands (none: Done keeps what the Pi presents). */
+  refusal?: { card: React.ReactNode; line: string; blocksDone?: string };
 }
 
 function unavailableWords(adjustment: Adjustment, noun: string, piHref: string | null): React.ReactNode | null {
@@ -61,12 +66,15 @@ function statusWords(adjustment: Adjustment): string {
 
 /**
  * A live adjustment's tab (Position, Picture) as a LivePreviewEditor: the controls, Central's
- * refusals as an inline ProblemCard (its code under Details), and the bottom bar with the Pi's
- * acknowledgement (Central's time of it), **Done** and **Revert**.
+ * refusals as an inline ProblemCard (its code under Details) unless the tab says them itself (a
+ * refused change: `ownRefusals`, `refusal`), and the bottom bar with the Pi's acknowledgement
+ * (Central's time of it), **Done** and **Revert**.
  */
-export function LiveAdjustment({ adjustment, noun, piHref, unconfirmed, children }: LiveAdjustmentProps) {
+export function LiveAdjustment({
+  adjustment, noun, piHref, unconfirmed, children, ownRefusals, refusal,
+}: LiveAdjustmentProps) {
   const reason = unavailableWords(adjustment, noun, piHref);
-  const { error } = adjustment;
+  const error = adjustment.error !== null && ownRefusals?.has(adjustment.error.code) ? null : adjustment.error;
   const notes = [
     ...(adjustment.leftAt !== null
       ? [`Your unsaved changes were reverted at ${timeOfDay(adjustment.leftAt)} because you left this Frame's page.`]
@@ -93,7 +101,10 @@ export function LiveAdjustment({ adjustment, noun, piHref, unconfirmed, children
       }}
       status={statusWords(adjustment)}
       notes={notes}
-      problem={error === null ? undefined : (
+      problemLine={refusal?.line}
+      lastRefused={refusal !== undefined}
+      doneBlocked={refusal?.blocksDone}
+      problem={refusal !== undefined ? refusal.card : error === null ? undefined : (
         <ProblemCard
           scope="central"
           variant="inline"

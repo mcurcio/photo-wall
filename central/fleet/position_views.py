@@ -12,6 +12,7 @@ from pydantic import AwareDatetime, Field
 
 from central.fleet.position_history import PositionEntry, PositionEntryKind, PositionRestoreRefusal
 from central.installation_models import FrameRefView
+from contracts.display_turn import DisplayTurn
 from contracts.frame_lighting import FrameLighting
 from contracts.models import Model, RectangleFit
 
@@ -23,9 +24,11 @@ class ProfilePxView(Model):
 
 
 class MadeForView(Model):
-    """What an entry was made for: the profile whose aspect its rectangle has and the Display seen on the Frame's
-    port then (None: none)."""
+    """What an entry was made for: the profile whose aspect its rectangle has, how the screen hung (`turn`,
+    degrees clockwise: its rectangle is in fractions of the screen as it hung) and the Display seen on the
+    Frame's port then (None: none)."""
     profile_px: ProfilePxView
+    turn: DisplayTurn
     display_id: UUID | None
 
 
@@ -72,7 +75,7 @@ def position_entry_view(entry: PositionEntry, *, frame_name: str,
         number=entry.number, at=entry.at, session_id=record.session_id, restored_from=record.restored_from,
         fit=record.values.fit, lighting=record.values.lighting,
         made_for=MadeForView(profile_px=ProfilePxView(width=width, height=height),
-                             display_id=entry.made_for.display_id),
+                             turn=entry.made_for.turn, display_id=entry.made_for.display_id),
         restore_refusal=restore_refusal)
 
 

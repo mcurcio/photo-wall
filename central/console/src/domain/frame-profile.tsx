@@ -13,7 +13,7 @@ import { Inline } from "../ui/stack";
 import { Switch } from "../ui/switch";
 import { pixelSize } from "../timeWords.js";
 import { useMutate } from "../useMutate.js";
-import { type Turn, TURN_WORDS } from "./turn-words";
+import { HANGS, type Turn } from "./turn-words";
 
 interface Profile {
   width_px?: number;
@@ -171,13 +171,20 @@ export function FrameProfile({ snapshot, frame, draftFit }: FrameProfileProps) {
       <FactRow label="Pixel height" tone="set">{`${profile.height_px ?? "—"} px`}</FactRow>
       <FactRow label="Diagonal" tone="set">{`${profile.diagonal_inches ?? "—"} in`}</FactRow>
       <FactRow label="Video capable" tone="set">{profile.video ? "yes" : "no"}</FactRow>
+      {/* A turned screen: the profile is its size as it hangs, the display's own size the other way round. */}
+      {(turn === 90 || turn === 270) && usable(profile) && usable(observation) ? (
+        <Note>
+          {`${pixelSize(profile.width_px!, profile.height_px!)} px as it hangs: the display is `
+            + `${pixelSize(observation!.width_px!, observation!.height_px!)}, turned.`}
+        </Note>
+      ) : null}
       {mismatch && observation && draft === null ? (
         <ProblemCard
           scope="setup"
           subject="Frame profile"
           variant="inline"
           verdict={{ severity: "todo", label: "Check the Display", receipt: null }}
-          what={`The Pi reported its Display at ${pixelSize(observation.width_px!, observation.height_px!)}, but this Frame's profile is ${pixelSize(profile.width_px!, profile.height_px!)}. The screen hangs: ${TURN_WORDS[turn]}.`}
+          what={`The Pi reported its Display at ${pixelSize(observation.width_px!, observation.height_px!)}, but this Frame's profile is ${pixelSize(profile.width_px!, profile.height_px!)}. This screen hangs ${HANGS[turn]}.`}
           doing={null}
           action={{ label: "Edit Frame profile", onAction: begin }}
           details={(

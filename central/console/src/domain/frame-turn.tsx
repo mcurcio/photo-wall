@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import { turnFrame } from "../framesApi.js";
 import { formatRoute } from "../routes.js";
+import { timeOfDay } from "../timeWords.js";
 import { Note } from "../patterns/fact-row";
 import { OwnerLinks } from "../patterns/link-to-owner";
 import { ProblemCard } from "../patterns/problem-card";
@@ -20,8 +21,9 @@ export interface FrameTurnProps {
   generation: number;
 }
 
-/** What the last choice came to: the turn applied, or why not (Central's code, if it answered). */
-export type TurnAnswer = { kind: "changed" } | { kind: "refused"; words: string; code: string | null };
+/** What the last choice came to: the turn saved (when, as this browser read Central's answer, worded),
+ * or why not (Central's code, if it answered). */
+export type TurnAnswer = { kind: "changed"; at: string } | { kind: "refused"; words: string; code: string | null };
 
 export interface FrameTurnChoiceProps {
   /** The turn the control shows: the one being sent while it is sent, else the Frame's. */
@@ -35,6 +37,9 @@ export interface FrameTurnChoiceProps {
 }
 
 const OPTIONS = TURNS.map((turn) => ({ value: String(turn), label: TURN_WORDS[turn] }));
+const QUESTION = "Which way is the top of the screen?";
+const HELP = "Which way the display's top edge points as it hangs on the wall: the edge at the top when the display "
+  + "stands on its feet (where its logo reads the right way up). Photo Wall turns the picture to match.";
 
 /** Central's refusal of a turn, in the operator's words. */
 function refusal(code: string): string {
@@ -49,20 +54,23 @@ function refusal(code: string): string {
 }
 
 /**
- * The section as drawn (stories draw it in each state): the four turns as one choice, the answer
- * to the last one under it.
+ * The section as drawn (stories draw it in each state): the four turns as one choice (two by two on a
+ * phone), a choice being sent, and the answer to the last one under it: when it was saved and the
+ * way to the Position tab, or why it was refused.
  */
 export function FrameTurnChoice({ turn, sending, answer, positionHref, onChoose }: FrameTurnChoiceProps) {
   return (
     <Section title="How the screen hangs">
-      <Field label="Screen"
-        help="Where the screen's own top edge is, as you face it. Photo Wall turns the picture to match.">
-        <SegmentedControl label="Screen" value={String(turn)} options={OPTIONS} disabled={sending}
+      <Field label={QUESTION} help={HELP}>
+        <SegmentedControl label={QUESTION} value={String(turn)} options={OPTIONS} disabled={sending} layout="grid"
           onChange={(value) => onChoose(Number(value) as Turn)} />
       </Field>
+      {sending ? <Note live>Sending…</Note> : null}
       {answer?.kind === "changed" ? (
         <>
-          <Note live>The picture turns now. Check its position on the Position tab, then press Done there.</Note>
+          <Note live>
+            {`Saved at ${answer.at}. The picture turns now. Check its position on the Position tab, then press Done there.`}
+          </Note>
           <OwnerLinks links={[{ text: "Open the Position tab", href: positionHref }]} />
         </>
       ) : null}
@@ -103,7 +111,7 @@ export function FrameTurn({ frameId, turn, generation }: FrameTurnProps): React.
       const result = await mutate(() => turnFrame(frameId, { turn: chosen, expected_generation: generation })) as
         { ok: boolean; changed?: boolean; code?: string };
       if (result.ok) {
-        setAnswer(result.changed ? { kind: "changed" } : null);
+        setAnswer(result.changed ? { kind: "changed", at: timeOfDay(Date.now() / 1000) } : null);
       } else {
         const code = result.code ?? "unknown";
         setAnswer({ kind: "refused", words: refusal(code), code });

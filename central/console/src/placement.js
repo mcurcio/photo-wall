@@ -73,13 +73,30 @@ export function place(rectangle, screen, aspect) {
         && centreX >= 0 && centreX <= 1 && centreY >= 0 && centreY <= 1 && fraction > 0 && fraction <= 1)) {
     throw new Error("frame_rectangle");
   }
+  const placement = pixels(rectangle, screen, aspect);
+  const { x, y, width, height } = placement;
+  if (!(x >= 0 && x + width <= screen[0] && y >= 0 && y + height <= screen[1])) return null;
+  return placement;
+}
+
+/**
+ * `place`'s pixels with neither of its checks on the rectangle: where `rectangle` would lie, on the
+ * screen or not (the editor draws a refused one there and names the edge it crosses). Its fields
+ * need only be finite numbers; throws as `place` for the screen and the aspect.
+ *
+ * @param {Rectangle} rectangle
+ * @param {[number, number]} screen as it hangs
+ * @param {number} aspect
+ * @returns {Placement}
+ */
+export function pixels(rectangle, screen, aspect) {
   checkScreen(screen, aspect);
+  const { centre_x: centreX, centre_y: centreY, width: fraction } = rectangle;
   const [screenWidth, screenHeight] = screen;
   const width = Math.max(1, halfUp(fraction * screenWidth));
   const height = Math.max(1, halfUp(width / aspect));
   const x = halfUp(centreX * screenWidth - width / 2);
   const y = halfUp(centreY * screenHeight - height / 2);
-  if (!(x >= 0 && x + width <= screenWidth && y >= 0 && y + height <= screenHeight)) return null;
   return { x, y, width, height };
 }
 

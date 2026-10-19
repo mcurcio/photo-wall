@@ -337,7 +337,7 @@ def test_a_position_drafted_as_a_mat_opening_changes_what_fits_before_done(page,
             row.get_by_role("button", name="Details", exact=True).click()
             expect(row).to_contain_text("Frame output 1,920 × 1,080 px, 16:9")
             expect(row).not_to_contain_text("display")
-            position = open_frame(page, FRAME, "position").get_by_role("region", name="Position", exact=True)
+            position = open_frame(page, FRAME, "position").get_by_role("region", name="Where the picture sits on the screen", exact=True)
             expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
             # The line says what the Frame is judged at; its pixels are under Details (design fix
             # round 4), in the board the line opens.

@@ -430,7 +430,7 @@ def test_the_frame_profile_notes_a_reported_resolution_it_does_not_match(page, r
         expect(problem).to_contain_text("Frame profile: Check the Display.")
         expect(problem).to_contain_text(
             "The Pi reported its Display at 1,920 × 1,080, but this Frame's profile is 1,080 × 1,920.")
-        expect(problem).to_contain_text("The screen hangs: Upright.")
+        expect(problem).to_contain_text("This screen hangs upright.")
         # One action: edit the profile; the how-to is under Details.
         problem.get_by_role("button", name="Edit Frame profile", exact=True).click()
         expect(frame.get_by_role("form", name="Edit Frame profile", exact=True)).to_be_visible()
@@ -463,7 +463,7 @@ def test_a_rebound_frame_keeps_its_turn_whatever_its_readiness(page, registry):
         expect(frame.get_by_role("region", name="Frame profile", exact=True)).to_be_visible()
         expect(_mismatch(frame)).to_have_count(0)
         registry.turn_frame(FRAME, 0, expected_generation=stored.generation)
-        expect(_mismatch(frame)).to_contain_text("The screen hangs: Upright.", timeout=15_000)
+        expect(_mismatch(frame)).to_contain_text("This screen hangs upright.", timeout=15_000)
 
 
 # --- The Position editor (render redesign S5): every assertion is on a visible value, word or
@@ -508,7 +508,7 @@ def test_dragging_the_picture_moves_it_and_sends_the_new_centre(page, registry, 
         across = float(_exact(frame, "Centre across").input_value())
         down = float(_exact(frame, "Centre down").input_value())
         assert across > SAVED_X + HALF and down > 540, (across, down)
-        expect(_exact(frame, "Picture width")).to_have_value("960")
+        expect(frame.get_by_label("Width in pixels", exact=True)).to_have_value("960")
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
         expect(bar.get_by_role("button", name="Done", exact=True)).to_be_enabled()
         sent = _fit_sent(sessions)
@@ -524,8 +524,8 @@ def test_dragging_the_handle_resizes_the_picture_at_the_frames_shape_about_its_c
         frame = open_frame(page, FRAME, "position")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         _drag(page, frame, "Picture size handle", 30)
-        expect(_exact(frame, "Picture width")).not_to_have_value("960")
-        width = float(_exact(frame, "Picture width").input_value())
+        expect(frame.get_by_label("Width in pixels", exact=True)).not_to_have_value("960")
+        width = float(frame.get_by_label("Width in pixels", exact=True).input_value())
         assert width > 960, width
         expect(_exact(frame, "Centre across")).to_have_value(_across(SAVED_X))
         expect(frame.get_by_label("Width in pixels", exact=True)).to_have_value(str(round(width)))
@@ -557,14 +557,68 @@ def test_a_move_past_the_edge_is_refused_where_it_is_made_says_so_and_sends_noth
         edits = sessions.count("edit")
         assert _left_x(sessions.row["calibration"]) == 0
         left.click()
-        expect(frame.get_by_role("alert")).to_contain_text("The picture would run off the screen as it hangs")
+        problem = frame.get_by_role("alert")
+        expect(problem).to_contain_text("Not moved")
+        expect(problem).to_contain_text(
+            "The Pi kept the last position: this one would run past the left edge of the screen.")
+        editor = frame.get_by_role("group", name="Picture position", exact=True)
+        expect(editor.get_by_role("img", name="Refused position", exact=True)).to_be_visible()
+        expect(editor.get_by_role("img", name="What the Pi is presenting", exact=True)).to_be_visible()
+        expect(_bar(page).get_by_role("status")).to_contain_text("(your last change was refused)")
         expect(_exact(frame, "Centre across")).to_have_value(_across(0))
+        # Its one fix: the nearest position that fits (here the one the Pi presents).
+        problem.get_by_role("button", name="Move it back inside", exact=True).click()
+        expect(frame.get_by_role("alert")).to_have_count(0)
+        expect(editor.get_by_role("img", name="Refused position", exact=True)).to_have_count(0)
+        expect(_exact(frame, "Centre across")).to_have_value(_across(0))
+        page.wait_for_timeout(500)
+        sent = len(sessions.sent)
+        edits = sessions.count("edit")
 
-        _exact(frame, "Centre across").fill("1500")  # 1020 to 1980 px: past the right edge
-        expect(frame.get_by_role("alert")).to_contain_text("The picture would run off the screen as it hangs")
+        # A typed value is refused in its Field, next to the value, with no card.
+        across = _exact(frame, "Centre across")
+        across.fill("1500")  # 1020 to 1980 px: past the right edge
+        expect(across).to_have_attribute("aria-invalid", "true")
+        expect(across).to_have_accessible_description("Would run past the right edge of the screen")
+        expect(frame.get_by_role("alert")).to_have_count(0)
         page.wait_for_timeout(500)
         assert sessions.count("edit") == edits, sessions.sent[sent:]
         assert _left_x(sessions.row["calibration"]) == 0
+
+
+def test_a_position_central_refuses_as_off_the_screen_is_not_sent_again_and_done_waits(page, registry, sessions):
+    """Central measures the screen otherwise and refuses the draft (`position_off_screen`): the card says
+    the Pi kept the last position, the draft is not sent again (a refused value is never retried), the
+    acknowledgement says the change was refused and Done waits for a position that fits. "Move it back
+    inside" returns to the position the Pi presents.
+
+    Mutation: drop the REFUSED_VALUE check from liveAdjustment.js's loop -> the same edit is sent again
+    -> RED."""
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        frame = open_frame(page, FRAME, "position")
+        bar = _bar(page)
+        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
+        sessions.fail["edit"] = (422, "position_off_screen")
+        _move(page)
+        problem = frame.get_by_role("alert")
+        expect(problem).to_contain_text("Not moved")
+        expect(problem).to_contain_text(
+            "The Pi kept the last position: this one would run off the screen as the Pi measures it.")
+        expect(problem).not_to_contain_text("keeps trying")
+        expect(problem.get_by_role("button", name="Revert", exact=True)).to_have_count(0)
+        expect(bar.get_by_role("status")).to_contain_text("(your last change was refused)")
+        expect(bar.get_by_role("button", name="Done", exact=True)).to_be_disabled()
+        expect(bar).to_contain_text("Done is offered once the picture fits the screen.")
+        edits = sessions.count("edit")
+        page.wait_for_timeout(1500)
+        assert sessions.count("edit") == edits, sessions.sent
+
+        problem.get_by_role("button", name="Move it back inside", exact=True).click()
+        expect(frame.get_by_role("alert")).to_have_count(0)
+        expect(_centre_field(page)).to_have_value(_across(SAVED_X))
+        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
 
 
 def test_fill_the_screen_sends_the_largest_centred_rectangle(page, registry, sessions):
@@ -574,7 +628,7 @@ def test_fill_the_screen_sends_the_largest_centred_rectangle(page, registry, ses
         frame = open_frame(page, FRAME, "position")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         frame.get_by_role("button", name="Fill the screen", exact=True).click()
-        expect(_exact(frame, "Picture width")).to_have_value("1920")
+        expect(frame.get_by_label("Width in pixels", exact=True)).to_have_value("1920")
         page.wait_for_timeout(500)
         assert _fit_sent(sessions) == {"mode": "rectangle", "centre_x": 0.5, "centre_y": 0.5, "width": 1}
 
@@ -595,7 +649,7 @@ def test_a_frame_turned_a_quarter_draws_a_portrait_screen_and_its_draft_is_in_fr
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "position")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
-        expect(frame).to_contain_text("The screen hangs: Top to the right.")
+        expect(frame).to_contain_text("This screen hangs with its top to the right.")
         expect(frame.get_by_role("link", name="Change it on the Hardware tab", exact=True)).to_have_attribute(
             "href", f"#/wall/frames/{FRAME}/hardware")
         editor = frame.get_by_role("group", name="Picture position", exact=True)
@@ -604,14 +658,14 @@ def test_a_frame_turned_a_quarter_draws_a_portrait_screen_and_its_draft_is_in_fr
         _exact(frame, "Centre across")
         expect(frame).to_contain_text("In pixels of the 1,080 × 1,920 screen as it hangs")
         expect(_exact(frame, "Centre across")).to_have_value("540")
-        expect(_exact(frame, "Picture width")).to_have_value("540")
+        expect(frame.get_by_label("Width in pixels", exact=True)).to_have_value("540")
 
         _move(page)
         expect(_exact(frame, "Centre across")).to_have_value("550")
         page.wait_for_timeout(500)
         assert abs(_fit_sent(sessions)["centre_x"] - 550 / 1080) < 1e-9, _fit_sent(sessions)
         frame.get_by_role("button", name="Fill the screen", exact=True).click()
-        expect(_exact(frame, "Picture width")).to_have_value("1080")
+        expect(frame.get_by_label("Width in pixels", exact=True)).to_have_value("1080")
         page.wait_for_timeout(500)
         assert _fit_sent(sessions)["width"] == 1, _fit_sent(sessions)
 

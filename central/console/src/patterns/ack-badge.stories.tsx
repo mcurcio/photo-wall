@@ -13,5 +13,9 @@ type Story = StoryObj<typeof meta>;
 
 export const Requested: Story = {};
 export const Acknowledged: Story = { args: { state: "acknowledged", at: "21:04:07" } };
+/** The Pi presents the change before one Central refused: said in brackets. */
+export const AcknowledgedRefused: Story = {
+  args: { state: "acknowledged", at: "18:30:41", note: "your last change was refused" },
+};
 /** Central served no time for the acknowledgement: no dangling separator. */
 export const AcknowledgedNoTime: Story = { args: { state: "acknowledged", at: null } };

@@ -21,6 +21,8 @@ const ADJUSTMENT: Adjustment = {
   restore: async () => ({ ok: false, error: "trial_ended" }),
   savedAt: null,
   leftAt: null,
+  refused: false,
+  sessionFit: null,
 };
 
 const meta = {
@@ -67,6 +69,18 @@ export const OffScreenRefused: Story = {
     },
   },
   render: PushedPastTheEdge,
+};
+/** Central refused the draft (it measured the screen otherwise): the Pi keeps the session's position,
+ * the draft is drawn dashed and Done waits for a position that fits. */
+export const CentralRefused: Story = {
+  args: {
+    adjustment: {
+      ...ADJUSTMENT, dirty: true, refused: true,
+      draft: { fit: { mode: "rectangle", centre_x: 0.7, centre_y: 0.5, width: 0.5 }, lighting: UPGRADED },
+      sessionFit: { mode: "rectangle", centre_x: 0.5, centre_y: 0.5, width: 0.5 },
+      error: { words: "", code: "position_off_screen", stops: false, refused: "" },
+    },
+  },
 };
 /** The Frame profile is not set: no editor, only the way to set it. */
 export const NoProfile: Story = { args: { aspect: null } };

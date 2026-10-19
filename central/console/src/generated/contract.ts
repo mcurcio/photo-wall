@@ -145,6 +145,7 @@ export type LuxOnFrame = number;
 export interface MadeForView {
   display_id: string | null;
   profile_px: ProfilePxView;
+  turn: 0 | 90 | 180 | 270;
 }
 
 export interface Measured {

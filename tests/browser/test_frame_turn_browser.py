@@ -32,6 +32,7 @@ OUTPUT = "HDMI-A-1"  # enroll() reports it connected at 1920 x 1080
 DEVICE = "device-frame-turn-pi"
 PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 CHANGED = "The picture turns now. Check its position on the Position tab, then press Done there."
+SAVED = re.compile(rf"^Saved at \d\d:\d\d:\d\d\. {re.escape(CHANGED)}$")
 CONFLICT = "This Frame changed while you chose. Choose again."
 
 
@@ -53,7 +54,8 @@ def _section(frame):
 
 
 def _choice(section, words):
-    return section.get_by_role("radiogroup", name="Screen").get_by_role("radio", name=words, exact=True)
+    return section.get_by_role("radiogroup", name="Which way is the top of the screen?").get_by_role(
+        "radio", name=words, exact=True)
 
 
 def _note(frame):
@@ -71,15 +73,16 @@ def test_choosing_top_to_the_right_turns_the_frame_and_the_position_tab_follows(
         frame = open_frame(page, FRAME, "hardware")
         section = _section(frame)
         expect(section).to_contain_text(
-            "Where the screen's own top edge is, as you face it. Photo Wall turns the picture to match.")
+            "Which way the display's top edge points as it hangs on the wall: the edge at the top when the display "
+            "stands on its feet (where its logo reads the right way up). Photo Wall turns the picture to match.")
         expect(_choice(section, "Upright")).to_be_checked()
         # Upright, a 1080 x 1920 profile does not match the 1920 x 1080 the Pi reported.
         expect(_note(frame)).to_contain_text(
             "The Pi reported its Display at 1,920 × 1,080, but this Frame's profile is 1,080 × 1,920.")
-        expect(_note(frame)).to_contain_text("The screen hangs: Upright.")
+        expect(_note(frame)).to_contain_text("This screen hangs upright.")
 
         _choice(section, "Top to the right").click()
-        expect(section.get_by_role("status")).to_have_text(CHANGED)
+        expect(section.get_by_role("status")).to_have_text(SAVED)
         stored = _stored(registry)
         assert (stored.turn, stored.readiness) == (90, Readiness.POSITION_NEEDED)
         expect(_choice(section, "Top to the right")).to_be_checked()
@@ -88,10 +91,19 @@ def test_choosing_top_to_the_right_turns_the_frame_and_the_position_tab_follows(
 
         section.get_by_role("link", name="Open the Position tab", exact=True).click()
         expect(page).to_have_url(re.compile(rf"#/wall/frames/{FRAME}/position$"))
-        expect(page.get_by_text("The screen hangs: Top to the right.")).to_be_visible()
+        expect(page.get_by_text("This screen hangs with its top to the right.")).to_be_visible()
         editor = page.get_by_role("group", name="Picture position", exact=True)
         box = editor.bounding_box()
         assert box["height"] > box["width"], box
+        # History says the turn in words with the position it kept, in the editor's pixels, and why the
+        # rows made upright cannot be restored, with the way back to the Hardware tab.
+        history = page.get_by_role("region", name="History", exact=True)
+        turned = history.get_by_role("listitem", name=re.compile(r"Kept \(screen turned\)$"))
+        expect(turned).to_contain_text("Screen turned: it hangs with its top to the right. Position kept: Centre")
+        expect(turned).to_contain_text("Centre 540 across, 960 down · Width 324 px")
+        upright = history.get_by_role("listitem", name=re.compile(r"Created$"))
+        expect(upright.get_by_role("button", name="Restore", exact=True)).to_have_accessible_description(
+            re.compile(r"^Made when the screen hung upright\. Turn the screen back on the Hardware tab to restore it\."))
         page.unroute_all(behavior="ignoreErrors")
 
 
@@ -128,7 +140,7 @@ def test_an_unbound_frame_shows_the_control_and_takes_a_turn(page, registry):
         frame = open_frame(page, FRAME, "hardware")
         section = _section(frame)
         _choice(section, "Top to the left").click()
-        expect(section.get_by_role("status")).to_have_text(CHANGED)
+        expect(section.get_by_role("status")).to_have_text(SAVED)
         assert _stored(registry).turn == 270
 
 

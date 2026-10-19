@@ -14,7 +14,7 @@ type Story = StoryObj<typeof meta>;
 /** The screen hangs as built: its own top edge at the top. */
 export const Upright: Story = {};
 /** Just turned: the picture turns now, and its position is checked on the Position tab. */
-export const TopToTheRight: Story = { args: { turn: 90, answer: { kind: "changed" } } };
+export const TopToTheRight: Story = { args: { turn: 90, answer: { kind: "changed", at: "18:29:27" } } };
 /** A choice on its way to Central: the control waits for the answer. */
 export const Sending: Story = { args: { turn: 270, sending: true } };
 /** Central refused the choice: the Frame changed meanwhile. */

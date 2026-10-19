@@ -13,10 +13,27 @@ export type Turn = FrameTurnChange["turn"];
 /** The four turns, in the control's order. */
 export const TURNS: readonly Turn[] = [0, 90, 180, 270];
 
-/** Each turn in words: where the screen's own top edge is, as you face it. */
+/** Each turn in words, as the choice names it: where the display's own top edge points, as you face it. */
 export const TURN_WORDS: Record<Turn, string> = {
   0: "Upright",
   90: "Top to the right",
   180: "Upside down",
   270: "Top to the left",
+};
+
+/** How the screen hangs, inside a sentence: "This screen hangs upright.", "Made when the screen
+ * hung with its top to the right." (the Position tab's line and a History row's). */
+export const HANGS: Record<Turn, string> = {
+  0: "upright",
+  90: "with its top to the right",
+  180: "upside down",
+  270: "with its top to the left",
+};
+
+/** Which edge of the screen drawn as it hangs is the display's own top edge. */
+export const TOP_EDGE: Record<Turn, "top" | "right" | "bottom" | "left"> = {
+  0: "top",
+  90: "right",
+  180: "bottom",
+  270: "left",
 };

@@ -414,7 +414,7 @@ def test_followup_frame_position_draft(page, registry, scheme, suffix):
             expect(photos.get_by_text(re.compile(r"\d+ of \d+ fit")).locator("visible=true").first).to_be_visible()
             expect(photos.locator("[aria-busy=true]")).to_have_count(0)
             _top_shot(page, f"followup-frame-overview-bound{suffix}", scheme)
-            position = open_frame(page, BOUND, "position").get_by_role("region", name="Position", exact=True)
+            position = open_frame(page, BOUND, "position").get_by_role("region", name="Where the picture sits on the screen", exact=True)
             expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
             position.get_by_role("button", name="Exact values", exact=True).click()
             # A centred 960 x 540 opening on the 1920 x 1080 screen.

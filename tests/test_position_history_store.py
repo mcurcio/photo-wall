@@ -148,7 +148,7 @@ def test_save_appends_a_kept_entry_made_for_the_profile_and_the_display_seen(reg
     newest = _history(registry)["entries"][0]
     assert (newest["kind"], newest["session_id"], newest["restored_from"]) == ("kept-saved", trial["trial_id"], None)
     assert RectangleFit.model_validate(newest["fit"]) == SKEWED and FrameLighting.model_validate(newest["lighting"]) == DEEP
-    assert newest["made_for"] == {"profile_px": PORTRAIT, "display_id": str(display)}
+    assert newest["made_for"] == {"profile_px": PORTRAIT, "turn": 0, "display_id": str(display)}
     assert newest["restore_refusal"] is None
 
 

@@ -394,7 +394,7 @@ def test_no_show_fleet_or_neutral_route_holds_display_controls(page, registry):
         commissioning = [
             page.get_by_role("tablist", name="Frame settings", include_hidden=True),
             page.get_by_role("tab", name="Position", exact=True, include_hidden=True),
-            page.get_by_role("region", name="Position", exact=True, include_hidden=True),
+            page.get_by_role("region", name="Where the picture sits on the screen", exact=True, include_hidden=True),
         ]
         # Positive control: every Wall sample is a Wall page, and the Position sample
         # shows the controls, so the checks below are not vacuous.
