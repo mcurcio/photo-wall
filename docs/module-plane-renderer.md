@@ -115,7 +115,10 @@ smaller picture or shows it 1:1 and never shrinks one (bench T2: shrinking large
 | 1280 x 720 photo | 1920 x 1080 | 1280 x 720 | enlarged |
 
 The look works in the picture's own coordinates and the Frame's physical size, so a picture
-finished smaller looks the same, enlarged; its dither pattern is enlarged with it. A 1080p video
+finished smaller looks the same, enlarged, except for what the look draws at the Frame's own
+scale: the mat shadow's edge and the dither pattern are drawn at the finished resolution and
+enlarged with it (two screen pixels soft for a 1080p video in a 4K Frame; far more for a small
+photo). A source at least as large as its Frame loses nothing. A 1080p video
 in a 4K Frame costs about a quarter of the GPU work it took at the Frame's size (35 ms per frame on
 the test Pi, milestone 3).
 
