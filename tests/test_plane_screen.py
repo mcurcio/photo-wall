@@ -298,6 +298,19 @@ def test_trial_hands_the_librarys_envelope_to_the_outputs_trial_state(monkeypatc
     assert call[2:4] == (b"HDMI-A-1", str(grant.grant_id).encode())
 
 
+def test_a_commit_under_a_trial_is_tagged_as_the_trial_whatever_it_shows(monkeypatch):
+    """The shell draws the overlay, and Display Host reports the trial presented, only for a commit
+    tagged "trial-" + the candidate's hash: a Frame with nothing to play included."""
+    screens, library = _screens(monkeypatch)
+    monkeypatch.setattr(plane_screen, "_boottime_ms", lambda: 1000)
+    raw = _envelope(RectangleFit(width=0.5))
+    library.answers["pw_frame_client_trial"] = _trial_answer(raw, 1)
+    empty = OutputComposition(BINDING, fallback=True)
+    applied = screens.trial(empty, FrameGrant(uuid4(), 3, 2, "frame", True))
+    assert plane_screen.commit_tag(empty, (), applied) == "trial-" + json.loads(raw)["candidate_sha256"]
+    assert plane_screen.commit_tag(empty, (), None) == plane_screen.composition_tag(empty, ())
+
+
 def test_trial_keeps_one_trial_state_per_output_on_the_boottime_clock(monkeypatch):
     """TrialState's fences hold across reads: past the trial's expiry the same envelope read again
     is not drawn (a delayed envelope cannot revive it)."""

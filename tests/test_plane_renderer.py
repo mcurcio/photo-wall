@@ -51,7 +51,7 @@ def framed(fit: RectangleFit | None = None, **fields):
 def trial(fit: RectangleFit, lighting: FrameLighting = LIGHTING, sequence: int = 1) -> AppliedTrial:
     """What player/plane_screen.py `PlaneScreens.trial` answers while a Position trial is drawn."""
     candidate = SimpleNamespace(trial_id=uuid4(), generation=1, sequence=sequence, candidate_sha256="a" * 64,
-                                expires_boottime_ms=10**15)
+                                frame_tag="trial-" + "a" * 64, expires_boottime_ms=10**15)
     return AppliedTrial(candidate, Calibration(fit=fit), lighting)
 
 
@@ -542,6 +542,7 @@ def test_a_trial_moves_the_plane_carries_its_overlay_and_is_reported():
     assert moved == Placement(0, 540, 1920, 1080)
     assert rig.screens.commits[-1][0].planes[0].at == moved
     assert rig.screens.overlays[-1] == (moved, SIZE)
+    assert rig.screens.commits[-1][2] == tried.candidate.frame_tag     # the shell draws the overlay under it
     applied = result.applied_calibration
     assert applied.calibration == tried.calibration and applied.trial_id == str(tried.candidate.trial_id)
     assert (applied.trial_generation, applied.trial_sequence, applied.candidate_sha256) == (1, 1, "a" * 64)
@@ -551,6 +552,7 @@ def test_a_trial_moves_the_plane_carries_its_overlay_and_is_reported():
     result = rig.settle(still)
     assert rig.screens.commits[-1][0].planes[0].at == Placement(0, 0, *SIZE)
     assert rig.screens.overlays[-1] is None and result.applied_calibration.trial_id is None
+    assert not rig.screens.commits[-1][2].startswith("trial-")
 
 
 def test_a_trials_lighting_finishes_the_still_again():
@@ -614,10 +616,15 @@ def test_a_pattern_is_pending_until_the_gpu_finished_it():
 
 
 def test_a_trial_over_a_fallback_with_nothing_playing_draws_the_commissioning_grid():
+    """A Frame with no photo (Central's plan has no layers) still shows its Position trial: the
+    grid, the overlay, and the commit tagged as the trial, which is what the shell draws the
+    overlay under and what Display Host reports to Central as the trial presented."""
     rig = Rig()
     rig.screens.trial_now = trial(RectangleFit(width=0.5))
     result = rig.settle(fallback=True, timebase=None)
     assert result.status == "presented" and rig.screens.commits[-1][0].planes == ()
+    assert rig.screens.commits[-1][2] == rig.screens.trial_now.candidate.frame_tag
+    assert result.applied_calibration.trial_id == str(rig.screens.trial_now.candidate.trial_id)
     request = rig.patterns.draws[-1][0]
     assert request.operations.test_pattern is None and request.placement == Placement(960, 540, 1920, 1080)
     assert rig.screens.overlays[-1] == (request.placement, SIZE)
@@ -625,6 +632,28 @@ def test_a_trial_over_a_fallback_with_nothing_playing_draws_the_commissioning_gr
     rig.clock.tick()
     rig.present(fallback=True, timebase=None)
     assert len(rig.patterns.draws) == 1 and rig.screens.grounds[-1].handle != rig.screens.grounds[-2].handle
+
+
+@pytest.mark.parametrize("pattern", list(TestPattern))
+@pytest.mark.parametrize("tried", [False, True], ids=["no-trial", "trial"])
+def test_a_screen_with_nothing_to_play_still_shows_its_pattern_and_its_trial(pattern, tried):
+    """A granted screen whose Frame has nothing to play (a fallback with no layers: Central sends no
+    layers while the Position is to check) still commits what the screen must show: every test
+    pattern and calibration target as its ground, a trial's overlay and the trial's tag."""
+    rig = Rig()
+    rig.renderer.set_player("player-1")
+    rig.screens.operations = replace(neutral_operations(OUTPUT, 4, DisplayLight(200, .01)), test_pattern=pattern)
+    rig.screens.trial_now = trial(RectangleFit(width=0.5)) if tried else None
+    result = rig.settle(fallback=True, timebase=None)
+    composition, pictures, tag, change = rig.screens.commits[-1]
+    assert result.status == "presented" and composition.planes == () and pictures == {} and change == 4
+    assert rig.patterns.draws[-1][0].operations.test_pattern is pattern
+    assert rig.screens.grounds[-1].handle == 1000 + rig.patterns.draws[-1][1]
+    if tried:
+        assert tag == rig.screens.trial_now.candidate.frame_tag
+        assert rig.screens.overlays[-1] == (Placement(960, 540, 1920, 1080), SIZE)
+    else:
+        assert not tag.startswith("trial-") and rig.screens.overlays[-1] is None
 
 
 def test_a_calibration_targets_qr_names_the_player_once_it_has_an_id(monkeypatch):
