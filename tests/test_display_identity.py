@@ -97,7 +97,8 @@ def _unbind(registry, frame_id: str) -> None:
 def _report(registry, serial: str, output_id: str, identity: DisplayIdentity | None, *, connected: bool = True,
             data: bytes | None = None) -> None:
     """The Pi's Output report, recorded by Central's link store on the display line's state bucket."""
-    report = WireReport(output_id, connected, identity, MODE if identity else (), (), None, None, None, None)
+    report = WireReport(output_id, connected, identity, MODE if identity else (), (), None, None, None, None,
+                        None)
     token = Token(EPOCH, next(_SEQ))
     read = Read(token, "$KV.state_display." + output_report_key(output_id), {},
                 encode_output_report(report) if data is None else data)

@@ -80,7 +80,7 @@ def _test(registry, test_id: str) -> InForce:
 def _answer(registry, for_change: int, result: PowerResult, in_force: InForce | None) -> None:
     """The Pi's report on HDMI-A-1 for `for_change`, recorded through the link store and its judge."""
     report = WireReport("HDMI-A-1", True, NO_SERIAL, (), (PowerMethod.DDC_CI,), PowerMethod.DDC_CI, for_change,
-                        result, in_force)
+                        result, in_force, None)
     _report(registry, SERIAL, "HDMI-A-1", NO_SERIAL, data=encode_output_report(report))
 
 

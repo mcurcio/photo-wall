@@ -65,7 +65,8 @@ from contracts.wire_codec import (
     whole,
 )
 
-SCHEMA_MAJOR: Final = 9                         # the display line's schema major (birth, envelope); 9 from the render redesign (the turn)
+SCHEMA_MAJOR: Final = 10                        # the display line's schema major (birth, envelope); 10 from the frame box (the Display's size)
+DISPLAY_MM_MAX: Final = 2550                    # an EDID base block states at most 255 cm a side
 
 # Every Output a Node can have: the Pi 5's two HDMI connectors, and the two virtual connectors the
 # software end-to-end tier runs (player/output_discovery.py's `weston_ini` iterates these).
@@ -305,7 +306,8 @@ class OutputReport:
     change these results belong to (None: no document seen since the controller started); `result`
     = the last attempt's result for that change (None: no attempt for it yet, e.g. the display was
     already in the wanted state at start and was left alone); `in_force` = the request the Pi is
-    carrying out (None without a document)."""
+    carrying out (None without a document); `size_mm` = the display's picture area as built, in whole
+    millimetres (width, height), as its EDID base block states it (None: not stated, or no EDID)."""
     output_id: str
     connected: bool
     identity: DisplayIdentity | None
@@ -315,11 +317,13 @@ class OutputReport:
     for_change: int | None
     result: PowerResult | None
     in_force: InForce | None
+    size_mm: tuple[int, int] | None
 
     def __post_init__(self) -> None:
         """ValueError("output_report") unless output_id is in OUTPUT_IDS, modes has at most
         MAX_DISPLAY_MODES entries, answers are unique and in METHOD_PRECEDENCE order, method is in
-        answers when set, and for_change >= 1 when set. `for_change` names power changes only."""
+        answers when set, for_change >= 1 when set, and size_mm is None or a tuple of two ints (never
+        bools) each in 1..DISPLAY_MM_MAX. `for_change` names power changes only."""
         answers = self.answers
         require(self.output_id in OUTPUT_IDS and type(self.connected) is bool
                  and (self.identity is None or isinstance(self.identity, DisplayIdentity))
@@ -330,7 +334,10 @@ class OutputReport:
                  and (self.method is None or self.method in answers)
                  and (self.for_change is None or whole(self.for_change, 1))
                  and (self.result is None or isinstance(self.result, PowerResult))
-                 and (self.in_force is None or isinstance(self.in_force, InForce)), "output_report")
+                 and (self.in_force is None or isinstance(self.in_force, InForce))
+                 and (self.size_mm is None or (isinstance(self.size_mm, tuple) and len(self.size_mm) == 2
+                                               and all(whole(side, 1, DISPLAY_MM_MAX) for side in self.size_mm))),
+                 "output_report")
 
 
 @dataclass(frozen=True)
@@ -394,7 +401,7 @@ def encode_output_report(report: OutputReport) -> bytes:
 def decode_output_report(raw: bytes) -> OutputReport:
     """ValueError("output_report") for anything but a valid encoding."""
     def build(value: dict[str, Any]) -> OutputReport:
-        identity, in_force = value["identity"], value["in_force"]
+        identity, in_force, size_mm = value["identity"], value["in_force"], value["size_mm"]
         return OutputReport(**{
             **value,
             "identity": None if identity is None else DisplayIdentity(**fields_of(DisplayIdentity, identity)),
@@ -402,7 +409,8 @@ def decode_output_report(raw: bytes) -> OutputReport:
             "answers": tuple(PowerMethod(method) for method in list_of(value["answers"])),
             "method": optional(PowerMethod, value["method"]),
             "result": optional(PowerResult, value["result"]),
-            "in_force": None if in_force is None else _in_force(in_force)})
+            "in_force": None if in_force is None else _in_force(in_force),
+            "size_mm": None if size_mm is None else tuple(list_of(size_mm))})
     return decode(raw, OUTPUT_REPORT_BYTES, OutputReport, build, "output_report")
 
 
@@ -468,7 +476,7 @@ def _in_force(value: object) -> InForce:
 
 
 __all__ = [
-    "BEST_DETECTED", "MAX_DISPLAY_MODES", "MAX_REQUEST_SECONDS", "METHOD_PRECEDENCE",
+    "BEST_DETECTED", "DISPLAY_MM_MAX", "MAX_DISPLAY_MODES", "MAX_REQUEST_SECONDS", "METHOD_PRECEDENCE",
     "OUTPUT_DOCUMENT_BYTES", "OUTPUT_IDS", "OUTPUT_REPORT_BYTES", "POWER_ATTEMPT_BYTES",
     "MAX_POWER_CHANGES", "SCHEMA_MAJOR", "SET_TIME_PATTERN", "Darkness", "DisplayIdentity", "DisplayMode",
     "InForce", "InForceKind", "MethodChoice", "OutputDocument", "OutputPower", "OutputReport",

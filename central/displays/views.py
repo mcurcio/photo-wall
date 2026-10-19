@@ -70,6 +70,7 @@ class DisplayView(Model):
     power_method: PowerMethod | None              # None = best detected
     switch_input_on_power_on: bool
     never_off_on_other_input: bool
+    size_mm: tuple[int, int] | None               # the Display's picture area as built (its EDID's); None: not stated
 
 
 class FrameDisplayView(Model):

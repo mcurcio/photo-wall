@@ -46,7 +46,7 @@ from nodeapi.documents import Document
 from .bus import DISPLAY_SLICE, BusPictureSink, BusReportSink, display_session
 from .ddc import DdcChannel
 from .domain import OutputState
-from .edid import parse_edid, read_edid
+from .edid import EdidReading, parse_edid, read_edid
 from .output_power import OutputPowerController, PiClock, ReportSink
 from .picture import (
     DdcPictureAdapter,
@@ -176,16 +176,17 @@ class OutputReporter:
                 continue
             self._seen[output_id] = seen
             raw = self._read(output_id) if state.connected else None
-            identity, modes = parse_edid(raw) if raw is not None else (None, ())
-            report = OutputReport(output_id, state.connected, identity, modes, answers=(), method=None,
-                                  for_change=None, result=None, in_force=None)
+            reading = parse_edid(raw) if raw is not None else EdidReading(None, (), None)
+            report = OutputReport(output_id, state.connected, reading.identity, reading.modes, answers=(),
+                                  method=None, for_change=None, result=None, in_force=None,
+                                  size_mm=reading.size_mm)
             if self._reports.get(output_id) != report:
                 self._reports[output_id] = report
                 self._sink.put_report(report)
 
 
 class PowerObservations:
-    """`ReportSink` for the OutputReporter that hands what it saw (connection, EDID identity and
+    """`ReportSink` for the OutputReporter that hands what it saw (connection, EDID identity,
     modes) to the power controller, so the power controller is the one writer of each Output's
     report and the report carries both halves (roadmap 1b, D2); and the connection and identity to
     the picture controller (decision 0022: an identity whose list is not held is asked, another
@@ -199,7 +200,7 @@ class PowerObservations:
 
     def put_report(self, report: OutputReport) -> None:
         self._power.output(report.output_id, connected=report.connected, identity=report.identity,
-                           modes=report.modes)
+                           modes=report.modes, size_mm=report.size_mm)
         self._picture.output(report.output_id, connected=report.connected, identity=report.identity)
         self._turns.output(report.output_id, connected=report.connected)
 

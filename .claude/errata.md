@@ -6529,3 +6529,15 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
 - **Fix C:** a video's `VIDEO_TARGETS` targets are made together by `_released` on the first draw (the `finish` during its prepare lead), not in `prepare` (prepare never imports).
 - **Seen only on the Pi, not run here:** Weston placing a viewport-scaled sub-surface on a plane (vc4 scales; Weston 14's DRM backend takes a scaled view onto a plane only when the plane offers scaling), the fade cadence with the fixes, and the GPU time of a 1080p video's look. The display harness's case 10 proves the enlargement under headless Weston (GL renderer).
 - **CI finding (display harness, run 39180390003):** `native_picture_e2e_harness.py`'s room-light case held every pixel to the look's full-resolution reference while its 64 x 48 grey source was now finished at 64 x 36 and enlarged six times: the far light's mat shadow edge, drawn at the finished resolution, came out 0.518 against 0.556 near the top edge. That is the rule's real cost (what the look draws at the Frame's own scale is as soft as the source), recorded in 0029 and the module; the harness's source is now 512 x 384 (its crop larger than the 384 x 216 placement), so it keeps proving the look pixel for pixel.
+
+## fb-2 (the Display's size and the screen-size rule)
+
+- **The owned-test rule `git grep -l "OutputReport("` misses an alias.** `tests/test_display_power_requests.py`
+  constructs the wire report as `WireReport(` (`from contracts.node_output import OutputReport as WireReport`),
+  so the literal grep does not list it, yet the new required `size_mm` field breaks it. fb-2 updated its one
+  constructor (adds `None`), as it did `tests/test_display_identity.py`'s `WireReport(` (that file is on the
+  grep list for its enrollment `OutputReport(`). Conversely the grep lists files that construct only the
+  enrollment `contracts.enrollment.OutputReport` (width_px/height_px), which fb-2 left untouched.
+- **`OutputPowerController.output` takes `size_mm` with a default of None** (keyword), because
+  `tests/integration/test_central_night_off.py` (not owned) calls it with `identity` and `modes` only. The
+  production path (`PowerObservations.put_report`) always passes the report's size.

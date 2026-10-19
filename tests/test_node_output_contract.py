@@ -8,7 +8,8 @@ calendar set times with the console test on top, and the largest one still fits 
 Schema 4 (decision 0022): picture has left both for its own keys (contracts/node_picture.py), so a
 document or report that still carries a picture part is refused. Schema 9 (render redesign S2): the
 document carries the turn, how the screen hangs, checked by contracts/display_turn.py `is_turn`; a
-document without it, or with any other value, is refused.
+document without it, or with any other value, is refused. Schema 10 (the frame box): the report
+carries the display's picture area as its EDID base block states it (`size_mm`, None when unstated).
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ import pytest
 
 from contracts.node_output import (
     BEST_DETECTED,
+    DISPLAY_MM_MAX,
     MAX_POWER_CHANGES,
     MAX_REQUEST_SECONDS,
     OUTPUT_DOCUMENT_BYTES,
@@ -60,7 +62,8 @@ TESTING = InForce(InForceKind.TEST, Power.OFF, "req-7", 120, None)
 REPORT = OutputReport(
     "HDMI-A-1", True, IDENTITY,
     (DisplayMode(1920, 1080, 60000, preferred=True), DisplayMode(1280, 720, 59940)),
-    (PowerMethod.DDC_CI, PowerMethod.SIGNAL_OFF), PowerMethod.DDC_CI, 3, PowerResult.CONFIRMED, TESTING)
+    (PowerMethod.DDC_CI, PowerMethod.SIGNAL_OFF), PowerMethod.DDC_CI, 3, PowerResult.CONFIRMED, TESTING,
+    (950, 540))
 ATTEMPT = PowerAttempt("HDMI-A-1", 3, TESTING, PowerMethod.DDC_CI, PowerResult.CONFIRMED, 840)
 CANONICAL = (b'{"change":3,"method":"ddc-ci","never_off_on_other_input":true,"output_id":"HDMI-A-1",'
              b'"power":{"changes":[{"at":"2026-10-12T22:00:00Z","power":"off"},'
@@ -69,8 +72,8 @@ CANONICAL = (b'{"change":3,"method":"ddc-ci","never_off_on_other_input":true,"ou
              b'"switch_input_on_power_on":true,"turn":0}')
 
 
-def test_the_display_line_is_schema_9():
-    assert SCHEMA_MAJOR == 9
+def test_the_display_line_is_schema_10():
+    assert SCHEMA_MAJOR == 10
 
 
 @pytest.mark.parametrize("value, encode, decode", [
@@ -80,14 +83,15 @@ def test_the_display_line_is_schema_9():
     (OutputDocument("HDMI-A-2", 4, TIMETABLE, BEST_DETECTED, True, True, 90),
      encode_output_document, decode_output_document),
     (REPORT, encode_output_report, decode_output_report),
-    (OutputReport("HDMI-A-2", False, None, (), (), None, None, None, None),
+    (OutputReport("HDMI-A-2", False, None, (), (), None, None, None, None, None),
      encode_output_report, decode_output_report),
     (OutputReport("HDMI-A-2", True, DisplayIdentity("ABC", 0, "", "SN 0042"), (), (PowerMethod.HDMI_CEC,),
                   PowerMethod.HDMI_CEC, 9, PowerResult.ANOTHER_INPUT,
-                  InForce(InForceKind.TIMETABLE, Power.OFF, None, None, "2026-10-12T22:00:00Z")),
+                  InForce(InForceKind.TIMETABLE, Power.OFF, None, None, "2026-10-12T22:00:00Z"),
+                  (DISPLAY_MM_MAX, 1)),
      encode_output_report, decode_output_report),
     (OutputReport("HDMI-A-2", True, None, (), (), None, 9, None,
-                  InForce(InForceKind.TIMETABLE_RAN_OUT, None, None, None, None)),
+                  InForce(InForceKind.TIMETABLE_RAN_OUT, None, None, None, None), None),
      encode_output_report, decode_output_report),
     (ATTEMPT, encode_power_attempt, decode_power_attempt),
     (PowerAttempt("HDMI-A-2", 1, InForce(InForceKind.TIMETABLE, Power.ON, None, None, None), None,
@@ -108,6 +112,15 @@ def test_a_documents_bytes_are_canonical_whatever_the_input_order():
         raw = json.dumps(shuffled).encode()
         assert raw != CANONICAL
         assert encode_output_document(decode_output_document(raw)) == CANONICAL
+
+
+def test_a_report_without_its_size_is_refused():
+    """Schema 10: `size_mm` is always present on the wire (null when the display states none)."""
+    raw = json.loads(encode_output_report(REPORT))
+    assert raw["size_mm"] == [950, 540]
+    del raw["size_mm"]
+    with pytest.raises(ValueError, match="^output_report$"):
+        decode_output_report(json.dumps(raw).encode())
 
 
 def test_set_times_are_whole_utc_seconds_both_ways():
@@ -229,7 +242,7 @@ def test_an_attempt_never_carries_out_a_timetable_that_ran_out():
 def _report(**changes) -> OutputReport:
     fields = {"output_id": "HDMI-A-1", "connected": True, "identity": IDENTITY, "modes": (),
               "answers": (PowerMethod.HDMI_CEC, PowerMethod.SIGNAL_OFF), "method": PowerMethod.SIGNAL_OFF,
-              "for_change": 1, "result": None, "in_force": None}
+              "for_change": 1, "result": None, "in_force": None, "size_mm": None}
     return OutputReport(**{**fields, **changes})
 
 
@@ -240,8 +253,14 @@ def _report(**changes) -> OutputReport:
     {"answers": (PowerMethod.SIGNAL_OFF, PowerMethod.SIGNAL_OFF)},
     {"for_change": 0},
     {"modes": (DisplayMode(640, 480, 60000),) * 65},
+    {"size_mm": (0, 540)},
+    {"size_mm": (950, DISPLAY_MM_MAX + 1)},
+    {"size_mm": (True, 540)},
+    {"size_mm": (950.0, 540)},
+    {"size_mm": [950, 540]},
+    {"size_mm": (950, 540, 1)},
 ], ids=["unknown-output", "method-not-answered", "answers-out-of-order", "answers-repeated", "change-0",
-        "too-many-modes"])
+        "too-many-modes", "size-zero", "size-past-max", "size-bool", "size-float", "size-list", "size-three"])
 def test_a_report_refuses(changes):
     with pytest.raises(ValueError, match="^output_report$"):
         _report(**changes)

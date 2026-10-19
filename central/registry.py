@@ -30,10 +30,15 @@ from central.frame_lighting.ports import FrameLightingCheck
 from central.infra.display_store import (
     POSITION_COLUMNS,
     POSITION_FACTS,
+    SCREEN_COLUMNS,
+    SCREEN_FACTS,
+    SCREEN_JOIN,
     SEEN_DISPLAY_JOIN,
     commit_position,
+    frame_display_mm,
     frame_readiness,
     frame_readiness_in,
+    frame_screen_px,
     resolve_output,
 )
 from central.infra.output_wakes import notify_nodes_in
@@ -885,16 +890,17 @@ class Registry:
                                "ORDER BY player_id,output_id").fetchall()
         frames = conn.execute("SELECT f.id,f.name,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,"  # noqa: S608
                               "f.calibration,f.lighting,f.turn,f.configuration_revision,"
-                              f"b.player_id,b.output_id,{POSITION_COLUMNS} FROM frames f LEFT JOIN bindings b "
-                              f"ON b.frame_id=f.id {SEEN_DISPLAY_JOIN} ORDER BY f.id").fetchall()
+                              f"b.player_id,b.output_id,{POSITION_COLUMNS},{SCREEN_COLUMNS} FROM frames f "
+                              f"LEFT JOIN bindings b ON b.frame_id=f.id {SCREEN_JOIN} ORDER BY f.id").fetchall()
         bound_player_ids = {frame["player_id"] for frame in frames if frame["player_id"] is not None}
         return InstallationInventory(
             players=tuple(PlayerInventory.model_validate({**row, "is_bound": row["id"] in bound_player_ids})
                          for row in players),
             outputs=tuple(OutputInventory.model_validate(row) for row in outputs),
             frames=tuple(FrameInventory.model_validate(
-                {**{key: value for key, value in row.items() if key not in POSITION_FACTS},
-                 "generation": row["generation"], "readiness": frame_readiness(row)}) for row in frames),
+                {**{key: value for key, value in row.items() if key not in POSITION_FACTS + SCREEN_FACTS},
+                 "generation": row["generation"], "readiness": frame_readiness(row),
+                 "screen_px": frame_screen_px(row), "display_mm": frame_display_mm(row)}) for row in frames),
             walls=tuple(WallInventory.model_validate(row) for row in conn.execute(
                 "SELECT surface_id, name, room FROM walls ORDER BY surface_id").fetchall()),
         )

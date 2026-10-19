@@ -36,7 +36,7 @@ DOCUMENT = SimpleNamespace(change=4)        # Why reads only the document's chan
 
 def report(result: PowerResult | None, *, power: Power = Power.OFF, change: int = 4) -> OutputReport:
     return OutputReport("HDMI-A-1", True, None, (), (PowerMethod.DDC_CI,), PowerMethod.DDC_CI, change,
-                        result, InForce(InForceKind.TIMETABLE, power, None, None, "1970-01-12T13:46:40Z"))
+                        result, InForce(InForceKind.TIMETABLE, power, None, None, "1970-01-12T13:46:40Z"), None)
 
 
 def why(answer: OutputReport | None):
