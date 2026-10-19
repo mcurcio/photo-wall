@@ -180,12 +180,13 @@ export function cropPercent(cropLimit) {
  * (§13) keeps its stored id, so there is no name, id or collision to check.
  *
  * A hand-picked frame whose candidates were read and are empty (`noMedia`) has
- * nothing to choose: its problem belongs to the frame choice (field `targets`).
+ * nothing to choose: its problem belongs to the frame choice (field `targets`), and so
+ * does one whose screen size is not known yet (`unsized`), which Central judges nothing for.
  *
  * @param {{name: string, idOverride: string|null, mode: "live"|"authored",
  *          sourceRefs: string[], targets: string[], cycleSeconds: string|number,
  *          selections: Record<string, string>, loadingMedia?: boolean,
- *          noMedia?: string[]}} draft
+ *          noMedia?: string[], unsized?: string[]}} draft
  * @param {Set<string>} existingIds the stored Scene ids
  * @param {{editing?: boolean}} [options]
  * @returns {Problem[]}
@@ -235,6 +236,14 @@ export function sceneProblems(draft, existingIds, { editing = false } = {}) {
       if (draft.loadingMedia) {
         // While a frame's candidates are read, that is the state to say (§6).
         problems.push({ field: `media:${frameId}`, message: "Loading compatible media…" });
+      } else if (draft.unsized?.includes(frameId)) {
+        // Central judges no photo for a Frame whose screen size is not known (decision 0030).
+        problems.push({
+          field: "targets",
+          message:
+            `No candidates for ${frameId} yet: its screen size is not known yet. ` +
+            "Choose another frame, or wait until its Pi reports its screen.",
+        });
       } else if (draft.noMedia?.includes(frameId)) {
         problems.push({
           field: "targets",

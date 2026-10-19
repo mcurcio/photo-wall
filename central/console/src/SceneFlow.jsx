@@ -240,13 +240,13 @@ export function SceneFlow({ snapshot, route, navigate, rememberScene, markDraft,
   const problemList = useMemo(
     () =>
       inStepOrder(
-        sceneProblems({ ...value, loadingMedia: candidates.loading, noMedia }, takenIds, {
+        sceneProblems({ ...value, loadingMedia: candidates.loading, noMedia, unsized: candidates.unsized }, takenIds, {
           editing: editingId !== null,
         }),
         SCENE_FIELD_STEP,
         steps,
       ),
-    [value, candidates.loading, noMedia, takenIds, editingId, steps],
+    [value, candidates.loading, candidates.unsized, noMedia, takenIds, editingId, steps],
   );
   const problems = useProblems(problemList);
 
