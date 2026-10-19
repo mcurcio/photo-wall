@@ -669,7 +669,7 @@ def test_a_screen_with_nothing_to_play_still_shows_its_pattern_and_its_trial(pat
     rig = Rig()
     rig.renderer.set_player("player-1")
     rig.screens.operations = replace(neutral_operations(OUTPUT, 4, DisplayLight(200, .01)), test_pattern=pattern)
-    rig.screens.trial_now = trial(RectangleFit(width=0.5)) if tried else None
+    rig.screens.trial_now = trial(centred(0.5)) if tried else None
     result = rig.settle(fallback=True, timebase=None)
     composition, pictures, tag, change = rig.screens.commits[-1]
     assert result.status == "presented" and composition.planes == () and pictures == {} and change == 4
