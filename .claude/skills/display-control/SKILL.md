@@ -1,6 +1,6 @@
 ---
 name: display-control
-description: Operate a Photo Wall Pi's displays by hand over SSH - read a display's EDID, map HDMI ports to CEC devices and DDC/CI buses, turn a display off and on with cec-ctl or ddcutil, ask a display for the picture list (`getvcp <codes> --terse`, `capabilities`) and read and set its picture settings (brightness VCP 10, contrast VCP 12, colour preset 14, gains…), and read what the display controller did. Read the HDMI signal range (Broadcast RGB, is_limited_range, the AVI InfoFrame) and whether a display honours it (the EDID's quantization-selectable bit). Use it for the 1b bench step (Test off and on), the display-tuning bench steps (Full and Limited on a TV, the time without photos per change), the 1c and picture-split bench steps (display and Photo Wall brightness from the console read back, which codes a display answers, the time of an ask, power during an ask, Cover on the test monitor, write timing), to diagnose "Display didn't answer", "The display did not take it", "Checking what this display offers" that never clears or a power method that never answers, or to probe a new display's support. Also, when the owner sends a photo of a Frame while tuning, read the picture and Position values Central sent it at that time (configuration snapshots); when he AirDrops a photo of the calibration targets, read it with the reader script and tell him what to change. The rules (what the controller does, what Central decides) live in the docs it links; this is the runbook and its traps.
+description: Operate a Photo Wall Pi's displays by hand over SSH - read a display's EDID (identity, and its size from the base block, never a detailed timing), map HDMI ports to CEC devices and DDC/CI buses, turn a display off and on with cec-ctl or ddcutil, ask a display for the picture list (`getvcp <codes> --terse`, `capabilities`) and read and set its picture settings (brightness VCP 10, contrast VCP 12, colour preset 14, gains…), and read what the display controller did. Read the HDMI signal range (Broadcast RGB, is_limited_range, the AVI InfoFrame) and whether a display honours it (the EDID's quantization-selectable bit). Use it for the 1b bench step (Test off and on), the display-tuning bench steps (Full and Limited on a TV, the time without photos per change), the 1c and picture-split bench steps (display and Photo Wall brightness from the console read back, which codes a display answers, the time of an ask, power during an ask, Cover on the test monitor, write timing), to diagnose "Display didn't answer", "The display did not take it", "Checking what this display offers" that never clears or a power method that never answers, or to probe a new display's support. Also, when the owner sends a photo of a Frame while tuning, read the picture and Position values Central sent it at that time (configuration snapshots); when he AirDrops a photo of the calibration targets, read it with the reader script and tell him what to change. The rules (what the controller does, what Central decides) live in the docs it links; this is the runbook and its traps.
 ---
 
 # display-control
@@ -70,6 +70,26 @@ sudo journalctl -b --no-pager _PID=$(pgrep -x weston) | grep EDID   # Weston's r
 
 The test monitor reads maker `XYM`, product 5475, name `MNN`, serial blank and zero: no usable
 serial, so Central recognises it by make and model on its Frame.
+
+**The display's size: the base block, never a detailed timing.** A Frame's physical size (the room
+lights, the mat shadow, the large-Frame video rule, the wall plan) is its Position box's share of
+the Display's picture area, and that area is the EDID base block's bytes 21 and 22: width and
+height in whole centimetres ([0030](../../../docs/decisions/0030-frame-box.md); `appliance/display_host/edid.py`).
+Either byte 0 means no size stated (a projector, or an aspect-ratio encoding). Never read the
+millimetres in a detailed timing descriptor: they can be wrong by a factor of two.
+
+```sh
+od -An -tu1 -j21 -N2 /sys/class/drm/card1-HDMI-A-1/edid      # width and height in cm (decimal)
+od -An -tu1 -j66 -N3 /sys/class/drm/card1-HDMI-A-1/edid      # the preferred timing's mm bytes (54+12..14): do not use
+```
+
+The production Samsung QN43Q8F gave two answers (read on the production Pi, 2026-10-19): its base
+block says 95 x 54 cm, 43 inches across (right); its preferred timing's bytes 80, 29, 116 say
+80 + 7 x 256 = 1872 by 29 + 4 x 256 = 1053 mm, 85 inches (wrong). Display Host reports the base
+block's as the Output report's `size_mm` (950, 540); Central keeps it on the Display and shows it at
+`GET /v1/operator/frames/<id>/display` (`size_mm`) and on the Hardware tab ("95 × 54 cm, 43 in
+across"). A display that states none reads "Does not state its size": its Frame gets only even
+room light and counts as large for video.
 
 ## HDMI-CEC
 
@@ -199,7 +219,7 @@ Frame bound and its Position saved, or it shows no photos). Note the values to r
    `connector … disconnected`, and `photo-wall-node-player` is still running.
 8. **The turn on the test monitor:** on the Hardware tab set How the screen hangs to Top to the
    right, then Done on the Position tab: the screen turns (Weston's transform), the picture keeps
-   the Frame profile's shape upright as the screen hangs, and nothing shows outside its rectangle.
+   its box's shape upright as the screen hangs, and nothing shows outside its box.
 
 Afterwards put the settings back from the console (Revert, or "As the display has it" and the old
 value by hand), not only by hand: a hand write to a set code is reported as "Changed on the

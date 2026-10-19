@@ -36,7 +36,7 @@ While tuning a Display against a sheet of white paper ([0024](0024-display-tunin
 | | `sent-back` | Revert or a lapse put the wall back from a draft; nothing kept |
 | | `sent-kept` | the kept values sent anew (after Done, Copy, a Display newly seen) |
 | Position | `kept-saved` | Done (Save) kept a trial's draft |
-| | `kept-profile-changed` | the Frame's profile changed; its fit and mat are as they were |
+| | `kept-profile-changed` | the Frame's profile changed; its fit and mat are as they were (written until [0030](0030-frame-box.md) removed the profile; stored entries stay readable) |
 | | `kept-unrecorded` | as for picture |
 | | `sent-draft` | a trial's draft handed to the Node: not kept |
 | | `sent-back` | the kept values handed back once a draft went |
@@ -46,7 +46,7 @@ While tuning a Display against a sheet of white paper ([0024](0024-display-tunin
 - **Retention (placeholders the owner may tune).** Per key, the newest 500 kept and 20,000 sent entries (about an hour of dragging on Position at about 5 a second); each writer trims its own key under its lock when it appends, so there is no reaper (`central/tuning_history/bounds.py` `KEPT_ENTRIES`, `SENT_ENTRIES`). A deleted Frame takes its Position history; Displays are never deleted. No entry is written for the past: history starts at the upgrade.
 - **Restore loads the editor; Done still keeps (R5).** Each restore rule lives with its owner.
   - Picture (`central/displays/picture.py` `restored`): the entry's hardware codes the display offers now (the rest are skipped and named), its software values with its LUT under today's recipe when the LUT is still on the LUTs list (else the draft keeps its own LUT, and the answer says so), and its signal range. The test pattern is never restored. Only the session's own Display's entries: another Display's values cross only by Copy (`other_display`).
-  - Position (`central/fleet/position_history.py` `restore_refusal`, `restored_draft`): refused for another Frame's entry, an entry made for another Frame profile (its corners are fractions of that output) or against another Display than the one seen now; the draft keeps the trial's base revision, so a save made elsewhere is still refused.
+  - Position (`central/fleet/position_history.py` `restore_refusal`, `restored_draft`): refused for another Frame's entry, an entry made for another Frame profile (its corners are fractions of that output) or against another Display than the one seen now (since [0030](0030-frame-box.md) an entry's box is its own shape, so the profile refusal is gone; one made for the screen hung another way is refused instead, [0029](0029-render-planes.md)); the draft keeps the trial's base revision, so a save made elsewhere is still refused.
 - **The read contract** (`central/tuning_history/ports.py` `TuningHistoryQueries`) is one read for the console and the agent alike: a Display's picture history, a Frame's Position history, a Frame's snapshot at a time; plain JSON, newest first. Its routes, tables and SQL are the [runbook's](../runbook.md#configuration-snapshots); the tabs' words are the [console design's](../operator-console-design.md#5-the-frame-page); the agent's procedure is the [display-control skill](../../.claude/skills/display-control/SKILL.md#reading-the-values-while-the-owner-tunes).
 - **No database logic.** Every rule is app code; migration 096 adds the three tables and two columns, with no trigger or stored procedure.
 
@@ -67,7 +67,7 @@ Prior art: SQL:2011 system-versioned tables (a row's history read "as of" a time
 - Sent entries are Central's intent, not the Pi's answer: the Pi presents a change seconds later (about 10 s for a signal range change, [0024](0024-display-tuning.md)), and a test pattern the Pi drops at its own 10-minute bound still shows in the entry until the session ends.
 - Changes made with the TV's own remote or menus are never seen (a hardware value changed on the display's buttons shows on the Picture tab, not in the history).
 - Five writer sites, and a compare per Node exchange for Position.
-- Restore crosses Displays only through Copy; Position refuses another profile's or Display's entry rather than adapting it.
+- Restore crosses Displays only through Copy; Position refuses another profile's or Display's entry rather than adapting it (the profile's refusal went with the profile, [0030](0030-frame-box.md)).
 - Deferred: naming and pinning an entry. Not planned: algorithmic photo matching (Q1).
 
 ## As built
