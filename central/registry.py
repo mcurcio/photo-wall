@@ -51,6 +51,7 @@ from central.installation_models import (
     WallInventory,
     WallNaming,
 )
+from central.installation_ports import InstallationSessions
 from central.installation_repository import PostgresInstallationRepository
 from central.transaction_locks import acquire_runtime_locks, holds_runtime_locks_in
 from contracts.display_turn import DisplayTurn
@@ -169,11 +170,14 @@ def _name_or(exc: UniqueViolation, code: str) -> str:
 class Registry:
     IDENTIFY_OUTPUT_TTL_SECONDS = 15
 
-    def __init__(self, db: Database, clock: Clock, *, lighting: FrameLightingCheck):
+    def __init__(self, db: Database, clock: Clock, *, lighting: FrameLightingCheck,
+                 installation: InstallationSessions | None = None):
         """`lighting`: the Frame-lighting check every lighting write goes through (the composition
-        root's PgFrameLighting)."""
+        root's PgFrameLighting). `installation`: the Installation port that holds the one query
+        of a Player's configuration (PostgreSQL's unless given, as Coordinator's)."""
         self.db, self.clock = db, clock
         self.lighting = lighting
+        self.installation: InstallationSessions = installation or PostgresInstallationRepository(clock)
 
     @contextmanager
     def _equipment_write(self):
@@ -805,9 +809,9 @@ class Registry:
 
     def configuration_in(self, conn, player_id: str, epoch: int) -> dict[str, list[OutputBinding]]:
         """Hold registry authority through the caller's offer/configuration transaction: the one query
-        and mapping, PostgresInstallationRepository.configuration_in; stale_authority 403 when the
+        and mapping, the Installation port's `configuration_in`; stale_authority 403 when the
         session is not current."""
-        configuration = PostgresInstallationRepository(self.clock).configuration_in(conn, player_id, epoch)
+        configuration = self.installation.configuration_in(conn, player_id, epoch)
         if configuration is None:
             raise RegistryError("stale_authority", 403)
         return configuration
