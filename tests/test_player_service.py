@@ -2052,8 +2052,9 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
         # An http root needs no trust store; the fixture CA keeps the host's out of it.
         trust = Trust.public(tls.write_bundle(tmp_path / "ca.pem", tls.CA))
         transport = HttpTransport(trust=trust)
+        # A sized mode: on a screen of unknown size a Frame has no Frame output (decision 0030).
         service = PlayerService(PlayerConfig(central_origin=origin, cache_dir=str(cache_dir)),
-            load_identity(), (OutputReport(output_id="HDMI-A-1", width_px=0, height_px=0),),
+            load_identity(), (OutputReport(output_id="HDMI-A-1", width_px=1920, height_px=1080),),
             RecordingRenderer(), immediate,
             find_central=functools.partial(find_central, Configured(Origin.parse_root(origin)),
                                            transport=transport),

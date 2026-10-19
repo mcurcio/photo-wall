@@ -11,7 +11,7 @@ from pathlib import Path
 from psycopg.types.json import Jsonb
 from support.position import LIGHTING
 
-from contracts.models import Layer, Plan
+from contracts.models import Layer
 
 MIGRATION = Path(__file__).parents[1] / "central/migrations/084_layer_crop.sql"
 COMMON = {"run_id": "run-1", "output_id": "HDMI-A-1", "frame_id": "frame-0",
@@ -30,7 +30,7 @@ def _layer(assignment_id: str, start: float, **fields) -> dict:
 
 def test_stored_media_layers_without_a_crop_read_back_centred(registry):
     """Mutation probe: rewrite every layer (black included) -> a black layer carries a crop and
-    the plan no longer validates."""
+    its layer no longer validates."""
     layers = [
         _layer("before-5a", 0),                                   # no crop key
         _layer("additive", 5, crop=None),                         # 5a's additive shape
@@ -59,9 +59,11 @@ def test_stored_media_layers_without_a_crop_read_back_centred(registry):
             "SELECT manifest FROM plan_offers ORDER BY revision").fetchall()]
         locks = {row["assignment_id"]: row["layer"] for row in conn.execute(
             "SELECT assignment_id,layer FROM assignment_locks").fetchall()}
-    migrated = Plan.model_validate(manifests[0])
+    # 084 rewrites layers only: the binding stays in the shape its build stored (today's Plan
+    # binding has since changed, decision 0030), so the layers are what is validated.
+    migrated = [Layer.model_validate(layer) for layer in manifests[0]["layers"]]
     assert [(layer.assignment_id, layer.crop and layer.crop.offset)
-            for layer in migrated.layers] == [
+            for layer in migrated] == [
         ("before-5a", 0.5), ("additive", 0.5), ("chosen", 0.0), ("black", None)]
     assert manifests[1]["layers"] == []
     assert Layer.model_validate(locks["before-5a"]).crop.offset == 0.5
