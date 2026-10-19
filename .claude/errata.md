@@ -6691,3 +6691,28 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
 - **Local browser runs on an overloaded host (load average about 146) timed out tests** (a
   Hardware-tab turn test among them): of seven full runs of the touched browser files, five passed,
   one had 3 timeouts and one an unattributed one. CI judges.
+
+## fb-11 (the Hardware tab without the Frame profile)
+
+- **Owned list too narrow: four more browser tests asserted the old Frame profile section** and fail
+  without a change: `tests/browser/test_console_frame_page_browser.py` (its Hardware tests: the
+  "Frame profile" region, the reported-resolution "Check the Display" card and its parametrised
+  no-note case), `tests/browser/test_frame_turn_browser.py` (the same card around a turn) and
+  `tests/browser/test_frame_fit_browser.py` (the profile's "Pixel width" after Done). fb-11 changed
+  only those assertions: they now read the Frame section's "N × M pixels, a:b"; the card, whose
+  only subject was the profile against the reported mode, is gone with the profile, and its two
+  tests with it. `frame-display.stories.tsx` (the story file, not only its baselines) changed too.
+- **frame-page.tsx still passes `snapshot` and `draftFit` to `FrameProfile`** (fb-10 owns the page):
+  `FrameProfileProps` keeps both as optional props nothing reads, marked transitional, so the
+  branch typechecks. fb-10 removes the Hardware tab's `FrameDraftFit` call (its `wholeProfile`) and
+  fb-14 drops the two props with the rename to `FrameFacts`.
+- **`frameProfileProblem` (framesApi.js) went with `updateFrameProfile`**: its only callers were the
+  two removed editors; `orientationCoherent` itself stays in projection.js for fb-14.
+- **A Frame whose screen is not known says so** ("Not known yet: the Pi has not reported this screen's
+  resolution"; unbound: "Not known until this Frame is connected to a Pi"); a bound Frame whose
+  Display was not seen yet reads as "does not state its size" (the inventory's `display_mm` is None
+  for both); the page names no third case.
+- **No UX designer agent proposed the Frame section's layout** (no tool to start one here): Shows
+  videos, "Size on screen", "Size on the wall" and the Position-tab link. The end review's designer
+  should judge the Hardware tab's screenshots. `patterns/problem-card.stories.tsx` still uses
+  "Frame profile" / "Edit Frame profile" as sample words (not owned).

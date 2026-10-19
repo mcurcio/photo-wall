@@ -1,5 +1,5 @@
 import { apiWrite, callApi } from "./apiWrite.js";
-import { dragToPlacement, orientationCoherent } from "./projection.js";
+import { dragToPlacement } from "./projection.js";
 import { FRAME_ID_PATTERN } from "./frameIds.js";
 
 export { FRAME_ID_PATTERN } from "./frameIds.js";
@@ -57,28 +57,6 @@ export async function createFrame(id, placement, profile) {
 }
 
 /**
- * Replace a Frame's persistent Frame profile. The generation is captured when
- * the editor opens so a concurrent equipment change cannot silently authorize
- * this edit. Bound Frames and Frames targeted by a live Run are refused by the
- * server. A successful change also invalidates the committed calibration.
- *
- * @param {string} frameId
- * @param {{width_px:number, height_px:number, diagonal_inches:number, video:boolean}} profile
- * @param {number} expectedGeneration
- * @returns {Promise<{ok:true, changed:boolean, frame:object}|{ok:false, code:string, status:number}>}
- */
-export async function updateFrameProfile(frameId, profile, expectedGeneration) {
-  const result = await apiWrite(`/v1/operator/frames/${frameId}/profile`, {
-    method: "PUT",
-    body: { profile, expected_generation: expectedGeneration },
-  });
-  if (result.ok) {
-    return { ok: true, changed: result.data?.changed === true, frame: result.data };
-  }
-  return { ok: false, code: result.error ?? String(result.status), status: result.status };
-}
-
-/**
  * Set how a Frame's screen hangs (render redesign S5): PUT /v1/operator/frames/{id}/turn with
  * `body` = contract.ts `FrameTurnChange` ({turn, expected_generation}, the generation the operator
  * saw). Central answers {frame_id, turn, generation, changed}; a turn already set is
@@ -117,24 +95,6 @@ export async function setFrameVideo(frameId, video) {
     return { ok: true, changed: result.data?.changed === true, video: result.data?.video === true };
   }
   return { ok: false, code: result.error ?? String(result.status), status: result.status };
-}
-
-/** Validate the shared FrameProfile contract and its orientation against a Frame. */
-export function frameProfileProblem(profile, frame) {
-  const width = Number(profile.width_px);
-  const height = Number(profile.height_px);
-  const diagonal = Number(profile.diagonal_inches);
-  if (!Number.isInteger(width) || width < 1 || width > 16384 ||
-      !Number.isInteger(height) || height < 1 || height > 16384) {
-    return "Pixel width and height must be whole numbers from 1 to 16384.";
-  }
-  if (!Number.isFinite(diagonal) || diagonal <= 0) {
-    return "Diagonal must be a positive number.";
-  }
-  if (!orientationCoherent(frame.width_mm, frame.height_mm, width, height)) {
-    return "Frame profile must match the frame's orientation.";
-  }
-  return null;
 }
 
 /**

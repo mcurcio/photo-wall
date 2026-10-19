@@ -1,8 +1,8 @@
 """The Frame page's turn control (render redesign S5, bead B5): the Hardware tab's "How the screen
 hangs" sets the Frame's turn through the real Registry (`PUT /v1/operator/frames/{id}/turn`), the
 moment it is chosen. A turn makes the Frame's Position one to check (readiness position-needed), the
-Position tab draws the screen as it now hangs, and the Frame profile's reported-resolution note
-compares the profile with the screen as it hangs (domain/frame-turn.tsx, domain/frame-profile.tsx).
+Position tab draws the screen as it now hangs, and the Frame section's size on screen is the box on
+the screen as it hangs (domain/frame-turn.tsx, domain/frame-profile.tsx).
 The Position tab's live session needs a Pi's Display Host, so there the Frame page tests' fake
 Central answers the session routes (test_console_frame_page_browser.py `FakeSessions`).
 """
@@ -58,8 +58,8 @@ def _choice(section, words):
         "radio", name=words, exact=True)
 
 
-def _note(frame):
-    return frame.get_by_role("group", name="Check the Display", exact=True)
+def _facts(frame):
+    return frame.get_by_role("region", name="Frame", exact=True)
 
 
 def test_choosing_top_to_the_right_turns_the_frame_and_the_position_tab_follows(page, registry):
@@ -76,18 +76,16 @@ def test_choosing_top_to_the_right_turns_the_frame_and_the_position_tab_follows(
             "Which way the display's top edge points as it hangs on the wall: the edge at the top when the display "
             "stands on its feet (where its logo reads the right way up). Photo Wall turns the picture to match.")
         expect(_choice(section, "Upright")).to_be_checked()
-        # Upright, a 1080 x 1920 profile does not match the 1920 x 1080 the Pi reported.
-        expect(_note(frame)).to_contain_text(
-            "The Pi reported its Display at 1,920 × 1,080, but this Frame's profile is 1,080 × 1,920.")
-        expect(_note(frame)).to_contain_text("This screen hangs upright.")
+        # Upright, the 9:16 box is 576 x 1,024 pixels of the 1920 x 1080 screen.
+        expect(_facts(frame)).to_contain_text("576 × 1,024 pixels, 9:16")
 
         _choice(section, "Top to the right").click()
         expect(section.get_by_role("status")).to_have_text(SAVED)
         stored = _stored(registry)
         assert (stored.turn, stored.readiness) == (90, Readiness.POSITION_NEEDED)
         expect(_choice(section, "Top to the right")).to_be_checked()
-        # Hung top to the right, the screen is 1080 x 1920: the profile matches it.
-        expect(_note(frame)).to_have_count(0)
+        # Hung top to the right, the screen is 1080 x 1920: the box keeps its shares, another shape.
+        expect(_facts(frame)).to_contain_text("324 × 1,820 pixels")
 
         section.get_by_role("link", name="Open the Position tab", exact=True).click()
         expect(page).to_have_url(re.compile(rf"#/wall/frames/{FRAME}/position$"))
