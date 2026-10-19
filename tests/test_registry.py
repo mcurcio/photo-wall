@@ -540,3 +540,28 @@ def test_delete_frame_requires_a_complete_runtime_reference_snapshot(registry, m
     assert (excinfo.value.code, excinfo.value.status) == (
         "frame_reference_snapshot_required", 500)
     assert [f.id for f in registry.inventory().frames] == ["portrait"]
+
+
+def test_configuration_comes_from_the_installation_port_registry_is_given():
+    """Registry depends on the Installation port, not on its PostgreSQL adapter: the one query of
+    a Player's configuration is the port's; None (session not current) is stale_authority.
+    Mutation probe: build PostgresInstallationRepository inside `configuration_in` -> this fails."""
+    from contracts.time import ManualClock
+
+    held = {"bindings": [], "execution_bindings": []}
+
+    class Installation:
+        def __init__(self):
+            self.asked = []
+
+        def configuration_in(self, conn, player_id, epoch):
+            self.asked.append((conn, player_id, epoch))
+            return held if epoch == 1 else None
+
+    installation = Installation()
+    registry = Registry(None, ManualClock(0), lighting=None, installation=installation)
+    assert registry.configuration_in("conn", "p-1", 1) is held
+    with pytest.raises(RegistryError) as refused:
+        registry.configuration_in("conn", "p-1", 2)
+    assert (refused.value.code, refused.value.status) == ("stale_authority", 403)
+    assert installation.asked == [("conn", "p-1", 1), ("conn", "p-1", 2)]
