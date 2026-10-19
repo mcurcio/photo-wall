@@ -8,13 +8,23 @@ from central.registry import RegistryError
 from central.runtime import Contribution, Runtime, Scene
 
 
-@pytest.fixture(autouse=True)
-def persistent_frame(registry):
+def bound_portrait_frame(registry, frame_id: str = "left") -> None:
+    """A portrait Frame bound full screen to a 1080 x 1920 Output: its Frame output is known, so
+    photos can be authored onto it (frame box run fb-8)."""
+    from test_registry import enroll
+
     from central.registry import FrameCreate
     from contracts.models import FrameProfile
 
-    registry.create_frame(FrameCreate(id="left", width_mm=300, height_mm=500,
+    registry.create_frame(FrameCreate(id=frame_id, width_mm=300, height_mm=500,
         profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)))
+    player, _, _ = enroll(registry, count=1, size=(1080, 1920))
+    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
+
+
+@pytest.fixture(autouse=True)
+def persistent_frame(registry):
+    bound_portrait_frame(registry)
 
 
 def authored_scene(asset_id: str, *, source_refs=(), revision=1):

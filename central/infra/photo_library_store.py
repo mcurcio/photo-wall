@@ -272,10 +272,13 @@ def _copy_sizes_in(conn: Any, asset_id: str) -> dict[MeasurableCopy, CopySize]:
                                   measured_at=row["measured_at"]) for row in rows}
 
 
-def _frame_copy(frame: FrameOutput, preview: CopySize | None) -> FrameCopy:
+def _frame_copy(frame: FrameOutput, preview: CopySize | None) -> FrameCopy | None:
+    """What `frame` asks of a photo's copy; None for a Frame without a Frame output (it asks
+    none: `frame_need`)."""
     need = frame_need(frame)
+    if need is None:
+        return None
     return FrameCopy(frame_id=frame.frame_id, need_px=(need.width, need.height),
-                     output_known=frame.output_px is not None,
                      preview_holds=None if preview is None
                      else covers(preview.width, preview.height, (need,)))
 
@@ -1208,7 +1211,8 @@ class PgPhotoLibrary:
             copies=tuple(CopyView(name=name, in_immich=in_immich, measured=measured.get(name))
                          for name, in_immich in kept.items()),
             prepared_from=row["made_from"],
-            frames=tuple(_frame_copy(frame, measured.get("preview")) for frame in outputs))
+            frames=tuple(copy for frame in outputs
+                         if (copy := _frame_copy(frame, measured.get("preview"))) is not None))
 
     def pool_thumbnail(self, asset_id: str) -> PoolThumbnail | None:
         with self.db.transaction() as conn:

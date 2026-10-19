@@ -91,7 +91,7 @@ from central.runtime import RuntimeConflict, Scene, SceneInUse, SceneOnWall, Sce
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceInUse, SourceNameService
 from central.tuning_history_routes import mount_tuning_history_routes
-from central.wall_plan.fit import FitTarget
+from central.wall_plan.fit import fit_target
 from central.wall_plan.fit_analysis import analyse
 from central.wall_plan.fit_settings import FIT_SETTING_RANGES
 from central.why_routes import mount_why_routes
@@ -778,14 +778,19 @@ def create_app(
         crop_limit: float | None = Query(default=None, ge=FIT_SETTING_RANGES["crop_limit"][0],
                                          le=FIT_SETTING_RANGES["crop_limit"][1]),
     ):
-        # Follow-ups B1: the Frame as the fit rule sees it (its Frame output), judged with the
-        # saved photo fit settings; no crop limit given is the house's.
+        # Follow-ups B1: the Frame as the fit rule sees it (its Frame output's `fit_target`),
+        # judged with the saved photo fit settings; no crop limit given is the house's. A Frame
+        # with no known screen has no shape, so nothing is judged for it (frame box run fb-8).
         target = None
         if frame_id is not None:
-            profile = registry.frame_profile(frame_id)      # an unknown Frame: unknown_frame
             with db.transaction() as conn:
-                outputs = {output.frame_id: output.output_px for output in frame_outputs_in(conn)}
-            target = FitTarget(profile=profile, output_px=outputs.get(frame_id))
+                output = next((output for output in frame_outputs_in(conn)
+                               if output.frame_id == frame_id), None)
+            if output is None:
+                raise RegistryError("unknown_frame", 404)
+            target = fit_target(output)
+            if target is None:
+                raise RegistryError("frame_size_unknown", 409)
         return media_application.source_candidates(source_ref, target=target,
                                                    crop_limit=crop_limit,
                                                    settings=fit_settings.fit_settings())

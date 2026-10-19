@@ -9,8 +9,8 @@ different moments. Like the source creation time, but also frame config, show au
 Real Chromium against the production app and a disposable database. The library is seeded
 through the photo library store's worker side (tests/browser/photo_seed.py) and measured through
 `PgKeyContent` (tests/support/measured_photos.py): a 3:2, a 4:3, a 16:9 and a 1:1 photo, on a
-16:9 Frame "living-room" and a 9:16 Frame "hall" (placed, judged by shape: no Pi reports their
-Displays). At the house crop limit (35 %) three fit living-room and none fit hall; the 1:1 photo
+16:9 Frame "living-room" and a 9:16 Frame "hall" (each full screen on its own Pi's Output: 3,840 x
+2,160 and 1,080 x 1,920, its Frame output). At the house crop limit (35 %) three fit living-room and none fit hall; the 1:1 photo
 fits hall from a crop limit of 44 %, the 4:3 one from 58 %.
 
 Design review round 2 (2026-10-11; owner: "I was trying to say that “preview” is an idea, rather
@@ -76,10 +76,10 @@ SHAPES = ((6000, 4000), (4032, 3024), (3840, 2160), (3000, 3000))  # 3:2, 4:3, 1
 SOURCE = "holiday:1"
 SCENE_ID = "evenings"
 # A Frame with nothing that fits, in plain words (src/domain/photo-fit.ts `emptyFrameWords`): the
-# selection's most common shape against the Frame's (planned, until it reports its output), and
-# what to do; the sentence starts with a capital, not the Frame's name.
+# selection's most common shape against the Frame output's, and what to do; the sentence starts
+# with a capital, not the Frame's name.
 NOTHING_FITS_HALL = re.compile(
-    rf"Most of these photos are \d+:\d+ and ({HALL} is planned at 9:16|{HALL}'s Frame output is 9:16): "
+    rf"Most of these photos are \d+:\d+ and {HALL}'s Frame output is 9:16: "
     r"add photos closer to 9:16 or raise the crop limit\.")
 
 
@@ -292,11 +292,10 @@ def test_the_frame_page_shows_one_row_per_scene_with_its_relation_to_now(page, r
         expect(_row(scene, HALL).get_by_role("img", name=f"{HALL}, 9:16", exact=True)).to_be_visible()
         _said_once(scene, "Nothing fits", "alarm")
         expect(scene).to_contain_text("From the Scene's 4 photos, judged at the house crop limit, 35 %.")
-        # The page is hall's: the row does not name hall or its shape again, and says what it is
-        # judged at (no Pi reports hall's output here): its planned shape, never "is 9:16".
+        # The page is hall's: the row does not name hall or its shape again; it is judged at its
+        # Frame output (its Pi reports it), never at a planned shape.
         expect(_row(scene, HALL).get_by_role("heading", name=HALL, exact=True)).to_have_count(0)
-        expect(_row(scene, HALL)).to_contain_text(
-            "Judged at hall's planned 9:16 shape; hall hasn't reported its output yet.")
+        expect(_row(scene, HALL)).not_to_contain_text("planned")
         expect(scene).not_to_contain_text("hall is 9:16")
         expect(_row(scene, HALL).get_by_role("button", name="Details", exact=True)).to_have_count(0)
         expect(photos).not_to_contain_text("photos fit this Frame")
@@ -466,13 +465,13 @@ def test_a_sample_opens_the_photo_sheet_with_immichs_copies_and_no_immich_id(pag
         ])
         expect(sheet).to_contain_text(f"{LIVING} (16:9): fits")
         # Unedited, the original is the photo Immich shows (its size is Immich's own), and which
-        # copy plays is one plain clause per Frame: neither Frame has reported its output, so each
-        # needs its planned size, which the 1,440 x 960 preview is smaller than.
+        # copy plays is one plain clause per Frame: each needs its Frame output, which the
+        # 1,440 x 960 preview is smaller than.
         expect(copies.locator("p").last).to_have_text("Original: 6,000 × 4,000")
         plays = sheet.get_by_role("group", name="Which copy plays", exact=True)
         expect(plays.locator("p")).to_have_text([
-            f"{HALL}: Plays from a larger copy: Immich's preview is smaller than its planned 1,080 × 1,920 px.",
-            f"{LIVING}: Plays from a larger copy: Immich's preview is smaller than its planned 3,840 × 2,160 px.",
+            f"{HALL}: Plays from a larger copy: Immich's preview is smaller than its Frame output, 1,080 × 1,920 px.",
+            f"{LIVING}: Plays from a larger copy: Immich's preview is smaller than its Frame output, 3,840 × 2,160 px.",
         ])
         expect(sheet).not_to_contain_text("screen")
         html = page.content()

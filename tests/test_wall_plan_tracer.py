@@ -20,6 +20,7 @@ from collections import defaultdict
 
 import pytest
 from support.frame_media import seed_variant
+from support.frame_outputs import frame_outputs_of, target_of
 from support.house_time import UTC_HOUSE
 from support.key_content_builders import face, measured
 from support.measured_photos import measure
@@ -88,13 +89,14 @@ def wall(crop_limit: float | None = None) -> Runtime:
 
 
 def full_screen(frame: str) -> FitTarget:
-    """A Frame full screen on a Display of its profile's size: its Frame output is the profile's."""
+    """A Frame full screen on a Display of its profile's pixels and size: its Frame output is the
+    profile's."""
     profile = PROFILES[frame]
-    return FitTarget(profile=profile, output_px=(profile.width_px, profile.height_px))
+    return target_of(profile.width_px, profile.height_px, inches=profile.diagonal_inches)
 
 
 def an_hour(instance: Runtime, photos, *, frames=FRAMES, outputs=None) -> Projection:
-    """`outputs`: each Frame's Frame output (default: full screen, `full_screen`)."""
+    """`outputs`: each Frame's Frame output pixels (default: full screen, `full_screen`)."""
     return project(
         instance, 0,
         bindings_by_player={"player": tuple(
@@ -105,8 +107,8 @@ def an_hour(instance: Runtime, photos, *, frames=FRAMES, outputs=None) -> Projec
         authored_candidates={}, locked_assignments={}, history=WallHistory(),
         horizon_seconds=300, plan_seconds=3600,
         max_clock_uncertainty=UNCERTAINTY, settings=FitSettings(),
-        frame_outputs=outputs if outputs is not None else {
-            frame: full_screen(frame).output_px for frame in frames})
+        frame_outputs=frame_outputs_of(outputs if outputs is not None else {
+            frame: full_screen(frame).output_px for frame in frames}, inches=24))
 
 
 def placed_by_frame(projection: Projection) -> dict[str, list]:

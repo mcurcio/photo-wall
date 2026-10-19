@@ -183,7 +183,7 @@ from central.infra.power_store import power_policy_in
 from central.installation_models import FrameOutput
 from central.live_session import Lease, begin_lease
 from central.power.timetable import frame_timetable, unbound_timetable
-from contracts.models import Calibration, FrameProfile, frame_output
+from contracts.models import Calibration, frame_output, frame_size_mm
 from contracts.node_link import Pipe
 from contracts.node_output import (
     OUTPUT_IDS,
@@ -244,23 +244,25 @@ POSITION_COLUMNS: Final = ("b.player_id IS NOT NULL AS bound, f.generation, f.po
 
 def frame_outputs_in(conn: Any) -> tuple[FrameOutput, ...]:
     """Every Frame's FrameOutput, ordered by frame id, in the caller's transaction (follow-ups
-    2026-10-11, slice A1): frames LEFT JOIN bindings LEFT JOIN outputs on (player_id,
-    output_id) and the Display seen there; `display_px` is `model.screen_px` of
+    2026-10-11, slice A1; frame box run fb-8): frames LEFT JOIN bindings LEFT JOIN outputs on
+    (player_id, output_id) and the Display seen there; `display_px` is `model.screen_px` of
     `outputs.observation` width_px x height_px (the enrollment report, connected or not) and that
-    Display's modes; `turn` is `f.turn`; `output_px` is `contracts.models.frame_output` at that turn.
-    The one read of Frame outputs: the media worker's rendition choice (PgPhotoLibrary), the
-    Planner's slots and the fit analysis (roadmap 5a) all ask here. Never raises for a Frame
-    without an Output."""
+    Display's modes; `turn` is `f.turn`; `output_px` is `contracts.models.frame_output` at that
+    turn; `video` is `f.video`; `size_mm` is `contracts.models.frame_size_mm` of the Position's box
+    and the seen Display's size (`frame_display_mm`). The one read of Frame outputs: the media
+    worker's rendition choice (PgPhotoLibrary), the Planner's slots, authoring, the source preview
+    and the fit analysis all ask here. Never raises for a Frame without an Output."""
     rows = conn.execute(
-        f"SELECT f.id, f.profile, f.calibration, f.turn, {SCREEN_COLUMNS} FROM frames f "  # noqa: S608
+        f"SELECT f.id, f.video, f.calibration, f.turn, {SCREEN_COLUMNS} FROM frames f "  # noqa: S608
         f"LEFT JOIN bindings b ON b.frame_id=f.id {SCREEN_JOIN} ORDER BY f.id").fetchall()
     frames = []
     for row in rows:
-        profile = FrameProfile.model_validate(row["profile"])
+        calibration = Calibration.model_validate(row["calibration"])
         display = frame_screen_px(row)
         frames.append(FrameOutput(
-            frame_id=row["id"], profile=profile, turn=row["turn"], display_px=display,
-            output_px=frame_output(Calibration.model_validate(row["calibration"]), display, row["turn"])))
+            frame_id=row["id"], turn=row["turn"], video=row["video"], display_px=display,
+            output_px=frame_output(calibration, display, row["turn"]),
+            size_mm=frame_size_mm(calibration.fit, frame_display_mm(row), row["turn"])))
     return tuple(frames)
 
 

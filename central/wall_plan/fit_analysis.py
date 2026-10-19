@@ -38,6 +38,7 @@ from central.wall_plan.fit import (
     MediaKind,
     band,
     crop_share,
+    fit_target,
     judge,
     shape_fit,
 )
@@ -258,9 +259,10 @@ def analyse(request: FitAnalysisRequest, reader: FitAnalysisReader,
     taken: set[str] = set()
     for frame_id in judged:
         output, draft = outputs[frame_id], drafts.get(frame_id)
-        target = FitTarget(profile=output.profile, output_px=output.output_px) if draft is None \
-            else FitTarget(profile=draft.profile,
-                           output_px=frame_output(draft.calibration, output.display_px, output.turn))
+        target = fit_target(output if draft is None else output.model_copy(update={
+            "output_px": frame_output(draft.calibration, output.display_px, output.turn)}))
+        if target is None:   # no known screen: no shape, not judged (fb-10 lists it)
+            continue
         frame = _frame_fit(frame_id, target, output.display_px, draft is not None, sizes,
                            crop_limit, settings, samples, taken)
         if frame.lead is not None:
@@ -313,7 +315,8 @@ def _frame_fit(frame_id: str, target: FitTarget, display_px: tuple[int, int] | N
     fit_by_shape = measured = 0
     for group in sizes.groups:
         size = (group.kind, group.width, group.height)
-        refusal = shape_fit(group.kind, group.width, group.height, target, crop_limit, settings)
+        refusal = shape_fit(group.kind, group.width, group.height, target, crop_limit, settings,
+                            size_known=True)
         if refusal is None:
             passing.add(size)
             fit_by_shape += group.photos
@@ -338,9 +341,9 @@ def _frame_fit(frame_id: str, target: FitTarget, display_px: tuple[int, int] | N
             by_content[verdict.reason].append(_sample(photo, None))
     lead = next((sample for sample in fitting if sample.asset_id not in taken), None)
     return FrameFit(
-        frame_id=frame_id, aspect=target.profile.width_px / target.profile.height_px,
+        frame_id=frame_id, aspect=target.aspect,
         output_px=target.output_px, display_px=display_px, draft=draft,
-        band=band(target.profile.width_px / target.profile.height_px, crop_limit),
+        band=band(target.aspect, crop_limit),
         photos=sum(group.photos for group in sizes.groups) + sizes.size_unknown,
         fit_by_shape=fit_by_shape, refused_by_shape=by_shape, size_unknown=sizes.size_unknown,
         measured=measured,
@@ -359,9 +362,9 @@ def _nearest_crop_limit(groups: tuple[SizeGroup, ...], target: FitTarget,
     (each group's `crop_share`, raised to the range's floor); None when none does."""
     low, high = FIT_SETTING_RANGES["crop_limit"]
     found = [limit for group in groups
-             if (limit := max(low, crop_share(group.width, group.height, target.profile))) <= high
+             if (limit := max(low, crop_share(group.width, group.height, target.aspect))) <= high
              and shape_fit(group.kind, group.width, group.height, target, limit,
-                           settings) is None]
+                           settings, size_known=True) is None]
     return min(found, default=None)
 
 

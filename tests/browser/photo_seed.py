@@ -177,7 +177,11 @@ TALL_FRAME, WIDE_FRAME = "hall", "living-room"
 
 def seed_varied_frames(registry) -> tuple[str, str]:
     """Two Frames beside the test's own, so a screenshot shows both shapes: "hall", 9:16 on a 32"
-    display, and "living-room", 16:9 on a 55" one (placed, not bound)."""
+    display, and "living-room", 16:9 on a 55" one, each bound full screen to its own Pi's Output
+    of its pixels (frame box run fb-8: a Frame with no known screen has no shape and no photo is
+    judged for it). No Display is seen, so neither states a size."""
+    from test_registry import enroll
+
     from central.registry import FrameCreate
     from contracts.models import FrameProfile
 
@@ -187,6 +191,9 @@ def seed_varied_frames(registry) -> tuple[str, str]:
     registry.create_frame(FrameCreate(id=WIDE_FRAME, surface_id="living", x_mm=100, y_mm=100, width_mm=1210,
                                       height_mm=680, profile=FrameProfile(width_px=3840, height_px=2160,
                                                                           diagonal_inches=55)))
+    for frame_id, screen in ((TALL_FRAME, (1080, 1920)), (WIDE_FRAME, (3840, 2160))):
+        player, _, _ = enroll(registry, count=1, size=screen)
+        registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
     return TALL_FRAME, WIDE_FRAME
 
 

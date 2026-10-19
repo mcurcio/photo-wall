@@ -55,6 +55,7 @@ from central.wall_plan.fit import (
     band,
     crop_share,
     judge,
+    large_frame,
     shape_fit,
 )
 from central.wall_plan.fit_settings import FitSettings
@@ -93,8 +94,9 @@ class Slot(Model):
     """One Frame's showing to fill: an Intent of the Runtime's timeline.
 
     It can take a candidate when: the candidate is in its pool (`pools[slot.pool]`), or in
-    `authored` for a hand-placed slot; the fit rule accepts it on `target` (its Frame's profile
-    and Frame output) at `crop_limit`, the Scene's resolved value
+    `authored` for a hand-placed slot; the fit rule accepts it on `target` (its Frame's
+    `fit_target`; None when the Frame has no Frame output, and then the slot takes no candidate)
+    at `crop_limit`, the Scene's resolved value
     (`central.wall_plan.fit.judge`, measured key content for an image); it is not
     `preparation_failure`d nor measure-failed; inside the preparation window its variant is usable
     for the Frame; and no extent of that photo on another Frame overlaps this slot's."""
@@ -106,7 +108,7 @@ class Slot(Model):
     end: Instant
     fade_in: float = Field(ge=0, allow_inf_nan=False)
     after_end: AfterEnd
-    target: FitTarget
+    target: FitTarget | None
     crop_limit: Fraction
     pool: str = ""                        # key into `pools`; "" for a hand-placed slot
     authored: tuple[Identifier, ...] = ()    # hand-placed photos, in authored order
@@ -202,7 +204,7 @@ def variant_usable(candidate: Candidate, target: FitTarget, settings: FitSetting
         return variant.media_type in ("image/jpeg", "image/png") and variant.duration is None
     return (
         variant.media_type == "video/mp4" and variant.duration is not None
-        and (target.profile.diagonal_inches < settings.large_frame_inches
+        and (not large_frame(target, settings)
              or min(variant.width, variant.height) >= settings.large_frame_video_short_side)
     )
 
@@ -228,13 +230,13 @@ def fit_of(candidate: Candidate, target: FitTarget, crop_limit: float,
 def candidate_shape_fit(candidate: Candidate, target: FitTarget, crop_limit: float,
                         settings: FitSettings) -> DoesNotFit | None:
     """`shape_fit` for a candidate at its `judged_size`. An image whose readable size is not
-    measured yet is judged by shape alone (as a Frame whose output is unknown), so nothing is
-    refused on a size no one measured; it is still never placed (`fit_of` answers None). Pure."""
+    measured yet is judged by shape alone (`size_known` False), so nothing is refused on a size
+    no one measured; it is still never placed (`fit_of` answers None). Pure."""
     size = judged_size(candidate)
     if size is None:
         return shape_fit(candidate.kind, candidate.original_width, candidate.original_height,
-                         target.model_copy(update={"output_px": None}), crop_limit, settings)
-    return shape_fit(candidate.kind, *size, target, crop_limit, settings)
+                         target, crop_limit, settings, size_known=False)
+    return shape_fit(candidate.kind, *size, target, crop_limit, settings, size_known=True)
 
 
 def fits_slot(candidate: Candidate, slot: Slot, settings: FitSettings) -> bool:
@@ -263,13 +265,16 @@ def shape_bounds(slots: Sequence[Slot]) -> ShapeBounds:
     videos, and for an image the Frame output as a floor on the revision's sides (the window the
     rule needs is never larger than the photo, and the readable size never larger than the
     revision). A superset of `shape_fit`'s acceptances, so the exact judgement drops what the
-    store keeps, never the other way. Pure."""
+    store keeps, never the other way. A slot without a target takes nothing and adds no class.
+    Pure."""
     classes: dict[ShapeClass, None] = {}
     for slot in slots:
-        profile = slot.target.profile
-        low, high = band(profile.width_px / profile.height_px, slot.crop_limit)
-        width, height = slot.target.output_px or (0, 0)
-        classes[ShapeClass(video=profile.video, min_ratio=low * (1 - SHAPE_RATIO_SLACK),
+        target = slot.target
+        if target is None:
+            continue
+        low, high = band(target.aspect, slot.crop_limit)
+        width, height = target.output_px
+        classes[ShapeClass(video=target.video, min_ratio=low * (1 - SHAPE_RATIO_SLACK),
                            max_ratio=high * (1 + SHAPE_RATIO_SLACK), min_width=width,
                            min_height=height)] = None
     return ShapeBounds(classes=tuple(classes))
@@ -284,13 +289,15 @@ def _judged(kind: MediaKind, width: int, height: int, key: KeyContent | None,
 _Standing = Literal["take", "measure", "prepare", "unusable", "no"]
 
 
-def _standing(candidate: Candidate, target: FitTarget, crop_limit: float, settings: FitSettings,
-              *, inside: bool) -> tuple[_Standing, Fits | None]:
+def _standing(candidate: Candidate, target: FitTarget | None, crop_limit: float,
+              settings: FitSettings, *, inside: bool) -> tuple[_Standing, Fits | None]:
     """What a slot does with one candidate of its pool, before asking where else it is on
     screen: take it (with the fit rule's crop), request a measurement or (inside the
     preparation window) a prepared copy, leave it ("unusable": it fits, but its prepared copy
-    cannot be drawn here), or nothing (it does not fit, or it failed)."""
-    if candidate.preparation_failure or isinstance(candidate.analysis, MeasureFailed):
+    cannot be drawn here), or nothing (it does not fit, it failed, or the slot's Frame has no
+    Frame output, `target` None)."""
+    if (target is None or candidate.preparation_failure
+            or isinstance(candidate.analysis, MeasureFailed)):
         return "no", None
     verdict = fit_of(candidate, target, crop_limit, settings)
     if verdict is None:
@@ -582,6 +589,9 @@ class _Walk:
         """Step 5's last resort: place the line's first photo of the slot's pool whose key
         content is unknown, that passes `shape_fit`, is usable and is free, centred. Inside the
         preparation window an unprepared one is requested (at most `depth`) and skipped."""
+        target = slot.target
+        if target is None:
+            return False
         pool = self.pools.get(slot.pool, frozenset())
         inside = slot.start < self.window.preparation_end
         requested, depth = 0, 1 + self.limits.offer_extra
@@ -591,11 +601,11 @@ class _Walk:
                     or candidate.kind != "image" or candidate.preparation_failure
                     or isinstance(candidate.analysis, Measured)
                     or judged_size(candidate) is None
-                    or candidate_shape_fit(candidate, slot.target, slot.crop_limit,
+                    or candidate_shape_fit(candidate, target, slot.crop_limit,
                                            self.settings) is not None):
                 continue
             if (candidate.variant is not None
-                    and not variant_usable(candidate, slot.target, self.settings)):
+                    and not variant_usable(candidate, target, self.settings)):
                 continue
             if not self._free(candidate, slot):
                 continue
@@ -606,7 +616,7 @@ class _Walk:
                 continue
             self._place(slot, candidate, Fits(
                 crop=CENTRED, crop_share=crop_share(candidate.original_width,
-                                                    candidate.original_height, slot.target.profile),
+                                                    candidate.original_height, target.aspect),
                 interest_kept=1.0), pass_number=self._pick(slot.scene_id, asset_id))
             return True
         return False

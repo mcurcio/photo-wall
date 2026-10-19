@@ -683,7 +683,9 @@ def test_orphaned_pending_cues_are_superseded_not_skipped_as_not_ready(registry)
 # photo on a 9:16 Frame crops 43.75 % of its area: it passes at 50 % and is refused at 35 %.
 
 def square_photo_scene(registry, crop_limit=None):
-    frame(registry, "portrait")
+    from test_authored_scene import bound_portrait_frame
+
+    bound_portrait_frame(registry, "portrait")
     square = photo("square", taken_at=900, width=2000, height=2000)
     seed_pool(registry, "square:1", (square,))
     selection = {} if crop_limit is None else {"selection": SceneSelection(crop_limit=crop_limit)}

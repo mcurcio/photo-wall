@@ -6627,3 +6627,35 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
   (it was a 16:9 rectangle across a portrait screen); `tests/test_render_bench.py` says so.
 - **`picture_board` and `picture_lights` still take `binding.profile`** (fb-9 owns player/geometry.py and
   the lights' size); only the finishing aspect moved to `placement.aspect` here.
+
+## fb-8 (the Planner judges by the Frame output)
+
+- **The wall e2e demo's video will be refused (needs a fix outside fb-8's files).** `scripts/demo_wall.py`'s
+  simulated Pis report no Display, so every demo Frame's size is unknown and counts as large (the page's
+  rule, decision 6b); the demo's 320 x 180 video is under the 1,080-row floor, so it is never planned or
+  prepared and the e2e's `video_not_prepared` / `media_types_not_presented` checks will fail in
+  `software-e2e.yml`. Fix (not done here, not an owned file): the demo saves photo fit settings with
+  `large_frame_video_short_side` <= 180, or its Pi reports a sized Display. `tests/test_wall_demo.py`'s
+  video check now judges a sized 24-inch Frame and says so.
+- **The console's candidates read fails whole on one unsized target Frame.** `useCandidates.js` reads
+  `/v1/operator/sources/{ref}/candidates?frame_id=` for every target Frame in one `Promise.all`; an
+  unsized Frame (e.g. an unbound one) now answers 409 `frame_size_unknown` (as the page says), so the Scene
+  flow shows "Could not load candidate media for these Frames." for the whole Scene. The console should
+  read `frame_size_unknown` as "no candidates for this Frame" (`candidatesApi.js`/`useCandidates.js`, not
+  owned by any bead). Browser tests that target the unbound `lobby-left` Frame in the Scene flow
+  (`test_scene_flow_browser.py`, `test_operator_showrunner_browser.py`) may go red until then; not run
+  locally.
+- **Files outside fb-8's list changed to stay green** (each the smallest edit): `tests/test_coordination.py`
+  (`square_photo_scene` binds its Frame), `tests/test_scene_apply_now.py` (binds its Frame), both through
+  `tests/test_authored_scene.py`'s new `bound_portrait_frame`; `tests/browser/photo_seed.py`
+  (`seed_varied_frames` binds hall and living-room full screen to their own Pis, so the Fit board judges
+  them); new `tests/support/frame_outputs.py` (one FrameOutput / FitTarget builder for pure tests).
+- **The fit analysis skips an unsized Frame for now** (`fit_analysis.py` `analyse`: `fit_target` None ->
+  `continue`), and reads `target.aspect` where it read the profile's; fb-10 adds `unsized`. A draft is
+  judged at `fit_target` of the saved output with the draft's `output_px`, but keeps the SAVED box's
+  `size_mm`: FrameOutput carries no Display size, so fb-10's `frame_size_mm(draft.calibration.fit, the
+  Display's size, turn)` needs the Display's mm (add `display_mm` to FrameOutput, or read it beside it).
+- **`Registry.frame_profile` has no caller left** (the source-candidates route reads `frame_outputs_in`);
+  `frame_profiles_in` stays on the ports for fb-14 to delete.
+- **`large_frame` compares the diagonal from mm with `>=` exactly**; a Frame stated at exactly the
+  threshold (40 in from 25.4 x 40 mm) can land a hair under it in floating point. No test depends on it.

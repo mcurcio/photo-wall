@@ -71,3 +71,41 @@ def test_a_photo_that_fills_a_mat_opening_is_judged_against_the_opening_everywhe
         contributions=(Contribution(target="frame:hall", source_refs=(POOL,)),)))
     coordinator.runtime.command("activate", "house", "calendar", 1000)
     assert {entry.asset_id for entry in coordinator.advance().plan} == {opening.asset_id}
+
+
+def test_a_bound_frame_with_no_known_screen_is_judged_for_no_photo_anywhere(registry):
+    """Frame box run fb-8: a Frame bound to an Output that enrolled at 0 x 0, with no Display
+    seen there, has no screen size, so no Frame output and no shape. The planning pass gives it
+    no photo, the candidates route answers "frame_size_unknown", authoring onto it is refused
+    "authored_frame_size_unknown" and the photo sheet lists it under no photo's Frames."""
+    player, _, _ = enroll(registry, count=1, size=(0, 0))
+    registry.create_frame(FrameCreate(id="hall", width_mm=530, height_mm=300, profile=WIDE))
+    registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0)
+    save_position(registry, "hall")
+    fitting = photo("fitting", taken_at=900, width=3840, height=2160)
+    seed_pool(registry, POOL, (fitting,))
+    measure(registry, fitting)
+    prepare(registry, (fitting,))
+    client = TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False))
+
+    candidates = client.get(f"/v1/operator/sources/{POOL}/candidates",
+                            params={"frame_id": "hall"}, headers=AUTH)
+    assert (candidates.status_code, candidates.json()) == (409, {"error": "frame_size_unknown"})
+    scene = Scene(scene_id="hand-placed", contributions=(
+        Contribution(target="frame:hall", asset_refs=(fitting.asset_id,)),))
+    authored = client.put(f"/v1/operator/scenes/{scene.scene_id}/authored", headers=AUTH, json={
+        "scene": scene.model_dump(mode="json"), "source_ref": POOL,
+        "asset_ids": [fitting.asset_id]})
+    assert (authored.status_code, authored.json()) == (409, {"error": "authored_frame_size_unknown"})
+    sheet = client.get(f"/v1/operator/library/photos/{fitting.asset_id}", headers=AUTH)
+    assert sheet.status_code == 200, sheet.text
+    assert sheet.json()["frames"] == []
+
+    coordinator = Coordinator(registry.db, registry.clock)
+    coordinator.runtime.command("set_scene", Scene(
+        scene_id="house", cycle_seconds=30, loop=True,
+        contributions=(Contribution(target="frame:hall", source_refs=(POOL,)),)))
+    coordinator.runtime.command("activate", "house", "calendar", 1000)
+    plan = coordinator.advance().plan
+    assert plan
+    assert {entry.asset_id for entry in plan} == {None}

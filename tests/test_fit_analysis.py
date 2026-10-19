@@ -12,10 +12,11 @@ import math
 from collections import Counter
 
 import pytest
+from support.frame_outputs import frame_output_of
 from support.key_content_builders import banded_grid, key_content
 
 from central.installation_models import FrameOutput
-from central.wall_plan.fit import FitTarget, band, crop_share, judge, shape_fit
+from central.wall_plan.fit import band, crop_share, fit_target, judge, shape_fit
 from central.wall_plan.fit_analysis import (
     CONTENT_SAMPLE,
     RATIO_BIN_COUNT,
@@ -30,7 +31,7 @@ from central.wall_plan.fit_analysis import (
 )
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import UnitBox
-from contracts.models import Calibration, FrameProfile, PositionBox, frame_output
+from contracts.models import Calibration, FrameProfile, PositionBox
 
 DISPLAY = (3840, 2160)
 WIDE = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55)
@@ -42,9 +43,8 @@ SELECTION = FitSelection(sources=("family:1",))
 
 def output(frame_id: str, profile: FrameProfile, display=DISPLAY) -> FrameOutput:
     """A Frame on the whole screen of a Display of `display` (each test's profile has the
-    display's shape): its Frame output is the display's pixels."""
-    return FrameOutput(frame_id=frame_id, profile=profile, turn=0, display_px=display,
-                       output_px=frame_output(Calibration(), display, 0))
+    display's shape) and the profile's diagonal: its Frame output is the display's pixels."""
+    return frame_output_of(frame_id, display, inches=profile.diagonal_inches)
 
 
 class Reader:
@@ -105,9 +105,9 @@ def test_the_shape_tier_is_the_fit_rule_photo_by_photo() -> None:
     answer = analyse(request(tier="shape"), Reader(photos, frames), HOUSE)
     assert [frame.frame_id for frame in answer.frames] == ["hall", "stairs", "study"]
     for frame, saved in zip(answer.frames, frames, strict=True):
-        target = FitTarget(profile=saved.profile, output_px=saved.output_px)
-        verdicts = [shape_fit(p.kind, p.width, p.height, target, HOUSE.crop_limit, HOUSE)
-                    for p in photos]
+        target = fit_target(saved)
+        verdicts = [shape_fit(p.kind, p.width, p.height, target, HOUSE.crop_limit, HOUSE,
+                              size_known=True) for p in photos]
         assert frame.fit_by_shape == sum(v is None for v in verdicts)
         refused = Counter(v.reason for v in verdicts if v is not None)
         assert {count.reason: count.photos for count in frame.refused_by_shape} == {
@@ -118,7 +118,7 @@ def test_the_shape_tier_is_the_fit_rule_photo_by_photo() -> None:
                                      for v, p in zip(verdicts, photos, strict=True))
         assert frame.photos == len(photos)
         assert frame.output_px == saved.output_px and frame.draft is False
-        assert frame.band == band(saved.profile.width_px / saved.profile.height_px, .35)
+        assert frame.band == band(saved.output_px[0] / saved.output_px[1], .35)
     assert (answer.photos, answer.videos, answer.waiting, answer.left_out) == (200, 0, 2, 1)
 
 
@@ -219,7 +219,7 @@ def test_the_content_tier_judges_a_seeded_sample() -> None:
     assert hall.fit_checked + sum(c.photos for c in hall.refused_by_content) == hall.checked
     assert {c.reason for c in hall.refused_by_content} == {"face_cut", "interest_cut"}
     assert next(c for c in hall.refused_by_content if c.reason == "interest_cut").photos > 0
-    target = FitTarget(profile=WIDE, output_px=three_frames()[0].output_px)
+    target = fit_target(three_frames()[0])
     for sample in hall.fitting:
         verdict = judge("image", 4000, 3000, next(p for p in photos
                                                   if p.asset_id == sample.asset_id).key,
@@ -253,7 +253,7 @@ def test_the_shape_tier_reads_no_sample_and_names_the_nearest_crop_limit() -> No
     stairs, study = answer.frames
     assert all(frame.checked == 0 and frame.lead is None for frame in answer.frames)
     assert stairs.fit_by_shape == 0
-    share = crop_share(4000, 3000, TALL)
+    share = crop_share(4000, 3000, 1080 / 1920)
     assert .05 <= share <= .6
     assert stairs.nearest_crop_limit == pytest.approx(share)
     assert study.fit_by_shape == 30 and study.nearest_crop_limit is None
@@ -288,3 +288,15 @@ def test_unknown_or_unjudged_frames_are_refused() -> None:
     assert unjudged.value.status == 422
     only = analyse(request(frames=("study", "hall"), tier="shape"), reader, HOUSE)
     assert [frame.frame_id for frame in only.frames] == ["hall", "study"]
+
+
+def test_a_frame_with_no_known_screen_is_not_judged() -> None:
+    """Frame box run fb-8: a Frame whose screen size is not known has no Frame output, so no
+    shape; it gets no answer (fb-10 lists it as not judged), and a draft for it none either."""
+    unsized = frame_output_of("attic", None)
+    reader = Reader(mixed(), (*three_frames(), unsized))
+    answer = analyse(request(tier="shape"), reader, HOUSE)
+    assert [frame.frame_id for frame in answer.frames] == ["hall", "stairs", "study"]
+    draft = FrameDraft(frame_id="attic", profile=WIDE, calibration=Calibration())
+    drafted = analyse(request(tier="shape", frames=("attic",), frame_drafts=(draft,)), reader, HOUSE)
+    assert drafted.frames == ()

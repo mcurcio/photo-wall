@@ -146,13 +146,12 @@ class CopyView(Model):
 
 class FrameCopy(Model):
     """What one Frame asks of a photo's copy, for the photo sheet (follow-ups review): its need
-    (`central.photo_library.rendition.frame_need`: its Frame output, or its profile's size until
-    its screen reports, `output_known` False), and whether Immich's preview, as Photo Wall last
-    measured it, holds that need (`preview_holds`; None: the preview's size is not known yet)."""
+    (`central.photo_library.rendition.frame_need`: its Frame output; a Frame without one has no
+    FrameCopy), and whether Immich's preview, as Photo Wall last measured it, holds that need
+    (`preview_holds`; None: the preview's size is not known yet)."""
 
     frame_id: str
     need_px: tuple[int, int]
-    output_known: bool
     preview_holds: bool | None
 
 

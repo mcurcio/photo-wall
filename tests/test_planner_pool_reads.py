@@ -13,6 +13,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pytest
+from support.frame_outputs import frame_outputs_of
 from support.house_time import UTC_HOUSE
 from support.key_content_builders import face, measured
 from support.photo_pools import photo as library_photo
@@ -102,8 +103,8 @@ def plan(instance: Runtime, frames: dict[str, str], lines: SceneLines, *, now: f
         lines=lines, authored_candidates={}, locked_assignments={}, history=history,
         horizon_seconds=horizon, plan_seconds=plan_seconds, max_clock_uncertainty=0.1,
         limits=limits, settings=FitSettings(),
-        frame_outputs={frame: (PROFILES[shape].width_px, PROFILES[shape].height_px)
-                       for frame, shape in frames.items()})
+        frame_outputs=frame_outputs_of({frame: (PROFILES[shape].width_px, PROFILES[shape].height_px)
+                                        for frame, shape in frames.items()}, inches=24))
 
 
 def mixed_pool(count: int) -> SourcePool:

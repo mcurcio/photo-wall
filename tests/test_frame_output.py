@@ -5,11 +5,15 @@ output and not the Display".
 `contracts.models.frame_output` turns a Frame's Position (its box) and the size
 its Output last reported into its picture's pixels; `central.infra.display_store.frame_outputs_in`
 is the one read of every Frame's, which the media worker reaches as `PgPhotoLibrary.frame_outputs`.
+Frame box run fb-8: it also reads the Frame's "Shows videos" and its physical size, the box's share
+of the seen Display's size.
 """
 from __future__ import annotations
 
 from psycopg.types.json import Jsonb
 from support.position import save_position
+from test_display_identity import _bind, enroll_pi
+from test_display_size import _sized
 from test_registry import enroll
 
 from central.db import ProcessTransactionClock
@@ -57,10 +61,12 @@ def test_every_frame_reads_its_frame_output_by_frame_id(registry):
                              "connected": False}), player["player_id"], "HDMI-A-2"))
         outputs = frame_outputs_in(conn)
     assert outputs == (
-        FrameOutput(frame_id="a-hall", profile=PORTRAIT, turn=0, output_px=None, display_px=None),
-        FrameOutput(frame_id="b-attic", profile=LANDSCAPE, turn=0, output_px=None, display_px=None),
-        FrameOutput(frame_id="c-lounge", profile=LANDSCAPE, turn=0, output_px=(960, 540),
-                    display_px=(1920, 1080)),
+        FrameOutput(frame_id="a-hall", turn=0, video=True, output_px=None, display_px=None,
+                    size_mm=None),
+        FrameOutput(frame_id="b-attic", turn=0, video=True, output_px=None, display_px=None,
+                    size_mm=None),
+        FrameOutput(frame_id="c-lounge", turn=0, video=True, output_px=(960, 540),
+                    display_px=(1920, 1080), size_mm=None),
     )
     store = PgPhotoLibrary(registry.db, times=ProcessTransactionClock(registry.clock))
     assert store.frame_outputs() == outputs
@@ -78,10 +84,28 @@ def test_a_turned_frames_box_reads_its_frame_output_on_the_screen_as_it_hangs(re
     save_position(registry, "lounge", Calibration(fit=PositionBox(top=1313 / 3840, height=1215 / 3840)))
     with registry.db.transaction() as conn:
         outputs = frame_outputs_in(conn)
-    assert outputs == (FrameOutput(frame_id="lounge", profile=LANDSCAPE, turn=90, output_px=(2160, 1215),
-                                   display_px=(3840, 2160)),)
+    assert outputs == (FrameOutput(frame_id="lounge", turn=90, video=True, output_px=(2160, 1215),
+                                   display_px=(3840, 2160), size_mm=None),)
 
 
 def test_no_frame_reads_nothing(registry):
     with registry.db.transaction() as conn:
         assert frame_outputs_in(conn) == ()
+
+
+def test_a_frame_reads_its_videos_setting_and_its_size_from_its_display(registry):
+    """Frame box run fb-8: "Shows videos" is the Frame's own (frames.video); its physical size is
+    its box's share of the seen Display's picture area (950 x 540 mm here: a box half as wide and
+    high is 475 x 270 mm); a Display that states no size gives none."""
+    pi = enroll_pi(registry, "pi-a")
+    _frame(registry, "kitchen", LANDSCAPE)
+    _bind(registry, "kitchen", pi, "HDMI-A-1")
+    save_position(registry, "kitchen", OPENING)
+    registry.set_frame_video("kitchen", False)
+    with registry.db.transaction() as conn:
+        [unsized] = frame_outputs_in(conn)
+    assert (unsized.video, unsized.size_mm, unsized.output_px) == (False, None, (960, 540))
+    _sized(registry, "pi-a", "HDMI-A-1", (950, 540))
+    with registry.db.transaction() as conn:
+        [sized] = frame_outputs_in(conn)
+    assert sized.size_mm == (475, 270)

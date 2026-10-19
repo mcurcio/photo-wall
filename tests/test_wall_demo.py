@@ -1382,8 +1382,12 @@ def test_every_demo_upload_fills_every_demo_frame(project):
     """Roadmap 5a's fit rule refuses a photo whose Frame-shaped window, inside the Scene's crop
     limit, has fewer pixels than the Frame, or cuts its key content. Every demo image, measured
     as the worker measures it (no faces: the fixture's machine learning is off), and the video
-    fill every demo Frame at the demo Scene's crop limit, so the wall's baseline shows both."""
-    from central.wall_plan.fit import Fits, FitTarget, judge, shape_fit
+    fill every demo Frame at the demo Scene's crop limit, so the wall's baseline shows both. The
+    video is judged on a Frame below the large-Frame size (a Frame whose Display states no size
+    counts as large: .claude/errata.md, fb-8)."""
+    from support.frame_outputs import target_of
+
+    from central.wall_plan.fit import Fits, judge, shape_fit
     from central.wall_plan.fit_settings import FitSettings
     from contracts.models import FrameProfile
     from media.key_content import measure
@@ -1397,20 +1401,23 @@ def test_every_demo_upload_fills_every_demo_frame(project):
 
     profile = FrameProfile.model_validate(DEMO_FRAME_PROFILE)
     # Full screen on a Display of the profile's size: the largest Frame output it can have.
-    target, house = FitTarget(profile=profile,
-                              output_px=(profile.width_px, profile.height_px)), FitSettings()
+    target, house = target_of(profile.width_px, profile.height_px,
+                              inches=profile.diagonal_inches), FitSettings()
     for label, (size, _) in DEMO_IMAGES.items():
         key = measure((), synthetic_image(f"{project}-{label}", size, "2026-01-01T00:00:00Z"))
         verdict = judge("image", *size, key, target, DEMO_CROP_LIMIT, house)
         assert isinstance(verdict, Fits), (label, verdict)
-    assert shape_fit("video", *DEMO_VIDEO_SIZE, target, DEMO_CROP_LIMIT, house) is None
+    assert shape_fit("video", *DEMO_VIDEO_SIZE, target, DEMO_CROP_LIMIT, house,
+                     size_known=True) is None
 
 
 def test_every_demo_upload_fills_the_demo_frame_output_and_none_fills_the_whole_display():
     """The e2e baseline needs photos on the wall: the fit rule judges them against the Frame
     output (owner, 2026-10-11), so the demo's Position is a mat opening its small uploads fill,
     on the 1920 x 1080 Output its simulated Pis report. Full screen, none of them would."""
-    from central.wall_plan.fit import FitTarget, shape_fit
+    from support.frame_outputs import target_of
+
+    from central.wall_plan.fit import shape_fit
     from central.wall_plan.fit_settings import FitSettings
     from contracts.models import FrameProfile, frame_output
     from scripts.demo_wall import DEMO_CROP_LIMIT, DEMO_FRAME_PROFILE, DEMO_IMAGES, DEMO_VIDEO_SIZE
@@ -1423,11 +1430,11 @@ def test_every_demo_upload_fills_the_demo_frame_output_and_none_fills_the_whole_
     assert opening == (90, 90) and whole == (1080, 1080)        # the square Frame on the whole height
     uploads = [("image", size) for size, _ in DEMO_IMAGES.values()] + [("video", DEMO_VIDEO_SIZE)]
     for kind, (width, height) in uploads:
-        assert shape_fit(kind, width, height, FitTarget(profile=profile, output_px=opening),
-                         DEMO_CROP_LIMIT, FitSettings()) is None, (kind, width, height)
+        assert shape_fit(kind, width, height, target_of(*opening, inches=profile.diagonal_inches),
+                         DEMO_CROP_LIMIT, FitSettings(), size_known=True) is None, (kind, width, height)
     for size, _ in DEMO_IMAGES.values():
-        refused = shape_fit("image", *size, FitTarget(profile=profile, output_px=whole),
-                            DEMO_CROP_LIMIT, FitSettings())
+        refused = shape_fit("image", *size, target_of(*whole), DEMO_CROP_LIMIT, FitSettings(),
+                            size_known=True)
         assert refused is not None and refused.reason == "below_frame_pixels"
 
 

@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
 
 import pytest
+from support.frame_outputs import frame_output_of, target_of
 from support.house_time import UTC_HOUSE, window_program
 from support.key_content_builders import measured
 from support.position import LIGHTING
@@ -11,7 +12,6 @@ from central.catalog import Candidate, SourcePool
 from central.house_time.model import HouseTime
 from central.planner import PlannerLimits, PlanningBudgetExceeded, PlanningError, eligible, project
 from central.runtime import Child, Contribution, RecordingActuator, Runtime, Scene, Transition
-from central.wall_plan.fit import FitTarget
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
@@ -60,16 +60,19 @@ def runtime(*, cycle=10, contributions=None, children=(), order="newest_first",
 
 
 def full_screen(bindings) -> dict:
-    """Each bound Frame full screen on a Display of its profile's size (its Frame output)."""
-    return {item.frame_id: (item.profile.width_px, item.profile.height_px)
+    """Each bound Frame full screen on a Display of its profile's pixels, size and videos setting
+    (its Frame output)."""
+    return {item.frame_id: frame_output_of(item.frame_id, (item.profile.width_px, item.profile.height_px),
+                                           video=item.profile.video, inches=item.profile.diagonal_inches)
             for items in bindings.values() for item in items}
 
 
 def propose(instance, *, now=0, horizon=25, assets=None, pools=None, bindings=None,
-            authored=None, locks=None, limits=None):
+            authored=None, locks=None, limits=None, frame_outputs=None):
     bindings = bindings or {"player-one": (binding(),)}
     options = dict(
-        bindings_by_player=bindings, settings=FitSettings(), frame_outputs=full_screen(bindings),
+        bindings_by_player=bindings, settings=FitSettings(),
+        frame_outputs=full_screen(bindings) if frame_outputs is None else frame_outputs,
         lines=PoolLines(pools if pools is not None else {
             "holiday:1": pool("holiday:1", *(assets or [candidate()])),
         }),
@@ -120,9 +123,7 @@ def test_original_eligibility_precedes_derivative_dimensions(kind, width, height
     not orientation labels; the Frame's pixels; requirements :186's video floor)."""
     asset = candidate(kind=kind, width=width, height=height,
                       variant_width=3840, variant_height=2160)
-    profile = binding(diagonal=diagonal, video=video).profile
-    target, house = FitTarget(profile=profile, output_px=(profile.width_px, profile.height_px)), \
-        FitSettings()
+    target, house = target_of(1080, 1920, video=video, inches=diagonal), FitSettings()
     assert eligible(asset, target, house.crop_limit, house) is expected
     assert eligible(asset, target, 0.5, house) is (expected or (width, height) == (2000, 2000))
 
@@ -457,3 +458,25 @@ def test_a_cross_faded_photo_starts_its_layer_before_its_turn():
             for layer in offered] == [(0, 10, 0, 3, 0), (7, 20, 7, 3, 0), (17, 30, 17, 3, 0)]
     assert list(offered) == sorted(offered, key=stack_order)
     assert [layer.start for layer in layers(propose(instance, horizon=8))] == [0, 7]
+
+
+def test_a_bound_frame_with_no_known_screen_gets_no_photo_and_asks_for_none():
+    """Frame box run fb-8: a Frame whose screen size is not known has no Frame output, so no
+    shape: its slots take no photo (no layer, so the Player keeps its last still, else the
+    fallback) and ask for no measurement or copy; beside it a sized Frame fills. Mutation probe:
+    give `fit_target` a 16:9 shape when `output_px` is None and the unsized Frame is filled."""
+    instance = runtime(contributions=(
+        Contribution(target="frame:left", source_refs=("holiday:1",)),
+        Contribution(target="frame:right", source_refs=("holiday:1",))))
+    bindings = {"player-one": (binding("left", "hdmi-1"), binding("right", "hdmi-2"))}
+    photos = [candidate("wide", width=1920, height=1080), candidate("tall", width=1080, height=1920),
+              candidate("later", width=1080, height=1920, prepared=False)]
+    result = propose(instance, assets=photos, bindings=bindings, frame_outputs={
+        "left": frame_output_of("left", None), "right": frame_output_of("right", (1080, 1920))})
+    left = [entry for entry in result.plan if entry.frame_id == "left"]
+    assert left
+    assert all(entry.state == "unfilled" and entry.asset_id is None for entry in left)
+    assert {layer.frame_id for layer in layers(result)} == {"right"}
+    assert ("no_eligible_candidates", "frame:left") in {(d.code, d.target) for d in result.diagnostics}
+    right = {entry.assignment_id for entry in result.plan if entry.frame_id == "right"}
+    assert all(set(request.assignment_ids) <= right for request in result.acquisitions)

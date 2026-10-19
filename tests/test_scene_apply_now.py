@@ -217,13 +217,10 @@ def test_the_authored_save_and_apply_now_replaces_in_its_own_transaction(registr
     applied in one transaction (Coordinator.configure_authored_scene_and_apply_now), answering the
     `SceneOnWall` with the authored refs."""
     from test_authored_media import setup_source
-    from test_authored_scene import authored_scene
+    from test_authored_scene import authored_scene, bound_portrait_frame
 
     from central.coordination import Coordinator
-    from central.registry import FrameCreate
-    from contracts.models import FrameProfile
-    registry.create_frame(FrameCreate(id="left", width_mm=300, height_mm=500,
-        profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)))
+    bound_portrait_frame(registry)
     _repo, spec, originals = setup_source(registry)
     coordinator = Coordinator(registry.db, registry.clock)
     asset = originals[0].asset_id

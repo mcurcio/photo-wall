@@ -7,12 +7,9 @@ import pytest
 
 from central.installation_models import FrameOutput
 from central.photo_library.model import CopySize, LibraryAsset, OriginalFile
-from central.photo_library.rendition import FrameNeed, covers, rendition_needs
-from contracts.models import FrameProfile
+from central.photo_library.rendition import FrameNeed, covers, frame_need, rendition_needs
 from media.library_client import fetch_plan
 
-LANDSCAPE = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55)
-PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 UHD = FrameNeed(aspect=16 / 9, width=3840, height=2160)
 SHA = "a" * 40
 
@@ -74,19 +71,25 @@ def test_an_unedited_raw_photo_follows_its_connections_full_size_copies(full_siz
     assert fetch_plan(raw, (UHD,), {}, full_size_copies) == plan
 
 
-def test_needs_are_each_frames_output_or_its_profile_until_reported():
-    """A4 case 2: a Frame with no Frame output asks its profile's size (never too small); two
-    Frames of one shape and size are one need."""
+def test_needs_are_each_frames_output_and_none_without_one():
+    """A4 case 2, frame box run fb-8: each Frame asks its Frame output at that output's shape; a
+    Frame with no Frame output (no known screen) asks nothing; two Frames of one shape and size
+    are one need."""
     frames = (
-        FrameOutput(frame_id="hall", profile=PORTRAIT, turn=0, output_px=None, display_px=None),
-        FrameOutput(frame_id="lounge", profile=LANDSCAPE, turn=0, output_px=(1536, 864),
-                    display_px=(3840, 2160)),
-        FrameOutput(frame_id="study", profile=LANDSCAPE, turn=0, output_px=(1536, 864),
-                    display_px=(3840, 2160)),
+        FrameOutput(frame_id="attic", turn=0, video=True, output_px=None, display_px=None,
+                    size_mm=None),
+        FrameOutput(frame_id="hall", turn=0, video=True, output_px=(480, 540),
+                    display_px=(1920, 1080), size_mm=None),
+        FrameOutput(frame_id="lounge", turn=0, video=True, output_px=(1536, 864),
+                    display_px=(3840, 2160), size_mm=None),
+        FrameOutput(frame_id="study", turn=0, video=True, output_px=(1536, 864),
+                    display_px=(3840, 2160), size_mm=None),
     )
+    assert frame_need(frames[0]) is None
     assert rendition_needs(frames) == (
-        FrameNeed(aspect=1080 / 1920, width=1080, height=1920),
+        FrameNeed(aspect=480 / 540, width=480, height=540),
         FrameNeed(aspect=16 / 9, width=1536, height=864))
+    assert rendition_needs(frames[:1]) == ()
     assert rendition_needs(()) == ()
 
 
