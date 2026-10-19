@@ -72,6 +72,8 @@ The schema forbids unknown keys; the retired `boot_context_file` and `allow_http
 
 The systemd sandbox keeps the Wayland runtime visible and grants the Player write access only to its runtime health directory and any explicitly configured cache directory. Native namespace boot and exact-image testing remain required to qualify the built unit.
 
+`player.service` and every module it loads also load inside Central's image, whose qualification runs Player-side tests there. A package only the Pi has (GStreamer's `gi`, `segno`, EGL and gbm through ctypes) is therefore imported or opened inside the function that uses it, never at module load. `tests/test_node_rollout_image_check.py` holds this on every pull request: it loads the image qualification's modules and suites with only the image's runtime and pytest distributions importable.
+
 ## Acceptance boundary
 
 Service tests cover fresh enrollment/session rotation, stale grants and revocations, current-state reconciliation, independent time-probe diagnostics, bounded bodies and redirects, cancellation during media transfer, valid surviving-cache reuse, corrupt-cache reacquisition, and real central HTTP integration. The complete exact-image native path, process restart/reboot on built artifacts, failed-candidate reboot, and physical Pi/PXE/dual-HDMI behavior remain acceptance work in [validation](validation.md).
