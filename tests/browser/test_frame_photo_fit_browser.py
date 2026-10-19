@@ -83,3 +83,30 @@ def test_the_hand_placed_chooser_offers_what_fits_at_the_drafts_crop_limit(page,
         choice = form.get_by_label(f"Media for frame {FRAME}", exact=True)
         expect(choice.get_by_role("option", name=re.compile(r"^Photo 1000×900"))).to_have_count(1)
         expect(choice.get_by_role("option", name=re.compile(r"^Photo 1920×1080"))).to_have_count(1)
+
+
+def test_a_frame_whose_screen_size_is_not_known_says_so_instead_of_judging(page, registry):
+    """Frame box run fb-10: a Frame on no Pi has no known screen, so no Frame output: its Photos
+    say so in one line and draw no count, judged nowhere (the analysis lists it as unsized).
+    Mutation probe: say "no Frame" for an answer whose one Frame is unsized -> RED."""
+    from console_tasks import open_frame
+    from operator_harness import sign_in
+    from test_operator_showrunner_browser import _runtime
+
+    from central.runtime import Contribution, Scene
+
+    registry.create_frame(FrameCreate(id="attic", surface_id="wall", x_mm=0, y_mm=0,
+                                      width_mm=480, height_mm=270, profile=WIDE))
+    now = registry.clock.utc()
+    wide = public_photo(number=1, width=1920, height=1080, captured_at=now)
+    queue = _photos(registry, wide)
+    measure_all(registry, (wide.asset,))
+    _runtime(registry).command("set_scene", Scene(scene_id="evenings", loop=True, contributions=(
+        Contribution(target="frame:attic", source_refs=(SOURCE,)),)))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        sign_in(page, origin)
+        open_frame(page, "attic", "overview")
+        scene = page.get_by_role("region", name="Photos", exact=True).get_by_role(
+            "group", name="Scene evenings", exact=True)
+        expect(scene).to_contain_text("Its screen size is not known yet, so no photo is judged for it.")
+        expect(scene).not_to_contain_text("fit")

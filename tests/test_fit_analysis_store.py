@@ -7,7 +7,8 @@ from fastapi.testclient import TestClient
 from support.measured_photos import measure_all
 from support.photo_pools import fixture_connection, library_of, photo, seed_pool
 from support.position import save_position
-from test_display_identity import ADMIN, AUTH
+from test_display_identity import ADMIN, AUTH, _bind, enroll_pi
+from test_display_size import _sized
 from test_registry import enroll
 
 from central.app import create_app
@@ -118,3 +119,36 @@ def test_unknown_sources_drafts_and_frames_are_refused(registry):
     empty = client.post(ANALYSIS_PATH, headers=AUTH, json={"selection": {}})
     assert empty.status_code == 422
     assert client.post(ANALYSIS_PATH, json={"selection": {"sources": ["family:1"]}}).status_code == 401
+
+
+def test_a_frame_draft_is_judged_by_its_box_alone_and_an_unbound_frame_is_unsized(registry):
+    """Frame box run fb-10: a draft carries only its Position. On a 1,920 x 1,080 screen of a
+    950 x 540 mm Display, a box a quarter wide and half high is judged at 480 x 540 and is no
+    large Frame (21.5 inches across against the house's 40), so the 720-row video fits it; an
+    unbound Frame (no known screen) is listed in `unsized` and has no answer. A draft carrying a
+    profile is refused (no such field)."""
+    pi = enroll_pi(registry, "pi-a")
+    registry.create_frame(FrameCreate(id="lounge", width_mm=530, height_mm=300, profile=WIDE))
+    _bind(registry, "lounge", pi, "HDMI-A-1")
+    save_position(registry, "lounge")
+    _sized(registry, "pi-a", "HDMI-A-1", (950, 540))
+    registry.create_frame(FrameCreate(id="attic", width_mm=530, height_mm=300, profile=WIDE))
+    seed_pool(registry, "family:1", (photo("tall", taken_at=900, width=1200, height=1350),
+                                     photo("clip", taken_at=901, width=640, height=720,
+                                           kind="video")))
+    client = _client(registry)
+    box = {"fit": {"mode": "box", "left": 0.5, "top": 0.25, "width": 0.25, "height": 0.5}}
+    answer = client.post(ANALYSIS_PATH, headers=AUTH, json={
+        "selection": {"sources": ["family:1"]}, "tier": "shape",
+        "frame_drafts": [{"frame_id": "lounge", "calibration": box}]})
+    assert answer.status_code == 200, answer.text
+    body = answer.json()
+    (lounge,) = body["frames"]
+    assert (lounge["frame_id"], lounge["output_px"], lounge["draft"]) == ("lounge", [480, 540], True)
+    assert lounge["fit_by_shape"] == 2
+    assert body["unsized"] == ["attic"]
+    with_profile = client.post(ANALYSIS_PATH, headers=AUTH, json={
+        "selection": {"sources": ["family:1"]}, "frame_drafts": [{
+            "frame_id": "lounge", "calibration": box,
+            "profile": {"width_px": 1920, "height_px": 1080, "diagonal_inches": 24}}]})
+    assert with_profile.status_code == 422

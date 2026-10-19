@@ -82,39 +82,38 @@ export function FramePhotos({ snapshot, frameId }: { snapshot: object | null; fr
 export interface FrameDraftFitProps {
   snapshot: object | null;
   frameId: string;
-  /** The Frame profile as it would be (the draft, or the saved one); null while not whole. */
-  profile: FrameDraft["profile"] | null;
-  /** Its Position as it would be (the draft, or the saved one); null while not known. */
+  /** Its Position as it would be (the draft, or the saved one), the one source of its shape and
+   * size; null while not known. */
   calibration: object | null;
 }
 
 /**
- * The Frame config moment (follow-ups C1): while a Frame profile or Position is being changed,
+ * The Frame config moment (follow-ups C1): while a Frame's Position is being changed,
  * one line per Scene that shows photos here, judged with the unsaved values (a `FrameDraft`), so
  * the change's effect on what fits shows before it is kept. Nothing when no Scene shows photos
  * here or the values are not whole yet.
  */
-export function FrameDraftFit({ snapshot, frameId, profile, calibration }: FrameDraftFitProps) {
+export function FrameDraftFit({ snapshot, frameId, calibration }: FrameDraftFitProps) {
   const scenes = scenesOnFrame(snapshot, frameId);
-  if (scenes.length === 0 || profile === null || calibration === null) return null;
+  if (scenes.length === 0 || calibration === null) return null;
   return (
     <Stack label="What would fit">
       {scenes.map((scene) => (
-        <DraftLine key={scene.sceneId} scene={scene} frameId={frameId} profile={profile} calibration={calibration} />
+        <DraftLine key={scene.sceneId} scene={scene} frameId={frameId} calibration={calibration} />
       ))}
     </Stack>
   );
 }
 
-function DraftLine({ scene, frameId, profile, calibration }: {
-  scene: SceneUse; frameId: string; profile: FrameDraft["profile"]; calibration: object;
+function DraftLine({ scene, frameId, calibration }: {
+  scene: SceneUse; frameId: string; calibration: object;
 }) {
-  const key = JSON.stringify([profile, calibration]);
+  const key = JSON.stringify(calibration);
   const question: FitQuestion = useMemo(() => {
-    const [draftProfile, draftCalibration] = JSON.parse(key) as [FrameDraft["profile"], object];
+    const draft: FrameDraft = { frame_id: frameId, calibration: JSON.parse(key) as object };
     return {
       selection: { sources: scene.sourceRefs }, frames: [frameId], crop_limit: scene.cropLimit,
-      frame_drafts: [{ frame_id: frameId, profile: draftProfile, calibration: draftCalibration }],
+      frame_drafts: [draft],
     };
   }, [scene, frameId, key]);
   return (

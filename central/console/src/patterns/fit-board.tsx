@@ -31,6 +31,9 @@ export interface FitBoardView {
   /** Each Frame, with its alert (a Frame that will go without, or with too few photos), said
    * once where the Frame is drawn. */
   frames: readonly FrameFitView[];
+  /** Each Frame that is not judged because its screen size is not known, one line each
+   * ("The screen size of attic is not known yet, so no photo is judged for it."). */
+  unsized: readonly string[];
   shape: Omit<ShapeMapProps, "focused">;
   /** Nothing to judge (no photo in the selection, or no Frame), in words; null otherwise. */
   empty: string | null;
@@ -128,6 +131,7 @@ function Board({ view, size, lead, named, faded, onShuffle, onFrame, action, onO
       )}
       {view.judged !== null && <p className="m-0 text-xs text-muted">{view.judged}</p>}
       {view.reading !== null && <p className="m-0 text-xs text-muted">{view.reading}</p>}
+      {view.unsized.map((line) => <p key={line} className="m-0 text-xs text-muted">{line}</p>)}
       {lead === "shapes" && (
         <section aria-label="The shapes of these photos" className="flex min-w-0 flex-col gap-2">
           <h5 className="m-0 text-sm font-medium text-text">Their shapes, and the shapes each Frame takes</h5>

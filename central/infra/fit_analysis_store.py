@@ -17,13 +17,18 @@ measurement requests, central/media_repository.py).
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, Final
 
 from pydantic import ValidationError
 
 from central.db import Database, TransactionClock
-from central.infra.display_store import frame_outputs_in
+from central.infra.display_store import (
+    SCREEN_COLUMNS,
+    SCREEN_JOIN,
+    frame_display_mm,
+    frame_outputs_in,
+)
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.installation_models import FrameOutput
 from central.photo_library.rendition import Size, readable_of
@@ -173,6 +178,14 @@ class PgFitAnalysisReader:
         """FitAnalysisReader.frame_outputs."""
         with self.db.transaction() as conn:
             return frame_outputs_in(conn)
+
+    def display_sizes(self) -> Mapping[str, tuple[int, int] | None]:
+        """FitAnalysisReader.display_sizes: `frame_outputs_in`'s join, its Display's size alone."""
+        with self.db.transaction() as conn:
+            rows = conn.execute(
+                f"SELECT f.id, {SCREEN_COLUMNS} FROM frames f "  # noqa: S608
+                f"LEFT JOIN bindings b ON b.frame_id=f.id {SCREEN_JOIN}").fetchall()
+        return {row["id"]: frame_display_mm(row) for row in rows}
 
     @staticmethod
     def _pools_in(conn: Any, selection: FitSelection) -> tuple[list[str], bool]:

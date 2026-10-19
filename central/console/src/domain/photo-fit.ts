@@ -55,10 +55,10 @@ export interface FitSelection {
   drafts?: string[];
 }
 
-/** A Frame as it would be configured (its draft profile and Position). */
+/** A Frame as it would be configured: its draft Position, the one source of its shape and size
+ * (Central's `FrameDraft`; frame box run fb-10). */
 export interface FrameDraft {
   frame_id: string;
-  profile: { width_px: number; height_px: number; diagonal_inches: number; video: boolean };
   calibration: object;
 }
 
@@ -88,7 +88,8 @@ export interface RefusalCount { reason: FitRefusal; photos: number; samples: Fit
 export interface FrameFit {
   frame_id: string;
   aspect: number;
-  output_px: [number, number] | null;
+  /** The Frame output it is judged at (a Frame without one is in `FitAnalysis.unsized`). */
+  output_px: [number, number];
   display_px: [number, number] | null;
   draft: boolean;
   band: [number, number];
@@ -117,6 +118,8 @@ export interface FitAnalysis {
   reading: boolean;
   bins: RatioBin[];
   frames: FrameFit[];
+  /** The judged Frames whose screen size is not known: nothing is judged for them. */
+  unsized: string[];
   read_at: number;
 }
 
@@ -186,20 +189,23 @@ export function ratioWords(ratio: number): string {
  * Every sentence here starts with a capital letter, also where a Frame's name ("hall") would
  * lead it: the sentence is turned so the name sits inside it. A Frame is judged at its Frame
  * output, never its Display (owner, 2026-10-11: "make sure that compatibility is measuring
- * against the Frame output and not the Display"); until the Frame reports its output, at the
- * shape its Frame profile plans, and the words say "planned".
+ * against the Frame output and not the Display"). A Frame whose screen size is not known is not
+ * judged ({@link unsizedWords}).
  */
 
-/** The shape a Frame is judged at: its Frame output's, else its planned one (its profile's). */
+/** The shape a Frame is judged at: its Frame output's. */
 function shapeOf(frame: FrameFit): number {
-  return frame.output_px === null ? frame.aspect : frame.output_px[0] / frame.output_px[1];
+  return frame.output_px[0] / frame.output_px[1];
 }
 
-/** A Frame's shape in a clause: "hall's Frame output is 9:16", or, not reported yet, "hall is
- * planned at 9:16". */
-function frameShapeClause(frame: FrameFit, name: string): string {
-  const shape = ratioWords(shapeOf(frame));
-  return frame.output_px === null ? `${name} is planned at ${shape}` : `${name}'s Frame output is ${shape}`;
+/** Each judged Frame whose screen size is not known, in one sentence of its own (frame box run
+ * fb-10): "Its screen size is not known yet, so no photo is judged for it." when it is the only
+ * Frame judged, else naming it. */
+export function unsizedWords(analysis: FitAnalysis, name: (frameId: string) => string = (id) => id): string[] {
+  const alone = analysis.frames.length === 0 && analysis.unsized.length === 1;
+  return analysis.unsized.map((frameId) => alone
+    ? "Its screen size is not known yet, so no photo is judged for it."
+    : `The screen size of ${name(frameId)} is not known yet, so no photo is judged for it.`);
 }
 
 /**
@@ -233,9 +239,9 @@ export function emptyFrameWords(frame: FrameFit, name: string, most: string | nu
       return `These are videos, and ${name} shows no videos: add photos.`;
     default:
       return most === null
-        ? `None of these photos is close to ${shape}, ${frame.output_px === null ? `the shape ${name} is planned at`
-          : `the shape of ${name}'s Frame output`}: add photos closer to ${shape} or raise the crop limit.`
-        : `Most of these photos are ${most} and ${frameShapeClause(frame, name)}: add photos closer to ${shape} or raise the crop limit.`;
+        ? `None of these photos is close to ${shape}, the shape of ${name}'s Frame output: add photos closer to ${
+          shape} or raise the crop limit.`
+        : `Most of these photos are ${most} and ${name}'s Frame output is ${shape}: add photos closer to ${shape} or raise the crop limit.`;
   }
 }
 
@@ -291,7 +297,7 @@ export function percentWords(limit: number): string {
  * fits hall · Only 1 photo fits stairs". */
 export function lineWords(analysis: FitAnalysis, name: (frameId: string) => string = (id) => id): string {
   const frames = analysis.frames;
-  if (frames.length === 0) return "There is no Frame to show them on yet";
+  if (frames.length === 0) return noFrameWords(analysis, name);
   const empty = frames.filter((frame) => frame.photos > 0 && !hasFit(frame)).map((frame) => name(frame.frame_id));
   if (frames.length === 1) {
     const [frame] = frames;
@@ -381,20 +387,15 @@ function size([width, height]: [number, number]): string {
 }
 
 /** What a Frame is judged at, in words: its Frame output (the picture inside its Position, at
- * its shape) in pixels, a Details fact, never its Display's mode; or, before the Frame reports
- * its output, "Judged at hall's planned 9:16 shape; hall hasn't reported its output yet." */
-export function outputWords(frame: FrameFit, name = frame.frame_id): string {
-  if (frame.output_px === null) {
-    return `Judged at ${name}'s planned ${ratioWords(frame.aspect)} shape; ${name} hasn't reported its output yet.`;
-  }
+ * its shape) in pixels, a Details fact, never its Display's mode. */
+export function outputWords(frame: FrameFit): string {
   return `Frame output ${size(frame.output_px)} px, ${ratioWords(shapeOf(frame))}`;
 }
 
-/** A one-Frame line under a Position or Frame profile being set: what it is judged at, without
- * pixels (they are under the board's Details). */
-function draftOutputWords(frame: FrameFit, name: string): string {
-  return frame.output_px === null ? outputWords(frame, name)
-    : `Judged at its Frame output as you set it, ${ratioWords(shapeOf(frame))}`;
+/** A one-Frame line under a Position being set: what it is judged at, without pixels (they are
+ * under the board's Details). */
+function draftOutputWords(frame: FrameFit): string {
+  return `Judged at its Frame output as you set it, ${ratioWords(shapeOf(frame))}`;
 }
 
 /** The line over Frames drawn side by side (a strip): a neutral count only, as each tile says
@@ -403,10 +404,17 @@ function draftOutputWords(frame: FrameFit, name: string): string {
  * says how many fit it. */
 export function stripWords(analysis: FitAnalysis): string {
   const frames = analysis.frames;
-  if (frames.length === 0) return "There is no Frame to show them on yet";
+  if (frames.length === 0) return noFrameWords(analysis);
   if (frames.length === 1) return countedWords(analysis);
   const fits = frames.filter((frame) => frame.photos === 0 || hasFit(frame)).length;
   return `Fits ${fits} of ${frames.length} Frames`;
+}
+
+/** An answer with no Frame judged, in one line: why each named Frame was not, else that there is
+ * none. */
+function noFrameWords(analysis: FitAnalysis, name?: (frameId: string) => string): string {
+  return analysis.unsized.length > 0 ? unsizedWords(analysis, name).join(" ")
+    : "There is no Frame to show them on yet";
 }
 
 /** The selection's counts ("8 photos · 0 videos"), "so far" while Immich is still read. */
@@ -517,7 +525,7 @@ function frameView(frame: FrameFit, name: string, href: string | undefined, aler
   // Waiting photos are neither fit nor refused: not among those that "don't fit".
   const left = frame.photos - frame.fit_by_shape - unsized;
   const limited = shaped.some((count) => count.reason === "above_player_limit");
-  const output = frame.output_px === null ? null : outputWords(frame, name);
+  const output = outputWords(frame);
   // The Pi's limit in pixels is a Details fact (design language §7: pixels only there).
   const limit = limited ? `This Pi draws a photo at most ${countText(maxStillEdge)} px on its longest side` : null;
   const summary = left > 0 ? `Why ${countText(left)} don't fit`
@@ -535,9 +543,9 @@ function frameView(frame: FrameFit, name: string, href: string | undefined, aler
     segments,
     samples: frame.fitting.map((sample) => cropOf(sample, frame.aspect, "fits")),
     checked: checkedWords(frame),
-    // The Frame output in pixels is a Details fact (design language §7, units); not known yet
-    // is said in words.
-    unknownOutput: frame.output_px === null ? outputWords(frame, name) : null,
+    // The Frame output in pixels is a Details fact (design language §7, units); a Frame without
+    // one is not judged, so it has no view (the board's `unsized` lines say it).
+    unknownOutput: null,
     detail: [output, limit].filter((part): part is string => part !== null).join(" · ") || null,
     waiting: unsized > 0 ? waitingWords(unsized) : null,
     alert,
@@ -578,12 +586,14 @@ export function boardView(analysis: FitAnalysis, options: BoardOptions = {}): Fi
   const total = analysis.photos + analysis.videos;
   const empty = total === 0
     ? (analysis.reading ? "Reading Immich: no photos found yet." : "No photos in this selection.")
-    : analysis.frames.length === 0 ? "There is no Frame to show these photos on yet." : null;
+    : analysis.frames.length === 0
+      ? (analysis.unsized.length > 0 ? unsizedWords(analysis, name).join(" ") : "There is no Frame to show these photos on yet.")
+      : null;
   return {
     summary: countedWords(analysis),
     stripLine: stripWords(analysis),
     line: options.lineOutput && analysis.frames.length === 1
-      ? `${lineWords(analysis, name)} · ${draftOutputWords(analysis.frames[0], name(analysis.frames[0].frame_id))}`
+      ? `${lineWords(analysis, name)} · ${draftOutputWords(analysis.frames[0])}`
       : lineWords(analysis, name),
     judged: options.judged === undefined ? `Judged at a crop limit of ${percentWords(analysis.crop_limit)}.`
       : options.judged === null ? null : judgedWords(options.judged, analysis),
@@ -596,6 +606,7 @@ export function boardView(analysis: FitAnalysis, options: BoardOptions = {}): Fi
       range: [analysis.bins[0]?.low ?? 0.25, analysis.bins[analysis.bins.length - 1]?.high ?? 4],
       ticks: TICKS,
     },
+    unsized: analysis.frames.length === 0 ? [] : unsizedWords(analysis, name),
     empty,
   };
 }

@@ -56,7 +56,6 @@ interface Frame {
   generation?: number;
   player_id?: string | null;
   output_id?: string | null;
-  profile?: { width_px?: number; height_px?: number; diagonal_inches?: number; video?: boolean };
   calibration?: { revision?: number; fit?: object };
   /** How the Frame's screen hangs (Central's `turn`; set on the Hardware tab). */
   turn?: Turn;
@@ -65,17 +64,6 @@ interface Frame {
   /** The Display seen there's own size in millimetres (its EDID's); null when none is stated. */
   display_mm?: [number, number] | null;
   readiness?: Readiness;
-}
-
-type WholeProfile = { width_px: number; height_px: number; diagonal_inches: number; video: boolean };
-
-/** A Frame profile whose every value is set, as a Frame draft carries it; null otherwise. */
-function wholeProfile(profile: Frame["profile"] | null | undefined): WholeProfile | null {
-  if (!profile) return null;
-  const { width_px: width, height_px: height, diagonal_inches: diagonal } = profile;
-  if (!(Number.isInteger(width) && (width ?? 0) > 0 && Number.isInteger(height) && (height ?? 0) > 0
-    && Number.isFinite(diagonal) && (diagonal ?? 0) > 0)) return null;
-  return { width_px: width!, height_px: height!, diagonal_inches: diagonal!, video: profile.video ?? true };
 }
 
 const TABS = [
@@ -233,7 +221,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
             hardwareHref={formatRoute({ section: "wall", id: frameId, tab: "hardware" })}
             readiness={frame.readiness}
             whatFits={(
-              <FrameDraftFit snapshot={snapshot} frameId={frameId} profile={wholeProfile(frame.profile)}
+              <FrameDraftFit snapshot={snapshot} frameId={frameId}
                 calibration={{ revision: frame.calibration?.revision ?? 1, fit: adjustment.draft.fit }} />
             )} />
         )}
@@ -272,11 +260,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
             <BindingFacet key={frameId} snapshot={snapshot} bootFacts={bootFacts} frameId={frameId}
               onTab={(next: string) => choose(next as Tab)} />
             <FrameDisplay key={`${frameId}:display`} frameId={frameId} />
-            <FrameProfile key={`${frameId}:profile`} snapshot={snapshot} frame={frame}
-              draftFit={(profile) => (
-                <FrameDraftFit snapshot={snapshot} frameId={frameId} profile={wholeProfile(profile)}
-                  calibration={{ revision: frame.calibration?.revision ?? 1, fit: frame.calibration?.fit ?? { mode: "box" } }} />
-              )} />
+            <FrameProfile key={`${frameId}:profile`} snapshot={snapshot} frame={frame} />
             <FrameTurn key={`${frameId}:turn`} frameId={frameId} turn={frame.turn ?? 0}
               generation={frame.generation ?? 0} />
           </>
