@@ -38,7 +38,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, TypeGuard
@@ -46,9 +46,11 @@ from uuid import UUID
 
 from central.power.timetable import Timetable
 from contracts.display_turn import DisplayTurn
+from contracts.frame_fit import OutputSize
 from contracts.node_output import (
     BEST_DETECTED,
     DisplayIdentity,
+    DisplayMode,
     InForceKind,
     OutputDocument,
     OutputPower,
@@ -149,6 +151,16 @@ def readiness(position: FramePosition) -> Readiness:
     if position.position_generation != position.generation:
         return Readiness.POSITION_NEEDED
     return Readiness.READY
+
+
+def screen_px(reported: OutputSize | None, modes: Sequence[DisplayMode]) -> OutputSize | None:
+    """The mode as built of a Frame's screen (frame box run, .claude/runs/frame-box/page.md):
+    `reported` (its Pi's report of the bound Output, outputs.observation width_px x height_px) when
+    both sides are >= 1, else the first preferred mode of `modes` (the Display seen on that Output,
+    displays.modes; Weston, given no mode, runs the preferred one), else None. The one home of a
+    Frame's screen size: central/infra/display_store.py `frame_outputs_in` and the inventory's
+    `FrameInventory.screen_px` ask here (migration 102 and 104 state the same rule in SQL). Pure."""
+    ...
 
 
 def adopts(position: FramePosition, seen_before: UUID | None, seen_now: UUID) -> bool:

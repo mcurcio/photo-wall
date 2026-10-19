@@ -23,12 +23,18 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Final
 
 OutputSize = tuple[int, int]                            # (width, height) in output pixels, each >= 1
 # The Frame output (owner, 2026-10-11: compatibility "measuring against the Frame output and not
 # the Display"): the Frame's picture as drawn, its width and height in whole output pixels
 # (`place`'s), each >= 1.
 PictureSize = tuple[int, int]
+# A Display's picture area in whole millimetres as built (never turned), as its EDID's base block
+# states it (appliance/display_host/edid.py; frame box run, .claude/runs/frame-box/page.md): each >= 1.
+ScreenMm = tuple[int, int]
+# How far a FrameBox's right or bottom edge may pass the screen's in floating point (0.7 + 0.3).
+BOX_SLACK: Final = 1e-9
 
 
 def window_holds(width: int, height: int, aspect: float, need: PictureSize) -> bool:
@@ -73,6 +79,28 @@ class FrameRectangle:
 
 
 @dataclass(frozen=True)
+class FrameBox:
+    """A Frame's box on its screen (frame box run, .claude/runs/frame-box/page.md; owner,
+    2026-10-19: "I need to be able to set width and height independently, along with the position
+    of that box on the display"): its left and top edges, its width and its height, each a fraction
+    of the screen's width or height as it hangs (contracts/display_turn.py `hanging`). The one
+    source of the Frame's shape: its pixels are `place_box` on the screen's mode, its aspect their
+    ratio, its physical size `box_size_mm`. Always on its screen: no check needs the screen.
+
+    __post_init__: ValueError("frame_box") unless each field is a finite int or float (never a
+    bool), 0 <= left, 0 <= top, 0 < width, 0 < height, left + width <= 1 + BOX_SLACK and
+    top + height <= 1 + BOX_SLACK."""
+    left: float
+    top: float
+    width: float
+    height: float
+
+    def __post_init__(self) -> None:
+        """See the class docstring."""
+        ...
+
+
+@dataclass(frozen=True)
 class Placement:
     """A Frame's rectangle on its screen in whole pixels as the screen hangs: the top-left corner
     (x, y) and the size, which the Frame's picture fills on screen: finished no larger than this
@@ -82,6 +110,13 @@ class Placement:
     y: int
     width: int
     height: int
+
+    @property
+    def aspect(self) -> float:
+        """width / height: the Frame's aspect (frame box run). The one home of a Frame's shape as a
+        number: Central's fit rule (`FitTarget.aspect` asks its Frame output, these sides) and the
+        Player's crop (player/planes.py) both read it. Pure."""
+        ...
 
 
 def place(rectangle: FrameRectangle, screen: OutputSize, aspect: float) -> Placement:
@@ -110,6 +145,27 @@ def place(rectangle: FrameRectangle, screen: OutputSize, aspect: float) -> Place
     return Placement(x=x, y=y, width=width, height=height)
 
 
+def place_box(box: FrameBox, screen: OutputSize) -> Placement:
+    """`box` in whole pixels on a screen of `screen` = (W, H) pixels as it hangs, by its edges, each
+    rounding half up (floor(v + 0.5)), so two boxes that share an edge share its pixel column:
+    x = min(W - 1, round(left * W)), right = max(x + 1, min(W, round((left + width) * W))),
+    width = right - x; y and height likewise down with H. Total: every FrameBox on every screen
+    has a placement of at least 1 x 1 lying on that screen. The one home of how a Frame's box
+    becomes pixels: the Player's planes, Central's Frame output (contracts/models.py
+    `frame_output`) and the console's mirror (central/console/src/placement.js `placeBox`) ask here.
+    Pure. ValueError("placement_screen") unless both screen sides are ints (never bools) >= 1."""
+    ...
+
+
+def box_size_mm(box: FrameBox, screen_mm: ScreenMm) -> tuple[float, float]:
+    """The box's physical (width, height) in millimetres on a Display whose picture area is
+    `screen_mm` as it hangs (already turned): (box.width * screen_mm[0], box.height * screen_mm[1]).
+    The one home of a Frame's physical size (the Player's lights and mat, the wall plan, the
+    Planner's large-Frame video rule); contracts/models.py `frame_size_mm` turns the Display first.
+    Pure. ValueError("screen_mm") unless both sides are ints (never bools) >= 1."""
+    ...
+
+
 def _finite(value: object) -> bool:
     """Whether `value` is a finite int or float, never a bool."""
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
@@ -120,4 +176,5 @@ def _half_up(value: float) -> int:
     return math.floor(value + 0.5)
 
 
-__all__ = ["FrameRectangle", "OutputSize", "PictureSize", "Placement", "place", "window_holds"]
+__all__ = ["BOX_SLACK", "FrameBox", "FrameRectangle", "OutputSize", "PictureSize", "Placement", "ScreenMm", "box_size_mm",
+           "place", "place_box", "window_holds"]
