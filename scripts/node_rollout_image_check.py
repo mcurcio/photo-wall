@@ -34,6 +34,8 @@ SUITES = {
     "fence_contract": ("test_node_lifecycle.py", "test_node_runtime_reconciliation.py"),
     "readiness_contract": ("test_readiness_diagnostics.py", "test_coordination.py", "test_node_central.py"),
 }
+# The project packages the image's source stage copies into /app (Dockerfile, `FROM scratch AS source`).
+IMAGE_PACKAGES = frozenset({"central", "contracts", "media", "player", "uplink", "nodeapi"})
 PRODUCTION_MODULES = ("central.app", "central.coordination", "central.fleet.node_lifecycle", "contracts.node_protocol")
 
 
@@ -76,11 +78,39 @@ def inside(output: Path):
         if result != 0:
             raise RuntimeError("qualification_suite_failed:"+category)
     for name, module in tuple(sys.modules.items()):
-        if name.split(".", 1)[0] in {"central", "contracts", "media", "player"}:
+        if name.split(".", 1)[0] in IMAGE_PACKAGES:
             filename = getattr(module, "__file__", None)
             if filename and not Path(filename).resolve().is_relative_to("/app"):
                 raise ValueError("qualification_source_shadowed")
     (output / "execution.json").write_text(json.dumps({"interpreter": sys.executable, "imports": imports}))
+
+
+def distribution_closure(roots: tuple[str, ...]) -> list:
+    """Every installed distribution the requirement strings in roots need, extras followed."""
+    from importlib.metadata import distribution
+
+    from packaging.requirements import Requirement
+
+    pending, seen = [Requirement(root) for root in roots], {}
+    while pending:
+        requirement = pending.pop()
+        dist = distribution(requirement.name)
+        name = dist.metadata["Name"].lower().replace("_", "-")
+        extras = set(requirement.extras) | (seen[name][1] if name in seen else set())
+        if name in seen and extras == seen[name][1]:
+            continue
+        seen[name] = (dist, extras)
+        pending.extend(req for req in map(Requirement, dist.requires or ())
+                       if req.marker is None
+                       or any(req.marker.evaluate({"extra": extra}) for extra in {"", *extras}))
+    return [dist for dist, _ in seen.values()]
+
+
+# What a Central image's interpreter can import besides the standard library and its own source:
+# the project's runtime closure (`uv sync --no-dev`) and the pytest closure check() copies in.
+# The dev group is not in it, and neither is anything only the Pi has (gi, segno, EGL, gbm).
+TEST_DEPENDENCIES = ("pytest",)
+IMAGE_DISTRIBUTIONS = ("photo-wall", *TEST_DEPENDENCIES)
 
 
 def _test_dependencies(destination: Path):
@@ -88,19 +118,7 @@ def _test_dependencies(destination: Path):
     # are overlaid. Docker Linux and CI host use the same CPython minor version.
     # Every installed file of pytest's runtime distribution closure is copied
     # (packages and single-file modules such as py.py), per its metadata.
-    from importlib.metadata import distribution
-
-    from packaging.requirements import Requirement
-
-    pending, seen = ["pytest"], set()
-    while pending:
-        dist = distribution(pending.pop())
-        name = dist.metadata["Name"].lower().replace("_", "-")
-        if name in seen:
-            continue
-        seen.add(name)
-        pending.extend(req.name for req in map(Requirement, dist.requires or ())
-                       if req.marker is None or req.marker.evaluate({"extra": ""}))
+    for dist in distribution_closure(TEST_DEPENDENCIES):
         root = Path(dist.locate_file("")).resolve()
         for file in dist.files:
             source = Path(dist.locate_file(file)).resolve()
