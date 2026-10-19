@@ -21,7 +21,6 @@ from central.frame_lighting.policy import (
 from central.infra.room_light_store import document_in
 from central.room_light.model import FixedLight, RoomLight
 from contracts.frame_lighting import FrameLighting
-from contracts.models import PlayerConfiguration
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.room_light import FixedColour, FixedEntry
 
@@ -101,7 +100,7 @@ def test_099_upgrades_every_frame_to_the_python_upgrade_rule(database_provisione
                     UPGRADE_DISPLAY_LIGHT, 1.5, 50 / 100)
                 stored = conn.execute("SELECT configuration FROM player_configurations").fetchone()["configuration"]
                 assert "mat" not in stored["bindings"][0]
-                assert PlayerConfiguration.model_validate(stored).bindings[0].lighting == expected["hall"]
+                assert FrameLighting.model_validate(stored["bindings"][0]["lighting"]) == expected["hall"]
                 offered = conn.execute("SELECT manifest FROM plan_offers").fetchone()["manifest"]["bindings"]
                 assert [FrameLighting.model_validate(each["lighting"]) for each in offered] == [
                     expected["hall"], upgrade_lighting(UPGRADE_DISPLAY_LIGHT, 2.5, 1.0)]

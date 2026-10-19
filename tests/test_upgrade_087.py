@@ -40,9 +40,10 @@ def test_087_names_a_secured_locks_variant_and_keeps_serving_its_bytes(empty_dat
         # Power and the week's tables (089-091), the Frame's lighting (099, over the picture
         # tables 092-097 it rewrites), its Position history (096), its turn (101) and the turn each
         # history entry is made for (102, over no rows yet), which seeding through today's code reads
-        # and writes.
+        # and writes; the Position's stored form (104, over no rows yet), so the Position today's
+        # code saves is the one it reads back.
         migrate_before(db, "087", also=("089_", "090_", "091_", "092_", "093_", "094_", "096_",
-                                        "097_", "099_", "101_", "102_"))
+                                        "097_", "099_", "101_", "102_", "104_"))
         registry = Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
         frame(registry, "portrait")
         picture = photo("photo-1", taken_at=900)
