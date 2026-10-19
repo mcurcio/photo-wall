@@ -2,15 +2,15 @@ import { useState } from "react";
 
 import { setFrameVideo } from "../framesApi.js";
 import { isBound } from "../join.js";
-import { boxSizeMm } from "../placement.js";
-import { FactRow, Note } from "../patterns/fact-row";
+import { Note } from "../patterns/fact-row";
 import { SettingRow } from "../patterns/setting-row";
 import { formatRoute } from "../routes.js";
 import { Link } from "../ui/link";
 import { Section } from "../ui/section";
 import { Switch } from "../ui/switch";
 import { useMutate } from "../useMutate.js";
-import { boxPixels, screenOf, shapeWords, sizeWords, WHOLE_SCREEN, type Box } from "./position-box";
+import { FrameSizeFacts } from "./frame-size-facts";
+import { screenOf, WHOLE_SCREEN, type Box } from "./position-box";
 import type { Turn } from "./turn-words";
 
 /** A Frame's readiness as Central works it out (central/displays/model.py `Readiness`); never stored. */
@@ -88,12 +88,6 @@ function boxOf(frame: Frame): Box {
     : WHOLE_SCREEN;
 }
 
-/** What the Frame's size on its screen is not known for, in words. */
-const NO_SCREEN = "Not known yet: the Pi has not reported this screen's resolution";
-const NOT_CONNECTED = "Not known until this Frame is connected to a Pi";
-/** A Display that states no size (frame box run decision 6): the Player draws only washes. */
-const NO_DISPLAY_SIZE = "This display does not state its size: only even room light is drawn on this Frame";
-
 /**
  * The Frame page's Frame section (Hardware tab; frame box run, .claude/runs/frame-box/page.md, beads
  * fb-11 and fb-14): the Frame's Shows videos switch and its size, worked out, never typed. Its pixels are its
@@ -103,17 +97,11 @@ const NO_DISPLAY_SIZE = "This display does not state its size: only even room li
  */
 export function FrameFacts({ frame }: FrameFactsProps) {
   const turn = frame.turn ?? 0;
-  const box = boxOf(frame);
-  const screen = screenOf(frame.screen_px ?? null, turn);
-  const bound = isBound(frame);
-  const onWall = sizeWords(boxSizeMm(box, frame.display_mm ?? null, turn) as [number, number] | null);
   return (
     <Section title="Frame">
       <ShowsVideos frame={frame} />
-      <FactRow label="Size on screen" tone="derived">
-        {screen !== null ? shapeWords(boxPixels(box, screen)) : bound ? NO_SCREEN : NOT_CONNECTED}
-      </FactRow>
-      {bound ? <FactRow label="Size on the wall" tone="derived">{onWall ?? NO_DISPLAY_SIZE}</FactRow> : null}
+      <FrameSizeFacts box={boxOf(frame)} screen={screenOf(frame.screen_px ?? null, turn)}
+        displayMm={frame.display_mm ?? null} turn={turn} bound={isBound(frame)} />
       <Note>
         <Link href={formatRoute({ section: "wall", id: frame.id, tab: "position" })}>
           Change its size and place on the Position tab

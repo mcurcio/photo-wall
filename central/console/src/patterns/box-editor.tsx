@@ -1,6 +1,7 @@
 import * as React from "react";
 
 import { cn } from "../ui/cn";
+import { Disclosure } from "../ui/disclosure";
 
 /*
  * BoxEditor (frame box run, .claude/runs/frame-box/page.md, bead fb-4; owner, 2026-10-19: "I need
@@ -14,10 +15,12 @@ import { cn } from "../ui/cn";
  * Drawn on a sunken well: the screen in the surface colour, the box in the
  * text colour and named inside when there is room, the display's own top edge thicker. Its eight
  * handles are drawn in the accent (what you act on): a square at each corner, a short bar at each
- * edge's middle; each takes the pointer over 44 units (an edge's along the whole edge between the
- * corners'), so a phone's finger finds it. The keyboard reaches the drawing (the arrow keys report a
- * move) and then each handle in turn, edges before corners (the arrow keys report that handle's
- * resize, an edge's on its own axis only).
+ * edge's middle. Each takes the pointer over 44 CSS pixels however small the drawing is shown
+ * (design language §2: a phone's finger finds it), reaching into the box at most a quarter of its
+ * width or height, so a press in the box's middle always moves it. A box too small for three
+ * handles across (or down) keeps only its corners. The keyboard reaches the drawing (the arrow keys
+ * report a move) and then each handle in turn, edges before corners (the arrow keys report that
+ * handle's resize, an edge's on its own axis only).
  */
 
 /** A box on the screen in whole pixels: its top-left corner and its size (src/placement.js `Placement`). */
@@ -55,6 +58,10 @@ export interface BoxEditorProps {
   disabled?: boolean;
   /** The editor's controls: beside a portrait screen on a wide page, below it otherwise. */
   aside?: React.ReactNode;
+  /** How to use it, in words: above the drawing on a wide page; on a phone folded under it as
+   * `helpSummary`, so the drawing and the editor's bar fit the first screen. Shown with `aside`. */
+  help?: React.ReactNode;
+  helpSummary?: string;
 }
 
 // The drawing's largest size in its own units: a landscape screen is drawn 480 wide, a portrait one
@@ -62,13 +69,13 @@ export interface BoxEditorProps {
 const MAX_WIDTH = 480;
 const MAX_HEIGHT = 360;
 // Room round the screen for the handles' pointer areas at its edges.
-const PAD = 22;
-// A corner handle as drawn (14 units across), an edge handle's bar (24 by 8), and the area that
-// takes the pointer (44 units across).
+const PAD = 32;
+// A corner handle as drawn (14 units across) and an edge handle's bar (24 by 8).
 const CORNER = 7;
 const BAR_LONG = 12;
 const BAR_THICK = 4;
-const HIT = 22;
+// Half the area that takes the pointer, in CSS pixels (44 across: design language §2's touch target).
+const HIT_CSS = 22;
 // The box's name is drawn inside it when it has this much room.
 const NAME_WIDTH = 150;
 const NAME_HEIGHT = 40;
@@ -131,20 +138,30 @@ function edgeLine(edge: ScreenEdge, width: number, height: number) {
   }
 }
 
-/** A handle's pointer area on a drawn box: a 44-unit square at a corner; along an edge, a 44-unit
- * band over the whole edge between the corners' squares, and never shorter than its drawn bar (on a
- * small box the corners, drawn later, take the pointer where they overlap it). */
-function hitArea(spec: HandleSpec, box: PixelRectangle) {
+/** The span a handle's pointer area takes on one axis, from the edge it sits on at `at` (0 the near
+ * edge, 1 the far, 0.5 the middle) of a box from `start` over `size`: `hit` * 2 in all, inward at
+ * most a quarter of `size` (so the box's middle half is always the box's) and the rest outward. */
+function hitSpan(at: number, start: number, size: number, hit: number): [number, number] {
+  const inward = Math.min(hit, size / 4);
+  const outward = hit * 2 - inward;
+  if (at === 0) return [start - outward, hit * 2];
+  if (at === 1) return [start + size - inward, hit * 2];
+  return [start, size];
+}
+
+/** A handle's pointer area on a drawn box, `hit` units out from its edge (44 CSS pixels across in
+ * all): a square at a corner; along an edge, a band over the edge between the corners' areas. */
+function hitArea(spec: HandleSpec, box: PixelRectangle, hit: number) {
   const [atX, atY] = spec.at;
-  const x = box.x + box.width * atX;
-  const y = box.y + box.height * atY;
-  if (spec.across && spec.down) return { x: x - HIT, y: y - HIT, width: HIT * 2, height: HIT * 2 };
+  const [x, width] = hitSpan(atX, box.x, box.width, hit);
+  const [y, height] = hitSpan(atY, box.y, box.height, hit);
+  if (spec.across && spec.down) return { x, y, width, height };
   if (spec.across) {
-    const long = Math.max(BAR_LONG * 2, box.height - HIT * 2);
-    return { x: x - HIT, y: y - long / 2, width: HIT * 2, height: long };
+    const inside = Math.min(hit, box.height / 4);
+    return { x, y: box.y + inside, width, height: Math.max(1, box.height - inside * 2) };
   }
-  const long = Math.max(BAR_LONG * 2, box.width - HIT * 2);
-  return { x: x - long / 2, y: y - HIT, width: long, height: HIT * 2 };
+  const inside = Math.min(hit, box.width / 4);
+  return { x: box.x + inside, y, width: Math.max(1, box.width - inside * 2), height };
 }
 
 /** A handle as drawn: a square at a corner, a bar along the middle of an edge. */
@@ -160,12 +177,31 @@ function drawnHandle(spec: HandleSpec, box: PixelRectangle) {
 /** The box editor (module comment). */
 export function BoxEditor({
   label, screen, picture, pictureLabel = "Picture", topEdge, onMove, onResize, onArrow, disabled = false, aside,
+  help, helpSummary = "How to use it",
 }: BoxEditorProps): React.JSX.Element {
   const scale = Math.min(MAX_WIDTH / screen.width, MAX_HEIGHT / screen.height);
   const drawn = { width: screen.width * scale, height: screen.height * scale };
   const view = { width: drawn.width + PAD * 2, height: drawn.height + PAD * 2 };
   const svgRef = React.useRef<SVGSVGElement | null>(null);
   const drag = React.useRef<Drag | null>(null);
+  const portrait = screen.width < screen.height;
+  const shownWidth = portrait ? SHOWN_PORTRAIT : SHOWN_LANDSCAPE;
+  // The drawing's units per CSS pixel as shown, the larger of its two axes (its own size until
+  // measured): the handles' pointer areas are 44 CSS pixels across whatever size it is shown at.
+  const [unitsPerCss, setUnitsPerCss] = React.useState(view.width / shownWidth);
+  React.useEffect(() => {
+    const svg = svgRef.current;
+    if (svg === null || typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(() => {
+      const shown = svg.getBoundingClientRect();
+      if (shown.width > 0 && shown.height > 0) {
+        setUnitsPerCss(Math.max(view.width / shown.width, view.height / shown.height));
+      }
+    });
+    observer.observe(svg);
+    return () => observer.disconnect();
+  }, [view.width, view.height]);
+  const hit = HIT_CSS * unitsPerCss;
 
   // The pointer in screen pixels (the drawing may be shown smaller or larger than its view box).
   const pixels = (event: React.PointerEvent): [number, number] => {
@@ -215,8 +251,9 @@ export function BoxEditor({
   const box: PixelRectangle = {
     x: picture.x * scale, y: picture.y * scale, width: picture.width * scale, height: picture.height * scale,
   };
-  const portrait = screen.width < screen.height;
-  const shownWidth = portrait ? SHOWN_PORTRAIT : SHOWN_LANDSCAPE;
+  // A box too small for three handles' pointer areas across (or down) keeps only its corners.
+  const compact = box.width < hit * 6 || box.height < hit * 6;
+  const handles = compact ? HANDLES.filter((spec) => spec.across && spec.down) : HANDLES;
   const drawing = (
     <svg
       ref={svgRef}
@@ -260,18 +297,18 @@ export function BoxEditor({
             {pictureLabel}
           </text>
         )}
-        {!disabled && HANDLES.map((spec) => (
+        {!disabled && handles.map((spec) => (
           <rect key={`${spec.handle}-drawn`} aria-hidden="true" {...drawnHandle(spec, box)} rx={3}
             className="pointer-events-none fill-accent stroke-surface" strokeWidth={2} />
         ))}
-        {!disabled && HANDLES.map((spec) => (
+        {!disabled && handles.map((spec) => (
           <rect
             key={spec.handle}
             role="button"
             tabIndex={0}
             aria-label={`${spec.words}: ${pictureLabel}`}
             aria-keyshortcuts={keysOf(spec)}
-            {...hitArea(spec, box)}
+            {...hitArea(spec, box, hit)}
             className={cn("fill-transparent outline-none focus-visible:stroke-focus", spec.cursor)}
             strokeWidth={2}
             onPointerDown={(event) => start(event, spec)}
@@ -283,9 +320,15 @@ export function BoxEditor({
   );
   if (aside === undefined) return drawing;
   return (
-    <div className={cn("flex min-w-0 flex-col gap-4", portrait && "md:flex-row md:items-start")}>
-      {drawing}
-      <div className="flex min-w-0 flex-1 flex-col gap-4">{aside}</div>
+    <div className="flex min-w-0 flex-col gap-4">
+      {help !== undefined && <div className="max-md:hidden">{help}</div>}
+      <div className={cn("flex min-w-0 flex-col gap-4", portrait && "md:flex-row md:items-start")}>
+        {drawing}
+        <div className="flex min-w-0 flex-1 flex-col gap-4">
+          {help !== undefined && <div className="md:hidden"><Disclosure summary={helpSummary}>{help}</Disclosure></div>}
+          {aside}
+        </div>
+      </div>
     </div>
   );
 }

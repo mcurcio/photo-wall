@@ -366,7 +366,7 @@ def test_first_run_guidance_has_no_dismiss_and_opens_edit_layout(page, registry)
         expect(page.get_by_role("group", name="Editing layout", exact=True)).to_be_visible()
         assert current_hash(page) == "#/wall/layout"
         expect(page.get_by_text("Click or drag on this plan to place a Frame")).to_be_visible()
-        expect(page.get_by_role("button", name="Add frame with measurements", exact=True)
+        expect(page.get_by_role("button", name="Add a Frame by its position", exact=True)
                ).to_be_enabled()
 
 
@@ -481,7 +481,7 @@ def test_measured_create_and_numeric_reposition(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         edit_layout(page)
-        page.get_by_role("button", name="Add frame with measurements", exact=True).click()
+        page.get_by_role("button", name="Add a Frame by its position", exact=True).click()
         form = page.get_by_role("form", name="New frame")
         form.get_by_label("Frame id", exact=True).fill("measured-frame")
         form.get_by_label("X position (mm)").fill("125")
@@ -845,7 +845,7 @@ def test_a_drag_on_the_daily_wall_sends_no_write_and_edit_layout_sends_one_patch
         expect(page.get_by_role("form", name="New frame")).to_have_count(0)
         assert next(f for f in registry.inventory().frames if f.id == PLACED).x_mm == 100
         # The daily face offers no write control at all.
-        for name in ("Add frame with measurements", f"Delete frame {PLACED}",
+        for name in ("Add a Frame by its position", f"Delete frame {PLACED}",
                      f"Edit placement for {PLACED}"):
             expect(page.get_by_role("button", name=name, exact=True)).to_have_count(0)
 

@@ -217,7 +217,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
         )}
         {tab === "position" && (
           <FramePosition adjustment={adjustment} size={frame.screen_px ?? null} displayMm={frame.display_mm ?? null}
-            piHref={piHref} turn={frame.turn ?? 0}
+            piHref={piHref} turn={frame.turn ?? 0} bound={isBound(frame)}
             hardwareHref={formatRoute({ section: "wall", id: frameId, tab: "hardware" })}
             readiness={frame.readiness}
             whatFits={(

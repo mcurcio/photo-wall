@@ -3,12 +3,16 @@ import { Button } from "../ui/button";
 export interface NudgePadProps {
   /** The pad's accessible name. */
   label: string;
-  /** What each button names after its direction ("Move up the top-left corner"). */
+  /** What each button names after its direction ("Move up: the picture"). */
   subject: string;
+  /** Each button's words before the subject, by direction (default "Move up", "Move left", ...). */
+  words?: Partial<Record<Direction, string>>;
   /** One step on each axis, -1, 0 or 1. */
   onNudge: (dx: number, dy: number) => void;
   disabled?: boolean;
 }
+
+type Direction = "up" | "left" | "right" | "down";
 
 const DIRECTIONS = [
   { name: "up", mark: "↑", dx: 0, dy: -1 },
@@ -21,12 +25,12 @@ const DIRECTIONS = [
  * NudgePad: four arrow buttons in a cross. Each press reports one step in its direction; the
  * caller decides how far a step goes.
  */
-export function NudgePad({ label, subject, onNudge, disabled = false }: NudgePadProps) {
+export function NudgePad({ label, subject, words = {}, onNudge, disabled = false }: NudgePadProps) {
   const button = (direction: (typeof DIRECTIONS)[number]) => (
     <Button
       key={direction.name}
       className="w-12 px-0"
-      aria-label={`Move ${direction.name}: ${subject}`}
+      aria-label={`${words[direction.name] ?? `Move ${direction.name}`}: ${subject}`}
       disabled={disabled}
       onClick={() => onNudge(direction.dx, direction.dy)}
     >

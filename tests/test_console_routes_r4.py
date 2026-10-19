@@ -815,8 +815,6 @@ FRAME_PAGE_IMPORTS = {
     # The Picture tab (1c K1): its routes, the session hook's type and a display level's words
     # (0022 R11); Position (render redesign S5): the placement rule it judges every change by.
     "frame-picture.tsx": {"pictureApi.js", "pictureSession.js", "levelWords.js"},
-    # Position (frame box run fb-7): the box's physical size by the Display's (placement.js `boxSizeMm`).
-    "frame-position.tsx": {"placement.js"},
     # The Position as a box (frame box run fb-4): its pixels, moves and words, the editor's and
     # History's one home, by the same rule.
     "position-box.ts": {"placement.js"},
@@ -824,7 +822,9 @@ FRAME_PAGE_IMPORTS = {
                            "frameIds.js"},
     # The Hardware tab's Frame facts (frame box run fb-11, fb-14): the Shows videos write and
     # refresh-after-write, and the box's size on the Display (placement.js).
-    "frame-facts.tsx": {"framesApi.js", "placement.js", "useMutate.js"},
+    "frame-facts.tsx": {"framesApi.js", "useMutate.js"},
+    # A Frame's two sizes in one wording (Position and Hardware tabs): the box's size on the Display.
+    "frame-size-facts.tsx": {"placement.js"},
     # The Hardware tab's turn control (render redesign S5): its write and refresh-after-write.
     "frame-turn.tsx": {"framesApi.js", "useMutate.js"},
     # The Hardware tab's Display (1b K1, E-1B-K1-1): its read and polling, and the route change

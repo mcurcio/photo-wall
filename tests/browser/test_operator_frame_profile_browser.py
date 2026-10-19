@@ -35,7 +35,7 @@ pytestmark = pytest.mark.skipif(
     reason="set PHOTO_WALL_BROWSER_TESTS=1 and install Playwright Chromium",
 )
 
-NO_SIZE = "This display does not state its size: only even room light is drawn on this Frame"
+NO_SIZE = "Size on the wall: Not known (this display does not state its size)"
 
 
 def _frame(registry, frame_id="lobby") -> str:
@@ -91,7 +91,8 @@ def test_the_frame_reads_its_pixels_shape_and_size_from_its_box_and_display(page
         expect(inspector).not_to_contain_text("Diagonal")
         link = facts.get_by_role("link", name="Change its size and place on the Position tab", exact=True)
         expect(link).to_have_attribute("href", f"#/wall/frames/{frame_id}/position")
-        expect(_display(inspector)).to_contain_text("95 × 54 cm, 43 in across")
+        expect(_display(inspector)).to_contain_text("95 × 54 cm")
+        expect(inspector).not_to_contain_text(" in across")
         assert not calls
 
 
@@ -116,6 +117,8 @@ def test_a_display_that_states_no_size_says_so_and_what_it_means(page, registry)
         facts = _facts(inspector)
         expect(facts).to_contain_text("1,920 × 1,080 pixels, 16:9")
         expect(facts).to_contain_text(NO_SIZE)
+        expect(facts).to_contain_text(
+            "Until then, only even room light is drawn and this Frame counts as large for videos.")
         expect(_display(inspector)).to_contain_text("Does not state its size")
 
 
