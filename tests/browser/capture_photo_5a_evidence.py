@@ -251,11 +251,11 @@ def _matted_living_room(registry):
     from support.position import save_position
     from test_registry import enroll
 
-    from contracts.models import Calibration, RectangleFit
+    from contracts.models import Calibration, PositionBox
 
     player, _key, _request = enroll(registry, count=1, size=(3840, 2160))
     registry.bind("living-room", player["player_id"], "HDMI-A-1", expected_generation=0)
-    save_position(registry, "living-room", Calibration(fit=RectangleFit(width=0.5)))
+    save_position(registry, "living-room", Calibration(fit=PositionBox(left=0.25, top=0.25, width=0.5, height=0.5)))
 
 
 def _board(within, name):

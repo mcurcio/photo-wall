@@ -449,7 +449,7 @@ def main() -> None:
         WestonBackend,
     )
     from contracts.display_turn import hanging
-    from contracts.models import Calibration, RectangleFit
+    from contracts.models import Calibration, PositionBox
     from contracts.node_calibration import TrialCandidate, candidate_hash, canonical, encode_trial
     from contracts.node_display import Surface
     from contracts.node_protocol import NodeProcessIdentity, OutputKey
@@ -784,7 +784,7 @@ def main() -> None:
 
         boot_ms = time.clock_gettime_ns(time.CLOCK_BOOTTIME) // 1_000_000
         trial_id, lighting = uuid.uuid4(), frame_lighting()
-        calibration = canonical(Calibration(fit=RectangleFit(width=0.5)).model_dump(mode="json"))
+        calibration = canonical(Calibration(fit=PositionBox(left=0.25, top=0.25, width=0.5, height=0.5)).model_dump(mode="json"))
         trial = TrialCandidate(
             trial_id=trial_id, generation=1, sequence=1, baseline=admitted, calibration_json=calibration,
             candidate_sha256=candidate_hash(trial_id, 1, 1, admitted, calibration, lighting),

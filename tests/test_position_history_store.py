@@ -35,7 +35,7 @@ from central.infra.position_history_store import record_sent_in, write_position_
 from central.transaction_locks import acquire_runtime_locks
 from central.tuning_history import bounds as retention
 from contracts.frame_lighting import FrameLighting
-from contracts.models import Calibration, FrameProfile, RectangleFit
+from contracts.models import Calibration, FrameProfile, PositionBox
 from contracts.node_calibration import parse_trial
 
 AUTH = {"Authorization": "Bearer " + ADMIN}
@@ -147,7 +147,7 @@ def test_save_appends_a_kept_entry_made_for_the_profile_and_the_display_seen(reg
     assert node.save(trial)["state"] == "saved"
     newest = _history(registry)["entries"][0]
     assert (newest["kind"], newest["session_id"], newest["restored_from"]) == ("kept-saved", trial["trial_id"], None)
-    assert RectangleFit.model_validate(newest["fit"]) == SKEWED and FrameLighting.model_validate(newest["lighting"]) == DEEP
+    assert PositionBox.model_validate(newest["fit"]) == SKEWED and FrameLighting.model_validate(newest["lighting"]) == DEEP
     assert newest["made_for"] == {"profile_px": PORTRAIT, "turn": 0, "display_id": str(display)}
     assert newest["restore_refusal"] is None
 
@@ -189,7 +189,7 @@ def test_a_change_made_outside_photo_wall_is_recorded_before_the_next_save(regis
     saved, unrecorded = history["entries"][:2]
     assert (saved["kind"], unrecorded["kind"], history["unrecorded_change"]) == ("kept-saved", "kept-unrecorded", False)
     assert FrameLighting.model_validate(unrecorded["lighting"]) == DEEP and unrecorded["session_id"] is None
-    assert RectangleFit.model_validate(unrecorded["fit"]) == PORTRAIT_ON_WIDE.fit  # the rig's saved fit
+    assert PositionBox.model_validate(unrecorded["fit"]) == PORTRAIT_ON_WIDE.fit  # the rig's saved fit
     assert unrecorded["made_for"]["profile_px"] == PORTRAIT
 
 
@@ -268,7 +268,7 @@ def test_what_each_exchange_hands_the_node_is_recorded_once(registry):
     assert [(entry["kind"], entry["session_id"]) for entry in entries] == [
         ("sent-back", trial["trial_id"]), ("sent-draft", trial["trial_id"]), ("sent-draft", trial["trial_id"]),
         ("kept-saved", None), ("kept-created", None)]
-    assert RectangleFit.model_validate(entries[0]["fit"]) == PORTRAIT_ON_WIDE.fit   # the saved values back
+    assert PositionBox.model_validate(entries[0]["fit"]) == PORTRAIT_ON_WIDE.fit   # the saved values back
 
     lapsed = node.edit(node.begin(), SHIFTED)
     node.exchange()
@@ -404,7 +404,7 @@ def test_kept_and_sent_entries_are_trimmed_apart(registry, monkeypatch):
     monkeypatch.setattr(retention, "SENT_ENTRIES", 2)
     Node(registry)
     for width in (0.2, 0.22, 0.24):
-        save_position(registry, "node-f0", Calibration(fit=RectangleFit(width=width)))
+        save_position(registry, "node-f0", Calibration(fit=PositionBox(width=width, height=0.5)))
     session = uuid4()
     with registry.db.transaction() as conn:
         for depth in (1.0, 2.0, 3.0):

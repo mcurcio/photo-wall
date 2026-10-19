@@ -1,23 +1,23 @@
-"""The Frame fit's shared geometry (render redesign, run ledger .claude/runs/render-planes/): stdlib only.
+"""The Frame fit's shared geometry (render redesign, run ledger .claude/runs/render-planes/; frame
+box run, .claude/runs/frame-box/page.md): stdlib only.
 
-A Frame's place on its screen is an upright rectangle (`FrameRectangle`); the Player shows the
-Frame's picture as its own display plane at `place`'s pixels, and Central sizes photos by the
-same pixels (contracts/models.py `frame_output`). Display Host never imports this module
-(pyproject.toml: "Display Host never computes a Frame's geometry").
+A Frame's place on its screen is a box (`FrameBox`); the Player shows the Frame's picture as its
+own display plane at `place_box`'s pixels, and Central sizes photos by the same pixels
+(contracts/models.py `frame_output`). Display Host never imports this module (pyproject.toml:
+"Display Host never computes a Frame's geometry").
 
 Rules this module owns (one home each):
-- **The rectangle's pixels** (`FrameRectangle`, `place`): a Frame's upright rectangle on its
-  screen as it hangs becomes whole pixels by rounding half up (floor(v + 0.5)): its width from
-  the screen's width, its height from that width and the Frame profile's aspect, its corner from
-  its centre; a rectangle that does not lie wholly on its screen is refused, never clipped.
+- **The box's pixels** (`FrameBox`, `place_box`): a Frame's box on its screen as it hangs becomes
+  whole pixels by rounding each edge half up (floor(v + 0.5)); a box always lies on its screen.
+- **The box's physical size** (`box_size_mm`): its share of the Display's picture area.
 - **A photo holds the Frame output** (`window_holds`): the largest window of the Frame's aspect
   cut from an image holds the Frame output's pixels on both axes.
 
-Rules it does NOT own: orientation (setting #96), which is the Frame profile's aspect alone (owner
-2026-10-11: ""landscape" and "portrait" are descriptions of the aspect ratio. whereas the angle
-of rotation is a quality of the way frames are hung on the wall"); the screen's turn
+Rules it does NOT own: orientation, which is the box's aspect on its screen (owner 2026-10-11:
+""landscape" and "portrait" are descriptions of the aspect ratio. whereas the angle of rotation
+is a quality of the way frames are hung on the wall"); the screen's turn
 (contracts/display_turn.py); the picture operations (the Player, player/geometry.py); where a
-Frame's rectangle and profile are stored (Central).
+Frame's box is stored (Central).
 """
 from __future__ import annotations
 
@@ -59,26 +59,6 @@ def window_holds(width: int, height: int, aspect: float, need: PictureSize) -> b
 
 
 @dataclass(frozen=True)
-class FrameRectangle:
-    """A Frame's place on its screen (render redesign, run ledger .claude/runs/render-planes/
-    s1-page.md): an upright rectangle at the Frame profile's aspect (the
-    profile stays the one source of the aspect), its centre as fractions of the screen's width and
-    height as it hangs (contracts/display_turn.py `hanging`), its width as a fraction of that
-    width; its height follows from the aspect. The screen's turn is the only turn. Whether it lies inside its screen needs the screen and the aspect: `place` checks it.
-
-    __post_init__: ValueError("frame_rectangle") unless each field is a finite int or float (never
-    a bool), 0 <= centre_x <= 1, 0 <= centre_y <= 1 and 0 < width <= 1."""
-    centre_x: float
-    centre_y: float
-    width: float
-
-    def __post_init__(self) -> None:
-        if not (all(_finite(value) for value in (self.centre_x, self.centre_y, self.width))
-                and 0 <= self.centre_x <= 1 and 0 <= self.centre_y <= 1 and 0 < self.width <= 1):
-            raise ValueError("frame_rectangle")
-
-
-@dataclass(frozen=True)
 class FrameBox:
     """A Frame's box on its screen (frame box run, .claude/runs/frame-box/page.md; owner,
     2026-10-19: "I need to be able to set width and height independently, along with the position
@@ -109,7 +89,7 @@ class Placement:
     """A Frame's rectangle on its screen in whole pixels as the screen hangs: the top-left corner
     (x, y) and the size, which the Frame's picture fills on screen: finished no larger than this
     (player/planes.py `finish_size`), the display controller enlarges it or shows it 1:1, never
-    shrinks it (bench T2: a shrunk 4K picture glitches at four). Built by `place`."""
+    shrinks it (bench T2: a shrunk 4K picture glitches at four). Built by `place_box`."""
     x: int
     y: int
     width: int
@@ -121,32 +101,6 @@ class Placement:
         number: Central's fit rule (`FitTarget.aspect` asks its Frame output, these sides) and the
         Player's crop (player/planes.py) both read it. Pure."""
         return self.width / self.height
-
-
-def place(rectangle: FrameRectangle, screen: OutputSize, aspect: float) -> Placement:
-    """`rectangle` in whole pixels on a screen of `screen` = (W, H) pixels as it hangs, for a Frame
-    profile of width-to-height `aspect`; each value rounds half up (floor(v + 0.5)):
-    width = max(1, round(rectangle.width * W)), height = max(1, round(width / aspect)),
-    x = round(centre_x * W - width / 2), y = round(centre_y * H - height / 2).
-    The one home of how a rectangle becomes pixels: the Player's planes and the Frame output
-    Central sizes photos by (contracts/models.py `frame_output`) both ask here. Pure.
-
-    ValueError("placement_screen") unless both screen sides are ints (never bools) >= 1;
-    ValueError("placement_aspect") unless `aspect` is finite and above 0;
-    ValueError("placement_outside") unless 0 <= x, x + width <= W, 0 <= y and y + height <= H."""
-    screen_width, screen_height = screen
-    if not (type(screen_width) is int and type(screen_height) is int
-            and screen_width >= 1 and screen_height >= 1):
-        raise ValueError("placement_screen")
-    if not (_finite(aspect) and aspect > 0):
-        raise ValueError("placement_aspect")
-    width = max(1, _half_up(rectangle.width * screen_width))
-    height = max(1, _half_up(width / aspect))
-    x = _half_up(rectangle.centre_x * screen_width - width / 2)
-    y = _half_up(rectangle.centre_y * screen_height - height / 2)
-    if not (0 <= x and x + width <= screen_width and 0 <= y and y + height <= screen_height):
-        raise ValueError("placement_outside")
-    return Placement(x=x, y=y, width=width, height=height)
 
 
 def place_box(box: FrameBox, screen: OutputSize) -> Placement:
@@ -199,5 +153,5 @@ def _half_up(value: float) -> int:
     return math.floor(value + 0.5)
 
 
-__all__ = ["BOX_SLACK", "FrameBox", "FrameRectangle", "OutputSize", "PictureSize", "Placement", "ScreenMm", "box_size_mm",
-           "place", "place_box", "window_holds"]
+__all__ = ["BOX_SLACK", "FrameBox", "OutputSize", "PictureSize", "Placement", "ScreenMm", "box_size_mm", "place_box",
+           "window_holds"]

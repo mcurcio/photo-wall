@@ -260,8 +260,7 @@ def analyse(request: FitAnalysisRequest, reader: FitAnalysisReader,
         output, draft = outputs[frame_id], drafts.get(frame_id)
         target = FitTarget(profile=output.profile, output_px=output.output_px) if draft is None \
             else FitTarget(profile=draft.profile,
-                           output_px=frame_output(draft.profile, draft.calibration,
-                                                  output.display_px, output.turn))
+                           output_px=frame_output(draft.calibration, output.display_px, output.turn))
         frame = _frame_fit(frame_id, target, output.display_px, draft is not None, sizes,
                            crop_limit, settings, samples, taken)
         if frame.lead is not None:

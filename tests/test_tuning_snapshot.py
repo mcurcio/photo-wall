@@ -38,7 +38,7 @@ from central.fleet.position_history import (
 from central.infra.display_store import PgPictureSessions, output_documents
 from central.infra.picture_history_store import append_kept_in
 from central.tuning_history.model import snapshot_at
-from contracts.models import RectangleFit
+from contracts.models import PositionBox
 
 AT = datetime(2026, 10, 13, 21, 4, 7, tzinfo=UTC)
 
@@ -129,7 +129,7 @@ def test_a_snapshot_needs_a_time_with_its_zone_and_a_known_frame(registry):
 
 def _position(*, frame_id: str = "kitchen", at: datetime = AT) -> PositionEntry:
     return PositionEntry(uuid4(), frame_id, 1, at, MadeFor((1080, 1920), 0, None),
-                         PositionRecord(PositionEntryKind.KEPT_SAVED, PositionValues(RectangleFit(), LIGHTING), None, None))
+                         PositionRecord(PositionEntryKind.KEPT_SAVED, PositionValues(PositionBox(), LIGHTING), None, None))
 
 
 def _picture(kind: PictureEntryKind, *, frame_id: str | None = "kitchen", at: datetime = AT) -> PictureEntry:

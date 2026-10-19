@@ -5,10 +5,10 @@ import type { PositionEntryKind, PositionEntryView, PositionHistoryView } from "
 import { refusalWords } from "../liveAdjustment.js";
 import { changedSummary, type HistoryDay, HistoryList, type HistoryRow } from "../patterns/history-list";
 import { unitWords } from "../patterns/units";
-import { pixelSize } from "../timeWords.js";
+import { countText, pixelSize } from "../timeWords.js";
 import { inkWords, lightDetails, type PaperProfileChoice, profileWords } from "./frame-lighting/model";
 import type { PixelSize } from "./frame-position";
-import { centreWords, pixelValues, screenOf, widthWords } from "./position-on-screen";
+import { boxPixels, screenOf, shapeWords } from "./position-box";
 import { HANGS } from "./turn-words";
 import type { Adjustment } from "./live-adjustment";
 import { daysOf, historyProblem, shownEntries } from "./picture-history";
@@ -53,12 +53,13 @@ export const WHAT: Record<PositionEntryKind, string> = {
 };
 const NOT_KEPT = new Set<PositionEntryKind>(["sent-draft", "sent-back"]);
 
-// The values a row's summary names, in the editor's words: the picture's centre and width in pixels,
-// how the screen hung, and the lighting's mat and lights (the rest of the lighting under Details).
-const POSITION = ["Centre", "Width"];
+// The values a row's summary names, in the editor's words: the box's left and top edges and its size
+// (in pixels of the screen when its size is known, else as shares of it), how the screen hung, and
+// the lighting's mat and lights (the rest of the lighting under Details).
+const POSITION = ["Left and top", "Size"];
 const FIRST_LINE = [...POSITION, "Screen", "Mat depth", "Lights"];
-// Under Details only: the same centre and width as shares of the screen (they change with the pixels).
-const SHARES = new Set(["Centre (share of the screen)", "Width (share of the screen)"]);
+// Under Details only: the same box as shares of the screen (they change with the pixels).
+const SHARES = new Set(["Left and top (share of the screen)", "Size (share of the screen)"]);
 
 const percent = (fraction: number) => `${(fraction * 100).toFixed(1)} %`;
 type Detail = { label: string; value: string };
@@ -85,19 +86,27 @@ export function positionSummary(kind: PositionEntryKind, details: readonly Detai
   });
 }
 
-/** Every value of an entry: the picture's centre and width in pixels of the screen as it hung (the
- * Pi's reported mode `size`, turned by the entry's turn), how it hung, the lighting (the mat's depth,
- * each light's values, the paper), the screen size it was made for, then the centre and width as
- * shares of the screen. `names`: the room lights' names by id; `profiles`: the paper profiles on the list. */
+/** Every value of an entry: the box's left and top edges and its size in pixels of the screen as it
+ * hung (the Pi's reported mode `size`, turned by the entry's turn; position-box.ts), or as shares of
+ * the screen when no size is known, how it hung, the lighting (the mat's depth, each light's values,
+ * the paper), the screen size it was made for, then (with a known size) the box as shares of the
+ * screen. `names`: the room lights' names by id; `profiles`: the paper profiles on the list. */
 export function positionDetails(entry: PositionEntryView, size: PixelSize | null = null,
   names: Readonly<Record<string, string>> = {}, profiles: readonly PaperProfileChoice[] = []): Detail[] {
   const { lighting } = entry;
   const { width, height } = entry.made_for.profile_px;
-  const rectangle = { centre_x: entry.fit.centre_x ?? 0.5, centre_y: entry.fit.centre_y ?? 0.5, width: entry.fit.width ?? 1 };
-  const values = pixelValues(rectangle, screenOf(size, entry.made_for.turn));
+  const box = { left: entry.fit.left ?? 0, top: entry.fit.top ?? 0, width: entry.fit.width ?? 1, height: entry.fit.height ?? 1 };
+  const screen = screenOf(size === null ? null : [size.width, size.height], entry.made_for.turn);
+  const shares = [
+    { label: "Left and top", value: `${percent(box.left)} across, ${percent(box.top)} down` },
+    { label: "Size", value: `${percent(box.width)} × ${percent(box.height)} of the screen` },
+  ];
+  const placed = screen === null ? null : boxPixels(box, screen);
   return [
-    { label: "Centre", value: centreWords(values) },
-    { label: "Width", value: widthWords(values.width) },
+    ...(placed === null ? shares : [
+      { label: "Left and top", value: `${countText(placed.x)} across, ${countText(placed.y)} down` },
+      { label: "Size", value: shapeWords(placed) },
+    ]),
     { label: "Screen", value: `hung ${HANGS[entry.made_for.turn]}` },
     { label: "Mat depth", value: unitWords(lighting.mat_depth_mm, "mm") },
     { label: "Lights", value: String(lighting.lights.length) },
@@ -106,8 +115,7 @@ export function positionDetails(entry: PositionEntryView, size: PixelSize | null
     { label: "Ink density", value: inkWords(lighting.paper.ink_density) },
     { label: "Paper profile", value: profileWords(lighting.paper.profile, profiles) },
     { label: "Made for", value: `${pixelSize(width, height)} px` },
-    { label: "Centre (share of the screen)", value: `${percent(rectangle.centre_x)} across, ${percent(rectangle.centre_y)} down` },
-    { label: "Width (share of the screen)", value: percent(rectangle.width) },
+    ...(placed === null ? [] : shares.map(({ label, value }) => ({ label: `${label} (share of the screen)`, value }))),
   ];
 }
 
@@ -194,11 +202,11 @@ export function PositionHistoryList({
 /**
  * The Position tab's History (configuration snapshots; owner, 2026-10-13: "configuration snapshots"
  * that keep "a history of what has been done in the past", used to "View and restore"): every kept
- * and not-kept Position of the Frame (its centre, width and lighting), newest first by
+ * and not-kept Position of the Frame (its box and lighting), newest first by
  * day, read while the tab is shown (historyApi.js `useHistoryPages`) and again after a Restore, Done
  * or Revert. Restore replaces the operator's draft with an entry (liveAdjustment.js `restore`); the
  * live session shows it, Done keeps it and Revert returns to the kept Position. Each row says its
- * Position in the editor's pixels (position-on-screen.ts). An entry made for another screen size, a
+ * Position in pixels of its screen (position-box.ts). An entry made for another screen size, a
  * screen hung another way or another display cannot be restored, and says so (a turn with the way to
  * the Hardware tab).
  */

@@ -9,13 +9,12 @@ from pydantic import BeforeValidator, Field, model_serializer, model_validator
 from contracts.display_turn import DisplayTurn, hanging, is_turn
 from contracts.frame_fit import (
     FrameBox,
-    FrameRectangle,
     OutputSize,
     PictureSize,
     Placement,
     ScreenMm,
     box_size_mm,
-    place,
+    place_box,
 )
 from contracts.frame_lighting import FrameLighting
 
@@ -54,34 +53,6 @@ def _exact_turn(value: object) -> DisplayTurn:
 ExactTurn = Annotated[DisplayTurn, BeforeValidator(_exact_turn)]
 
 
-RectangleWidth = Annotated[float, Field(gt=0, le=1, allow_inf_nan=False)]
-
-
-class RectangleFit(Model):
-    """Frame fit Rectangle (render redesign S2, run ledger .claude/runs/render-planes/s2-page.md;
-    owner, 2026-10-17: "We can make the position pure crop and scale"): the Frame's picture is an
-    upright rectangle at the Frame profile's aspect on its screen as it hangs (the Frame's turn,
-    frames.turn); `centre_x` and `centre_y` are fractions of that screen's width and height,
-    `width` a fraction of its width; the height follows from the aspect. The screen's turn is
-    the only turn. Its rule's one home is contracts/frame_fit.py `FrameRectangle` (the validator builds one);
-    where it lands in pixels is `frame_placement`."""
-    mode: Literal["rectangle"] = "rectangle"
-    centre_x: Fraction = 0.5
-    centre_y: Fraction = 0.5
-    width: RectangleWidth = 1.0
-
-    @model_validator(mode="after")
-    def upright(self) -> Self:
-        """`self.rectangle()` (FrameRectangle's own check); its ValueError("frame_rectangle")
-        becomes the model's validation error."""
-        self.rectangle()
-        return self
-
-    def rectangle(self) -> FrameRectangle:
-        """The contracts/frame_fit.py `FrameRectangle` of these three fields. Pure."""
-        return FrameRectangle(centre_x=self.centre_x, centre_y=self.centre_y, width=self.width)
-
-
 BoxSide = Annotated[float, Field(gt=0, le=1, allow_inf_nan=False)]
 
 
@@ -114,11 +85,11 @@ class PositionBox(Model):
 
 class Calibration(Model):
     """A Frame's Position (the console's word): where its picture sits on its screen as it hangs,
-    one upright rectangle (`RectangleFit`; the default is centred at the screen's full width).
-    `revision` rises with every saved Position."""
+    one box (`PositionBox`; the default is the whole screen). `revision` rises with every saved
+    Position."""
 
     revision: int = Field(default=1, ge=1)
-    fit: RectangleFit = Field(default_factory=RectangleFit)
+    fit: PositionBox = Field(default_factory=PositionBox)
 
 
 class OutputBinding(Model):
@@ -131,52 +102,24 @@ class OutputBinding(Model):
     lighting: FrameLighting                             # the Frame's lights, mat and paper
 
 
-def frame_output(profile: FrameProfile, calibration: Calibration, output: OutputSize | None,
-                 turn: DisplayTurn) -> PictureSize | None:
-    """The Frame output of a Frame whose Output reports `output` (width, height, as built) and
+def frame_output(calibration: Calibration, output: OutputSize | None, turn: DisplayTurn) -> PictureSize | None:
+    """The Frame output of a Frame whose Output's mode is `output` (width, height, as built) and
     whose screen hangs at `turn`: its picture's pixels, `frame_placement`'s (width, height). None
-    when `output` is None or has a side below 1 (its Pi has not reported the Output's size) or
-    when the rectangle runs off the screen. Pure; the one place a Frame's calibration and profile
-    become its Frame output (follow-ups 2026-10-11, slice A1)."""
+    exactly when `output` is None or has a side below 1 (no screen size is known). The box alone
+    gives the Frame's shape (frame box run, .claude/runs/frame-box/page.md). Pure; the one place a
+    Frame's calibration becomes its Frame output."""
     if output is None or output[0] < 1 or output[1] < 1:
         return None
-    try:
-        placement = frame_placement(profile, calibration.fit, output, turn)
-    except ValueError as error:
-        if str(error) != "placement_outside":
-            raise
-        return None
+    placement = frame_placement(calibration.fit, output, turn)
     return placement.width, placement.height
 
 
-def frame_placement(profile: FrameProfile, fit: RectangleFit, output: OutputSize,
-                    turn: DisplayTurn) -> Placement:
-    """Where a Frame's rectangle lands, in whole pixels, on a screen whose mode is `output`
-    (width, height as built, never turned) hung at `turn`:
-    `place(fit.rectangle(), hanging(output, turn), profile.width_px / profile.height_px)`.
-    The one home, for Central, of a Frame's rectangle on its screen (the Frame output and Save's
-    check, `off_screen`). Pure. ValueError as `hanging` ("display_turn", "screen_size") and `place`
-    ("placement_outside")."""
-    return place(fit.rectangle(), hanging(output, turn), profile.width_px / profile.height_px)
-
-
-def off_screen(profile: FrameProfile, calibration: Calibration, output: OutputSize | None,
-               turn: DisplayTurn) -> bool:
-    """Whether `calibration`'s rectangle does not lie wholly on its screen (`output` as built,
-    hung at `turn`): True exactly when `output` is known (both sides >= 1) and `frame_placement`
-    refuses it with "placement_outside". Pure. ValueError("display_turn") for a turn outside
-    TURNS."""
-    if output is None or output[0] < 1 or output[1] < 1:
-        if not is_turn(turn):
-            raise ValueError("display_turn")
-        return False
-    try:
-        frame_placement(profile, calibration.fit, output, turn)
-    except ValueError as error:
-        if str(error) != "placement_outside":
-            raise
-        return True
-    return False
+def frame_placement(fit: PositionBox, output: OutputSize, turn: DisplayTurn) -> Placement:
+    """Where a Frame's box lands, in whole pixels, on a screen whose mode is `output` (width,
+    height as built, never turned) hung at `turn`: `place_box(fit.box(), hanging(output, turn))`.
+    The one home, for Central, of a Frame's box on its screen. Pure. ValueError as `hanging`
+    ("display_turn", "screen_size")."""
+    return place_box(fit.box(), hanging(output, turn))
 
 
 def frame_size_mm(fit: PositionBox, display_mm: ScreenMm | None, turn: DisplayTurn) -> tuple[float, float] | None:

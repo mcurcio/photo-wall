@@ -13,8 +13,8 @@ player/plane_renderer.py `PlaneRenderer` with the real `PlaneScreens` on the ins
 library, `FitPass`, `PatternPass`, `StillDecode` and `PlayerLuts`, drawing on tests/harness_device.py's
 `MemfdDevice` (software GL, memfd-backed LINEAR buffers: the container has no render node), and
 presenting and finishing every 50 ms on real GLib. It shows one flat grey Frame whose Position is a
-`RectangleFit` (centre (0.5, 0.5), width 0.6) on the 640 x 480 headless Output, so its placement
-(contracts/frame_fit.py `place`) is smaller than the Output. Weston runs its GL renderer on
+`PositionBox` (centred, 384 x 216 pixels) on the 640 x 480 headless Output, so its placement
+(contracts/frame_fit.py `place_box`) is smaller than the Output. Weston runs its GL renderer on
 llvmpipe: its pixman renderer offers no zwp_linux_dmabuf_v1, which the planes' pictures need
 (native_screen_harness.py). The shell's private client is the harness health client in its default
 mode: a mapped health layer (so the shell raises no fallback tint) that tints only the Output's
@@ -81,7 +81,7 @@ PHOTO = pathlib.Path("/tmp/pw-picture-e2e-grey.png")
 # a smaller source is finished smaller and enlarged, softening the mat shadow's edge.
 PHOTO_SIZE = (512, 384)
 GREY = 128
-RECTANGLE = dict(centre_x=.5, centre_y=.5, width=.6)     # the Frame's Position (a RectangleFit)
+BOX = dict(left=.2, top=.275, width=.6, height=.45)     # the Frame's Position (a PositionBox): 384 x 216 at (128, 132)
 TOLERANCE = 0.02            # the GL reference's 0.015 plus the framebuffer's 8-bit rounding
 PICTURE_CHANGE = 3
 PROFILE = dict(width_px=1600, height_px=900, diagonal_inches=10)
@@ -107,12 +107,11 @@ def upgrade_lighting():
 
 
 def placement():
-    """The Frame's placement on the Output (contracts/frame_fit.py `place`)."""
-    from contracts.frame_fit import place
-    from contracts.models import RectangleFit
+    """The Frame's placement on the Output (contracts/frame_fit.py `place_box`)."""
+    from contracts.frame_fit import place_box
+    from contracts.models import PositionBox
 
-    return place(RectangleFit(**RECTANGLE).rectangle(), (WIDTH_PX, HEIGHT_PX),
-                 PROFILE["width_px"] / PROFILE["height_px"])
+    return place_box(PositionBox(**BOX).box(), (WIDTH_PX, HEIGHT_PX))
 
 
 def room():
@@ -159,7 +158,7 @@ def player() -> None:
         FrameProfile,
         Layer,
         OutputBinding,
-        RectangleFit,
+        PositionBox,
         Variant,
     )
     from contracts.photo_crop import CENTRED
@@ -179,7 +178,7 @@ def player() -> None:
                       media_type="image/png", width=PHOTO_SIZE[0], height=PHOTO_SIZE[1])
     binding = OutputBinding(output_id=OUTPUT, frame_id="frame", generation=1, profile=FrameProfile(**PROFILE),
                             lighting=upgrade_lighting(),
-                            calibration=Calibration(fit=RectangleFit(**RECTANGLE)))
+                            calibration=Calibration(fit=PositionBox(**BOX)))
     layer = LocalLayer(Layer(assignment_id="grey", run_id="run", output_id=OUTPUT, frame_id="frame",
                              binding_generation=1, start=0, end=10**9, media_origin=0, variant=variant,
                              crop=CENTRED),

@@ -75,7 +75,7 @@ def test_the_lighting_rides_the_binding():
 def test_the_trial_candidate_hash_covers_the_lighting():
     """Mutation probe: leave "lighting" out of candidate_hash -> the two hashes are equal."""
     trial_id = uuid4()
-    calibration = '{"fit":{"centre_x":0.5,"centre_y":0.5,"mode":"rectangle","width":1.0},"revision":1}'
+    calibration = '{"fit":{"height":1.0,"left":0.0,"mode":"box","top":0.0,"width":1.0},"revision":1}'
     baseline = _surface()
     assert candidate_hash(trial_id, 1, 1, baseline, calibration, SPOT_LIGHTING) != candidate_hash(
         trial_id, 1, 1, baseline, calibration, LIGHTING)
@@ -88,7 +88,7 @@ def test_the_frames_wires_refuse_a_message_without_its_lighting():
     Mutation probes: let parse_trial take a missing lighting (a default on TrialCandidate) ->
     the envelope is read; default OutputBinding.lighting -> the binding without it is read."""
     trial_id, baseline = uuid4(), _surface()
-    calibration = '{"fit":{"centre_x":0.5,"centre_y":0.5,"mode":"rectangle","width":1.0},"revision":1}'
+    calibration = '{"fit":{"height":1.0,"left":0.0,"mode":"box","top":0.0,"width":1.0},"revision":1}'
     lighting = LIGHTING
     envelope = json.loads(encode_trial(TrialCandidate(
         trial_id, 1, 1, baseline, calibration, candidate_hash(trial_id, 1, 1, baseline, calibration, lighting),

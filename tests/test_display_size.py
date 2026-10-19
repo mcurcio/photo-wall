@@ -125,7 +125,7 @@ def test_a_frame_whose_output_enrolled_at_0_by_0_takes_its_displays_preferred_mo
         calibration = Calibration.model_validate(
             conn.execute("SELECT calibration FROM frames WHERE id=%s", (frame,)).fetchone()["calibration"])
     assert output.display_px == (1920, 1080)
-    assert output.output_px == frame_output(output.profile, calibration, (1920, 1080), output.turn) == (1920, 1080)
+    assert output.output_px == frame_output(calibration, (1920, 1080), output.turn) == (1920, 1080)
 
 
 def test_the_inventory_carries_each_frames_screen_and_display_size(registry):

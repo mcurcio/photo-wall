@@ -192,10 +192,10 @@ try:
                     assert status == 200, (status, raw)
                     trial = json.loads(raw)
                     trial_path += "/" + trial["trial_id"]
-                    # A centred rectangle 40 % of the width: the 9:16 Frame (256 x 455 pixels) lies
-                    # on the fixture's 640 x 480 Output, so Save's off-screen check takes it.
+                    # A centred 9:16 box 40 % of the width: 256 x 455 pixels at (192, 13) on the
+                    # fixture's 640 x 480 Output.
                     calibration = {**trial["calibration"], "fit": {
-                        "mode": "rectangle", "centre_x": 0.5, "centre_y": 0.5, "width": 0.4}}
+                        "mode": "box", "left": 192 / 640, "top": 13 / 480, "width": 0.4, "height": 455 / 480}}
                     status, raw = transport.request("POST", trial_path, json.dumps({
                         "operation": "edit", "expected_sequence": 1, "calibration": calibration,
                         "lighting": trial["lighting"],  # the whole draft, as the console sends it: the saved lighting

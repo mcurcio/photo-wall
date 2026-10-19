@@ -8,6 +8,7 @@ import { NudgePad } from "../patterns/nudge-pad";
 import { ProblemCard } from "../patterns/problem-card";
 import { type PixelRectangle, RectangleEditor } from "../patterns/rectangle-editor";
 import { pixelSize } from "../timeWords.js";
+import { rectangleOf } from "../useDraft.js";
 import { Button } from "../ui/button";
 import { Disclosure } from "../ui/disclosure";
 import { Field, NumberInput } from "../ui/field";
@@ -139,8 +140,7 @@ export function FramePosition({
   const [step, setStep] = useState<(typeof STEPS)[number]>("10");
   const [refusedHere, setRefusedHere] = useState<Refused | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
-  const fit = adjustment.draft.fit as Rectangle;
-  const current: Rectangle = { centre_x: fit.centre_x, centre_y: fit.centre_y, width: fit.width };
+  const current: Rectangle = rectangleOf(adjustment.draft.fit);
   const values = pixelValues(current, screen);
 
   // Every change is a candidate: placed, it is sent; not placed, it is refused here (null: taken,

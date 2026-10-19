@@ -14,7 +14,7 @@ from central.fleet.position_history import PositionEntry, PositionEntryKind, Pos
 from central.installation_models import FrameRefView
 from contracts.display_turn import DisplayTurn
 from contracts.frame_lighting import FrameLighting
-from contracts.models import Model, RectangleFit
+from contracts.models import Model, PositionBox
 
 
 class ProfilePxView(Model):
@@ -24,8 +24,8 @@ class ProfilePxView(Model):
 
 
 class MadeForView(Model):
-    """What an entry was made for: the profile whose aspect its rectangle has, how the screen hung (`turn`,
-    degrees clockwise: its rectangle is in fractions of the screen as it hung) and the Display seen on the
+    """What an entry was made for: the profile whose aspect its box has, how the screen hung (`turn`,
+    degrees clockwise: its box is in fractions of the screen as it hung) and the Display seen on the
     Frame's port then (None: none)."""
     profile_px: ProfilePxView
     turn: DisplayTurn
@@ -43,7 +43,7 @@ class PositionEntryView(Model):
     at: AwareDatetime
     session_id: UUID | None
     restored_from: UUID | None
-    fit: RectangleFit
+    fit: PositionBox
     lighting: FrameLighting
     made_for: MadeForView
     restore_refusal: PositionRestoreRefusal | None

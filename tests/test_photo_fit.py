@@ -19,7 +19,7 @@ from central.wall_plan.fit import (
     shape_fit,
 )
 from central.wall_plan.fit_settings import FitSettings
-from contracts.models import Calibration, FrameProfile, RectangleFit, frame_output
+from contracts.models import Calibration, FrameProfile, PositionBox, frame_output
 
 UHD = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55)
 UHD_40 = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=40)
@@ -52,9 +52,10 @@ def _refused(verdict: FitVerdict) -> str:
 
 
 def _opening(width: float) -> FitTarget:
-    """UHD's Frame drawn as a centred rectangle `width` of the 3840 x 2160 Display's width."""
-    calibration = Calibration(fit=RectangleFit(width=width))
-    return FitTarget(profile=UHD, output_px=frame_output(UHD, calibration, DISPLAY, 0))
+    """UHD's Frame drawn as a centred box `width` of the 3840 x 2160 Display's width and height."""
+    margin = (1 - width) / 2
+    calibration = Calibration(fit=PositionBox(left=margin, top=margin, width=width, height=width))
+    return FitTarget(profile=UHD, output_px=frame_output(calibration, DISPLAY, 0))
 
 
 MAT = _opening(.4)                                           # a 40 % x 40 % opening

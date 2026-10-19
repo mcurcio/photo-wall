@@ -96,6 +96,7 @@ from nodeapi.pull import Batch, Read
 MIGRATION_075 = Path(__file__).parents[1] / "central/migrations/075_display_picture.sql"
 MIGRATION_096 = Path(__file__).parents[1] / "central/migrations/096_tuning_history.sql"
 MIGRATION_102 = Path(__file__).parents[1] / "central/migrations/102_rectangle_positions.sql"
+MIGRATION_104 = Path(__file__).parents[1] / "central/migrations/104_frame_box_positions.sql"
 SERIAL = "pi-picture"
 SKEWED_CORNERS = [[0.1, 0.05], [0.95, 0.0], [1.0, 1.0], [0.0, 0.9]]
 # The test monitor as the Pi asked it: brightness and contrast as levels of 100, a colour preset list.
@@ -645,8 +646,8 @@ def _bindings_as_1b(registry, table: str, column: str) -> int:
 
 def test_075_rewrites_the_stored_configurations_and_offers_so_central_still_plans(registry):
     """A Player's last configuration and its plan offers hold copies of the Frame's Position; 075
-    rewrites them to 1c's Cover (asserted as JSON) and 102 to a rectangle, after which today's
-    strict models read them, so Central hands the Player a configuration and plans. Mutation probe:
+    rewrites them to 1c's Cover (asserted as JSON), 102 to a rectangle and 104 to a box, after which
+    today's strict models read them, so Central hands the Player a configuration and plans. Mutation probe:
     drop the two binding rewrites -> `configuration` raises."""
     [player] = setup_players(registry, 1)
     coordinator = Coordinator(registry.db, registry.clock)
@@ -661,16 +662,18 @@ def test_075_rewrites_the_stored_configurations_and_offers_so_central_still_plan
     cover = {"mode": "cover", "corners": SKEWED_CORNERS, "rotation": 0}
     [stored] = _sql(registry, "SELECT configuration FROM player_configurations")
     assert [binding["calibration"]["fit"] for binding in stored["configuration"]["bindings"]] == [cover]
-    # 102 again on a database that already has it: its one column comes off first.
+    # 102 and 104 again on a database that already has them: 102's one column comes off first.
     _sql(registry, "ALTER TABLE position_entries DROP COLUMN turn")
     with registry.db.transaction() as conn:
         conn.execute(MIGRATION_102.read_text())
+    with registry.db.transaction() as conn:
+        conn.execute(MIGRATION_104.read_text())
 
     configuration = coordinator.configuration(player["player_id"], epoch)
     [binding] = configuration.bindings
     [frame] = _sql(registry, "SELECT calibration FROM frames WHERE id='frame-0'")
     assert binding.calibration == Calibration.model_validate(frame["calibration"])
-    assert binding.calibration.fit.mode == "rectangle"
+    assert binding.calibration.fit.mode == "box"
     coordinator.advance()
     for row in _sql(registry, "SELECT manifest FROM plan_offers"):
         Plan.model_validate(row["manifest"])

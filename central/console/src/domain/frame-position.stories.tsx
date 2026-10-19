@@ -6,7 +6,7 @@ import type { Adjustment } from "./live-adjustment";
 import { UPGRADED } from "./room-lights/room-lights.fixtures";
 
 const ADJUSTMENT: Adjustment = {
-  draft: { fit: { mode: "rectangle", centre_x: 0.5, centre_y: 0.5, width: 0.75 }, lighting: UPGRADED },
+  draft: { fit: { mode: "box", left: 0.125, top: 0.125, width: 0.75, height: 0.75 }, lighting: UPGRADED },
   change: () => ({ valid: true }),
   changeLighting: () => {},
   dirty: false,
@@ -46,7 +46,7 @@ export const TurnedScreen: Story = {
     turn: 90, aspect: 1080 / 1920,
     adjustment: {
       ...ADJUSTMENT, dirty: true, phase: "sending", latest: 2,
-      draft: { fit: { mode: "rectangle", centre_x: 0.5, centre_y: 0.45, width: 0.9 }, lighting: UPGRADED },
+      draft: { fit: { mode: "box", left: 0.05, top: 0, width: 0.9, height: 0.9 }, lighting: UPGRADED },
     },
   },
 };
@@ -65,7 +65,7 @@ function PushedPastTheEdge({ adjustment, size, turn, aspect, piHref, hardwareHre
 export const OffScreenRefused: Story = {
   args: {
     adjustment: {
-      ...ADJUSTMENT, draft: { fit: { mode: "rectangle", centre_x: 0.75, centre_y: 0.5, width: 0.5 }, lighting: UPGRADED },
+      ...ADJUSTMENT, draft: { fit: { mode: "box", left: 0.5, top: 0.25, width: 0.5, height: 0.5 }, lighting: UPGRADED },
     },
   },
   render: PushedPastTheEdge,
@@ -76,8 +76,8 @@ export const CentralRefused: Story = {
   args: {
     adjustment: {
       ...ADJUSTMENT, dirty: true, refused: true,
-      draft: { fit: { mode: "rectangle", centre_x: 0.7, centre_y: 0.5, width: 0.5 }, lighting: UPGRADED },
-      sessionFit: { mode: "rectangle", centre_x: 0.5, centre_y: 0.5, width: 0.5 },
+      draft: { fit: { mode: "box", left: 0.45, top: 0.25, width: 0.5, height: 0.5 }, lighting: UPGRADED },
+      sessionFit: { centre_x: 0.5, centre_y: 0.5, width: 0.5 },
       error: { words: "", code: "position_off_screen", stops: false, refused: "" },
     },
   },

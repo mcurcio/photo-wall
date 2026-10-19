@@ -12,7 +12,7 @@ export interface AtReading {
 }
 
 export interface Calibration {
-  fit?: RectangleFit;
+  fit?: PositionBox;
   revision?: number;
 }
 
@@ -209,12 +209,20 @@ export interface PlayerVersionView {
   version: ReleaseTag | null;
 }
 
+export interface PositionBox {
+  height?: number;
+  left?: number;
+  mode: "box";
+  top?: number;
+  width?: number;
+}
+
 export type PositionEntryKind = "kept-created" | "kept-saved" | "kept-profile-changed" | "kept-turn-changed" | "kept-unrecorded" | "sent-draft" | "sent-back";
 
 export interface PositionEntryView {
   at: string;
   entry_id: string;
-  fit: RectangleFit;
+  fit: PositionBox;
   frame: FrameRefView;
   kind: PositionEntryKind;
   lighting: FrameLighting;
@@ -244,13 +252,6 @@ export interface ProfilePxView {
 }
 
 export type Reading = Measured | Unavailable;
-
-export interface RectangleFit {
-  centre_x?: number;
-  centre_y?: number;
-  mode: "rectangle";
-  width?: number;
-}
 
 export interface RefusedReportView {
   address: string;
@@ -590,6 +591,24 @@ export const LIMITS = {
       pattern: "^[A-Za-z0-9:_.-]{1,128}$",
     },
   },
+  PositionBox: {
+    height: {
+      exclusiveMinimum: 0,
+      maximum: 1,
+    },
+    left: {
+      maximum: 1,
+      minimum: 0,
+    },
+    top: {
+      maximum: 1,
+      minimum: 0,
+    },
+    width: {
+      exclusiveMinimum: 0,
+      maximum: 1,
+    },
+  },
   PositionEntryView: {
     number: {
       integer: true,
@@ -612,20 +631,6 @@ export const LIMITS = {
       integer: true,
       maximum: 16384,
       minimum: 1,
-    },
-  },
-  RectangleFit: {
-    centre_x: {
-      maximum: 1,
-      minimum: 0,
-    },
-    centre_y: {
-      maximum: 1,
-      minimum: 0,
-    },
-    width: {
-      exclusiveMinimum: 0,
-      maximum: 1,
     },
   },
   RefusedReportView: {
@@ -829,7 +834,6 @@ export const REFUSALS = {
     "node_body_too_large",
     "calibration_revision_conflict",
     "calibration_trial_baseline_changed",
-    "position_off_screen",
   ],
 } as const;
 export type DrawnReportRefusal = (typeof REFUSALS)["DrawnReportRefusal"][number];

@@ -5,13 +5,13 @@ import { type PositionEntryView, type PositionHistoryView, PositionHistoryList }
 import { LIVING_ROOM, PROFILES, ROOMS } from "./room-lights/room-lights.fixtures";
 
 const FRAME = { id: "lobby", name: "Lobby" };
-type Rectangle = { centre_x: number; centre_y: number; width: number };
-const OPENING: Rectangle = { centre_x: 0.5, centre_y: 0.49, width: 0.82 };
-const FULL: Rectangle = { centre_x: 0.5, centre_y: 0.5, width: 1 };
+type Box = { left: number; top: number; width: number; height: number };
+const OPENING: Box = { left: 0.09, top: 0.08, width: 0.82, height: 0.82 };
+const FULL: Box = { left: 0, top: 0, width: 1, height: 1 };
 const NAMES = Object.fromEntries(ROOMS.lights.map((light) => [light.id, light.light.name]));
 
 const ADJUSTMENT: Adjustment = {
-  draft: { fit: { mode: "rectangle", ...OPENING }, lighting: LIVING_ROOM },
+  draft: { fit: { mode: "box", ...OPENING }, lighting: LIVING_ROOM },
   change: () => ({ valid: true }),
   changeLighting: () => {},
   dirty: false,
@@ -32,11 +32,11 @@ const ADJUSTMENT: Adjustment = {
 
 // Times in UTC: the story's times show in the browser's zone (no house clock here).
 function entry(id: string, kind: PositionEntryView["kind"], at: string, values: {
-  rectangle?: Rectangle; depth?: number;
+  box?: Box; depth?: number;
   lights?: PositionEntryView["lighting"]["lights"]; profile?: { width: number; height: number };
   refusal?: PositionEntryView["restore_refusal"]; turn?: PositionEntryView["made_for"]["turn"];
 } = {}): PositionEntryView {
-  const fit: PositionEntryView["fit"] = { mode: "rectangle", ...(values.rectangle ?? OPENING) };
+  const fit: PositionEntryView["fit"] = { mode: "box", ...(values.box ?? OPENING) };
   return {
     entry_id: id, frame: FRAME, kind, number: 1, at, session_id: null, restored_from: null, fit,
     lighting: { ...LIVING_ROOM, mat_depth_mm: values.depth ?? 2.5, lights: values.lights ?? LIVING_ROOM.lights.slice(0, 2) },
@@ -50,8 +50,8 @@ const KEPT: PositionHistoryView = {
   unrecorded_change: false,
   entries: [
     entry("k2", "kept-saved", "2026-10-13T19:58:31Z"),
-    entry("k1", "kept-saved", "2026-10-12T21:10:02Z", { rectangle: FULL, depth: 0, lights: [] }),
-    entry("k0", "kept-created", "2026-10-12T21:02:40Z", { rectangle: FULL, depth: 0, lights: LIVING_ROOM.lights.slice(1, 2) }),
+    entry("k1", "kept-saved", "2026-10-12T21:10:02Z", { box: FULL, depth: 0, lights: [] }),
+    entry("k0", "kept-created", "2026-10-12T21:02:40Z", { box: FULL, depth: 0, lights: LIVING_ROOM.lights.slice(1, 2) }),
   ],
 };
 
@@ -78,7 +78,7 @@ export const NotKept: Story = {
       entries: [
         entry("s3", "sent-back", "2026-10-13T20:04:40Z"),
         entry("s2", "sent-draft", "2026-10-13T20:04:07Z", { depth: 6 }),
-        entry("s1", "sent-draft", "2026-10-13T20:03:55Z", { rectangle: { centre_x: 0.52, centre_y: 0.49, width: 0.82 } }),
+        entry("s1", "sent-draft", "2026-10-13T20:03:55Z", { box: { left: 0.11, top: 0.08, width: 0.82, height: 0.82 } }),
         ...KEPT.entries,
       ],
     },
@@ -116,9 +116,9 @@ export const TurnedScreen: Story = {
       ...KEPT,
       entries: [
         entry("t1", "kept-turn-changed", "2026-10-13T20:30:00Z",
-          { rectangle: { centre_x: 0.5, centre_y: 0.5, width: 0.25 }, profile: { width: 1080, height: 1920 }, turn: 90 }),
+          { box: { left: 0.375, top: 0.375, width: 0.25, height: 0.25 }, profile: { width: 1080, height: 1920 }, turn: 90 }),
         entry("t0", "kept-created", "2026-10-13T20:20:00Z",
-          { rectangle: { centre_x: 0.5, centre_y: 0.5, width: 0.25 }, profile: { width: 1080, height: 1920 },
+          { box: { left: 0.375, top: 0.375, width: 0.25, height: 0.25 }, profile: { width: 1080, height: 1920 },
             refusal: "made_for_other_turn" }),
       ],
     },

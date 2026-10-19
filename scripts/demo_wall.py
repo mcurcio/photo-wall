@@ -924,15 +924,13 @@ def labelled(*labels):
 
 
 def demo_position(observation: dict):
-    """The demo Frame's Position: a Rectangle DEMO_OPENING_PX output pixels wide at the top left
-    of the Output its Pi reported (the demo's Frames are square and hang at turn 0), so its Frame
-    output (contracts.models.frame_output) is DEMO_OPENING_PX x DEMO_OPENING_PX however large the
+    """The demo Frame's Position: a box DEMO_OPENING_PX output pixels square at the top left of
+    the Output its Pi reported (the demo's Frames hang at turn 0), so its Frame output
+    (contracts.models.frame_output) is DEMO_OPENING_PX x DEMO_OPENING_PX however large the
     Display is."""
-    from contracts.models import Calibration, RectangleFit
-    width = DEMO_OPENING_PX / observation["width_px"]
-    return Calibration(fit=RectangleFit(centre_x=width / 2,
-                                        centre_y=(DEMO_OPENING_PX / 2) / observation["height_px"],
-                                        width=width))
+    from contracts.models import Calibration, PositionBox
+    return Calibration(fit=PositionBox(width=DEMO_OPENING_PX / observation["width_px"],
+                                       height=DEMO_OPENING_PX / observation["height_px"]))
 
 
 def operator_action(action: str):

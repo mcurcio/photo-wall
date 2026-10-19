@@ -260,8 +260,7 @@ def frame_outputs_in(conn: Any) -> tuple[FrameOutput, ...]:
         display = frame_screen_px(row)
         frames.append(FrameOutput(
             frame_id=row["id"], profile=profile, turn=row["turn"], display_px=display,
-            output_px=frame_output(profile, Calibration.model_validate(row["calibration"]), display,
-                                   row["turn"])))
+            output_px=frame_output(Calibration.model_validate(row["calibration"]), display, row["turn"])))
     return tuple(frames)
 
 

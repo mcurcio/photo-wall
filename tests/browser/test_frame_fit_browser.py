@@ -1,12 +1,12 @@
 """The Position tab's Frame fit (render redesign S5, run ledger .claude/runs/render-planes/s5-page.md
-B2): the picture is one upright rectangle of the Frame profile's shape on its screen as it hangs
-(owner, 2026-10-17: "We can make the position pure crop and scale"); the screen's turn is the
-Frame's own, set on the Hardware tab, never the Position's. No Fit choice, no rotation, no angle,
-no trim.
+B2; frame box run fb-6): the picture is one box on its screen as it hangs, which the rectangle
+editor still edits by its centre and width at the box's own shape until bead fb-7 (owner,
+2026-10-17: "We can make the position pure crop and scale"); the screen's turn is the Frame's own,
+set on the Hardware tab, never the Position's. No Fit choice, no rotation, no angle, no trim.
 
 The live session is test_console_frame_page_browser.py's fake Central (`FakeSessions`: Central's
-trial rules, Save through the real Registry's Save CAS), so Save keeps the rectangle and leaves the
-Frame profile, the one source of the Frame's shape, as it was, exactly as Central does.
+trial rules, Save through the real Registry's Save CAS), so Save keeps the box and leaves the
+Frame profile as it was, exactly as Central does.
 
 Mutation probes: send the fit with the old form's keys (useDraft.js `updateHandles`) -> the
 draft-shape case fails; offer Done only for a changed draft (live-preview-editor.tsx
@@ -93,8 +93,8 @@ def test_the_tab_edits_one_rectangle_with_no_fit_choice_rotation_or_trim(page, r
         draft = _wait_for_draft(page, sessions, after, lambda draft: _left_x(draft) != SAVED_X)
         assert set(draft) == {"revision", "fit"}, draft
         assert draft["revision"] == 2
-        assert set(draft["fit"]) == {"mode", "centre_x", "centre_y", "width"}, draft
-        assert draft["fit"]["mode"] == "rectangle" and _left_x(draft) == SAVED_X + 10
+        assert set(draft["fit"]) == {"mode", "left", "top", "width", "height"}, draft
+        assert draft["fit"]["mode"] == "box" and _left_x(draft) == SAVED_X + 10
 
 
 def test_the_width_typed_in_pixels_sends_its_share_of_the_screen(page, registry, sessions):
@@ -107,12 +107,12 @@ def test_the_width_typed_in_pixels_sends_its_share_of_the_screen(page, registry,
         position.get_by_label("Width in pixels", exact=True).fill("1000")  # 80 to 1080 px across: it stays on the screen
         draft = _wait_for_draft(page, sessions, after, lambda draft: draft["fit"]["width"] != 0.5)
         assert draft["fit"]["width"] == 1000 / 1920
-        assert draft["fit"]["centre_x"] == (SAVED_X + HALF) / 1920
+        assert abs(draft["fit"]["left"] + draft["fit"]["width"] / 2 - (SAVED_X + HALF) / 1920) < 1e-9, draft
         expect(position.get_by_role("slider", name="Width", exact=True)).to_have_value("1000")
 
 
-def test_a_saved_rectangle_keeps_the_frames_own_profile(page, registry, sessions):
-    """Done saves the rectangle; the Hardware tab still shows the Frame's own 1920 x 1080 profile."""
+def test_a_saved_box_keeps_the_frames_own_profile(page, registry, sessions):
+    """Done saves the box; the Hardware tab still shows the Frame's own 1920 x 1080 profile."""
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
@@ -125,7 +125,7 @@ def test_a_saved_rectangle_keeps_the_frames_own_profile(page, registry, sessions
         expect(page.get_by_role("status").filter(has_text="Saved at")).to_be_visible()
         expect(position.get_by_role("alert")).to_have_count(0)
         fit = _saved(registry).fit
-        assert (fit.mode, fit.centre_x, fit.centre_y, fit.width) == ("rectangle", 0.5, 0.5, 0.5)
+        assert (fit.mode, fit.left, fit.top, fit.width, fit.height) == ("box", 0.25, 0.25, 0.5, 0.5)
         profile = page.get_by_role("region", name="Frame profile", exact=True)
         open_frame(page, FRAME, "hardware")
         expect(profile).to_contain_text("Pixel width: 1920 px")
@@ -173,8 +173,8 @@ def test_with_no_reported_output_size_a_step_is_a_pixel_of_a_common_screen_not_t
         position = _position(open_frame(page, FRAME, "position"))
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         expect(position).to_contain_text("The Pi has not reported its display's size")
-        saved = _saved(registry).fit.centre_x
+        saved = _saved(registry).fit.left
         after = len(sessions.sent)
         _move(page)
-        draft = _wait_for_draft(page, sessions, after, lambda draft: draft["fit"]["centre_x"] != saved)
-        assert abs((draft["fit"]["centre_x"] - saved) * 1920 - 10) < 1e-6, draft
+        draft = _wait_for_draft(page, sessions, after, lambda draft: draft["fit"]["left"] != saved)
+        assert abs((draft["fit"]["left"] - saved) * 1920 - 10) < 1e-6, draft

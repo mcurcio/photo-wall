@@ -64,7 +64,7 @@ from support.position import save_position
 from central.photo_library.model import InPool, SourceQuery
 from central.runtime import Contribution, Scene
 from central.wall_plan.selection import SceneSelection
-from contracts.models import Calibration, RectangleFit
+from contracts.models import Calibration, PositionBox
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -314,7 +314,7 @@ def test_a_position_drafted_as_a_mat_opening_changes_what_fits_before_done(page,
     seed_frame(registry)
     # _seed keeps a rectangle half the screen wide (room for the editor to move); this test's Frame
     # output is the whole 1,920 x 1,080 screen, so its saved Position is the full-width rectangle.
-    save_position(registry, FRAME, Calibration(fit=RectangleFit()), expected_revision=2)
+    save_position(registry, FRAME, Calibration(fit=PositionBox()), expected_revision=2)
     sessions = FakeSessions(page, registry)
     library = library_of(registry)
     ref = connected(library)

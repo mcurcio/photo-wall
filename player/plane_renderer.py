@@ -14,8 +14,8 @@ a calibration target's QR (player/calibration_target.py `target_modules`) and bo
 Rules this module owns (one home each):
 - **The drawn Position**: the Output's Position trial (`Screens.trial` under the composition's
   grant; a prepare asks under the grant of its binding alone) while one is drawn, else the binding's
-  calibration; its rectangle is placed by `place` at the profile's aspect (one that does not lie
-  on the screen fails, "decode"). The drawn lighting is the trial's while one is
+  calibration; its box is placed by `place_box` (a box always lies on its screen, so a placement
+  never fails). The drawn lighting is the trial's while one is
   drawn, else the binding's. Every presented answer names the drawn Position (`applied_calibration`,
   with the trial's identity while one is drawn), and a commit under a trial carries the trial
   overlay's corners of the drawn placement and the trial's tag (player/plane_screen.py
@@ -29,7 +29,7 @@ Rules this module owns (one home each):
   pattern is a tuning overlay, not a change of what plays.
 - **When a picture is finished again**: a still when anything its pixels depend on changes (its
   decode, its finish size (player/planes.py `finish_size`: the smaller of its cropped source and
-  the placement, which the display controller enlarges to the placement), the turn, the crop, the profile's aspect, the Output's picture
+  the placement, which the display controller enlarges to the placement), the turn, the crop, the placement's aspect, the Output's picture
   operations, the Frame's lights, its LUT's generation); a playing video on each new decoded
   frame while it is seen (in its screen's last commit), into the first of its VIDEO_TARGETS
   targets the screen has released. Never a fade: a fade is a strength.
@@ -83,7 +83,7 @@ Rules this module owns (one home each):
 - **Outcomes**: no grant: "pending", nothing committed; a candidate grant: the screen's ground
   under the candidate tag, made again on every present the pacer allows (the shell completes a
   handoff only on a presented commit after its release, which the app cannot see); an Output gone,
-  a Position off the screen, a trial refused or a picture refused: "failed"
+  a trial refused or a picture refused: "failed"
   ("decode"); over the controller budget with every other Output's last commit: "failed"
   ("capacity"), nothing committed; a seen layer's picture (or the pattern) not finished yet:
   "pending", the screen keeps its last commit; else "presented" (that commit), its composition the
@@ -99,7 +99,7 @@ from pathlib import Path
 from typing import Final, Literal, Protocol
 
 from contracts.calibration_target import QrModules, TargetCode
-from contracts.frame_fit import Placement, place
+from contracts.frame_fit import Placement, place_box
 from contracts.frame_lighting import FrameLighting
 from contracts.models import AppliedCalibration, Calibration, Layer, OutputBinding
 from contracts.node_frame import PictureOperations, neutral_operations
@@ -277,12 +277,11 @@ class _Drawn:
 @dataclass(frozen=True)
 class _Setting:
     """What a Frame's pictures are finished for now: the Position drawn, its screen, its placement
-    on it and the profile's aspect, the picture operations drawn and the change a tag names (None:
+    on it (whose `aspect` is the Frame's shape), the picture operations drawn and the change a tag names (None:
     the stand-in, never tagged), the Frame's lights, its LUT and the LUTs' generation."""
     drawn: _Drawn
     screen: Screen
     placement: Placement
-    aspect: float
     operations: PictureOperations
     tagged: int | None
     lights: FrameLights
@@ -440,7 +439,7 @@ class PlaneRenderer:
             placed = self._place(composition.binding, drawn)
             if isinstance(placed, str):
                 continue
-            screen, placement, _aspect = placed
+            screen, placement = placed
             operations = self._screens.picture(composition.binding.output_id)
             if self._patterned(composition, operations, drawn):
                 busiest.append((Composition(screen, ()),))     # a pattern is the ground: no planes
@@ -558,14 +557,11 @@ class PlaneRenderer:
         """Decode `local` and ask `finish` for its picture for `binding`'s Frame as it is drawn now
         (module rules): "prepared" once finished, "pending" while decoding or finishing (or before the
         Output is there, while its trial is refused, or while a fade it is not needed before is
-        under way), "failed" ("decode") when its media cannot be decoded or drawn, or the drawn
-        Position is not a rectangle on the screen. A black layer is prepared once its black picture
+        under way), "failed" ("decode") when its media cannot be decoded or drawn. A black layer is prepared once its black picture
         is finished."""
         setting = self._binding_setting(binding)
         if setting == "gone":
             return PrepareResult("pending")
-        if setting == "failed":
-            return PrepareResult("failed", "decode")
         if self._deferred(local):
             return PrepareResult("pending")
         picture = self._ready(local, binding, setting)
@@ -601,7 +597,7 @@ class PlaneRenderer:
             setting = self._setting(composition.binding, self._drawn(composition, grant))
         except ValueError:                          # a trial refused
             return _FAILED
-        if setting == "gone" or setting == "failed":
+        if setting == "gone":
             return _FAILED
         state.expires = None if setting.drawn.trial is None else _expiry(setting.drawn.trial, now)
         self._keep_blacks(output_id, {setting.ground, setting.size})
@@ -717,37 +713,30 @@ class PlaneRenderer:
             return _Drawn(composition.binding.calibration, composition.binding.lighting, None)
         return _Drawn(trial.calibration, trial.lighting, trial)
 
-    def _place(self, binding: OutputBinding, drawn: _Drawn) -> tuple[Screen, Placement, float] | Literal[
-            "gone", "failed"]:
-        """The Frame's screen, its placement on it by the drawn Position and the profile's aspect;
-        "failed" when `place` refuses it (it does not lie on the screen) or the profile's aspect,
-        "gone" without the screen."""
-        fit = drawn.calibration.fit
+    def _place(self, binding: OutputBinding, drawn: _Drawn) -> tuple[Screen, Placement] | Literal["gone"]:
+        """The Frame's screen and the drawn Position's box on it (`place_box`; its `aspect` is the
+        Frame's shape); "gone" without the screen. Never "failed": a box always places."""
         screen = self._screens.screen(binding.output_id)
         if screen is None:
             return "gone"
-        aspect = binding.profile.width_px / binding.profile.height_px
-        try:
-            return screen, place(fit.rectangle(), screen.size, aspect), aspect
-        except ValueError:
-            return "failed"
+        return screen, place_box(drawn.calibration.fit.box(), screen.size)
 
-    def _setting(self, binding: OutputBinding, drawn: _Drawn) -> _Setting | Literal["gone", "failed"]:
+    def _setting(self, binding: OutputBinding, drawn: _Drawn) -> _Setting | Literal["gone"]:
         """What the Frame's pictures are finished for now, drawn by `drawn` (`_place`'s answers
         otherwise)."""
         placed = self._place(binding, drawn)
         if isinstance(placed, str):
             return placed
-        screen, placement, aspect = placed
+        screen, placement = placed
         operations = self._screens.picture(binding.output_id)
         shown = operations or neutral_operations(binding.output_id, 1, UPGRADE_DISPLAY_LIGHT)
         lights = picture_lights(drawn.lighting, self._room_lights, binding.profile, shown.light)
         ref = drawn.lighting.paper.profile
-        return _Setting(drawn, screen, placement, aspect, shown,
+        return _Setting(drawn, screen, placement, shown,
                         None if operations is None else operations.picture_change, lights,
                         None if ref is None else self._luts.lut(ref), self._luts.generation())
 
-    def _binding_setting(self, binding: OutputBinding) -> _Setting | Literal["gone", "failed"]:
+    def _binding_setting(self, binding: OutputBinding) -> _Setting | Literal["gone"]:
         """`_setting` of `binding`'s Frame with the trial read under its binding's grant (module
         rule); "gone" while that trial refuses (a prepare waits for the next tick)."""
         composition = OutputComposition(binding)
@@ -888,12 +877,12 @@ class PlaneRenderer:
     @staticmethod
     def _key(entry: _Layer, setting: _Setting) -> tuple:
         """Everything a layer's pixels depend on besides its decode (module rule)."""
-        return (setting.target(entry.local.layer), setting.screen.turn, entry.local.layer.crop, setting.aspect,
+        return (setting.target(entry.local.layer), setting.screen.turn, entry.local.layer.crop, setting.placement.aspect,
                 setting.operations, setting.lights, setting.generation)
 
     @staticmethod
     def _request(entry: _Layer, source: FitSource, setting: _Setting) -> FitRequest:
-        return FitRequest(source, entry.local.layer.crop, setting.aspect, setting.finish(entry.local.layer),
+        return FitRequest(source, entry.local.layer.crop, setting.placement.aspect, setting.finish(entry.local.layer),
                           setting.screen.turn, setting.operations, setting.lights, setting.lut)
 
     def _may_step(self) -> bool:

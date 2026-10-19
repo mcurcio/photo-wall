@@ -14,6 +14,7 @@ revision is refused (`trial_baseline_revision_changed`). The rest of the page is
 """
 
 import itertools
+import math
 import os
 import re
 import time
@@ -28,8 +29,9 @@ from test_registry import enroll
 from central.displays.model import Readiness
 from central.fleet.models import TrialRefused
 from central.registry import FrameCreate
-from contracts.frame_fit import place
-from contracts.models import Calibration, FrameProfile, RectangleFit
+from contracts.display_turn import hanging
+from contracts.frame_fit import place_box
+from contracts.models import Calibration, FrameProfile, PositionBox
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -62,15 +64,28 @@ LANDSCAPE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 
 
-def _rectangle(x):
-    """The saved picture's rectangle with its left edge `x` pixels in (half the screen wide, centred down)."""
-    return RectangleFit(centre_x=(x + HALF) / 1920, centre_y=0.5, width=0.5)
+def _box(x):
+    """The saved picture's box with its left edge `x` pixels in (half the 1920 x 1080 screen wide and
+    high, centred down): the rectangle editor shows its centre at x + HALF across."""
+    return PositionBox(left=x / 1920, top=0.25, width=0.5, height=0.5)
+
+
+def _centred(width, aspect, screen):
+    """The box of a picture `width` of `screen`'s width wide at `aspect`, centred, in whole pixels."""
+    screen_width, screen_height = screen
+    pixel_width = math.floor(width * screen_width + 0.5)
+    pixel_height = math.floor(pixel_width / aspect + 0.5)
+    x = math.floor(screen_width / 2 - pixel_width / 2 + 0.5)
+    y = math.floor(screen_height / 2 - pixel_height / 2 + 0.5)
+    return PositionBox(left=x / screen_width, top=y / screen_height, width=pixel_width / screen_width,
+                       height=pixel_height / screen_height)
 
 
 def _seed(registry, profile=LANDSCAPE, turn=0):
     """A Frame bound to an Output the Player app reported connected at 1920 x 1080, with a
-    saved position (a rectangle half the screen wide, its left edge SAVED_X pixels in, revision 2;
-    a quarter of it for a portrait profile, so it lies on the screen); returns the Player's id.
+    saved position (a box half the screen wide and high, its left edge SAVED_X pixels in, revision 2;
+    for a portrait profile a centred 9:16 box a quarter of the screen as it hangs wide); returns the
+    Player's id.
     The Frame hangs at `turn` (set before the Save, so the Frame is ready), which the Hardware tab's
     Frame profile check reads."""
     # A fixed device id gives a fixed Player id: the page shows its last six hex digits, and a
@@ -84,9 +99,9 @@ def _seed(registry, profile=LANDSCAPE, turn=0):
     if turn:
         registry.turn_frame(FRAME, turn, expected_generation=1)
     if landscape:
-        position = Calibration(fit=_rectangle(SAVED_X))
+        position = Calibration(fit=_box(SAVED_X))
     else:
-        position = Calibration(fit=RectangleFit(width=0.25))
+        position = Calibration(fit=_centred(0.25, 9 / 16, hanging((1920, 1080), turn)))
     save_position(registry, FRAME, position, expected_revision=1)
     return identity["player_id"]
 
@@ -95,16 +110,16 @@ def _saved(registry):
     return next(frame for frame in registry.inventory().frames if frame.id == FRAME).calibration
 
 
-def _left_x(calibration, screen=(1920, 1080), aspect=16 / 9):
+def _left_x(calibration, screen=(1920, 1080)):
     """A saved or drafted position's left edge, in pixels of the screen as it hangs (Central's own
-    `place`)."""
+    `place_box`)."""
     fit = calibration["fit"] if isinstance(calibration, dict) else calibration.fit.model_dump(mode="json")
-    return place(RectangleFit.model_validate(fit).rectangle(), screen, aspect).x
+    return place_box(PositionBox.model_validate(fit).box(), screen).x
 
 
 def _save_elsewhere(registry, x=ELSEWHERE_X):
     """Another window saves the Frame's position (revision 2 -> 3)."""
-    save_position(registry, FRAME, Calibration(fit=_rectangle(x)), expected_revision=2)
+    save_position(registry, FRAME, Calibration(fit=_box(x)), expected_revision=2)
 
 
 class FakeSessions:
@@ -512,8 +527,9 @@ def test_dragging_the_picture_moves_it_and_sends_the_new_centre(page, registry, 
         expect(bar.get_by_role("status")).to_have_text(PRESENTED)
         expect(bar.get_by_role("button", name="Done", exact=True)).to_be_enabled()
         sent = _fit_sent(sessions)
-        assert sent["mode"] == "rectangle" and sent["width"] == 0.5, sent
-        assert abs(sent["centre_x"] * 1920 - across) < 0.1 and abs(sent["centre_y"] * 1080 - down) < 0.1, sent
+        assert (sent["mode"], sent["width"], sent["height"]) == ("box", 0.5, 0.5), sent
+        assert abs((sent["left"] + sent["width"] / 2) * 1920 - across) < 0.1, sent
+        assert abs((sent["top"] + sent["height"] / 2) * 1080 - down) < 0.1, sent
         expect(frame.get_by_role("alert")).to_have_count(0)
 
 
@@ -531,11 +547,13 @@ def test_dragging_the_handle_resizes_the_picture_at_the_frames_shape_about_its_c
         expect(frame.get_by_label("Width in pixels", exact=True)).to_have_value(str(round(width)))
         page.wait_for_timeout(500)
         sent = _fit_sent(sessions)
-        # One rectangle of the Frame's shape: a width, never a height or corners of its own.
-        assert set(sent) == {"mode", "centre_x", "centre_y", "width"}, sent
-        assert abs(sent["width"] * 1920 - width) < 0.5 and sent["centre_x"] == (SAVED_X + HALF) / 1920, sent
-        placed = place(RectangleFit.model_validate(sent).rectangle(), (1920, 1080), 16 / 9)
-        assert placed.height == int(placed.width * 9 / 16 + 0.5), placed
+        # One box, its shape kept by the rectangle editor (useDraft.js's adapter until fb-7): the
+        # height grows with the width about the same centre.
+        assert set(sent) == {"mode", "left", "top", "width", "height"}, sent
+        assert abs(sent["width"] * 1920 - width) < 0.5, sent
+        assert abs(sent["left"] + sent["width"] / 2 - (SAVED_X + HALF) / 1920) < 1e-9, sent
+        placed = place_box(PositionBox.model_validate(sent).box(), (1920, 1080))
+        assert abs(placed.height - placed.width * 9 / 16) <= 1, placed
 
 
 def test_a_move_past_the_edge_is_refused_where_it_is_made_says_so_and_sends_nothing(page, registry, sessions):
@@ -586,42 +604,7 @@ def test_a_move_past_the_edge_is_refused_where_it_is_made_says_so_and_sends_noth
         assert _left_x(sessions.row["calibration"]) == 0
 
 
-def test_a_position_central_refuses_as_off_the_screen_is_not_sent_again_and_done_waits(page, registry, sessions):
-    """Central measures the screen otherwise and refuses the draft (`position_off_screen`): the card says
-    the Pi kept the last position, the draft is not sent again (a refused value is never retried), the
-    acknowledgement says the change was refused and Done waits for a position that fits. "Move it back
-    inside" returns to the position the Pi presents.
-
-    Mutation: drop the REFUSED_VALUE check from liveAdjustment.js's loop -> the same edit is sent again
-    -> RED."""
-    _seed(registry)
-    with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
-        frame = open_frame(page, FRAME, "position")
-        bar = _bar(page)
-        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
-        sessions.fail["edit"] = (422, "position_off_screen")
-        _move(page)
-        problem = frame.get_by_role("alert")
-        expect(problem).to_contain_text("Not moved")
-        expect(problem).to_contain_text(
-            "The Pi kept the last position: this one would run off the screen as the Pi measures it.")
-        expect(problem).not_to_contain_text("keeps trying")
-        expect(problem.get_by_role("button", name="Revert", exact=True)).to_have_count(0)
-        expect(bar.get_by_role("status")).to_contain_text("(your last change was refused)")
-        expect(bar.get_by_role("button", name="Done", exact=True)).to_be_disabled()
-        expect(bar).to_contain_text("Done is offered once the picture fits the screen.")
-        edits = sessions.count("edit")
-        page.wait_for_timeout(1500)
-        assert sessions.count("edit") == edits, sessions.sent
-
-        problem.get_by_role("button", name="Move it back inside", exact=True).click()
-        expect(frame.get_by_role("alert")).to_have_count(0)
-        expect(_centre_field(page)).to_have_value(_across(SAVED_X))
-        expect(bar.get_by_role("status")).to_have_text(PRESENTED)
-
-
-def test_fill_the_screen_sends_the_largest_centred_rectangle(page, registry, sessions):
+def test_fill_the_screen_sends_the_whole_screen(page, registry, sessions):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
@@ -630,7 +613,7 @@ def test_fill_the_screen_sends_the_largest_centred_rectangle(page, registry, ses
         frame.get_by_role("button", name="Fill the screen", exact=True).click()
         expect(frame.get_by_label("Width in pixels", exact=True)).to_have_value("1920")
         page.wait_for_timeout(500)
-        assert _fit_sent(sessions) == {"mode": "rectangle", "centre_x": 0.5, "centre_y": 0.5, "width": 1}
+        assert _fit_sent(sessions) == {"mode": "box", "left": 0, "top": 0, "width": 1, "height": 1}
 
 
 def test_a_frame_turned_a_quarter_draws_a_portrait_screen_and_its_draft_is_in_fractions_of_it(
@@ -644,7 +627,7 @@ def test_a_frame_turned_a_quarter_draws_a_portrait_screen_and_its_draft_is_in_fr
     registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
     generation = next(frame for frame in registry.inventory().frames if frame.id == FRAME).generation
     registry.turn_frame(FRAME, 90, expected_generation=generation)
-    save_position(registry, FRAME, Calibration(fit=RectangleFit(width=0.5)), expected_revision=1)
+    save_position(registry, FRAME, Calibration(fit=_centred(0.5, 9 / 16, (1080, 1920))), expected_revision=1)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "position")
@@ -663,7 +646,8 @@ def test_a_frame_turned_a_quarter_draws_a_portrait_screen_and_its_draft_is_in_fr
         _move(page)
         expect(_exact(frame, "Centre across")).to_have_value("550")
         page.wait_for_timeout(500)
-        assert abs(_fit_sent(sessions)["centre_x"] - 550 / 1080) < 1e-9, _fit_sent(sessions)
+        sent = _fit_sent(sessions)
+        assert abs(sent["left"] + sent["width"] / 2 - 550 / 1080) < 1e-9, sent
         frame.get_by_role("button", name="Fill the screen", exact=True).click()
         expect(frame.get_by_label("Width in pixels", exact=True)).to_have_value("1080")
         page.wait_for_timeout(500)

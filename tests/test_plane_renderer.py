@@ -18,9 +18,9 @@ import pytest
 from test_executor import LIGHTING, binding, layer, media
 
 from contracts.calibration_target import TargetCode
-from contracts.frame_fit import Placement, place
+from contracts.frame_fit import Placement, place_box
 from contracts.frame_lighting import AT_FULL, FrameLighting, Paper, WashLight
-from contracts.models import Calibration, RectangleFit
+from contracts.models import Calibration, PositionBox
 from contracts.node_frame import neutral_operations
 from contracts.node_picture import DisplayLight
 from contracts.room_light import FixedColour, FixedEntry, RoomLightsDocument
@@ -43,12 +43,18 @@ FRAME = 1 / 60
 SIZE = (3840, 2160)
 
 
-def framed(fit: RectangleFit | None = None, **fields):
-    """test_executor's binding, its Position a rectangle (full width, centred, unless `fit`)."""
-    return binding(calibration=Calibration(fit=fit or RectangleFit()), **fields)
+def centred(width: float, height: float | None = None) -> PositionBox:
+    """A box `width` of the screen wide and `height` (default `width`) high, centred."""
+    height = width if height is None else height
+    return PositionBox(left=(1 - width) / 2, top=(1 - height) / 2, width=width, height=height)
 
 
-def trial(fit: RectangleFit, lighting: FrameLighting = LIGHTING, sequence: int = 1) -> AppliedTrial:
+def framed(fit: PositionBox | None = None, **fields):
+    """test_executor's binding (a 16:9 profile), its Position a box (the whole screen unless `fit`)."""
+    return binding(calibration=Calibration(fit=fit or PositionBox()), **fields)
+
+
+def trial(fit: PositionBox, lighting: FrameLighting = LIGHTING, sequence: int = 1) -> AppliedTrial:
     """What player/plane_screen.py `PlaneScreens.trial` answers while a Position trial is drawn."""
     candidate = SimpleNamespace(trial_id=uuid4(), generation=1, sequence=sequence, candidate_sha256="a" * 64,
                                 frame_tag="trial-" + "a" * 64, expires_boottime_ms=10**15)
@@ -409,9 +415,9 @@ def test_what_a_still_depends_on_finishes_it_again_and_nothing_else_does():
     operations = neutral_operations(OUTPUT, 7, DisplayLight(200, .01))
     assert draws_after(lambda: setattr(rig.screens, "operations", operations)) == 1
     assert rig.screens.commits[-1][3] == 7              # the tag names the change drawn
-    frame = lit.model_copy(update={"calibration": Calibration(fit=RectangleFit(width=0.5))})
-    assert draws_after(lambda: None) == 0               # a new rectangle, the same finish size (1080p)
-    frame = lit.model_copy(update={"calibration": Calibration(fit=RectangleFit(width=0.25))})
+    frame = lit.model_copy(update={"calibration": Calibration(fit=centred(0.5))})
+    assert draws_after(lambda: None) == 0               # a new box, the same finish size (1080p)
+    frame = lit.model_copy(update={"calibration": Calibration(fit=centred(0.25))})
     assert draws_after(lambda: None) == 1               # a smaller placement than the source
     assert rig.fitter.draws[-1][0].size == (960, 540)
     assert draws_after(lambda: setattr(rig.screens, "screen_now", Screen(OUTPUT, (2160, 3840), 90))) == 1
@@ -518,10 +524,10 @@ def test_a_present_over_the_budget_fails_capacity_and_commits_nothing():
     assert rig.renderer.present(OutputComposition(framed(), tuple(layers[1:]), timebase=0.0)).status == "presented"
 
 
-def test_a_rectangle_position_places_its_plane_and_is_reported_without_a_trial():
+def test_a_box_position_places_its_plane_and_is_reported_without_a_trial():
     rig = Rig()
     still = photo("still", start=0)
-    bound = framed(RectangleFit(centre_x=0.5, centre_y=0.5, width=0.5))
+    bound = framed(centred(0.5))
     result = rig.settle(still, frame=bound)
     assert rig.screens.commits[-1][0].planes[0].at == Placement(960, 540, 1920, 1080)
     assert result.applied_calibration.calibration == bound.calibration
@@ -534,11 +540,11 @@ def test_a_trial_moves_the_plane_carries_its_overlay_and_is_reported():
     still = photo("still", start=0)
     rig.settle(still)
     assert rig.screens.commits[-1][0].planes[0].at == Placement(0, 0, *SIZE)
-    tried = trial(RectangleFit(centre_x=0.25, centre_y=0.5, width=0.5))
+    tried = trial(PositionBox(top=0.25, width=0.5, height=0.5))
     rig.screens.trial_now = tried
     rig.clock.tick()
     result = rig.settle(still)
-    moved = place(tried.calibration.fit.rectangle(), SIZE, 1920 / 1080)
+    moved = place_box(tried.calibration.fit.box(), SIZE)
     assert moved == Placement(0, 540, 1920, 1080)
     assert rig.screens.commits[-1][0].planes[0].at == moved
     assert rig.screens.overlays[-1] == (moved, SIZE)
@@ -561,7 +567,7 @@ def test_a_trials_lighting_finishes_the_still_again():
     rig.settle(still)
     lit = FrameLighting(mat_depth_mm=0, paper=Paper(whiteness=.8, ink_density=2),
                         lights=(WashLight(light="room", lux=300, reference=AT_FULL),))
-    rig.screens.trial_now = trial(RectangleFit(), lighting=lit)
+    rig.screens.trial_now = trial(PositionBox(), lighting=lit)
     rig.clock.tick()
     rig.settle(still)
     assert len(rig.fitter.draws) == 2
@@ -620,7 +626,7 @@ def test_a_trial_over_a_fallback_with_nothing_playing_draws_the_commissioning_gr
     grid, the overlay, and the commit tagged as the trial, which is what the shell draws the
     overlay under and what Display Host reports to Central as the trial presented."""
     rig = Rig()
-    rig.screens.trial_now = trial(RectangleFit(width=0.5))
+    rig.screens.trial_now = trial(centred(0.5))
     result = rig.settle(fallback=True, timebase=None)
     assert result.status == "presented" and rig.screens.commits[-1][0].planes == ()
     assert rig.screens.commits[-1][2] == rig.screens.trial_now.candidate.frame_tag
@@ -798,12 +804,24 @@ def test_while_a_commit_is_in_flight_a_present_commits_nothing():
     assert len(rig.screens.commits) == 2
 
 
-def test_an_output_gone_or_a_refused_rectangle_fails_the_present():
+def test_an_output_gone_fails_the_present():
     rig = Rig(screen_now=None)
     assert (rig.present(photo("p", start=0)).status, rig.present(photo("p", start=0)).code) == ("failed", "decode")
-    rig = Rig()
-    off = framed(RectangleFit(centre_x=0.9))
-    assert rig.present(photo("p", start=0), frame=off).code == "decode"
+
+
+def test_a_box_of_its_own_shape_places_at_place_boxs_pixels_and_finishes_at_its_aspect():
+    """A box a quarter wide and half high on a 1920 x 1080 screen, its profile 16:9: the plane is at
+    exactly `place_box`'s pixels (480 x 540) and the picture is finished at 480:540, the box's
+    shape, never the profile's (frame box run, fb-6). Mutation probe: take `_place`'s height from
+    the width and the profile's aspect -> RED."""
+    rig = Rig(screen_now=Screen(OUTPUT, (1920, 1080), 0))
+    still = photo("still", start=0)
+    box = PositionBox(left=0.5, top=0.25, width=0.25, height=0.5)
+    assert rig.settle(still, frame=framed(box)).status == "presented"
+    assert rig.screens.commits[-1][0].planes[0].at == place_box(box.box(), (1920, 1080)) == Placement(960, 270, 480, 540)
+    request = rig.fitter.draws[-1][0]
+    assert request.aspect == pytest.approx(480 / 540)
+    assert request.size[0] / request.size[1] == pytest.approx(480 / 540, rel=0.01)
 
 
 def test_presented_carries_the_drawn_composition_and_the_witness_tag():
@@ -1054,7 +1072,7 @@ def test_a_black_picture_nobody_asks_for_again_is_asked_by_finish_and_retired_by
     made = rig.device.made
     rig.device.hold = True
     for width in (0.9, 0.8, 0.7, 0.6):
-        frame = framed(RectangleFit(width=width))
+        frame = framed(centred(width))
         rig.clock.tick()
         rig.present(dark, frame=frame)
         rig.renderer.finish()                           # the new size's black drawn, fence pending
@@ -1116,7 +1134,7 @@ def sized(key: str, width: int, height: int, **fields) -> LocalLayer:
     return LocalLayer(layer(key, variant=variant, **fields), Path(f"/media/{key}.jpg"), 0.0, 1.0)
 
 
-HALF = framed(RectangleFit(width=0.5))          # a 1920 x 1080 placement on the 4K screen
+HALF = framed(centred(0.5))          # a 1920 x 1080 placement on the 4K screen
 
 
 def test_a_1080p_video_in_a_4k_placement_is_finished_at_1080p_and_shown_enlarged():
@@ -1151,8 +1169,9 @@ def test_a_photo_is_finished_at_the_smaller_of_its_source_and_its_placement(sour
 def test_a_turned_screen_finishes_the_picture_at_its_size_laid_out_turned():
     rig = Rig(screen_now=Screen(OUTPUT, (2160, 3840), 90))
     still = sized("still", 1280, 720, start=0)
-    rig.ready(still)
-    rig.settle(still)
+    wide = framed(PositionBox(top=1313 / 3840, height=1215 / 3840))     # 2160 x 1215 across the turned screen
+    rig.ready(still, frame=wide)
+    rig.settle(still, frame=wide)
     assert rig.fitter.draws[-1][0].size == (1280, 720)
     assert rig.screens.commits[-1][1]["still"].size == (720, 1280)
 

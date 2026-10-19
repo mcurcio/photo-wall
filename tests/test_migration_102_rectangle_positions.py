@@ -1,10 +1,11 @@
 """102 over rows seeded at 101 (render planes S5, frozen page .claude/runs/render-planes/s5-page.md,
-"The conversion" and B1): every stored Position is a rectangle that `place` accepts on its screen as
-it hangs, the old quarter turn is the Frame's turn reversed, and only an exact conversion keeps a
-Frame ready.
+"The conversion" and B1): every stored Position is a rectangle that v0.41.0's `place` accepts on its
+screen as it hangs, the old quarter turn is the Frame's turn reversed, and only an exact conversion
+keeps a Frame ready.
 
 Every row is raw SQL and JSON on the schema `migrate_before(db, "102")` builds, never today's
-models, so this test outlives the deletion of Cover and Corners (S5 B6). The oracle is
+models, so this test outlives the deletion of Cover and Corners (S5 B6) and of the rectangle itself
+(frame box run fb-6: `_rectangle` and `_place` are this test's own copies of v0.41.0's form and rule). The oracle is
 tests/fixtures/cover_rectangles.json: today's `contracts.frame_fit.cover_rectangle` answers over the
 page's grid, recorded once before B6 deletes it.
 """
@@ -22,8 +23,7 @@ from central.db import Database
 from central.displays.model import Readiness
 from central.infra.display_store import frame_readiness_in
 from contracts.display_turn import hanging
-from contracts.frame_fit import place
-from contracts.models import Plan, PlayerConfiguration, RectangleFit
+from contracts.frame_fit import Placement
 
 RECORDS = json.loads((Path(__file__).parent / "fixtures/cover_rectangles.json").read_text())["records"]
 COVER = {(json.dumps(r["corners"]), r["q"], tuple(r["output"]), tuple(r["shape"])): r for r in RECORDS}
@@ -37,6 +37,27 @@ CENTRED = {"mode": "rectangle", "centre_x": 0.5, "centre_y": 0.5, "width": 1.0}
 LIGHTING = {"mat_depth_mm": 0.0, "lights": [{"kind": "wash", "light": "room", "lux": 1000.0,
                                              "reference": {"kind": "at-full"}}],
             "paper": {"whiteness": 0.9, "ink_density": 3.5228787452803374, "profile": None}}
+
+
+def _rectangle(fit: dict) -> dict:
+    """`fit` when it is v0.41.0's RectangleFit as stored: mode "rectangle", its centre in the unit
+    square and a width above 0 and at most 1, nothing else; AssertionError otherwise."""
+    assert fit["mode"] == "rectangle" and set(fit) <= {"mode", "centre_x", "centre_y", "width"}, fit
+    centre_x, centre_y, width = fit.get("centre_x", 0.5), fit.get("centre_y", 0.5), fit.get("width", 1.0)
+    assert 0 <= centre_x <= 1 and 0 <= centre_y <= 1 and 0 < width <= 1, fit
+    return fit
+
+
+def _place(fit: dict, screen: tuple[int, int], aspect: float) -> Placement:
+    """v0.41.0's `place` (contracts/frame_fit.py before fb-6): the rectangle's whole pixels on the
+    screen as it hangs, each half up; AssertionError when they do not lie on it."""
+    fit = _rectangle(fit)
+    pixel_width = max(1, math.floor(fit.get("width", 1.0) * screen[0] + 0.5))
+    pixel_height = max(1, math.floor(pixel_width / aspect + 0.5))
+    x = math.floor(fit.get("centre_x", 0.5) * screen[0] - pixel_width / 2 + 0.5)
+    y = math.floor(fit.get("centre_y", 0.5) * screen[1] - pixel_height / 2 + 0.5)
+    assert 0 <= x and x + pixel_width <= screen[0] and 0 <= y and y + pixel_height <= screen[1], (fit, screen)
+    return Placement(x, y, pixel_width, pixel_height)
 
 
 def _profile(width: int, height: int) -> dict:
@@ -142,7 +163,7 @@ def test_102_turns_every_history_entry_into_a_rectangle_place_accepts(empty_data
     by_number = {case["number"]: case for case in cases}
     assert len(rows) == (len(OUTPUTS) + 1) * len(cases) == 5 * 5 * 7 * 13
     for row in rows:
-        fit = RectangleFit.model_validate(row["fit"])
+        fit = _rectangle(row["fit"])
         # Each entry is made for its own fit's turn (Restore refuses it on a screen hung another way).
         assert row["turn"] == _turn(by_number[row["number"]]["rotation"]), row
         if row["frame_id"] == "grid-unbound":
@@ -153,7 +174,7 @@ def test_102_turns_every_history_entry_into_a_rectangle_place_accepts(empty_data
         turn, (width_px, height_px) = _turn(case["rotation"]), case["shape"]
         aspect = width_px / height_px
         screen = hanging(mode, turn)
-        placed = place(fit.rectangle(), screen, aspect)
+        placed = _place(fit, screen, aspect)
         record = COVER[(case["corners"], _quarter(case["rotation"]), mode, case["shape"])]
         where = (row["frame_id"], case, record, placed)
         if record["width"] <= screen[0] + 1e-6 and record["height"] <= screen[1] + 1e-6:
@@ -277,14 +298,11 @@ def test_102_worked_frames_trials_configurations_and_offers(empty_database):
     saved = trials["saved"]
     assert (saved["calibration"]["revision"], saved["saved_calibration"]["revision"]) == (3, 4)
     for copy in (saved["calibration"]["fit"], saved["saved_calibration"]["fit"]):
-        RectangleFit.model_validate(copy)
+        _rectangle(copy)
 
-    stored = PlayerConfiguration.model_validate(configuration)
     assert configuration["bindings"][0]["calibration"] == frames["e2"]["calibration"]
     assert configuration["bindings"][1]["calibration"] == KEPT
-    assert [binding.calibration.fit for binding in stored.bindings] == [
-        RectangleFit.model_validate(frames["e2"]["calibration"]["fit"]), RectangleFit.model_validate(KEPT["fit"])]
-    offered = Plan.model_validate(manifest)
+    for binding in (*configuration["bindings"], *manifest["bindings"]):
+        _rectangle(binding["calibration"]["fit"])
     assert [binding["calibration"] for binding in manifest["bindings"]] == [
         frames["e2"]["calibration"], {"revision": 6, "fit": CENTRED}, {"revision": 2, "fit": CENTRED}]
-    assert all(isinstance(binding.calibration.fit, RectangleFit) for binding in offered.bindings)

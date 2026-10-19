@@ -1,8 +1,9 @@
 """The console's placement rule (central/console/src/placement.js `hanging`, `place`, `fillScreen`)
-against Central's (contracts/display_turn.py `hanging`, contracts/frame_fit.py `place`) on vectors
-built here: a rectangle the console's Position editor accepts is one Central's Save and the
-Player's planes accept, pixel for pixel, and one it refuses they refuse (render redesign S5, run
-ledger .claude/runs/render-planes/s5-page.md B2).
+against Central's (contracts/display_turn.py `hanging`) and, for the rectangle the Position editor
+still draws until bead fb-7 deletes it, against `_reference_place`, this test's own copy of
+v0.41.0's contracts/frame_fit.py `place` (Central and the Player place boxes now, frame box run
+fb-6), on vectors built here (render redesign S5, run ledger .claude/runs/render-planes/s5-page.md
+B2).
 
 Runs the module under Node (it is pure), which the console build already requires, the way
 tests/test_console_flow.py runs console modules. Without Node it skips on a developer machine, but
@@ -29,7 +30,7 @@ from pathlib import Path
 import pytest
 
 from contracts.display_turn import TURNS, hanging
-from contracts.frame_fit import FrameBox, FrameRectangle, place, place_box
+from contracts.frame_fit import FrameBox, Placement, place_box
 from contracts.models import PositionBox, frame_size_mm
 
 ROOT = Path(__file__).parents[1]
@@ -74,11 +75,39 @@ def _console(cases):
     return json.loads(result.stdout)
 
 
+def _finite(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _reference_place(rectangle: dict, screen, aspect) -> Placement:
+    """v0.41.0's contracts/frame_fit.py `FrameRectangle` check and `place`, kept here only while the
+    console's rectangle editor lives (bead fb-7 deletes both): each value half up,
+    width = max(1, round(width * W)), height = max(1, round(width / aspect)), the corner from the
+    centre; ValueError "frame_rectangle", "placement_screen", "placement_aspect" or
+    "placement_outside"."""
+    centre_x, centre_y, fraction = rectangle["centre_x"], rectangle["centre_y"], rectangle["width"]
+    if not (all(_finite(value) for value in (centre_x, centre_y, fraction))
+            and 0 <= centre_x <= 1 and 0 <= centre_y <= 1 and 0 < fraction <= 1):
+        raise ValueError("frame_rectangle")
+    screen_width, screen_height = screen
+    if not (type(screen_width) is int and type(screen_height) is int and screen_width >= 1 and screen_height >= 1):
+        raise ValueError("placement_screen")
+    if not (_finite(aspect) and aspect > 0):
+        raise ValueError("placement_aspect")
+    width = max(1, math.floor(fraction * screen_width + 0.5))
+    height = max(1, math.floor(width / aspect + 0.5))
+    x = math.floor(centre_x * screen_width - width / 2 + 0.5)
+    y = math.floor(centre_y * screen_height - height / 2 + 0.5)
+    if not (0 <= x and x + width <= screen_width and 0 <= y and y + height <= screen_height):
+        raise ValueError("placement_outside")
+    return Placement(x, y, width, height)
+
+
 def _python_place(rectangle, screen, aspect):
-    """Central's answer in the console's shape: a placement dict, None for "placement_outside", or
-    {"error": code} for every other refusal."""
+    """The reference's answer in the console's shape: a placement dict, None for "placement_outside",
+    or {"error": code} for every other refusal."""
     try:
-        placed = place(FrameRectangle(**rectangle), tuple(screen), aspect)
+        placed = _reference_place(rectangle, tuple(screen), aspect)
     except ValueError as error:
         return None if str(error) == "placement_outside" else {"error": str(error)}
     return {"x": placed.x, "y": placed.y, "width": placed.width, "height": placed.height}
@@ -161,7 +190,7 @@ def test_place_refuses_with_centrals_codes(rectangle, screen, aspect):
     (answer,) = _console([["place", [rectangle, screen, aspect]]])
     assert "error" in answer
     with pytest.raises(ValueError) as refused:
-        place(FrameRectangle(**rectangle), tuple(screen), aspect)
+        _reference_place(rectangle, tuple(screen), aspect)
     assert answer["error"] == str(refused.value)
 
 
