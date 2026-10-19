@@ -7,7 +7,7 @@ Every `*_in` method runs in the caller's transaction.
 """
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
 from central.installation_models import FrameOutput
@@ -113,4 +113,9 @@ class FitAnalysisReader(Protocol):
 
     def frame_outputs(self) -> tuple[FrameOutput, ...]:
         """Every Frame's Frame output (`central.infra.display_store.frame_outputs_in`)."""
+        ...
+
+    def display_sizes(self) -> Mapping[str, tuple[int, int] | None]:
+        """Each Frame's seen Display's size in mm as built (`display_store.frame_display_mm`;
+        None: none seen, or none stated), by frame id: a Frame draft's physical size."""
         ...

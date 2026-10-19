@@ -6716,3 +6716,29 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
   videos, "Size on screen", "Size on the wall" and the Position-tab link. The end review's designer
   should judge the Hardware tab's screenshots. `patterns/problem-card.stories.tsx` still uses
   "Frame profile" / "Edit Frame profile" as sample words (not owned).
+## fb-10 (the fit analysis without the profile)
+
+- **A draft's physical size needs the Display's size, which `FrameOutput` does not carry**: the
+  page says `size_mm = frame_size_mm(draft.calibration.fit, the Display's size, turn)`, but the
+  analysis's port gave only `frame_outputs()` (whose `size_mm` is the saved box's). The smallest
+  edit outside fb-10's list: `central/wall_plan/ports.py` `FitAnalysisReader.display_sizes()`
+  (each Frame's seen Display's size, `display_store.frame_display_mm`), read only when a Frame is
+  drafted, implemented in `PgFitAnalysisReader` over `frame_outputs_in`'s own join.
+- **Files outside fb-10's list changed to meet "console drafts carry no profile" and "the board
+  shows each unsized Frame as one line"**: `central/console/src/domain/frame-photos.tsx`
+  (`FrameDraftFit` takes no profile; the draft it sends is `{frame_id, calibration}`),
+  `central/console/src/patterns/fit-board.tsx` (`FitBoardView.unsized`, one muted line each) and
+  `patterns/fit-board.fixtures.ts` (`unsized: []`, no visual change), and
+  `tests/test_console_routes_r4.py` (`SHARED_WITH_SHOW` adds `position-box.ts`, `placement.js`,
+  `turn-words.ts`: the Scene's Frame picker draws a not-yet-judged Frame at its box's shape, by
+  the box's one home, instead of the profile's).
+- **The Hardware tab's FrameProfile no longer gets a `draftFit`**: with the profile no part of a
+  Frame's geometry, a profile edit changes nothing the analysis judges. `frame-profile.tsx` still
+  declares the optional prop: fb-11's.
+- **`FrameFitView.unknownOutput` (patterns/frame-fit-row.tsx) is now always null from the domain**:
+  a FrameFit always has an output. The pattern field and the OFFICE fixture's "planned" sentence
+  stay because removing them changes Storybook baselines this lane cannot regenerate; a follow-up
+  (or fb-15) deletes them with new baselines.
+- **`tests/browser/test_fit_board_browser.py::test_the_frame_page_shows_one_row_per_scene_with_its_relation_to_now`
+  expects no Details on hall's row**, but since fb-8's seed binds hall to a reported screen, the row
+  has a Frame output and so Details (see the A/B in fb-10's report).

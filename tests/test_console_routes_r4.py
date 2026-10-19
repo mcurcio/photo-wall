@@ -93,6 +93,12 @@ SHARED_WITH_SHOW = {
     "photo-fit-board.tsx",
     "photoFitApi.js",
     "photo-sheet.tsx",  # the photo a Fit board's sample opens
+    # A Frame's box on its screen as it hangs (frame box run fb-10): the Scene's Frame picker
+    # draws a Frame no photo is judged for yet at its Position's shape, by the box's one home.
+    # Pure numbers and words, no write.
+    "position-box.ts",
+    "placement.js",
+    "turn-words.ts",
     "libraryApi.js",  # the photo sheet's one photo's facts
     # A Frame's health as a chip (design review round 2): the Frame page header's words and
     # severity, also the Show side's Frame chips and the Scene's Frame picker. Words only.

@@ -7,7 +7,7 @@ against the Frame output and not the Display"; "Note that this preview idea coul
 different moments. Like the source creation time, but also frame config, show authoring, etc."
 
 So it is ONE read with every input saved or a draft: the selection (saved Sources and unsaved
-Photo source drafts), the Frames (saved, or a draft profile and calibration for a Frame), the
+Photo source drafts), the Frames (saved, or a draft Position for a Frame), the
 crop limit and the tuning values. Every console moment (Photo source editor, Frame page, Scene
 editor, Show now, Settings › Photo fit, Sources list) asks here and nowhere else.
 
@@ -46,16 +46,17 @@ from central.wall_plan.fit_settings import FIT_SETTING_RANGES, FitSettings
 from central.wall_plan.key_content import KeyContent
 from contracts.models import (
     Calibration,
-    FrameProfile,
     Identifier,
     Instant,
     Model,
     PhotoCrop,
     frame_output,
+    frame_size_mm,
 )
 from contracts.photo_crop import CENTRED
 
 if TYPE_CHECKING:
+    from central.installation_models import FrameOutput
     from central.wall_plan.ports import FitAnalysisReader
 
 # Per Frame, the most measured photos the content tier judges (F-FU-8: "checked N of M").
@@ -96,18 +97,17 @@ class FitSelection(Model):
 
 
 class FrameDraft(Model):
-    """A saved Frame as it would be configured (the Frame config moment): its draft profile and
-    Position, judged with the size its Output last reported. The console sends both, its saved
-    values for the one it did not change."""
+    """A saved Frame as it would be configured (the Frame config moment): its draft Position,
+    judged on the screen its Output last reported and the Display seen there (frame box run
+    fb-10: the Position is the one source of the Frame's shape and size)."""
 
     frame_id: Identifier
-    profile: FrameProfile
     calibration: Calibration
 
 
 class FitAnalysisRequest(Model):
     """POST /v1/operator/photo-fit/analysis. `frames` None: every Frame of the wall, by id.
-    A `frame_drafts` entry replaces that Frame's saved profile and Position (its id must be
+    A `frame_drafts` entry replaces that Frame's saved Position (its id must be
     judged). `crop_limit` None: `settings.crop_limit`. `settings` None: the saved settings.
     `seed` reorders the samples (Shuffle)."""
 
@@ -199,12 +199,13 @@ class FrameFit(Model):
     FIT_SETTING_RANGES at which some photo of the selection would pass `shape_fit` (the console's
     "Raise the crop limit to N %"), else None. Content tier
     (sampled; all 0 and empty at tier "shape"): `checked` photos judged by `judge`, `fit_checked`
-    of them fit, `refused_by_content` holds face_cut and interest_cut. `output_px` None: judged
-    by shape only (its Output has not reported a size). `draft`: judged as a FrameDraft."""
+    of them fit, `refused_by_content` holds face_cut and interest_cut. `output_px`: the Frame
+    output it was judged at (a Frame without one has no FrameFit: FitAnalysis.unsized).
+    `draft`: judged as a FrameDraft."""
 
     frame_id: Identifier
     aspect: float = Field(gt=0)
-    output_px: tuple[int, int] | None
+    output_px: tuple[int, int]
     display_px: tuple[int, int] | None
     draft: bool
     band: tuple[float, float]
@@ -222,8 +223,10 @@ class FrameFit(Model):
 
 
 class FitAnalysis(Model):
-    """The answer: the selection's counts, its Shape map, one FrameFit per judged Frame (in frame
-    id order), and the crop limit and settings it was judged at."""
+    """The answer: the selection's counts, its Shape map, one FrameFit per judged Frame with a
+    Frame output (in frame id order), the judged Frames with none (`unsized`: their screen size
+    is not known, so no photo is judged for them; frame box run fb-10), and the crop limit and
+    settings it was judged at."""
 
     tier: AnalysisTier
     crop_limit: float
@@ -235,13 +238,14 @@ class FitAnalysis(Model):
     reading: bool
     bins: tuple[RatioBin, ...]
     frames: tuple[FrameFit, ...]
+    unsized: tuple[Identifier, ...] = Field(default=(), max_length=64)
     read_at: Instant
 
 
 def analyse(request: FitAnalysisRequest, reader: FitAnalysisReader,
             saved: FitSettings) -> FitAnalysis:
-    """The analysis (module docstring). Reads: one `selection_sizes`, one `frame_outputs`, and
-    at tier "full" at most one `sample` call per judged Frame for the content tier plus one per
+    """The analysis (module docstring). Reads: one `selection_sizes`, one `frame_outputs`, one
+    `display_sizes` when a Frame is drafted, and at tier "full" at most one `sample` call per judged Frame for the content tier plus one per
     refusal reason that has photos. AnalysisRefused for an unknown frame id in `frames` or
     `frame_drafts` ("frame_unknown"); the reader raises it for an unknown Source or draft."""
     settings = request.settings or saved
@@ -254,14 +258,17 @@ def analyse(request: FitAnalysisRequest, reader: FitAnalysisReader,
     if any(frame_id not in judged for frame_id in drafts):
         raise AnalysisRefused("draft_frame_not_judged", 422)
     sizes = reader.selection_sizes(request.selection)
+    display_mm = reader.display_sizes() if drafts else {}
     samples = _Samples(reader, request.selection, request.seed, request.tier == "full")
     frames: list[FrameFit] = []
+    unsized: list[str] = []
     taken: set[str] = set()
     for frame_id in judged:
         output, draft = outputs[frame_id], drafts.get(frame_id)
-        target = fit_target(output if draft is None else output.model_copy(update={
-            "output_px": frame_output(draft.calibration, output.display_px, output.turn)}))
-        if target is None:   # no known screen: no shape, not judged (fb-10 lists it)
+        target = fit_target(output if draft is None else _drafted(
+            output, draft, display_mm.get(frame_id)))
+        if target is None:   # no known screen: no shape, so nothing is judged for it
+            unsized.append(frame_id)
             continue
         frame = _frame_fit(frame_id, target, output.display_px, draft is not None, sizes,
                            crop_limit, settings, samples, taken)
@@ -274,7 +281,17 @@ def analyse(request: FitAnalysisRequest, reader: FitAnalysisReader,
         + sizes.size_unknown,
         videos=sum(group.photos for group in sizes.groups if group.kind == "video"),
         waiting=sizes.waiting, left_out=sizes.left_out, reading=sizes.reading,
-        bins=_bins(sizes.groups), frames=tuple(frames), read_at=sizes.read_at)
+        bins=_bins(sizes.groups), frames=tuple(frames), unsized=tuple(unsized),
+        read_at=sizes.read_at)
+
+
+def _drafted(output: FrameOutput, draft: FrameDraft,
+             display_mm: tuple[int, int] | None) -> FrameOutput:
+    """`output` as `draft` would make it: its Frame output and physical size from the draft's
+    Position on the same screen (`display_px`, `turn`) and Display (`display_mm`)."""
+    return output.model_copy(update={
+        "output_px": frame_output(draft.calibration, output.display_px, output.turn),
+        "size_mm": frame_size_mm(draft.calibration.fit, display_mm, output.turn)})
 
 
 # The refusals each tier counts, in the fit rule's order (central/wall_plan/fit.py).

@@ -18,6 +18,8 @@ import {
   useFitAnalysis,
 } from "./photo-fit";
 import { PhotoSheet } from "./photo-sheet";
+import { type Box, boxPixels, screenOf, WHOLE_SCREEN } from "./position-box";
+import type { Turn } from "./turn-words";
 
 /** A fit question without its tier and seed: the board asks each tier, and Shuffle owns the seed. */
 export type FitQuestion = Omit<FitAnalysisRequest, "tier" | "seed">;
@@ -55,16 +57,23 @@ export function fitReading(state: LoadState<FitAnalysis>): boolean {
   return value !== null && value.reading && value.frames.length > 0 && value.photos + value.videos > 0;
 }
 
-interface InventoryFrame { id: string; profile?: { width_px?: number; height_px?: number } }
+interface InventoryFrame {
+  id: string;
+  calibration?: { fit?: Partial<Box> };
+  /** The Frame's screen, the mode as built (Central's `screen_px`); null when not known. */
+  screen_px?: [number, number] | null;
+  turn?: Turn;
+}
 
-/** A Frame not judged yet (no photos chosen): drawn at its profile's shape (its Frame output's
- * shape: the picture keeps the profile's shape inside its Position), empty. */
+/** A Frame not judged yet (no photos chosen): drawn at its Frame output's shape, its Position's
+ * box on its screen as it hangs (position-box.ts, the box's one home), empty; none when its
+ * screen size is not known. */
 function unjudged(snapshot: object | null, frameId: string, words: string): FrameFitView | null {
   const frames = (snapshot as { inventory?: { frames?: InventoryFrame[] } } | null)?.inventory?.frames ?? [];
-  const profile = frames.find((frame) => frame.id === frameId)?.profile;
-  const width = profile?.width_px ?? 0;
-  const height = profile?.height_px ?? 0;
-  if (width <= 0 || height <= 0) return null;
+  const frame = frames.find((item) => item.id === frameId);
+  const screen = screenOf(frame?.screen_px ?? null, frame?.turn ?? 0);
+  if (frame === undefined || screen === null) return null;
+  const { width, height } = boxPixels({ ...WHOLE_SCREEN, ...frame.calibration?.fit }, screen);
   return {
     key: frameId, name: frameId, aspect: width / height, ratio: ratioWords(width / height), lead: null, emptyText: "",
     count: words, segments: [], samples: [], checked: null, unknownOutput: null, detail: null, alert: null, why: null,
@@ -76,7 +85,7 @@ function unjudged(snapshot: object | null, frameId: string, words: string): Fram
  * The Frame picker's tiles (the Scene's Frames step, design review round 2): each Frame drawn at
  * its Frame output's shape with the photo it would show and how many of the chosen photos fit
  * it (its alert's chip if it would go without or have few), from the one read of every Frame;
- * before any photo is chosen (`read` null), at its profile's shape, empty. `sharing`: the Frames
+ * before any photo is chosen (`read` null), at its Position's shape, empty. `sharing`: the Frames
  * chosen so far, whom the photos are shared between.
  */
 export function frameChoiceTiles(read: FitRead | null, snapshot: object | null, sharing: number,

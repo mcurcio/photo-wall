@@ -45,7 +45,7 @@ const ADVANCED: readonly Row[] = [
   { key: "min_salience_spread", label: "Smallest spread of interest", control: "slider", scale: 100, unit: "%", step: 1,
     help: "Below this, no part of a photo stands out, and any crop of it is fine." },
   { key: "large_frame_inches", label: "Large Frame size for videos", control: "number", scale: 1, unit: "in", step: 1,
-    help: "From this diagonal up, a Frame shows a video only when it has at least the rows below." },
+    help: "From this diagonal up, worked out from the display's size and the Position, a Frame shows a video only when it has at least the rows below. A Frame on a display that does not state its size counts as large." },
   { key: "large_frame_video_short_side", label: "Rows a video needs on a large Frame", control: "number", scale: 1, unit: "px", step: 1, whole: true,
     help: "A video's shorter side, in pixels, on a Frame at least the size above." },
 ];

@@ -50,8 +50,10 @@ def output(frame_id: str, profile: FrameProfile, display=DISPLAY) -> FrameOutput
 class Reader:
     """FitAnalysisReader over a list of photos, recording every call."""
 
-    def __init__(self, photos: list[SamplePhoto], outputs: tuple[FrameOutput, ...]) -> None:
+    def __init__(self, photos: list[SamplePhoto], outputs: tuple[FrameOutput, ...],
+                 display_mm: dict[str, tuple[int, int] | None] | None = None) -> None:
         self.photos, self.outputs, self.calls = photos, outputs, []
+        self.display_mm = display_mm or {}
 
     def selection_sizes(self, selection: FitSelection) -> SelectionSizes:
         self.calls.append(("selection_sizes",))
@@ -72,6 +74,10 @@ class Reader:
     def frame_outputs(self):
         self.calls.append(("frame_outputs",))
         return self.outputs
+
+    def display_sizes(self):
+        self.calls.append(("display_sizes",))
+        return dict(self.display_mm)
 
 
 def photo(number: int, width: int, height: int, *, measured: bool = True, kind="image",
@@ -145,7 +151,7 @@ def test_a_frame_draft_is_judged_with_its_own_position() -> None:
     saved = analyse(request(tier="shape"), Reader(photos, frames), HOUSE)
     mat = Calibration(fit=PositionBox(left=.3, top=.3, width=.4, height=.4))      # a centred 40 % x 40 % opening
     drafted = analyse(request(tier="shape", frame_drafts=(
-        FrameDraft(frame_id="hall", profile=WIDE, calibration=mat),)),
+        FrameDraft(frame_id="hall", calibration=mat),)),
         Reader(photos, frames), HOUSE)
     hall, draft = saved.frames[0], drafted.frames[0]
     small = sum((p.width, p.height) == (1600, 900) for p in photos)
@@ -282,7 +288,7 @@ def test_unknown_or_unjudged_frames_are_refused() -> None:
     with pytest.raises(AnalysisRefused) as unknown:
         analyse(request(frames=("hall", "attic")), reader, HOUSE)
     assert (unknown.value.code, unknown.value.status) == ("frame_unknown", 404)
-    draft = FrameDraft(frame_id="study", profile=FOUR_THREE, calibration=Calibration())
+    draft = FrameDraft(frame_id="study", calibration=Calibration())
     with pytest.raises(AnalysisRefused) as unjudged:
         analyse(request(frames=("hall",), frame_drafts=(draft,)), reader, HOUSE)
     assert unjudged.value.status == 422
@@ -290,13 +296,52 @@ def test_unknown_or_unjudged_frames_are_refused() -> None:
     assert [frame.frame_id for frame in only.frames] == ["hall", "study"]
 
 
-def test_a_frame_with_no_known_screen_is_not_judged() -> None:
-    """Frame box run fb-8: a Frame whose screen size is not known has no Frame output, so no
-    shape; it gets no answer (fb-10 lists it as not judged), and a draft for it none either."""
+def test_a_frame_with_no_known_screen_is_listed_unsized_and_not_judged() -> None:
+    """Frame box run fb-10: a Frame whose screen size is not known has no Frame output, so no
+    shape; it is listed in `unsized` and is nowhere in `frames`, also when a draft names it."""
     unsized = frame_output_of("attic", None)
     reader = Reader(mixed(), (*three_frames(), unsized))
     answer = analyse(request(tier="shape"), reader, HOUSE)
     assert [frame.frame_id for frame in answer.frames] == ["hall", "stairs", "study"]
-    draft = FrameDraft(frame_id="attic", profile=WIDE, calibration=Calibration())
+    assert answer.unsized == ("attic",)
+    draft = FrameDraft(frame_id="attic", calibration=Calibration())
     drafted = analyse(request(tier="shape", frames=("attic",), frame_drafts=(draft,)), reader, HOUSE)
-    assert drafted.frames == ()
+    assert drafted.frames == () and drafted.unsized == ("attic",)
+    only = analyse(request(tier="shape", frames=("hall",)), reader, HOUSE)
+    assert only.unsized == ()
+
+
+def test_a_draft_box_is_judged_at_its_own_output_and_size() -> None:
+    """Frame box run fb-10: a Frame filling a 1,920 x 1,080 screen of a 950 x 540 mm Display,
+    drafted as a box a quarter wide and half high, is judged at 480 x 540 (the draft's Frame
+    output, never the saved Position's) and 237.5 x 270 mm (`frame_size_mm` of the draft box).
+    Mutation probe: judge the draft at the saved Position's output -> 1,920 x 1,080, RED."""
+    saved = frame_output_of("lounge", (1920, 1080), inches=43)
+    photos = [photo(n, 600, 675) for n in range(4)] + [photo(9, 1920, 1080)]
+    reader = Reader(photos, (saved,), {"lounge": (950, 540)})
+    box = Calibration(fit=PositionBox(left=.5, top=.25, width=.25, height=.5))
+    answer = analyse(request(tier="shape", frame_drafts=(
+        FrameDraft(frame_id="lounge", calibration=box),)), reader, HOUSE)
+    (lounge,) = answer.frames
+    assert lounge.output_px == (480, 540) and lounge.draft is True
+    assert math.isclose(lounge.aspect, 480 / 540)
+    assert lounge.fit_by_shape == 4      # the 8:9 photos fit the draft; the 16:9 one does not
+    undrafted = analyse(request(tier="shape"), Reader(photos, (saved,)), HOUSE).frames[0]
+    assert undrafted.output_px == (1920, 1080) and undrafted.fit_by_shape == 1
+
+
+def test_a_draft_frame_is_large_by_its_drafted_physical_size() -> None:
+    """The draft's physical size is the draft box on the Display's own size (950 x 540 mm, 43
+    inches across): a 360-row video is under the floor on the whole box (a large Frame from 30
+    inches), and the same Frame drafted as a half-size box (21.5 inches) is not a large Frame."""
+    saved = frame_output_of("lounge", (1920, 1080), inches=43)
+    video = SamplePhoto(asset_id="clip", kind="video", width=640, height=360)
+    settings = FitSettings(large_frame_inches=30)
+    reader = Reader([video], (saved,), {"lounge": (950, 540)})
+    whole = analyse(request(tier="shape", settings=settings), reader, HOUSE).frames[0]
+    small = analyse(request(tier="shape", settings=settings, frame_drafts=(FrameDraft(
+        frame_id="lounge", calibration=Calibration(fit=PositionBox(width=.5, height=.5))),)),
+        reader, HOUSE).frames[0]
+    refusals = {count.reason: count.photos for count in whole.refused_by_shape}
+    assert refusals["below_frame_pixels"] == 1 and whole.fit_by_shape == 0
+    assert small.fit_by_shape == 1

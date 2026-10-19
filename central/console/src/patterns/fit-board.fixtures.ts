@@ -141,6 +141,7 @@ export const READY: FitBoardView = {
   judged: "Judged on every Frame at the house crop limit, 35 %: a Source has no Frames of its own.",
   reading: null,
   frames: [HALL, LIVING, OFFICE],
+  unsized: [],
   shape: { bins: BINS, bands: BANDS, range: [0.25, 4], ticks: TICKS },
   empty: null,
 };
