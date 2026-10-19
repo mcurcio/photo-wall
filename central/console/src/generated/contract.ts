@@ -148,7 +148,6 @@ export type LuxOnFrame = number;
 
 export interface MadeForView {
   display_id: string | null;
-  profile_px: ProfilePxView;
   turn: 0 | 90 | 180 | 270;
 }
 
@@ -244,12 +243,7 @@ export interface PositionRestore {
   expected_sequence: number;
 }
 
-export type PositionRestoreRefusal = "other_frame" | "made_for_other_profile" | "made_for_other_turn" | "made_for_other_display";
-
-export interface ProfilePxView {
-  height: number;
-  width: number;
-}
+export type PositionRestoreRefusal = "other_frame" | "made_for_other_turn" | "made_for_other_display";
 
 export type Reading = Measured | Unavailable;
 
@@ -621,18 +615,6 @@ export const LIMITS = {
       minimum: 1,
     },
   },
-  ProfilePxView: {
-    height: {
-      integer: true,
-      maximum: 16384,
-      minimum: 1,
-    },
-    width: {
-      integer: true,
-      maximum: 16384,
-      minimum: 1,
-    },
-  },
   RefusedReportView: {
     source: {
       pattern: "^[a-z][a-z0-9-]{0,31}$",
@@ -798,7 +780,6 @@ export const REFUSALS = {
   ],
   PositionRestoreRefusal: [
     "other_frame",
-    "made_for_other_profile",
     "made_for_other_turn",
     "made_for_other_display",
   ],

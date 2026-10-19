@@ -17,17 +17,9 @@ from contracts.frame_lighting import FrameLighting
 from contracts.models import Model, PositionBox
 
 
-class ProfilePxView(Model):
-    """A Frame profile's output in pixels."""
-    width: Annotated[int, Field(ge=1, le=16384)]
-    height: Annotated[int, Field(ge=1, le=16384)]
-
-
 class MadeForView(Model):
-    """What an entry was made for: the profile whose aspect its box has, how the screen hung (`turn`,
-    degrees clockwise: its box is in fractions of the screen as it hung) and the Display seen on the
-    Frame's port then (None: none)."""
-    profile_px: ProfilePxView
+    """What an entry was made for: how the screen hung (`turn`, degrees clockwise: its box is in
+    fractions of the screen as it hung) and the Display seen on the Frame's port then (None: none)."""
     turn: DisplayTurn
     display_id: UUID | None
 
@@ -68,16 +60,13 @@ class PositionRestore(Model):
 def position_entry_view(entry: PositionEntry, *, frame_name: str,
                         restore_refusal: PositionRestoreRefusal | None) -> PositionEntryView:
     """`entry` as the routes answer it, with the Frame's name today and Restore's answer for it now."""
-    width, height = entry.made_for.profile_px
     record = entry.record
     return PositionEntryView(
         entry_id=entry.entry_id, frame=FrameRefView(id=entry.frame_id, name=frame_name), kind=record.kind,
         number=entry.number, at=entry.at, session_id=record.session_id, restored_from=record.restored_from,
         fit=record.values.fit, lighting=record.values.lighting,
-        made_for=MadeForView(profile_px=ProfilePxView(width=width, height=height),
-                             turn=entry.made_for.turn, display_id=entry.made_for.display_id),
+        made_for=MadeForView(turn=entry.made_for.turn, display_id=entry.made_for.display_id),
         restore_refusal=restore_refusal)
 
 
-__all__ = ["MadeForView", "PositionEntryView", "PositionHistoryView", "PositionRestore", "ProfilePxView",
-           "position_entry_view"]
+__all__ = ["MadeForView", "PositionEntryView", "PositionHistoryView", "PositionRestore", "position_entry_view"]

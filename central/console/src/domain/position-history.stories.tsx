@@ -31,14 +31,14 @@ const ADJUSTMENT: Adjustment = {
 // Times in UTC: the story's times show in the browser's zone (no house clock here).
 function entry(id: string, kind: PositionEntryView["kind"], at: string, values: {
   box?: Box; depth?: number;
-  lights?: PositionEntryView["lighting"]["lights"]; profile?: { width: number; height: number };
+  lights?: PositionEntryView["lighting"]["lights"];
   refusal?: PositionEntryView["restore_refusal"]; turn?: PositionEntryView["made_for"]["turn"];
 } = {}): PositionEntryView {
   const fit: PositionEntryView["fit"] = { mode: "box", ...(values.box ?? OPENING) };
   return {
     entry_id: id, frame: FRAME, kind, number: 1, at, session_id: null, restored_from: null, fit,
     lighting: { ...LIVING_ROOM, mat_depth_mm: values.depth ?? 2.5, lights: values.lights ?? LIVING_ROOM.lights.slice(0, 2) },
-    made_for: { profile_px: values.profile ?? { width: 1920, height: 1080 }, turn: values.turn ?? 0, display_id: null },
+    made_for: { turn: values.turn ?? 0, display_id: null },
     restore_refusal: values.refusal ?? null,
   };
 }
@@ -82,14 +82,15 @@ export const NotKept: Story = {
     },
   },
 };
-/** Positions made for another screen size, before the Frame's profile changed: Restore says why it is refused. */
-export const OtherProfile: Story = {
+/** A Position kept when the Frame's screen size changed, before the box was the Frame's shape: it lists in
+ * its words, and it and the taller boxes before it restore like any other (a box is its own shape). */
+export const ScreenSizeChanged: Story = {
   args: {
     history: {
       ...KEPT,
       entries: [
-        entry("p1", "kept-profile-changed", "2026-10-13T20:30:00Z", { profile: { width: 3840, height: 2160 } }),
-        ...KEPT.entries.map((kept) => ({ ...kept, restore_refusal: "made_for_other_profile" as const })),
+        entry("p1", "kept-profile-changed", "2026-10-13T20:30:00Z", { box: { left: 0.3, top: 0, width: 0.4, height: 1 } }),
+        ...KEPT.entries,
       ],
     },
   },
@@ -114,10 +115,9 @@ export const TurnedScreen: Story = {
       ...KEPT,
       entries: [
         entry("t1", "kept-turn-changed", "2026-10-13T20:30:00Z",
-          { box: { left: 0.375, top: 0.375, width: 0.25, height: 0.25 }, profile: { width: 1080, height: 1920 }, turn: 90 }),
+          { box: { left: 0.375, top: 0.375, width: 0.25, height: 0.25 }, turn: 90 }),
         entry("t0", "kept-created", "2026-10-13T20:20:00Z",
-          { box: { left: 0.375, top: 0.375, width: 0.25, height: 0.25 }, profile: { width: 1080, height: 1920 },
-            refusal: "made_for_other_turn" }),
+          { box: { left: 0.375, top: 0.375, width: 0.25, height: 0.25 }, refusal: "made_for_other_turn" }),
       ],
     },
   },

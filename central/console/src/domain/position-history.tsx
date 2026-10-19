@@ -5,7 +5,7 @@ import type { PositionEntryKind, PositionEntryView, PositionHistoryView } from "
 import { refusalWords } from "../liveAdjustment.js";
 import { changedSummary, type HistoryDay, HistoryList, type HistoryRow } from "../patterns/history-list";
 import { unitWords } from "../patterns/units";
-import { countText, pixelSize } from "../timeWords.js";
+import { countText } from "../timeWords.js";
 import { inkWords, lightDetails, type PaperProfileChoice, profileWords } from "./frame-lighting/model";
 import type { PixelSize } from "./frame-position";
 import { boxPixels, screenOf, shapeWords } from "./position-box";
@@ -89,12 +89,10 @@ export function positionSummary(kind: PositionEntryKind, details: readonly Detai
 /** Every value of an entry: the box's left and top edges and its size in pixels of the screen as it
  * hung (the Pi's reported mode `size`, turned by the entry's turn; position-box.ts), or as shares of
  * the screen when no size is known, how it hung, the lighting (the mat's depth, each light's values,
- * the paper), the screen size it was made for, then (with a known size) the box as shares of the
- * screen. `names`: the room lights' names by id; `profiles`: the paper profiles on the list. */
+ * the paper), then (with a known size) the box as shares of the screen. `names`: the room lights' names by id; `profiles`: the paper profiles on the list. */
 export function positionDetails(entry: PositionEntryView, size: PixelSize | null = null,
   names: Readonly<Record<string, string>> = {}, profiles: readonly PaperProfileChoice[] = []): Detail[] {
   const { lighting } = entry;
-  const { width, height } = entry.made_for.profile_px;
   const box = { left: entry.fit.left ?? 0, top: entry.fit.top ?? 0, width: entry.fit.width ?? 1, height: entry.fit.height ?? 1 };
   const screen = screenOf(size === null ? null : [size.width, size.height], entry.made_for.turn);
   const shares = [
@@ -114,19 +112,15 @@ export function positionDetails(entry: PositionEntryView, size: PixelSize | null
     { label: "Paper whiteness", value: lighting.paper.whiteness.toFixed(2) },
     { label: "Ink density", value: inkWords(lighting.paper.ink_density) },
     { label: "Paper profile", value: profileWords(lighting.paper.profile, profiles) },
-    { label: "Made for", value: `${pixelSize(width, height)} px` },
     ...(placed === null ? [] : shares.map(({ label, value }) => ({ label: `${label} (share of the screen)`, value }))),
   ];
 }
 
-/** Restore's state for one entry: refused for another screen size, a screen hung another way (with
- * the way to turn it back) or display (Central's `restore_refusal`, in words), else offered only
+/** Restore's state for one entry: refused for a screen hung another way (with the way to turn it
+ * back) or another display (Central's `restore_refusal`, in words), else offered only
  * while the live adjustment runs. */
 export function restoreState(entry: PositionEntryView, adjustment: Adjustment, hardwareHref = ""): HistoryRow["restore"] {
-  const { width, height } = entry.made_for.profile_px;
   switch (entry.restore_refusal) {
-    case "made_for_other_profile":
-      return { disabled: true, reason: `Made for another screen size (${pixelSize(width, height)} px).` };
     case "made_for_other_turn":
       return {
         disabled: true,

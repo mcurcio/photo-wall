@@ -5,7 +5,7 @@
 Every trial runs on tests/test_node_calibration.py's rig (`setup_trial`): a Node Pi with node-f0 and
 node-f1 bound, both saved once by `save_position` at support.position's PORTRAIT_ON_WIDE (so each begins
 with one kept-saved entry). The Node's exchanges are real `NodeDisplay.exchange` calls.
-(1) Save appends kept-saved; (2) a profile change; (3) a change made outside Photo Wall; (4) what
+(1) Save appends kept-saved; (2) a turn, and an entry of another box; (3) a change made outside Photo Wall; (4) what
 the exchanges hand the Node; (5) Restore; (6) Restore's refusals; (7) the page and time; (8) kept and
 sent retention apart; (9) a deleted Frame's history; (10) one transaction.
 """
@@ -27,20 +27,17 @@ from central.fleet.position_history import (
     PositionEntryKind,
     PositionValues,
     TrialHanded,
-    profile_changed_record,
     saved_record,
 )
 from central.infra import position_history_store
 from central.infra.position_history_store import record_sent_in, write_position_in
-from central.transaction_locks import acquire_runtime_locks
 from central.tuning_history import bounds as retention
 from contracts.frame_lighting import FrameLighting
-from contracts.models import Calibration, FrameProfile, PositionBox
+from contracts.models import Calibration, PositionBox
 from contracts.node_calibration import parse_trial
 
 AUTH = {"Authorization": "Bearer " + ADMIN}
 DEEP = LIGHTING.model_copy(update={"mat_depth_mm": 3.0})
-PORTRAIT = {"width": 1080, "height": 1920}
 
 
 class Node:
@@ -120,21 +117,24 @@ def _see_display(registry, frame_id: str = "node-f0") -> UUID:
     return display
 
 
-def _entry(registry, *, frame_id: str = "node-f0", width: int = 1080, height: int = 1920,
-           display: UUID | None = None, fit=SKEWED, turn: int | None = None) -> UUID:
-    """An entry Photo Wall wrote at another time (another profile, turn or Display), as stored; `turn`
+def _entry(registry, *, frame_id: str = "node-f0", kind: str = "kept-saved", display: UUID | None = None,
+           fit=SKEWED, turn: int | None = None) -> UUID:
+    """An entry Photo Wall wrote at another time (another box, turn or Display), as stored; `turn`
     None: the Frame's turn now."""
     entry = uuid4()
-    _sql(registry, "INSERT INTO position_entries(id, frame_id, number, kind, at, fit, lighting, profile_width_px, "
-                   "profile_height_px, turn, display_id) SELECT %s, %s, COALESCE(max(number), 0) + 1, 'kept-saved', "
-                   "clock_timestamp(), %s, %s, %s, %s, COALESCE(%s, (SELECT turn FROM frames WHERE id=%s)), %s "
-                   "FROM position_entries WHERE frame_id=%s",
-         (entry, frame_id, fit.model_dump_json(), LIGHTING.model_dump_json(), width, height, turn, frame_id, display,
-          frame_id))
+    _sql(registry, "INSERT INTO position_entries(id, frame_id, number, kind, at, fit, lighting, turn, display_id) "
+                   "SELECT %s, %s, COALESCE(max(number), 0) + 1, %s, clock_timestamp(), %s, %s, "
+                   "COALESCE(%s, (SELECT turn FROM frames WHERE id=%s)), %s FROM position_entries WHERE frame_id=%s",
+         (entry, frame_id, kind, fit.model_dump_json(), LIGHTING.model_dump_json(), turn, frame_id, display, frame_id))
     return entry
 
 
-def test_save_appends_a_kept_entry_made_for_the_profile_and_the_display_seen(registry):
+def _turn(registry, frame_id: str, turn: int) -> None:
+    generation = _sql(registry, "SELECT generation FROM frames WHERE id=%s", (frame_id,))[0]["generation"]
+    registry.turn_frame(frame_id, turn, expected_generation=generation)
+
+
+def test_save_appends_a_kept_entry_made_for_the_turn_and_the_display_seen(registry):
     """(1) A new Frame's creation is its first kept entry, and the rig's first Save on it is one
     kept-saved entry, no unrecorded one. Mutation probe P3-no-append: no kept append in
     `write_position_in` -> no new kept-saved."""
@@ -148,34 +148,34 @@ def test_save_appends_a_kept_entry_made_for_the_profile_and_the_display_seen(reg
     newest = _history(registry)["entries"][0]
     assert (newest["kind"], newest["session_id"], newest["restored_from"]) == ("kept-saved", trial["trial_id"], None)
     assert PositionBox.model_validate(newest["fit"]) == SKEWED and FrameLighting.model_validate(newest["lighting"]) == DEEP
-    assert newest["made_for"] == {"profile_px": PORTRAIT, "turn": 0, "display_id": str(display)}
+    assert newest["made_for"] == {"turn": 0, "display_id": str(display)}
     assert newest["restore_refusal"] is None
 
 
-def test_a_profile_change_is_kept_and_older_entries_are_made_for_another_profile(registry):
-    """(2) Acceptance 2 on an unbound Frame (a bound one's profile opens only when its Display
-    changed), and Restore's 409 for an entry of another profile on a trial. Mutation probe
-    P3-profile-unchecked: drop the profile comparison -> the older entries may be restored."""
+def test_an_entry_kept_before_a_turn_is_refused_made_for_another_turn(registry):
+    """(2) fb-13: a box is fractions of the screen as it hangs, so after the Frame's turn the entry
+    kept before it is refused made_for_other_turn, and the turn's own entry is not."""
+    Node(registry)
+    before_turn = _history(registry)["entries"][0]
+    assert before_turn["kind"] == "kept-saved"
+    _turn(registry, "node-f0", 90)
+    turned, kept = _history(registry)["entries"][:2]
+    assert (turned["kind"], turned["made_for"]["turn"], turned["restore_refusal"]) == ("kept-turn-changed", 90, None)
+    assert (kept["entry_id"], kept["restore_refusal"]) == (before_turn["entry_id"], "made_for_other_turn")
+
+
+def test_an_old_entry_of_another_box_lists_and_restores_its_box_is_its_shape(registry):
+    """(2) fb-13: a box is its own shape, so an old entry of another box (a stored
+    kept-profile-changed one, still listed) made for this turn restores as it is. Mutation probe:
+    keep the deleted profile comparison as an always-true refusal -> the other box is refused."""
     node = Node(registry)
-    frame(registry, "spare")
-    for width, height in ((720, 1280), (1440, 2560)):
-        with registry.db.transaction() as conn:
-            acquire_runtime_locks(conn)
-            generation = conn.execute("SELECT generation FROM frames WHERE id='spare'").fetchone()["generation"]
-            registry.replace_frame_profile("spare", FrameProfile(width_px=width, height_px=height,
-                                                                 diagonal_inches=24),
-                                           expected_generation=generation, conn=conn)
-    newer, older, created = _history(registry, "spare")["entries"]
-    assert created["kind"] == "kept-created"
-    assert (newer["kind"], newer["made_for"]["profile_px"], newer["restore_refusal"]) == (
-        "kept-profile-changed", {"width": 1440, "height": 2560}, None)
-    assert (older["kind"], older["made_for"]["profile_px"], older["restore_refusal"]) == (
-        "kept-profile-changed", {"width": 720, "height": 1280}, "made_for_other_profile")
-    other = _entry(registry, width=720, height=1280)
-    assert _history(registry)["entries"][0]["restore_refusal"] == "made_for_other_profile"
-    with pytest.raises(NodeControlError) as refused:
-        node.restore(node.begin(), other)
-    assert (refused.value.code, refused.value.status) == ("made_for_other_profile", 409)
+    trial = node.begin()
+    tall = PositionBox(left=0.3, top=0.0, width=0.4, height=1.0)
+    old = _entry(registry, kind="kept-profile-changed", fit=tall)
+    listed = _history(registry)["entries"][0]
+    assert (listed["entry_id"], listed["kind"], listed["restore_refusal"]) == (str(old), "kept-profile-changed", None)
+    restored = node.restore(trial, old)
+    assert restored["calibration"]["fit"] == tall.model_dump(mode="json") and restored["restored_from"] == str(old)
 
 
 def test_a_change_made_outside_photo_wall_is_recorded_before_the_next_save(registry):
@@ -190,22 +190,7 @@ def test_a_change_made_outside_photo_wall_is_recorded_before_the_next_save(regis
     assert (saved["kind"], unrecorded["kind"], history["unrecorded_change"]) == ("kept-saved", "kept-unrecorded", False)
     assert FrameLighting.model_validate(unrecorded["lighting"]) == DEEP and unrecorded["session_id"] is None
     assert PositionBox.model_validate(unrecorded["fit"]) == PORTRAIT_ON_WIDE.fit  # the rig's saved fit
-    assert unrecorded["made_for"]["profile_px"] == PORTRAIT
-
-
-def test_a_profile_change_records_a_change_made_outside_photo_wall_first(registry):
-    """(3) Design rule 3 on the other kept write. Mutation probe P3-no-unrecorded(profile): the
-    profile change skips the unrecorded check -> no kept-unrecorded under kept-profile-changed."""
-    frame(registry, "spare")
-    _sql(registry, "UPDATE frames SET lighting=%s WHERE id='spare'", (DEEP.model_dump_json(),))
-    with registry.db.transaction() as conn:
-        acquire_runtime_locks(conn)
-        registry.replace_frame_profile("spare", FrameProfile(width_px=720, height_px=1280, diagonal_inches=24),
-                                       expected_generation=0, conn=conn)
-    changed, unrecorded, created = _history(registry, "spare")["entries"]
-    assert (changed["kind"], unrecorded["kind"], created["kind"]) == (
-        "kept-profile-changed", "kept-unrecorded", "kept-created")
-    assert FrameLighting.model_validate(unrecorded["lighting"]) == DEEP == FrameLighting.model_validate(changed["lighting"])
+    assert unrecorded["made_for"] == {"turn": 0, "display_id": None}
 
 
 def test_a_new_frame_records_its_creation_so_no_change_reads_as_made_outside(registry):
@@ -218,31 +203,26 @@ def test_a_new_frame_records_its_creation_so_no_change_reads_as_made_outside(reg
     PgRoomLights(registry.db, PgHouseLock()).remove_room_light("room")
     frame(registry, "spare")
     assert _history(registry, "spare")["unrecorded_change"] is False
-    with registry.db.transaction() as conn:
-        acquire_runtime_locks(conn)
-        registry.replace_frame_profile("spare", FrameProfile(width_px=720, height_px=1280, diagonal_inches=24),
-                                       expected_generation=0, conn=conn)
+    _turn(registry, "spare", 90)
     entries = _history(registry, "spare")["entries"]
-    assert [entry["kind"] for entry in entries] == ["kept-profile-changed", "kept-created"]
+    assert [entry["kind"] for entry in entries] == ["kept-turn-changed", "kept-created"]
     assert FrameLighting.model_validate(entries[1]["lighting"]).lights == ()
 
 
 def test_the_kept_write_takes_only_a_kept_kind_and_its_own_values(registry):
-    """The one kept Position write refuses what is not a Save or a profile change, a profile with
-    the wrong kind, and values that are not the calibration it stores; the Frame is untouched."""
+    """The one kept Position write refuses what is not a Save (a kept-profile-changed record too:
+    nothing writes it since fb-13) and values that are not the calibration it stores; the Frame is
+    untouched."""
     Node(registry)
     before = _sql(registry, "SELECT calibration, lighting, generation FROM frames WHERE id='node-f0'")
-    portrait = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
     saved = saved_record(PositionValues(SKEWED, DEEP), session_id=None, restored_from=None)
-    sent = replace(saved, kind=PositionEntryKind.SENT_DRAFT)
-    for record, calibration, profile, code in (
-            (sent, Calibration(fit=SKEWED), None, "position_history_kind"),
-            (saved, Calibration(fit=SKEWED), portrait, "position_history_kind"),
-            (profile_changed_record(PositionValues(SKEWED, DEEP)), Calibration(fit=SKEWED), None,
+    for record, calibration, code in (
+            (replace(saved, kind=PositionEntryKind.SENT_DRAFT), Calibration(fit=SKEWED), "position_history_kind"),
+            (replace(saved, kind=PositionEntryKind.KEPT_PROFILE_CHANGED), Calibration(fit=SKEWED),
              "position_history_kind"),
-            (saved, Calibration(fit=SHIFTED), None, "position_history_values")):
+            (saved, Calibration(fit=SHIFTED), "position_history_values")):
         with registry.db.transaction() as conn, pytest.raises(ValueError, match=code):
-            write_position_in(conn, "node-f0", record, calibration=calibration, profile=profile)
+            write_position_in(conn, "node-f0", record, calibration=calibration)
     assert _sql(registry, "SELECT calibration, lighting, generation FROM frames WHERE id='node-f0'") == before
 
 
@@ -418,10 +398,7 @@ def test_kept_and_sent_entries_are_trimmed_apart(registry, monkeypatch):
 def test_a_deleted_frame_takes_its_history(registry):
     """(9) Acceptance 9 (the schema's cascade)."""
     frame(registry, "spare")
-    with registry.db.transaction() as conn:
-        acquire_runtime_locks(conn)
-        registry.replace_frame_profile("spare", FrameProfile(width_px=720, height_px=1280, diagonal_inches=24),
-                                       expected_generation=0, conn=conn)
+    _turn(registry, "spare", 90)
     assert len(_sql(registry, "SELECT id FROM position_entries WHERE frame_id='spare'")) == 2
     with _client(registry) as client:
         assert client.delete("/v1/operator/frames/spare", headers=AUTH).status_code == 200

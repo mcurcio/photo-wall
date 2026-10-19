@@ -6754,3 +6754,26 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
   `full_screen` gives every Frame the default 1080 x 1920, 40-inch output and the one landscape case
   passes its `frame_outputs` explicitly; the other planner tests keep `FrameProfile` as a local shape
   holder for fb-14.
+## frame-box fb-13 (Position history without the profile)
+
+- **Deleting the `/profile` route breaks two tests no bead owns.**
+  `tests/test_display_changed_readiness.py` (`_put_profile`, the two
+  `test_another_display_keeps_the_frame_not_ready_until_position_is_committed_again` cases) still
+  corrects the profile through `PUT /v1/operator/frames/{id}/profile`, and
+  `tests/test_display_picture_settings.py::test_075_rewrites_the_stored_configurations_and_offers_so_central_still_plans`
+  re-runs migrations 102 and 104 on a fully migrated database, whose SQL reads
+  `position_entries.profile_width_px/height_px`, gone after 107 (its prep line has to add both
+  columns back, as it drops `turn`). Both are RED on the branch after fb-13 until fb-14 (or the
+  end fix) takes them: the display-changed test's profile step goes, and the 075 test re-adds the
+  two columns before re-running 102/104.
+- **`central/console/src/domain/position-history.stories.tsx` is not in fb-13's owned list**, but
+  `MadeForView.profile_px` and `made_for_other_profile` leaving the contract stops it typechecking.
+  fb-13 changed it: `OtherProfile` became `ScreenSizeChanged` (a stored kept-profile-changed entry of
+  another box, restorable), and its two baselines were deleted. The new story's PNGs were not drawn:
+  Docker answered 500 on this host, so CI's `console-catalog` leg fails "no baseline" for
+  `domain-positionhistory--screen-size-changed` until someone runs
+  `python3 scripts/catalog_baselines.py -k positionhistory`. The other PositionHistory stories lose
+  only the "Made for" detail, which is under Details (closed in the catalog).
+- **Stale words left in files fb-13 does not own:** `central/fleet/node_calibration.py:313`
+  (docstring lists `made_for_other_profile`) and `central/infra/tuning_history_store.py:67`
+  (docstring: refusal "against the Frame's profile"). Both are comments only.
