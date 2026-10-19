@@ -6574,3 +6574,24 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
 - **Shows videos is a `SettingRow` of kind `content`** (it changes what plays, not equipment): no
   "acts on" note; "Default: On" with Reset when off. The UX designer review of the Hardware tab
   (fb-11) should confirm the row's place (first in the section, above the profile facts).
+
+## fb-4 (the console's box: rule mirror, words and BoxEditor)
+
+- **No UX designer agent proposed the layout before the build.** The page asks for one; this lane
+  had no tool to start an agent, so the implementer applied docs/design-language.md and the
+  console-ux skill itself and kept RectangleEditor's drawing (sizes, colours, the thicker top edge,
+  the aside, the phone limits). The handles: a 14-unit accent square at each corner and a 24 x 8 bar
+  at each edge's middle; each takes the pointer over 44 units (an edge's band runs the whole edge
+  between the corners'); Tab reaches the drawing (arrows move) and then each handle, edges before
+  corners (arrows resize, an edge on its own axis), each a named button with `aria-keyshortcuts`.
+  The end review's UX designer should judge the five stories (Default, Turned, Small, WholeScreen,
+  Disabled) and, in fb-7, the Position tab.
+- **`tests/test_console_routes_r4.py` (not owned) declares `position-box.ts`'s import of
+  `placement.js`**, as 9f705daf did for position-on-screen.ts; without it the layer test is red.
+  fb-7 deletes the position-on-screen.ts row.
+- **DL §4 has no BoxEditor entry yet** (docs/design-language.md, not owned): fb-15 (docs) adds it and
+  drops RectangleEditor's, with the accent allow list's `patterns/rectangle-editor` (§9) becoming
+  `patterns/box-editor`.
+- **`boxSizeMm` refuses an invalid box ("frame_box") before the null size.** Central cannot ask
+  `frame_size_mm` about a box that is no PositionBox, so the parity test refuses such a box first on
+  both sides; the stub's comment did not say.

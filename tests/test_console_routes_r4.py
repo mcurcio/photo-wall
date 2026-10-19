@@ -813,6 +813,9 @@ FRAME_PAGE_IMPORTS = {
     # A Position's pixels and words, the editor's and History's one home: the screen as it hangs,
     # where a refused rectangle would lie and the nearest one that fits, by the same rule.
     "position-on-screen.ts": {"placement.js"},
+    # The Position as a box (frame box run fb-4): its pixels, moves and words by the same rule;
+    # replaces position-on-screen.ts in fb-7.
+    "position-box.ts": {"placement.js"},
     "frame-overview.tsx": {"PrecedenceExplanation.jsx", "ReadinessNotice.jsx", "readinessRecovery.js",
                            "frameIds.js"},
     # The Frame profile's note compares it with the screen as it hangs (render redesign S5).

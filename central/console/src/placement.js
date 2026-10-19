@@ -129,15 +129,40 @@ export function fillScreen(screen, aspect) {
  * @returns {Placement}
  */
 export function placeBox(box, screen) {
-  void box;
-  void screen;
-  throw new Error("frame box bead fb-4");
+  checkBox(box);
+  const [screenWidth, screenHeight] = screen;
+  if (!(side(screenWidth) && side(screenHeight))) throw new Error("placement_screen");
+  const [x, width] = edges(box.left, box.width, screenWidth);
+  const [y, height] = edges(box.top, box.height, screenHeight);
+  return { x, y, width, height };
+}
+
+/** How far a box's right or bottom edge may pass 1 in floating point (Python's BOX_SLACK). */
+const BOX_SLACK = 1e-9;
+
+/** Error("frame_box") as contracts/frame_fit.py `FrameBox` refuses a box. */
+function checkBox(box) {
+  const { left, top, width, height } = box;
+  if (!([left, top, width, height].every(finite)
+        && left >= 0 && top >= 0 && width > 0 && height > 0
+        && left + width <= 1 + BOX_SLACK && top + height <= 1 + BOX_SLACK)) {
+    throw new Error("frame_box");
+  }
+}
+
+/** One axis of `placeBox` (Python's `_edges`): the first pixel and the pixel count of the span
+ * `start` to `start + length` on `count` pixels, each edge rounding half up on its own. */
+function edges(start, length, count) {
+  const first = Math.min(count - 1, halfUp(start * count));
+  const end = Math.max(first + 1, Math.min(count, halfUp((start + length) * count)));
+  return [first, end - first];
 }
 
 /**
  * The box's physical [width, height] in millimetres: contracts/models.py `frame_size_mm`,
  * [box.width * W, box.height * H] of `displayMm` (the Display's picture area as built) turned by
- * `turn` (`hanging`); null when `displayMm` is null.
+ * `turn` (`hanging`); null when `displayMm` is null. Throws Error("frame_box") as `placeBox` for
+ * any box (Central's box is a PositionBox before it has a size), then as `hanging` for a known size.
  *
  * @param {Box} box
  * @param {[number, number] | null} displayMm as built
@@ -145,8 +170,8 @@ export function placeBox(box, screen) {
  * @returns {[number, number] | null}
  */
 export function boxSizeMm(box, displayMm, turn) {
-  void box;
-  void displayMm;
-  void turn;
-  throw new Error("frame box bead fb-4");
+  checkBox(box);
+  if (displayMm === null) return null;
+  const [width, height] = hanging(displayMm, turn);
+  return [box.width * width, box.height * height];
 }
