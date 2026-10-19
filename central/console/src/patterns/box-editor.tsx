@@ -9,9 +9,9 @@ import { cn } from "../ui/cn";
  * move it, any of its four edges or four corners to resize it (the opposite edges stay put; width
  * and height change independently), or, with the drawing focused, the arrow keys to report a step.
  * It holds no geometry rule: every move and size is the caller's to accept (domain/frame-position.tsx,
- * by domain/position-box.ts). Replaces patterns/rectangle-editor.tsx in bead fb-7.
+ * by domain/position-box.ts).
  *
- * Drawn as RectangleEditor was: the screen in the surface colour on a sunken well, the box in the
+ * Drawn on a sunken well: the screen in the surface colour, the box in the
  * text colour and named inside when there is room, the display's own top edge thicker. Its eight
  * handles are drawn in the accent (what you act on): a square at each corner, a short bar at each
  * edge's middle; each takes the pointer over 44 units (an edge's along the whole edge between the

@@ -9,8 +9,7 @@ import type { Turn } from "./turn-words";
  * its physical size. The one home of these numbers and their words, so the Position editor
  * (frame-position.tsx), its History (position-history.tsx) and the Hardware tab's Frame facts say a
  * box alike. The pixel rule is src/placement.js `placeBox` (Central's contracts/frame_fit.py
- * `place_box`); this module adds none. Pure: no React, no request. Replaces position-on-screen.ts
- * in bead fb-7.
+ * `place_box`); this module adds none. Pure: no React, no request.
  *
  * Moves and resizes work on the box's pixels: the editor's steps are whole pixels of the screen,
  * and a box built back from whole pixels (`boxFromPixels`) places on exactly those pixels, so what

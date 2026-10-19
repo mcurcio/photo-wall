@@ -39,9 +39,9 @@ from test_console_frame_page_browser import (
     OVERTAKEN,
     PRESENTED,
     SAVED_X,
-    _across,
     _bar,
-    _centre_field,
+    _left,
+    _left_field,
     _left_x,
     _move,
     _seed,
@@ -189,7 +189,7 @@ def test_a_tried_and_a_kept_position_are_listed_and_restore_puts_the_kept_one_ba
 
         seen = _history_reads(page)
         field = _move(page, 2)
-        expect(field).to_have_value(_across(SAVED_X + 20))
+        expect(field).to_have_value(_left(SAVED_X + 20))
         # A row says what differs from the row below it: here the moved left edge alone.
         expect(_rows(page, TRIED).first).to_contain_text("Left and top")
         expect(_rows(page, TRIED).first).not_to_contain_text("Size")
@@ -209,8 +209,8 @@ def test_a_tried_and_a_kept_position_are_listed_and_restore_puts_the_kept_one_ba
         _rows(page, KEPT).last.get_by_role("button", name="Restore", exact=True).click()
         expect(_depth(page)).to_have_value("0")
         open_frame(page, FRAME, "position")
-        field = _centre_field(page)   # the tab was left: Exact values opens again
-        expect(field).to_have_value(_across(SAVED_X))
+        field = _left_field(page)
+        expect(field).to_have_value(_left(SAVED_X))
         page.wait_for_timeout(600)  # the loop's next exchanges: the restored draft stays what the Pi is handed
         assert (_left_x(sessions.row["calibration"]), sessions.row["lighting"]["mat_depth_mm"]) == (SAVED_X, 0)
         _done(page)

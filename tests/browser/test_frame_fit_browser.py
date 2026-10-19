@@ -1,17 +1,18 @@
 """The Position tab's Frame fit (render redesign S5, run ledger .claude/runs/render-planes/s5-page.md
-B2; frame box run fb-6): the picture is one box on its screen as it hangs, which the rectangle
-editor still edits by its centre and width at the box's own shape until bead fb-7 (owner,
-2026-10-17: "We can make the position pure crop and scale"); the screen's turn is the Frame's own,
-set on the Hardware tab, never the Position's. No Fit choice, no rotation, no angle, no trim.
+B2; frame box run, .claude/runs/frame-box/page.md fb-6, fb-7): the picture is one box on its screen
+as it hangs, its left, top, width and height set independently (owner, 2026-10-19: "I need to be
+able to set width and height independently, along with the position of that box on the display");
+the screen's turn is the Frame's own, set on the Hardware tab, never the Position's. No Fit choice,
+no rotation, no angle, no trim, and no Frame profile: the box is the Frame's shape.
 
 The live session is test_console_frame_page_browser.py's fake Central (`FakeSessions`: Central's
 trial rules, Save through the real Registry's Save CAS), so Save keeps the box and leaves the
 Frame profile as it was, exactly as Central does.
 
-Mutation probes: send the fit with the old form's keys (useDraft.js `updateHandles`) -> the
-draft-shape case fails; offer Done only for a changed draft (live-preview-editor.tsx
-`unconfirmed`) -> the check-again case fails; step by the Frame profile instead of 1920 x 1080
-with no reported size (frame-position.tsx `FALLBACK_SIZE`) -> the no-size case fails.
+Mutation probes: send the fit with other keys (useDraft.js `fitOf`) -> the draft-shape case fails;
+offer Done only for a changed draft (live-preview-editor.tsx `unconfirmed`) -> the check-again case
+fails; step by the Frame profile instead of the 16:9 stand-in with no known screen size
+(frame-position.tsx `STAND_IN`) -> the no-size case fails.
 """
 
 import os
@@ -23,7 +24,6 @@ from operator_harness import operator_server, sign_in
 from playwright.sync_api import expect
 from test_console_frame_page_browser import (
     FRAME,
-    HALF,
     PRESENTED,
     SAVED_X,
     FakeSessions,
@@ -72,8 +72,8 @@ def _wait_for_draft(page, fake, after, check):
     raise AssertionError(_sent(fake, after))
 
 
-def test_the_tab_edits_one_rectangle_with_no_fit_choice_rotation_or_trim(page, registry, sessions):
-    """The draft is the rectangle and its base, nothing else: no corners, rotation, trim or brightness."""
+def test_the_tab_edits_one_box_with_no_fit_choice_rotation_or_trim(page, registry, sessions):
+    """The draft is the box and its base, nothing else: no corners, rotation, trim or brightness."""
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
@@ -84,8 +84,7 @@ def test_the_tab_edits_one_rectangle_with_no_fit_choice_rotation_or_trim(page, r
         expect(position.get_by_role("slider", name="Angle", exact=True)).to_have_count(0)
         expect(position.get_by_role("radio", name="90°", exact=True)).to_have_count(0)
         expect(position).to_contain_text("This screen hangs upright.")
-        position.get_by_role("button", name="Exact values", exact=True).click()
-        expect(position).not_to_contain_text(re.compile(r"trim|rotation|corner", re.I))
+        expect(position).not_to_contain_text(re.compile(r"trim|rotation|profile", re.I))
         expect(position.get_by_label(re.compile(r"^Trim"))).to_have_count(0)
 
         after = len(sessions.sent)
@@ -97,18 +96,17 @@ def test_the_tab_edits_one_rectangle_with_no_fit_choice_rotation_or_trim(page, r
         assert draft["fit"]["mode"] == "box" and _left_x(draft) == SAVED_X + 10
 
 
-def test_the_width_typed_in_pixels_sends_its_share_of_the_screen(page, registry, sessions):
+def test_the_width_typed_in_pixels_sends_its_share_of_the_screen_and_keeps_the_rest(page, registry, sessions):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         position = _position(open_frame(page, FRAME, "position"))
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         after = len(sessions.sent)
-        position.get_by_label("Width in pixels", exact=True).fill("1000")  # 80 to 1080 px across: it stays on the screen
+        position.get_by_label("Width", exact=True).fill("1000")  # 100 to 1100 px across: it stays on the screen
         draft = _wait_for_draft(page, sessions, after, lambda draft: draft["fit"]["width"] != 0.5)
-        assert draft["fit"]["width"] == 1000 / 1920
-        assert abs(draft["fit"]["left"] + draft["fit"]["width"] / 2 - (SAVED_X + HALF) / 1920) < 1e-9, draft
-        expect(position.get_by_role("slider", name="Width", exact=True)).to_have_value("1000")
+        assert draft["fit"] == {"mode": "box", "left": SAVED_X / 1920, "top": 0.25, "width": 1000 / 1920,
+                                "height": 0.5}, draft
 
 
 def test_a_saved_box_keeps_the_frames_own_profile(page, registry, sessions):
@@ -159,20 +157,25 @@ def test_a_frame_to_check_again_is_kept_by_done_with_no_change(page, registry, s
         expect(_bar(page)).to_contain_text("No changes to keep.")
 
 
-def test_with_no_reported_output_size_a_step_is_a_pixel_of_a_common_screen_not_the_profile(
-        page, registry, sessions):
-    """The Frame profile is the Frame's shape, never the screen's size: while the Pi reports no
-    size, a step is a pixel of 1920 x 1080 and the tab says so (here its output last reported
-    disconnected). Mutation probe: fall back to the profile (1600 x 1200 here) -> the 10 px step
-    moves the centre 10/1600 of the width."""
+def test_with_no_known_screen_size_the_drawing_stands_in_at_16_9_never_the_profile(page, registry, sessions):
+    """The Frame profile is no screen size: while neither the Pi's report nor a Display seen on the
+    Output gives one (Central's `screen_px` is None), the drawing is a 16:9 stand-in, a note says the
+    numbers are shares of the screen, no pixels or shape are claimed and a step is 1/1,920 of its
+    width. Mutation probe: stand in by the profile (1600 x 1200 here) -> the 10 px step moves the
+    left edge 10/1600 of the width -> RED."""
     _seed(registry, profile=FOUR_THREE)
     with registry.db.transaction() as conn:
-        conn.execute("UPDATE outputs SET observation = jsonb_set(observation, '{connected}', 'false')")
+        conn.execute("""UPDATE outputs SET observation = observation || '{"width_px": 0, "height_px": 0}'""")
+    assert next(frame for frame in registry.inventory().frames if frame.id == FRAME).screen_px is None
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         position = _position(open_frame(page, FRAME, "position"))
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
-        expect(position).to_contain_text("The Pi has not reported its display's size")
+        expect(position).to_contain_text("the drawing stands in at 16:9")
+        expect(position).to_contain_text("shares of the screen, not its pixels")
+        expect(position.get_by_role("group", name="This Frame", exact=True)).not_to_contain_text("pixels,")
+        drawn = position.get_by_role("group", name="Picture position", exact=True).bounding_box()
+        assert drawn["width"] > drawn["height"], drawn
         saved = _saved(registry).fit.left
         after = len(sessions.sent)
         _move(page)

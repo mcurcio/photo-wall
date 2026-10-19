@@ -6659,3 +6659,35 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
   `frame_profiles_in` stays on the ports for fb-14 to delete.
 - **`large_frame` compares the diagonal from mm with `>=` exactly**; a Frame stated at exactly the
   threshold (40 in from 25.4 x 40 mm) can land a hair under it in floating point. No test depends on it.
+
+## fb-7 (the console's Position editor on the box)
+
+- **Files outside fb-7's list had to change to stay green or meet the acceptance grep** (each the
+  smallest edit): `tests/test_console_routes_r4.py` (frame-position.tsx's declared imports become
+  `{placement.js}`; the deleted position-on-screen.ts's row goes: the test requires each declared
+  module to exist and import exactly its set), `central/console/src/domain/position-box.ts` and
+  `patterns/box-editor.tsx` (comment lines naming position-on-screen.ts and RectangleEditor, which
+  the acceptance grep finds), `central/console/src/domain/position-history.stories.tsx` (its
+  Adjustment literal named `refused` and `sessionFit`, which go), `tests/browser/test_position_history_browser.py`
+  (imports the renamed helpers `_left`, `_left_field`), `tests/browser/test_fit_board_browser.py`
+  and `tests/browser/capture_photo_5a_evidence.py` (they typed "Width in pixels" under "Exact values";
+  the box needs Width and Height typed apart), `tests/test_position_box_fit.py` (its grep no longer
+  excludes frame-position.tsx and its stories: both are clean now).
+- **liveAdjustment.js's value-refusal path is gone** (fb-6's "left for fb-7"): `REFUSED_VALUE`,
+  `Problem.refused`, the returned `refused` and `sessionFit`. `change` is useDraft's `changeFit`
+  (a whole box); useDraft's `updateHandles` and `rectangleOf` are gone.
+- **The Hardware tab's FrameDraftFit still sends the profile** (frame-page.tsx `wholeProfile`): the
+  draft analysis needs it until fb-10 changes `FrameDraft`; the Position tab itself takes no profile.
+  The Hardware tab's empty fit is now `{mode: "box"}` (fb-6's note).
+- **A typed value that would run the box off its screen is taken, not refused**: its size is first
+  held to the screen, then the box moved flush with the edge (`boxFromPixels`); the field then shows
+  the value taken. "Centre" stays (keeps the size, centres the box).
+- **No UX designer agent proposed the tab's layout before the build** (this lane had no tool to start
+  one): the drawing with, beside or below it, "This Frame" facts (Shape, Size), Step and the nudge
+  pad, Left and Top, Width and Height, Fill the screen and Centre; the unknown-size note above. The
+  end review's UX designer should judge the five FramePosition stories.
+- **docs/design-language.md (B4 row, the "Not moved" row, the accent allow list) and docs/runbook.md
+  still describe the rectangle editor, `place` and `position_off_screen`**: fb-15's.
+- **Local browser runs on an overloaded host (load average about 146) timed out tests** (a
+  Hardware-tab turn test among them): of seven full runs of the touched browser files, five passed,
+  one had 3 timeouts and one an unattributed one. CI judges.

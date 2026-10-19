@@ -5,7 +5,7 @@ import { isBound } from "./join.js";
 import { LIGHTING_REFUSAL_WORDS } from "./domain/frame-lighting/model";
 import { POSITION_RESTORE_WORDS, TRIAL_REFUSAL_WORDS } from "./domain/trial-refusals";
 import { beginBody, draftBody } from "./trialBodies";
-import { draftKey, fitOf, rectangleOf, useDraft } from "./useDraft.js";
+import { draftKey, fitOf, useDraft } from "./useDraft.js";
 import { useMutate } from "./useMutate.js";
 
 /*
@@ -42,9 +42,9 @@ import { useMutate } from "./useMutate.js";
  * REFUSALS. Most pass: the page keeps the session and keeps trying, and the words go away once
  * a later answer succeeds (the Pi not having shown the latest change goes once it has). A few
  * stop it until the operator answers (STOPPING: someone saved meanwhile; the Frame lost its
- * Pi): the session is ended and the page waits for Revert. A refusal of the value itself
- * (REFUSED_VALUE) is not tried again: the session keeps the change before it and the words stay
- * until the draft changes.
+ * Pi): the session is ended and the page waits for Revert. No value is refused for itself: the
+ * Position is a box, which always lies on its screen, and the lighting is checked by its own
+ * bounds before it is drafted.
  *
  * RESTORE (`restore`) loads a Position history entry (historyApi.js) into the session: it waits for a
  * loop request in flight like Done, names the session's sequence (tried once more after a
@@ -82,11 +82,6 @@ const STOPPING = new Set([
   "trial_baseline_revision_changed", "calibration_revision_conflict", "calibration_trial_baseline_changed",
   "trial_frame_unbound",
 ]);
-// The refusals of a value itself: sending the same draft again would be refused again, so it is not
-// sent again; the Pi keeps the change before it, and the words stay until the draft changes. None
-// since the Position is a box, which always lies on its screen (frame box run, fb-6); bead fb-7
-// removes this path with the rectangle editor that reads `refused` and `sessionFit`.
-const REFUSED_VALUE = new Set();
 const NOT_PRESENTED = "trial_latest_not_presented";
 // Begin is refused while another session for this Frame runs (another window, or this page's
 // own a moment ago); Central ends an abandoned one within seconds, so it is tried again.
@@ -114,7 +109,7 @@ export function useVisible() {
 /**
  * @typedef {import("./useDraft.js").Trying} Draft   `{fit, lighting}`: the Frame fit (its box) and lighting being tried
  * @typedef {import("./useDraft.js").Fit} Fit
- * @typedef {import("./useDraft.js").RectangleView} RectangleView
+ * @typedef {import("./useDraft.js").Box} Box
  * @typedef {import("./useDraft.js").Lighting} Lighting
  * @typedef {"checking"|"not_admitted"|"unavailable"|"unbound"|"idle"|"connecting"|"waiting"
  *           |"stopped"|"sending"|"shown"} Phase
@@ -122,25 +117,19 @@ export function useVisible() {
  *   adjustment (Central's capability `not_admitted`); `waiting`: another session for
  *   this Frame is running; `stopped`: a refusal stopped it until Revert; `sending`: the latest
  *   change is not shown yet; `shown`: the Pi has presented it.
- * @typedef {{words: string, code: string, stops: boolean, refused?: string}} Problem
- *   `code` is Central's, for a Details disclosure only. `refused`: the draft (its `draftKey`) whose
- *   value Central refused (REFUSED_VALUE): it is not sent again, and the problem goes once the draft
- *   is another.
+ * @typedef {{words: string, code: string, stops: boolean}} Problem
+ *   `code` is Central's, for a Details disclosure only.
  */
 
 /**
  * @param {{frameId: string, frame: object|undefined, open: boolean}} props
- * @returns {{draft: Draft, change: (patch: Partial<RectangleView>) => {valid: boolean, reason?: string},
+ * @returns {{draft: Draft, change: (box: Box) => {valid: boolean, reason?: string},
  *            changeLighting: (lighting: Lighting) => void, dirty: boolean, phase: Phase, error: Problem|null, busy: boolean,
  *            ack: {revision: number, at: number}|null, latest: number|null,
  *            done: () => Promise<boolean>, revert: () => Promise<void>, retry: () => void,
  *            restore: (entryId: string) => Promise<{ok: true}|{ok: false, error: string}>,
- *            savedAt: number|null, leftAt: number|null, refused: boolean,
- *            sessionFit: RectangleView|null}}
- *   `change` takes the rectangle editor's patch (useDraft.js's adapter, until bead fb-7).
- *   `refused`: Central refused the draft's value (REFUSED_VALUE), so it is not sent and the session
- *   still shows `sessionFit`, the fit of the session as served in the adapter's rectangle view (null
- *   with no session).
+ *            savedAt: number|null, leftAt: number|null}}
+ *   `change` takes the Position editor's whole box (useDraft.js `changeFit`).
  *   `latest` is the number of the change last made (null with no session); `ack` the newest
  *   one the Pi presented and when (Central's clock, seconds), so Done is offered only when
  *   they match. `savedAt` and `leftAt` are this browser's clock (epoch seconds, shown only,
@@ -149,7 +138,7 @@ export function useVisible() {
  */
 export function useFrameAdjustment({ frameId, frame, open }) {
   const committed = frame?.calibration ?? null;
-  const { trying: draft, base, dirty, updateHandles: change, changeFit, changeLighting, clearDraft, adopt } =
+  const { trying: draft, base, dirty, changeFit, changeLighting, clearDraft, adopt } =
     useDraft(frameId, committed, frame?.lighting ?? null);
   const bound = isBound(frame);
   const generation = frame?.generation ?? null;
@@ -187,11 +176,8 @@ export function useFrameAdjustment({ frameId, frame, open }) {
     state.current.received = performance.now();
     setRow(next);
   }, []);
-  const fail = useCallback((code, sent = null) => {
-    const problem = {
-      words: refusalWords(code), code, stops: STOPPING.has(code),
-      ...(sent !== null && REFUSED_VALUE.has(code) ? { refused: sent } : {}),
-    };
+  const fail = useCallback((code) => {
+    const problem = { words: refusalWords(code), code, stops: STOPPING.has(code) };
     state.current.error = problem;
     setError(problem);
   }, []);
@@ -219,8 +205,6 @@ export function useFrameAdjustment({ frameId, frame, open }) {
       operation, expected_sequence: before.sequence, ...(candidate ?? {}),
     };
     const request = () => apiWrite(begin ? path : `${path}/${before.trial_id}`, { method: "POST", body });
-    // The draft this request carries, should Central refuse its value.
-    const sent = candidate === undefined ? null : draftKey(current.draft);
     let result;
     try {
       result = operation === "save" ? await mutate(request) : await request();
@@ -243,7 +227,7 @@ export function useFrameAdjustment({ frameId, frame, open }) {
         return null;
       }
       const code = result.error ?? `http_${result.status}`;
-      fail(code, sent);
+      fail(code);
       if (begin) current.waitUntil = performance.now() + RETRY_MS;
       if (STOPPING.has(code) && current.row?.state === "active") {
         end(current.row);
@@ -258,8 +242,7 @@ export function useFrameAdjustment({ frameId, frame, open }) {
     const passing = current.error;
     const shown = result.data.presented_sequence === result.data.sequence &&
       result.data.presented_sha256 === result.data.candidate_sha256;
-    const still = passing?.refused !== undefined && passing.refused === draftKey(current.draft);
-    if (passing !== null && !passing.stops && !still && (passing.code !== NOT_PRESENTED || shown)) {
+    if (passing !== null && !passing.stops && (passing.code !== NOT_PRESENTED || shown)) {
       current.error = null;
       setError(null);
     }
@@ -303,8 +286,7 @@ export function useFrameAdjustment({ frameId, frame, open }) {
         await send("renew", payload());
         return;
       }
-      const drafted = draftKey(current.draft);
-      if (drafted !== draftKey(session.calibration, session.lighting) && current.error?.refused !== drafted) {
+      if (draftKey(current.draft) !== draftKey(session.calibration, session.lighting)) {
         if (performance.now() < current.editAt) return;
         await send("edit", payload());
         return;
@@ -371,9 +353,7 @@ export function useFrameAdjustment({ frameId, frame, open }) {
   }, [fly]);
 
   const active = row?.state === "active";
-  // A draft whose value Central refused is not sent: the latest change is still the session's.
-  const refused = error?.refused !== undefined && error.refused === draftKey(draft);
-  const changed = active && !refused && draftKey(draft) !== draftKey(row.calibration, row.lighting);
+  const changed = active && draftKey(draft) !== draftKey(row.calibration, row.lighting);
   const presented = active && row.presented_sequence != null && row.presented_sha256 === row.candidate_sha256;
   const latest = active ? row.sequence + (changed ? 1 : 0) : null;
   const ack = presented ? { revision: row.presented_sequence, at: row.presented_at ?? null } : null;
@@ -451,12 +431,8 @@ export function useFrameAdjustment({ frameId, frame, open }) {
     if (capability !== "native_trial") setRetries((count) => count + 1);
   }, [capability]);
 
-  // The fit the session shows (the Pi presents it once `ack` is the latest): a refused draft's
-  // way back.
-  const sessionFit = active ? rectangleOf(fitOf(row.calibration)) : null;
-
   return {
-    draft, change, changeLighting, dirty, phase, error, busy, ack, latest, savedAt, leftAt, refused, sessionFit,
+    draft, change: changeFit, changeLighting, dirty, phase, error, busy, ack, latest, savedAt, leftAt,
     done, revert, retry, restore,
   };
 }

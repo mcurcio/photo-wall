@@ -26,8 +26,6 @@ const ADJUSTMENT: Adjustment = {
   restore: async () => ({ ok: true }),
   savedAt: null,
   leftAt: null,
-  refused: false,
-  sessionFit: null,
 };
 
 // Times in UTC: the story's times show in the browser's zone (no house clock here).
