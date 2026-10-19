@@ -42,6 +42,7 @@ from console_tasks import (
 )
 from operator_harness import operator_server
 from playwright.sync_api import expect
+from support.frames import frame_create
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -101,14 +102,10 @@ def _wide_frame_with_scene(registry):
     from test_operator_showrunner_browser import OUTPUT, SOURCE, _runtime, _seed_source
     from test_registry import enroll
 
-    from central.registry import FrameCreate
     from central.runtime import Contribution, Scene
-    from contracts.models import FrameProfile
 
     identity, _key, _request = enroll(registry, count=1)
-    registry.create_frame(FrameCreate(id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=480,
-                                      height_mm=270,
-                                      profile=FrameProfile(width_px=192, height_px=108, diagonal_inches=24)))
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
     registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
     save_position(registry, FRAME)
     now = registry.clock.utc()

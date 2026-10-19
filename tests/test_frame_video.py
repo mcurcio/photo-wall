@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 from support.frame_media import seed_variant
+from support.frames import frame_create
 from support.migrations import migrate_before
 from support.photo_pools import photo, seed_pool
 from support.position import save_position
@@ -22,12 +23,9 @@ from test_wall_plan_tracer import prepare
 from central.app import create_app
 from central.coordination import Coordinator
 from central.displays.model import Readiness
-from central.registry import FrameCreate
 from central.runtime import Contribution, Scene
-from contracts.models import FrameProfile
 
 DISPLAY = (1920, 1080)
-WIDE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 POOL = "library:1"
 
 
@@ -37,7 +35,7 @@ def _client(registry) -> TestClient:
 
 def _ready_frame(registry) -> None:
     player, _, _ = enroll(registry, count=1, size=DISPLAY)
-    registry.create_frame(FrameCreate(id="hall", width_mm=530, height_mm=300, profile=WIDE))
+    registry.create_frame(frame_create("hall"))
     registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0)
     save_position(registry, "hall")
 
@@ -126,9 +124,8 @@ def before_105(registry) -> None:
 
 
 def test_105_carries_each_profiles_video_onto_its_frame(registry):
-    registry.create_frame(FrameCreate(id="still-only", width_mm=530, height_mm=300,
-                                      profile=WIDE.model_copy(update={"video": False})))
-    registry.create_frame(FrameCreate(id="moving", width_mm=530, height_mm=300, profile=WIDE))
+    registry.create_frame(frame_create("still-only", video=False))
+    registry.create_frame(frame_create("moving"))
     with registry.db.transaction() as conn:   # a profile stored before `video` was written: shows videos
         conn.execute("UPDATE frames SET profile = profile - 'video' WHERE id='moving'")
     before_105(registry)

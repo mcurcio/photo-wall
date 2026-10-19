@@ -17,6 +17,7 @@ from itertools import combinations
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from support.frame_outputs import frame_outputs_of
+from support.frames import Screen
 from support.house_time import UTC_HOUSE
 from support.key_content_builders import face, measured
 from support.position import LIGHTING
@@ -29,15 +30,15 @@ from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import MeasureFailed
 from central.wall_plan.order import KeptStill, PhotoShowing, PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
-from contracts.models import AfterEnd, FrameProfile, Layer, OutputBinding, Variant
+from contracts.models import AfterEnd, Layer, OutputBinding, Variant
 from contracts.on_screen import Extent, on_screen_extent, replaces_kept_at
 from contracts.photo_crop import CENTRED
 
 PROFILES = {
-    "wide": FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24),
-    "tall": FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24),
-    "four_three": FrameProfile(width_px=1440, height_px=1080, diagonal_inches=24),
-    "square": FrameProfile(width_px=1080, height_px=1080, diagonal_inches=24),
+    "wide": Screen(1920, 1080, inches=24),
+    "tall": Screen(1080, 1920, inches=24),
+    "four_three": Screen(1440, 1080, inches=24),
+    "square": Screen(1080, 1080, inches=24),
 }
 SIZES = {"wide": (3840, 2160), "tall": (2160, 3840), "four_three": (4000, 3000),
          "three_four": (3000, 4000), "two_three": (2400, 3600), "square": (3000, 3000)}

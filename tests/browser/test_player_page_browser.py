@@ -42,6 +42,7 @@ from operator_harness import (
     run_page_clock,
 )
 from playwright.sync_api import expect
+from support.frames import frame_create
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_node_acceptance import Witnesses
 from test_node_boot import boot_service, claim_for, cold_setup, environment, publish_deployment
@@ -53,8 +54,6 @@ from central.fleet.node_commands import NodeCommands, OperatorReboot
 from central.fleet.node_ingest import NodeIngest
 from central.fleet.node_observations import NodeObservations
 from central.fleet.node_sessions import NodeControlConfig
-from central.registry import FrameCreate
-from contracts.models import FrameProfile
 from contracts.node_boot import NodeBootRequestV2
 from contracts.node_display import DisplayExchange, encode_display_exchange
 from contracts.node_lifecycle import parse_stage_command
@@ -501,9 +500,7 @@ def _reboot(page):
 
 def test_the_reboot_dialog_names_frames_and_a_recorded_reboot_is_requested(page, registry):
     box = Box(registry)
-    registry.create_frame(FrameCreate(id="lobby", surface_id="wall", x_mm=100, y_mm=100, width_mm=400,
-                                      height_mm=300, profile=FrameProfile(width_px=1920, height_px=1080,
-                                                                          diagonal_inches=24)))
+    registry.create_frame(frame_create("lobby", x_mm=100, y_mm=100))
     registry.bind("lobby", box.player_id, "HDMI-A-1", expected_generation=0)
     with _node_server(registry) as origin:
         sent = _reboot_posts(page)

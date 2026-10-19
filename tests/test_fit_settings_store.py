@@ -7,6 +7,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
+from support.frames import frame_create
 from support.measured_photos import measure
 from support.photo_pools import photo, seed_pool
 from support.position import save_position
@@ -19,13 +20,10 @@ from central.coordination import Coordinator
 from central.db import ProcessTransactionClock
 from central.infra.fit_settings_store import PgFitSettings
 from central.photo_fit_routes import SETTINGS_PATH
-from central.registry import FrameCreate
 from central.runtime import Contribution, Scene
 from central.wall_plan.fit_settings import FIT_SETTING_RANGES, FitSettings
 from central.wall_plan.selection import SceneSelection
-from contracts.models import FrameProfile
 
-WIDE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 POOL = "library:1"
 
 
@@ -70,7 +68,7 @@ def test_a_row_that_no_longer_validates_reads_as_the_defaults(registry):
 
 def _one_wide_frame(registry) -> None:
     player, _, _ = enroll(registry)
-    registry.create_frame(FrameCreate(id="frame-wide", width_mm=530, height_mm=300, profile=WIDE))
+    registry.create_frame(frame_create("frame-wide"))
     registry.bind("frame-wide", player["player_id"], "HDMI-A-1", expected_generation=0)
     save_position(registry, "frame-wide")
 

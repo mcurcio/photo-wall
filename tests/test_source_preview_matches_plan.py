@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 from media_queue import RecordingMediaQueue
+from support.frames import frame_create
 from support.position import save_position
 from test_registry import enroll
 
@@ -47,11 +48,10 @@ from central.photo_library.model import (
 )
 from central.photo_library.ports import CheckFailed, CheckStep
 from central.photo_library.views import ConnectionWrite
-from central.registry import FrameCreate
 from central.runtime import Contribution, Scene
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceNameService
-from contracts.models import Calibration, FrameProfile, PositionBox
+from contracts.models import Calibration, PositionBox
 from contracts.time import ManualClock
 from media.immich import ImmichClient, LibraryLimits
 from media.library_checks import LibraryChecks
@@ -69,8 +69,9 @@ ANNA_AND_BEN = {"anna-ben-1", "anna-ben-2", "anna-ben-3"}
 GARDEN = {"garden-1", "garden-2"}
 # Frames sized to the fixture's photos (96 x 64, the edited one 64 x 96), so each clears the fit
 # rule's pixel floor (roadmap 5a rule 2) and a 3:2 photo fills 16:9 within the 35 % crop limit.
-LANDSCAPE = FrameProfile(width_px=64, height_px=36, diagonal_inches=24)
-PORTRAIT = FrameProfile(width_px=36, height_px=64, diagonal_inches=24)
+# Each Frame's box in pixels, in the screen's top-left corner.
+LANDSCAPE = (64, 36)
+PORTRAIT = (36, 64)
 
 
 def _tool(name: str) -> str:
@@ -160,20 +161,17 @@ class Wall:
         return {row["asset_id"]: self.labels.get(row["upstream_id"], row["upstream_id"])
                 for row in rows}
 
-    def frames(self, *frame_ids: str, profile: FrameProfile = LANDSCAPE) -> None:
+    def frames(self, *frame_ids: str, box_px: tuple[int, int] = LANDSCAPE) -> None:
         player, _, _ = enroll(self.registry, count=len(frame_ids))
         for index, frame_id in enumerate(frame_ids):
-            wide = profile.width_px > profile.height_px
-            self.registry.create_frame(FrameCreate(id=frame_id, width_mm=500 if wide else 300,
-                                                   height_mm=300 if wide else 500,
-                                                   profile=profile))
+            self.registry.create_frame(frame_create(frame_id))
             self.registry.bind(frame_id, player["player_id"], f"HDMI-A-{index + 1}",
                                expected_generation=0)
             # Follow-ups B1: the fit rule needs the Frame output (its picture on the enrolled
-            # 1920 x 1080 Output), so each Frame's Position is a box of the profile's own
+            # 1920 x 1080 Output), so each Frame's Position is a box of `box_px`
             # pixels in the screen's top-left corner and the fixture's 96 x 64 photos hold it.
             save_position(self.registry, frame_id, Calibration(fit=PositionBox(
-                width=profile.width_px / 1920, height=profile.height_px / 1080)))
+                width=box_px[0] / 1920, height=box_px[1] / 1080)))
 
     def show(self, frame_ids, source_refs):
         runtime = self.coordinator.runtime
@@ -317,7 +315,7 @@ def test_an_edited_photo_plays_as_immich_shows_it(wall, immich_library):
     shown = wall.shown(draft)
     assert set(shown.values()) == {"edited"}
     source = wall.names.save_draft(draft, "edited")["source_ref"]
-    wall.frames("edited-frame", profile=PORTRAIT)
+    wall.frames("edited-frame", box_px=PORTRAIT)
     projection = wall.show(("edited-frame",), (source,))
     assert {request.asset_id for request in projection.acquisitions} == set(shown)
     [job] = wall.prepare_all(projection.acquisitions)

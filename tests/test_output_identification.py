@@ -1,6 +1,7 @@
 """Central persistence, eligibility and delivery for output identification."""
 
 from fastapi.testclient import TestClient
+from support.frames import frame_body
 from test_registry import ADMIN, enroll, hello
 
 from central.app import create_app
@@ -91,10 +92,7 @@ def test_identify_output_supersedes_and_stops_when_bound_or_disconnected(registr
         assert disconnected.status_code == 409
         assert disconnected.json() == {"error": "output_disconnected"}
 
-        assert client.post("/v1/operator/frames", headers=operator, json={
-            "id": "portrait", "width_mm": 300, "height_mm": 500,
-            "profile": {"width_px": 1080, "height_px": 1920, "diagonal_inches": 24},
-        }).status_code == 201
+        assert client.post("/v1/operator/frames", headers=operator, json=frame_body("portrait")).status_code == 201
         active = client.post(f"{url}/HDMI-A-1/identify", headers=operator)
         assert active.status_code == 200
         assert client.put("/v1/operator/frames/portrait/binding", headers=operator, json={

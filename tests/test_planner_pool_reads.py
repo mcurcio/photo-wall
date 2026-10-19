@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from support.frame_outputs import frame_outputs_of
+from support.frames import Screen
 from support.house_time import UTC_HOUSE
 from support.key_content_builders import face, measured
 from support.photo_pools import photo as library_photo
@@ -38,12 +39,12 @@ from central.wall_plan.order import (
     WallHistory,
 )
 from central.wall_plan.selection import SceneSelection
-from contracts.models import FrameProfile, OutputBinding, Variant
+from contracts.models import OutputBinding, Variant
 from contracts.on_screen import Extent
 
 PROFILES = {
-    "wide": FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24),
-    "tall": FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24),
+    "wide": Screen(1920, 1080, inches=24),
+    "tall": Screen(1080, 1920, inches=24),
 }
 SIZES = {"wide": (3840, 2160), "tall": (2160, 3840), "four_three": (4000, 3000),
          "square": (3000, 3000)}

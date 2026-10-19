@@ -6,14 +6,14 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 from support.house_time import UTC_HOUSE, set_house, window_program
-from test_operator_frames import ADMIN, AUTH, _portrait
+from test_operator_frames import ADMIN, AUTH, _frame
 
 from central.app import create_app
 from central.runtime import Child, Contribution, Scene
 
 
 def test_the_runtime_read_serves_protection_and_program_windows(registry):
-    _portrait(registry)
+    _frame(registry)
     set_house(registry.db, UTC_HOUSE)
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     runtime = app.state.coordinator.runtime

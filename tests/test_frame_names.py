@@ -9,16 +9,14 @@ Mutation probe (P-case): make the uniqueness case-sensitive (the index on `name`
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+from support.frames import frame_body
 from test_operator_frames import ADMIN, AUTH
 
 from central.app import create_app
 
-PROFILE = {"width_px": 1080, "height_px": 1920, "diagonal_inches": 24}
-
 
 def _create(client, frame_id: str, **fields) -> dict:
-    response = client.post("/v1/operator/frames", headers=AUTH, json={
-        "id": frame_id, "width_mm": 300, "height_mm": 500, "profile": PROFILE, **fields})
+    response = client.post("/v1/operator/frames", headers=AUTH, json=frame_body(frame_id, **fields))
     assert response.status_code == 201, response.text
     return response.json()
 
@@ -39,11 +37,9 @@ def test_frames_take_the_smallest_free_name_and_rename_refuses_a_taken_one(regis
         for taken in ("frame 1", "STUDY", "Frame 2"):
             refused = client.put("/v1/operator/frames/hall/name", headers=AUTH, json={"name": taken})
             assert (refused.status_code, refused.json()) == (409, {"error": "name_taken"}), taken
-        clash = client.post("/v1/operator/frames", headers=AUTH, json={
-            "id": "cellar", "name": "hall", "width_mm": 300, "height_mm": 500, "profile": PROFILE})
+        clash = client.post("/v1/operator/frames", headers=AUTH, json=frame_body("cellar", name="hall"))
         assert (clash.status_code, clash.json()) == (409, {"error": "name_taken"})
-        again = client.post("/v1/operator/frames", headers=AUTH, json={
-            "id": "hall", "width_mm": 300, "height_mm": 500, "profile": PROFILE})
+        again = client.post("/v1/operator/frames", headers=AUTH, json=frame_body("hall"))
         assert (again.status_code, again.json()) == (409, {"error": "frame_exists"})
 
         missing = client.put("/v1/operator/frames/nowhere/name", headers=AUTH, json={"name": "X"})

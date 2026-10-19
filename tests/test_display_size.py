@@ -12,6 +12,7 @@ Frame outputs (`frame_outputs_in`).
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+from support.frames import frame_create
 from test_display_identity import (
     ADMIN,
     AUTH,
@@ -27,8 +28,7 @@ from test_display_identity import (
 from central.app import create_app
 from central.displays.model import screen_px
 from central.infra.display_store import frame_outputs_in
-from central.registry import FrameCreate
-from contracts.models import Calibration, FrameProfile, frame_output
+from contracts.models import Calibration, frame_output
 from contracts.node_output import DisplayMode, OutputReport, encode_output_report
 
 P1080 = DisplayMode(1920, 1080, 60000, preferred=True)
@@ -111,8 +111,7 @@ def _enrolled_at_0_by_0(registry, player_id: str) -> None:
 def test_a_frame_whose_output_enrolled_at_0_by_0_takes_its_displays_preferred_mode(registry):
     pi = enroll_pi(registry, "pi-a")
     frame = "kitchen"
-    registry.create_frame(FrameCreate(id=frame, width_mm=500, height_mm=300,
-                                      profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)))
+    registry.create_frame(frame_create(frame))
     _bind(registry, frame, pi, "HDMI-A-1")
     _enrolled_at_0_by_0(registry, pi)
     with registry.db.transaction() as conn:

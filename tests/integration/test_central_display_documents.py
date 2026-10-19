@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 
 from integration.bus_servers import hub_server, leaf_connections, node_server, until
+from support.frames import frame_create
 from test_display_identity import enroll_pi
 
 from appliance.display_host.bus import DISPLAY_COMPONENT, DISPLAY_SLICE, DISPLAY_VERSION
@@ -35,8 +36,7 @@ from central.infra.display_store import (
 from central.infra.frame_lighting_store import PgFrameLighting
 from central.infra.node_link_store import PgLinkStores
 from central.infra.node_links import NodeLinks
-from central.registry import FrameCreate, Registry
-from contracts.models import FrameProfile
+from central.registry import Registry
 from contracts.node_link import CENTRAL_WRITER, Pipe, account_id
 from contracts.node_output import (
     BEST_DETECTED,
@@ -81,8 +81,7 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
     player = enroll_pi(registry, SERIAL)
     with database.transaction() as conn:   # one enrolled Output only: HDMI-A-2 has no `outputs` row
         conn.execute("DELETE FROM outputs WHERE player_id=%s AND output_id='HDMI-A-2'", (player,))
-    registry.create_frame(FrameCreate(id="kitchen", width_mm=300, height_mm=500,
-                                      profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)))
+    registry.create_frame(frame_create("kitchen"))
     registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0)
     hub = hub_server(tmp_path, [SERIAL])
     node = node_server(tmp_path, SERIAL, hub)

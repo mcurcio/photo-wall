@@ -18,13 +18,11 @@ from operator_harness import operator_server
 from playwright.sync_api import expect
 from psycopg.types.json import Jsonb
 from public_media import public_photo
+from support.frames import Screen, frame_create
 from support.measured_photos import measure_all
 from support.position import save_position
 from test_operator_showrunner_browser import OUTPUT, SOURCE, _seed_source
 from test_registry import enroll
-
-from central.registry import FrameCreate
-from contracts.models import FrameProfile
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -34,14 +32,13 @@ pytestmark = pytest.mark.skipif(
 FRAME = "hall-wide"
 # 16:9, and small enough that every photo below holds more pixels than it (the fit rule's floor):
 # its Display reports this size too, so its Frame output (follow-ups B1) is 192 x 108.
-WIDE = FrameProfile(width_px=192, height_px=108, diagonal_inches=24)
+WIDE = Screen(192, 108)
 
 
 def _wide_frame(registry):
     """FRAME, 16:9, bound to a Pi's output with its position saved (a Scene may target it)."""
     identity, _key, _request = enroll(registry, count=1)
-    registry.create_frame(FrameCreate(id=FRAME, surface_id="wall", x_mm=100, y_mm=100,
-                                      width_mm=480, height_mm=270, profile=WIDE))
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
     with registry.db.transaction() as conn:
         conn.execute("UPDATE outputs SET observation = observation || %s WHERE player_id=%s",
                      (Jsonb({"width_px": WIDE.width_px, "height_px": WIDE.height_px}),
@@ -95,8 +92,7 @@ def test_a_frame_whose_screen_size_is_not_known_says_so_instead_of_judging(page,
 
     from central.runtime import Contribution, Scene
 
-    registry.create_frame(FrameCreate(id="attic", surface_id="wall", x_mm=0, y_mm=0,
-                                      width_mm=480, height_mm=270, profile=WIDE))
+    registry.create_frame(frame_create("attic", x_mm=0, y_mm=0))
     now = registry.clock.utc()
     wide = public_photo(number=1, width=1920, height=1080, captured_at=now)
     queue = _photos(registry, wide)

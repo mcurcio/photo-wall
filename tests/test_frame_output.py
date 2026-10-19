@@ -11,6 +11,7 @@ of the seen Display's size.
 from __future__ import annotations
 
 from psycopg.types.json import Jsonb
+from support.frames import frame_create
 from support.position import save_position
 from test_display_identity import _bind, enroll_pi
 from test_display_size import _sized
@@ -20,11 +21,8 @@ from central.db import ProcessTransactionClock
 from central.infra.display_store import frame_outputs_in
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.installation_models import FrameOutput
-from central.registry import FrameCreate
-from contracts.models import Calibration, FrameProfile, PositionBox, frame_output
+from contracts.models import Calibration, PositionBox, frame_output
 
-LANDSCAPE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
-PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 # A centred box half the screen's width and height: a half-size mat opening.
 OPENING = Calibration(fit=PositionBox(left=0.25, top=0.25, width=0.5, height=0.5))
 
@@ -39,19 +37,13 @@ def test_the_frame_output_follows_the_position_not_the_display():
     assert frame_output(OPENING, (1920, 1080), 0) == (960, 540)
 
 
-def _frame(registry, frame_id: str, profile: FrameProfile) -> None:
-    wide = profile.width_px > profile.height_px
-    registry.create_frame(FrameCreate(id=frame_id, width_mm=500 if wide else 300,
-                                      height_mm=300 if wide else 500, profile=profile))
-
-
 def test_every_frame_reads_its_frame_output_by_frame_id(registry):
     """A bound Frame with a reported Output reads its picture's pixels; a Frame whose Output
     reported 0 x 0 and an unbound Frame read None for both; ordered by frame id."""
     player, _key, _request = enroll(registry, count=2)
-    _frame(registry, "c-lounge", LANDSCAPE)
-    _frame(registry, "a-hall", PORTRAIT)
-    _frame(registry, "b-attic", LANDSCAPE)
+    registry.create_frame(frame_create("c-lounge"))
+    registry.create_frame(frame_create("a-hall"))
+    registry.create_frame(frame_create("b-attic"))
     registry.bind("c-lounge", player["player_id"], "HDMI-A-1", expected_generation=0)
     registry.bind("b-attic", player["player_id"], "HDMI-A-2", expected_generation=0)
     save_position(registry, "c-lounge", OPENING)
@@ -77,7 +69,7 @@ def test_a_turned_frames_box_reads_its_frame_output_on_the_screen_as_it_hangs(re
     turn: the screen is 2160 x 3840, so its Frame output is 2160 x 1215 and its turn is the Frame's
     (frames.turn)."""
     player, _key, _request = enroll(registry, count=1, size=(3840, 2160))
-    _frame(registry, "lounge", LANDSCAPE)
+    registry.create_frame(frame_create("lounge"))
     registry.bind("lounge", player["player_id"], "HDMI-A-1", expected_generation=0)
     generation = next(frame for frame in registry.inventory().frames if frame.id == "lounge").generation
     registry.turn_frame("lounge", 90, expected_generation=generation)
@@ -98,7 +90,7 @@ def test_a_frame_reads_its_videos_setting_and_its_size_from_its_display(registry
     its box's share of the seen Display's picture area (950 x 540 mm here: a box half as wide and
     high is 475 x 270 mm); a Display that states no size gives none."""
     pi = enroll_pi(registry, "pi-a")
-    _frame(registry, "kitchen", LANDSCAPE)
+    registry.create_frame(frame_create("kitchen"))
     _bind(registry, "kitchen", pi, "HDMI-A-1")
     save_position(registry, "kitchen", OPENING)
     registry.set_frame_video("kitchen", False)

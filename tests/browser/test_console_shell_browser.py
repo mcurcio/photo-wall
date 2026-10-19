@@ -50,6 +50,7 @@ from operator_harness import (
 )
 from photo_seed import connected, library_of
 from playwright.sync_api import expect
+from support.frames import frame_create
 from support.position import PORTRAIT_ON_WIDE, save_position
 from test_operator_showrunner_browser import (
     INVALID_FRAME,
@@ -60,9 +61,6 @@ from test_operator_showrunner_browser import (
     _seed_source,
 )
 from test_registry import ADMIN, enroll
-
-from central.registry import FrameCreate
-from contracts.models import FrameProfile
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -75,7 +73,6 @@ CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
 SAMPLES = json.loads(
     (Path(__file__).parents[2] / "central/console/src/routeSamples.json").read_text())
 SAMPLE_FRAME = "sample-frame"  # the frame id in the Wall's sample paths
-PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
 NARROW = {"width": 390, "height": 844}
 
 
@@ -100,9 +97,7 @@ def _expect_on(page, section):
 
 
 def _frame(registry, frame_id, *, x_mm=100):
-    registry.create_frame(FrameCreate(
-        id=frame_id, surface_id="wall", x_mm=x_mm, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(frame_id, x_mm=x_mm, y_mm=100))
 
 
 def _bound_commissioned(registry, frame_id, *, x_mm=100, commissioned=True):

@@ -44,29 +44,25 @@ from operator_harness import (
     sign_in,
 )
 from playwright.sync_api import expect
+from support.frames import frame_create
 from test_registry import ADMIN, enroll
 
 from central.content_catalog.catalog import device_id_for_serial
 from central.fleet.node_sessions import NodeControlConfig
-from central.registry import FrameCreate
 from central.runtime import Contribution, Scene
 from central.runtime_store import RuntimeStore
-from contracts.models import FrameProfile
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
     reason="set PHOTO_WALL_BROWSER_TESTS=1 and install Playwright Chromium",
 )
 
-LANDSCAPE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 
 
 def _placed_frame(registry, frame_id):
     # A frame with a distinct (non-origin) position so it renders on the plan and
     # is selectable by identity, rather than being routed to the Unplaced tray.
-    registry.create_frame(FrameCreate(
-        id=frame_id, surface_id="wall", x_mm=100, y_mm=100,
-        width_mm=400, height_mm=300, profile=LANDSCAPE))
+    registry.create_frame(frame_create(frame_id, x_mm=100, y_mm=100))
 
 
 def _port(output_id):
@@ -357,9 +353,7 @@ def test_the_second_output_of_a_bound_player_is_bindable_and_stored(page, regist
     identity, _, _ = enroll(registry, count=2)
     player_id = identity["player_id"]
     _placed_frame(registry, "left")
-    registry.create_frame(FrameCreate(
-        id="right", surface_id="wall", x_mm=600, y_mm=100,
-        width_mm=400, height_mm=300, profile=LANDSCAPE))
+    registry.create_frame(frame_create("right", x_mm=600, y_mm=100))
     registry.bind("left", player_id, "HDMI-A-1", expected_generation=0)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
@@ -397,9 +391,7 @@ def test_a_chosen_output_that_vanishes_on_a_poll_is_cleared_and_announced(page, 
     identity, _, _ = enroll(registry, count=1)
     player_id = identity["player_id"]
     _placed_frame(registry, "mine")
-    registry.create_frame(FrameCreate(
-        id="theirs", surface_id="wall", x_mm=600, y_mm=100,
-        width_mm=400, height_mm=300, profile=LANDSCAPE))
+    registry.create_frame(frame_create("theirs", x_mm=600, y_mm=100))
     with operator_server(registry.db, registry.clock) as origin:
         pause_page_clock(page, registry.clock.utc())
         sign_in(page, origin)
@@ -806,9 +798,7 @@ def _two_bound(registry, *, live_run_on=None):
     identity, _, _ = enroll(registry, count=2)
     player_id = identity["player_id"]
     _placed_frame(registry, "left")
-    registry.create_frame(FrameCreate(
-        id="right", surface_id="wall", x_mm=600, y_mm=100,
-        width_mm=400, height_mm=300, profile=LANDSCAPE))
+    registry.create_frame(frame_create("right", x_mm=600, y_mm=100))
     registry.bind("left", player_id, "HDMI-A-1", expected_generation=0)
     registry.bind("right", player_id, "HDMI-A-2", expected_generation=0)
     if live_run_on is not None:
@@ -1019,9 +1009,7 @@ def test_the_fleet_pages_never_scroll_sideways_at_390_px(page, registry):
     long_id = "reception-" + "north-wall-left-of-the-main-entrance-" * 2 + "panel"
     identity, _, _ = enroll(registry, count=2)
     _two_bound(registry)
-    registry.create_frame(FrameCreate(
-        id=long_id, surface_id="wall", x_mm=100, y_mm=900,
-        width_mm=400, height_mm=300, profile=LANDSCAPE))
+    registry.create_frame(frame_create(long_id, x_mm=100, y_mm=900))
     page.set_viewport_size({"width": 390, "height": 844})
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "hardware")

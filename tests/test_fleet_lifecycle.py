@@ -6,16 +6,15 @@ from uuid import UUID
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from psycopg.types.json import Jsonb
+from support.frames import frame_create
 
 from central.content_catalog.catalog import device_id_for_serial
 from central.registry import (
     Enrollment,
-    FrameCreate,
     OutputReport,
     RegistryError,
     enrollment_message,
 )
-from contracts.models import FrameProfile
 
 SERIAL = "abcdef1234567890"
 DEVICE_ID = device_id_for_serial(SERIAL)
@@ -76,9 +75,7 @@ def test_bound_retirement_refusal_does_not_create_a_device_tombstone(registry) -
         conn.execute("INSERT INTO outputs(player_id,output_id,observation) VALUES(%s,%s,%s)",
                      (PLAYER_ID, "HDMI-A-1", Jsonb({"output_id": "HDMI-A-1",
                                                     "width_px": 1920, "height_px": 1080})))
-    registry.create_frame(FrameCreate(
-        id="lifecycle-frame", width_mm=300, height_mm=200,
-        profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)))
+    registry.create_frame(frame_create("lifecycle-frame"))
     registry.bind("lifecycle-frame", PLAYER_ID, "HDMI-A-1", expected_generation=0)
     with pytest.raises(RegistryError, match="player_bound"):
         registry.retire(PLAYER_ID)

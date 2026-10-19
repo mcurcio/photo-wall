@@ -9,6 +9,7 @@ from __future__ import annotations
 import time
 
 from psycopg.types.json import Jsonb
+from support.frames import frame_create
 from support.key_content_builders import key_content
 from support.photo_pools import library_of, photo, seed_pool
 from support.position import PORTRAIT_ON_WIDE, save_position
@@ -18,19 +19,13 @@ from central.db import ProcessTransactionClock
 from central.infra.fit_analysis_store import PgFitAnalysisReader
 from central.photo_library.model import InPool
 from central.photo_library.ports import CheckComplete, CheckStep
-from central.registry import FrameCreate
 from central.wall_plan.fit_analysis import CONTENT_SAMPLE, FitAnalysisRequest, FitSelection, analyse
 from central.wall_plan.fit_settings import FitSettings
-from contracts.models import FrameProfile
 
 PHOTOS = 50_000
 STEP = 1_000
 SIZES = ((4000, 3000), (3000, 4000), (6000, 4000), (3840, 2160), (2160, 3840), (1600, 900),
          (4000, 4000), (1080, 1920), (8000, 2000), (5472, 3648))
-PROFILES = (FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24),
-            FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24),
-            FrameProfile(width_px=1440, height_px=1080, diagonal_inches=20),
-            FrameProfile(width_px=1080, height_px=1080, diagonal_inches=20))
 
 
 def _wall(registry) -> None:
@@ -39,10 +34,7 @@ def _wall(registry) -> None:
         for output in range(2):
             index = 2 * pi + output
             frame_id = f"frame-{index}"
-            profile = PROFILES[index % len(PROFILES)]
-            # Millimetres in the profile's own orientation (a Frame and its profile agree).
-            registry.create_frame(FrameCreate(id=frame_id, width_mm=profile.width_px // 4,
-                                              height_mm=profile.height_px // 4, profile=profile))
+            registry.create_frame(frame_create(frame_id))
             registry.bind(frame_id, player["player_id"], f"HDMI-A-{output + 1}",
                           expected_generation=0)
             save_position(registry, frame_id, PORTRAIT_ON_WIDE)

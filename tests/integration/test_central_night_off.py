@@ -23,6 +23,7 @@ from typing import Any
 from fastapi.testclient import TestClient
 from integration.bus_servers import hub_server, leaf_connections, node_server, until
 from node.display.test_display_power_methods import Clock, Curtain, Display, ddc
+from support.frames import frame_create
 from support.house_time import LONDON, at, set_house
 from test_display_identity import ADMIN, AUTH, enroll_pi
 
@@ -40,8 +41,7 @@ from central.infra.display_store import (
 from central.infra.frame_lighting_store import PgFrameLighting
 from central.infra.node_link_store import PgLinkStores
 from central.infra.node_links import NodeLinks
-from central.registry import FrameCreate, Registry
-from contracts.models import FrameProfile
+from central.registry import Registry
 from contracts.node_link import Pipe, account_id
 from contracts.node_output import InForceKind, Power, PowerResult, decode_output_report
 from contracts.time import ManualClock
@@ -91,8 +91,7 @@ def test_the_pi_keeps_night_off_while_central_is_away(database, tmp_path):
     registry = Registry(database, ManualClock(FOUR_PM), lighting=PgFrameLighting(LUT_RECIPE_ID))
     set_house(database, LONDON)
     player = enroll_pi(registry, SERIAL)
-    registry.create_frame(FrameCreate(id="bedroom", width_mm=300, height_mm=500,
-                                      profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)))
+    registry.create_frame(frame_create("bedroom"))
     registry.bind("bedroom", player, OUTPUT, expected_generation=0)
     with database.transaction() as conn:   # Night off on every Frame (the seed chose the Frames there were)
         conn.execute("""UPDATE night_off SET settings = jsonb_set(settings, '{frames}', '{"kind": "all-frames"}')""")

@@ -4,6 +4,7 @@ the analysis answers through `POST /v1/operator/photo-fit/analysis`."""
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+from support.frames import frame_create
 from support.measured_photos import measure_all
 from support.photo_pools import fixture_connection, library_of, photo, seed_pool
 from support.position import save_position
@@ -17,11 +18,7 @@ from central.infra.fit_analysis_store import PgFitAnalysisReader
 from central.photo_fit_routes import ANALYSIS_PATH
 from central.photo_library.model import InPool, SourceQuery
 from central.photo_library.ports import CheckComplete, CheckStep
-from central.registry import FrameCreate
 from central.wall_plan.fit_analysis import FitSelection
-from contracts.models import FrameProfile
-
-WIDE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 
 
 def _client(registry) -> TestClient:
@@ -34,7 +31,7 @@ def _reader(registry) -> PgFitAnalysisReader:
 
 def _wide_frame(registry, frame_id: str = "hall") -> None:
     player, _, _ = enroll(registry, count=1)
-    registry.create_frame(FrameCreate(id=frame_id, width_mm=530, height_mm=300, profile=WIDE))
+    registry.create_frame(frame_create(frame_id))
     registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
     save_position(registry, frame_id)
 
@@ -128,11 +125,11 @@ def test_a_frame_draft_is_judged_by_its_box_alone_and_an_unbound_frame_is_unsize
     unbound Frame (no known screen) is listed in `unsized` and has no answer. A draft carrying a
     profile is refused (no such field)."""
     pi = enroll_pi(registry, "pi-a")
-    registry.create_frame(FrameCreate(id="lounge", width_mm=530, height_mm=300, profile=WIDE))
+    registry.create_frame(frame_create("lounge"))
     _bind(registry, "lounge", pi, "HDMI-A-1")
     save_position(registry, "lounge")
     _sized(registry, "pi-a", "HDMI-A-1", (950, 540))
-    registry.create_frame(FrameCreate(id="attic", width_mm=530, height_mm=300, profile=WIDE))
+    registry.create_frame(frame_create("attic"))
     seed_pool(registry, "family:1", (photo("tall", taken_at=900, width=1200, height=1350),
                                      photo("clip", taken_at=901, width=640, height=720,
                                            kind="video")))

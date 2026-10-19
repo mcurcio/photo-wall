@@ -11,13 +11,10 @@ from central.runtime import Contribution, Runtime, Scene
 def bound_portrait_frame(registry, frame_id: str = "left") -> None:
     """A portrait Frame bound full screen to a 1080 x 1920 Output: its Frame output is known, so
     photos can be authored onto it (frame box run fb-8)."""
+    from support.frames import frame_create
     from test_registry import enroll
 
-    from central.registry import FrameCreate
-    from contracts.models import FrameProfile
-
-    registry.create_frame(FrameCreate(id=frame_id, width_mm=300, height_mm=500,
-        profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)))
+    registry.create_frame(frame_create(frame_id))
     player, _, _ = enroll(registry, count=1, size=(1080, 1920))
     registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
 

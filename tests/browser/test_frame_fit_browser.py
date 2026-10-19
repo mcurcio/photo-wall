@@ -35,16 +35,11 @@ from test_console_frame_page_browser import (
 )
 
 from central.displays.model import Readiness
-from contracts.models import FrameProfile
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
     reason="set PHOTO_WALL_BROWSER_TESTS=1 and install Playwright Chromium",
 )
-
-# A 4:3 Frame: its profile is neither the screen's size nor its shape.
-FOUR_THREE = FrameProfile(width_px=1600, height_px=1200, diagonal_inches=24)
-
 
 @pytest.fixture
 def sessions(page, registry):
@@ -162,8 +157,11 @@ def test_with_no_known_screen_size_the_drawing_stands_in_at_16_9_never_the_profi
     numbers are shares of the screen, no pixels or shape are claimed and a step is 1/1,920 of its
     width. Mutation probe: stand in by the profile (1600 x 1200 here) -> the 10 px step moves the
     left edge 10/1600 of the width -> RED."""
-    _seed(registry, profile=FOUR_THREE)
+    _seed(registry)
     with registry.db.transaction() as conn:
+        # A 4:3 profile, neither the screen's size nor its shape, so a stand-in by it shows (until
+        # fb-14 drops the profile).
+        conn.execute("""UPDATE frames SET profile = profile || '{"width_px": 1600, "height_px": 1200}'""")
         conn.execute("""UPDATE outputs SET observation = observation || '{"width_px": 0, "height_px": 0}'""")
     assert next(frame for frame in registry.inventory().frames if frame.id == FRAME).screen_px is None
     with operator_server(registry.db, registry.clock) as origin:

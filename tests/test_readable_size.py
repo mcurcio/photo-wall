@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import pytest
 from support.frame_outputs import frame_outputs_of, target_of
+from support.frames import Screen
 from support.house_time import UTC_HOUSE
 from support.key_content_builders import key_content
 from support.position import LIGHTING
@@ -25,12 +26,12 @@ from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import Measured
 from central.wall_plan.order import PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
-from contracts.models import FrameProfile, OutputBinding
+from contracts.models import OutputBinding
 
 RAW = "image/x-sony-arw"
 SHA = "a" * 40
-P1080 = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
-P720 = FrameProfile(width_px=1280, height_px=720, diagonal_inches=24)
+P1080 = Screen(1920, 1080, inches=24)
+P720 = Screen(1280, 720, inches=24)
 HOUSE = FitSettings()
 
 
@@ -67,7 +68,7 @@ def test_an_unedited_raw_with_full_size_copies_off_is_read_at_its_preview():
 @pytest.mark.parametrize(("profile", "fits"), [(P1080, False), (P720, True)])
 def test_the_raw_preview_is_refused_on_1080p_and_accepted_on_720p(profile, fits):
     """Acceptance 1. Mutation probe 1 (judge the original's size): the 1080p case fits."""
-    target = target_of(profile.width_px, profile.height_px, inches=profile.diagonal_inches)
+    target = target_of(profile.width_px, profile.height_px, inches=profile.inches)
     verdict = fit_of(candidate((1440, 960)), target, HOUSE.crop_limit, HOUSE)
     if fits:
         assert isinstance(verdict, Fits)
@@ -75,7 +76,7 @@ def test_the_raw_preview_is_refused_on_1080p_and_accepted_on_720p(profile, fits)
         assert verdict == DoesNotFit(reason="below_frame_pixels")
 
 
-def _plan(photo: Candidate, profile: FrameProfile):
+def _plan(photo: Candidate, profile: Screen):
     runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="scene", cycle_seconds=30, loop=True,
                             selection=SceneSelection(),
@@ -88,7 +89,7 @@ def _plan(photo: Candidate, profile: FrameProfile):
         authored_candidates={}, locked_assignments={}, history=WallHistory(),
         horizon_seconds=300, plan_seconds=600, settings=HOUSE,
         frame_outputs=frame_outputs_of({"f": (profile.width_px, profile.height_px)},
-                                       inches=profile.diagonal_inches))
+                                       inches=profile.inches))
 
 
 def test_an_unmeasured_raw_is_not_placed_and_its_measurement_is_asked_for():

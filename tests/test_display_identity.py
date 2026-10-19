@@ -18,6 +18,7 @@ import uuid
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
+from support.frames import frame_create
 
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
@@ -30,8 +31,7 @@ from central.infra.display_store import (
     OutputReportJudge,
 )
 from central.infra.node_link_store import PgLinkStores
-from central.registry import Enrollment, FrameCreate, OutputReport, enrollment_message
-from contracts.models import FrameProfile
+from central.registry import Enrollment, OutputReport, enrollment_message
 from contracts.node_link import Pipe
 from contracts.node_output import (
     BEST_DETECTED,
@@ -76,8 +76,7 @@ def enroll_pi(registry, serial: str) -> str:
 
 
 def _frame(registry, frame_id: str) -> str:
-    registry.create_frame(FrameCreate(id=frame_id, width_mm=300, height_mm=500,
-                                      profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)))
+    registry.create_frame(frame_create(frame_id))
     return frame_id
 
 

@@ -26,11 +26,9 @@ import pytest
 from console_tasks import connect, visit
 from operator_harness import operator_server, reload_after, report_readiness, run_page_clock
 from playwright.sync_api import expect
+from support.frames import frame_create
 from test_registry import enroll
 from test_releases_browser import _catalog
-
-from central.registry import FrameCreate
-from contracts.models import FrameProfile
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -207,9 +205,7 @@ def _add_player(registry, index):
     enrolled, key, _ = enroll(registry, count=1)
     player_id = enrolled["player_id"]
     frame = f"frame-{index}"
-    registry.create_frame(FrameCreate(id=frame, surface_id="wall", x_mm=100 + 500 * index, y_mm=100, width_mm=400,
-                                      height_mm=300, profile=FrameProfile(width_px=1920, height_px=1080,
-                                                                          diagonal_inches=24)))
+    registry.create_frame(frame_create(frame, x_mm=100 + 500 * index, y_mm=100))
     registry.bind(frame, player_id, "HDMI-A-1", expected_generation=0)
     report_readiness(registry, player_id)
     device = next(p.device_id for p in registry.inventory().players if p.id == player_id)

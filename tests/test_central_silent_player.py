@@ -17,6 +17,7 @@ import json
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from support.frames import frame_create
 from support.position import PORTRAIT_ON_WIDE, save_position
 from test_coordination import report
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
@@ -29,9 +30,7 @@ from central.fleet.node_ingest import NodeIngest
 from central.fleet.node_observations import NodeObservations
 from central.fleet.node_sessions import NodeControlConfig
 from central.node_runtime_reconciliation import NodeRuntimeReconciler
-from central.registry import FrameCreate
 from contracts.liveness import SILENT_AFTER_SECONDS
-from contracts.models import FrameProfile
 from contracts.node_boot import NodeBootRequestV2
 from contracts.node_observation import (
     HOST_OBSERVATION_INTERVAL_SECONDS,
@@ -70,9 +69,7 @@ class Incident:
         identity, _, _ = enroll(registry, count=2, device_id=DEVICE_ID)
         self.player_id = identity["player_id"]
         if bound:
-            registry.create_frame(FrameCreate(
-                id=FRAME, surface_id="wall", x_mm=100, y_mm=100, width_mm=300, height_mm=500,
-                profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)))
+            registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
             registry.bind(FRAME, self.player_id, OUTPUT, expected_generation=0)
             save_position(registry, FRAME, PORTRAIT_ON_WIDE)
         # The node sessions are admitted after the Position commit: an admitted node boot turns

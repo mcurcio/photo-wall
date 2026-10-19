@@ -3,6 +3,7 @@
 import pytest
 from support.frame_media import seed_variant
 from support.frame_outputs import target_of
+from support.frames import frame_create
 from support.key_content_builders import banded_grid
 from support.measured_photos import measure, measure_all
 from test_authored_media import asset, setup_source
@@ -12,10 +13,10 @@ from central.coordination import Coordinator
 from central.db import ProcessTransactionClock
 from central.kernel.job_types import PrepareMedia
 from central.media_repository import MediaRepository, prepare_lock
-from central.registry import FrameCreate, RegistryError
+from central.registry import RegistryError
 from central.runtime import Child, Contribution, Scene
 from central.wall_plan.fit_settings import FitSettings
-from contracts.models import FrameProfile, Variant
+from contracts.models import Variant
 
 HOUSE = FitSettings()
 
@@ -24,17 +25,11 @@ PORTRAIT = target_of(1080, 1920, inches=24)
 LANDSCAPE = target_of(1920, 1080, inches=24)
 
 
-def add_frame(registry, frame_id: str, *, portrait: bool = True, bound: bool = True,
-              diagonal_inches: float = 24) -> None:
+def add_frame(registry, frame_id: str, *, portrait: bool = True, bound: bool = True) -> None:
     """A Frame, by default bound full screen to an Output of its own pixels (its Frame output:
     frame box run fb-8, a Frame with no known screen has no shape and takes no photo)."""
     width_px, height_px = (1080, 1920) if portrait else (1920, 1080)
-    width_mm, height_mm = (300, 500) if portrait else (500, 300)
-    registry.create_frame(FrameCreate(
-        id=frame_id, width_mm=width_mm, height_mm=height_mm,
-        profile=FrameProfile(width_px=width_px, height_px=height_px,
-                             diagonal_inches=diagonal_inches),
-    ))
+    registry.create_frame(frame_create(frame_id))
     if bound:
         player, _, _ = enroll(registry, count=1, size=(width_px, height_px))
         registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
@@ -191,7 +186,7 @@ def test_frame_filtered_api_and_atomic_save_share_original_eligibility(registry)
     portrait = asset(2, width=2000, height=4000)
     low_video = asset(3, width=1280, height=720, kind="video")
     _, spec, _ = setup_source(registry, assets=(landscape, portrait, low_video))
-    add_frame(registry, "large", diagonal_inches=55)   # its Display states no size: large
+    add_frame(registry, "large")   # its Display states no size: large
     with client_for(registry) as client:
         headers = {"Authorization": "Bearer " + ADMIN}
         route = f"/v1/operator/sources/{spec.source_ref}/candidates"

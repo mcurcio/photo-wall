@@ -13,6 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 from runtime_fakes import apply_procrastinate_schema
+from support.frames import frame_create
 
 from central.app import create_app
 from central.media_queue import CHECK_CONNECTION_TASK
@@ -186,8 +187,7 @@ def test_a_pool_photos_facts_say_which_frames_the_preview_holds(client, registry
     from support.position import save_position
     from test_registry import enroll
 
-    from central.registry import FrameCreate
-    from contracts.models import Calibration, FrameProfile, PositionBox
+    from contracts.models import Calibration, PositionBox
 
     test_client, library = client
     ref = _add(test_client).json()["connection_ref"]
@@ -199,9 +199,8 @@ def test_a_pool_photos_facts_say_which_frames_the_preview_holds(client, registry
     library.record_step(library.begin_check(pool_key),
                         CheckStep(progress={}, entries=(InPool(asset=shown),), seen_so_far=1))
     player, _, _ = enroll(registry, count=2)
-    profile = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
     for frame_id in ("attic", "lounge", "study"):
-        registry.create_frame(FrameCreate(id=frame_id, width_mm=530, height_mm=300, profile=profile))
+        registry.create_frame(frame_create(frame_id))
     registry.bind("lounge", player["player_id"], "HDMI-A-1", expected_generation=0)
     save_position(registry, "lounge")
     registry.bind("study", player["player_id"], "HDMI-A-2", expected_generation=0)

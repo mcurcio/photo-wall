@@ -17,11 +17,10 @@ import pytest
 from console_tasks import open_pi
 from operator_harness import answer_first, operator_server, sign_in, submit_sign_in
 from playwright.sync_api import expect
+from support.frames import frame_create
 from test_registry import ADMIN, enroll
 
 from central.operator_session import SESSION_SECONDS, SessionCodec
-from central.registry import FrameCreate
-from contracts.models import FrameProfile
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -30,12 +29,10 @@ pytestmark = pytest.mark.skipif(
 
 FRAME = "session-1"
 ROTATED = "rotated-operator-" + "r" * 40
-LANDSCAPE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 
 
 def _seed(registry):
-    registry.create_frame(FrameCreate(id=FRAME, surface_id="wall", x_mm=100, y_mm=100,
-                                      width_mm=400, height_mm=300, profile=LANDSCAPE))
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
 
 
 def _frame(page):

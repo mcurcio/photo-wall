@@ -31,20 +31,21 @@ from central.wall_plan.fit_analysis import (
 )
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import UnitBox
-from contracts.models import Calibration, FrameProfile, PositionBox
+from contracts.models import Calibration, PositionBox
 
 DISPLAY = (3840, 2160)
-WIDE = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55)
-TALL = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=32)
-FOUR_THREE = FrameProfile(width_px=1440, height_px=1080, diagonal_inches=20)
+# Each Display's size across, in inches.
+WIDE = 55
+TALL = 32
+FOUR_THREE = 20
 HOUSE = FitSettings()
 SELECTION = FitSelection(sources=("family:1",))
 
 
-def output(frame_id: str, profile: FrameProfile, display=DISPLAY) -> FrameOutput:
-    """A Frame on the whole screen of a Display of `display` (each test's profile has the
-    display's shape) and the profile's diagonal: its Frame output is the display's pixels."""
-    return frame_output_of(frame_id, display, inches=profile.diagonal_inches)
+def output(frame_id: str, inches: float, display=DISPLAY) -> FrameOutput:
+    """A Frame on the whole screen of a Display of `display` pixels, `inches` across: its Frame
+    output is the display's pixels."""
+    return frame_output_of(frame_id, display, inches=inches)
 
 
 class Reader:
