@@ -67,6 +67,9 @@ class WallInventory(Model):
     room: str
 
 
+Pixels = Annotated[int, Field(ge=1, le=65536, strict=True)]
+
+
 class FrameInventory(Model):
     id: Identifier
     name: str
@@ -84,9 +87,9 @@ class FrameInventory(Model):
     configuration_revision: int = Field(ge=1)
     player_id: Identifier | None = None
     output_id: Identifier | None = None
+    screen_px: tuple[Pixels, Pixels] | None    # the bound Output's screen (central/displays/model.py `screen_px`); None: unbound or unknown
+    display_mm: tuple[int, int] | None         # the Display seen there's size (its EDID's); None: none seen, or none stated
 
-
-Pixels = Annotated[int, Field(ge=1, le=65536, strict=True)]
 
 
 class FrameOutput(Model):

@@ -85,6 +85,7 @@ from central.displays.model import (
     power_status,
     project_output,
     readiness,
+    screen_px,
     serial_usable,
 )
 from central.displays.picture import (
@@ -244,29 +245,52 @@ POSITION_COLUMNS: Final = ("b.player_id IS NOT NULL AS bound, f.generation, f.po
 def frame_outputs_in(conn: Any) -> tuple[FrameOutput, ...]:
     """Every Frame's FrameOutput, ordered by frame id, in the caller's transaction (follow-ups
     2026-10-11, slice A1): frames LEFT JOIN bindings LEFT JOIN outputs on (player_id,
-    output_id); `display_px` from `outputs.observation` width_px x height_px when both are >= 1
-    (the enrollment report, connected or not); `turn` is `f.turn`; `output_px` is
-    `contracts.models.frame_output` at that turn.
+    output_id) and the Display seen there; `display_px` is `model.screen_px` of
+    `outputs.observation` width_px x height_px (the enrollment report, connected or not) and that
+    Display's modes; `turn` is `f.turn`; `output_px` is `contracts.models.frame_output` at that turn.
     The one read of Frame outputs: the media worker's rendition choice (PgPhotoLibrary), the
     Planner's slots and the fit analysis (roadmap 5a) all ask here. Never raises for a Frame
     without an Output."""
     rows = conn.execute(
-        "SELECT f.id, f.profile, f.calibration, f.turn, (o.observation->>'width_px')::int AS width_px, "
-        "(o.observation->>'height_px')::int AS height_px FROM frames f "
-        "LEFT JOIN bindings b ON b.frame_id=f.id "
-        "LEFT JOIN outputs o ON o.player_id=b.player_id AND o.output_id=b.output_id "
-        "ORDER BY f.id").fetchall()
+        f"SELECT f.id, f.profile, f.calibration, f.turn, {SCREEN_COLUMNS} FROM frames f "  # noqa: S608
+        f"LEFT JOIN bindings b ON b.frame_id=f.id {SCREEN_JOIN} ORDER BY f.id").fetchall()
     frames = []
     for row in rows:
         profile = FrameProfile.model_validate(row["profile"])
-        width, height = row["width_px"], row["height_px"]
-        display = (width, height) if width is not None and height is not None \
-            and width >= 1 and height >= 1 else None
+        display = frame_screen_px(row)
         frames.append(FrameOutput(
             frame_id=row["id"], profile=profile, turn=row["turn"], display_px=display,
             output_px=frame_output(profile, Calibration.model_validate(row["calibration"]), display,
                                    row["turn"])))
     return tuple(frames)
+
+
+# A frames row `f` and its binding `b` (LEFT JOIN) and this join give SCREEN_COLUMNS: the Output's
+# report of its mode and the Display seen there (`frame_screen_px`, `frame_display_mm`).
+SCREEN_JOIN: Final = ("LEFT JOIN outputs o ON o.player_id=b.player_id AND o.output_id=b.output_id "
+                      f"{SEEN_DISPLAY_JOIN} LEFT JOIN displays d ON d.id=seen.display_id")
+SCREEN_COLUMNS: Final = ("(o.observation->>'width_px')::int AS reported_width_px, "
+                         "(o.observation->>'height_px')::int AS reported_height_px, d.modes AS display_modes, "
+                         "d.width_mm AS display_width_mm, d.height_mm AS display_height_mm")
+SCREEN_FACTS: Final = ("reported_width_px", "reported_height_px", "display_modes", "display_width_mm",
+                       "display_height_mm")
+
+
+def frame_screen_px(row: Mapping[str, Any]) -> tuple[int, int] | None:
+    """`model.screen_px` of a row selected with SCREEN_COLUMNS."""
+    width, height = row["reported_width_px"], row["reported_height_px"]
+    reported = None if width is None or height is None else (width, height)
+    return screen_px(reported, tuple(DisplayMode(**mode) for mode in row["display_modes"] or ()))
+
+
+def frame_display_mm(row: Mapping[str, Any]) -> tuple[int, int] | None:
+    """The seen Display's size of a row selected with SCREEN_COLUMNS (None: none seen, or none stated)."""
+    return _size_mm(row["display_width_mm"], row["display_height_mm"])
+
+
+def _size_mm(width_mm: int | None, height_mm: int | None) -> tuple[int, int] | None:
+    """A displays row's size columns as (width, height); None unless both are stated."""
+    return None if width_mm is None or height_mm is None else (width_mm, height_mm)
 
 
 def frame_position(row: Mapping[str, Any]) -> FramePosition:
@@ -322,7 +346,7 @@ def _modes_json(modes: tuple[DisplayMode, ...]) -> Jsonb:
 
 
 def _recognise(conn: Any, player_id: str, output_id: str, identity: DisplayIdentity,
-               modes: tuple[DisplayMode, ...], *, before: DisplayIdentity | None, recorded: UUID | None,
+               modes: tuple[DisplayMode, ...], size_mm: tuple[int, int] | None, *, before: DisplayIdentity | None, recorded: UUID | None,
                now: float, present: bool = True) -> UUID | None:
     """The Display `identity` is on this Output, by the model's rules: a serial another connected
     Output reports at the same time is recorded shared (for good), and every Output already holding
@@ -354,7 +378,7 @@ def _recognise(conn: Any, player_id: str, output_id: str, identity: DisplayIdent
                       bound_frame_id=None if bound is None else bound["frame_id"])
     if key is None:
         return recorded if identity == before else None
-    return _display_for(conn, key, identity, modes, now)
+    return _display_for(conn, key, identity, modes, size_mm, now)
 
 
 def _rekey_shared(conn: Any, identity: DisplayIdentity, now: float) -> None:
@@ -370,8 +394,8 @@ def _rekey_shared(conn: Any, identity: DisplayIdentity, now: float) -> None:
     for row in rows:
         held = _identity(row["identity"]) or identity
         key = display_key(held, serial_counts=False, bound_frame_id=row["frame_id"])
-        modes = tuple(DisplayMode(**mode) for mode in (row["report"] or {}).get("modes", ()))
-        display_id = None if key is None else _display_for(conn, key, held, modes, now)
+        modes, size_mm = _sighted(row["report"])
+        display_id = None if key is None else _display_for(conn, key, held, modes, size_mm, now)
         conn.execute("UPDATE output_displays SET display_id=%s WHERE player_id=%s AND output_id=%s",
                      (display_id, row["player_id"], row["output_id"]))
         if display_id is not None:
@@ -379,21 +403,34 @@ def _rekey_shared(conn: Any, identity: DisplayIdentity, now: float) -> None:
                          (display_id, row["frame_id"], row["display_id"]))
 
 
+def _sighted(report: Mapping[str, Any] | None) -> tuple[tuple[DisplayMode, ...], tuple[int, int] | None]:
+    """The modes and the size of a stored Output report (an output_displays row's `report`)."""
+    size_mm = (report or {}).get("size_mm")
+    return (tuple(DisplayMode(**mode) for mode in (report or {}).get("modes", ())),
+            None if size_mm is None else (size_mm[0], size_mm[1]))
+
+
 def _display_for(conn: Any, key: DisplayKey, identity: DisplayIdentity, modes: tuple[DisplayMode, ...],
-                 now: float) -> UUID:
-    """The Display keyed `key`, made on its first sighting; its modes follow the latest sighting."""
+                 size_mm: tuple[int, int] | None, now: float) -> UUID:
+    """The Display keyed `key`, made on its first sighting; its modes follow the latest sighting
+    that states any, its size (width_mm, height_mm) the latest that states one."""
     where, value = ("serial", key.serial) if key.serial is not None else ("frame_id", key.frame_id)
     select = f"SELECT id FROM displays WHERE maker=%s AND product=%s AND {where}=%s"   # noqa: S608 (a column name)
     row = conn.execute(select, (key.maker, key.product, value)).fetchone()
     if row is None:
         light = default_picture().light   # a new Display's light: the placeholder until the paper match
-        conn.execute("INSERT INTO displays(id, maker, product, name, serial, frame_id, modes, first_seen_at, "
-                     "matched_lux, panel_black) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+        width, height = size_mm or (None, None)
+        conn.execute("INSERT INTO displays(id, maker, product, name, serial, frame_id, modes, width_mm, height_mm, "
+                     "first_seen_at, matched_lux, panel_black) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                     "ON CONFLICT DO NOTHING",
                      (uuid.uuid4(), key.maker, key.product, identity.name, key.serial, key.frame_id,
-                      _modes_json(modes), now, light.matched_lux, light.black))
+                      _modes_json(modes), width, height, now, light.matched_lux, light.black))
         row = conn.execute(select, (key.maker, key.product, value)).fetchone()
-    elif modes:
-        conn.execute("UPDATE displays SET modes=%s WHERE id=%s", (_modes_json(modes), row["id"]))
+    else:
+        if modes:
+            conn.execute("UPDATE displays SET modes=%s WHERE id=%s", (_modes_json(modes), row["id"]))
+        if size_mm is not None:
+            conn.execute("UPDATE displays SET width_mm=%s, height_mm=%s WHERE id=%s", (*size_mm, row["id"]))
     return row["id"]
 
 
@@ -406,7 +443,7 @@ def record_report(conn: Any, player_id: str, report: OutputReport, now: float) -
     seen_before = display_id = None if row is None else row["display_id"]
     if report.identity is not None:
         display_id = _recognise(conn, player_id, report.output_id, report.identity, report.modes,
-                                before=before, recorded=display_id, now=now)
+                                report.size_mm, before=before, recorded=display_id, now=now)
     if display_id is not None and display_id != seen_before:   # a Display newly recorded here
         _adopt(conn, player_id, report.output_id, seen_before, display_id)
     identity = report.identity or before
@@ -431,8 +468,8 @@ def resolve_output(conn: Any, player_id: str, output_id: str) -> None:
     identity = None if row is None else _identity(row["identity"])
     if identity is None:
         return
-    modes = tuple(DisplayMode(**mode) for mode in row["report"].get("modes", ()))
-    display_id = _recognise(conn, player_id, output_id, identity, modes, before=identity,
+    modes, size_mm = _sighted(row["report"])
+    display_id = _recognise(conn, player_id, output_id, identity, modes, size_mm, before=identity,
                             recorded=row["display_id"], now=_CLOCK.now_in(conn), present=row["connected"])
     conn.execute("UPDATE output_displays SET display_id=%s WHERE player_id=%s AND output_id=%s",
                  (display_id, player_id, output_id))
@@ -862,7 +899,8 @@ def _display_view(row: Mapping[str, Any]) -> DisplayView:
         id=row["id"], maker=row["maker"], product=row["product"], name=row["name"], serial=row["serial"],
         tied_to_frame=row["serial"] is None, modes=tuple(ModeView(**mode) for mode in row["modes"]),
         power_method=row["power_method"], switch_input_on_power_on=row["switch_input_on_power_on"],
-        never_off_on_other_input=row["never_off_on_other_input"])
+        never_off_on_other_input=row["never_off_on_other_input"],
+        size_mm=_size_mm(row["width_mm"], row["height_mm"]))
 
 
 class PgDisplayQueries:

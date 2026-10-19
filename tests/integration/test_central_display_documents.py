@@ -5,7 +5,7 @@ the shipped `DISPLAY_SLICE`. Central runs the worker's own composition of the fl
 `NodeLinks` over `PgLinkStores` with the `OutputReportJudge`, its documents from
 `DisplayDocuments`. (1) The Node's desired bucket receives `output-HDMI-A-1` (its enrolled Output)
 with standing on. (2) The session's Output report is recorded and judged into `output_displays`
-(the Display recognised on the bound Frame). (3) A report from an Output Central had no row for
+(the Display recognised on the bound Frame, holding the size the report states). (3) A report from an Output Central had no row for
 gives that Output a document within 3 s, carried by the judge's wake (`changed()`), not by a
 reconcile: the link first settles (its reconcile after draining the session's `birth`), and no
 reconcile runs between the report and the document (E-1B-C3-3). (4) Turning the bound Frame
@@ -64,7 +64,8 @@ _LISTEN_PROBE = "no-such-device"   # only a wake of all moves its count
 
 
 def _report(output_id: str) -> bytes:
-    return encode_output_report(OutputReport(output_id, True, IDENTITY, MODES, (), None, None, None, None))
+    return encode_output_report(OutputReport(output_id, True, IDENTITY, MODES, (), None, None, None, None,
+                                             (950, 540)))
 
 
 def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, tmp_path, monkeypatch):
@@ -129,11 +130,13 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
             display.state.put(output_report_key("HDMI-A-1"), _report("HDMI-A-1"))
 
             async def judged():
-                found = rows("SELECT o.connected, d.frame_id FROM output_displays o JOIN displays d "
+                found = rows("SELECT o.connected, d.frame_id, d.width_mm, d.height_mm FROM output_displays o "
+                             "JOIN displays d "
                              "ON d.id=o.display_id WHERE o.player_id=%s AND o.output_id='HDMI-A-1'", (player,))
                 return found or None
             [seen] = await until(judged, SECONDS, "the report judged into output_displays")
             assert (seen["connected"], seen["frame_id"]) == (True, "kitchen")
+            assert (seen["width_mm"], seen["height_mm"]) == (950, 540)   # the Display's size, from the bus
             recorded = rows("SELECT data FROM node_link_records WHERE device_id=%s AND stream=%s "
                             "AND subject LIKE '%%.output-HDMI-A-1'", (device_id_for_serial(SERIAL), REPORT_STREAM))
             assert [bytes(row["data"]) for row in recorded] == [_report("HDMI-A-1")]

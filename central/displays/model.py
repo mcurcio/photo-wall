@@ -160,7 +160,10 @@ def screen_px(reported: OutputSize | None, modes: Sequence[DisplayMode]) -> Outp
     displays.modes; Weston, given no mode, runs the preferred one), else None. The one home of a
     Frame's screen size: central/infra/display_store.py `frame_outputs_in` and the inventory's
     `FrameInventory.screen_px` ask here (migration 102 and 104 state the same rule in SQL). Pure."""
-    ...
+    if reported is not None and reported[0] >= 1 and reported[1] >= 1:
+        return reported
+    preferred = next((mode for mode in modes if mode.preferred), None)
+    return None if preferred is None else (preferred.width, preferred.height)
 
 
 def adopts(position: FramePosition, seen_before: UUID | None, seen_now: UUID) -> bool:

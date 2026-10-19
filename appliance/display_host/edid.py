@@ -1,19 +1,24 @@
-"""A display's EDID to its identity and modes (roadmap 1b; run ledger .claude/runs/display-1b.md,
-slice D1). Pure: bytes in, values out; the read of /sys/class/drm/<card>-<output>/edid is the
+"""A display's EDID to its identity, modes and picture size (roadmap 1b; run ledger
+.claude/runs/display-1b.md, slice D1; the size: frame box run, .claude/runs/frame-box/page.md). Pure: bytes in, values out; the read of /sys/class/drm/<card>-<output>/edid is the
 caller's (`read_edid`).
 
 The Pi normalises what the EDID says and never decides "same display": that is Central's
 (central/displays/). Spike, 2026-10-10: the test monitor's EDID is maker XYM, product 5475, name
 MNN, serial 0 and blank serial text, so `serial` is None for it.
+
+The size is the base block's (bytes 21 and 22, whole centimetres), never a detailed timing's
+millimetres. Evidence, 2026-10-19 on the production Pi: the Samsung QN43Q8F states 95 x 54 cm in
+its base block (43 in across: right) and 1872 x 1053 mm in its preferred timing (85 in: wrong).
 """
 from __future__ import annotations
 
 import glob
 from collections.abc import Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from contracts.node_output import MAX_DISPLAY_MODES, DisplayIdentity, DisplayMode
+from contracts.node_output import DISPLAY_MM_MAX, MAX_DISPLAY_MODES, DisplayIdentity, DisplayMode
 
 DRM_ROOT: Final = Path("/sys/class/drm")
 MAX_EDID_BYTES: Final = 32 * 1024     # a base block and up to 255 extensions
@@ -24,6 +29,8 @@ _HEADER: Final = bytes((0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00))
 _MAKER: Final = slice(8, 10)          # three 5-bit letters, big-endian, "A" = 1
 _PRODUCT: Final = slice(10, 12)       # little-endian
 _SERIAL_NUMBER: Final = slice(12, 16)  # little-endian
+_SIZE_CM: Final = (21, 22)            # the picture's width and height in whole cm; 0 in either: none stated
+_MM_PER_CM: Final = 10
 _DESCRIPTORS: Final = (54, 72, 90, 108)
 _EXTENSIONS: Final = 126
 _DESCRIPTOR: Final = 18
@@ -47,15 +54,34 @@ _VICS: Final[dict[int, tuple[int, int, int]]] = {
 }
 
 
-def parse_edid(raw: bytes) -> tuple[DisplayIdentity | None, tuple[DisplayMode, ...]]:
-    """The identity and the modes `raw` states. Identity None when the base block is absent,
+@dataclass(frozen=True)
+class EdidReading:
+    """What one EDID states: the display's identity (None: not a valid one), its modes (the
+    preferred one first) and its picture area as built in whole mm (width, height; None: not
+    stated)."""
+    identity: DisplayIdentity | None
+    modes: tuple[DisplayMode, ...]
+    size_mm: tuple[int, int] | None
+
+
+def parse_edid(raw: bytes) -> EdidReading:
+    """What `raw` states. Nothing (EdidReading(None, (), None)) when the base block is absent,
     shorter than 128 bytes, has a wrong header or checksum; modes come from the detailed timing
     descriptors and the CTA extension's short video descriptors that the base block's checksum
-    covers, deduplicated, the preferred one first, at most MAX_DISPLAY_MODES. Never raises."""
+    covers, deduplicated, the preferred one first, at most MAX_DISPLAY_MODES; the size is the base
+    block's bytes 21 and 22 (cm) times 10 when both are >= 1, else None (detailed timing
+    descriptors' millimetre sizes are never read). Never raises."""
     base = raw[:_BLOCK] if isinstance(raw, bytes) else b""
     if not _valid_block(base) or base[:len(_HEADER)] != _HEADER:
-        return None, ()
-    return _identity(base), _modes(raw, base)
+        return EdidReading(None, (), None)
+    return EdidReading(_identity(base), _modes(raw, base), _size_mm(base))
+
+
+def _size_mm(base: bytes) -> tuple[int, int] | None:
+    """The base block's picture size in mm; None when either side is 0 (a projector, or an
+    aspect-ratio encoding)."""
+    width, height = (base[offset] * _MM_PER_CM for offset in _SIZE_CM)
+    return (width, height) if 1 <= width <= DISPLAY_MM_MAX and 1 <= height <= DISPLAY_MM_MAX else None
 
 
 def _valid_block(block: bytes) -> bool:

@@ -111,7 +111,7 @@ MATCHED = PictureDocument("HDMI-A-1", 9, {"10": 46}, PICTURE_DOCUMENT.software,
                           light=DisplayLight(matched_lux=400.0, black=0.001))
 REPORT = OutputReport("HDMI-A-1", True, DisplayIdentity("XYM", 5475, "MNN", None),
                       (DisplayMode(1920, 1080, 60000, preferred=True),), (PowerMethod.DDC_CI, PowerMethod.SIGNAL_OFF),
-                      PowerMethod.DDC_CI, 2, None, None)
+                      PowerMethod.DDC_CI, 2, None, None, (950, 540))
 
 
 async def _names(node) -> frozenset[str]:

@@ -14,8 +14,9 @@ from uuid import uuid4
 
 from appliance.display_host.bus import DISPLAY_SLICE, BusReportSink, display_session
 from appliance.display_host.domain import OutputState
-from appliance.display_host.edid import parse_edid, read_edid
-from appliance.display_host.runner import OutputReporter
+from appliance.display_host.edid import EdidReading, parse_edid, read_edid
+from appliance.display_host.output_power import OutputPowerController
+from appliance.display_host.runner import OutputReporter, PowerObservations
 from contracts.node_output import (
     DisplayIdentity,
     DisplayMode,
@@ -41,13 +42,15 @@ def _text(tag: int, text: str) -> bytes:
     return bytes((0, 0, 0, tag, 0)) + body
 
 
-def _timing(width: int, height: int, refresh_hz: int, *, interlaced: bool = False) -> bytes:
+def _timing(width: int, height: int, refresh_hz: int, *, interlaced: bool = False,
+            size_mm: tuple[int, int] = (0, 0)) -> bytes:
     blank_h, blank_v = 280, 45                         # CTA 1080p60: 2200 x 1125 total
     clock = (width + blank_h) * (height + blank_v) * refresh_hz // 10_000
     d = bytearray(18)
     d[0:2] = clock.to_bytes(2, "little")
     d[2], d[3], d[4] = width & 0xFF, blank_h & 0xFF, (width >> 8) << 4 | blank_h >> 8
     d[5], d[6], d[7] = height & 0xFF, blank_v & 0xFF, (height >> 8) << 4 | blank_v >> 8
+    d[12], d[13], d[14] = size_mm[0] & 0xFF, size_mm[1] & 0xFF, (size_mm[0] >> 8) << 4 | size_mm[1] >> 8
     d[17] = 0x80 if interlaced else 0x18
     return bytes(d)
 
@@ -58,14 +61,17 @@ def _checksummed(block: bytearray) -> bytes:
 
 
 def edid(maker: str = "XYM", product: int = 5475, *, name: str | None = "MNN", serial_number: int = 0,
-         serial_text: str | None = " ", timings: tuple[bytes, ...] = (), vics: tuple[int, ...] = ()) -> bytes:
-    """A base block (and a CTA extension when `vics`) stating the given identity and timings."""
+         serial_text: str | None = " ", timings: tuple[bytes, ...] = (), vics: tuple[int, ...] = (),
+         size_cm: tuple[int, int] = (0, 0)) -> bytes:
+    """A base block (and a CTA extension when `vics`) stating the given identity, timings and
+    picture size (bytes 21 and 22, whole centimetres; 0 states none)."""
     base = bytearray(128)
     base[0:8] = bytes((0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00))
     base[8:10] = _letters(maker)
     base[10:12] = product.to_bytes(2, "little")
     base[12:16] = serial_number.to_bytes(4, "little")
     base[18], base[19] = 1, 3                          # EDID 1.3
+    base[21], base[22] = size_cm
     descriptors = [*timings]
     if name is not None:
         descriptors.append(_text(0xFC, name))
@@ -89,39 +95,59 @@ def edid(maker: str = "XYM", product: int = 5475, *, name: str | None = "MNN", s
 SPIKE = edid(timings=(_timing(1920, 1080, 60),))
 SPIKE_IDENTITY = DisplayIdentity("XYM", 5475, "MNN", None)
 P1080 = DisplayMode(1920, 1080, 60000, preferred=True)
+# The Samsung QN43Q8F as read on the production Pi (2026-10-19): its base block states 95 x 54 cm
+# (43 in across, right); its preferred detailed timing states 1872 x 1053 mm (bytes 12-14 = 80, 29,
+# 116; 85 in, wrong). The base block's is the size.
+QN43Q8F_TIMING = _timing(3840, 2160, 60, size_mm=(1872, 1053))
+QN43Q8F = edid("SAM", 29749, name="QN43Q8F", timings=(QN43Q8F_TIMING,), size_cm=(95, 54))
 
 
 # parse_edid: what the bytes say.
 
 def test_the_spike_monitor_has_no_usable_serial_and_prefers_1080p60():
-    assert parse_edid(SPIKE) == (SPIKE_IDENTITY, (P1080,))
+    assert parse_edid(SPIKE) == EdidReading(SPIKE_IDENTITY, (P1080,), None)
+
+
+def test_the_size_is_the_base_blocks_centimetres_never_the_detailed_timings_millimetres():
+    reading = parse_edid(QN43Q8F)
+    assert reading.size_mm == (950, 540)
+    assert reading.identity == DisplayIdentity("SAM", 29749, "QN43Q8F", None)
+    assert [(mode.width, mode.height, mode.preferred) for mode in reading.modes] == [(3840, 2160, True)]
+
+
+def test_a_base_block_stating_either_side_zero_states_no_size():
+    """A projector, or an aspect-ratio encoding (VESA E-EDID 1.4 3.6.2): no size."""
+    for size_cm in ((95, 0), (0, 54), (0, 0)):
+        reading = parse_edid(edid(timings=(QN43Q8F_TIMING,), size_cm=size_cm))
+        assert reading.size_mm is None and reading.modes   # the timing's millimetres are never the size
 
 
 def test_a_numeric_serial_is_its_decimal():
-    identity, _ = parse_edid(edid(serial_number=0x01020304, serial_text=None))
+    identity = parse_edid(edid(serial_number=0x01020304, serial_text=None)).identity
     assert identity == DisplayIdentity("XYM", 5475, "MNN", "16909060")
 
 
 def test_the_serial_text_wins_over_the_number():
-    identity, _ = parse_edid(edid(serial_number=1234, serial_text="ABC-0042"))
+    identity = parse_edid(edid(serial_number=1234, serial_text="ABC-0042")).identity
     assert identity is not None and identity.serial == "ABC-0042"
 
 
 def test_a_bad_checksum_has_no_identity():
-    broken = bytearray(SPIKE)
+    broken = bytearray(QN43Q8F)
     broken[20] ^= 0x01
-    assert parse_edid(bytes(broken)) == (None, ())
-    assert parse_edid(SPIKE[:127]) == (None, ())
-    assert parse_edid(b"") == (None, ())
+    nothing = EdidReading(None, (), None)
+    assert parse_edid(bytes(broken)) == nothing
+    assert parse_edid(QN43Q8F[:127]) == nothing
+    assert parse_edid(b"") == nothing
 
 
 def test_cta_video_descriptors_follow_the_preferred_mode_once_each():
-    _, modes = parse_edid(edid(timings=(_timing(1920, 1080, 60),), vics=(16, 4, 97, 5, 200)))
+    modes = parse_edid(edid(timings=(_timing(1920, 1080, 60),), vics=(16, 4, 97, 5, 200))).modes
     assert modes == (P1080, DisplayMode(1280, 720, 60000), DisplayMode(3840, 2160, 60000))
 
 
 def test_an_interlaced_first_timing_is_neither_a_mode_nor_preferred():
-    _, modes = parse_edid(edid(timings=(_timing(1920, 540, 60, interlaced=True),), vics=(4,)))
+    modes = parse_edid(edid(timings=(_timing(1920, 540, 60, interlaced=True),), vics=(4,))).modes
     assert modes == (DisplayMode(1280, 720, 60000),)
 
 
@@ -188,7 +214,15 @@ def test_a_connected_output_reports_its_identity_and_modes_on_the_display_line()
     run.sysfs.edids["HDMI-A-1"] = SPIKE
     run.reporter.observe((state("HDMI-A-1", 1),))
     report = run.on_line("HDMI-A-1")
-    assert report == OutputReport("HDMI-A-1", True, SPIKE_IDENTITY, (P1080,), (), None, None, None, None)
+    assert report == OutputReport("HDMI-A-1", True, SPIKE_IDENTITY, (P1080,), (), None, None, None, None, None)
+
+
+def test_a_connected_output_reports_its_displays_size_on_the_display_line():
+    run = Reporting()
+    run.sysfs.edids["HDMI-A-1"] = QN43Q8F
+    run.reporter.observe((state("HDMI-A-1", 1),))
+    report = run.on_line("HDMI-A-1")
+    assert report is not None and report.size_mm == (950, 540)
 
 
 def test_a_disconnect_reports_no_identity_and_a_reconnect_the_same_one():
@@ -253,3 +287,22 @@ def test_a_picture_report_is_its_own_state_key_beside_the_output_report():
     BusPictureSink(session).put_picture(report)
     assert decode_picture_report(session.state.get(picture_report_key("HDMI-A-2"))) == report
     assert session.state.get(output_report_key("HDMI-A-2")) is None
+
+
+def test_the_power_controller_the_one_writer_of_the_report_carries_the_size_on():
+    """In production the reporter's sink is PowerObservations, and the power controller writes the
+    Output's report: what the EDID said about the size reaches the line through it."""
+    run = Reporting()
+    power = OutputPowerController({}, run.sink, clock=None, black=None)   # never started: no look runs
+    reporter = OutputReporter(PowerObservations(power, Ignored(), Ignored()), read=run.sysfs.read)
+    run.sysfs.edids["HDMI-A-1"] = QN43Q8F
+    reporter.observe((state("HDMI-A-1", 1),))
+    report = run.on_line("HDMI-A-1")
+    assert report is not None and report.size_mm == (950, 540)
+
+
+class Ignored:
+    """The picture controller and the screen turns: not what this test is about."""
+
+    def output(self, *_args, **_kwargs) -> None:
+        return None
