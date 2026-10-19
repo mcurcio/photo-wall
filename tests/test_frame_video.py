@@ -34,9 +34,9 @@ def _client(registry) -> TestClient:
     return TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False))
 
 
-def _ready_frame(registry) -> None:
+def _ready_frame(registry, *, video: bool = True) -> None:
     player, _, _ = enroll(registry, count=1, size=DISPLAY)
-    registry.create_frame(frame_create("hall"))
+    registry.create_frame(frame_create("hall", video=video))
     registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0)
     save_position(registry, "hall")
 
@@ -85,11 +85,12 @@ def test_an_unknown_frame_is_404_and_a_non_boolean_is_422(registry):
     assert loose.status_code == 422
 
 
-def _planned_kinds(registry, *, switches: tuple[bool, ...]) -> set[str]:
-    """The kinds the Planner's first plan puts on the hall Frame, after the operator flips
-    Shows videos through `switches` in order. The pool holds a photo and a newer video, both of
-    the Frame's shape and prepared; with no shown history the line puts its first on the Frame."""
-    _ready_frame(registry)
+def _planned_kinds(registry, *, switches: tuple[bool, ...], created_with_video: bool = True) -> set[str]:
+    """The kinds the Planner's first plan puts on the hall Frame, created with Shows videos
+    `created_with_video`, after the operator flips Shows videos through `switches` in order. The
+    pool holds a photo and a newer video, both of the Frame's shape and prepared; with no shown
+    history the line puts its first on the Frame."""
+    _ready_frame(registry, video=created_with_video)
     still = photo("still", taken_at=900, width=DISPLAY[0], height=DISPLAY[1])
     clip = photo("clip", taken_at=901, width=DISPLAY[0], height=DISPLAY[1], kind="video")
     seed_pool(registry, POOL, (still, clip))
@@ -110,6 +111,13 @@ def _planned_kinds(registry, *, switches: tuple[bool, ...]) -> set[str]:
 
 def test_switched_off_the_next_plan_puts_no_video_on_the_frame_while_its_photos_play(registry):
     assert _planned_kinds(registry, switches=(False,)) == {"image"}
+
+
+def test_created_without_videos_the_plan_puts_no_video_on_the_frame(registry):
+    """Mutation probe: make `Registry.create_frame` store video=True whatever was asked -> the
+    newer video is planned on the Frame."""
+    assert _planned_kinds(registry, switches=(), created_with_video=False) == {"image"}
+    assert _hall(registry).video is False
 
 
 def test_switched_on_again_videos_come_back(registry):
