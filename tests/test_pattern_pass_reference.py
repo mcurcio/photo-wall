@@ -13,7 +13,6 @@ import pytest
 from contracts.calibration_target import TargetCode
 from contracts.frame_fit import Placement
 from contracts.frame_lighting import AT_FULL, FarLight, FrameLighting, Paper, WashLight
-from contracts.models import FrameProfile
 from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
 from contracts.room_light import FixedColour, FixedEntry, RoomLightsDocument
@@ -40,8 +39,8 @@ from player.pattern_pass import PATTERN_CODES, PatternPass, PatternRequest
 
 SCREEN = (64, 48)
 PLACEMENT = Placement(16, 15, 32, 18)
-LANDSCAPE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27)
-PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=27)
+LANDSCAPE = PLACEMENT                       # 32 x 18: the board's aspect is the placement's pixels'
+PORTRAIT = Placement(16, 7, 18, 32)
 MODULES = target_modules(TargetCode("p-" + "0123456789abcdef" * 2, "HDMI-A-1", 3))
 LIGHTING = FrameLighting(mat_depth_mm=8, paper=Paper(whiteness=.9, ink_density=1.8), lights=(
     WashLight(light="room", lux=200, reference=AT_FULL),
@@ -49,7 +48,7 @@ LIGHTING = FrameLighting(mat_depth_mm=8, paper=Paper(whiteness=.9, ink_density=1
 ROOM = RoomLightsDocument(change=1, lights={
     "room": FixedEntry(colour=FixedColour(kelvin=6500)), "lamp": FixedEntry(colour=FixedColour(kelvin=3000))})
 DISPLAY = DisplayLight(250.0, .01)
-LIGHTS = picture_lights(LIGHTING, ROOM, LANDSCAPE, DISPLAY)
+LIGHTS = picture_lights(LIGHTING, ROOM, (598.0, 336.0), DISPLAY)   # a 27" 16:9 picture, mm
 
 
 def operations(pattern: TestPattern | None) -> PictureOperations:
@@ -90,13 +89,13 @@ def test_the_commissioning_grid_has_lines_on_a_slate():
 
 # -- picture_board ---------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("profile", [LANDSCAPE, PORTRAIT])
+@pytest.mark.parametrize("placement", [LANDSCAPE, PORTRAIT])
 @pytest.mark.parametrize("modules", [None, MODULES])
-def test_picture_board_is_the_pictures_own_aspect_and_portrait(profile, modules):
-    """The profile's physical long side over its short side, portrait when it is taller than wide."""
-    board = picture_board(profile, modules)
+def test_picture_board_is_the_pictures_own_aspect_and_portrait(placement, modules):
+    """The placement's long side over its short side in pixels, portrait when it is taller than wide."""
+    board = picture_board(placement, modules)
     assert board.aspect == pytest.approx(16 / 9)
-    assert (board.portrait, board.modules) == (profile is PORTRAIT, modules)
+    assert (board.portrait, board.modules) == (placement is PORTRAIT, modules)
 
 
 # -- the codes ---------------------------------------------------------------------------------------

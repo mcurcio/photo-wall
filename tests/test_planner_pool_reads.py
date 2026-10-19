@@ -98,7 +98,7 @@ def plan(instance: Runtime, frames: dict[str, str], lines: SceneLines, *, now: f
     return project(
         instance, now,
         bindings_by_player={"player": tuple(OutputBinding(
-            output_id=f"out-{frame}", frame_id=frame, generation=1, profile=PROFILES[shape], lighting=LIGHTING)
+            output_id=f"out-{frame}", frame_id=frame, generation=1, lighting=LIGHTING, display_mm=None)
             for frame, shape in frames.items())},
         lines=lines, authored_candidates={}, locked_assignments={}, history=history,
         horizon_seconds=horizon, plan_seconds=plan_seconds, max_clock_uncertainty=0.1,

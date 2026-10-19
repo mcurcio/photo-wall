@@ -8,16 +8,14 @@ light, the paper or the mat. Where the board's squares sit is B1's
 this by tests/native_fit_pass_harness.py."""
 from __future__ import annotations
 
-import math
-
 import pytest
 
-import player.geometry as geometry
 from contracts.calibration_target import SCREEN_ROWS, Square, Surface, TargetCode, square
 from contracts.colour import srgb_to_linear
+from contracts.frame_fit import Placement
 from contracts.frame_lighting import AT_FULL, FarLight, FrameLighting, Paper, WashLight
 from contracts.lut import LUT_BYTES
-from contracts.models import FrameProfile
+from contracts.models import PositionBox, frame_size_mm
 from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
 from contracts.room_light import (
@@ -38,7 +36,8 @@ from player.geometry import (
 )
 
 PRE, POST = TestPattern.TARGET_PRE_SOFTWARE, TestPattern.TARGET_POST_SOFTWARE
-PROFILE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27)
+QN43 = (950, 540)                           # a Display's picture area, mm, as its EDID states it
+PLACEMENT = Placement(0, 0, 1920, 1080)       # the whole of its 1080p screen
 DISPLAY = DisplayLight(1000.0, 0.0003)
 LIT = picture_lights(
     FrameLighting(mat_depth_mm=8, paper=Paper(whiteness=.6, ink_density=1.2), lights=(
@@ -46,9 +45,9 @@ LIT = picture_lights(
         FarLight(light="room", lux=200, reference=AT_FULL, from_degrees=0, steep_degrees=30,
                  softness_degrees=20))),
     RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=FixedColour(kelvin=3000))}),
-    PROFILE, DISPLAY)
+    frame_size_mm(PositionBox(), QN43, 0), DISPLAY)
 GLOWING_TABLE = bytes([200]) * LUT_BYTES
-DRAW = picture_board(PROFILE, target_modules(TargetCode("p-" + "ab" * 16, "HDMI-A-1", 9)))
+DRAW = picture_board(PLACEMENT, target_modules(TargetCode("p-" + "ab" * 16, "HDMI-A-1", 9)))
 MULTIPLIERS, SLOPE, EXPONENT = (1.0, .9, .8), .8, 1.1
 
 
@@ -95,20 +94,13 @@ def black_squares() -> list[tuple[float, float]]:
 NO_LIGHTS = FrameLighting(mat_depth_mm=0, lights=(), paper=Paper(whiteness=.9, ink_density=2))
 
 
-def test_the_pictures_size_is_its_profiles_own_landscape_or_portrait():
-    """A screen's turn turns the screen, not the wall: a portrait profile's picture is tall."""
-    diagonal = 27 * 25.4
-    width, height = diagonal * 16 / math.hypot(16, 9), diagonal * 9 / math.hypot(16, 9)
-    portrait = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=27)
-    assert picture_lights(NO_LIGHTS, None, PROFILE, DISPLAY).size_mm == pytest.approx((width, height))
-    assert picture_lights(NO_LIGHTS, None, portrait, DISPLAY).size_mm == pytest.approx((height, width))
-
-
-def test_the_lights_and_the_board_take_the_pictures_size_from_the_one_rule(monkeypatch):
-    monkeypatch.setattr(geometry, "_profile_size_mm", lambda profile: (123.0, 45.0))
-    assert picture_lights(NO_LIGHTS, None, PROFILE, DISPLAY).size_mm == (123.0, 45.0)
-    board = picture_board(PROFILE, None)
-    assert (board.aspect, board.portrait) == (123.0 / 45.0, False)
+def test_the_pictures_size_is_its_displays_landscape_or_portrait():
+    """A screen's turn turns the screen, not the wall: the Display hung turned gives a tall picture
+    (contracts/models.py `frame_size_mm`), and the lights take that size as given."""
+    landscape, portrait = frame_size_mm(PositionBox(), QN43, 0), frame_size_mm(PositionBox(), QN43, 90)
+    assert picture_lights(NO_LIGHTS, None, landscape, DISPLAY).size_mm == pytest.approx((950, 540))
+    assert picture_lights(NO_LIGHTS, None, portrait, DISPLAY).size_mm == pytest.approx((540, 950))
+    assert picture_lights(NO_LIGHTS, None, None, DISPLAY).size_mm is None
 
 
 # -- 2. The stages -----------------------------------------------------------------------------

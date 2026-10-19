@@ -50,7 +50,7 @@ def centred(width: float, height: float | None = None) -> PositionBox:
 
 
 def framed(fit: PositionBox | None = None, **fields):
-    """test_executor's binding (a 16:9 profile), its Position a box (the whole screen unless `fit`)."""
+    """test_executor's binding (no Display size), its Position a box (the whole screen unless `fit`)."""
     return binding(calibration=Calibration(fit=fit or PositionBox()), **fields)
 
 
@@ -575,6 +575,26 @@ def test_a_trials_lighting_finishes_the_still_again():
     assert rig.fitter.draws[1][0].lights.paper == lit.paper
 
 
+def test_the_lights_take_the_frames_size_from_its_displays_and_the_drawn_box():
+    """Frame box run decision 12: the binding carries the Display's size and the Player works out
+    the Frame's from the box it draws (the binding's, or a trial's) and the screen's turn; with no
+    Display size the lights have none (washes only). Mutation probe: size the lights by the
+    binding's box during a trial -> the trial's draw reads 475 mm."""
+    rig = Rig()
+    still = photo("still", start=0)
+    sized = framed(centred(0.5), display_mm=(950, 540))
+    rig.settle(still, frame=sized)
+    assert rig.fitter.draws[-1][0].lights.size_mm == pytest.approx((475.0, 270.0))
+    rig.screens.trial_now = trial(centred(0.25))
+    rig.clock.tick()
+    rig.settle(still, frame=sized)
+    assert rig.fitter.draws[-1][0].lights.size_mm == pytest.approx((237.5, 135.0))
+    rig.screens.trial_now = None
+    rig.clock.tick()
+    rig.settle(still, frame=framed(centred(0.5)))
+    assert rig.fitter.draws[-1][0].lights.size_mm is None
+
+
 def test_a_test_pattern_is_the_screens_ground_drawn_once_per_request():
     rig = Rig()
     still = photo("still", start=0)
@@ -665,8 +685,8 @@ def test_a_screen_with_nothing_to_play_still_shows_its_pattern_and_its_trial(pat
 def test_a_calibration_targets_qr_names_the_player_once_it_has_an_id(monkeypatch):
     boards = []
 
-    def board(profile, modules):
-        boards.append((profile, modules))
+    def board(placement, modules):
+        boards.append((placement, modules))
         return BoardDraw(16 / 9, False, modules)
 
     monkeypatch.setattr(plane_renderer_module, "picture_board", board)
@@ -680,7 +700,7 @@ def test_a_calibration_targets_qr_names_the_player_once_it_has_an_id(monkeypatch
     rig.settle()
     assert len(rig.patterns.draws) == 2
     assert rig.patterns.draws[-1][0].board.modules == target_modules(TargetCode("p", OUTPUT, 3))
-    assert boards[-1][0] == framed().profile
+    assert boards[-1][0] == rig.patterns.draws[-1][0].placement      # the board's aspect: the box's pixels
     rig.renderer.set_player("p")
     rig.clock.tick()
     rig.present()

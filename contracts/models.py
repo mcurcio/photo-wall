@@ -25,6 +25,7 @@ from contracts.identifiers import Digest as Digest
 from contracts.identifiers import Identifier as Identifier
 from contracts.identifiers import Instant as Instant
 from contracts.identifiers import TargetIdentifier as TargetIdentifier
+from contracts.node_output import DISPLAY_MM_MAX
 from contracts.wire_model import Model
 
 Positive = Annotated[float, Field(gt=0, allow_inf_nan=False)]
@@ -92,14 +93,23 @@ class Calibration(Model):
     fit: PositionBox = Field(default_factory=PositionBox)
 
 
+# A Display's picture area in whole millimetres as built (its EDID base block's; contracts/
+# frame_fit.py `ScreenMm` on the wire), each side 1..DISPLAY_MM_MAX.
+DisplayMmSide = Annotated[int, Field(ge=1, le=DISPLAY_MM_MAX, strict=True)]
+DisplayMm = tuple[DisplayMmSide, DisplayMmSide]
+
+
 class OutputBinding(Model):
     output_id: Identifier
     frame_id: Identifier
     generation: int = Field(ge=1)
     configuration_revision: int = Field(default=1, ge=1)
-    profile: FrameProfile
     calibration: Calibration = Field(default_factory=Calibration)
     lighting: FrameLighting                             # the Frame's lights, mat and paper
+    # The Display seen on this Output: its picture area as built (frame box run decision 12); None
+    # when none is seen or it states none. Required: the Player draws the Frame's physical size
+    # from it (`frame_size_mm` of the drawn box and the screen's turn).
+    display_mm: DisplayMm | None
 
 
 def frame_output(calibration: Calibration, output: OutputSize | None, turn: DisplayTurn) -> PictureSize | None:

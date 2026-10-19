@@ -14,7 +14,7 @@ import pytest
 import player.plane_screen as plane_screen
 from contracts.frame_fit import Placement
 from contracts.frame_lighting import FrameLighting, Paper
-from contracts.models import Calibration, FrameProfile, Layer, OutputBinding, PositionBox, Variant
+from contracts.models import Calibration, Layer, OutputBinding, PositionBox, Variant
 from contracts.node_calibration import (
     MAX_TRIAL_BYTES,
     TrialCandidate,
@@ -260,7 +260,7 @@ def test_an_overlay_on_a_screen_not_configured_yet_answers_output_gone_unsent(mo
 
 LIGHTING = FrameLighting(mat_depth_mm=0, lights=(), paper=Paper(whiteness=0.9, ink_density=2))
 BINDING = OutputBinding(output_id="HDMI-A-1", frame_id="frame", generation=3, configuration_revision=2,
-                        profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27), lighting=LIGHTING)
+                        lighting=LIGHTING, display_mm=None)
 BASELINE = Surface(OutputKey(uuid4(), uuid4(), "HDMI-A-1", 1, 1), NodeProcessIdentity(100, 5, uuid4()),
                    1, BINDING.generation, BINDING.configuration_revision, "frame")
 

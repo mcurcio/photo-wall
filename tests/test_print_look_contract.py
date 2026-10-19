@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from contracts.frame_lighting import CloseLight, FrameLighting, Paper, WashLight
 from contracts.kelvin import KELVIN_TABLE_MAX, KELVIN_TABLE_MIN, KELVIN_WHITE, kelvin_white
 from contracts.lut import LUT_BYTES, LUT_GRID, LutRef, lut_offset
-from contracts.models import FrameProfile, OutputBinding
+from contracts.models import OutputBinding
 from contracts.node_calibration import (
     TrialCandidate,
     candidate_hash,
@@ -66,7 +66,7 @@ def test_a_lut_is_named_by_its_inputs_and_laid_out_red_fastest():
 
 def test_the_lighting_rides_the_binding():
     binding = OutputBinding(output_id="HDMI-A-1", frame_id="f", generation=1,
-                            profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27), lighting=LIGHTING)
+                            lighting=LIGHTING, display_mm=(600, 340))
     round_trip = OutputBinding.model_validate_json(
         binding.model_copy(update={"lighting": SPOT_LIGHTING}).model_dump_json())
     assert round_trip.lighting == SPOT_LIGHTING
@@ -97,8 +97,7 @@ def test_the_frames_wires_refuse_a_message_without_its_lighting():
     del envelope["lighting"]
     with pytest.raises(ValueError, match="trial_envelope_invalid"):
         parse_trial(canonical(envelope))
-    binding = {"output_id": "HDMI-A-1", "frame_id": "f", "generation": 1,
-               "profile": {"width_px": 1920, "height_px": 1080, "diagonal_inches": 27}}
+    binding = {"output_id": "HDMI-A-1", "frame_id": "f", "generation": 1, "display_mm": [600, 340]}
     for bad in (binding, {**binding, "mat": {"depth_mm": 0.0, "lights": []}},
                 {**binding, "lighting": LIGHTING.model_dump(mode="json"), "mat": {"depth_mm": 0.0, "lights": []}}):
         with pytest.raises(ValidationError):

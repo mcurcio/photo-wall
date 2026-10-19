@@ -28,16 +28,15 @@ from contracts.calibration_target import (
     qr_copies,
     square,
 )
-from contracts.models import FrameProfile
+from contracts.frame_fit import Placement
 from player.calibration_target import target_modules
 from player.geometry import BoardDraw, board_point, board_signal, picture_board
 from scripts.calibration_target.boards import charuco_board, marker_squares
 
 CODE = TargetCode("p-" + "0123456789abcdef" * 2, "HDMI-A-1", 3)
 MODULES = target_modules(CODE)
-WIDE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27)
-TALL = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=27)    # the same picture, hung tall
-FIVE_INCH = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=5)
+WIDE = Placement(0, 0, 1920, 1080)
+TALL = Placement(0, 0, 1080, 1920)                  # the same picture, hung tall
 LANDSCAPE = picture_board(WIDE, MODULES)
 PORTRAIT = picture_board(TALL, MODULES)
 
@@ -64,6 +63,16 @@ def test_the_board_takes_the_pictures_aspect_and_its_portrait():
     assert PORTRAIT.aspect == pytest.approx(16 / 9) and PORTRAIT.portrait
     assert LANDSCAPE.columns == PORTRAIT.columns == 17
     assert LANDSCAPE.modules == MODULES
+
+
+def test_the_boards_aspect_is_the_placements_pixels():
+    """Frame box run decision 11: the board's aspect is its placement's pixels, the long side over
+    the short, portrait when narrower than tall; where the box sits on its screen does not matter.
+    Mutation probe: aspect width / height -> the narrow placement reads 0.889."""
+    narrow = picture_board(Placement(100, 20, 480, 540), None)
+    assert narrow.aspect == pytest.approx(1.125) and narrow.portrait
+    assert picture_board(Placement(0, 0, 540, 480), None).aspect == pytest.approx(1.125)
+    assert not picture_board(Placement(0, 0, 540, 480), None).portrait
 
 
 @pytest.mark.parametrize("draw", [LANDSCAPE, PORTRAIT])
@@ -141,7 +150,7 @@ def test_a_copy_cut_by_the_pictures_edge_draws_the_raster():
 # -- 3. The tracer's seam: OpenCV finds what the Player draws ----------------------------------------
 
 def test_the_drawn_board_is_found_and_its_code_read():
-    draw = picture_board(FIVE_INCH, MODULES)
+    draw = picture_board(WIDE, MODULES)
     assert draw.columns == 17
     parameters = cv2.aruco.CharucoParameters()
     parameters.minMarkers = 1

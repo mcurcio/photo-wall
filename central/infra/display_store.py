@@ -266,13 +266,18 @@ def frame_outputs_in(conn: Any) -> tuple[FrameOutput, ...]:
     return tuple(frames)
 
 
+# After SEEN_DISPLAY_JOIN, this join gives DISPLAY_SIZE_COLUMNS: the seen Display's size
+# (`frame_display_mm`), which a binding carries (frame box run fb-9) and SCREEN_COLUMNS include.
+DISPLAY_SIZE_JOIN: Final = "LEFT JOIN displays d ON d.id=seen.display_id"
+DISPLAY_SIZE_COLUMNS: Final = "d.width_mm AS display_width_mm, d.height_mm AS display_height_mm"
+
 # A frames row `f` and its binding `b` (LEFT JOIN) and this join give SCREEN_COLUMNS: the Output's
 # report of its mode and the Display seen there (`frame_screen_px`, `frame_display_mm`).
 SCREEN_JOIN: Final = ("LEFT JOIN outputs o ON o.player_id=b.player_id AND o.output_id=b.output_id "
-                      f"{SEEN_DISPLAY_JOIN} LEFT JOIN displays d ON d.id=seen.display_id")
+                      f"{SEEN_DISPLAY_JOIN} {DISPLAY_SIZE_JOIN}")
 SCREEN_COLUMNS: Final = ("(o.observation->>'width_px')::int AS reported_width_px, "
                          "(o.observation->>'height_px')::int AS reported_height_px, d.modes AS display_modes, "
-                         "d.width_mm AS display_width_mm, d.height_mm AS display_height_mm")
+                         f"{DISPLAY_SIZE_COLUMNS}")
 SCREEN_FACTS: Final = ("reported_width_px", "reported_height_px", "display_modes", "display_width_mm",
                        "display_height_mm")
 
@@ -285,7 +290,8 @@ def frame_screen_px(row: Mapping[str, Any]) -> tuple[int, int] | None:
 
 
 def frame_display_mm(row: Mapping[str, Any]) -> tuple[int, int] | None:
-    """The seen Display's size of a row selected with SCREEN_COLUMNS (None: none seen, or none stated)."""
+    """The seen Display's size of a row selected with DISPLAY_SIZE_COLUMNS (or SCREEN_COLUMNS, which
+    hold them; None: none seen, or none stated)."""
     return _size_mm(row["display_width_mm"], row["display_height_mm"])
 
 

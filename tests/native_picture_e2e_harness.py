@@ -84,7 +84,8 @@ GREY = 128
 BOX = dict(left=.2, top=.275, width=.6, height=.45)     # the Frame's Position (a PositionBox): 384 x 216 at (128, 132)
 TOLERANCE = 0.02            # the GL reference's 0.015 plus the framebuffer's 8-bit rounding
 PICTURE_CHANGE = 3
-PROFILE = dict(width_px=1600, height_px=900, diagonal_inches=10)
+# The Display's picture area, mm (its EDID's): the box's share of it is a 221 x 125 mm picture, 10" 16:9.
+DISPLAY_MM = (369, 277)
 LIGHTING_FILE = pathlib.Path("/tmp/pw-picture-e2e-lighting.json")   # the binding's lighting, for the Player
 LUT_FILE = pathlib.Path("/tmp/pw-picture-e2e-lut.bin")              # the fixture LUT's bytes
 LUT_RELEASE = pathlib.Path("/tmp/pw-picture-e2e-lut-release")       # present: the Player holds them
@@ -155,7 +156,6 @@ def player() -> None:
     from contracts.lut import LutRef
     from contracts.models import (
         Calibration,
-        FrameProfile,
         Layer,
         OutputBinding,
         PositionBox,
@@ -176,7 +176,7 @@ def player() -> None:
     payload = PHOTO.read_bytes()
     variant = Variant(asset_id="asset-" + hashlib.sha256(payload).hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(payload).hexdigest(), size=len(payload),
                       media_type="image/png", width=PHOTO_SIZE[0], height=PHOTO_SIZE[1])
-    binding = OutputBinding(output_id=OUTPUT, frame_id="frame", generation=1, profile=FrameProfile(**PROFILE),
+    binding = OutputBinding(output_id=OUTPUT, frame_id="frame", generation=1, display_mm=DISPLAY_MM,
                             lighting=upgrade_lighting(),
                             calibration=Calibration(fit=PositionBox(**BOX)))
     layer = LocalLayer(Layer(assignment_id="grey", run_id="run", output_id=OUTPUT, frame_id="frame",
@@ -285,11 +285,13 @@ def grey_linear() -> tuple[float, float, float]:
 
 
 def lights_of(operations, lighting=None):
-    """The Frame's lights (`picture_lights`) as the Player draws them with `operations`."""
-    from contracts.models import FrameProfile
+    """The Frame's lights (`picture_lights`) as the Player draws them with `operations`: at the
+    box's share of the Display's size (`frame_size_mm`, the screen unturned)."""
+    from contracts.models import PositionBox, frame_size_mm
     from player.geometry import picture_lights
 
-    return picture_lights(lighting or upgrade_lighting(), room(), FrameProfile(**PROFILE), operations.light)
+    return picture_lights(lighting or upgrade_lighting(), room(), frame_size_mm(PositionBox(**BOX), DISPLAY_MM, 0),
+                          operations.light)
 
 
 def compare(operations, *, reference=None) -> tuple[int, int]:

@@ -33,7 +33,6 @@ from central.infra.display_store import (
     SCREEN_COLUMNS,
     SCREEN_FACTS,
     SCREEN_JOIN,
-    SEEN_DISPLAY_JOIN,
     commit_position,
     frame_display_mm,
     frame_readiness,
@@ -54,6 +53,7 @@ from central.installation_models import (
     WallInventory,
     WallNaming,
 )
+from central.installation_repository import PostgresInstallationRepository
 from central.transaction_locks import acquire_runtime_locks, holds_runtime_locks_in
 from contracts.display_turn import DisplayTurn
 from contracts.enrollment import Enrollment as Enrollment
@@ -877,23 +877,13 @@ class Registry:
             return self.configuration_in(conn, player_id, epoch)
 
     def configuration_in(self, conn, player_id: str, epoch: int) -> dict[str, list[OutputBinding]]:
-        """Hold registry authority through the caller's offer/configuration transaction."""
-        player = conn.execute("SELECT 1 FROM players WHERE id=%s AND authority_epoch=%s "
-                              "AND retired_at IS NULL FOR SHARE", (player_id, epoch)).fetchone()
-        if not player:
+        """Hold registry authority through the caller's offer/configuration transaction: the one query
+        and mapping, PostgresInstallationRepository.configuration_in; stale_authority 403 when the
+        session is not current."""
+        configuration = PostgresInstallationRepository(self.clock).configuration_in(conn, player_id, epoch)
+        if configuration is None:
             raise RegistryError("stale_authority", 403)
-        rows = conn.execute(f"SELECT f.*,b.output_id,{POSITION_COLUMNS} FROM bindings b "  # noqa: S608
-                            f"JOIN frames f ON f.id=b.frame_id {SEEN_DISPLAY_JOIN} "
-                            "WHERE b.player_id=%s ORDER BY b.output_id FOR SHARE OF f,b",
-                            (player_id,)).fetchall()
-        bindings = [OutputBinding(output_id=r["output_id"], frame_id=r["id"], generation=r["generation"],
-                              configuration_revision=r["configuration_revision"],
-                              profile=FrameProfile.model_validate(r["profile"]),
-                              calibration=Calibration.model_validate(r["calibration"]),
-                              lighting=FrameLighting.model_validate(r["lighting"]))
-                for r in rows]
-        return {"bindings": bindings, "execution_bindings": [binding for binding, row in
-                zip(bindings, rows, strict=True) if frame_readiness(row) is Readiness.READY]}
+        return configuration
 
     def inventory(self) -> InstallationInventory:
         with self.db.transaction() as conn:

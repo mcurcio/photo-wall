@@ -64,7 +64,7 @@ def test_a_pass_over_fifty_thousand_photos_reads_only_the_top_of_its_line(regist
                             for n in range(FRAMES))))
     runtime.activate("scene", "run", 0)
     bindings = {"player": tuple(OutputBinding(output_id=f"out-{n}", frame_id=f"f{n}",
-                                              generation=1, profile=WIDE, lighting=LIGHTING)
+                                              generation=1, lighting=LIGHTING, display_mm=None)
                                 for n in range(FRAMES))}
 
     def one_pass():

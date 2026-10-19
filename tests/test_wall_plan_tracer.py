@@ -101,7 +101,7 @@ def an_hour(instance: Runtime, photos, *, frames=FRAMES, outputs=None) -> Projec
         instance, 0,
         bindings_by_player={"player": tuple(
             OutputBinding(output_id=f"out-{frame}", frame_id=frame, generation=1,
-                          profile=PROFILES[frame], lighting=LIGHTING) for frame in frames)},
+                          lighting=LIGHTING, display_mm=None) for frame in frames)},
         lines=PoolLines({POOL: SourcePool(source_ref=POOL, ready=True,
                                           candidates=tuple(photos.values()))}),
         authored_candidates={}, locked_assignments={}, history=WallHistory(),

@@ -127,7 +127,7 @@ def target_bytes(size: tuple[int, int], turn: int, fill) -> bytes:
 
 def app() -> None:
     from contracts.frame_fit import Placement
-    from contracts.models import FrameProfile, Layer, OutputBinding, Variant
+    from contracts.models import Layer, OutputBinding, Variant
     from contracts.photo_crop import CENTRED
     from player.fit_pass import target_size
     from player.gpu import Target
@@ -138,7 +138,7 @@ def app() -> None:
     screens = PlaneScreens()
     binding = OutputComposition(OutputBinding(
         output_id=OUTPUT, frame_id="frame", generation=1,
-        profile=FrameProfile(width_px=WIDTH_PX, height_px=HEIGHT_PX, diagonal_inches=10),
+        display_mm=None,
         lighting=frame_lighting()))
     pictures, fds = {}, []
     candidate, last, pending = True, 0.0, b""

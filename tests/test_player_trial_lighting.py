@@ -9,7 +9,7 @@ from uuid import uuid4
 import pytest
 
 from contracts.frame_lighting import AT_FULL, CloseLight, FrameLighting, Paper, WashLight
-from contracts.models import Calibration, FrameProfile, OutputBinding, PositionBox
+from contracts.models import Calibration, OutputBinding, PositionBox
 from contracts.node_calibration import TrialCandidate, candidate_hash, canonical, encode_trial
 from contracts.node_display import Surface
 from contracts.node_protocol import NodeProcessIdentity, OutputKey
@@ -19,7 +19,7 @@ from player.rendering import OutputComposition
 LIGHTING = FrameLighting(mat_depth_mm=0, lights=(WashLight(light="room", lux=1000, reference=AT_FULL),),
                          paper=Paper(whiteness=0.9, ink_density=3.5))
 BINDING = OutputBinding(output_id="HDMI-A-1", frame_id="frame", generation=3, configuration_revision=2,
-                        profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=27), lighting=LIGHTING)
+                        lighting=LIGHTING, display_mm=(600, 340))
 COMPOSITION = OutputComposition(BINDING)
 DRAFT_FIT = PositionBox(left=0.15, top=0.25, width=0.5, height=0.5)    # a drafted Position unlike the binding's
 BASELINE = Surface(OutputKey(uuid4(), uuid4(), "HDMI-A-1", 1, 1), NodeProcessIdentity(100, 5, uuid4()),

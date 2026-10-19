@@ -12,11 +12,12 @@ import pytest
 from contracts.frame_lighting import (
     AT_FULL,
     CloseLight,
+    FarLight,
     FrameLighting,
     Paper,
     WashLight,
 )
-from contracts.models import FrameProfile
+from contracts.models import PositionBox, frame_size_mm
 from contracts.node_frame import neutral_operations
 from contracts.node_picture import DisplayLight
 from contracts.room_light import (
@@ -36,6 +37,8 @@ from contracts.room_light import (
 )
 from player.geometry import (
     HIGHLIGHT_KNEE,
+    FrameLights,
+    LitLight,
     dithered,
     encode_srgb,
     final_pixel,
@@ -50,9 +53,9 @@ from player.geometry import (
 MATCHED, BLACK = 1000.0, 0.0003
 DISPLAY = DisplayLight(MATCHED, BLACK)
 OPERATIONS = neutral_operations("headless", 1, DisplayLight(MATCHED, BLACK))
-PROFILE = FrameProfile(width_px=1600, height_px=900, diagonal_inches=43)
-# The picture's physical size, the profile's own as it hangs: a 43" 16:9 picture, by hand.
+# The picture's physical size as it hangs: a 43" 16:9 picture, by hand.
 WIDTH_MM, HEIGHT_MM = 43 * 25.4 * 16 / math.hypot(16, 9), 43 * 25.4 * 9 / math.hypot(16, 9)
+SIZE = (WIDTH_MM, HEIGHT_MM)
 UPGRADE_PAPER = Paper(whiteness=0.9, ink_density=-math.log10(BLACK))
 WHITE_ROOM = FixedEntry(colour=FixedColour(kelvin=6500))
 SPOT = CloseLight(light="bookshelf-spot", lux=400, reference=AT_FULL, across_mm=0, up_mm=350, out_mm=250,
@@ -77,7 +80,7 @@ def test_the_upgrade_wash_and_paper_draw_todays_picture(photo):
     """Acceptance 2: one wash of a FULL_ON room light at the matched lux, paper of whiteness 0.9
     and ink -log10(black), neutral contrast, gamma and white: the signal is the photo."""
     lit = picture_lights(lighting(WashLight(light="room", lux=MATCHED, reference=AT_FULL)),
-                       document(room=WHITE_ROOM), PROFILE, DISPLAY)
+                       document(room=WHITE_ROOM), SIZE, DISPLAY)
     assert lit.peak == pytest.approx(1.0)
     for x, y in ((.1, .1), (.5, .5), (.9, .8)):
         assert pixel(photo, lit, x, y)[:3] == pytest.approx(tuple(encode_srgb(value) for value in photo), abs=1e-9)
@@ -121,11 +124,11 @@ def spot_lighting() -> FrameLighting:
 def test_the_spot_is_a_cone_that_feathers_and_switching_it_off_leaves_the_wash():
     """The tracer's Pi half, in the reference: the cone is brightest inside, falls through the
     feather and is gone outside; the spot off, the Frame equals the wash alone."""
-    on = picture_lights(spot_lighting(), document(bookshelf_spot=WHITE_ROOM, room=WHITE_ROOM), PROFILE, DISPLAY)
+    on = picture_lights(spot_lighting(), document(bookshelf_spot=WHITE_ROOM, room=WHITE_ROOM), SIZE, DISPLAY)
     off = picture_lights(spot_lighting(), document(bookshelf_spot=WhiteEntry(colour=FixedColour(kelvin=6500), state=Dimmer(
-        on=False, brightness=1.0)), room=WHITE_ROOM), PROFILE, DISPLAY)
+        on=False, brightness=1.0)), room=WHITE_ROOM), SIZE, DISPLAY)
     wash = picture_lights(lighting(WashLight(light="room", lux=MATCHED / 10, reference=AT_FULL)),
-                        document(room=WHITE_ROOM), PROFILE, DISPLAY)
+                        document(room=WHITE_ROOM), SIZE, DISPLAY)
     grey = (0.5, 0.5, 0.5)
     centre, feather, outside = (pixel(grey, on, x, .5)[0] for x in (.5, .64, .95))
     assert centre > feather > outside
@@ -149,7 +152,7 @@ def test_a_warm_light_keeps_one_colour_from_the_shadows_to_paper_white():
     enough to pass the TV's white keeps the same green/red and blue/red ratios after the rolloff.
     Mutation probe: roll each channel apart -> the ratios climb toward white (0.17 -> 0.51)."""
     warm = picture_lights(lighting(WashLight(light="lamp", lux=MATCHED, reference=AT_FULL)),
-                        document(lamp=FixedEntry(colour=FixedColour(kelvin=2700))), PROFILE, DISPLAY)
+                        document(lamp=FixedEntry(colour=FixedColour(kelvin=2700))), SIZE, DISPLAY)
     assert warm.peak > 1
     ratios = []
     for grey in (0.05, 0.18, 0.4, 0.7, 1.0):
@@ -167,7 +170,7 @@ def test_the_close_light_falls_off_as_the_inverse_square_on_a_slant_and_feathers
     smoothstep of (outer - phi) / (outer - inner) of that in the feather, and nothing past the outer
     beam. Mutation probes: drop the (d0 / d)**3 -> the inner point reads 400; a linear feather -> the
     feather point misses the smoothstep; the picture's size taken as (H, W) -> the light's place moves."""
-    lit = picture_lights(lighting(SPOT), document(bookshelf_spot=WHITE_ROOM), PROFILE, DISPLAY)
+    lit = picture_lights(lighting(SPOT), document(bookshelf_spot=WHITE_ROOM), SIZE, DISPLAY)
     width, height = WIDTH_MM, HEIGHT_MM
     light = (width / 2, height / 2 - 350.0, 250.0)
 
@@ -193,7 +196,7 @@ def test_the_peak_is_the_brightest_paper_white_on_the_opening_not_a_bound_past_t
     cone -> the peak is far above every pixel's signal."""
     close = CloseLight(light="bookshelf-spot", lux=400, reference=AT_FULL, across_mm=200, up_mm=0, out_mm=60,
                        inner_beam_degrees=20, outer_beam_degrees=40)
-    lit = picture_lights(lighting(close), document(bookshelf_spot=WHITE_ROOM), PROFILE, DISPLAY)
+    lit = picture_lights(lighting(close), document(bookshelf_spot=WHITE_ROOM), SIZE, DISPLAY)
     white = (UPGRADE_PAPER.whiteness,) * 3
     brightest = max(max(paper_signal(white, irradiance(lit, (i + .5) / 101, (j + .5) / 101), DISPLAY))
                     for i in range(101) for j in range(101))
@@ -209,7 +212,7 @@ def test_a_ramp_dimmed_to_five_lux_dithers_instead_of_banding():
     tile spans more than one code, and each tile's mean equals the undithered signal's within a
     sixth of a step (undithered rounding is off by up to half)."""
     dim = picture_lights(lighting(WashLight(light="room", lux=5, reference=AT_FULL)),
-                       document(room=WHITE_ROOM), PROFILE, DISPLAY)
+                       document(room=WHITE_ROOM), SIZE, DISPLAY)
     width = 256
     undithered = [pixel((i / (width - 1),) * 3, dim)[0] for i in range(width)]
     assert 8 < undithered[-1] * 255 < 40              # a few dozen steps: the room dims the picture
@@ -228,3 +231,56 @@ def test_the_dither_is_under_half_a_step_and_averages_out():
     assert max(abs(offset) for offset in offsets) < 0.5 / 255
     assert sum(offsets) == pytest.approx(0.0, abs=1e-15)
     assert dithered(0.5, 1, 2) == dithered(0.5, 5, 6)
+
+
+# -- The Frame's size from its Display's (frame box run, bead fb-9) ------------------------------------
+
+QN43 = (950, 540)                   # the Samsung's picture area, as its EDID base block states it
+WINDOW = FarLight(light="window", lux=300, reference=AT_FULL, from_degrees=270, steep_degrees=45,
+                  softness_degrees=0)   # from the left: its mat shadow runs down the opening's left edge
+BAND_MM = 10.0                      # a 10 mm mat under a 45-degree light: 10 mm of shadow
+
+
+def _window_lit(box: PositionBox, turn: int = 0):
+    return picture_lights(lighting(WINDOW, depth=BAND_MM), document(window=WHITE_ROOM),
+                          frame_size_mm(box, QN43, turn), DISPLAY)
+
+
+def test_the_mat_shadow_is_drawn_at_the_frames_size_from_its_displays():
+    """A Frame filling a 950 x 540 mm Display draws a far light's mat shadow at the width a 950 mm
+    picture gives: dark to BAND_MM / 950 of the picture, lit past it (the scalar reference the
+    shader is held to); a box half the screen wide is a 475 mm picture, so the same mat is twice the
+    share of it. Mutation probe: `frame_size_mm` drops the box's width -> the half box's shadow
+    ends at BAND_MM / 950."""
+    whole = _window_lit(PositionBox())
+    assert whole.size_mm == pytest.approx(QN43)
+    edge = BAND_MM / QN43[0]
+    assert irradiance(whole, .5 * edge, .5) == (0.0, 0.0, 0.0)
+    assert irradiance(whole, 1.5 * edge, .5)[1] == pytest.approx(300.0)
+    half = _window_lit(PositionBox(left=.25, top=0, width=.5, height=1))
+    assert half.size_mm == pytest.approx((475.0, 540.0))
+    assert irradiance(half, 1.5 * edge, .5) == (0.0, 0.0, 0.0)     # past the whole box's edge, still dark
+    assert irradiance(half, 2.5 * edge, .5)[1] == pytest.approx(300.0)
+    assert _window_lit(PositionBox(left=.25, top=0, width=.5, height=1), 90).size_mm == pytest.approx((270.0, 950.0))
+
+
+def test_with_no_display_size_only_wash_lights_add_light():
+    """A Display that states no size: the wash still lights the picture, everywhere the same; the
+    far and the close light need millimetres and add none (frame box run decision 6). Mutation
+    probe: drop the wash lights too when the size is None -> the wash reads nothing."""
+    every = lighting(WASH, WINDOW, SPOT, depth=BAND_MM)
+    room = document(room=WHITE_ROOM, window=WHITE_ROOM, bookshelf_spot=WHITE_ROOM)
+    unknown = picture_lights(every, room, None, DISPLAY)
+    assert unknown.size_mm is None and [lit.kind for lit in unknown.lights] == ["wash"]
+    for x, y in ((0.0, 0.0), (.01, .5), (.5, .5), (1.0, 1.0)):
+        assert irradiance(unknown, x, y)[1] == pytest.approx(50.0)
+    assert unknown.peak == pytest.approx(max(paper_signal((UPGRADE_PAPER.whiteness,) * 3, (50.0,) * 3, DISPLAY)))
+    assert [lit.kind for lit in picture_lights(every, room, QN43, DISPLAY).lights] == ["wash", "far", "close"]
+
+
+def test_lights_with_no_size_hold_only_washes():
+    close = LitLight("close", (1.0, 1.0, 1.0), position_mm=(0.0, 0.0, 100.0), beam=(.1, .2))
+    with pytest.raises(ValueError, match="frame_lights"):
+        FrameLights(size_mm=None, depth_mm=0.0, paper=UPGRADE_PAPER, lights=(close,), peak=1.0)
+    FrameLights(size_mm=None, depth_mm=0.0, paper=UPGRADE_PAPER, lights=(LitLight("wash", (1.0, 1.0, 1.0)),),
+                peak=1.0)
