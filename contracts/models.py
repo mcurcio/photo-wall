@@ -7,7 +7,15 @@ from typing import Annotated, Final, Literal, Self
 from pydantic import BeforeValidator, Field, model_serializer, model_validator
 
 from contracts.display_turn import DisplayTurn, hanging, is_turn
-from contracts.frame_fit import FrameRectangle, OutputSize, PictureSize, Placement, place
+from contracts.frame_fit import (
+    FrameBox,
+    FrameRectangle,
+    OutputSize,
+    PictureSize,
+    Placement,
+    ScreenMm,
+    place,
+)
 from contracts.frame_lighting import FrameLighting
 
 # The identifier rules' one home is contracts/identifiers.py; re-exported here under these names.
@@ -71,6 +79,29 @@ class RectangleFit(Model):
     def rectangle(self) -> FrameRectangle:
         """The contracts/frame_fit.py `FrameRectangle` of these three fields. Pure."""
         return FrameRectangle(centre_x=self.centre_x, centre_y=self.centre_y, width=self.width)
+
+
+BoxSide = Annotated[float, Field(gt=0, le=1, allow_inf_nan=False)]
+
+
+class PositionBox(Model):
+    """A Frame's Position as a box (frame box run, .claude/runs/frame-box/page.md; owner,
+    2026-10-19: "I need to be able to set width and height independently, along with the position
+    of that box on the display"): `left`, `top`, `width` and `height` are fractions of its screen's
+    width and height as it hangs (the Frame's turn, frames.turn). The one source of the Frame's
+    shape and pixel size; the default is the whole screen. Its rule's one home is
+    contracts/frame_fit.py `FrameBox` (an after-validator builds one, so a box past the screen's
+    right or bottom edge is refused with FrameBox's ValueError("frame_box")); where it lands in
+    pixels is `frame_placement`. `mode` names the form in stored JSON and on the wire."""
+    mode: Literal["box"] = "box"
+    left: Fraction = 0.0
+    top: Fraction = 0.0
+    width: BoxSide = 1.0
+    height: BoxSide = 1.0
+
+    def box(self) -> FrameBox:
+        """The contracts/frame_fit.py `FrameBox` of these four fields. Pure."""
+        ...
 
 
 class Calibration(Model):
@@ -138,6 +169,16 @@ def off_screen(profile: FrameProfile, calibration: Calibration, output: OutputSi
             raise
         return True
     return False
+
+
+def frame_size_mm(fit: PositionBox, display_mm: ScreenMm | None, turn: DisplayTurn) -> tuple[float, float] | None:
+    """A Frame's physical (width, height) in millimetres as it hangs: `box_size_mm(fit.box(),
+    hanging(display_mm, turn))`, where `display_mm` is the picture area of the Display seen on its
+    Output as built (its EDID's; OutputBinding.display_mm, displays.width_mm and height_mm). None
+    when `display_mm` is None (the Display states no size, or none is seen). The one home, for
+    Central and the Player, of a Frame's physical size (frame box run). Pure. ValueError as
+    `hanging` ("display_turn", "screen_size") for a known size."""
+    ...
 
 
 class IdentifyOutput(Model):

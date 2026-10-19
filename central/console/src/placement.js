@@ -113,3 +113,40 @@ export function fillScreen(screen, aspect) {
   const [screenWidth, screenHeight] = screen;
   return { centre_x: 0.5, centre_y: 0.5, width: Math.min(screenWidth, Math.floor(screenHeight * aspect + 1e-6)) / screenWidth };
 }
+
+/**
+ * A Frame's box in whole pixels (frame box run, .claude/runs/frame-box/page.md, bead fb-4):
+ * contracts/frame_fit.py `place_box` and `FrameBox`'s check, mirrored pixel for pixel
+ * (tests/test_console_placement.py). Edges round half up: x = min(W - 1, halfUp(left * W)),
+ * right = max(x + 1, min(W, halfUp((left + width) * W))), width = right - x; y and height likewise
+ * with H. Throws Error("frame_box") unless every field is finite, 0 <= left, 0 <= top, 0 < width,
+ * 0 < height, left + width <= 1 + 1e-9 and top + height <= 1 + 1e-9; Error("placement_screen")
+ * unless both sides are integers of at least 1.
+ *
+ * @typedef {{left: number, top: number, width: number, height: number}} Box   fractions of the screen as it hangs
+ * @param {Box} box
+ * @param {[number, number]} screen as it hangs
+ * @returns {Placement}
+ */
+export function placeBox(box, screen) {
+  void box;
+  void screen;
+  throw new Error("frame box bead fb-4");
+}
+
+/**
+ * The box's physical [width, height] in millimetres: contracts/models.py `frame_size_mm`,
+ * [box.width * W, box.height * H] of `displayMm` (the Display's picture area as built) turned by
+ * `turn` (`hanging`); null when `displayMm` is null.
+ *
+ * @param {Box} box
+ * @param {[number, number] | null} displayMm as built
+ * @param {Turn} turn
+ * @returns {[number, number] | null}
+ */
+export function boxSizeMm(box, displayMm, turn) {
+  void box;
+  void displayMm;
+  void turn;
+  throw new Error("frame box bead fb-4");
+}
