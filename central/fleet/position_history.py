@@ -1,4 +1,4 @@
-"""A Frame's Position history, pure: the Frame fit (its rectangle) and the Frame's
+"""A Frame's Position history, pure: the Frame fit (its box) and the Frame's
 lighting (its lights, mat depth and paper).
 
 One numbering per Frame, in commit order under the Frame's row lock, for two kinds of entry, each
@@ -13,8 +13,8 @@ written where its state converges and never by an editor:
   `deliver_in`), appended only when the handed values differ from the Frame's newest entry
   (`sent_record`): a trial's draft, or the kept values back once a draft went.
 
-Each entry says what it was made for (`MadeFor`: the profile whose aspect its rectangle has, the
-turn of the screen as it hung, whose fractions its rectangle is, and the Display seen on the Frame's
+Each entry says what it was made for (`MadeFor`: the profile whose aspect its box has, the
+turn of the screen as it hung, whose fractions its box is, and the Display seen on the Frame's
 port), which is what Restore checks (`restore_refusal`): a Position made for another profile,
 another turn or another Display is refused, never adapted. An entry is a record of what was, never a
 second source of current state (frames.calibration and frames.lighting stay the truth). Every `at` is
@@ -29,7 +29,7 @@ from typing import Final
 from uuid import UUID
 
 from contracts.frame_lighting import FrameLighting
-from contracts.models import Calibration, RectangleFit
+from contracts.models import Calibration, PositionBox
 
 
 class PositionEntryKind(StrEnum):
@@ -53,15 +53,15 @@ SENT_KINDS: Final = frozenset({PositionEntryKind.SENT_DRAFT, PositionEntryKind.S
 class PositionValues:
     """What a Position entry records: the Frame fit and the Frame's lighting (the calibration's
     revision is not a value: it only orders saves)."""
-    fit: RectangleFit
+    fit: PositionBox
     lighting: FrameLighting
 
 
 @dataclass(frozen=True)
 class MadeFor:
     """What an entry was made for: the Frame's profile (`profile_px`, width and height in pixels: the
-    aspect its rectangle has), the Frame's turn (`turn`, 0/90/180/270: the screen as it hung, whose
-    fractions the rectangle is) and the Display seen on the Frame's bound port then (None:
+    aspect its box has), the Frame's turn (`turn`, 0/90/180/270: the screen as it hung, whose
+    fractions the box is) and the Display seen on the Frame's bound port then (None:
     unbound, or none seen)."""
     profile_px: tuple[int, int]
     turn: int

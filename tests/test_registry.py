@@ -33,14 +33,14 @@ from contracts.models import (
     TARGET_ID_PATTERN,
     Calibration,
     FrameProfile,
-    RectangleFit,
+    PositionBox,
 )
 from contracts.player_control import ControlHello
 
 ADMIN = "test-operator-" + "x" * 40
 # A Position of the portrait Frame (`frame`) on a 1920 x 1080 screen that differs from
 # support.position's PORTRAIT_ON_WIDE: a smaller rectangle left of centre.
-SKEWED = Calibration(fit=RectangleFit(centre_x=0.4, width=0.25))
+SKEWED = Calibration(fit=PositionBox(left=0.275, top=0.1, width=0.25, height=0.79))
 
 
 def enroll(registry, key=None, count=2, device_id=None, size=(1920, 1080)):

@@ -48,7 +48,7 @@ from central.infra.display_store import SEEN_DISPLAY_JOIN
 from central.tuning_history import bounds as retention
 from central.tuning_history.bounds import HistoryPage
 from contracts.frame_lighting import FrameLighting
-from contracts.models import Calibration, FrameProfile, RectangleFit
+from contracts.models import Calibration, FrameProfile, PositionBox
 
 _KEPT_VALUES: Final = sorted(kind.value for kind in KEPT_KINDS)
 _SENT_VALUES: Final = sorted(kind.value for kind in SENT_KINDS)
@@ -211,7 +211,7 @@ def _entry(row: Mapping[str, Any]) -> PositionEntry:
         row["id"], row["frame_id"], row["number"], row["at"].astimezone(UTC),
         MadeFor((row["profile_width_px"], row["profile_height_px"]), row["turn"], row["display_id"]),
         PositionRecord(PositionEntryKind(row["kind"]),
-                       PositionValues(RectangleFit.model_validate(row["fit"]), FrameLighting.model_validate(row["lighting"])),
+                       PositionValues(PositionBox.model_validate(row["fit"]), FrameLighting.model_validate(row["lighting"])),
                        row["session_id"], row["restored_from"]))
 
 

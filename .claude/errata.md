@@ -6595,3 +6595,35 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
 - **`boxSizeMm` refuses an invalid box ("frame_box") before the null size.** Central cannot ask
   `frame_size_mm` about a box that is no PositionBox, so the parity test refuses such a box first on
   both sides; the stub's comment did not say.
+
+## fb-6 (TRACER: the Position is a box, end to end)
+
+- **Files outside fb-6's list had to change for the tracer to stay green** (each the smallest edit):
+  `central/console/src/domain/frame-position.tsx` (one read: `rectangleOf(adjustment.draft.fit)`, the
+  useDraft.js adapter, and its import), `frame-position.stories.tsx` and `position-history.stories.tsx`
+  (the generated `PositionBox` type refuses rectangle fits; the frame-position stories keep each
+  rectangle's centre and width, so their baselines are unchanged, checked with `--check`), the
+  position-history stories' baselines (the History now says "Left and top" and "Size"),
+  `tests/test_console_routes_r4.py` (frame-position.tsx's declared import of useDraft.js, until fb-7),
+  `tests/test_frame_placement.py` (deleted: it tested the deleted `place`), `tests/test_migration_102_rectangle_positions.py`
+  (imported the deleted `place` and `RectangleFit`; now its own copies, as 104's test), and
+  `tests/test_display_picture_settings.py` (its 075 case reads today's models after 102, so it applies
+  104 after 102 too).
+- **Left for fb-7 (dead since the box cannot leave its screen):** liveAdjustment.js's `REFUSED_VALUE`
+  (now empty), `refused` and `sessionFit` (now the adapter's rectangle view); frame-position.tsx's
+  `OFF_SCREEN` constant, its "central refused" card path and the `CentralRefused` story (it still names
+  `position_off_screen`; tests/test_position_box_fit.py's grep excludes those two files and names fb-7).
+  `placement.js`'s comment still names `FrameRectangle`; `tests/test_console_placement.py` keeps its own
+  copy of v0.41.0's `place` as the oracle for the console's `place`, both deleted with the rectangle vectors.
+- **frame-page.tsx (fb-7) sends `{mode: "rectangle"}` as the Hardware tab's draft fit when a Frame has no
+  calibration** (`frame.calibration?.fit ?? { mode: "rectangle" }`): Central now refuses it. Every Frame
+  has a calibration, so it never runs; fb-7 should send `{mode: "box"}`.
+- **The adapter draws at the profile's aspect, the box keeps its own.** The rectangle editor places its
+  rectangle at the Frame profile's aspect (frame-page.tsx `aspectOf`); useDraft.js turns each patch into a
+  box keeping the box's own height-to-width share. They agree for every exactly converted Position (104);
+  for a clipped one (104's not-exact cases) the editor draws the profile's shape while the Pi shows the
+  box. Transitional until fb-7's BoxEditor.
+- **The render bench's turn step now shows no ground**: its Frame is the whole screen, turned or not
+  (it was a 16:9 rectangle across a portrait screen); `tests/test_render_bench.py` says so.
+- **`picture_board` and `picture_lights` still take `binding.profile`** (fb-9 owns player/geometry.py and
+  the lights' size); only the finishing aspect moved to `placement.aspect` here.

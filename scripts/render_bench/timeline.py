@@ -14,14 +14,14 @@ from pathlib import Path
 from typing import Final, Literal
 
 from contracts.display_turn import DisplayTurn
-from contracts.frame_fit import place
+from contracts.frame_fit import place_box
 from contracts.frame_lighting import FrameLighting, Paper
 from contracts.models import (
     Calibration,
     FrameProfile,
     Layer,
     OutputBinding,
-    RectangleFit,
+    PositionBox,
     Variant,
     stack_order,
 )
@@ -84,7 +84,7 @@ class Step:
 @dataclass(frozen=True)
 class Tracer:
     """The whole tracer: its steps in order, the one Frame's binding (a 16:9 profile, no lights,
-    its Position a RectangleFit centred at full width), and the plan's layers (contracts.models.Layer,
+    its Position the whole screen), and the plan's layers (contracts.models.Layer,
     each media layer's Variant named by its file's sha256 and size, its crop centred), by stack
     order."""
     steps: tuple[Step, ...]
@@ -184,7 +184,7 @@ def tracer(output_id: str, photos: Sequence[Media], video: Media, *, origin: flo
     for index in range(1, OVERLOAD_PICTURES):
         plan.add(f"overload-{index}", variants[index % len(variants)], at, opacity=0.5)
     step("overload", hold)
-    position = Calibration(fit=RectangleFit(centre_x=0.5, centre_y=0.5, width=1.0))
+    position = Calibration(fit=PositionBox())
     return Tracer(tuple(steps), OutputBinding(output_id=output_id, frame_id=FRAME_ID, generation=1, profile=_PROFILE,
                                               calibration=position, lighting=_LIGHTING),
                   plan.layers(at))
@@ -209,8 +209,7 @@ def _kept(tracer: Tracer, at: float, screen_size: tuple[int, int]) -> tuple[Outp
     layers given up until it fits the Pi 5's controller budget: the Player's own rules (player/look.py
     `look`, player/planes.py `compose`, player/controller_budget.py `fits`, and the executor's shed
     loop, `shed_overload`)."""
-    profile = tracer.binding.profile
-    placement = place(tracer.binding.calibration.fit.rectangle(), screen_size, profile.width_px / profile.height_px)
+    placement = place_box(tracer.binding.calibration.fit.box(), screen_size)
     screen = Screen(tracer.binding.output_id, screen_size, step_at(tracer, at).turn)
 
     def composed(composition: OutputComposition) -> Composition:

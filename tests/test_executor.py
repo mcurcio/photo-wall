@@ -18,7 +18,7 @@ from contracts.models import (
     OutputBinding,
     Plan,
     PlayerConfiguration,
-    RectangleFit,
+    PositionBox,
     Revocation,
     Variant,
 )
@@ -164,7 +164,7 @@ def test_native_ack_rejects_stale_or_different_authority(tmp_path, fault):
                 drawn = replace(drawn, binding=drawn.binding.model_copy(update={"generation": 2}))
             elif fault == "calibration":
                 drawn = replace(drawn, binding=drawn.binding.model_copy(
-                    update={"calibration": Calibration(fit=RectangleFit(width=0.5))}))
+                    update={"calibration": Calibration(fit=PositionBox(left=0.25, top=0.25, width=0.5, height=0.5))}))
             else:
                 local = drawn.layers[0]
                 drawn = replace(drawn, layers=(replace(local, layer=local.layer.model_copy(

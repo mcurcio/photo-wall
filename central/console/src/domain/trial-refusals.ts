@@ -34,7 +34,6 @@ export const TRIAL_REFUSAL_WORDS: Record<TrialRefusal, string> = {
   node_body_too_large: "Photo Wall refused this change: it is too large to send.",
   calibration_revision_conflict: OVERTAKEN,
   calibration_trial_baseline_changed: OVERTAKEN,
-  position_off_screen: "The picture would run off the screen as it hangs. Make it smaller or move it in.",
 };
 
 /** Every reason a Position history entry cannot be restored, in words. */

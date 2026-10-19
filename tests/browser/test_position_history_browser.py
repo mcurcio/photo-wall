@@ -190,9 +190,9 @@ def test_a_tried_and_a_kept_position_are_listed_and_restore_puts_the_kept_one_ba
         seen = _history_reads(page)
         field = _move(page, 2)
         expect(field).to_have_value(_across(SAVED_X + 20))
-        # A row says what differs from the row below it: here the moved centre alone.
-        expect(_rows(page, TRIED).first).to_contain_text("Centre")
-        expect(_rows(page, TRIED).first).not_to_contain_text("Width")
+        # A row says what differs from the row below it: here the moved left edge alone.
+        expect(_rows(page, TRIED).first).to_contain_text("Left and top")
+        expect(_rows(page, TRIED).first).not_to_contain_text("Size")
         expect(_rows(page, TRIED).first).not_to_contain_text("Mat depth")
         _done(page)
         expect(_rows(page, KEPT)).to_have_count(2)
@@ -204,7 +204,7 @@ def test_a_tried_and_a_kept_position_are_listed_and_restore_puts_the_kept_one_ba
         _depth(page).fill("6")
         expect(lighting_group(page)).to_contain_text("6 mm")
         expect(_rows(page, TRIED).first).to_contain_text("Mat depth 6 mm")
-        expect(_rows(page, TRIED).first).not_to_contain_text("Centre")
+        expect(_rows(page, TRIED).first).not_to_contain_text("Left and top")
 
         _rows(page, KEPT).last.get_by_role("button", name="Restore", exact=True).click()
         expect(_depth(page)).to_have_value("0")

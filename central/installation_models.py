@@ -97,8 +97,8 @@ class FrameOutput(Model):
     """One Frame's Frame output and what it came from (follow-ups 2026-10-11, slice A1; owner,
     2026-10-11: compatibility "measuring against the Frame output and not the Display").
 
-    `output_px` is `contracts.models.frame_output(profile, calibration, display_px, turn)`: the
-    Frame's picture in output pixels, (width, height) along its own axes. `turn` is how the
+    `output_px` is `contracts.models.frame_output(calibration, display_px, turn)`: the Frame's
+    picture in output pixels, (width, height) along its own axes, its shape the Position's box. `turn` is how the
     Frame's screen hangs (frames.turn; render redesign S2). `display_px` is the
     size its Output last reported (`outputs.observation` width_px x height_px, kept while the
     display is unplugged). Both are None for a Frame bound to no Output, or whose Output never

@@ -809,7 +809,7 @@ FRAME_PAGE_IMPORTS = {
     # The Picture tab (1c K1): its routes, the session hook's type and a display level's words
     # (0022 R11); Position (render redesign S5): the placement rule it judges every change by.
     "frame-picture.tsx": {"pictureApi.js", "pictureSession.js", "levelWords.js"},
-    "frame-position.tsx": {"placement.js"},
+    "frame-position.tsx": {"placement.js", "useDraft.js"},   # useDraft.js: the rectangle adapter until fb-7
     # A Position's pixels and words, the editor's and History's one home: the screen as it hangs,
     # where a refused rectangle would lie and the nearest one that fits, by the same rule.
     "position-on-screen.ts": {"placement.js"},

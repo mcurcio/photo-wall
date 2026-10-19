@@ -47,7 +47,7 @@ from contracts.models import (
     FrameProfile,
     Observation,
     OutputBinding,
-    RectangleFit,
+    PositionBox,
     Variant,
     frame_output,
     frame_placement,
@@ -144,7 +144,7 @@ def test_an_hour_of_the_wall_fills_each_frame_and_crops_on_the_player():
     assert {entry.crop.offset for entry in planned["tall"]} == {0.0}
     width, height = SIZES["two_three"]
     screen = (1080, 1920)                      # the 9:16 Frame's screen, its whole width
-    placement = frame_placement(TALL, RectangleFit(), screen, 0)
+    placement = frame_placement(PositionBox(), screen, 0)
     points = [placement_uv(x / 20, y / 20, placement, screen) for x in range(21) for y in range(21)]
     samples = [fit_source_uv(u, v, TALL.width_px / TALL.height_px, (width, height), offered[0].crop)
                for u, v in (point for point in points if point is not None)]
@@ -161,7 +161,7 @@ def test_a_mat_opening_frame_plans_a_photo_smaller_than_its_display():
     a 3,840 x 2,160 Display needs 1,536 x 864 pixels, so a 1,600 x 900 photo fills it all hour;
     judged against the Display's size the same wall has nothing to show.
     Mutation probe: judge rule 2 against the profile's pixels -> nothing is placed."""
-    mat = Calibration(fit=RectangleFit(width=0.4))
+    mat = Calibration(fit=PositionBox(left=0.3, top=0.3, width=0.4, height=0.4))
     small = {"small": measured("small", 1600, 900, variant=Variant(
         asset_id="asset-" + hashlib.sha256(b"small").hexdigest()[:16], recipe_id="e" * 64, sha256=hashlib.sha256(b"small").hexdigest(), size=10, media_type="image/jpeg",
         width=1600, height=900))}
@@ -171,7 +171,7 @@ def test_a_mat_opening_frame_plans_a_photo_smaller_than_its_display():
         contributions=(Contribution(target="frame:wide", source_refs=(POOL,),
                                     after_end="keep_this_photo"),)))
     instance.activate("tracer", "run", 0)
-    opening = frame_output(WIDE, mat, (3840, 2160), 0)
+    opening = frame_output(mat, (3840, 2160), 0)
     assert opening == (1536, 864)
     planned = placed_by_frame(an_hour(instance, small, frames=("wide",),
                                       outputs={"wide": opening}))
@@ -210,7 +210,7 @@ class MeasureQueue:
 
 
 def wall_players(registry):
-    """Two Players' 1920 x 1080 screens, each a Frame across its whole width: the wide Frame's
+    """Two Players' 1920 x 1080 screens, each a Frame on its whole screen: the wide Frame's
     screen upright (Frame output 1920 x 1080), the tall Frame's hung a quarter turn (1080 x 1920)."""
     players = []
     for frame_id, profile, size, turn in (("frame-wide", WIDE, (1210, 680), 0),
@@ -222,7 +222,7 @@ def wall_players(registry):
         if turn:
             generation = next(frame for frame in registry.inventory().frames if frame.id == frame_id).generation
             registry.turn_frame(frame_id, turn, expected_generation=generation)
-        save_position(registry, frame_id, Calibration(fit=RectangleFit()))
+        save_position(registry, frame_id, Calibration(fit=PositionBox()))
         players.append(player)
     return players
 

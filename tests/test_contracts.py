@@ -52,14 +52,15 @@ def test_clock_uncertainty_is_not_pipeline_position():
     assert layer.position(clock.utc()) == 32
 
 
-def test_a_position_is_its_rectangle_centred_at_full_width_by_default():
+def test_a_position_is_the_whole_screen_by_default():
     assert Calibration().model_dump(mode="json") == {
-        "revision": 1, "fit": {"mode": "rectangle", "centre_x": 0.5, "centre_y": 0.5, "width": 1.0}}
+        "revision": 1, "fit": {"mode": "box", "left": 0.0, "top": 0.0, "width": 1.0, "height": 1.0}}
 
 
 @pytest.mark.parametrize("fit", [
-    {"mode": "rectangle", "rotation": 0},
-    {"mode": "rectangle", "corners": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+    {"mode": "box", "rotation": 0},
+    {"mode": "box", "corners": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+    {"mode": "rectangle", "centre_x": 0.5, "centre_y": 0.5, "width": 1.0},
     {"mode": "cover"},
     {"mode": "corners"},
     {"mode": "cover", "corners": [[0, 0], [1, 0], [1, 1], [0, 1]], "rotation": 0},

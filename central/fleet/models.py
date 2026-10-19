@@ -55,7 +55,6 @@ class TrialRefusal(StrEnum):
     BODY_TOO_LARGE = "node_body_too_large"
     CALIBRATION_REVISION_CONFLICT = "calibration_revision_conflict"        # Save, the Registry's check
     CALIBRATION_BASELINE_CHANGED = "calibration_trial_baseline_changed"    # Save, the Registry's check
-    POSITION_OFF_SCREEN = "position_off_screen"     # Save: a Rectangle runs off its screen as it hangs
 
 
 TRIAL_REFUSAL_STATUS: Final[dict[TrialRefusal, int]] = {
@@ -67,7 +66,6 @@ TRIAL_REFUSAL_STATUS: Final[dict[TrialRefusal, int]] = {
     TrialRefusal.SURFACE_CHANGED: 409, TrialRefusal.UNKNOWN_ENTRY: 404,
     TrialRefusal.OPERATION_INVALID: 422, TrialRefusal.BODY_TOO_LARGE: 413,
     TrialRefusal.CALIBRATION_REVISION_CONFLICT: 409, TrialRefusal.CALIBRATION_BASELINE_CHANGED: 409,
-    TrialRefusal.POSITION_OFF_SCREEN: 422,
 }
 
 

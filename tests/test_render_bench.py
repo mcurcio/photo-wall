@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from contracts.models import RectangleFit
+from contracts.models import PositionBox
 from player.geometry import encode_srgb
 from player.plane_renderer import PlaneRenderer
 from player.planes import Screen
@@ -79,7 +79,7 @@ def test_the_ground_shows_unless_the_bottom_picture_covers_the_screen_at_full(pl
     assert not timeline.ground_seen(plan, dip.start + 0.3, SCREEN)             # the dip's black layer
     assert timeline.ground_seen(plan, overload.start + 1, SCREEN)              # five at half strength
     turned = next(step for step in plan.steps if step.turn == 90)
-    assert timeline.ground_seen(plan, turned.start + 1, (2160, 3840))         # a 16:9 Frame on a turned screen
+    assert not timeline.ground_seen(plan, turned.start + 1, (2160, 3840))     # the whole-screen box, turned
 
 
 def test_the_overload_is_cut_to_the_budget(plan):
@@ -97,7 +97,7 @@ def test_what_lies_beneath_a_kept_picture_is_judged_over_the_kept_pictures(plan)
 
 
 def test_the_tracers_frame_is_a_centred_full_width_rectangle(plan):
-    assert plan.binding.calibration.fit == RectangleFit(centre_x=0.5, centre_y=0.5, width=1.0)
+    assert plan.binding.calibration.fit == PositionBox()
 
 
 class _Screen:

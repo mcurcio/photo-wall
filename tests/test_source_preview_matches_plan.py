@@ -51,7 +51,7 @@ from central.registry import FrameCreate
 from central.runtime import Contribution, Scene
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceNameService
-from contracts.models import Calibration, FrameProfile, RectangleFit
+from contracts.models import Calibration, FrameProfile, PositionBox
 from contracts.time import ManualClock
 from media.immich import ImmichClient, LibraryLimits
 from media.library_checks import LibraryChecks
@@ -170,11 +170,10 @@ class Wall:
             self.registry.bind(frame_id, player["player_id"], f"HDMI-A-{index + 1}",
                                expected_generation=0)
             # Follow-ups B1: the fit rule needs the Frame output (its picture on the enrolled
-            # 1920 x 1080 Output), so each Frame's Position is a rectangle of the profile's own
+            # 1920 x 1080 Output), so each Frame's Position is a box of the profile's own
             # pixels in the screen's top-left corner and the fixture's 96 x 64 photos hold it.
-            save_position(self.registry, frame_id, Calibration(fit=RectangleFit(
-                centre_x=profile.width_px / 2 / 1920, centre_y=profile.height_px / 2 / 1080,
-                width=profile.width_px / 1920)))
+            save_position(self.registry, frame_id, Calibration(fit=PositionBox(
+                width=profile.width_px / 1920, height=profile.height_px / 1080)))
 
     def show(self, frame_ids, source_refs):
         runtime = self.coordinator.runtime

@@ -30,7 +30,7 @@ from central.wall_plan.fit_analysis import (
 )
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import UnitBox
-from contracts.models import Calibration, FrameProfile, RectangleFit, frame_output
+from contracts.models import Calibration, FrameProfile, PositionBox, frame_output
 
 DISPLAY = (3840, 2160)
 WIDE = FrameProfile(width_px=3840, height_px=2160, diagonal_inches=55)
@@ -41,10 +41,10 @@ SELECTION = FitSelection(sources=("family:1",))
 
 
 def output(frame_id: str, profile: FrameProfile, display=DISPLAY) -> FrameOutput:
-    """A Frame across the whole width of a Display of `display`: its Frame output is the
-    rectangle of the profile's shape at that width."""
+    """A Frame on the whole screen of a Display of `display` (each test's profile has the
+    display's shape): its Frame output is the display's pixels."""
     return FrameOutput(frame_id=frame_id, profile=profile, turn=0, display_px=display,
-                       output_px=frame_output(profile, Calibration(fit=RectangleFit()), display, 0))
+                       output_px=frame_output(Calibration(), display, 0))
 
 
 class Reader:
@@ -143,7 +143,7 @@ def test_a_frame_draft_is_judged_with_its_own_position() -> None:
     says so."""
     photos, frames = mixed(), three_frames()
     saved = analyse(request(tier="shape"), Reader(photos, frames), HOUSE)
-    mat = Calibration(fit=RectangleFit(width=.4))      # a centred 40 % x 40 % opening
+    mat = Calibration(fit=PositionBox(left=.3, top=.3, width=.4, height=.4))      # a centred 40 % x 40 % opening
     drafted = analyse(request(tier="shape", frame_drafts=(
         FrameDraft(frame_id="hall", profile=WIDE, calibration=mat),)),
         Reader(photos, frames), HOUSE)

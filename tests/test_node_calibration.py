@@ -13,7 +13,7 @@ from central.fleet.node_display import NodeDisplay
 from central.fleet.node_sessions import NodeControlError
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.infra.frame_lighting_store import PgFrameLighting
-from contracts.models import Calibration, RectangleFit
+from contracts.models import Calibration, PositionBox
 from contracts.node_calibration import candidate_hash, canonical, parse_trial
 from contracts.node_display import (
     DisplayExchange,
@@ -27,8 +27,8 @@ from player.rendering import OutputComposition
 
 # Two Positions of the rig's 9:16 Frames on their 1920 x 1080 screens, each unlike the saved one
 # (support.position's PORTRAIT_ON_WIDE) and unlike each other.
-SKEWED = RectangleFit(centre_x=0.45, width=0.28)                   # smaller, left of centre
-SHIFTED = RectangleFit(centre_x=0.6, centre_y=0.55, width=0.2)     # smaller still, right and down
+SKEWED = PositionBox(left=0.31, top=0.1, width=0.28, height=0.8)       # smaller, left of centre
+SHIFTED = PositionBox(left=0.5, top=0.2, width=0.2, height=0.7)         # smaller still, right and down
 LIGHTING_JSON = LIGHTING.model_dump(mode="json")                   # an edit carries the whole draft lighting
 
 
@@ -132,7 +132,7 @@ def test_local_terminal_expiry_rejects_delayed_trial_and_canonical_output_primit
         config = binding(conn, row["player_id"], row["authority_epoch"])["bindings"][0]
     calibration = Calibration(
         revision=config.calibration.revision,
-        fit=RectangleFit(centre_x=0.3, centre_y=0.6, width=0.2),
+        fit=PositionBox(left=0.2, top=0.3, width=0.2, height=0.6),
     )
     raw = canonical(calibration.model_dump(mode="json"))
     candidate = replace(

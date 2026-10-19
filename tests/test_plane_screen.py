@@ -14,7 +14,7 @@ import pytest
 import player.plane_screen as plane_screen
 from contracts.frame_fit import Placement
 from contracts.frame_lighting import FrameLighting, Paper
-from contracts.models import Calibration, FrameProfile, Layer, OutputBinding, RectangleFit, Variant
+from contracts.models import Calibration, FrameProfile, Layer, OutputBinding, PositionBox, Variant
 from contracts.node_calibration import (
     MAX_TRIAL_BYTES,
     TrialCandidate,
@@ -283,8 +283,8 @@ def _trial_answer(raw: str | None, result: int):
     return answer
 
 
-@pytest.mark.parametrize("fit", [RectangleFit(centre_x=0.4, centre_y=0.5, width=0.5), RectangleFit()],
-                         ids=["moved", "whole-width"])
+@pytest.mark.parametrize("fit", [PositionBox(left=0.15, top=0.25, width=0.5, height=0.5), PositionBox()],
+                         ids=["moved", "whole-screen"])
 def test_trial_hands_the_librarys_envelope_to_the_outputs_trial_state(monkeypatch, fit):
     screens, library = _screens(monkeypatch)
     monkeypatch.setattr(plane_screen, "_boottime_ms", lambda: 1000)
@@ -317,7 +317,7 @@ def test_trial_keeps_one_trial_state_per_output_on_the_boottime_clock(monkeypatc
     screens, library = _screens(monkeypatch)
     now = [1000]
     monkeypatch.setattr(plane_screen, "_boottime_ms", lambda: now[0])
-    library.answers["pw_frame_client_trial"] = _trial_answer(_envelope(RectangleFit()), 1)
+    library.answers["pw_frame_client_trial"] = _trial_answer(_envelope(PositionBox()), 1)
     grant = FrameGrant(uuid4(), 3, 2, "frame", True)
     assert screens.trial(OutputComposition(BINDING), grant) is not None
     now[0] = 6000
