@@ -1102,6 +1102,31 @@ def test_a_failed_candidates_read_offers_retry(page, registry):
                ).to_have_count(0)
 
 
+def test_a_frame_whose_screen_size_is_not_known_has_no_candidates_and_the_others_load(
+        page, registry):
+    """Decision 0030: Central judges no photo for a Frame whose screen size is not known (409
+    frame_size_unknown). That Frame alone has no candidates, said on the frame choice; the
+    other Frames' choosers still load. Mutation probe: let one Frame's 409 fail the whole read
+    -> "Could not load candidate media" replaces every chooser."""
+    _seed(registry)
+    _add_lobby_frame(registry)
+    portrait_a, portrait_b, landscape = _authored_photos(registry)
+    queue = _seed_source(registry, (portrait_a, portrait_b, landscape))
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "scenes")
+        form = start_scene(page, hand_picked=True)
+        scene_frames_then_photos(page, form, (VALID_FRAME, LOBBY_FRAME), SOURCE)   # lobby: unbound
+        scene_continue(page, "Media per frame")
+        chooser = form.get_by_label(f"Media for frame {VALID_FRAME}", exact=True)
+        expect(chooser.get_by_role("option")).to_have_count(3)
+        expect(form.get_by_text("Could not load candidate media for these Frames.")).to_have_count(0)
+        _steps(page).get_by_role("button", name="Frames", exact=True).click()
+        targets = form.get_by_role("group", name="Target Frames", exact=True)
+        expect(targets).to_have_accessible_description(
+            f"No candidates for {LOBBY_FRAME} yet: its screen size is not known yet. "
+            "Choose another frame, or wait until its Pi reports its screen.")
+
+
 # --- Final review: a write belongs to the draft it was sent from.
 
 
