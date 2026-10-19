@@ -6,6 +6,7 @@ import pytest
 from console_tasks import connect, frame_heading, frame_name, open_frame, visit
 from operator_harness import operator_server
 from playwright.sync_api import expect
+from support.position import save_position
 from test_registry import enroll
 
 from central.displays.model import Readiness
@@ -131,6 +132,41 @@ def test_bound_refusal_keeps_profile_draft_and_explains_unbind(page, registry):
         expect(form.get_by_label("Pixel width", exact=True)).to_have_value("2560")
         expect(form.get_by_label("Pixel height", exact=True)).to_have_value("1440")
         assert registry.inventory().frames[0].profile.width_px == 1920
+
+
+def test_shows_videos_saves_at_once_and_keeps_a_ready_frame_ready(page, registry):
+    """Shows videos is the Frame's own setting (frame box run, fb-5): one switch on the Hardware
+    tab, saved the moment it is switched, with no generation, so a bound, ready Frame stays ready.
+    The profile editor no longer has a video field."""
+    _frame(registry)
+    identity, _, _ = enroll(registry)
+    registry.bind("profile-frame", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    save_position(registry, "profile-frame")
+    before = registry.inventory().frames[0]
+    assert (before.readiness, before.video) == (Readiness.READY, True)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        inspector = open_frame(page, "profile-frame", "hardware")
+        shows = inspector.get_by_role("switch", name="Shows videos", exact=True)
+        expect(shows).to_be_checked()
+        with page.expect_request(
+            lambda request: request.url.endswith("/v1/operator/frames/profile-frame/video")
+            and request.method == "PUT"
+        ) as captured:
+            shows.click()
+        assert captured.value.post_data_json == {"video": False}
+        expect(shows).not_to_be_checked()
+        expect(inspector.get_by_text("Saved", exact=True)).to_be_visible()
+        after = registry.inventory().frames[0]
+        assert (after.video, after.readiness, after.generation) == (False, Readiness.READY, before.generation)
+
+        inspector.get_by_role("button", name="Reset Shows videos (Default: On)", exact=True).click()
+        expect(shows).to_be_checked()
+        assert registry.inventory().frames[0].video is True
+
+        form = _editor(inspector)
+        expect(form.get_by_label("Video capable", exact=True)).to_have_count(0)
+        expect(form.get_by_role("switch")).to_have_count(0)
 
 
 def test_stale_generation_refusal_keeps_draft_and_guides_reload(page, registry):

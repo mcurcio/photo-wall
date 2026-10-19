@@ -36,7 +36,7 @@ from central.frame_lighting.views import PaperProfilesView, PaperProfileView
 from central.infra.home_assistant import references
 from central.infra.home_assistant.views import HomeAssistantStatesView
 from central.infra.light_sensor_judge import PI_SOURCE
-from central.registry import FrameTurnChange
+from central.registry import FrameTurnChange, FrameVideoChange
 from central.room_light.model import (
     ROOM_LIGHT_NAME_MAX,
     SENSORS_MAX,
@@ -78,7 +78,8 @@ from contracts.room_light import (
 )
 
 CONSOLE_BODIES: Final[tuple[type[BaseModel], ...]] = (   # bodies the console sends (and RoomLight, a union)
-    Sensor, TrialBegin, TrialEdit, TrialStep, FrameLighting, PositionRestore, VersionChoice, FrameTurnChange)
+    Sensor, TrialBegin, TrialEdit, TrialStep, FrameLighting, PositionRestore, VersionChoice, FrameTurnChange,
+    FrameVideoChange)
 CONSOLE_VIEWS: Final[tuple[type[BaseModel], ...]] = (    # answers the console reads
     RoomLightsView, DrawnView, RefusedReportsView, PaperProfileView, PaperProfilesView,
     PositionHistoryView, LightView, HomeAssistantStatesView, ReleasesView, InstallStarted)

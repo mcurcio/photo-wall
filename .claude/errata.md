@@ -6559,3 +6559,18 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
 - **For fb-6:** `tests/test_migration_102_rectangle_positions.py` (now stopping at `migrate_before(db, "103")`)
   still imports `contracts.frame_fit.place` and `contracts.models.RectangleFit`, which fb-6 deletes; fb-6 must
   give that test its own copy of the old rule (as test 104 has `_old_place`) or a raw-JSON check.
+
+## fb-5 Shows videos is the Frame's own setting
+
+- **`tests/test_upgrade_087.py` is outside fb-5's owned files but breaks with it**: it seeds through
+  today's `Registry.create_frame` on a database migrated through 087 plus a listed `also`, and
+  `create_frame` now writes `frames.video`. fb-5 adds `"105_"` to its `also` (one line, as fb-3 added
+  `"104_"`). Any later bead whose `create_frame` writes a new column does the same.
+- **"wake it as a photo-fit settings save does" wakes nothing**: `PgFitSettings.save_fit_settings`
+  only writes its row; the Planner reads settings at its next plan. `set_frame_video` does the same
+  (no wake), which the acceptance ("the next plan puts no video on it") holds.
+- **`docs/runbook.md` (Hardware tab paragraph) still lists "video capable" in the Frame profile**;
+  not fb-5's file. The Frame section's doc text belongs with fb-11's Hardware-tab rewrite.
+- **Shows videos is a `SettingRow` of kind `content`** (it changes what plays, not equipment): no
+  "acts on" note; "Default: On" with Reset when off. The UX designer review of the Hardware tab
+  (fb-11) should confirm the row's place (first in the section, above the profile facts).

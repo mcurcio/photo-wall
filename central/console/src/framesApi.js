@@ -98,6 +98,27 @@ export async function turnFrame(frameId, body) {
   return { ok: false, code: result.error ?? String(result.status), status: result.status };
 }
 
+/**
+ * Set whether a Frame shows videos (frame box run, fb-5): PUT /v1/operator/frames/{id}/video with
+ * contract.ts `FrameVideoChange` ({video}). The Frame's own setting, last write wins: no
+ * generation, and a ready Frame stays ready. Central answers {frame_id, video, changed}; the same
+ * value is `changed: false`. Refusals: 404 `unknown_frame`, 422 for a body outside the contract.
+ * Wrap in `useMutate()` at the call site so the inventory is read again.
+ *
+ * @param {string} frameId
+ * @param {boolean} video
+ * @returns {Promise<{ok:true, changed:boolean, video:boolean}|{ok:false, code:string, status:number}>}
+ */
+export async function setFrameVideo(frameId, video) {
+  /** @type {import("./generated/contract").FrameVideoChange} */
+  const body = { video };
+  const result = await apiWrite(`/v1/operator/frames/${frameId}/video`, { method: "PUT", body });
+  if (result.ok) {
+    return { ok: true, changed: result.data?.changed === true, video: result.data?.video === true };
+  }
+  return { ok: false, code: result.error ?? String(result.status), status: result.status };
+}
+
 /** Validate the shared FrameProfile contract and its orientation against a Frame. */
 export function frameProfileProblem(profile, frame) {
   const width = Number(profile.width_px);

@@ -1,11 +1,12 @@
 import type * as React from "react";
 import { useEffect, useRef, useState } from "react";
 
-import { frameProfileProblem, updateFrameProfile } from "../framesApi.js";
+import { frameProfileProblem, setFrameVideo, updateFrameProfile } from "../framesApi.js";
 import { boundOutput, isBound } from "../join.js";
 import { hanging } from "../placement.js";
 import { FactRow, Note } from "../patterns/fact-row";
 import { ProblemCard } from "../patterns/problem-card";
+import { SettingRow } from "../patterns/setting-row";
 import { Button } from "../ui/button";
 import { Field, NumberInput } from "../ui/field";
 import { Section } from "../ui/section";
@@ -29,6 +30,8 @@ interface Frame {
   id: string;
   generation?: number;
   profile?: Profile;
+  /** Shows videos: whether the Planner may put a video on this Frame (Central's `video`). */
+  video?: boolean;
   /** How the Frame's screen hangs (Central's `turn`; set on this tab's "How the screen hangs"). */
   turn?: Turn;
   readiness?: Readiness;
@@ -40,7 +43,6 @@ interface Draft {
   width_px: string;
   height_px: string;
   diagonal_inches: string;
-  video: boolean;
 }
 
 export interface FrameProfileProps {
@@ -73,9 +75,53 @@ function refusal(code: string): string {
   }
 }
 
+/** Shows videos as Central has it (a Frame read before it carried one shows videos, Central's default). */
+const showsVideos = (frame: Frame): boolean => frame.video ?? true;
+
+/** Central's refusal of a Shows videos save, in the operator's words. */
+function videoRefusal(code: string | undefined): string {
+  return code === "unknown_frame"
+    ? "This Frame no longer exists. Reload the wall to continue."
+    : "Photo Wall did not take the change. Try again.";
+}
+
+/**
+ * Shows videos (frame box run, fb-5): the Frame's own setting, saved the moment it is switched
+ * (last write wins, no generation; a ready Frame stays ready). Off, the wall plan puts only photos
+ * on this Frame.
+ */
+function ShowsVideos({ frame }: { frame: Frame }) {
+  const mutate = useMutate();
+  const [pending, setPending] = useState<boolean | null>(null);
+  const [save, setSave] = useState<{ state: "idle" | "saving" | "saved" | "error"; error?: string }>({ state: "idle" });
+  const change = async (video: boolean) => {
+    setPending(video);
+    setSave({ state: "saving" });
+    try {
+      const result = await mutate(() => setFrameVideo(frame.id, video)) as { ok: boolean; code?: string };
+      setSave(result.ok ? { state: "saved" } : { state: "error", error: videoRefusal(result.code) });
+    } catch {
+      setSave({ state: "error", error: "Photo Wall's server did not answer. Try again." });
+    } finally {
+      setPending(null);
+    }
+  };
+  const shown = pending ?? showsVideos(frame);
+  return (
+    <SettingRow
+      kind="content" label="Shows videos"
+      help="Whether the wall plan may put videos on this Frame. Photos play either way."
+      defaultLabel="Default: On"
+      onReset={shown ? undefined : () => void change(true)}
+      state={save.state} error={save.error}
+      control={<Switch checked={shown} disabled={pending !== null} onChange={(video) => void change(video)} />}
+    />
+  );
+}
+
 /**
  * The Frame page's Frame profile (Hardware tab): the size the operator declared for this
- * location (pixels, diagonal, video), which stays when a Display is swapped, its editor, and a
+ * location (pixels, diagonal) and the Frame's Shows videos switch, which stays when a Display is swapped, its editor, and a
  * problem card when the Pi reported its Display at another resolution when its photo app last
  * started (its last enrollment). Saving needs a Frame with no Pi and clears its position, which
  * is set again on the Position tab.
@@ -112,7 +158,6 @@ export function FrameProfile({ snapshot, frame, draftFit }: FrameProfileProps) {
       width_px: String(profile.width_px ?? ""),
       height_px: String(profile.height_px ?? ""),
       diagonal_inches: String(profile.diagonal_inches ?? ""),
-      video: Boolean(profile.video),
     });
     setGeneration(frame.generation ?? 0);
     setProblem(null);
@@ -132,7 +177,7 @@ export function FrameProfile({ snapshot, frame, draftFit }: FrameProfileProps) {
       width_px: Number(draft.width_px),
       height_px: Number(draft.height_px),
       diagonal_inches: Number(draft.diagonal_inches),
-      video: draft.video,
+      video: showsVideos(frame),   // transitional: the profile carries Shows videos until fb-14
     };
     try {
       const result = await mutate(() => updateFrameProfile(frame.id, submitted, generation)) as
@@ -166,11 +211,11 @@ export function FrameProfile({ snapshot, frame, draftFit }: FrameProfileProps) {
   );
   return (
     <Section title="Frame profile">
+      <ShowsVideos frame={frame} />
       <Note>Declared when the Frame was made; it stays when the Display is swapped.</Note>
       <FactRow label="Pixel width" tone="set">{`${profile.width_px ?? "—"} px`}</FactRow>
       <FactRow label="Pixel height" tone="set">{`${profile.height_px ?? "—"} px`}</FactRow>
       <FactRow label="Diagonal" tone="set">{`${profile.diagonal_inches ?? "—"} in`}</FactRow>
-      <FactRow label="Video capable" tone="set">{profile.video ? "yes" : "no"}</FactRow>
       {/* A turned screen: the profile is its size as it hangs, the display's own size the other way round. */}
       {(turn === 90 || turn === 270) && usable(profile) && usable(observation) ? (
         <Note>
@@ -219,12 +264,9 @@ export function FrameProfile({ snapshot, frame, draftFit }: FrameProfileProps) {
               <NumberInput min={0} step="any" value={draft.diagonal_inches}
                 onChange={(value) => setDraft({ ...draft, diagonal_inches: value })} />
             </Field>
-            <Field label="Video capable">
-              <Switch checked={draft.video} onChange={(video) => setDraft({ ...draft, video })} />
-            </Field>
           </Inline>
           {draftFit?.({ width_px: Number(draft.width_px), height_px: Number(draft.height_px),
-            diagonal_inches: Number(draft.diagonal_inches), video: draft.video })}
+            diagonal_inches: Number(draft.diagonal_inches), video: showsVideos(frame) })}
           {problemCard}
           <Inline>
             <Button type="submit" variant="primary" disabled={saving}>{saving ? "Saving…" : "Save profile"}</Button>
