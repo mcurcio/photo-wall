@@ -23,7 +23,7 @@ import { DrawnLine } from "../domain/room-lights/drawn-line";
 import { drawnOf, lightNames } from "../domain/room-lights/model";
 import type { DrawnView, RoomLightsView } from "../generated/contract";
 import { frameHealth } from "../health.js";
-import { boundOutput, isBound } from "../join.js";
+import { isBound } from "../join.js";
 import { useFrameAdjustment } from "../liveAdjustment.js";
 import { renameFrame } from "../framesApi.js";
 import { EntityHeader } from "../patterns/entity-header";
@@ -60,6 +60,10 @@ interface Frame {
   calibration?: { revision?: number; fit?: object };
   /** How the Frame's screen hangs (Central's `turn`; set on the Hardware tab). */
   turn?: Turn;
+  /** The Frame's screen, the mode as built (Central's `screen_px`); null when not known. */
+  screen_px?: [number, number] | null;
+  /** The Display seen there's own size in millimetres (its EDID's); null when none is stated. */
+  display_mm?: [number, number] | null;
   readiness?: Readiness;
 }
 
@@ -74,12 +78,6 @@ function wholeProfile(profile: Frame["profile"] | null | undefined): WholeProfil
   return { width_px: width!, height_px: height!, diagonal_inches: diagonal!, video: profile.video ?? true };
 }
 
-/** The Frame profile's width over its height (the picture's shape on its screen); null while it is not whole. */
-function aspectOf(profile: Frame["profile"] | null | undefined): number | null {
-  const whole = wholeProfile(profile);
-  return whole === null ? null : whole.width_px / whole.height_px;
-}
-
 const TABS = [
   { value: "overview", label: "Overview" },
   { value: "position", label: "Position" },
@@ -89,18 +87,9 @@ const TABS = [
   { value: "hardware", label: "Hardware" },
 ] as const;
 
-/**
- * The output's mode as built in pixels, as the Pi reported it; null when it reported none.
- * Position works on it as the screen hangs (the Frame's turn). Never the Frame profile: that is
- * the Frame's shape, not the output's (a Frame may fill part of its screen).
- */
-function outputSize(snapshot: object | null, frame: Frame): PixelSize | null {
-  const reported = (boundOutput(snapshot ?? {}, frame.id) as { observation?: { connected?: boolean; width_px?: number; height_px?: number } } | null)
-    ?.observation;
-  if (reported?.connected === true && (reported.width_px ?? 0) > 0 && (reported.height_px ?? 0) > 0) {
-    return { width: reported.width_px!, height: reported.height_px! };
-  }
-  return null;
+/** The Frame's screen size as History says an entry's box in it; null when not known. */
+function screenSize(frame: Frame): PixelSize | null {
+  return frame.screen_px == null ? null : { width: frame.screen_px[0], height: frame.screen_px[1] };
 }
 
 /** How often the house's lights are read while the Lighting or Position tab is shown: a light's
@@ -146,7 +135,7 @@ function useHouseLights(open: boolean): { rooms: RoomLightsView | null; drawn: D
  * tab each. The header names the Frame, its way back to the Wall and its health (health.js,
  * the plan tile's words). Overview is what Central puts on it and why, and its Photos: one Fit board
  * row per Scene that shows photos here (follow-ups C1); Position is where the
- * picture sits on its screen as it hangs (one rectangle: move, size, nudges), with the Frame's Position
+ * picture sits on its screen as it hangs (one box: move, width and height, nudges), with the Frame's Position
  * History; Lighting is the room lights that fall on it, its mat and its paper, and whether its Pi
  * draws with the house's lights as they are now, with the same History; Picture is
  * the contrast, colour temperature, gamma and matched light of the display that feeds it, with that display's History
@@ -239,8 +228,8 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
           </>
         )}
         {tab === "position" && (
-          <FramePosition adjustment={adjustment} size={outputSize(snapshot, frame)} piHref={piHref}
-            turn={frame.turn ?? 0} aspect={aspectOf(frame.profile)}
+          <FramePosition adjustment={adjustment} size={frame.screen_px ?? null} displayMm={frame.display_mm ?? null}
+            piHref={piHref} turn={frame.turn ?? 0}
             hardwareHref={formatRoute({ section: "wall", id: frameId, tab: "hardware" })}
             readiness={frame.readiness}
             whatFits={(
@@ -256,7 +245,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
         {session && (
           // The Frame's Position history (its fit and its lighting), with Restore into the draft.
           <PositionHistory key={`${frameId}:position-history`} frameId={frameId} adjustment={adjustment}
-            size={outputSize(snapshot, frame)}
+            size={screenSize(frame)}
             hardwareHref={formatRoute({ section: "wall", id: frameId, tab: "hardware" })}
             roomNames={lightNames(rooms)}
             profiles={profiles ?? []} />
@@ -286,7 +275,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
             <FrameProfile key={`${frameId}:profile`} snapshot={snapshot} frame={frame}
               draftFit={(profile) => (
                 <FrameDraftFit snapshot={snapshot} frameId={frameId} profile={wholeProfile(profile)}
-                  calibration={{ revision: frame.calibration?.revision ?? 1, fit: frame.calibration?.fit ?? { mode: "rectangle" } }} />
+                  calibration={{ revision: frame.calibration?.revision ?? 1, fit: frame.calibration?.fit ?? { mode: "box" } }} />
               )} />
             <FrameTurn key={`${frameId}:turn`} frameId={frameId} turn={frame.turn ?? 0}
               generation={frame.generation ?? 0} />

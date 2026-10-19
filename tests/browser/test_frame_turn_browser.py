@@ -95,6 +95,9 @@ def test_choosing_top_to_the_right_turns_the_frame_and_the_position_tab_follows(
         editor = page.get_by_role("group", name="Picture position", exact=True)
         box = editor.bounding_box()
         assert box["height"] > box["width"], box
+        # The box keeps its shares of the screen: on the screen as it now hangs it is another shape.
+        expect(page.get_by_role("group", name="This Frame", exact=True)).to_contain_text("324 × 1,820 pixels")
+        expect(page.get_by_label("Left", exact=True)).to_have_value("378")
         # History says the turn in words with the position it kept, in the editor's pixels, and why the
         # rows made upright cannot be restored, with the way back to the Hardware tab.
         history = page.get_by_role("region", name="History", exact=True)

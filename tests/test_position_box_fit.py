@@ -87,13 +87,11 @@ def test_no_known_screen_has_no_frame_output():
 def test_save_has_no_off_screen_refusal_and_nothing_names_the_old_forms():
     """A box always lies on its screen, so Save refuses no Position for where it lies: the refusal
     is gone from the vocabulary, and neither it nor the rectangle form is named anywhere in code
-    outside the migrations that converted them (and their tests). The console's rectangle editor,
-    frame-position.tsx, and its stories go in bead fb-7."""
+    outside the migrations that converted them (and their tests)."""
     assert "position_off_screen" not in {refusal.value for refusal in TrialRefusal}
     assert set(TRIAL_REFUSAL_STATUS) == set(TrialRefusal)
     found = subprocess.run(
         ["git", "grep", "-n", "-e", "RectangleFit", "-e", "position_off_screen", "--",
-         ".", ":!docs", ":!.claude", ":!AGENTS.md", ":!central/migrations", ":!tests/test_migration_*", ":!tests/test_position_box_fit.py",
-         ":!central/console/src/domain/frame-position.tsx", ":!central/console/src/domain/frame-position.stories.tsx"],
+         ".", ":!docs", ":!.claude", ":!AGENTS.md", ":!central/migrations", ":!tests/test_migration_*", ":!tests/test_position_box_fit.py"],
         cwd=ROOT, capture_output=True, text=True, check=False)
     assert found.returncode == 1, found.stdout

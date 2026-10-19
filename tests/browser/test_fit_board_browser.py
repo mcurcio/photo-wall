@@ -344,9 +344,9 @@ def test_a_position_drafted_as_a_mat_opening_changes_what_fits_before_done(page,
                 rf"^1 of 2 fit {FRAME} · That one photo stays up · Judged at its Frame output as you set it, 16:9$"
                 ))).to_be_visible()
             expect(position).not_to_contain_text("1,920 × 1,080 px")
-            position.get_by_role("button", name="Exact values", exact=True).click()
-            # A 960 x 540 opening, centred (the centre stays where the full-screen Position put it).
-            position.get_by_label("Width in pixels", exact=True).fill("960")
+            # A 960 x 540 opening in the screen's top-left corner (its width and height set apart).
+            position.get_by_label("Width", exact=True).fill("960")
+            position.get_by_label("Height", exact=True).fill("540")
             line = position.get_by_role("button", name=re.compile(
                 rf"^2 of 2 fit {FRAME} · Judged at its Frame output as you set it, 16:9$"))
             expect(line).to_be_visible()

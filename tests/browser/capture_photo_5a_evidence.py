@@ -416,9 +416,8 @@ def test_followup_frame_position_draft(page, registry, scheme, suffix):
             _top_shot(page, f"followup-frame-overview-bound{suffix}", scheme)
             position = open_frame(page, BOUND, "position").get_by_role("region", name="Where the picture sits on the screen", exact=True)
             expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
-            position.get_by_role("button", name="Exact values", exact=True).click()
-            # A centred 960 x 540 opening on the 1920 x 1080 screen.
-            for label, value in (("Centre across", "960"), ("Centre down", "540"), ("Width in pixels", "960")):
+            # A centred 960 x 540 opening on the 1920 x 1080 screen (its size first: the box stays on the screen).
+            for label, value in (("Width", "960"), ("Height", "540"), ("Left", "480"), ("Top", "270")):
                 position.get_by_label(label, exact=True).fill(value)
             expect(position.get_by_role("button", name=re.compile(rf"^2 of 2 fit {BOUND}"))).to_be_visible()
             _top_shot(page, f"followup-frame-position-draft{suffix}", scheme)

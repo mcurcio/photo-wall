@@ -1,26 +1,20 @@
-"""The console's placement rule (central/console/src/placement.js `hanging`, `place`, `fillScreen`)
-against Central's (contracts/display_turn.py `hanging`) and, for the rectangle the Position editor
-still draws until bead fb-7 deletes it, against `_reference_place`, this test's own copy of
-v0.41.0's contracts/frame_fit.py `place` (Central and the Player place boxes now, frame box run
-fb-6), on vectors built here (render redesign S5, run ledger .claude/runs/render-planes/s5-page.md
-B2).
+"""The console's placement rule (central/console/src/placement.js `hanging`, `placeBox`,
+`boxSizeMm`) against Central's, on vectors built here (render redesign S5, run ledger
+.claude/runs/render-planes/s5-page.md B2; frame box run, .claude/runs/frame-box/page.md fb-4, fb-7):
+`hanging` against contracts/display_turn.py `hanging`; `placeBox` against contracts/frame_fit.py
+`place_box` (with `FrameBox`'s check) and `boxSizeMm` against contracts/models.py `frame_size_mm`,
+on fb-1's grids and on 2,000 seeded random boxes, refusals included. The rectangle rule (`place`,
+`pixels`, `fillScreen`) went with the rectangle editor (fb-7): the module exports nothing else.
 
 Runs the module under Node (it is pure), which the console build already requires, the way
 tests/test_console_flow.py runs console modules. Without Node it skips on a developer machine, but
 FAILS where the checks are meant to run in full (`CI` or `PHOTO_WALL_BROWSER_TESTS` set).
 
-The box (frame box run, .claude/runs/frame-box/page.md fb-4): `placeBox` against
-contracts/frame_fit.py `place_box` (with `FrameBox`'s check) and `boxSizeMm` against
-contracts/models.py `frame_size_mm`, on fb-1's grids and on 2,000 seeded random boxes, refusals
-included.
-
-Mutation probes: drop `x + width <= W` from placement.js `place` -> rectangles past the right edge
-place in the console -> RED; compute placeBox's width as max(1, halfUp(width * W)) instead of from
-its two edges -> the box grid -> RED.
+Mutation probe: compute placeBox's width as max(1, halfUp(width * W)) instead of from its two
+edges -> the box grid -> RED.
 """
 
 import json
-import math
 import os
 import random
 import shutil
@@ -30,16 +24,14 @@ from pathlib import Path
 import pytest
 
 from contracts.display_turn import TURNS, hanging
-from contracts.frame_fit import FrameBox, Placement, place_box
+from contracts.frame_fit import FrameBox, place_box
 from contracts.models import PositionBox, frame_size_mm
 
 ROOT = Path(__file__).parents[1]
 PLACEMENT = ROOT / "central/console/src/placement.js"
 
-# The migration grid's Outputs (modes as built) and Frame shapes (s5-page.md, the fixture's grid).
+# The screens `hanging` is checked on (modes as built).
 OUTPUTS = [(3840, 2160), (1920, 1080), (1080, 1920), (1280, 1024)]
-SHAPES = [(1920, 1080), (1080, 1920), (1600, 1200), (1200, 1600), (1000, 1000), (1500, 1000), (1000, 1500)]
-WIDTHS = [round(0.1 * step, 1) for step in range(1, 11)]
 
 SCRIPT = r"""
 const placement = await import(process.argv[1]);
@@ -75,44 +67,6 @@ def _console(cases):
     return json.loads(result.stdout)
 
 
-def _finite(value) -> bool:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-
-
-def _reference_place(rectangle: dict, screen, aspect) -> Placement:
-    """v0.41.0's contracts/frame_fit.py `FrameRectangle` check and `place`, kept here only while the
-    console's rectangle editor lives (bead fb-7 deletes both): each value half up,
-    width = max(1, round(width * W)), height = max(1, round(width / aspect)), the corner from the
-    centre; ValueError "frame_rectangle", "placement_screen", "placement_aspect" or
-    "placement_outside"."""
-    centre_x, centre_y, fraction = rectangle["centre_x"], rectangle["centre_y"], rectangle["width"]
-    if not (all(_finite(value) for value in (centre_x, centre_y, fraction))
-            and 0 <= centre_x <= 1 and 0 <= centre_y <= 1 and 0 < fraction <= 1):
-        raise ValueError("frame_rectangle")
-    screen_width, screen_height = screen
-    if not (type(screen_width) is int and type(screen_height) is int and screen_width >= 1 and screen_height >= 1):
-        raise ValueError("placement_screen")
-    if not (_finite(aspect) and aspect > 0):
-        raise ValueError("placement_aspect")
-    width = max(1, math.floor(fraction * screen_width + 0.5))
-    height = max(1, math.floor(width / aspect + 0.5))
-    x = math.floor(centre_x * screen_width - width / 2 + 0.5)
-    y = math.floor(centre_y * screen_height - height / 2 + 0.5)
-    if not (0 <= x and x + width <= screen_width and 0 <= y and y + height <= screen_height):
-        raise ValueError("placement_outside")
-    return Placement(x, y, width, height)
-
-
-def _python_place(rectangle, screen, aspect):
-    """The reference's answer in the console's shape: a placement dict, None for "placement_outside",
-    or {"error": code} for every other refusal."""
-    try:
-        placed = _reference_place(rectangle, tuple(screen), aspect)
-    except ValueError as error:
-        return None if str(error) == "placement_outside" else {"error": str(error)}
-    return {"x": placed.x, "y": placed.y, "width": placed.width, "height": placed.height}
-
-
 def _python_hanging(size, turn):
     try:
         return list(hanging(tuple(size), turn))
@@ -124,37 +78,6 @@ def _answer(answer):
     return {"error": answer["error"]} if "error" in answer else answer["value"]
 
 
-def _centres(screen, width, aspect):
-    """Centres to try for a rectangle `width` wide on `screen`: the middle, both edges, the
-    rectangle flush on each side, a pixel past it, and half-pixel cases on each axis."""
-    w_px, h_px = screen
-    pixel_width = max(1, math.floor(width * w_px + 0.5))
-    pixel_height = max(1, math.floor(pixel_width / aspect + 0.5))
-    across = {0.0, 0.5, 1.0, pixel_width / 2 / w_px, 1 - pixel_width / 2 / w_px,
-              (pixel_width / 2 + 1) / w_px, (pixel_width / 2 - 1) / w_px,
-              (pixel_width / 2 + 0.5) / w_px, (w_px / 2 + 0.5) / w_px}
-    down = {0.0, 0.5, 1.0, pixel_height / 2 / h_px, 1 - pixel_height / 2 / h_px,
-            (pixel_height / 2 - 1) / h_px, (h_px / 2 + 0.5) / h_px}
-    across = sorted(value for value in across if 0 <= value <= 1)
-    down = sorted(value for value in down if 0 <= value <= 1)
-    return ([(x, 0.5) for x in across] + [(0.5, y) for y in down]
-            + [(across[0], down[0]), (across[-1], down[-1])])
-
-
-def _place_vectors():
-    vectors = []
-    for output in OUTPUTS:
-        for turn in TURNS:
-            screen = list(hanging(output, turn))
-            for shape in SHAPES:
-                aspect = shape[0] / shape[1]
-                for width in WIDTHS:
-                    for centre_x, centre_y in _centres(screen, width, aspect):
-                        vectors.append(({"centre_x": centre_x, "centre_y": centre_y, "width": width},
-                                        screen, aspect))
-    return vectors
-
-
 def test_hanging_matches_central_on_every_grid_screen_at_every_turn_and_refuses_alike():
     cases = [[list(size), turn] for size in OUTPUTS for turn in TURNS]
     cases += [[[1920, 1080], 45], [[1920, 1080], 360], [[1920, 1080], -90], [[1920, 1080], True],
@@ -164,49 +87,14 @@ def test_hanging_matches_central_on_every_grid_screen_at_every_turn_and_refuses_
     assert console[1] == [2160, 3840]
 
 
-def test_place_matches_central_pixel_for_pixel_on_the_grid():
-    vectors = _place_vectors()
-    console = [_answer(answer) for answer in _console([["place", list(vector)] for vector in vectors])]
-    central = [_python_place(*vector) for vector in vectors]
-    mismatches = [(vector, js, py) for vector, js, py in zip(vectors, console, central, strict=True) if js != py]
-    assert mismatches == []
-    # The grid holds both answers, so neither side can pass by always placing or always refusing.
-    assert any(answer is None for answer in central) and any(answer is not None for answer in central)
-
-
-@pytest.mark.parametrize(("rectangle", "screen", "aspect"), [
-    ({"centre_x": -0.01, "centre_y": 0.5, "width": 0.5}, [1920, 1080], 16 / 9),
-    ({"centre_x": 0.5, "centre_y": 1.01, "width": 0.5}, [1920, 1080], 16 / 9),
-    ({"centre_x": 0.5, "centre_y": 0.5, "width": 0}, [1920, 1080], 16 / 9),
-    ({"centre_x": 0.5, "centre_y": 0.5, "width": 1.01}, [1920, 1080], 16 / 9),
-    ({"centre_x": True, "centre_y": 0.5, "width": 0.5}, [1920, 1080], 16 / 9),
-    ({"centre_x": 0.5, "centre_y": 0.5, "width": 0.5}, [0, 1080], 16 / 9),
-    ({"centre_x": 0.5, "centre_y": 0.5, "width": 0.5}, [1920, 1080.5], 16 / 9),
-    ({"centre_x": 0.5, "centre_y": 0.5, "width": 0.5}, [1920, 1080], 0),
-    ({"centre_x": 0.5, "centre_y": 0.5, "width": 0.5}, [1920, 1080], -1.5),
-    ({"centre_x": -1, "centre_y": 0.5, "width": 0.5}, [0, 1080], 0),
-])
-def test_place_refuses_with_centrals_codes(rectangle, screen, aspect):
-    (answer,) = _console([["place", [rectangle, screen, aspect]]])
-    assert "error" in answer
-    with pytest.raises(ValueError) as refused:
-        _reference_place(rectangle, tuple(screen), aspect)
-    assert answer["error"] == str(refused.value)
-
-
-def test_fill_the_screen_places_and_one_pixel_wider_does_not():
-    cases = [(list(hanging(output, turn)), shape[0] / shape[1])
-             for output in OUTPUTS for turn in TURNS for shape in SHAPES]
-    console = [_answer(answer) for answer in _console([["fillScreen", list(case)] for case in cases])]
-    for (screen, aspect), filled in zip(cases, console, strict=True):
-        w_px, h_px = screen
-        assert filled == {"centre_x": 0.5, "centre_y": 0.5,
-                          "width": min(w_px, math.floor(h_px * aspect + 1e-6)) / w_px}
-        placed = _python_place(filled, screen, aspect)
-        assert placed is not None and "error" not in placed
-        wider = (round(filled["width"] * w_px) + 1) / w_px
-        if wider <= 1:
-            assert _python_place({**filled, "width": wider}, screen, aspect) is None
+def test_the_module_keeps_only_the_screens_turn_and_the_box():
+    """The rectangle rule went with the rectangle editor (frame box run fb-7): `place`, `pixels` and
+    `fillScreen` are no longer the console's."""
+    _require_node()
+    script = "const m = await import(process.argv[1]); process.stdout.write(JSON.stringify(Object.keys(m).sort()));"
+    result = subprocess.run(["node", "--input-type=module", "-e", script, "--", PLACEMENT.as_uri()],
+                            capture_output=True, text=True, check=True, timeout=120)
+    assert json.loads(result.stdout) == ["boxSizeMm", "hanging", "placeBox"]
 
 
 # fb-1's grids (tests/test_frame_box.py): the screens and the steps a box's edges take.
