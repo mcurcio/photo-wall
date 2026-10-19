@@ -303,7 +303,7 @@ def test_a_commit_under_a_trial_is_tagged_as_the_trial_whatever_it_shows(monkeyp
     tagged "trial-" + the candidate's hash: a Frame with nothing to play included."""
     screens, library = _screens(monkeypatch)
     monkeypatch.setattr(plane_screen, "_boottime_ms", lambda: 1000)
-    raw = _envelope(RectangleFit(width=0.5))
+    raw = _envelope(PositionBox(left=0.25, top=0.25, width=0.5, height=0.5))
     library.answers["pw_frame_client_trial"] = _trial_answer(raw, 1)
     empty = OutputComposition(BINDING, fallback=True)
     applied = screens.trial(empty, FrameGrant(uuid4(), 3, 2, "frame", True))
