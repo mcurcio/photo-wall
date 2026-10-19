@@ -6795,3 +6795,28 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
   its mutation probe (stand in by the profile) still bites until fb-14; `test_registry.py` and
   `test_operator_frames.py` keep a local `_portrait` (300 x 500 mm, 1080 x 1920) for their wall
   size, profile and orientation cases only.
+
+## frame-box fb-15 (docs)
+
+- **The requirements still name the Frame display profile.** `docs/requirements.md` lines 96-97
+  ("Frame display profile combines aperture geometry, physical size, resolution, and capabilities";
+  "An operator can correct a Frame's declared display profile ... A changed profile requires
+  calibration revalidation") contradict the owner's 2026-10-19 words ("diagonal inches is a weird
+  concept when we already have width and height"; "I agree with the breakdown"). fb-15 does not own
+  `requirements.md`; the owner's text needs restating there (the Frame's shape from its Position box,
+  its size from the Display, Shows videos its own setting), with his words and date. 0030 records the
+  decision; the console design keeps quoting the old line as the reason a display change blocks.
+- **Docs not owned by fb-15 still describe the profile as current:** `docs/execution-contract.md:127`
+  (the crop window's aspect "comes from the Player's own profile"), `docs/module-plane-renderer.md:82`
+  (`place(rectangle, screen as it hangs, profile aspect)`) and `:168` ("the profile's aspect"),
+  `.claude/skills/console-ux/SKILL.md:75` (`RectangleEditor`, "the Frame profile's shape").
+- **The roadmap's Developed cell names no PR number**: no pull request exists yet for
+  `feat/frame-box-position`; the 1a row says "the pull request of `feat/frame-box-position`" and the
+  PR's author replaces it with the link.
+- **fb-15's mutation probe does not bite on check_docs**: `scripts/check_docs.py` checks only that
+  relative links resolve, so deleting 0029's links to 0030 leaves it green (seen). A broken link to
+  0030 (`0030-frame-bx.md`) turns it RED (seen); the deletion is caught only by the reviewer's grep
+  (`grep -c 0030-frame-box.md docs/decisions/0029-render-planes.md` read 0 with the links removed).
+- **fb-15 describes fb-14's wall plan from the page, not the built code** (fb-14 runs beside it):
+  the runbook's "Place a new Frame" and "Move a Frame", the README's wall-plan sentence and the 108
+  migration wording follow page section fb-14. If fb-14's labels differ, the end review aligns them.
