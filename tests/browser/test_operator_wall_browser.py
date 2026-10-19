@@ -4,7 +4,9 @@ Reuses the existing operator browser harness (real Chromium against the
 production create_app on an ephemeral loopback listener, the disposable-schema
 `registry` fixture, and the autouse `page_errors` guard). Frames are seeded
 directly through the registry (as the `installation` fixture does) so the console
-renders real inventory geometry.
+renders real inventory geometry: where each Frame hangs, and its size on the wall from
+its Position box and its Display's own size (frame box run fb-14), or a dashed outline
+labelled "size not known yet" when that is not known.
 
 Every assertion is BEHAVIORAL — role/text/visible state — and locates frames by
 identity/label, NEVER by SVG coordinates or DOM structure (design §1c).
@@ -13,6 +15,7 @@ identity/label, NEVER by SVG coordinates or DOM structure (design §1c).
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from console_tasks import (
@@ -33,21 +36,20 @@ from operator_harness import (
 from playwright.sync_api import expect
 from support.console_words import SCENE as SCENE_WORDS
 from support.console_words import SCHEDULE
+from support.frames import frame_create
 from support.house_time import window_program
+from test_display_identity import MODE, SERIAL_DISPLAY, _bind, enroll_pi
+from test_display_identity import _report as _recorded
 from test_registry import enroll
 
-from central.registry import FrameCreate
 from central.runtime import Child, Contribution, Scene
 from central.runtime_store import RuntimeStore
-from contracts.models import FrameProfile
+from contracts.node_output import OutputReport, encode_output_report
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
     reason="set PHOTO_WALL_BROWSER_TESTS=1 and install Playwright Chromium",
 )
-
-PORTRAIT = FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24)
-LANDSCAPE = FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)
 
 PLACED = "placed-frame"
 ORIGIN = "legacy-origin"
@@ -56,18 +58,12 @@ OTHER_SURFACE = "window-frame"
 
 def _seed(registry):
     # A placed frame with distinct geometry on surface "wall".
-    registry.create_frame(FrameCreate(
-        id=PLACED, surface_id="wall", x_mm=100, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100))
     # A legacy origin-stacked frame (no distinct position) -> Unplaced tray.
-    registry.create_frame(FrameCreate(
-        id=ORIGIN, surface_id="wall", x_mm=0, y_mm=0,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(ORIGIN, x_mm=0, y_mm=0))
     # A placed frame on a second surface (sorts after "wall", so "wall" stays the
     # default) to prove the Surface filter re-renders the plan.
-    registry.create_frame(FrameCreate(
-        id=OTHER_SURFACE, surface_id="window", x_mm=50, y_mm=50,
-        width_mm=400, height_mm=300, profile=LANDSCAPE))
+    registry.create_frame(frame_create(OTHER_SURFACE, surface_id="window", x_mm=50, y_mm=50))
 
 
 def test_wall_plan_places_frames_and_unplaced_tray_holds_origin_frame(page, registry):
@@ -106,12 +102,8 @@ def _seed_now_showing(registry):
     enroll(registry, key=key, device_id=request.device_id, count=1)
     player_id = identity["player_id"]
 
-    registry.create_frame(FrameCreate(
-        id=SHOWING, surface_id="wall", x_mm=100, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
-    registry.create_frame(FrameCreate(
-        id=OFFLINE, surface_id="wall", x_mm=600, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(SHOWING, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(OFFLINE, x_mm=600, y_mm=100))
     # Compound-key bindings: same player, different outputs. frameHealth() must
     # resolve each frame to its OWN (player_id, output_id) port.
     registry.bind(SHOWING, player_id, "HDMI-A-1", expected_generation=0)
@@ -215,9 +207,7 @@ def test_an_unbound_frames_planned_fact_says_central_sends_it_no_layers(page, re
     """A Run on top of an unbound Frame is still Central's Runs, but the Planner gives an
     unbound Frame no layers (central/planner.py), so the basis says so, on the tile and on
     the Frame page's Overview (console DDD §35)."""
-    registry.create_frame(FrameCreate(
-        id="spare-frame", surface_id="wall", x_mm=100, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create("spare-frame", x_mm=100, y_mm=100))
     store = RuntimeStore(registry.db, registry.clock)
     store.command("set_scene", Scene(
         scene_id=SCENE, loop=True, cycle_seconds=30,
@@ -239,9 +229,7 @@ def test_an_unbound_frames_planned_fact_says_central_sends_it_no_layers(page, re
 
 
 def test_the_frame_page_guides_content_authoring_from_its_frame(page, registry):
-    registry.create_frame(FrameCreate(
-        id="new-frame", surface_id="wall", x_mm=100, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create("new-frame", x_mm=100, y_mm=100))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         page.get_by_role("button", name="Frame new-frame", exact=True).click()
@@ -282,13 +270,13 @@ def test_surface_filter_switches_the_plan(page, registry):
         expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_have_count(0)
 
 
-# Bead 10 -- S-place: drag-to-create (POST) + drag-to-move (PATCH). Assertions are
+# Bead 10 -- S-place: click- or drag-to-place (POST) + drag-to-move (PATCH). Assertions are
 # behavioral OUTCOMES: the STORED placement read back from registry.inventory()
 # (mm values), tray membership, and on-plan identity -- NEVER rendered SVG pixel
 # coordinates (design §1c). The px->mm scale MUST match projection.js
-# dragToPlacement (WALL_SPAN_MM / viewport.width = 4000 / 960).
+# pointToPlacement (WALL_SPAN_MM / viewport.width = 4000 / 960).
 SCALE = 4000 / 960
-TOL = 40  # mm; absorbs sub-pixel drag rounding + Math.round in dragToPlacement.
+TOL = 40  # mm; absorbs sub-pixel drag rounding + Math.round in pointToPlacement.
 
 
 def _plan_svg(page):
@@ -341,15 +329,7 @@ def _wait_for(predicate, timeout=5.0):
 def _seed_empty_wall(registry):
     """A "wall" Surface whose only frame is origin-stacked (routed to the tray),
     so the plan canvas is EMPTY yet the Surface exists to place onto."""
-    registry.create_frame(FrameCreate(
-        id="origin-seed", surface_id="wall", x_mm=0, y_mm=0,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
-
-
-def _fill_landscape_profile(page):
-    page.get_by_label("Pixel width (px)").fill("1920")
-    page.get_by_label("Pixel height (px)").fill("1080")
-    page.get_by_label("Diagonal (inches)").fill("24")
+    registry.create_frame(frame_create("origin-seed", x_mm=0, y_mm=0))
 
 
 def test_first_frame_can_be_drawn_when_installation_has_no_frames(page, registry):
@@ -358,12 +338,11 @@ def test_first_frame_can_be_drawn_when_installation_has_no_frames(page, registry
         connect(page, origin, "wall")
         edit_layout(page)
         expect(page.get_by_label("Surface", exact=True)).to_have_value("wall")
-        expect(page.get_by_text("Drag on this plan to place a Frame")).to_be_visible()
+        expect(page.get_by_text("Click or drag on this plan to place a Frame")).to_be_visible()
         _drag(page, _plan_box(page), 0.30, 0.30, 0.60, 0.50)
         form = page.get_by_role("form", name="New frame")
         expect(form).to_be_visible()
         form.get_by_label("Frame id", exact=True).fill("first-frame")
-        _fill_landscape_profile(page)
         form.get_by_role("button", name="Create frame", exact=True).click()
         expect(page.get_by_role("button", name="Frame first-frame", exact=True)
                ).to_be_visible()
@@ -386,7 +365,7 @@ def test_first_run_guidance_has_no_dismiss_and_opens_edit_layout(page, registry)
         # Add first frame opens Edit layout, where the first Frame is drawn.
         expect(page.get_by_role("group", name="Editing layout", exact=True)).to_be_visible()
         assert current_hash(page) == "#/wall/layout"
-        expect(page.get_by_text("Drag on this plan to place a Frame")).to_be_visible()
+        expect(page.get_by_text("Click or drag on this plan to place a Frame")).to_be_visible()
         expect(page.get_by_role("button", name="Add frame with measurements", exact=True)
                ).to_be_enabled()
 
@@ -399,11 +378,14 @@ def test_drag_create_posts_frame_with_scaled_placement(page, registry):
         box = _plan_box(page)
         before = {frame.id for frame in registry.inventory().frames}
 
-        # Drag a landscape rectangle across the middle of the empty canvas, then
-        # capture a coherent (landscape) display profile in the new-frame form.
+        # Drag across the middle of the empty canvas: the new Frame hangs at the drag's
+        # top-left. The form asks no size or shape (they come from its Display).
         _drag(page, box, 0.30, 0.30, 0.60, 0.50)
+        form = page.get_by_role("form", name="New frame")
+        for asked in ("Frame width (mm)", "Frame height (mm)", "Pixel width (px)", "Diagonal (inches)"):
+            expect(form.get_by_label(asked)).to_have_count(0)
+        expect(form.get_by_label("Shows videos")).to_be_checked()
         page.get_by_label("Frame id", exact=True).fill("lobby-left")
-        _fill_landscape_profile(page)
         page.get_by_role("button", name="Create frame", exact=True).click()
         # The form closes on a successful POST -> the row exists server-side.
         expect(page.get_by_role("button", name="Create frame", exact=True)).to_have_count(0)
@@ -413,15 +395,18 @@ def test_drag_create_posts_frame_with_scaled_placement(page, registry):
         frame = created[0]
         # The operator's readable id is the stored id (slice 2 §8).
         assert frame.id == "lobby-left"
-        # STORED placement matches the dragged region under the px->mm scale:
-        # start viewBox (0.30*960, 0.30*600), end (0.60*960, 0.50*600).
+        # STORED placement is the drag's top-left under the px->mm scale:
+        # start viewBox (0.30*960, 0.30*600).
         assert abs(frame.x_mm - 0.30 * 960 * SCALE) <= TOL       # ~1200
         assert abs(frame.y_mm - 0.30 * 600 * SCALE) <= TOL       # ~750
-        assert abs(frame.width_mm - 0.30 * 960 * SCALE) <= TOL   # ~1200
-        assert abs(frame.height_mm - 0.20 * 600 * SCALE) <= TOL  # ~500
+        # It fills its screen and shows videos; its size is not known until a Display states one.
+        assert (frame.video, frame.calibration.fit.width, frame.calibration.fit.height) == (True, 1, 1)
+        assert frame.size_mm is None
 
-        # And it renders on the plan by identity (not in the tray).
-        expect(page.get_by_role("button", name=f"Frame {frame.id}", exact=True)).to_be_visible()
+        # And it renders on the plan by identity (not in the tray), as the dashed outline.
+        tile = page.get_by_role("button", name=f"Frame {frame.id}", exact=True)
+        expect(tile).to_be_visible()
+        expect(tile).to_contain_text("size not known yet")
 
 
 def test_a_frame_id_with_a_colon_is_refused_before_any_request(page, registry):
@@ -439,7 +424,6 @@ def test_a_frame_id_with_a_colon_is_refused_before_any_request(page, registry):
         # Checked as you type: the rule is stated against the field.
         expect(field).to_have_attribute("aria-invalid", "true")
         expect(field).to_have_accessible_description(re.compile(r"^Not usable\."))
-        _fill_landscape_profile(page)
         page.get_by_role("button", name="Create frame", exact=True).click()
         expect(page.get_by_role("form", name="New frame").get_by_role("alert")
                ).to_contain_text("up to 96")
@@ -455,7 +439,6 @@ def test_a_taken_frame_id_says_so(page, registry):
         edit_layout(page)
         _drag(page, _plan_box(page), 0.30, 0.30, 0.60, 0.50)
         page.get_by_label("Frame id", exact=True).fill("origin-seed")
-        _fill_landscape_profile(page)
         page.get_by_role("button", name="Create frame", exact=True).click()
         expect(page.get_by_role("form", name="New frame").get_by_role("alert")
                ).to_have_text("A frame named origin-seed already exists.")
@@ -469,14 +452,13 @@ def test_drag_created_frame_never_lands_in_unplaced_tray(page, registry):
         box = _plan_box(page)
         before = {frame.id for frame in registry.inventory().frames}
 
-        # Drag DOWN-TO the plan ORIGIN corner so the rect's top-left is viewBox
+        # Drag DOWN-TO the plan ORIGIN corner so the new Frame's top-left is viewBox
         # (0,0) -> raw mm (0,0). (Pressing starts at a safe interior point and
         # releases at the corner; pointer capture keeps the events on the SVG.) The
         # non-origin nudge (errata: isUnplaced heuristic) must push it off (0,0) so
         # it is DRAWN, not routed into the Unplaced tray.
         _drag(page, box, 0.40, 0.40, 0.0, 0.0)
         page.get_by_label("Frame id", exact=True).fill("corner.1")
-        _fill_landscape_profile(page)
         page.get_by_role("button", name="Create frame", exact=True).click()
         expect(page.get_by_role("button", name="Create frame", exact=True)).to_have_count(0)
 
@@ -504,41 +486,36 @@ def test_measured_create_and_numeric_reposition(page, registry):
         form.get_by_label("Frame id", exact=True).fill("measured-frame")
         form.get_by_label("X position (mm)").fill("125")
         form.get_by_label("Y position (mm)").fill("75")
-        form.get_by_label("Frame width (mm)").fill("400")
-        form.get_by_label("Frame height (mm)").fill("225")
+        form.get_by_label("Shows videos").uncheck()
         form.get_by_role("button", name="Create frame", exact=True).click()
         expect(page.get_by_role("button", name="Frame measured-frame", exact=True)).to_be_visible()
         created = next(frame for frame in registry.inventory().frames if frame.id == "measured-frame")
-        assert (created.x_mm, created.y_mm, created.width_mm, created.height_mm) == (125, 75, 400, 225)
+        assert (created.x_mm, created.y_mm, created.video) == (125, 75, False)
 
         page.get_by_role("button", name="Frame measured-frame", exact=True).click()
         page.get_by_role("button", name="Edit placement for measured-frame", exact=True).click()
         form = page.get_by_role("form", name="Place frame measured-frame")
         form.get_by_label("X position (mm)").fill("850")
         form.get_by_label("Y position (mm)").fill("260")
-        form.get_by_label("Frame width (mm)").fill("420")
-        form.get_by_label("Frame height (mm)").fill("236.25")
+        expect(form.get_by_label("Shows videos")).to_have_count(0)   # a move moves only where it hangs
         form.get_by_role("button", name="Save placement", exact=True).click()
         def _repositioned():
             frame = next(f for f in registry.inventory().frames if f.id == "measured-frame")
-            return frame if (frame.x_mm, frame.y_mm, frame.width_mm, frame.height_mm) == (
-                850, 260, 420, 236.25) else None
+            return frame if (frame.x_mm, frame.y_mm) == (850, 260) else None
 
         _wait_for(_repositioned)
 
 
 def test_drag_move_existing_frame_patches_placement(page, registry):
-    registry.create_frame(FrameCreate(
-        id=PLACED, surface_id="wall", x_mm=100, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         edit_layout(page)
         expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()
         box = _plan_box(page)
 
-        # The single placed frame fits the viewport at rect x:0..360, y:0..600.
-        # Press inside it (viewBox ~180,300) and drag right to viewBox ~540,300;
+        # The single placed frame (unbound: the 500 x 300 mm outline) fits the viewport at rect
+        # x:0..960, y:0..576. Press inside it (viewBox ~180,300) and drag right to viewBox ~540,300;
         # the frame is REPOSITIONED (PATCH, LWW) and corrects on the next snapshot.
         _drag(page, box, 180 / 960, 300 / 600, 540 / 960, 300 / 600)
 
@@ -547,11 +524,9 @@ def test_drag_move_existing_frame_patches_placement(page, registry):
             return frame if frame.x_mm != 100 else None
 
         frame = _wait_for(_moved)
-        # Repositioned to the right (delta 360 viewBox px -> ~1500 mm).
+        # Repositioned to the right (delta 360 viewBox px -> ~1500 mm); a move sends no size.
         assert abs(frame.x_mm - 360 * SCALE) <= TOL  # ~1500
-        # A move must NOT resize: the stored physical dimensions are preserved.
-        assert frame.width_mm == 300
-        assert frame.height_mm == 500
+        assert frame.size_mm is None
         # It still renders on the plan by identity.
         expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()
 
@@ -559,9 +534,7 @@ def test_drag_move_existing_frame_patches_placement(page, registry):
 def test_a_drag_across_a_poll_ends_in_the_dragged_placement(page, registry):
     """Pass 2 §7: the 5 s poll replaces Plane A mid-drag, and the drag (a ref plus local
     state in Plan) survives it -- the release lands where the operator dragged to."""
-    registry.create_frame(FrameCreate(
-        id=PLACED, surface_id="wall", x_mm=100, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100))
     with operator_server(registry.db, registry.clock) as origin:
         pause_page_clock(page, registry.clock.utc())
         connect(page, origin, "wall")
@@ -612,17 +585,13 @@ def _seed_bound(registry):
     passes the runtime guard and is refused by the binding guard (frame_bound)."""
     identity, _key, _request = enroll(registry, count=1)
     player_id = identity["player_id"]
-    registry.create_frame(FrameCreate(
-        id=BOUND, surface_id="wall", x_mm=100, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(BOUND, x_mm=100, y_mm=100))
     registry.bind(BOUND, player_id, "HDMI-A-1", expected_generation=0)
     return player_id
 
 
 def test_delete_clear_frame_removes_it_from_the_plan(page, registry):
-    registry.create_frame(FrameCreate(
-        id=CLEAR, surface_id="wall", x_mm=100, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(CLEAR, x_mm=100, y_mm=100))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         edit_layout(page)
@@ -646,9 +615,7 @@ def test_delete_clear_frame_removes_it_from_the_plan(page, registry):
 
 def test_delete_frame_lists_stored_scene_roots_and_the_schedules_playing_them(page, registry):
     """The confirmation and the refusal name the Schedules playing those Scenes by their names."""
-    registry.create_frame(FrameCreate(
-        id=CLEAR, surface_id="wall", x_mm=100, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(CLEAR, x_mm=100, y_mm=100))
     store = RuntimeStore(registry.db, registry.clock)
     store.command("set_scene", Scene(scene_id="nested-gallery", children=(Child(scene=Scene(
         scene_id="inline", contributions=(Contribution(
@@ -673,9 +640,7 @@ def test_delete_frame_lists_stored_scene_roots_and_the_schedules_playing_them(pa
 
 
 def test_delete_frame_referenced_refusal_gives_refresh_and_edit_guidance(page, registry):
-    registry.create_frame(FrameCreate(
-        id=CLEAR, surface_id="wall", x_mm=100, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(CLEAR, x_mm=100, y_mm=100))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         edit_layout(page)
@@ -698,9 +663,7 @@ def test_delete_frame_referenced_refusal_gives_refresh_and_edit_guidance(page, r
 
 
 def test_delete_frame_queue_only_refusal_does_not_suggest_editing_scenes(page, registry):
-    registry.create_frame(FrameCreate(
-        id=CLEAR, surface_id="wall", x_mm=100, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(CLEAR, x_mm=100, y_mm=100))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         edit_layout(page)
@@ -756,9 +719,7 @@ def test_delete_frame_with_live_run_shows_finish_guidance(page, registry):
 
 def test_drop_tray_frame_onto_plan_gives_distinct_geometry(page, registry):
     # The only frame is origin-stacked -> it starts in the Unplaced tray.
-    registry.create_frame(FrameCreate(
-        id=ORIGIN, surface_id="wall", x_mm=0, y_mm=0,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(ORIGIN, x_mm=0, y_mm=0))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         edit_layout(page)
@@ -796,10 +757,7 @@ def test_drop_tray_frame_onto_plan_gives_distinct_geometry(page, registry):
             frame = next(f for f in registry.inventory().frames if f.id == ORIGIN)
             return frame if (frame.x_mm, frame.y_mm) != (0, 0) else None
 
-        moved = _wait_for(_placed)
-        # PATCH preserved the stored physical dimensions (partial placement).
-        assert moved.width_mm == 300
-        assert moved.height_mm == 500
+        _wait_for(_placed)
         # It now renders on the plan by identity and has LEFT the Unplaced tray.
         expect(page.get_by_role("button", name=f"Frame {ORIGIN}", exact=True)).to_be_visible()
         expect(tray.get_by_role("button", name=ORIGIN, exact=True)).to_have_count(0)
@@ -850,9 +808,7 @@ def test_guidance_banner_leaves_by_itself_when_the_first_frame_exists(page, regi
         sign_in(page, origin)
         guidance = page.get_by_role("note", name="Getting started")
         expect(guidance).to_be_visible()
-        registry.create_frame(FrameCreate(
-            id=PLACED, surface_id="wall", x_mm=100, y_mm=100,
-            width_mm=300, height_mm=500, profile=PORTRAIT))
+        registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100))
         page.get_by_role("button", name="Refresh", exact=True).click()
         expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()
         expect(page.get_by_role("note", name="Getting started")).to_have_count(0)
@@ -872,16 +828,17 @@ def _plan_writes(page):
 
 
 def test_a_drag_on_the_daily_wall_sends_no_write_and_edit_layout_sends_one_patch(page, registry):
-    registry.create_frame(FrameCreate(
-        id=PLACED, surface_id="wall", x_mm=100, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    # Two unbound Frames (500 x 300 mm outlines) 2 m apart: the plan spans 2000 x 300 mm, so
+    # PLACED is drawn at viewBox x 0..240, y 0..144 and the canvas right of it is empty.
+    registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create("far-frame", x_mm=1600, y_mm=100))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()
         writes = _plan_writes(page)
         box = _plan_box(page)
         # A drag across the tile and one across the empty canvas: nothing moves or opens.
-        _drag(page, box, 180 / 960, 300 / 600, 540 / 960, 300 / 600)
+        _drag(page, box, 120 / 960, 72 / 600, 480 / 960, 72 / 600)
         _drag(page, box, 0.60, 0.30, 0.90, 0.50)
         page.wait_for_timeout(500)
         assert writes == []
@@ -896,16 +853,14 @@ def test_a_drag_on_the_daily_wall_sends_no_write_and_edit_layout_sends_one_patch
         assert current_hash(page) == "#/wall/layout"
         # No Frame page in Edit layout.
         expect(page.get_by_role("tablist", name="Frame settings")).to_have_count(0)
-        _drag(page, _plan_box(page), 180 / 960, 300 / 600, 540 / 960, 300 / 600)
+        _drag(page, _plan_box(page), 120 / 960, 72 / 600, 480 / 960, 72 / 600)
         _wait_for(lambda: next(f for f in registry.inventory().frames if f.id == PLACED).x_mm != 100)
         page.wait_for_timeout(300)
         assert writes == [("PATCH", f"frames/{PLACED}")]
 
 
 def test_done_returns_to_the_daily_face(page, registry):
-    registry.create_frame(FrameCreate(
-        id=PLACED, surface_id="wall", x_mm=100, y_mm=100,
-        width_mm=300, height_mm=500, profile=PORTRAIT))
+    registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         bar = edit_layout(page)
@@ -952,3 +907,61 @@ def test_to_finish_lists_each_frames_missing_step_with_its_link(page, registry):
         expect(page.get_by_role("group", name="Editing layout", exact=True)).to_be_visible()
         # Structural to-dos are not attention: the strip and the page never say "to set up".
         expect(page.get_by_text(re.compile("to set up", re.I))).to_have_count(0)
+
+
+# Frame box run fb-14: each Frame is drawn at its size on the wall, its Position box's share of
+# its Display's own size, never a typed one; a click on empty canvas places a new Frame.
+SIZED = "sized-frame"
+UNSIZED = "unsized-frame"
+
+
+def _sized(registry, serial: str, output_id: str, size_mm: tuple[int, int]) -> None:
+    """The Pi's Output report stating the display's size, recorded off Playwright's running loop."""
+    report = OutputReport(output_id, True, SERIAL_DISPLAY, MODE, (), None, None, None, None, size_mm)
+    with ThreadPoolExecutor(1) as pool:
+        pool.submit(_recorded, registry, serial, output_id, SERIAL_DISPLAY,
+                    data=encode_output_report(report)).result()
+
+
+def _shape(locator) -> float:
+    box = locator.bounding_box()
+    return box["width"] / box["height"]
+
+
+def test_a_bound_frame_is_drawn_at_its_displays_size_and_an_unbound_one_as_a_dashed_outline(page, registry):
+    """A Frame bound to a Display stating 950 x 540 mm, its box the whole screen, is drawn 950 x 540
+    beside an unbound Frame's 500 x 300 mm outline labelled "size not known yet"."""
+    pi = enroll_pi(registry, "pi-a")
+    registry.create_frame(frame_create(SIZED, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(UNSIZED, x_mm=1200, y_mm=100))
+    _bind(registry, SIZED, pi, "HDMI-A-1")
+    _sized(registry, "pi-a", "HDMI-A-1", (950, 540))
+    assert next(frame for frame in registry.inventory().frames if frame.id == SIZED).size_mm == (950, 540)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        sized = page.get_by_role("button", name=f"Frame {SIZED}", exact=True)
+        unsized = page.get_by_role("button", name=f"Frame {UNSIZED}", exact=True)
+        expect(unsized).to_contain_text("size not known yet")
+        expect(sized).not_to_contain_text("size not known yet")
+        sized_rect, unsized_rect = sized.locator("rect"), unsized.locator("rect")
+        assert abs(_shape(sized_rect) - 950 / 540) < 0.02
+        assert abs(_shape(unsized_rect) - 500 / 300) < 0.02
+        assert abs(sized_rect.bounding_box()["width"] / unsized_rect.bounding_box()["width"] - 950 / 500) < 0.02
+        assert "plan__rect--unsized" in (unsized_rect.get_attribute("class") or "")
+        assert "plan__rect--unsized" not in (sized_rect.get_attribute("class") or "")
+
+
+def test_a_click_on_the_empty_plan_places_a_new_frames_top_left(page, registry):
+    _seed_empty_wall(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        edit_layout(page)
+        box = _plan_box(page)
+        page.mouse.click(box["x"] + 0.25 * box["width"], box["y"] + 0.5 * box["height"])
+        form = page.get_by_role("form", name="New frame")
+        form.get_by_label("Frame id", exact=True).fill("clicked")
+        form.get_by_role("button", name="Create frame", exact=True).click()
+        expect(page.get_by_role("button", name="Frame clicked", exact=True)).to_be_visible()
+        clicked = next(frame for frame in registry.inventory().frames if frame.id == "clicked")
+        assert abs(clicked.x_mm - 0.25 * 960 * SCALE) <= TOL   # ~1000
+        assert abs(clicked.y_mm - 0.5 * 600 * SCALE) <= TOL    # ~1250

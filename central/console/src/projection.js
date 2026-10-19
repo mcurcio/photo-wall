@@ -11,6 +11,26 @@
 /** @typedef {{x:number,y:number,w:number,h:number}} Rect */
 
 /**
+ * The size, in millimetres on the wall, of the dashed outline the plan draws for a Frame whose
+ * size is not known yet (frame box run decision 6: bound to nothing, or on a Display that states
+ * no size). Not the Frame's size: a placeholder that only shows where it hangs.
+ */
+export const UNSIZED_FRAME_MM = [500, 300];
+
+/**
+ * The Frame's drawn size on the wall: Central's `size_mm` (its Position box's share of its
+ * Display's own size, as its screen hangs; central/registry.py `_frame_inventory`), else the
+ * UNSIZED_FRAME_MM outline.
+ *
+ * @param {{size_mm?: [number, number]|null}} frame
+ * @returns {{size: [number, number], sized: boolean}}
+ */
+export function wallSize(frame) {
+  return Array.isArray(frame.size_mm) ? { size: frame.size_mm, sized: true }
+    : { size: UNSIZED_FRAME_MM, sized: false };
+}
+
+/**
  * True when a frame has no distinct position and therefore belongs in the
  * Unplaced tray rather than on the plan.
  *
@@ -31,28 +51,31 @@ export function isUnplaced(frame) {
 /**
  * Project the frames of one Surface from mm into px for the given viewport.
  *
- * Placed frames (distinct position) are scaled uniformly to fit the bounding box
- * of that Surface's placed frames into the viewport; origin-stacked frames are
- * returned by id in `unplaced` and never projected.
+ * Each placed frame (distinct position) is drawn from its top-left (`x_mm`, `y_mm`) at its
+ * {@link wallSize}; all are scaled uniformly to fit the bounding box of that Surface's placed
+ * frames into the viewport, and `sized` says whether the rect is the Frame's own size or the
+ * not-yet-known outline. Origin-stacked frames are returned by id in `unplaced` and never
+ * projected.
  *
- * @param {Array<{id: string, surface_id: string, x_mm: number, y_mm: number, width_mm: number, height_mm: number}>} frames
+ * @param {Array<{id: string, surface_id: string, x_mm: number, y_mm: number, size_mm?: [number, number]|null}>} frames
  * @param {string} surfaceId
  * @param {{width: number, height: number}} viewport
- * @returns {{placed: Array<{id: string, rect: Rect}>, unplaced: string[]}}
+ * @returns {{placed: Array<{id: string, rect: Rect, sized: boolean}>, unplaced: string[]}}
  */
 export function project(frames, surfaceId, viewport) {
   const onSurface = (frames ?? []).filter((frame) => frame.surface_id === surfaceId);
-  const placedFrames = onSurface.filter((frame) => !isUnplaced(frame));
+  const placedFrames = onSurface.filter((frame) => !isUnplaced(frame))
+    .map((frame) => ({ frame, ...wallSize(frame) }));
   const unplaced = onSurface.filter(isUnplaced).map((frame) => frame.id);
 
   if (placedFrames.length === 0) {
     return { placed: [], unplaced };
   }
 
-  const minX = Math.min(...placedFrames.map((frame) => frame.x_mm));
-  const minY = Math.min(...placedFrames.map((frame) => frame.y_mm));
-  const maxX = Math.max(...placedFrames.map((frame) => frame.x_mm + frame.width_mm));
-  const maxY = Math.max(...placedFrames.map((frame) => frame.y_mm + frame.height_mm));
+  const minX = Math.min(...placedFrames.map(({ frame }) => frame.x_mm));
+  const minY = Math.min(...placedFrames.map(({ frame }) => frame.y_mm));
+  const maxX = Math.max(...placedFrames.map(({ frame, size }) => frame.x_mm + size[0]));
+  const maxY = Math.max(...placedFrames.map(({ frame, size }) => frame.y_mm + size[1]));
   const spanX = maxX - minX;
   const spanY = maxY - minY;
 
@@ -62,14 +85,15 @@ export function project(frames, surfaceId, viewport) {
   const scaleY = spanY > 0 ? viewport.height / spanY : 1;
   const scale = Math.min(scaleX, scaleY);
 
-  const placed = placedFrames.map((frame) => ({
+  const placed = placedFrames.map(({ frame, size, sized }) => ({
     id: frame.id,
     rect: {
       x: (frame.x_mm - minX) * scale,
       y: (frame.y_mm - minY) * scale,
-      w: frame.width_mm * scale,
-      h: frame.height_mm * scale,
+      w: size[0] * scale,
+      h: size[1] * scale,
     },
+    sized,
   }));
 
   return { placed, unplaced };
@@ -81,9 +105,9 @@ export function project(frames, surfaceId, viewport) {
  * `project()` (above) draws the plan scale-to-fit against the bounding box of the
  * Surface's placed frames, so there is NO single global mm↔px scale to invert —
  * the forward scale is data-dependent and changes as frames are added. For the
- * INVERSE placement of a fresh pointer drag we therefore adopt ONE documented
+ * INVERSE placement of a fresh pointer press we therefore adopt ONE documented
  * convention: the viewport width maps to a 4 m wall. This is a deliberate,
- * flagged choice (see the report) — a drag-created/moved frame is NOT guaranteed
+ * flagged choice (see the report) — a placed/moved frame is NOT guaranteed
  * to render at the exact same pixels after the write, because `project()` re-fits
  * on the next snapshot; the design explicitly accepts this ("the plan corrects on
  * the next snapshot", design §9a/J3).
@@ -91,59 +115,47 @@ export function project(frames, surfaceId, viewport) {
 const WALL_SPAN_MM = 4000;
 
 /**
- * Invert a pointer-drag rectangle (px, in the plan's viewBox space) back to a mm
- * placement — the px→mm inverse of `project()`'s forward `mm→px` mapping (Bead 10,
- * design J3/§9a).
+ * The UNSIZED_FRAME_MM outline in viewBox px under the WALL_SPAN_MM convention: what the plan
+ * draws under the pointer while a new Frame is being placed (its size is not known until it is
+ * bound to a Display that states one).
  *
- * A single uniform `mmPerPx` (derived from the viewport WIDTH so a square drag
- * maps to a square placement, matching `project()`'s single `min()` scale) is
- * applied to every coordinate. Width/height are clamped to a minimum 1 mm so a
- * degenerate (zero-area) drag still yields a server-valid Frame (`FrameCreate`
- * requires `width_mm`/`height_mm` > 0).
+ * @param {{width: number, height: number}} viewport the plan viewport in px
+ * @returns {{w: number, h: number}}
+ */
+export function unsizedOutlinePx(viewport) {
+  const pxPerMm = viewport.width / WALL_SPAN_MM;
+  return { w: UNSIZED_FRAME_MM[0] * pxPerMm, h: UNSIZED_FRAME_MM[1] * pxPerMm };
+}
+
+/**
+ * Invert a pointer position (px, in the plan's viewBox space) back to where a Frame hangs on the
+ * wall: its top-left in mm, the px→mm inverse of `project()`'s forward mapping (Bead 10, design
+ * J3/§9a; frame box run fb-14: the wall placement is the Frame's top-left alone, its size comes
+ * from its Display).
+ *
+ * A single uniform `mmPerPx` (derived from the viewport WIDTH, matching `project()`'s single
+ * `min()` scale) is applied to both coordinates.
  *
  * ORIGIN NUDGE (errata 2026-09-13, "isUnplaced origin heuristic"): `isUnplaced`
  * routes a frame at exactly `x_mm === 0 && y_mm === 0` to the Unplaced tray. A
- * drag that lands at the plan origin would therefore be mis-routed into the tray
+ * press that lands at the plan origin would therefore be mis-routed into the tray
  * instead of being drawn. This inverse nudges the exact-origin case to a minimal
- * non-origin offset (`x_mm = 1`) so a drag-created frame ALWAYS has distinct
- * geometry and renders on the plan. `isUnplaced`'s read-only heuristic is left
+ * non-origin offset (`x_mm = 1`) so a placed frame ALWAYS has a distinct
+ * position and renders on the plan. `isUnplaced`'s read-only heuristic is left
  * untouched (per the errata's instruction).
  *
- * @param {Rect} pxRect the drag rectangle `{x, y, w, h}` in viewBox px
+ * @param {{x: number, y: number}} point the Frame's top-left in viewBox px
  * @param {{width: number, height: number}} viewport the plan viewport in px
  * @param {string} surfaceId the Surface the frame is being placed on
- * @returns {{surface_id: string, x_mm: number, y_mm: number, width_mm: number, height_mm: number}}
+ * @returns {{surface_id: string, x_mm: number, y_mm: number}}
  */
-export function dragToPlacement(pxRect, viewport, surfaceId) {
+export function pointToPlacement(point, viewport, surfaceId) {
   const mmPerPx = WALL_SPAN_MM / viewport.width;
-  let x_mm = Math.round(pxRect.x * mmPerPx);
-  let y_mm = Math.round(pxRect.y * mmPerPx);
-  const width_mm = Math.max(1, Math.round(pxRect.w * mmPerPx));
-  const height_mm = Math.max(1, Math.round(pxRect.h * mmPerPx));
+  let x_mm = Math.round(point.x * mmPerPx);
+  const y_mm = Math.round(point.y * mmPerPx);
   if (x_mm === 0 && y_mm === 0) {
     // Never emit the exact origin — see ORIGIN NUDGE above.
     x_mm = 1;
   }
-  return { surface_id: surfaceId, x_mm, y_mm, width_mm, height_mm };
-}
-
-/**
- * True when physical (mm) and pixel dimensions agree on orientation — the SAME
- * guard the server enforces on `FrameCreate`/`place_frame`
- * (central/registry.py `_orientation_coherent`). A square frame
- * (`height_mm === width_mm`) is always coherent; otherwise portrait-vs-landscape
- * must match between the mm rectangle and the display profile's pixels.
- *
- * Used by the new-frame form to reject an incoherent profile client-side (design
- * §J2's "invalid → inline reason, no request" discipline) before the POST, rather
- * than relying only on the server's 422.
- *
- * @param {number} widthMm
- * @param {number} heightMm
- * @param {number} widthPx
- * @param {number} heightPx
- * @returns {boolean}
- */
-export function orientationCoherent(widthMm, heightMm, widthPx, heightPx) {
-  return heightMm === widthMm || heightMm > widthMm === heightPx > widthPx;
+  return { surface_id: surfaceId, x_mm, y_mm };
 }

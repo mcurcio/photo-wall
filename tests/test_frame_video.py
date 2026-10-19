@@ -11,6 +11,7 @@ Mutation probe: make `Registry.set_frame_video` skip the write when the Frame is
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+from psycopg.types.json import Jsonb
 from support.frame_media import seed_variant
 from support.frames import frame_create
 from support.migrations import migrate_before
@@ -63,7 +64,6 @@ def test_switching_off_a_bound_ready_frame_saves_at_once_and_keeps_it_ready(regi
     assert answer.json() == {"frame_id": "hall", "video": False, "changed": True}
     after = _hall(registry)
     assert after.video is False
-    assert after.profile.video is False      # transitional: the profile follows until fb-14
     assert (after.readiness, after.generation, after.configuration_revision, after.calibration) == (
         Readiness.READY, before.generation, before.configuration_revision, before.calibration)
     assert _audits(registry) == [{"video": False}]
@@ -116,19 +116,22 @@ def test_switched_on_again_videos_come_back(registry):
     assert "video" in _planned_kinds(registry, switches=(False, True))
 
 
-def before_105(registry) -> None:
-    """Undo 105 on the real tables: no frames.video, and 105 not in the ledger."""
+def before_105(registry, profiles: dict[str, dict]) -> None:
+    """Undo 105 on the real tables: no frames.video, each Frame's profile JSON back (108 dropped
+    it), and 105 not in the ledger."""
     with registry.db.transaction() as conn:
-        conn.execute("ALTER TABLE frames DROP COLUMN video")
+        conn.execute("ALTER TABLE frames DROP COLUMN video, ADD COLUMN profile JSONB")
+        for frame_id, profile in profiles.items():
+            conn.execute("UPDATE frames SET profile=%s WHERE id=%s", (Jsonb(profile), frame_id))
         conn.execute("DELETE FROM schema_migrations WHERE name = '105_frame_video.sql'")
 
 
 def test_105_carries_each_profiles_video_onto_its_frame(registry):
-    registry.create_frame(frame_create("still-only", video=False))
-    registry.create_frame(frame_create("moving"))
-    with registry.db.transaction() as conn:   # a profile stored before `video` was written: shows videos
-        conn.execute("UPDATE frames SET profile = profile - 'video' WHERE id='moving'")
-    before_105(registry)
+    registry.create_frame(frame_create("still-only", video=True))
+    registry.create_frame(frame_create("moving", video=False))
+    shape = {"width_px": 1920, "height_px": 1080, "diagonal_inches": 24}
+    # The profiles as stored before 105; one stored before `video` was written: shows videos.
+    before_105(registry, {"still-only": {**shape, "video": False}, "moving": shape})
 
     migrate_before(registry.db, "106")
 

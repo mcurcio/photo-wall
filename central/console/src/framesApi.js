@@ -1,5 +1,5 @@
 import { apiWrite, callApi } from "./apiWrite.js";
-import { dragToPlacement } from "./projection.js";
+import { pointToPlacement } from "./projection.js";
 import { FRAME_ID_PATTERN } from "./frameIds.js";
 
 export { FRAME_ID_PATTERN } from "./frameIds.js";
@@ -7,7 +7,7 @@ export { FRAME_ID_PATTERN } from "./frameIds.js";
 /**
  * Low-level Frame write module (bead R-apiwrite). Holds the four Frame mutations
  * that both {@link module:Plan} and {@link module:UnplacedTray} issue —
- * `createFrame`/`moveFrame`/`deleteFrame`/`dropFromTray` — so the tray no longer
+ * `createFrame`/`placeFrame`/`deleteFrame`/`dropFromTray` — so the tray no longer
  * imports them from its sibling `Plan.jsx`. Each write goes through the shared
  * {@link apiWrite} helper and keeps its own result shape and message table; wrap
  * the calls in `useMutate()` at the call site so the plan refreshes after a write.
@@ -36,22 +36,22 @@ function interpretFrame(result) {
 }
 
 /**
- * Create a Frame (Bead 10; slice 2 §8): POST /v1/operator/frames with the
- * operator's readable id, the drag placement and the Frame profile. The id
- * must match {@link FRAME_ID_PATTERN} (the caller checks it before sending) and
- * cannot be changed later; a taken id answers 409 `frame_exists`. The server
- * re-runs the orientation-coherence guard and 422s an incoherent profile. Wrap
- * in `useMutate()` at the call site so the plan refreshes.
+ * Create a Frame (Bead 10; slice 2 §8; frame box run fb-14): POST /v1/operator/frames with the
+ * operator's readable id, where it hangs (its top-left on the wall) and Shows videos. Its shape
+ * and size are never sent: they come from its Position box on the Display it is bound to. The id
+ * must match {@link FRAME_ID_PATTERN} (the caller checks it before sending) and cannot be changed
+ * later; a taken id answers 409 `frame_exists`. The new Frame's Position is the whole screen.
+ * Wrap in `useMutate()` at the call site so the plan refreshes.
  *
  * @param {string} id the operator-chosen Frame id
- * @param {{surface_id: string, x_mm: number, y_mm: number, width_mm: number, height_mm: number}} placement
- * @param {{width_px: number, height_px: number, diagonal_inches: number, video: boolean}} profile
+ * @param {{surface_id: string, x_mm: number, y_mm: number}} placement
+ * @param {boolean} video Shows videos
  * @returns {Promise<{ok:true, frame:object}|{ok:false, error:string}>}
  */
-export async function createFrame(id, placement, profile) {
+export async function createFrame(id, placement, video) {
   const result = await apiWrite("/v1/operator/frames", {
     method: "POST",
-    body: { id, ...placement, profile },
+    body: { id, ...placement, video },
   });
   return interpretFrame(result);
 }
@@ -98,17 +98,16 @@ export async function setFrameVideo(frameId, video) {
 }
 
 /**
- * Reposition a Frame (Bead 10): PATCH /v1/operator/frames/{id} with a partial
- * placement. Last-write-wins, NO concurrency token (design §9a — the one
- * deliberate exception to R3; placement is cosmetic and never reaches a player).
- * Wrap in `useMutate()` at the call site so the plan corrects from the next
- * snapshot.
+ * Move a Frame on the wall (Bead 10; frame box run fb-14): PATCH /v1/operator/frames/{id} with a
+ * partial placement, its top-left only. Last-write-wins, NO concurrency token (design §9a — the
+ * one deliberate exception to R3; placement is cosmetic and never reaches a player). Wrap in
+ * `useMutate()` at the call site so the plan corrects from the next snapshot.
  *
  * @param {string} frameId
- * @param {{surface_id?: string, x_mm?: number, y_mm?: number, width_mm?: number, height_mm?: number}} placement
+ * @param {{surface_id?: string, x_mm?: number, y_mm?: number}} placement
  * @returns {Promise<{ok:true, frame:object}|{ok:false, error:string}>}
  */
-export async function moveFrame(frameId, placement) {
+export async function placeFrame(frameId, placement) {
   const result = await apiWrite(`/v1/operator/frames/${frameId}`, {
     method: "PATCH",
     body: placement,
@@ -163,27 +162,20 @@ export async function deleteFrame(frameId) {
 
 /**
  * Drop an Unplaced-tray Frame onto the plan (Bead 11, design J3/§12): PATCH the
- * frame with a distinct mm ORIGIN inverted from the drop point, reusing
- * {@link dragToPlacement} for the px->mm inversion and {@link moveFrame} for the
- * write. Only `surface_id`/`x_mm`/`y_mm` are sent — the PATCH is partial, so the
- * stored `width_mm`/`height_mm` (and thus orientation coherence with the profile)
- * are preserved; the drop merely gives the frame a non-origin position so
- * `isUnplaced` no longer routes it to the tray. Wrap in `useMutate()` so the frame
- * leaves the tray and renders on the plan from the next snapshot.
+ * frame with a distinct mm top-left inverted from the drop point, reusing
+ * {@link pointToPlacement} for the px->mm inversion and {@link placeFrame} for the
+ * write; the drop gives the frame a non-origin position so `isUnplaced` no longer
+ * routes it to the tray. Wrap in `useMutate()` so the frame leaves the tray and
+ * renders on the plan from the next snapshot.
  *
  * @param {string} frameId
- * @param {import("./projection.js").Rect} pxRect drop rectangle in viewBox px
+ * @param {{x: number, y: number}} point the drop point in viewBox px
  * @param {{width: number, height: number}} viewport the plan viewport in px
  * @param {string} surfaceId the Surface the frame is dropped onto
  * @returns {Promise<{ok:true, frame:object}|{ok:false, error:string}>}
  */
-export function dropFromTray(frameId, pxRect, viewport, surfaceId) {
-  const placement = dragToPlacement(pxRect, viewport, surfaceId);
-  return moveFrame(frameId, {
-    surface_id: placement.surface_id,
-    x_mm: placement.x_mm,
-    y_mm: placement.y_mm,
-  });
+export function dropFromTray(frameId, point, viewport, surfaceId) {
+  return placeFrame(frameId, pointToPlacement(point, viewport, surfaceId));
 }
 
 /**

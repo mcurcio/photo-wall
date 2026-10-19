@@ -33,7 +33,6 @@ from contracts.models import (
     IDENTIFIER_PATTERN,
     TARGET_ID_PATTERN,
     Calibration,
-    FrameProfile,
     PositionBox,
 )
 from contracts.player_control import ControlHello
@@ -68,14 +67,6 @@ def hello(registry, identity, capabilities=()):
 
 def frame(registry, frame_id="portrait"):
     registry.create_frame(frame_create(frame_id))
-
-
-def _portrait_on_the_wall(registry, frame_id="portrait"):
-    """A 300 x 500 mm Frame with a 1080 x 1920 profile: the wall size and orientation rule's own
-    subject (fb-14 changes them), so built here rather than by the test seed."""
-    registry.create_frame(FrameCreate(id=frame_id, width_mm=300, height_mm=500,
-                                     profile=FrameProfile(width_px=1080, height_px=1920,
-                                                          diagonal_inches=24)))
 
 
 def test_serial_enroll_creates_an_unbound_pending_record(registry):
@@ -222,7 +213,7 @@ def test_replacement_preserves_frame_rejects_retired_identity_and_revalidates(re
     assert registry.bind("portrait", new["player_id"], "HDMI-A-2", expected_generation=2)["generation"] == 3
     assert registry.bindings_for(new["player_id"], 1) == []
     location = registry.inventory().frames[0]
-    assert (location.id, location.width_mm, location.calibration.fit) == ("portrait", 300, SKEWED.fit)
+    assert (location.id, location.calibration.fit) == ("portrait", SKEWED.fit)
     save_position(registry, "portrait", PORTRAIT_ON_WIDE)
     assert registry.bindings_for(new["player_id"], 1)[0].generation == 3
 
@@ -438,7 +429,7 @@ def test_typed_inventory_preserves_the_complete_operator_json_response(registry)
     reports = Coordinator(registry.db, registry.clock).player_reports_lock_free()
     expected = registry.inventory().with_liveness(reports)
     assert isinstance(expected, InstallationInventory)
-    assert expected.frames[0].profile.width_px == 1080
+    assert expected.frames[0].screen_px == (1920, 1080)
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         response = client.get("/v1/operator/inventory", headers={"Authorization": "Bearer " + ADMIN})
         assert response.status_code == 200
@@ -447,21 +438,18 @@ def test_typed_inventory_preserves_the_complete_operator_json_response(registry)
 
 
 def test_place_frame_merges_only_supplied_fields_and_echoes_result(registry):
-    _portrait_on_the_wall(registry)
+    registry.create_frame(frame_create("portrait", surface_id="hall", x_mm=5, y_mm=6))
     result = registry.place_frame("portrait", FramePlacement(x_mm=10, y_mm=20))
-    assert result == {"id": "portrait", "surface_id": "wall", "x_mm": 10, "y_mm": 20,
-                      "width_mm": 300, "height_mm": 500}
+    assert result == {"id": "portrait", "surface_id": "hall", "x_mm": 10, "y_mm": 20}
     location = registry.inventory().frames[0]
-    assert (location.x_mm, location.y_mm, location.width_mm, location.height_mm) == (10, 20, 300, 500)
+    assert (location.surface_id, location.x_mm, location.y_mm) == ("hall", 10, 20)
 
 
-def test_place_frame_rejects_a_merged_result_that_breaks_orientation(registry):
-    _portrait_on_the_wall(registry)
-    # 300x500 portrait mm on a 1080x1920 portrait profile; widening to 600 makes
-    # the physical Frame landscape while the profile stays portrait -- incoherent.
-    with pytest.raises(RegistryError) as excinfo:
-        registry.place_frame("portrait", FramePlacement(width_mm=600))
-    assert (excinfo.value.code, excinfo.value.status) == ("oriented_profile", 422)
+def test_a_frame_moves_only_where_it_hangs():
+    """The wall placement is the Frame's top-left alone: its size comes from its Display (fb-14)."""
+    for typed in ({"width_mm": 600}, {"height_mm": 500}):
+        with pytest.raises(ValidationError):
+            FramePlacement.model_validate(typed)
 
 
 def test_place_frame_on_unknown_frame_is_404(registry):
@@ -511,11 +499,20 @@ def test_the_console_identifier_pattern_is_the_contracts_identifier_rule():
     assert pinned.group(1) == "^" + IDENTIFIER_PATTERN + "$"
 
 
-def test_frame_create_still_rejects_an_incoherent_profile(registry):
-    # Guards the validator migration onto the shared _orientation_coherent helper.
-    with pytest.raises(ValidationError):
-        FrameCreate(id="bad", width_mm=500, height_mm=300,
-                    profile=FrameProfile(width_px=1080, height_px=1920, diagonal_inches=24))
+def test_a_frame_is_created_with_an_id_and_a_place_and_never_a_typed_shape(registry):
+    """A Frame starts with the whole-screen box and Shows videos on; a profile, a wall size or a
+    diagonal is no field of a new Frame (owner, 2026-10-19: "diagonal inches is a weird concept
+    when we already have width and height")."""
+    registry.create_frame(FrameCreate(id="hall", x_mm=120, y_mm=40))
+    [hall] = registry.inventory().frames
+    assert (hall.id, hall.x_mm, hall.y_mm, hall.video) == ("hall", 120, 40, True)
+    assert hall.calibration.fit == PositionBox()
+    assert (hall.screen_px, hall.display_mm, hall.size_mm) == (None, None, None)
+    for typed in ({"width_mm": 400, "height_mm": 225},
+                  {"profile": {"width_px": 1920, "height_px": 1080, "diagonal_inches": 24}},
+                  {"diagonal_inches": 24}):
+        with pytest.raises(ValidationError):
+            FrameCreate.model_validate({"id": "bad", **typed})
 
 
 def test_delete_frame_requires_a_complete_runtime_reference_snapshot(registry, monkeypatch):

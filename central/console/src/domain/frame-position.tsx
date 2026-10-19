@@ -13,7 +13,7 @@ import { Field, NumberInput } from "../ui/field";
 import { SegmentedControl } from "../ui/segmented-control";
 import { Section } from "../ui/section";
 import { Inline, Stack } from "../ui/stack";
-import type { Readiness } from "./frame-profile";
+import type { Readiness } from "./frame-facts";
 import { type Adjustment, LiveAdjustment } from "./live-adjustment";
 import {
   type Box, boxFromPixels, boxPixels, movedBy, resizedBy, screenOf, shapeWords, sizeWords, WHOLE_SCREEN,

@@ -10,7 +10,7 @@ import { Section } from "../ui/section";
 import { Stack } from "../ui/stack";
 import { useRoute } from "../useRoute.js";
 import { useSnapshot } from "../useSnapshot.js";
-import type { Readiness } from "./frame-profile";
+import type { Readiness } from "./frame-facts";
 import { sizeWords } from "./position-box";
 
 /** A mode a display's EDID offers (central/displays/views.py `ModeView`). */

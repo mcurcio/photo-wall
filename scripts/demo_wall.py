@@ -48,7 +48,6 @@ SCENE_CYCLE_SECONDS = 8
 # 1920 x 1080 Output (the Frame output, not the Display, is what they must fill), and its Scene's
 # crop limit (45 %) lets every one of them fill every Frame: 5:3 and 3:5 crop 40 %, 3:2 33 %,
 # 19:12 37 %, the 16:9 video 44 %.
-DEMO_FRAME_PROFILE = {"width_px": 90, "height_px": 90, "diagonal_inches": 24, "video": True}
 DEMO_OPENING_PX = 90
 DEMO_CROP_LIMIT = 0.45
 # The upstream role's uploads: label -> (size, capture offset); "evolve" adds the last two.
@@ -1002,8 +1001,7 @@ def operator_action(action: str):
         try:
             for index, output in enumerate(outputs):
                 frame = "demo-frame-" + str(index + 1)
-                request("POST", "/v1/operator/frames", {"id": frame, "width_mm": 400, "height_mm": 400,
-                    "profile": DEMO_FRAME_PROFILE})
+                request("POST", "/v1/operator/frames", {"id": frame, "video": True})
                 request("PUT", "/v1/operator/frames/" + frame + "/binding", {
                     "player_id": output["player_id"], "output_id": output["output_id"], "expected_generation": 0})
                 save_position(registry, frame, demo_position(output["observation"]))

@@ -152,16 +152,12 @@ def test_a_frame_to_check_again_is_kept_by_done_with_no_change(page, registry, s
 
 
 def test_with_no_known_screen_size_the_drawing_stands_in_at_16_9_never_the_profile(page, registry, sessions):
-    """The Frame profile is no screen size: while neither the Pi's report nor a Display seen on the
-    Output gives one (Central's `screen_px` is None), the drawing is a 16:9 stand-in, a note says the
-    numbers are shares of the screen, no pixels or shape are claimed and a step is 1/1,920 of its
-    width. Mutation probe: stand in by the profile (1600 x 1200 here) -> the 10 px step moves the
-    left edge 10/1600 of the width -> RED."""
+    """While neither the Pi's report nor a Display seen on the Output gives a screen size (Central's
+    `screen_px` is None), the drawing is a 16:9 stand-in, a note says the numbers are shares of the
+    screen, no pixels or shape are claimed and a step is 1/1,920 of its width. Mutation probe: stand
+    in by 1600 x 1200 -> the 10 px step moves the left edge 10/1600 of the width -> RED."""
     _seed(registry)
     with registry.db.transaction() as conn:
-        # A 4:3 profile, neither the screen's size nor its shape, so a stand-in by it shows (until
-        # fb-14 drops the profile).
-        conn.execute("""UPDATE frames SET profile = profile || '{"width_px": 1600, "height_px": 1200}'""")
         conn.execute("""UPDATE outputs SET observation = observation || '{"width_px": 0, "height_px": 0}'""")
     assert next(frame for frame in registry.inventory().frames if frame.id == FRAME).screen_px is None
     with operator_server(registry.db, registry.clock) as origin:

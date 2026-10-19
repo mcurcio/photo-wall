@@ -20,13 +20,12 @@ import pytest
 from console_tasks import connect, current_hash, open_frame
 from operator_harness import operator_server
 from playwright.sync_api import expect
+from support.frames import frame_create
 from support.position import save_position
 from test_display_identity import NO_SERIAL, SERIAL_DISPLAY, _bind, _frame, enroll_pi
 from test_display_identity import _report as _recorded
 
 from central.displays.model import Readiness
-from central.registry import FrameCreate
-from contracts.models import FrameProfile
 from contracts.node_output import DisplayIdentity
 
 pytestmark = pytest.mark.skipif(
@@ -39,10 +38,8 @@ CARD = "Display changed"
 
 
 def _landscape(registry, frame_id: str) -> str:
-    """A landscape Frame; the reported displays prefer 1920 x 1080."""
-    registry.create_frame(FrameCreate(id=frame_id, surface_id="wall", x_mm=100, y_mm=100, width_mm=500,
-                                      height_mm=300,
-                                      profile=FrameProfile(width_px=1920, height_px=1080, diagonal_inches=24)))
+    """A Frame filling its screen; the reported displays prefer 1920 x 1080."""
+    registry.create_frame(frame_create(frame_id, x_mm=100, y_mm=100))
     return frame_id
 
 

@@ -14,7 +14,7 @@ import { PositionHistory } from "../domain/position-history";
 import { FramePosition, type PixelSize } from "../domain/frame-position";
 import { FrameInput, FramePower } from "../domain/frame-power";
 import { useFrameWhy } from "../domain/frame-why";
-import { FrameProfile, type Readiness } from "../domain/frame-profile";
+import { FrameFacts, type Readiness } from "../domain/frame-facts";
 import { FrameTurn } from "../domain/frame-turn";
 import type { Turn } from "../domain/turn-words";
 import type { HostsRead } from "../domain/hosts-read";
@@ -260,7 +260,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
             <BindingFacet key={frameId} snapshot={snapshot} bootFacts={bootFacts} frameId={frameId}
               onTab={(next: string) => choose(next as Tab)} />
             <FrameDisplay key={`${frameId}:display`} frameId={frameId} />
-            <FrameProfile key={`${frameId}:profile`} snapshot={snapshot} frame={frame} />
+            <FrameFacts key={`${frameId}:facts`} frame={frame} />
             <FrameTurn key={`${frameId}:turn`} frameId={frameId} turn={frame.turn ?? 0}
               generation={frame.generation ?? 0} />
           </>

@@ -424,10 +424,21 @@ label {
   stroke: var(--color-accent);
 }
 
+/* A Frame whose size on the wall is not known yet: a dashed outline (frame box run decision 6). */
+.plan__rect--unsized {
+  fill: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  stroke-dasharray: 8 6;
+}
+
 .plan__label {
   fill: var(--color-text);
   font-size: 14px;
   pointer-events: none;
+}
+
+.plan__label--note {
+  fill: var(--color-muted);
+  font-size: 12px;
 }
 
 .plan__status {

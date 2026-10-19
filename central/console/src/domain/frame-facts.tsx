@@ -1,4 +1,3 @@
-import type * as React from "react";
 import { useState } from "react";
 
 import { setFrameVideo } from "../framesApi.js";
@@ -33,12 +32,8 @@ interface Frame {
   output_id?: string | null;
 }
 
-export interface FrameProfileProps {
+export interface FrameFactsProps {
   frame: Frame;
-  /** Transitional (frame box run): the Frame page still passes these and nothing here reads them;
-   * fb-10 removes the page's draft fit and fb-14 renames this component, dropping both. */
-  snapshot?: object | null;
-  draftFit?: (profile: { width_px: number; height_px: number; diagonal_inches: number; video: boolean }) => React.ReactNode;
 }
 
 /** Shows videos as Central has it (a Frame read before it carried one shows videos, Central's default). */
@@ -100,13 +95,13 @@ const NOT_CONNECTED = "Not known until this Frame is connected to a Pi";
 const NO_DISPLAY_SIZE = "This display does not state its size: only even room light is drawn on this Frame";
 
 /**
- * The Frame page's Frame section (Hardware tab; frame box run, .claude/runs/frame-box/page.md, bead
- * fb-11): the Frame's Shows videos switch and its size, worked out, never typed. Its pixels are its
+ * The Frame page's Frame section (Hardware tab; frame box run, .claude/runs/frame-box/page.md, beads
+ * fb-11 and fb-14): the Frame's Shows videos switch and its size, worked out, never typed. Its pixels are its
  * Position's box on its screen as it hangs, its shape their ratio, its size on the wall the box's
  * share of the Display's own size (position-box.ts says each). Both change on the Position tab,
  * which it links to.
  */
-export function FrameProfile({ frame }: FrameProfileProps) {
+export function FrameFacts({ frame }: FrameFactsProps) {
   const turn = frame.turn ?? 0;
   const box = boxOf(frame);
   const screen = screenOf(frame.screen_px ?? null, turn);
