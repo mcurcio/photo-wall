@@ -2,7 +2,7 @@
 hangs" sets the Frame's turn through the real Registry (`PUT /v1/operator/frames/{id}/turn`), the
 moment it is chosen. A turn makes the Frame's Position one to check (readiness position-needed), the
 Position tab draws the screen as it now hangs, and the Frame section's size on screen is the box on
-the screen as it hangs (domain/frame-turn.tsx, domain/frame-profile.tsx).
+the screen as it hangs (domain/frame-turn.tsx, domain/frame-facts.tsx).
 The Position tab's live session needs a Pi's Display Host, so there the Frame page tests' fake
 Central answers the session routes (test_console_frame_page_browser.py `FakeSessions`).
 """

@@ -3,11 +3,11 @@ design rule 3: readiness is worked out from Position commits, never stored as a 
 
 Every report travels the real path (`test_display_identity._report`: the link store's commit and its
 Output report judge); bindings, Position commits and readiness go through the Registry, and the
-profile and the Hardware tab through the operator API. A Frame is ready when its latest Position
+Hardware tab through the operator API. A Frame is ready when its latest Position
 commit, made at its current generation, names the Display last seen on its Output. A first sighting
 on a Frame whose commit names no Display is adopted (the deploy of 1b, a display with no EDID); a
 blip never counts; any later, different Display makes the Frame display-changed, which drops it
-from what the Pi executes and lets the operator correct its profile before re-checking Position.
+from what the Pi executes until the operator re-checks its Position.
 """
 from __future__ import annotations
 
@@ -35,7 +35,6 @@ from contracts.node_output import DisplayIdentity
 
 OTHER_DISPLAY = DisplayIdentity("DEL", 41200, "DELL U2720Q", "CN0F1X8Z")
 MIGRATION = Path(__file__).parents[1] / "central/migrations/073_position_display.sql"
-CORRECTED_PROFILE = {"width_px": 1200, "height_px": 2000, "diagonal_inches": 24, "video": True}
 
 
 def _frame_row(registry, frame_id: str):
@@ -77,15 +76,10 @@ POSITION_COMMITS = pytest.mark.parametrize("commit", [_commit_by_calibrate, _com
                                            ids=["calibrate", "trial"])
 
 
-def _put_profile(client, registry, frame_id: str):
-    return client.put(f"/v1/operator/frames/{frame_id}/profile", headers=AUTH, json={
-        "profile": CORRECTED_PROFILE, "expected_generation": _frame_row(registry, frame_id).generation})
-
-
 @POSITION_COMMITS
 def test_another_display_keeps_the_frame_not_ready_until_position_is_committed_again(registry, commit):
-    """Mutation probes: ignore the Display in `readiness` (stays ready); keep the profile refusal
-    while display-changed (409); a commit that does not name the Display seen (stays changed)."""
+    """Mutation probes: ignore the Display in `readiness` (stays ready); a commit that does not name
+    the Display seen (stays changed)."""
     pi, frame = enroll_pi(registry, "pi-a"), _frame(registry, "lobby")
     _bind(registry, frame, pi, "HDMI-A-1")
     _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
@@ -93,9 +87,6 @@ def test_another_display_keeps_the_frame_not_ready_until_position_is_committed_a
     assert _readiness(registry, frame) is Readiness.READY and _executing(registry, pi) == [frame]
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     with TestClient(app) as client:
-        refused = _put_profile(client, registry, frame)   # bound and ready: the profile stays put
-        assert (refused.status_code, refused.json()) == (409, {"error": "frame_bound"})
-
         _report(registry, "pi-a", "HDMI-A-1", OTHER_DISPLAY)   # another display on its port
 
         assert _readiness(registry, frame) is Readiness.DISPLAY_CHANGED
@@ -104,10 +95,6 @@ def test_another_display_keeps_the_frame_not_ready_until_position_is_committed_a
         assert card["readiness"] == "display-changed"
         assert (card["display"]["serial"], card["position_display"]["serial"]) == (
             OTHER_DISPLAY.serial, SERIAL_DISPLAY.serial)
-
-        corrected = _put_profile(client, registry, frame)
-        assert corrected.status_code == 200 and corrected.json()["changed"] is True
-        assert _readiness(registry, frame) is Readiness.DISPLAY_CHANGED   # Position still names the old one
 
         commit(registry, frame, pi)
 

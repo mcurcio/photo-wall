@@ -4,7 +4,7 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
 import { factText } from "./facts.js";
 import { frameHealth } from "./health.js";
 import { isBound, plannedFor } from "./join.js";
-import { dragToPlacement, orientationCoherent, project } from "./projection.js";
+import { pointToPlacement, project, unsizedOutlinePx } from "./projection.js";
 
 /**
  * Per-Surface plan (Bead 1 read-only tracer; Bead 2 status chips; Bead 10 spatial
@@ -17,8 +17,11 @@ import { dragToPlacement, orientationCoherent, project } from "./projection.js";
  * Edit layout mode (`#/wall/layout`), which owns them.
  *
  * Renders the selected Surface's placed frames as hand-coded SVG `<rect>`
- * elements from their committed `x_mm/y_mm/width_mm/height_mm`, scaled to fit the
- * viewport by the pure `project()` helper. Each frame is selectable — clicking
+ * elements from where each hangs (`x_mm/y_mm`, its top-left) at its size on the wall (Central's
+ * `size_mm`: its Position box's share of its Display's own size), scaled to fit the viewport by
+ * the pure `project()` helper. A Frame whose size is not known yet (bound to nothing, or on a
+ * Display that states none) is a dashed `UNSIZED_FRAME_MM` outline labelled "size not known yet"
+ * (frame box run decision 6). Each frame is selectable — clicking
  * (or Enter/Space on the focused frame) calls `onSelect(frameId)`; `selection` is
  * the currently-selected `frameId|null`. Every frame carries an accessible name
  * that embeds its frame id, so tests locate frames by identity via role/text —
@@ -33,15 +36,16 @@ import { dragToPlacement, orientationCoherent, project } from "./projection.js";
  * to the tile's rect, so no text ever spills over a neighbouring tile. The planned fact is Central's projection, never
  * confirmed playback — the word "LIVE" is deliberately absent (design §6a).
  *
- * SPATIAL EDITING (Bead 10, design J3/§9a): a pointer drag on EMPTY canvas draws
- * an in-progress rectangle (Plane B, held as component-local drag state) and, on
- * release, opens a minimal new-frame form to capture the Frame id (slice 2 §8:
- * readable, checked as you type against FRAME_ID_PATTERN, never generated) and
- * the Frame profile (`FrameProfile`); submitting calls `edit.createFrame`. A pointer drag
- * that starts ON an existing frame repositions it via `edit.moveFrame` (`PATCH`,
- * last-write-wins, no token — §9a). LayoutEditor runs both through the shared
- * `useMutate()` hook so the plan corrects from the next Plane A snapshot. A press
- * that does not move beyond a small threshold stays a plain click (selection).
+ * SPATIAL EDITING (Bead 10, design J3/§9a; frame box run fb-14): a click or a drag on EMPTY
+ * canvas places a new Frame's top-left (a drag shows the not-yet-known outline under the pointer,
+ * Plane B, held as component-local drag state) and, on release, opens a minimal new-frame form to
+ * capture the Frame id (slice 2 §8: readable, checked as you type against FRAME_ID_PATTERN, never
+ * generated), where it hangs and Shows videos; submitting calls `edit.createFrame`. Its shape and
+ * size are never asked: they come from its Position box on its Display. A pointer drag that
+ * starts ON an existing frame moves its top-left via `edit.placeFrame` (`PATCH`, last-write-wins,
+ * no token — §9a). LayoutEditor runs both through the shared `useMutate()` hook so the plan
+ * corrects from the next Plane A snapshot. A press on a frame that does not move beyond a small
+ * threshold stays a plain click (selection).
  *
  * Origin-stacked / geometry-less frames are NOT drawn here; they belong to the
  * Unplaced tray (see UnplacedTray.jsx).
@@ -52,10 +56,10 @@ import { dragToPlacement, orientationCoherent, project } from "./projection.js";
  * happened. `regionRef` (optional) is attached to the plan region so the Unplaced tray
  * can move focus here after its own delete.
  *
- * @typedef {{createFrame: (id: string, placement: object, profile: object) => Promise<{ok: boolean, error?: string}>,
- *            moveFrame: (frameId: string, placement: object) => Promise<{ok: boolean, error?: string}>,
+ * @typedef {{createFrame: (id: string, placement: object, video: boolean) => Promise<{ok: boolean, error?: string}>,
+ *            placeFrame: (frameId: string, placement: object) => Promise<{ok: boolean, error?: string}>,
  *            takeTrayDrag: () => string|null,
- *            dropFromTray: (frameId: string, pxRect: object, viewport: object, surfaceId: string) => void,
+ *            dropFromTray: (frameId: string, point: object, viewport: object, surfaceId: string) => void,
  *            deleteFrame: (event: {currentTarget: Element}, frameId: string) => void,
  *            status: React.ReactNode}} PlanEdit
  *   `takeTrayDrag` returns, and clears, the Unplaced tray entry being dragged (or null).
@@ -82,6 +86,15 @@ function normRect(start, cur) {
   };
 }
 
+/**
+ * The outline a new Frame is drawn as while it is placed: the not-yet-known size, its top-left
+ * the top-left of the press and the pointer (a click: the press itself).
+ */
+function newFrameOutline(start, cur) {
+  const { x, y } = normRect(start, cur);
+  return { x, y, ...UNSIZED_PX };
+}
+
 /** Map a pointer event to viewBox px via the SVG's on-screen box (no letterbox:
  * `.plan__svg` is `width:100%; height:auto`, preserving the viewBox aspect). */
 function toViewbox(svg, event) {
@@ -92,7 +105,11 @@ function toViewbox(svg, event) {
   };
 }
 
-const PROFILE_DEFAULTS = { width_px: 1920, height_px: 1080, diagonal_inches: 24, video: true };
+/** The not-yet-known outline in viewBox px: what a new Frame is drawn as while it is placed. */
+const UNSIZED_PX = unsizedOutlinePx(VIEWPORT);
+
+/** The placement form's starting values (a Frame placed with measurements starts here). */
+const PLACEMENT_DEFAULTS = { x_mm: "1", y_mm: "0" };
 
 const FRAME_ID_HINT = "Letters, digits, -, _ or .; up to 96; cannot be changed later.";
 
@@ -116,10 +133,10 @@ export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit
   // liveAdjustment.js). `draft` mirrors it purely to render the in-progress rectangle.
   const dragRef = useRef(/** @type {object|null} */ (null));
   const [draft, setDraft] = useState(/** @type {object|null} */ (null));
-  // The pending new-frame drag rect awaiting a profile from the form (px).
+  // The open placement form: a new Frame (its id, where it hangs, Shows videos) or a Frame's move.
   const [placementForm, setPlacementForm] = useState(/** @type {{mode: "create"|"edit", frameId?: string}|null} */ (null));
-  const [placement, setPlacement] = useState({ x_mm: "1", y_mm: "0", width_mm: "400", height_mm: "225" });
-  const [profile, setProfile] = useState(PROFILE_DEFAULTS);
+  const [placement, setPlacement] = useState(PLACEMENT_DEFAULTS);
+  const [video, setVideo] = useState(true);
   const [frameId, setFrameId] = useState("");
   const hintId = useId();
   const [formError, setFormError] = useState(/** @type {string|null} */ (null));
@@ -144,7 +161,7 @@ export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit
     const start = toViewbox(svg, event);
     didDragRef.current = false;
     dragRef.current = { mode: "create", start, cur: start };
-    setDraft(normRect(start, start));
+    setDraft(newFrameOutline(start, start));
   };
 
   const beginMove = (event, id, rect) => {
@@ -177,7 +194,7 @@ export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit
     }
     setDraft(
       drag.mode === "create"
-        ? normRect(drag.start, cur)
+        ? newFrameOutline(drag.start, cur)
         : {
             x: drag.rect.x + (cur.x - drag.start.x),
             y: drag.rect.y + (cur.y - drag.start.y),
@@ -197,7 +214,7 @@ export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit
     if (trayFrameId != null) {
       if (surfaceId != null) {
         const pt = toViewbox(svgRef.current, event);
-        edit.dropFromTray(trayFrameId, { x: pt.x, y: pt.y, w: 1, h: 1 }, VIEWPORT, surfaceId);
+        edit.dropFromTray(trayFrameId, pt, VIEWPORT, surfaceId);
       }
       return;
     }
@@ -213,61 +230,44 @@ export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit
     }
     dragRef.current = null;
     setDraft(null);
-    if (!didDragRef.current) {
-      // A press that did not move is a click. Selection is handled HERE (not via a
-      // DOM `onClick`) because a frame's pointerdown sets pointer capture on the
-      // SVG, which redirects the subsequent `click` event to the SVG rather than
-      // the frame — so an onClick on the frame would never fire.
-      if (finished.mode === "move") {
-        onSelect(finished.frameId);
-      }
-      return;
-    }
     if (finished.mode === "create") {
-      setFormError(null);
-      setProfile(PROFILE_DEFAULTS);
-      setFrameId("");
-      const measured = dragToPlacement(normRect(finished.start, finished.cur), VIEWPORT, surfaceId);
-      setPlacement({ x_mm: String(measured.x_mm), y_mm: String(measured.y_mm), width_mm: String(measured.width_mm), height_mm: String(measured.height_mm) });
-      setPlacementForm({ mode: "create" });
+      // A click or a drag on empty canvas: the new Frame hangs at the top-left of press and release.
+      const corner = newFrameOutline(finished.start, finished.cur);
+      const placed = pointToPlacement(corner, VIEWPORT, surfaceId);
+      openCreate({ x_mm: String(placed.x_mm), y_mm: String(placed.y_mm) });
       return;
     }
-    // Move: translate the frame's rendered rect by the drag delta, invert to mm,
-    // and PATCH. Physical dimensions are preserved from the stored frame — a move
-    // must never resize (the rendered rect uses project()'s data-dependent scale,
-    // not dragToPlacement's; only the repositioned origin is taken from the drag).
-    const dx = finished.cur.x - finished.start.x;
-    const dy = finished.cur.y - finished.start.y;
-    const moved = {
-      x: finished.rect.x + dx,
-      y: finished.rect.y + dy,
-      w: finished.rect.w,
-      h: finished.rect.h,
-    };
-    const placement = dragToPlacement(moved, VIEWPORT, surfaceId);
-    const frame = framesById.get(finished.frameId);
-    edit.moveFrame(finished.frameId, {
-      surface_id: placement.surface_id,
-      x_mm: placement.x_mm,
-      y_mm: placement.y_mm,
-      width_mm: frame?.width_mm ?? placement.width_mm,
-      height_mm: frame?.height_mm ?? placement.height_mm,
-    }).catch(() => {});
+    if (!didDragRef.current) {
+      // A press on a frame that did not move is a click. Selection is handled HERE (not
+      // via a DOM `onClick`) because a frame's pointerdown sets pointer capture on the
+      // SVG, which redirects the subsequent `click` event to the SVG rather than the
+      // frame — so an onClick on the frame would never fire.
+      onSelect(finished.frameId);
+      return;
+    }
+    // Move: translate the frame's rendered top-left by the drag delta, invert to mm, and
+    // PATCH where it hangs. Its size is never sent: it comes from its Display.
+    edit.placeFrame(finished.frameId, pointToPlacement({
+      x: finished.rect.x + finished.cur.x - finished.start.x,
+      y: finished.rect.y + finished.cur.y - finished.start.y,
+    }, VIEWPORT, surfaceId)).catch(() => {});
   };
 
-  const openMeasuredCreate = () => {
+  const openCreate = (where) => {
     setFormError(null);
-    setProfile(PROFILE_DEFAULTS);
+    setVideo(true);
     setFrameId("");
-    setPlacement({ x_mm: "1", y_mm: "0", width_mm: "400", height_mm: "225" });
+    setPlacement(where);
     setPlacementForm({ mode: "create" });
   };
+
+  const openMeasuredCreate = () => openCreate(PLACEMENT_DEFAULTS);
 
   const openPlacementEdit = () => {
     const frame = framesById.get(selection);
     if (frame == null) return;
     setFormError(null);
-    setPlacement({ x_mm: String(frame.x_mm), y_mm: String(frame.y_mm), width_mm: String(frame.width_mm), height_mm: String(frame.height_mm) });
+    setPlacement({ x_mm: String(frame.x_mm), y_mm: String(frame.y_mm) });
     setPlacementForm({ mode: "edit", frameId: frame.id });
   };
 
@@ -279,10 +279,7 @@ export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit
     const numeric = Object.fromEntries(Object.entries(placement).map(([key, value]) => [key, Number(value)]));
     if (Object.values(placement).some((value) => String(value).trim() === "") ||
         Object.values(numeric).some((value) => !Number.isFinite(value))) {
-      setFormError("Enter finite numbers for all placement measurements."); return;
-    }
-    if (!(numeric.width_mm > 0 && numeric.height_mm > 0)) {
-      setFormError("Frame width and height must be positive."); return;
+      setFormError("Enter finite numbers for where the frame hangs."); return;
     }
     if (numeric.x_mm === 0 && numeric.y_mm === 0) {
       setFormError("Position (0, 0) is reserved for Unplaced frames. Choose a different x or y."); return;
@@ -291,38 +288,16 @@ export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit
       const idProblem = frameIdProblem(frameId);
       if (idProblem !== null) { setFormError(idProblem); return; }
     }
-    const framePlacement = { surface_id: surfaceId, ...numeric };
-    const widthPx = Number(profile.width_px);
-    const heightPx = Number(profile.height_px);
-    const diagonal = Number(profile.diagonal_inches);
-    if (!(widthPx > 0 && heightPx > 0 && diagonal > 0)) {
-      setFormError("Profile dimensions must be positive.");
-      return;
-    }
-    // Reject an incoherent profile client-side (design §J2: inline reason, no
-    // request) — the server enforces the same guard as a 422 backstop.
-    const frame = placementForm.mode === "edit" ? framesById.get(placementForm.frameId) : null;
-    const effectiveProfile = placementForm.mode === "edit" ? frame?.profile : null;
-    const checkedWidth = placementForm.mode === "edit" ? Number(effectiveProfile?.width_px) : widthPx;
-    const checkedHeight = placementForm.mode === "edit" ? Number(effectiveProfile?.height_px) : heightPx;
-    if (!orientationCoherent(numeric.width_mm, numeric.height_mm, checkedWidth, checkedHeight)) {
-      setFormError("Frame profile must match the frame's orientation.");
-      return;
-    }
+    const framePlacement = { surface_id: surfaceId, x_mm: numeric.x_mm, y_mm: numeric.y_mm };
     if (placementForm.mode === "edit") {
-      edit.moveFrame(placementForm.frameId, framePlacement).then((result) => {
+      edit.placeFrame(placementForm.frameId, framePlacement).then((result) => {
         if (result.ok) { setPlacementForm(null); setFormError(null); }
         else setFormError(`Could not save placement: ${result.error}`);
       }).catch((error) => setFormError(`Could not save placement: ${error?.message ?? "server error"}`));
       return;
     }
     const id = frameId;
-    edit.createFrame(id, framePlacement, {
-      width_px: widthPx,
-      height_px: heightPx,
-      diagonal_inches: diagonal,
-      video: profile.video,
-    })
+    edit.createFrame(id, framePlacement, video)
       .then((result) => {
         if (result.ok) {
           setPlacementForm(null);
@@ -373,10 +348,10 @@ export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit
             textAnchor="middle"
             className="plan__empty-hint"
           >
-            {edit === null ? "No Frames placed on this Surface" : "Drag on this plan to place a Frame"}
+            {edit === null ? "No Frames placed on this Surface" : "Click or drag on this plan to place a Frame"}
           </text>
         )}
-        {placed.map(({ id, rect }, index) => {
+        {placed.map(({ id, rect, sized }, index) => {
           const selected = selection === id;
           const planned = plannedFor(snapshot?.runtime, id, isBound(framesById.get(id)));
           const plannedText = factText(planned.fact);
@@ -404,7 +379,8 @@ export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit
                   y={rect.y}
                   width={rect.w}
                   height={rect.h}
-                  className={selected ? "plan__rect plan__rect--selected" : "plan__rect"}
+                  className={["plan__rect", selected ? "plan__rect--selected" : null,
+                    sized ? null : "plan__rect--unsized"].filter(Boolean).join(" ")}
                 />
                 <text
                   x={rect.x + rect.w / 2}
@@ -415,6 +391,17 @@ export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit
                 >
                   {id}
                 </text>
+                {!sized && (
+                  <text
+                    x={rect.x + rect.w / 2}
+                    y={rect.y + rect.h / 2 + 20}
+                    className="plan__label plan__label--note"
+                    textAnchor="middle"
+                    dominantBaseline="middle"
+                  >
+                    size not known yet
+                  </text>
+                )}
               </g>
               <clipPath id={`${clipPrefix}-${index}`}>
                 <rect x={rect.x} y={rect.y} width={rect.w} height={rect.h} />
@@ -510,49 +497,18 @@ export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit
           <label className="plan__new-frame-field">Y position (mm)
             <input required type="number" step="any" value={placement.y_mm} onChange={(event) => setPlacement({ ...placement, y_mm: event.target.value })} />
           </label>
-          <label className="plan__new-frame-field">Frame width (mm)
-            <input required type="number" min="0.000001" step="any" value={placement.width_mm} onChange={(event) => setPlacement({ ...placement, width_mm: event.target.value })} />
-          </label>
-          <label className="plan__new-frame-field">Frame height (mm)
-            <input required type="number" min="0.000001" step="any" value={placement.height_mm} onChange={(event) => setPlacement({ ...placement, height_mm: event.target.value })} />
-          </label>
           {placementForm.mode === "create" && <>
-          <label className="plan__new-frame-field">
-            Pixel width (px)
-            <input
-              type="number"
-              min="1"
-              value={profile.width_px}
-              onChange={(event) => setProfile({ ...profile, width_px: event.target.value })}
-            />
-          </label>
-          <label className="plan__new-frame-field">
-            Pixel height (px)
-            <input
-              type="number"
-              min="1"
-              value={profile.height_px}
-              onChange={(event) => setProfile({ ...profile, height_px: event.target.value })}
-            />
-          </label>
-          <label className="plan__new-frame-field">
-            Diagonal (inches)
-            <input
-              type="number"
-              min="1"
-              step="any"
-              value={profile.diagonal_inches}
-              onChange={(event) => setProfile({ ...profile, diagonal_inches: event.target.value })}
-            />
-          </label>
           <label className="plan__new-frame-field plan__new-frame-field--check">
             <input
               type="checkbox"
-              checked={profile.video}
-              onChange={(event) => setProfile({ ...profile, video: event.target.checked })}
+              checked={video}
+              onChange={(event) => setVideo(event.target.checked)}
             />
-            Video capable
+            Shows videos
           </label>
+          <p className="plan__new-frame-hint">
+            Its size comes from its display once it is connected; set its shape on the Position tab.
+          </p>
           </>}
           <div className="plan__new-frame-actions">
             <button type="submit">{placementForm.mode === "create" ? "Create frame" : "Save placement"}</button>

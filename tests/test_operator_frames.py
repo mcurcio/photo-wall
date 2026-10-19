@@ -1,6 +1,7 @@
 """HTTP-boundary behavioural checks for the guarded operator frame routes.
 
-PATCH /v1/operator/frames/{id} (reposition, Bead 5).
+POST /v1/operator/frames (create: an id and a place, never a typed shape; frame box run fb-14) and
+PATCH /v1/operator/frames/{id} (reposition, Bead 5: the Frame's top-left only).
 
 Bead 6 (B-DELETE): DELETE /v1/operator/frames/{id} removes a clear Frame and
 refuses (409) while a live Run targets it (`frame_in_use`) or while it is bound
@@ -24,12 +25,11 @@ from support.house_time import window_program
 from central.app import create_app
 from central.registry import (
     Enrollment,
-    FrameCreate,
     OutputReport,
     enrollment_message,
 )
 from central.runtime import Child, Contribution, Scene
-from contracts.models import FrameProfile
+from contracts.models import PositionBox
 
 ADMIN = "test-operator-" + "x" * 40
 AUTH = {"Authorization": "Bearer " + ADMIN}
@@ -37,14 +37,6 @@ AUTH = {"Authorization": "Bearer " + ADMIN}
 
 def _frame(registry, frame_id="portrait"):
     registry.create_frame(frame_create(frame_id))
-
-
-def _portrait(registry, frame_id="portrait"):
-    """A 300 x 500 mm Frame with a 1080 x 1920 profile: the wall size, profile and orientation
-    cases' own subject (fb-14 changes them), so built here rather than by the test seed."""
-    registry.create_frame(FrameCreate(id=frame_id, width_mm=300, height_mm=500,
-                                      profile=FrameProfile(width_px=1080, height_px=1920,
-                                                           diagonal_inches=24)))
 
 
 def enroll(registry, count=2):
@@ -69,22 +61,43 @@ def _scene_targeting(frame_id, scene_id):
     )
 
 
+def test_a_frame_created_with_only_an_id_and_a_place_fills_its_screen_and_shows_videos(registry):
+    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
+        response = client.post("/v1/operator/frames", headers=AUTH, json={"id": "hall", "x_mm": 120, "y_mm": 40})
+        assert response.status_code == 201, response.text
+        [hall] = client.get("/v1/operator/inventory", headers=AUTH).json()["frames"]
+    assert (hall["id"], hall["x_mm"], hall["y_mm"], hall["video"]) == ("hall", 120, 40, True)
+    assert hall["calibration"]["fit"] == PositionBox().model_dump(mode="json")
+    assert hall["size_mm"] is None
+    assert not {"profile", "width_mm", "height_mm"} & hall.keys()
+
+
+def test_a_frame_body_with_a_typed_shape_is_refused(registry):
+    """Owner, 2026-10-19: "diagonal inches is a weird concept when we already have width and
+    height". A profile, a wall size or a diagonal is no field of a Frame: 422, nothing created."""
+    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
+        for typed in ({"profile": {"width_px": 1920, "height_px": 1080, "diagonal_inches": 24, "video": True}},
+                      {"width_mm": 400, "height_mm": 225}, {"diagonal_inches": 24}):
+            response = client.post("/v1/operator/frames", headers=AUTH, json={"id": "hall", **typed})
+            assert response.status_code == 422, typed
+    assert registry.inventory().frames == ()
+
+
 def test_patch_reposition_merges_and_echoes(registry):
-    _portrait(registry)
+    _frame(registry)
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         response = client.patch("/v1/operator/frames/portrait", json={"x_mm": 10, "y_mm": 20},
                                 headers=AUTH)
         assert response.status_code == 200
-        assert response.json() == {"id": "portrait", "surface_id": "wall", "x_mm": 10,
-                                   "y_mm": 20, "width_mm": 300, "height_mm": 500}
+        assert response.json() == {"id": "portrait", "surface_id": "wall", "x_mm": 10, "y_mm": 20}
 
 
-def test_patch_reposition_rejects_incoherent_merge(registry):
-    _portrait(registry)
+def test_patch_reposition_refuses_a_size(registry):
+    """The wall placement is where the Frame hangs; its size comes from its Display."""
+    _frame(registry)
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         response = client.patch("/v1/operator/frames/portrait", json={"width_mm": 600}, headers=AUTH)
         assert response.status_code == 422
-        assert response.json() == {"error": "oriented_profile"}
 
 
 def test_patch_reposition_unknown_frame_is_404(registry):
@@ -95,7 +108,7 @@ def test_patch_reposition_unknown_frame_is_404(registry):
 
 
 def test_patch_reposition_without_authorization_is_401(registry):
-    _portrait(registry)
+    _frame(registry)
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         response = client.patch("/v1/operator/frames/portrait", json={"x_mm": 10})
         assert response.status_code == 401
@@ -104,7 +117,7 @@ def test_patch_reposition_without_authorization_is_401(registry):
 def test_the_profile_route_is_gone(registry):
     """fb-13: a Frame's shape is its Position's box, so nothing replaces a Frame profile: the route
     answers as no route (404 or 405) and the Frame is unchanged."""
-    _portrait(registry)
+    _frame(registry)
     before = registry.inventory().frames[0]
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         response = client.put("/v1/operator/frames/portrait/profile", headers=AUTH, json={

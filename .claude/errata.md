@@ -6820,3 +6820,37 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
 - **fb-15 describes fb-14's wall plan from the page, not the built code** (fb-14 runs beside it):
   the runbook's "Place a new Frame" and "Move a Frame", the README's wall-plan sentence and the 108
   migration wording follow page section fb-14. If fb-14's labels differ, the end review aligns them.
+
+## frame-box fb-14 (a Frame without profile or wall size)
+
+- **Two acceptance greps cannot be empty as written.** `git grep "profile->>'video'" central` finds
+  `central/migrations/105_frame_video.sql` (applied, never edited: it is the statement that moved the
+  profile's `video` onto the Frame). `git grep -E "FrameProfile|diagonal_inches|..." -- '*.py'` matches
+  tests: the migration tests write rows in the schema of their time (084, 099, 102, 104, 106), and the
+  refusal tests post a body with `profile`/`diagonal_inches` to prove the 422 the same acceptance asks
+  for. Outside `tests/` and the applied migrations both greps are empty (application Python, console
+  src, scripts).
+- **Files outside fb-14's owned list changed, each because the deletion broke it:**
+  `central/console/src/LayoutEditor.jsx` (the `createFrame`/`placeFrame` signatures; `moveFrame` is
+  `placeFrame` as the page names it), `central/console/src/domain/frame-display.tsx` and
+  `frame-position.tsx` (import `Readiness` from the renamed `frame-facts`), `central/console/src/index.css`
+  (two rules: the dashed `plan__rect--unsized` outline and its note), `tests/test_authored_compatibility.py`
+  (its `frame_profile` test, of a deleted method), `tests/test_display_picture_settings.py` (the 102/104
+  re-run puts back the profile columns 107/108 dropped, then drops them; it also selected `frames.profile`),
+  `tests/test_frame_video.py` (the 105 test restores the profile JSON 108 dropped; fb-5's transitional
+  assertion goes), `tests/test_display_changed_readiness.py` (the deleted profile route's steps),
+  `tests/test_upgrade_087.py` (adds 103, 107 and 108 to the schema it builds: 103 and 107 were already
+  missing on the branch), `tests/browser/test_frame_fit_browser.py` (its stand-in probe's profile SQL),
+  `tests/browser/test_frame_turn_browser.py` (a docstring path), `tests/test_console_routes_r4.py`
+  (`frame-facts.tsx`; `frame-display.tsx`'s declared imports, stale since fb-11),
+  `tests/browser/conftest.py` (the evidence check named fb-11's deleted test; it now names
+  `test_shows_videos_saves_at_once_and_keeps_a_ready_frame_ready`), `tests/test_wall_demo.py`
+  (`DEMO_FRAME_PROFILE` is gone from the demo script).
+- **"A click or a drag places its top-left"** made a click on empty canvas in Edit layout open the
+  New frame form (before, only a drag did). The empty plan's hint says "Click or drag on this plan to
+  place a Frame".
+- **Pre-existing on the branch (A/B on `origin/feat/frame-box-position`, the same failure):**
+  `tests/test_migration_084.py` (its plan's binding has `profile`, no `display_mm`: fb-9's binding),
+  `tests/test_player_service.py::test_real_central_http_media_commit_outage_rejoin_and_renewal`
+  (IndexError: no job offered), `tests/browser/test_fit_board_browser.py::...one_row_per_scene...`
+  (fb-10's errata above), `tests/node/apps/test_player_device_grants.py` (macOS).

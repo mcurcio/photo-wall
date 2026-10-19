@@ -367,7 +367,7 @@ def test_copy_carries_the_software_values_names_the_hardware_skipped_and_never_p
     # A's display moves to C's port: C is fed by A's own Display.
     _report(registry, "pi-a", "HDMI-A-1", None, connected=False)
     _report(registry, "pi-b", "HDMI-A-2", SERIAL_DISPLAY)
-    before = _sql(registry, "SELECT calibration, profile, position_generation FROM frames WHERE id='b'")
+    before = _sql(registry, "SELECT calibration, position_generation FROM frames WHERE id='b'")
     with _client(registry) as client:
         copied = client.post("/v1/operator/frames/a/picture-copies", headers=AUTH, json={"to_frames": ["b", "c", "d"]})
         assert copied.status_code == 200, copied.text
@@ -380,7 +380,7 @@ def test_copy_carries_the_software_values_names_the_hardware_skipped_and_never_p
     assert (target["matched_lux"], target["software_contrast_percent"],
             target["colour_temperature_kelvin"], target["gamma_tenths"]) == (2500.0, 70, 5000, 20)
     assert target["hardware_picture"] == {"10": 20}
-    assert _sql(registry, "SELECT calibration, profile, position_generation FROM frames WHERE id='b'") == before
+    assert _sql(registry, "SELECT calibration, position_generation FROM frames WHERE id='b'") == before
 
 
 def test_a_picture_edit_and_done_are_never_a_position_commit(registry):
@@ -662,12 +662,18 @@ def test_075_rewrites_the_stored_configurations_and_offers_so_central_still_plan
     cover = {"mode": "cover", "corners": SKEWED_CORNERS, "rotation": 0}
     [stored] = _sql(registry, "SELECT configuration FROM player_configurations")
     assert [binding["calibration"]["fit"] for binding in stored["configuration"]["bindings"]] == [cover]
-    # 102 and 104 again on a database that already has them: 102's one column comes off first.
-    _sql(registry, "ALTER TABLE position_entries DROP COLUMN turn")
+    # 102 and 104 again on a database that already has them: 102's one column comes off first, and
+    # the profile columns they read come back for them (107 and 108 dropped them) and go after.
+    _sql(registry, "ALTER TABLE position_entries DROP COLUMN turn, "
+                   "ADD COLUMN profile_width_px INT, ADD COLUMN profile_height_px INT")
+    _sql(registry, "ALTER TABLE frames ADD COLUMN profile JSONB")
+    _sql(registry, "UPDATE frames SET profile='{\"width_px\": 1920, \"height_px\": 1080}'")
     with registry.db.transaction() as conn:
         conn.execute(MIGRATION_102.read_text())
     with registry.db.transaction() as conn:
         conn.execute(MIGRATION_104.read_text())
+    _sql(registry, "ALTER TABLE position_entries DROP COLUMN profile_width_px, DROP COLUMN profile_height_px")
+    _sql(registry, "ALTER TABLE frames DROP COLUMN profile")
 
     configuration = coordinator.configuration(player["player_id"], epoch)
     [binding] = configuration.bindings

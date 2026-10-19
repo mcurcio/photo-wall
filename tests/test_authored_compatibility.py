@@ -112,16 +112,6 @@ def test_source_candidates_serve_the_planners_standing_for_the_frame(registry):
                for c in repo.source_candidates(spec.source_ref, settings=HOUSE)["candidates"])
 
 
-def test_registry_reads_persistent_profiles_and_rejects_unknown_frames(registry):
-    add_frame(registry, "left")
-    profile = registry.frame_profile("left")
-    assert profile.width_px == 1080 and profile.height_px == 1920
-    with registry.db.transaction() as conn:
-        assert registry.frame_profiles_in(conn, ("left",))["left"] == profile
-    with pytest.raises(RegistryError, match="unknown_frame"):
-        registry.frame_profile("missing")
-
-
 def test_authored_scene_rejects_incompatible_nested_assignment_atomically(registry):
     landscape = asset(1, width=4000, height=2000)
     portrait = asset(2, width=2000, height=4000)

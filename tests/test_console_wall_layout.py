@@ -53,7 +53,7 @@ def test_the_scan_catches_a_write_import_added_to_a_read_only_module(tmp_path):
         if module.is_file():
             (src / module.name).write_bytes(module.read_bytes())
     plan = src / "Plan.jsx"
-    plan.write_text('import { moveFrame } from "./framesApi.js";\n' + plan.read_text())
+    plan.write_text('import { placeFrame } from "./framesApi.js";\n' + plan.read_text())
     assert "framesApi.js" in _closure(plan, tmp_path)
 
 
@@ -63,7 +63,7 @@ const { wallUnfinished } = await import(process.argv[2]);
 const player = (id, extra = {}) => ({ id, device_id: `device-${id}`, authority_epoch: 1,
   registered_at: 10, last_seen: 900, retired_at: null, last_report_at: 995, ...extra });
 const frame = (id, extra = {}) => ({ id, surface_id: "wall", x_mm: 10, y_mm: 10,
-  width_mm: 300, height_mm: 500, player_id: null, output_id: null, readiness: "unbound",
+  size_mm: null, player_id: null, output_id: null, readiness: "unbound",
   ...extra });
 const output = (player_id, output_id) => ({ player_id, output_id,
   observation: { connected: true } });

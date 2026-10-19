@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 
 import { deleteFrameRequest, useConfirm } from "./ConfirmAction.jsx";
-import { createFrame, dropFromTray, moveFrame } from "./framesApi.js";
+import { createFrame, dropFromTray, placeFrame } from "./framesApi.js";
 import { Plan } from "./Plan.jsx";
 import { UnplacedTray } from "./UnplacedTray.jsx";
 import { useMutate } from "./useMutate.js";
@@ -57,15 +57,15 @@ export function LayoutEditor({ snapshot, surfaceId, filter, onDone }) {
 
   /** @type {import("./Plan.jsx").PlanEdit} */
   const planEdit = {
-    createFrame: (id, placement, profile) => mutate(() => createFrame(id, placement, profile)),
-    moveFrame: (frameId, placement) => mutate(() => moveFrame(frameId, placement)),
+    createFrame: (id, placement, video) => mutate(() => createFrame(id, placement, video)),
+    placeFrame: (frameId, placement) => mutate(() => placeFrame(frameId, placement)),
     takeTrayDrag: () => {
       const frameId = trayDragRef.current;
       trayDragRef.current = null;
       return frameId;
     },
-    dropFromTray: (frameId, pxRect, viewport, surface) => {
-      mutate(() => dropFromTray(frameId, pxRect, viewport, surface)).catch(() => {});
+    dropFromTray: (frameId, point, viewport, surface) => {
+      mutate(() => dropFromTray(frameId, point, viewport, surface)).catch(() => {});
     },
     deleteFrame: (event, frameId) => planDelete.open(event, deleteRequest(frameId)),
     status: planDelete.confirmation("plan__status-line"),

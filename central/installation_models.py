@@ -11,7 +11,7 @@ from central.displays.model import Readiness
 from contracts.enrollment import OutputReport
 from contracts.frame_lighting import FrameLighting
 from contracts.liveness import REPORT_INTERVAL, SILENT_AFTER_SECONDS
-from contracts.models import Calibration, ExactTurn, FrameProfile, Identifier, Instant, Model
+from contracts.models import Calibration, ExactTurn, Identifier, Instant, Model
 from contracts.node_commands import Owner
 
 
@@ -68,17 +68,15 @@ class WallInventory(Model):
 
 
 Pixels = Annotated[int, Field(ge=1, le=65536, strict=True)]
+PositiveMm = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 
 
 class FrameInventory(Model):
     id: Identifier
     name: str
     surface_id: Identifier
-    x_mm: float
+    x_mm: float                               # the Frame's top-left on the wall (frames.x_mm, y_mm)
     y_mm: float
-    width_mm: float = Field(gt=0)
-    height_mm: float = Field(gt=0)
-    profile: FrameProfile
     video: bool                               # Shows videos: may the Planner put a video here (frames.video)
     generation: int = Field(ge=0)
     calibration: Calibration
@@ -90,10 +88,7 @@ class FrameInventory(Model):
     output_id: Identifier | None = None
     screen_px: tuple[Pixels, Pixels] | None    # the bound Output's screen (central/displays/model.py `screen_px`); None: unbound or unknown
     display_mm: tuple[int, int] | None         # the Display seen there's size (its EDID's); None: none seen, or none stated
-
-
-
-PositiveMm = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+    size_mm: tuple[PositiveMm, PositiveMm] | None  # contracts.models.frame_size_mm(calibration.fit, display_mm, turn): the wall plan draws it; None: not known
 
 
 class FrameOutput(Model):

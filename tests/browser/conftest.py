@@ -47,7 +47,7 @@ CHECKS = {
     ),
     "test_a_stale_done_is_refused_and_keeps_the_other_save": ("stale_calibration_conflict",),
     "test_a_refresh_never_overwrites_the_draft": ("inventory_refresh_recovery",),
-    "test_hardware_keeps_the_frame_profile_apart_from_the_panel_record": (
+    "test_shows_videos_saves_at_once_and_keeps_a_ready_frame_ready": (
         "fresh_server_persistence",
     ),
     # Content walkthrough: sources, scenes, programs, runs (showrunner).

@@ -822,14 +822,14 @@ FRAME_PAGE_IMPORTS = {
     "position-box.ts": {"placement.js"},
     "frame-overview.tsx": {"PrecedenceExplanation.jsx", "ReadinessNotice.jsx", "readinessRecovery.js",
                            "frameIds.js"},
-    # The Frame profile's note compares it with the screen as it hangs (render redesign S5).
-    "frame-profile.tsx": {"framesApi.js", "placement.js", "useMutate.js"},
+    # The Hardware tab's Frame facts (frame box run fb-11, fb-14): the Shows videos write and
+    # refresh-after-write, and the box's size on the Display (placement.js).
+    "frame-facts.tsx": {"framesApi.js", "placement.js", "useMutate.js"},
     # The Hardware tab's turn control (render redesign S5): its write and refresh-after-write.
     "frame-turn.tsx": {"framesApi.js", "useMutate.js"},
-    # The Hardware tab's Display (1b K1, E-1B-K1-1): its read and polling, the profile write the
-    # display-changed card confirms, and the route change to Position.
-    "frame-display.tsx": {"displayApi.js", "framesApi.js", "projection.js", "useMutate.js", "useRoute.js",
-                          "useSnapshot.js"},
+    # The Hardware tab's Display (1b K1, E-1B-K1-1): its read and polling, and the route change
+    # to Position (the display-changed card asks only for the Position check, frame box run fb-11).
+    "frame-display.tsx": {"displayApi.js", "useRoute.js", "useSnapshot.js"},
     "live-adjustment.tsx": {"liveAdjustment.js"},
     "frame-power.tsx": {"powerApi.js"},
     # The Picture and Position tabs' Histories (configuration snapshots K1, K2): their reads (with

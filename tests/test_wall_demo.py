@@ -1376,6 +1376,11 @@ def test_the_demo_operator_drives_centrals_photo_routes_end_to_end(registry, tmp
         assert demo.check_finished({"pool": after}, before, "ok")
 
 
+# The size the tests' Display states for a demo Frame: below the large-Frame size, so the video
+# rule asks only its own rows.
+DEMO_SCREEN_INCHES = 24
+
+
 @pytest.mark.parametrize("project", ["pw-wall-demo-000000000000", "pw-wall-demo-5a5a5a5a5a5a",
                                      "pw-wall-demo-f00dfeedbeef"])
 def test_every_demo_upload_fills_every_demo_frame(project):
@@ -1389,20 +1394,17 @@ def test_every_demo_upload_fills_every_demo_frame(project):
 
     from central.wall_plan.fit import Fits, judge, shape_fit
     from central.wall_plan.fit_settings import FitSettings
-    from contracts.models import FrameProfile
     from media.key_content import measure
     from scripts.demo_wall import (
         DEMO_CROP_LIMIT,
-        DEMO_FRAME_PROFILE,
         DEMO_IMAGES,
+        DEMO_OPENING_PX,
         DEMO_VIDEO_SIZE,
     )
     from scripts.immich_actions import synthetic_image
 
-    profile = FrameProfile.model_validate(DEMO_FRAME_PROFILE)
-    # Full screen on a Display of the profile's size: the largest Frame output it can have.
-    target, house = target_of(profile.width_px, profile.height_px,
-                              inches=profile.diagonal_inches), FitSettings()
+    # The demo Frame's output (its Position's opening), on a Display stating a 24 in picture.
+    target, house = target_of(DEMO_OPENING_PX, DEMO_OPENING_PX, inches=DEMO_SCREEN_INCHES), FitSettings()
     for label, (size, _) in DEMO_IMAGES.items():
         key = measure((), synthetic_image(f"{project}-{label}", size, "2026-01-01T00:00:00Z"))
         verdict = judge("image", *size, key, target, DEMO_CROP_LIMIT, house)
@@ -1419,18 +1421,17 @@ def test_every_demo_upload_fills_the_demo_frame_output_and_none_fills_the_whole_
 
     from central.wall_plan.fit import shape_fit
     from central.wall_plan.fit_settings import FitSettings
-    from contracts.models import FrameProfile, frame_output
-    from scripts.demo_wall import DEMO_CROP_LIMIT, DEMO_FRAME_PROFILE, DEMO_IMAGES, DEMO_VIDEO_SIZE
+    from contracts.models import frame_output
+    from scripts.demo_wall import DEMO_CROP_LIMIT, DEMO_IMAGES, DEMO_VIDEO_SIZE
 
     assert "width_px=1920" in PLAYER_RUNNER and "height_px=1080" in PLAYER_RUNNER
-    profile = FrameProfile.model_validate(DEMO_FRAME_PROFILE)
     display = (1920, 1080)
     opening = frame_output(demo_position({"width_px": 1920, "height_px": 1080}), display, turn=0)
     whole = frame_output(Calibration(fit=PositionBox(left=420 / 1920, width=1080 / 1920)), display, turn=0)
     assert opening == (90, 90) and whole == (1080, 1080)        # the square Frame on the whole height
     uploads = [("image", size) for size, _ in DEMO_IMAGES.values()] + [("video", DEMO_VIDEO_SIZE)]
     for kind, (width, height) in uploads:
-        assert shape_fit(kind, width, height, target_of(*opening, inches=profile.diagonal_inches),
+        assert shape_fit(kind, width, height, target_of(*opening, inches=DEMO_SCREEN_INCHES),
                          DEMO_CROP_LIMIT, FitSettings(), size_known=True) is None, (kind, width, height)
     for size, _ in DEMO_IMAGES.values():
         refused = shape_fit("image", *size, target_of(*whole), DEMO_CROP_LIMIT, FitSettings(),

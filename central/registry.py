@@ -8,12 +8,13 @@ import secrets
 import uuid
 from collections.abc import Mapping
 from contextlib import contextmanager
+from typing import Any
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
-from pydantic import Field, StrictBool, model_validator
+from pydantic import Field, StrictBool
 
 from central.db import Database
 from central.fleet.acceptance_evidence import applied_is_latest
@@ -60,11 +61,11 @@ from contracts.frame_lighting import FrameLighting
 from contracts.models import (
     Calibration,
     ExactTurn,
-    FrameProfile,
     Identifier,
     Model,
     OutputBinding,
     TargetIdentifier,
+    frame_size_mm,
 )
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.player_control import (
@@ -80,6 +81,17 @@ from contracts.player_control import (
 from contracts.time import Clock
 
 
+def _frame_inventory(row: Mapping[str, Any]) -> FrameInventory:
+    """One Frame's inventory row from a frames row selected with POSITION_COLUMNS and SCREEN_COLUMNS:
+    its readiness, its screen, the Display's size and the Frame's size on the wall
+    (`frame_size_mm` of its box and that size, as its screen hangs; None when no size is known)."""
+    display_mm = frame_display_mm(row)
+    return FrameInventory.model_validate(
+        {**{key: value for key, value in row.items() if key not in POSITION_FACTS + SCREEN_FACTS},
+         "generation": row["generation"], "readiness": frame_readiness(row), "screen_px": frame_screen_px(row), "display_mm": display_mm,
+         "size_mm": frame_size_mm(Calibration.model_validate(row["calibration"]).fit, display_mm, row["turn"])})
+
+
 class RegistryError(Exception):
     def __init__(self, code: str, status: int = 409, *, details: dict | None = None):
         self.code, self.status = code, status
@@ -87,41 +99,28 @@ class RegistryError(Exception):
         super().__init__(code)
 
 
-def _orientation_coherent(width_mm: float, height_mm: float,
-                          width_px: int, height_px: int) -> bool:
-    """True when physical and pixel dimensions agree on orientation:
-    height_mm == width_mm OR (height_mm > width_mm) == (height_px > width_px).
-    Single copy of the invariant shared by FrameCreate and Registry.place_frame."""
-    return height_mm == width_mm or (height_mm > width_mm) == (height_px > width_px)
-
-
 class FrameCreate(Model):
+    """POST /v1/operator/frames: a new Frame, where it hangs and whether it shows videos (frame box
+    run fb-14). Its shape and size are never typed: they come from its Position box on the Display
+    it is bound to (owner, 2026-10-19: "diagonal inches is a weird concept when we already have
+    width and height")."""
     # A new Frame's id must be reachable by a Scene (contracts TARGET_ID_PATTERN).
     # Stored Frames and path parameters stay `Identifier`, so an older id is still
     # readable and deletable.
     id: TargetIdentifier
     name: Name | None = None              # None: "Frame N", N the smallest free
     surface_id: Identifier = "wall"
-    x_mm: float = 0
+    x_mm: float = 0                       # the Frame's top-left on the wall
     y_mm: float = 0
-    width_mm: float = Field(gt=0)
-    height_mm: float = Field(gt=0)
-    profile: FrameProfile
-
-    @model_validator(mode="after")
-    def oriented_profile(self):
-        if not _orientation_coherent(self.width_mm, self.height_mm,
-                                     self.profile.width_px, self.profile.height_px):
-            raise ValueError("display profile must use dimensions oriented to the physical Frame")
-        return self
+    video: StrictBool = True              # Shows videos (frames.video)
 
 
 class FramePlacement(Model):
+    """PATCH /v1/operator/frames/{frame_id}: where the Frame hangs on the wall (its top-left); a
+    field left out keeps its value."""
     surface_id: Identifier | None = None
     x_mm: float | None = None
     y_mm: float | None = None
-    width_mm: float | None = Field(default=None, gt=0)
-    height_mm: float | None = Field(default=None, gt=0)
 
 
 class FrameVideoChange(Model):
@@ -509,19 +508,18 @@ class Registry:
                 "expires_at": expires_at}
 
     def create_frame(self, frame: FrameCreate) -> dict:
-        """A new Frame at the default Position (`Calibration()`: centred, the screen's full width) and the lighting a new Frame starts with (a new Frame is bound
-        to no port yet, so no Display is seen: UPGRADE_DISPLAY_LIGHT), and its KEPT_CREATED Position
+        """A new Frame at the default Position (`Calibration()`: the whole screen), showing videos as
+        `frame.video` says, with the lighting a new Frame starts with (a new Frame is bound to no
+        port yet, so no Display is seen: UPGRADE_DISPLAY_LIGHT), and its KEPT_CREATED Position
         entry, in one transaction."""
         try:
             with self.db.transaction() as conn:
                 name = frame.name if frame.name is not None else _smallest_free(conn, "frames", "Frame")
                 calibration = Calibration()
                 lighting = self.lighting.new_frame_within(PgTransaction(conn), UPGRADE_DISPLAY_LIGHT)
-                conn.execute("INSERT INTO frames(id,name,surface_id,x_mm,y_mm,width_mm,height_mm,"
-                             "profile,video,calibration,lighting) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                             (frame.id, name, frame.surface_id, frame.x_mm, frame.y_mm,
-                              frame.width_mm, frame.height_mm, Jsonb(frame.profile.model_dump()),
-                              frame.profile.video,   # transitional: fb-14 takes video from FrameCreate
+                conn.execute("INSERT INTO frames(id,name,surface_id,x_mm,y_mm,video,calibration,lighting) "
+                             "VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                             (frame.id, name, frame.surface_id, frame.x_mm, frame.y_mm, frame.video,
                               Jsonb(calibration.model_dump(mode="json")), Jsonb(lighting.model_dump(mode="json"))))
                 record_created_in(conn, frame.id, created_record(position_values(calibration, lighting)))
                 _ensure_wall(conn, frame.surface_id)
@@ -548,16 +546,14 @@ class Registry:
         RegistryError unknown_frame 404. Last write wins: no generation, configuration revision or
         Position check (it changes planning, not the picture), so a ready Frame stays ready; audits
         "frame_video_changed" {"video"} when it changes. The Planner reads it at its next plan, as
-        it reads a saved photo-fit setting (nothing to wake). Until fb-14 drops the Frame profile,
-        the profile's "video" is written with it (transitional)."""
+        it reads a saved photo-fit setting (nothing to wake)."""
         with self.db.transaction() as conn:
             row = conn.execute("SELECT video FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
             if row is None:
                 raise RegistryError("unknown_frame", 404)
             if row["video"] == video:
                 return {"frame_id": frame_id, "video": video, "changed": False}
-            conn.execute("UPDATE frames SET video=%s, profile=jsonb_set(profile, '{video}', to_jsonb(%s::boolean)) "
-                         "WHERE id=%s", (video, video, frame_id))
+            conn.execute("UPDATE frames SET video=%s WHERE id=%s", (video, frame_id))
             self._audit(conn, "frame_video_changed", frame_id, {"video": video})
         return {"frame_id": frame_id, "video": video, "changed": True}
 
@@ -571,22 +567,6 @@ class Registry:
                 raise RegistryError("unknown_wall", 404)
             self._audit(conn, "wall_named", surface_id, naming.model_dump())
         return WallInventory.model_validate(row)
-
-    def frame_profile(self, frame_id: str) -> FrameProfile:
-        """Read the persistent profile for a Frame, whether it is bound yet."""
-        with self.db.transaction() as conn:
-            return self.frame_profiles_in(conn, (frame_id,))[frame_id]
-
-    def frame_profiles_in(self, conn, frame_ids) -> dict[str, FrameProfile]:
-        """Read all requested Frame profiles in the caller's transaction."""
-        ids = tuple(dict.fromkeys(frame_ids))
-        if not ids:
-            return {}
-        rows = conn.execute("SELECT id,profile FROM frames WHERE id=ANY(%s)", (list(ids),)).fetchall()
-        profiles = {row["id"]: FrameProfile.model_validate(row["profile"]) for row in rows}
-        if len(profiles) != len(ids):
-            raise RegistryError("unknown_frame", 404)
-        return profiles
 
     def bind(self, frame_id: str, player_id: str, output_id: str, *, expected_generation: int) -> dict:
         try:
@@ -647,9 +627,10 @@ class Registry:
             return {**row, "changed": True}
 
     def place_frame(self, frame_id: str, placement: FramePlacement) -> dict:
-        """Reposition: last-write-wins, no token (the one deliberate exception to R3,
-        design §9a). FOR UPDATE makes the read-merge-write atomic; the row is still LWW.
-        Bumps NO generation, NO configuration_revision; never touches calibration."""
+        """Move the Frame on the wall (its top-left): last-write-wins, no token (the one deliberate
+        exception to R3, design §9a). FOR UPDATE makes the read-merge-write atomic; the row is
+        still LWW. Bumps NO generation, NO configuration_revision; never touches calibration.
+        Answers {"id", "surface_id", "x_mm", "y_mm"}."""
         with self._equipment_write() as conn:
             frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE",
                                  (frame_id,)).fetchone()
@@ -657,14 +638,8 @@ class Registry:
                 raise RegistryError("unknown_frame", 404)
             merged = {field: value if value is not None else frame[field]
                       for field, value in placement.model_dump().items()}
-            profile = FrameProfile.model_validate(frame["profile"])
-            if not _orientation_coherent(merged["width_mm"], merged["height_mm"],
-                                         profile.width_px, profile.height_px):
-                raise RegistryError("oriented_profile", 422)
-            conn.execute("UPDATE frames SET surface_id=%s,x_mm=%s,y_mm=%s,width_mm=%s,"
-                         "height_mm=%s WHERE id=%s",
-                         (merged["surface_id"], merged["x_mm"], merged["y_mm"],
-                          merged["width_mm"], merged["height_mm"], frame_id))
+            conn.execute("UPDATE frames SET surface_id=%s,x_mm=%s,y_mm=%s WHERE id=%s",
+                         (merged["surface_id"], merged["x_mm"], merged["y_mm"], frame_id))
             _ensure_wall(conn, merged["surface_id"])
             self._audit(conn, "frame_repositioned", frame_id)
             return {"id": frame_id, **merged}
@@ -847,7 +822,7 @@ class Registry:
                                "FROM players ORDER BY registered_at,id").fetchall()
         outputs = conn.execute("SELECT player_id,output_id,observation FROM outputs "
                                "ORDER BY player_id,output_id").fetchall()
-        frames = conn.execute("SELECT f.id,f.name,f.surface_id,f.x_mm,f.y_mm,f.width_mm,f.height_mm,f.profile,f.video,"  # noqa: S608
+        frames = conn.execute("SELECT f.id,f.name,f.surface_id,f.x_mm,f.y_mm,f.video,"  # noqa: S608
                               "f.calibration,f.lighting,f.turn,f.configuration_revision,"
                               f"b.player_id,b.output_id,{POSITION_COLUMNS},{SCREEN_COLUMNS} FROM frames f "
                               f"LEFT JOIN bindings b ON b.frame_id=f.id {SCREEN_JOIN} ORDER BY f.id").fetchall()
@@ -856,10 +831,7 @@ class Registry:
             players=tuple(PlayerInventory.model_validate({**row, "is_bound": row["id"] in bound_player_ids})
                          for row in players),
             outputs=tuple(OutputInventory.model_validate(row) for row in outputs),
-            frames=tuple(FrameInventory.model_validate(
-                {**{key: value for key, value in row.items() if key not in POSITION_FACTS + SCREEN_FACTS},
-                 "generation": row["generation"], "readiness": frame_readiness(row),
-                 "screen_px": frame_screen_px(row), "display_mm": frame_display_mm(row)}) for row in frames),
+            frames=tuple(_frame_inventory(row) for row in frames),
             walls=tuple(WallInventory.model_validate(row) for row in conn.execute(
                 "SELECT surface_id, name, room FROM walls ORDER BY surface_id").fetchall()),
         )

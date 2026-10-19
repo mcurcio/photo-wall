@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from contracts.models import FrameProfile, OutputBinding
+from contracts.models import OutputBinding
 
 
 class InstallationSessions(Protocol):
@@ -15,8 +15,6 @@ class InstallationSessions(Protocol):
     def session_is_current_in(
         self, conn: Any, player_id: str, authority_epoch: int, *, lock: bool = False
     ) -> bool: ...
-
-    def frame_profiles_in(self, conn: Any, frame_ids: set[str]) -> dict[str, FrameProfile]: ...
 
     def configuration_in(
         self, conn: Any, player_id: str, authority_epoch: int

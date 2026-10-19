@@ -31,13 +31,6 @@ from contracts.wire_model import Model
 Positive = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 
 
-class FrameProfile(Model):
-    width_px: int = Field(gt=0, le=16384)
-    height_px: int = Field(gt=0, le=16384)
-    diagonal_inches: Positive
-    video: bool = True
-
-
 Fraction = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
 
 
