@@ -1008,6 +1008,12 @@ def operator_action(action: str):
                 frames.append(frame)
         finally:
             database.close()
+        # The demo's Pis report no Display, so its Frames' physical size is not known and each
+        # counts as a large Frame for videos (decision 0030); its small video then needs the
+        # large-Frame rows setting at or below its own short side to be chosen.
+        fit = request("GET", "/v1/operator/settings/photo-fit")["settings"]
+        request("PUT", "/v1/operator/settings/photo-fit",
+                {**fit, "large_frame_video_short_side": min(DEMO_VIDEO_SIZE)})
         request("PUT", "/v1/operator/scenes/demo", {"scene_id": "demo", "loop": True,
             "cycle_seconds": SCENE_CYCLE_SECONDS, "selection": {"crop_limit": DEMO_CROP_LIMIT},
             "contributions": [{"target": "frame:" + frame, "kind": "media", "source_refs": ["demo:1"]}
