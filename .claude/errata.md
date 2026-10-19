@@ -6541,3 +6541,21 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
 - **`OutputPowerController.output` takes `size_mm` with a default of None** (keyword), because
   `tests/integration/test_central_night_off.py` (not owned) calls it with `identity` and `modes` only. The
   production path (`PowerObservations.put_report`) always passes the report's size.
+
+## fb-3 (every stored Position becomes a box, migration 104)
+
+- **`central.db` applies every pending migration in one transaction**, so 102's `ON COMMIT DROP` temp tables
+  (`frame_screens`, `stored_fits`, `fit_answers`, `binding_rewrites`) still exist when 104 runs on a fresh or
+  pre-102 database: 104 names its own (`box_screens`, `box_copies`, `box_answers`, `box_bindings`). The page's
+  "one statement per table, as 102" holds; reusing 102's names does not.
+- **Owned-file list missed `tests/test_upgrade_087.py`** (not `test_migration_*`): it seeds a Position through
+  today's code, then `db.migrate()` and reads it back through the app (422 once 104 converted it under the
+  rectangle models). fb-3 adds `"104_"` to its `also=` (104 over no rows before seeding), so the Position today's
+  code saves is the one it reads, before and after fb-6.
+- **`tests/test_migration_099.py`** validated the whole `PlayerConfiguration` after `db.migrate()`; it now reads
+  only the binding's lighting (what 099 changes), so it no longer depends on the fit's current form.
+- **Active trials end only when a copy converts** (`state = 'active'` and a copy not yet a box), so re-running
+  104's statements changes nothing, as the acceptance asks; on the live database the two are the same set.
+- **For fb-6:** `tests/test_migration_102_rectangle_positions.py` (now stopping at `migrate_before(db, "103")`)
+  still imports `contracts.frame_fit.place` and `contracts.models.RectangleFit`, which fb-6 deletes; fb-6 must
+  give that test its own copy of the old rule (as test 104 has `_old_place`) or a raw-JSON check.

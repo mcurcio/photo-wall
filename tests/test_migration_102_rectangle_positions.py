@@ -133,7 +133,7 @@ def test_102_turns_every_history_entry_into_a_rectangle_place_accepts(empty_data
                 _entries(conn, f"grid-{index}", cases)
             _frame(conn, "grid-unbound", _profile(1920, 1080), {}, output=None)
             _entries(conn, "grid-unbound", cases)
-        db.migrate()
+        migrate_before(db, "103")   # 102 only: 104 turns each rectangle into a box (its own test)
         with db.transaction() as conn:
             rows = conn.execute("SELECT frame_id, number, fit, turn FROM position_entries").fetchall()
     finally:
@@ -249,7 +249,7 @@ def test_102_worked_frames_trials_configurations_and_offers(empty_database):
                              "bindings": [_binding("e2", "HDMI-A-2", old_e2),
                                           _binding("gone", "HDMI-A-8", {"revision": 6, "fit": {"mode": "cover"}}),
                                           _binding("bare", "HDMI-A-7", {"revision": 2})]}),))
-        db.migrate()
+        migrate_before(db, "103")   # 102 only: 104 turns each rectangle into a box (its own test)
         with db.transaction() as conn:
             frames = {row["id"]: row for row in conn.execute("SELECT * FROM frames").fetchall()}
             readiness = {frame_id: frame_readiness_in(conn, frame_id) for frame_id in WORKED}
