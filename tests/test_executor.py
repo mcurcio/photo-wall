@@ -131,6 +131,26 @@ def test_retained_fallback_waits_for_native_draw_without_overwriting_with_black(
     assert shown.fallback and shown.layers[0].layer.assignment_id == "picture"
 
 
+@pytest.mark.parametrize(("display_mm", "kept"), [(None, True), ((950, 540), False)],
+                         ids=["same-display", "new-display-size"])
+def test_a_kept_still_is_dropped_when_its_displays_size_changes(tmp_path, display_mm, kept):
+    """A kept still was composed for the Frame's physical size (its lights and mat, from the
+    Display's size): the same binding with a new `display_mm` drops it, an unchanged one keeps
+    it. Mutation probe: drop the display_mm comparison in `accept_configuration` -> the kept
+    still survives a new Display size."""
+    rig = Rig(tmp_path)
+    rig.play(layer(end=101, after_end="keep_this_photo"))
+    rig.advance(1.01)
+    rig.executor.tick()
+    assert rig.renderer.outputs["hdmi1"].layers
+    moved = binding(display_mm=display_mm, configuration_revision=2)
+    rig.executor.accept_configuration(rig.configuration.model_copy(update={
+        "configuration_revision": 2, "bindings": (moved, binding("hdmi2", "frame2"))}))
+    rig.executor.tick()
+    shown = rig.renderer.outputs["hdmi1"]
+    assert shown.fallback and bool(shown.layers) is kept
+
+
 @pytest.mark.parametrize(("first_draw_after_start", "kept"), [(1.9, False), (2, True)])
 def test_kept_still_takes_effect_from_its_first_draw_at_or_after_its_fade_in(
         tmp_path, first_draw_after_start, kept):
