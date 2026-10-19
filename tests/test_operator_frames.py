@@ -21,7 +21,6 @@ from fastapi.testclient import TestClient
 from support.house_time import window_program
 
 from central.app import create_app
-from central.displays.model import Readiness
 from central.registry import (
     Enrollment,
     FrameCreate,
@@ -95,136 +94,17 @@ def test_patch_reposition_without_authorization_is_401(registry):
         assert response.status_code == 401
 
 
-def _landscape_profile():
-    return {"width_px": 1920, "height_px": 1080, "diagonal_inches": 24, "video": True}
-
-
-def _replacement_portrait_profile():
-    return {"width_px": 1200, "height_px": 2000, "diagonal_inches": 24, "video": True}
-
-
-def test_put_profile_preserves_frame_identity_geometry_and_invalidates_calibration(registry):
+def test_the_profile_route_is_gone(registry):
+    """fb-13: a Frame's shape is its Position's box, so nothing replaces a Frame profile: the route
+    answers as no route (404 or 405) and the Frame is unchanged."""
     _portrait(registry)
-    # Seed the persisted state to prove the operation clears calibration validity (its Position,
-    # now at a stale generation) and raises the calibration revision a Save names.
-    with registry.db.transaction() as conn:
-        conn.execute("UPDATE frames SET position_generation=generation WHERE id='portrait'")
     before = registry.inventory().frames[0]
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
-        response = client.put("/v1/operator/frames/portrait/profile",
-                              json={"profile": _replacement_portrait_profile(), "expected_generation": 0},
-                              headers=AUTH)
-    assert response.status_code == 200
-    assert response.json() == {"profile": _replacement_portrait_profile(), "generation": 1, "changed": True}
-    after = registry.inventory().frames[0]
-    assert (after.id, after.surface_id, after.x_mm, after.y_mm, after.width_mm, after.height_mm) == (
-        before.id, before.surface_id, before.x_mm, before.y_mm, before.width_mm, before.height_mm)
-    assert after.profile.model_dump() == _replacement_portrait_profile()
-    assert after.readiness is Readiness.UNBOUND and after.generation == 1   # its Position (at 0) is stale
-    assert after.calibration.revision == before.calibration.revision + 1
-    assert after.configuration_revision == before.configuration_revision + 1
-
-
-def test_put_profile_guards_stale_generation_and_allows_identical_retry(registry):
-    _portrait(registry)
-    request = {"profile": {"width_px": 1080, "height_px": 1920,
-                            "diagonal_inches": 24, "video": True}, "expected_generation": 0}
-    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
-        same = client.put("/v1/operator/frames/portrait/profile", json=request, headers=AUTH)
-        stale = client.put("/v1/operator/frames/portrait/profile",
-                           json={**request, "expected_generation": 1}, headers=AUTH)
-    assert same.status_code == 200 and same.json()["changed"] is False
-    assert stale.status_code == 409 and stale.json() == {"error": "binding_generation_conflict"}
-    unchanged = registry.inventory().frames[0]
-    assert unchanged.generation == 0
-    assert unchanged.configuration_revision == 1
-
-
-def test_put_profile_refuses_bound_live_run_bad_orientation_and_missing_auth(registry):
-    identity = enroll(registry)
-    _portrait(registry)
-    app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
-    with TestClient(app) as client:
-        unauthed = client.put("/v1/operator/frames/portrait/profile",
-                             json={"profile": _landscape_profile(), "expected_generation": 0})
-        assert unauthed.status_code == 401
-        registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-        bound = client.put("/v1/operator/frames/portrait/profile",
-                           json={"profile": _landscape_profile(), "expected_generation": 1}, headers=AUTH)
-    assert bound.status_code == 409 and bound.json() == {"error": "frame_bound"}
-
-    # Unbound Frame with a live target is protected by the same route guard as delete.
-    registry.unbind("portrait", expected_generation=1)
-    now = registry.clock.utc()
-    app.state.coordinator.runtime.command("set_scene", _scene_targeting("portrait", "profile-live"))
-    admission = app.state.coordinator.runtime.command("activate", "profile-live", "profile-run", now)
-    with TestClient(app) as client:
-        live = client.put("/v1/operator/frames/portrait/profile",
-                          json={"profile": _landscape_profile(), "expected_generation": 2}, headers=AUTH)
-    assert live.status_code == 409 and live.json() == {"error": "frame_in_use"}
-
-    app.state.coordinator.runtime.command("cancel", admission.run_id, now)
-
-    app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
-    with TestClient(app) as client:
-        oriented = client.put("/v1/operator/frames/portrait/profile",
-                              json={"profile": _landscape_profile(), "expected_generation": 2}, headers=AUTH)
-    assert oriented.status_code == 422 and oriented.json() == {"error": "oriented_profile"}
-
-
-def test_put_profile_unknown_frame_is_404(registry):
-    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
-        response = client.put("/v1/operator/frames/nope/profile",
-                              json={"profile": _landscape_profile(), "expected_generation": 0}, headers=AUTH)
-    assert response.status_code == 404 and response.json() == {"error": "unknown_frame"}
-
-
-def test_profile_replacement_serializes_with_concurrent_run_activation(registry):
-    _portrait(registry)
-    app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
-    runtime = app.state.coordinator.runtime
-    runtime.command("set_scene", _scene_targeting("portrait", "profile-race"))
-    entered_registry = Event()
-    release_registry = Event()
-    activation_started = Event()
-    activation_done = Event()
-    replace = app.state.registry.replace_frame_profile
-
-    def pause_after_runtime_guard(*args, **kwargs):
-        entered_registry.set()
-        assert release_registry.wait(5)
-        return replace(*args, **kwargs)
-
-    app.state.registry.replace_frame_profile = pause_after_runtime_guard
-    with TestClient(app) as client, ThreadPoolExecutor(max_workers=2) as pool:
-        profile_future = pool.submit(
-            client.put,
-            "/v1/operator/frames/portrait/profile",
-            json={"profile": _replacement_portrait_profile(), "expected_generation": 0},
-            headers=AUTH,
-        )
-        assert entered_registry.wait(5)
-
-        def activate():
-            activation_started.set()
-            result = runtime.command("activate", "profile-race", "profile-race-run", registry.clock.utc())
-            activation_done.set()
-            return result
-
-        activation_future = pool.submit(activate)
-        assert activation_started.wait(5)
-        # The profile route holds both coordination and Runtime locks while it
-        # pauses between the live-Run check and the Frame write. Activation must
-        # wait for that transaction to finish.
-        assert not activation_done.wait(0.2)
-        release_registry.set()
-        response = profile_future.result(timeout=5)
-        admission = activation_future.result(timeout=5)
-
-    assert response.status_code == 200
-    assert admission.status == "admitted"
-    assert activation_done.is_set()
-    assert registry.inventory().frames[0].generation == 1
+        response = client.put("/v1/operator/frames/portrait/profile", headers=AUTH, json={
+            "profile": {"width_px": 1200, "height_px": 2000, "diagonal_inches": 24, "video": True},
+            "expected_generation": 0})
+    assert response.status_code in (404, 405)
+    assert registry.inventory().frames[0] == before
 
 
 def test_delete_clear_frame_returns_200_deleted(registry):

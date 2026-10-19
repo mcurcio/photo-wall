@@ -15,7 +15,7 @@ Mutation probes (each fails the named case):
 - K2-draft-not-replaced: keep the old draft after an accepted Restore (liveAdjustment.js `restore`)
   -> the tracer's centre and depth stay as tried.
 - K2-refusal-ignored: offer Restore whatever `restore_refusal` says (position-history.tsx
-  `restoreState`) -> the other-profile case.
+  `restoreState`) -> the screen-size-changed case's upside-down row.
 - K2-entry-revision: take the answer as the draft's origin (`adopt`) instead of keeping the draft's
   own -> the restored draft is no change, Done is never offered: the tracer and the overtaken case.
 - K2-always-enabled: `restoreState` offers Restore with no live session -> the no-session case.
@@ -219,18 +219,26 @@ def test_a_tried_and_a_kept_position_are_listed_and_restore_puts_the_kept_one_ba
         assert (_left_x(saved.calibration), saved.lighting.mat_depth_mm) == (SAVED_X, 0)
 
 
-def test_a_position_made_for_another_screen_size_cannot_be_restored_and_says_why(page, registry, sessions):
+def test_a_position_kept_when_the_screen_size_changed_restores_and_one_made_upside_down_says_why(
+        page, registry, sessions):
+    """fb-13: a box is its own shape, so a stored kept-profile-changed entry lists in its words and
+    restores; the same box kept while the screen hung upside down is refused, with the way back."""
     _seed(registry)
-    # The seeded Position as one made before the Frame's screen size changed.
-    _sql(registry, "UPDATE position_entries SET profile_width_px=3840, profile_height_px=2160 WHERE frame_id=%s",
+    _sql(registry, "UPDATE position_entries SET kind='kept-profile-changed' WHERE frame_id=%s AND kind='kept-saved'",
+         (FRAME,))
+    _sql(registry, "INSERT INTO position_entries(id, frame_id, number, kind, at, fit, lighting, turn, display_id) "
+                   "SELECT gen_random_uuid(), frame_id, number + 100, 'kept-saved', at - interval '1 minute', fit, "
+                   "lighting, 180, display_id FROM position_entries WHERE frame_id=%s AND kind='kept-profile-changed'",
          (FRAME,))
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         open_frame(page, FRAME, "position")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
-        restore = _rows(page, KEPT).first.get_by_role("button", name="Restore", exact=True)
-        expect(restore).to_be_disabled()
-        expect(restore).to_have_accessible_description(re.compile(r"Made for another screen size \(3,840 × 2,160 px\)"))
+        changed = _rows(page, "Kept (screen size changed)").first.get_by_role("button", name="Restore", exact=True)
+        expect(changed).to_be_enabled()
+        upside_down = _rows(page, KEPT).first.get_by_role("button", name="Restore", exact=True)
+        expect(upside_down).to_be_disabled()
+        expect(upside_down).to_have_accessible_description(re.compile(r"Made when the screen hung"))
 
 
 def test_a_restored_draft_keeps_its_base_so_a_save_made_elsewhere_still_stops_it(page, registry, sessions):

@@ -39,7 +39,6 @@ export const TRIAL_REFUSAL_WORDS: Record<TrialRefusal, string> = {
 /** Every reason a Position history entry cannot be restored, in words. */
 export const POSITION_RESTORE_WORDS: Record<PositionRestoreRefusal, string> = {
   other_frame: "That change was another Frame's.",
-  made_for_other_profile: "Made for another screen size.",
   made_for_other_turn: "Made for the screen hung another way.",
   made_for_other_display: "Made on another display.",
 };

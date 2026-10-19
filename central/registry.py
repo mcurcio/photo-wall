@@ -16,14 +16,12 @@ from psycopg.types.json import Jsonb
 from pydantic import Field, StrictBool, model_validator
 
 from central.db import Database
-from central.displays.model import Readiness
 from central.fleet.acceptance_evidence import applied_is_latest
 from central.fleet.device_fence import fence_in, retire_in
 from central.fleet.models import TrialRefusal, TrialRefused
 from central.fleet.position_history import (
     created_record,
     position_values,
-    profile_changed_record,
     saved_record,
 )
 from central.frame_lighting.ports import FrameLightingCheck
@@ -36,7 +34,6 @@ from central.infra.display_store import (
     commit_position,
     frame_display_mm,
     frame_readiness,
-    frame_readiness_in,
     frame_screen_px,
     resolve_output,
 )
@@ -125,11 +122,6 @@ class FramePlacement(Model):
     y_mm: float | None = None
     width_mm: float | None = Field(default=None, gt=0)
     height_mm: float | None = Field(default=None, gt=0)
-
-
-class FrameProfileReplacement(Model):
-    profile: FrameProfile
-    expected_generation: int = Field(ge=0)
 
 
 class FrameVideoChange(Model):
@@ -680,7 +672,7 @@ class Registry:
     def turn_frame(self, frame_id: str, turn: DisplayTurn, *, expected_generation: int) -> dict:
         """Set how the Frame's screen hangs (frames.turn), in one equipment write: RegistryError
         unknown_frame 404, then binding_generation_conflict 409 when `expected_generation` is not the
-        Frame's (the token before idempotency, as `replace_frame_profile`); the same turn answers
+        Frame's (the token before idempotency); the same turn answers
         {"frame_id", "turn", "generation", "changed": False} with no write. A new turn raises the
         generation and configuration_revision (a Position made for the other hanging needs checking:
         readiness POSITION_NEEDED until the next Save) and appends the kept-turn-changed Position history
@@ -705,46 +697,6 @@ class Registry:
             if bound is not None:
                 _wake_nodes_of(conn, bound["player_id"])
             return {"frame_id": frame_id, "turn": turn, **row, "changed": True}
-
-    def replace_frame_profile(self, frame_id: str, profile: FrameProfile, *,
-                              expected_generation: int, conn) -> dict:
-        """Replace display dimensions after an optimistic generation check.
-
-        The persistent Frame and its placement remain the same. A changed display
-        profile invalidates committed calibration. A change is a kept Position write
-        (configuration snapshots, migration 096): its kept-profile-changed entry, made for the new
-        profile, follows any change made outside Photo Wall recorded first.
-        """
-        if not holds_runtime_locks_in(conn):
-            raise RegistryError("frame_runtime_snapshot_required", 500)
-        frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
-        if not frame:
-            raise RegistryError("unknown_frame", 404)
-        # Check the token before idempotency so an old tab cannot silently
-        # succeed merely because another operator chose the same profile.
-        if frame["generation"] != expected_generation:
-            raise RegistryError("binding_generation_conflict")
-        current = FrameProfile.model_validate(frame["profile"])
-        if current == profile:
-            return {"profile": current.model_dump(), "generation": frame["generation"],
-                    "changed": False}
-        # A bound Frame's profile is the Position's ground truth; it opens only while the Display
-        # on its Output is not the one its Position names (the display-changed card, slice C2).
-        if frame_readiness_in(conn, frame_id) not in (Readiness.UNBOUND, Readiness.DISPLAY_CHANGED):
-            raise RegistryError("frame_bound")
-        if not _orientation_coherent(frame["width_mm"], frame["height_mm"],
-                                     profile.width_px, profile.height_px):
-            raise RegistryError("oriented_profile", 422)
-        calibration = Calibration.model_validate(frame["calibration"])
-        invalidated = calibration.model_copy(update={"revision": calibration.revision + 1})
-        row = {"generation": write_position_in(
-            conn, frame_id, profile_changed_record(position_values(calibration, FrameLighting.model_validate(frame["lighting"]))),
-            calibration=invalidated, profile=profile)}
-        # Transitional (fb-14 deletes): the profile's video is the Frame's Shows videos too.
-        conn.execute("UPDATE frames SET video=%s WHERE id=%s", (profile.video, frame_id))
-        self._audit(conn, "frame_profile_changed", frame_id,
-                    {"profile": profile.model_dump(), **row})
-        return {"profile": profile.model_dump(), **row, "changed": True}
 
     def delete_frame(self, frame_id: str, *, conn, references: Mapping[str, tuple[str, ...]]) -> dict:
         """Remove a clear Frame within the caller's serialized reference snapshot.

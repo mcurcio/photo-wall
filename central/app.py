@@ -79,7 +79,6 @@ from central.registry import (
     Enrollment,
     FrameCreate,
     FramePlacement,
-    FrameProfileReplacement,
     FrameTurnChange,
     FrameVideoChange,
     Registry,
@@ -695,19 +694,6 @@ def create_app(
         target = f"frame:{frame_id}"
         if any(run.phase in ("body", "outro") and target in run.participants for run in view.runs):
             raise RegistryError("frame_in_use", 409)
-
-    @app.put("/v1/operator/frames/{frame_id}/profile", dependencies=[Depends(admin)])
-    def replace_frame_profile(frame_id: Identifier, request: FrameProfileReplacement) -> dict:
-        # Keep the live-Run check and Frame update in one serialized transaction.
-        # Otherwise an activation could commit between the check and profile write.
-        with coordinator.serialized_runtime_read() as (conn, runtime):
-            references = runtime.frame_references(frame_id, clock.utc())
-            if references["run_ids"]:
-                raise RegistryError("frame_in_use", 409)
-            return registry.replace_frame_profile(
-                frame_id, request.profile, expected_generation=request.expected_generation,
-                conn=conn,
-            )
 
     @app.put("/v1/operator/frames/{frame_id}/turn", dependencies=[Depends(admin)])
     def turn_frame(frame_id: Identifier, request: FrameTurnChange) -> dict:
