@@ -85,10 +85,26 @@ bottom to top in `stack_order`.
 
 - **The strength is the controller's encoding of the plan's alpha** (`plane_strength`). The
   controller mixes stored sRGB values, not light (bench T3). Over a picture (a cross-fade, or a
-  Run playing beneath) the plane's alpha is the layer's alpha and the outgoing picture stays
-  opaque; over black (a fade through black, or nothing beneath) it is `encode_srgb(alpha)`, within
-  6 levels of 256 of the old linear-light mix. Which one applies is read from what the Player shows
-  beneath (the nearest seen layer beneath is a media layer), never from a field Central sends.
+  Run playing beneath) the plane's alpha is the layer's alpha; over black (a fade through black,
+  or nothing beneath) it is `encode_srgb(alpha)`, within 6 levels of 256 of the old linear-light
+  mix. Which one applies is read from what the Player shows beneath (the nearest seen layer
+  beneath is a media layer), never from a field Central sends.
+- **A shown picture keeps its plane.** Weston hands a screen's sub-windows the controller's
+  overlay planes again at every repaint, from the top down (its DRM backend,
+  `drm_output_find_plane_for_view`), so a picture added on top moves every picture beneath it to
+  another overlay, one that commit switches on. On the test Pi that move showed one black refresh
+  at the start of every cross-fade (owner, 2026-10-19: "The cross fade is looking smoother, but it
+  shows a black frame at the start of the transition"): the outgoing photo landed on a newly
+  switched-on overlay, which shows nothing for its first refresh. So when a layer fades in over an
+  opaque one and would itself be opaque at full (not a PNG, opacity 1), `compose` swaps the two:
+  the incoming at full beneath, the outgoing on top at `1 - strength`. The controller mixes
+  `a x top + (1 - a) x bottom`, so every pixel is the one the incoming at `strength` over the
+  outgoing gives; the outgoing keeps its overlay, the incoming enters beneath it, covered, and at
+  the end the outgoing is removed and its overlay takes the incoming's picture, as a cut does.
+  Costs: a PNG, or a layer of opacity below 1, still fades in on top (no order gives the same
+  mix), and a layer over one not opaque likewise; a third layer over a dissolve (a Run beneath
+  plus a fade) still moves the planes below it. Moving every picture's overlay never would take a
+  Weston patch that keeps each picture on the overlay it had; not done.
 - **Removed, never transparent.** A plane under `MIN_STRENGTH` (1/255) is left out, never shown
   at alpha 0; a plane's blend mode is always pre-multiplied, never None (bench T3).
 - **The cost the owner accepted** (Q2, 2026-10-17): a cross-fade is darker mid-way than a

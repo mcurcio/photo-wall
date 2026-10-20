@@ -34,7 +34,7 @@ from player.gpu import LINEAR, NV12, XR24, DmabufFrame, Target
 from player.pacing import DEFAULT_REFRESH, Word
 from player.plane_renderer import BAND_BYTES, FENCE_POLL, VIDEO_TARGETS, PlaneRenderer
 from player.plane_screen import FrameGrant, ScreenPicture
-from player.planes import Composition, Screen, plane_strength
+from player.planes import MIN_STRENGTH, Composition, Screen, plane_strength
 from player.rendering import LocalLayer, OutputComposition
 
 OUTPUT = "hdmi1"
@@ -353,9 +353,20 @@ def prepared_video(rig: Rig, clip: LocalLayer) -> FakeVideo:
     return decode
 
 
+def dissolved(alpha: float) -> list[tuple[str, float]]:
+    """The planes committed while "in" dissolves over "out" at `alpha` (player/planes.py, A shown
+    picture keeps its plane): "out" alone before; then "in" at full beneath "out" at 1 - alpha
+    (over a picture), "out" removed once under MIN_STRENGTH."""
+    if not alpha:
+        return [("out", 1.0)]
+    rest = round(1 - plane_strength(alpha, True), 9)
+    return [("in", 1.0)] + ([("out", rest)] if rest >= MIN_STRENGTH else [])
+
+
 def test_a_dissolve_draws_each_still_once_and_commits_the_plane_strengths():
-    """60 frame times through a one-second dissolve: two draws, 60 commits whose incoming strength
-    is its alpha (over a picture) and whose outgoing photo stays at full."""
+    """60 frame times through a one-second dissolve: two draws, 60 commits with the incoming photo
+    at full beneath and the outgoing one, which keeps its overlay, above it at 1 - the incoming's
+    alpha (over a picture)."""
     rig = Rig()
     outgoing, incoming = photo("out", start=0, end=200), photo("in", start=100, fade_in=1.0)
     rig.ready(outgoing, incoming)
@@ -369,8 +380,7 @@ def test_a_dissolve_draws_each_still_once_and_commits_the_plane_strengths():
     assert len(rig.screens.commits) == 60
     for index, (composition, _pictures, _tag, _change) in enumerate(rig.screens.commits):
         alpha = incoming.layer.alpha(100.0 + times[index] - start)
-        wanted = [("out", 1.0)] + ([("in", round(plane_strength(alpha, True), 9))] if alpha else [])
-        assert rig.strengths(index) == wanted
+        assert rig.strengths(index) == dissolved(alpha)
 
 
 def test_a_dip_to_black_commits_the_srgb_strength():
@@ -1039,8 +1049,7 @@ def test_a_dissolve_held_by_one_present_is_committed_by_frame_at_every_frame_tim
     assert len(rig.screens.commits) == commits + 60 and len(rig.fitter.draws) == 2
     for index, at in enumerate(times):
         alpha = incoming.layer.alpha(100.0 + at - start)
-        wanted = [("out", 1.0)] + ([("in", round(plane_strength(alpha, True), 9))] if alpha else [])
-        assert rig.strengths(commits + index) == wanted
+        assert rig.strengths(commits + index) == dissolved(alpha)
 
 
 def test_due_asks_a_pending_fence_again_soon_never_at_once():
