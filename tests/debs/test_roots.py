@@ -228,3 +228,84 @@ def test_the_app_root_loads_every_library_the_gpu_device_needs(mounted) -> None:
         capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert all(json.loads(result.stdout.strip().splitlines()[-1]).values())
+
+
+# Run in the app root (chroot, a private tmpfs on /tmp): the Player's own decodes on the root's
+# GStreamer, counting the process's open descriptors (fstat, as the chroot has no /proc) before and
+# after DECODES stills and DECODES refused videos, each closed. A leaked pipeline keeps its bus's
+# two sockets: on 2026-10-20 every photo leaked a pair and the Player ran out of descriptors.
+DECODES = 20
+DECODE_DESCRIPTORS = r"""
+import gc, json, os, resource, struct, sys, time, zlib
+from pathlib import Path
+os.environ["GST_REGISTRY"] = "/tmp/gst-registry.bin"
+sys.path[:0] = ["/usr/lib/photo-wall/player"]
+from player.decode import StillDecode, VideoFrames, VideoRefused
+decodes = int(sys.argv[1])
+
+def chunk(tag, data):
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+
+width, height = 64, 48
+photo = Path("/tmp/photo.png")
+photo.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+                  + chunk(b"IDAT", zlib.compress(b"".join(b"\x00" + bytes((200, 100, 50)) * width
+                                                          for _ in range(height))))
+                  + chunk(b"IEND", b""))
+
+def descriptors():
+    count = 0
+    for fd in range(min(resource.getrlimit(resource.RLIMIT_NOFILE)[0], 65536)):
+        try:
+            os.fstat(fd)
+        except OSError:
+            continue
+        count += 1
+    return count
+
+def still():
+    decode = StillDecode(photo)
+    deadline = time.monotonic() + 30
+    while (result := decode.result()) == "pending" and time.monotonic() < deadline:
+        time.sleep(0.005)
+    decode.close()
+    return None if isinstance(result, str) else list(result.size)
+
+def video():
+    try:
+        VideoFrames(photo, lambda: None).close()
+    except VideoRefused:
+        pass
+
+sizes = [still() for _ in range(3)]          # warm: the registry and GStreamer's own state
+video()
+gc.collect()
+before = descriptors()
+sizes += [still() for _ in range(decodes)]
+gc.collect()
+stills = descriptors()
+for _ in range(decodes):
+    video()
+gc.collect()
+print(json.dumps({"sizes": sizes, "before": before, "stills": stills, "videos": descriptors()}))
+"""
+
+
+def test_the_players_decodes_free_their_descriptors(mounted) -> None:
+    """Each still decoded and closed, and each video refused, leaves the Player's open descriptors
+    where they were (player/decode.py, module rule "Teardown"): fewer than one pipeline's two bus
+    sockets across all DECODES of each."""
+    role, mount = mounted
+    if role != "app":
+        return                          # the Player is the app root's alone
+    result = subprocess.run(
+        as_root(["unshare", "--fork", "--pid", "--mount", "--kill-child", "sh", "-ec",
+                 'mount -t tmpfs tmpfs "$1/tmp"\n'
+                 'exec chroot "$1" /usr/bin/python3 -I -B -c "$2" "$3"',
+                 "sh", str(mount / "rootfs"), DECODE_DESCRIPTORS, str(DECODES)]),
+        capture_output=True, text=True, timeout=240)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert report["sizes"] == [[64, 48]] * (3 + DECODES), result.stderr
+    assert report["stills"] - report["before"] < 2, report
+    assert report["videos"] - report["stills"] < 2, report
