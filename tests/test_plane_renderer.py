@@ -19,12 +19,13 @@ from test_executor import LIGHTING, binding, layer, media
 
 from contracts.calibration_target import TargetCode
 from contracts.frame_fit import Placement, place_box
-from contracts.frame_lighting import AT_FULL, FrameLighting, Paper, WashLight
+from contracts.frame_lighting import AT_FULL, FarLight, FrameLighting, Paper, WashLight
 from contracts.models import Calibration, PositionBox
 from contracts.node_frame import neutral_operations
 from contracts.node_picture import DisplayLight
 from contracts.room_light import FixedColour, FixedEntry, RoomLightsDocument
 from contracts.tuning import TestPattern
+from player import geometry as geometry_module
 from player import plane_renderer as plane_renderer_module
 from player.calibration_target import target_modules
 from player.calibration_trial import AppliedTrial
@@ -434,6 +435,57 @@ def test_what_a_still_depends_on_finishes_it_again_and_nothing_else_does():
     request = rig.fitter.draws[-1][0]
     assert request.turn == 90 and rig.screens.commits[-1][0].screen.turn == 90
     assert rig.screens.commits[0][3] is None            # the stand-in's draw names no change
+
+
+def test_a_frames_lights_are_worked_out_only_when_what_they_read_changes(monkeypatch):
+    """The Frame's lights and peak (player/geometry.py `picture_lights`, a 33 x 33 grid in Python)
+    are worked out once for what they read: the Frame's lighting, its room lights' entries, its
+    physical size and the Display's light; ticks and presents with all four unchanged reuse them,
+    a change to any one works them out again and the next finish draws with it. Mutation probe:
+    drop the memo on `picture_lights` -> every prepare and present counts one more."""
+    worked = []
+    brightest = geometry_module._brightest_white
+    monkeypatch.setattr(geometry_module, "_brightest_white", lambda *a: worked.append(a) or brightest(*a))
+    lighting = FrameLighting(mat_depth_mm=3, paper=Paper(whiteness=.91, ink_density=2.1), lights=(
+        WashLight(light="memo-wash", lux=123.25, reference=AT_FULL),
+        FarLight(light="memo-far", lux=321.5, reference=AT_FULL, from_degrees=30, steep_degrees=40,
+                 softness_degrees=5)))
+    rig = Rig()
+    rig.renderer.set_room_lights(RoomLightsDocument(change=1, lights={
+        "memo-wash": FixedEntry(colour=FixedColour(kelvin=4000)),
+        "memo-far": FixedEntry(colour=FixedColour(kelvin=5000))}))
+    still = photo("still", start=0)
+    frame = framed(lighting=lighting, display_mm=(950, 540))
+
+    def turns() -> list:
+        """A few ticks: prepare, present and finish with nothing changed; the lights drawn."""
+        for _ in range(5):
+            rig.renderer.prepare(still, frame)
+            rig.settle(still, frame=frame)
+            rig.clock.tick()
+        return rig.fitter.draws[-1][0].lights
+
+    first = turns()
+    assert len(worked) == 1
+    assert turns() == first and len(worked) == 1
+
+    rig.renderer.set_room_lights(RoomLightsDocument(change=2, lights={
+        "memo-wash": FixedEntry(colour=FixedColour(kelvin=4000)),
+        "memo-far": FixedEntry(colour=FixedColour(kelvin=3000))}))
+    warmer = turns()
+    assert len(worked) == 2 and warmer.lights != first.lights
+
+    rig.screens.operations = neutral_operations(OUTPUT, 7, DisplayLight(150, .01))
+    dimmer_display = turns()
+    assert len(worked) == 3 and dimmer_display.peak != warmer.peak
+
+    frame = framed(lighting=lighting.model_copy(update={"lights": lighting.lights[:1]}), display_mm=(950, 540))
+    wash_only = turns()
+    assert len(worked) == 4 and len(wash_only.lights) == 1
+
+    frame = framed(lighting=lighting.model_copy(update={"lights": lighting.lights[:1]}), display_mm=(1200, 675))
+    larger = turns()
+    assert len(worked) == 5 and larger.size_mm != wash_only.size_mm
 
 
 def test_a_covered_layer_keeps_its_picture():

@@ -184,6 +184,11 @@ transparency (a PNG) pre-multiplied. Within one level of 256 of the reference.
   decode, its finish size, the turn, the crop, the box's shape, the Display's picture
   operations, the Frame's lights, its LUT's generation); a video on each new decoded frame while
   it is seen. Never for a fade.
+- **When a Frame's lights are worked out**: `prepare` and `present` ask for them on every tick, and
+  `player/geometry.py` `picture_lights` works them out (its peak a 33 x 33 grid in Python) only when
+  what they read changes: the Frame's lighting, its room lights' entries, its physical size or the
+  Display's light; otherwise its memo answers. The memo is never a source of truth: empty, it costs
+  only time.
 - **Finishing is off the present path.** `present`, `frame` and `prepare` never draw, upload,
   import or fence. `finish`, run after a turn's commits, does the work owed: each seen video's
   newest frame (one draw per video per call), every pattern ground and black picture, then at most

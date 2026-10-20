@@ -46,6 +46,7 @@ from __future__ import annotations
 import itertools
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Final, Literal
 
 from contracts.calibration_target import (
@@ -652,6 +653,9 @@ def fit_source_uv(u: float, v: float, aspect: float, source: tuple[int, int],
     return left + u*(right-left), top + v*(bottom-top)
 
 
+FRAME_LIGHTS_MEMO: Final = 16   # `picture_lights` results kept: a Pi's Frames (two Outputs), their trials, spare
+
+
 def picture_lights(lighting: FrameLighting, document: RoomLightsDocument | None,
                    size_mm: tuple[float, float] | None, display: DisplayLight) -> FrameLights:
     """`lighting`'s lights against `document` (None: none received yet, so every light adds none), in
@@ -660,13 +664,23 @@ def picture_lights(lighting: FrameLighting, document: RoomLightsDocument | None,
     screen, not the wall), each light that adds light (`_lit`), with the Frame's peak: the paper
     white's brightest signal over the picture (`_brightest_white`). With `size_mm` None (the
     Display states no size) only wash lights add light: far and close lights and the mat's shadow
-    need millimetres. Pure."""
+    need millimetres. Pure, and worked out once for what it reads (`_frame_lights`): the renderer
+    asks on every tick and present, and the peak is PEAK_GRID^2 points in Python."""
+    entries = tuple(None if document is None else document.lights.get(light.light) for light in lighting.lights)
+    return _frame_lights(lighting, entries, size_mm, display)
+
+
+@lru_cache(maxsize=FRAME_LIGHTS_MEMO)
+def _frame_lights(lighting: FrameLighting, entries: tuple[RoomLightEntry | None, ...],
+                  size_mm: tuple[float, float] | None, display: DisplayLight) -> FrameLights:
+    """`picture_lights` of `lighting` whose i-th light's room-light entry is `entries[i]`: keyed by
+    exactly what the result depends on (every argument is frozen and hashable, compared by value),
+    so a memo hit is the same answer and an empty memo only costs time."""
     mat = UNSIZED_MAT if size_mm is None else size_mm
     lights = []
-    for light in lighting.lights:
+    for light, entry in zip(lighting.lights, entries, strict=True):
         if size_mm is None and not isinstance(light, WashLight):
             continue
-        entry = None if document is None else document.lights.get(light.light)
         rgb = light_on_frame(light, entry)
         if max(rgb) > 0:
             lights.append(_lit(light, rgb, lighting.mat_depth_mm, mat))
