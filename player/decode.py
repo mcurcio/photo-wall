@@ -19,6 +19,12 @@ Rules this module owns (one home each):
 - **The still pipeline** (`StillDecode`): filesrc ! decodebin ! videoconvert ! RGBA appsink,
   prerolled once; JPEG and PNG.
 - **Paths**: absolute filesystem paths only, never a URL (ValueError("decode_path")).
+- **Teardown** (`_Handlers`, player/architecture G13 and the 2026-10-20 fireplace incident): every
+  signal handler a decode connects goes through its `_Handlers`, which holds the decode only weakly
+  and refuses a handler that would hold it strongly; `close()` stops the pipeline, disconnects every
+  handler and drops the pipeline, so nothing keeps a pipeline (and its bus's two sockets) alive
+  once its decode is closed. A GObject signal's closure is invisible to Python's garbage collector:
+  a strong cycle through one is never collected.
 
 Rules it does NOT own: which position a video plays at (contracts/models.py `Layer.position`); GPU
 imports (player/gpu.py); when a layer is decoded (player/plane_renderer.py).
@@ -27,6 +33,7 @@ from __future__ import annotations
 
 import math
 import time
+import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -100,6 +107,39 @@ def _element(gst: Any, factory: str, **properties: Any) -> Any:
     return element
 
 
+class _Handlers:
+    """The signal handlers one decode connects (module rule "Teardown"): the one way a decode
+    connects a signal. A handler that is the owner's method is called through a weak reference;
+    any other handler that holds the owner (as its `self` or in its closure) is refused
+    (TypeError("decode_handler_holds_owner")), so no handler keeps its decode alive."""
+
+    def __init__(self, owner: object) -> None:
+        self._owner = weakref.ref(owner)
+        self._connected: list[tuple[Any, int]] = []
+
+    def connect(self, instance: Any, signal: str, handler: Callable[..., Any], *data: Any) -> None:
+        owner = self._owner()
+        if getattr(handler, "__self__", None) is owner:
+            handler = _weakly(weakref.WeakMethod(handler))
+        elif any(cell.cell_contents is owner for cell in getattr(handler, "__closure__", None) or ()):
+            raise TypeError("decode_handler_holds_owner")
+        self._connected.append((instance, instance.connect(signal, handler, *data)))
+
+    def close(self) -> None:
+        """Disconnect every handler (once the pipeline is NULL: no streaming thread calls one)."""
+        for instance, handler_id in self._connected:
+            instance.disconnect(handler_id)
+        self._connected.clear()
+
+
+def _weakly(method: weakref.WeakMethod) -> Callable[..., Any]:
+    """A handler calling `method` while its object lives (nothing once it is gone)."""
+    def call(*arguments: Any) -> Any:
+        bound = method()
+        return None if bound is None else bound(*arguments)
+    return call
+
+
 class StillDecode:
     """One still's decode (module rule), started at construction and polled."""
 
@@ -110,7 +150,9 @@ class StillDecode:
         self._started = time.monotonic()
         self._outcome: StillPicture | Literal["failed"] | None = None
         self._alpha = False
-        self._pipeline = gst.Pipeline.new(None)
+        self._handlers = _Handlers(self)
+        self._sink: Any = None
+        self._pipeline: Any = gst.Pipeline.new(None)
         try:
             source = _element(gst, "filesrc", location=str(location))
             decode = _element(gst, "decodebin")
@@ -118,14 +160,14 @@ class StillDecode:
             caps = _element(gst, "capsfilter", caps=gst.Caps.from_string("video/x-raw,format=RGBA"))
             self._sink = _element(gst, "appsink", sync=False, max_buffers=1, emit_signals=False)
         except VideoRefused:
-            self._outcome = "failed"
+            self._fail()
             return
         for element in (source, decode, convert, caps, self._sink):
             self._pipeline.add(element)
         source.link(decode)
         convert.link(caps)
         caps.link(self._sink)
-        decode.connect("pad-added", self._decoded, convert)
+        self._handlers.connect(decode, "pad-added", self._decoded, convert)
         if self._pipeline.set_state(gst.State.PAUSED) == gst.StateChangeReturn.FAILURE:
             self._fail()
 
@@ -155,22 +197,23 @@ class StillDecode:
             picture = _still_of(sample, self._alpha)
             if picture is None:
                 return self._fail()
-            self._outcome = "failed"                    # handed over: nothing kept
-            self._pipeline.set_state(gst.State.NULL)
+            self.close()                                # handed over: nothing kept
             return picture
         if time.monotonic() - self._started > STILL_TIMEOUT:
             return self._fail()
         return "pending"
 
     def _fail(self) -> Literal["failed"]:
-        self._outcome = "failed"
-        self._pipeline.set_state(self._gst.State.NULL)
+        self.close()
         return "failed"
 
     def close(self) -> None:
-        """Stop the pipeline and drop the picture."""
-        self._pipeline.set_state(self._gst.State.NULL)
+        """Stop and free the pipeline (module rule "Teardown") and drop the picture; again, nothing."""
         self._outcome = "failed"
+        pipeline, self._pipeline, self._sink = self._pipeline, None, None
+        if pipeline is not None:
+            pipeline.set_state(self._gst.State.NULL)
+        self._handlers.close()
 
 
 def _has_alpha(format_name: str | None) -> bool:
@@ -212,7 +255,11 @@ class VideoFrames:
         self._fds: set[int] = set()
         self._serial = 0
         self._failed = False
-        self._pipeline = gst.Pipeline.new(None)
+        self._handlers = _Handlers(self)
+        self._probe: Any = None
+        self._probe_id = 0
+        self._sink: Any = None
+        self._pipeline: Any = gst.Pipeline.new(None)
         try:
             self._build(location, on_frame)
             started = self._pipeline.set_state(gst.State.PAUSED)
@@ -241,17 +288,19 @@ class VideoFrames:
         if not (source.link(demux) and parse.link(decoder) and decoder.link(caps)
                 and caps.link(sink)):
             raise VideoRefused("decode")
-        demux.connect("pad-added", self._demuxed, parse)
+        handlers = self._handlers
+        handlers.connect(demux, "pad-added", self._demuxed, parse)
 
         def ready(_sink: Any) -> Any:   # a streaming thread: only schedule (module rule)
             on_frame()
             return gst.FlowReturn.OK
 
-        sink.connect("new-sample", ready)
-        sink.connect("eos", lambda _sink: on_frame())   # the owner's next latest() loops
+        handlers.connect(sink, "new-sample", ready)
+        handlers.connect(sink, "eos", lambda _sink: on_frame())   # the owner's next latest() loops
         self._probe = self._native.allocation_probe(int(gst.QueryType.ALLOCATION))
-        if not self._native.gst_pad_add_probe(_pointer(sink.get_static_pad("sink")),
-                                              _PROBE_QUERY_DOWNSTREAM, self._probe, None, None):
+        self._probe_id = self._native.gst_pad_add_probe(
+            _pointer(sink.get_static_pad("sink")), _PROBE_QUERY_DOWNSTREAM, self._probe, None, None)
+        if not self._probe_id:
             raise VideoRefused("decode")
 
     @staticmethod
@@ -275,6 +324,8 @@ class VideoFrames:
     def latest(self) -> DmabufFrame | None:
         """The newest decoded frame not yet taken (None: none since the last), held until `done`;
         older undelivered frames are dropped. VideoRefused("decode") after a pipeline error."""
+        if self._failed:
+            raise VideoRefused("decode")
         gst = self._gst
         bus = self._pipeline.get_bus()
         while (message := bus.pop_filtered(gst.MessageType.ERROR | gst.MessageType.EOS)) is not None:
@@ -313,11 +364,19 @@ class VideoFrames:
         return tuple(sorted(self._fds))
 
     def close(self) -> None:
-        """Stop the pipeline; every held frame is released."""
+        """Stop and free the pipeline (module rule "Teardown"); every held frame is released. Once
+        closed, `seek` answers False and `latest` refuses; again, nothing."""
         for sample in self._held.values():
             self._native.gst_mini_object_unref(sample)
         self._held.clear()
-        self._pipeline.set_state(self._gst.State.NULL)
+        self._failed = True
+        pipeline, sink, self._pipeline, self._sink = self._pipeline, self._sink, None, None
+        if pipeline is not None:
+            pipeline.set_state(self._gst.State.NULL)
+        self._handlers.close()
+        if self._probe_id and sink is not None:
+            self._native.gst_pad_remove_probe(_pointer(sink.get_static_pad("sink")), self._probe_id)
+        self._probe_id = 0
 
 
 def _pointer(gobject: Any) -> int:
@@ -379,6 +438,7 @@ class _GstNative:
         for library, name, restype, argtypes in (
                 (core, "gst_pad_add_probe", ctypes.c_ulong,
                  [pointer, uint, self.probe_type, pointer, pointer]),
+                (core, "gst_pad_remove_probe", None, [pointer, ctypes.c_ulong]),
                 (core, "gst_mini_object_make_writable", pointer, [pointer]),
                 (core, "gst_mini_object_unref", None, [pointer]),
                 (core, "gst_query_add_allocation_meta", None, [pointer, ctypes.c_size_t, pointer]),
