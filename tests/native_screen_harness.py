@@ -57,6 +57,13 @@ nothing but the app is on screen.
    half size (player/planes.py `finish_size`) and the sub-window's viewport enlarges it: the four
    quadrants fill RECTANGLE, black outside. Mutation probe: skip `wp_viewport_set_destination` in
    frame-client.c -> the picture shows at half size in RECTANGLE's top-left quarter.
+11. a_picture_changing_slot_is_held_once_and_released_once (owner, 2026-10-19: "it shows a black
+   frame at the start of the transition"; player/planes.py, A shown picture keeps its plane): blue
+   alone, then green at full beneath blue at 0.75, the dissolve's start (blue moves from the first
+   sub-window to the second), captures the stored-value mix (0, 63.75, 191.25); then green alone:
+   once that commit is presented blue is released and green stays busy, so a picture moving
+   between sub-windows within one present is counted held once and released once
+   (frame-client.c `pw_screen_present`).
 """
 import json
 import mmap
@@ -830,6 +837,26 @@ def main() -> None:
         print(f"ENLARGED inside={inside} outside={outside}", flush=True)
         assert inside > 800 and outside > 5000, (inside, outside)
         print("PASS an_enlarged_picture_fills_its_placement", flush=True)
+
+        # 11. a_picture_changing_slot_is_held_once_and_released_once
+        alone = ask(op="present", tag="dissolve-0", planes=[["dissolve-out", BLUE, left, top, width, height, 1.0]])
+        assert isinstance(alone["result"], int), alone
+        await_frame(lambda frame: rectangle_check(BLUE, frame))
+        swapped = ask(op="present", tag="dissolve-1", planes=[["dissolve-in", GREEN, left, top, width, height, 1.0],
+                                                              ["dissolve-out", BLUE, left, top, width, height, 0.75]])
+        assert isinstance(swapped["result"], int), swapped
+        assert swapped["busy"] == {"dissolve-in": True, "dissolve-out": True}, swapped
+        await_frame(lambda frame: rectangle_check((0, 63.75, 191.25), frame))
+        ended = ask(op="present", tag="dissolve-2", planes=[["dissolve-in", GREEN, left, top, width, height, 1.0]])
+        assert isinstance(ended["result"], int), ended
+        await_frame(lambda frame: rectangle_check(GREEN, frame))
+        pump(lambda seen: isinstance(seen, CompositorPresentation) and seen.frame_tag == "dissolve-2")
+        end = time.monotonic() + 5
+        while (busy := ask(op="busy")["busy"]).get("dissolve-out") and time.monotonic() < end:
+            time.sleep(0.05)
+        print(f"SWAP busy={busy}", flush=True)
+        assert (busy["dissolve-in"], busy["dissolve-out"]) == (True, False), busy
+        print("PASS a_picture_changing_slot_is_held_once_and_released_once", flush=True)
     except BaseException:
         app_log.flush()
         print("APP LOG:\n" + APP_LOG.read_text()[-4000:], flush=True)

@@ -16,6 +16,17 @@ Rules this module owns (one home each):
 - **Which strength applies** (`compose`): over a picture exactly when the nearest seen layer
   beneath it on the same Frame is a media layer; otherwise over black. What can be seen is
   player/visibility.py `visible_now`'s, never a second rule.
+- **A shown picture keeps its plane** (`compose`, `_stacked`): Weston gives a screen's planes the
+  display controller's overlays from the top down (libweston/backend-drm/state-propose.c
+  `drm_output_find_plane_for_view`), so a plane added on top would move every picture beneath it
+  to another overlay, and the test Pi shows nothing from an overlay a commit switches on for its
+  first refresh (owner, 2026-10-19: "it shows a black frame at the start of the transition"). So
+  when a layer fades in over an opaque one and would itself be opaque at full (not a PNG, its
+  opacity 1), the two swap: the incoming at full beneath, the one already shown on top at
+  1 - the incoming's strength. The controller mixes stored values (a * top + (1 - a) * bottom),
+  so the picture is the same at every pixel; the new picture enters beneath, covered, and the
+  shown one keeps its overlay until it leaves. A PNG (it may carry transparency) or a layer of
+  opacity below 1 cannot be swapped and fades in on top, as does a layer over one not opaque.
 - **Removed, never transparent**: a plane under MIN_STRENGTH is left out of the composition (bench
   T3: an opaque picture at alpha 0 is not black; the plane is removed instead).
 - **The finish size** (`finish_size`, `Plane.size`): a picture (a still photo or a video's frame) is
@@ -43,7 +54,7 @@ from contracts.models import Layer
 from contracts.photo_crop import CENTRED, crop_window
 from player.geometry import encode_srgb
 from player.rendering import LocalLayer
-from player.visibility import visible_now
+from player.visibility import opaque, visible_now
 
 MIN_STRENGTH: Final = 1 / 255
 """The weakest plane shown: the controller's 8-bit plane alpha rounds anything below to 0."""
@@ -128,7 +139,8 @@ def plane_strength(alpha: float, over_picture: bool) -> float:
 def compose(screen: Screen, frames: Sequence[FrameLayers]) -> Composition:
     """`screen`'s composition: for each Frame in order, its seen layers (`visible_now`) bottom to
     top, each a Plane at the Frame's placement at `plane_strength(alpha, over_picture)` (module
-    rule), a plane under MIN_STRENGTH left out. Pure.
+    rule), a layer fading in over an opaque one beneath it at full and that one above at the rest
+    (module rule, A shown picture keeps its plane), a plane under MIN_STRENGTH left out. Pure.
 
     ValueError("compose_frames") for two FrameLayers with one frame_id; ValueError("compose_outside")
     unless every placement lies inside `screen.size` (0 <= x, x + width <= W, 0 <= y,
@@ -144,14 +156,24 @@ def compose(screen: Screen, frames: Sequence[FrameLayers]) -> Composition:
             raise ValueError("compose_outside")
         if any(local.layer.output_id != screen.output_id for local in frame.layers):
             raise ValueError("compose_output")
-        beneath = None
-        for local in visible_now(frame.layers):
-            over_picture = beneath is not None and beneath.layer.presentation == "media"
-            strength = plane_strength(local.alpha, over_picture)
-            if strength >= MIN_STRENGTH:
-                planes.append(Plane(frame.frame_id, local, at, strength))
-            beneath = local
+        planes.extend(Plane(frame.frame_id, local, at, strength)
+                      for local, strength in _stacked(visible_now(frame.layers)) if strength >= MIN_STRENGTH)
     return Composition(screen, tuple(planes))
+
+
+def _stacked(seen: Sequence[LocalLayer]) -> list[tuple[LocalLayer, float]]:
+    """One Frame's `seen` layers (bottom to top) as planes bottom to top, each with its strength:
+    `plane_strength` over what lies beneath it in stack order (module rule, Which strength
+    applies), the lowest two swapped when a shown picture keeps its plane (module rule)."""
+    stacked, beneath = [], None
+    for local in seen:
+        stacked.append((local, plane_strength(local.alpha, beneath is not None
+                                              and beneath.layer.presentation == "media")))
+        beneath = local
+    if len(seen) >= 2 and opaque(seen[0].layer, seen[0].alpha) and opaque(seen[1].layer, seen[1].layer.opacity):
+        (shown, _), (entering, strength) = stacked[:2]
+        stacked[:2] = [(entering, 1.0), (shown, 1.0 - strength)]
+    return stacked
 
 
 __all__ = ["MIN_STRENGTH", "Composition", "FrameLayers", "Plane", "Screen", "compose", "finish_size", "plane_strength"]
