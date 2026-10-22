@@ -34,6 +34,13 @@ from player.rendering import (
 )
 from player.visibility import beneath_shown, shed, shown_within, visible_now
 
+DRAW_GRACE = 0.5
+"""Seconds a request the renderer answers "pending" is waited on before its layers fail ("decode").
+It must exceed the longest a renderer holds a commit in flight (player/pacing.py `OVERDUE`) plus
+one planning tick (player/service.py `PLANNING_TICK_MS`), or a held request on a silent Output is
+given up before it can be committed ([plane renderer](../docs/module-plane-renderer.md), "One
+commit in flight"; held by tests/test_plane_renderer.py)."""
+
 
 class AuthorityError(ValueError):
     """A message cannot establish current execution authority."""
@@ -910,7 +917,7 @@ class Executor:
         if pending is None or pending[0] != key:
             pending = (key, self.clock.monotonic())
             self._pending_presentations[output_id] = pending
-        return self.clock.monotonic() - pending[1] < .5
+        return self.clock.monotonic() - pending[1] < DRAW_GRACE
 
     def _acknowledgment(self, candidate: OutputComposition,
                         result: PresentationResult) -> tuple[OutputComposition, float] | None:

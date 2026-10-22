@@ -167,7 +167,8 @@ def test_kept_still_takes_effect_from_its_first_draw_at_or_after_its_fade_in(
     assert [local.layer.assignment_id for local in shown.layers] == (["picture"] if kept else [])
 
 
-@pytest.mark.parametrize("fault", ["future", "binding", "layer", "calibration"])
+@pytest.mark.parametrize("fault", ["future", "binding", "layer", "calibration", "fallback", "path",
+                                   "position", "alpha"])
 def test_native_ack_rejects_stale_or_different_authority(tmp_path, fault):
     rig = Rig(tmp_path)
 
@@ -184,6 +185,14 @@ def test_native_ack_rejects_stale_or_different_authority(tmp_path, fault):
             elif fault == "calibration":
                 drawn = replace(drawn, binding=drawn.binding.model_copy(
                     update={"calibration": Calibration(fit=PositionBox(left=0.25, top=0.25, width=0.5, height=0.5))}))
+            elif fault == "fallback":
+                drawn = replace(drawn, fallback=not drawn.fallback)
+            elif fault == "path":
+                drawn = replace(drawn, layers=(replace(drawn.layers[0], path=Path("/elsewhere")),))
+            elif fault == "position":
+                drawn = replace(drawn, layers=(replace(drawn.layers[0], position=-1.0),))
+            elif fault == "alpha":
+                drawn = replace(drawn, layers=(replace(drawn.layers[0], alpha=1.5),))
             else:
                 local = drawn.layers[0]
                 drawn = replace(drawn, layers=(replace(local, layer=local.layer.model_copy(
@@ -194,6 +203,36 @@ def test_native_ack_rejects_stale_or_different_authority(tmp_path, fault):
     observations = rig.play(layer())
     assert not any(o.status == "presented" for o in observations)
     assert any(o.status == "failed" for o in observations)
+
+
+def test_each_request_answered_pending_gets_its_own_draw_grace(tmp_path):
+    """The draw grace runs per request (`OutputComposition.request`): a photo that follows one still
+    pending at its cut is waited on from its own first "pending", not its predecessor's, so a
+    renderer that takes 0.3 s to draw each never fails the second."""
+    rig = Rig(tmp_path)
+    delays = {"first": 1.0, "second": .3}
+    seen: dict[tuple, float] = {}
+
+    class SlowRenderer(RecordingRenderer):
+        def present(self, composition):
+            if not composition.layers:
+                return super().present(composition)
+            first_seen = seen.setdefault(composition.request, rig.clock.monotonic())
+            delay = max(delays[local.layer.assignment_id] for local in composition.layers)
+            if rig.clock.monotonic() - first_seen < delay:
+                return PresentationResult("pending")
+            return super().present(composition)
+
+    rig.renderer = rig.executor.renderer = SlowRenderer()
+    first = layer("first", data=b"first", end=100.4)
+    second = layer("second", data=b"second", start=100.4)
+    observations = list(rig.play(first, second, payloads={"first": b"first", "second": b"second"}))
+    for _ in range(10):
+        rig.advance(.1)
+        rig.executor.prepare_imminent()
+        observations += rig.executor.tick()
+    assert [o.status for o in observations if o.assignment_id == "second"][-1] == "presented"
+    assert not any(o.status == "failed" for o in observations)
 
 
 def test_a_still_photo_drawn_long_ago_still_reads_as_presented(tmp_path):

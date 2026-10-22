@@ -1397,11 +1397,12 @@ class Wall:
         while self.now + FRAME <= until:
             self.refresh()
 
-    def cut(self, at: float) -> int:
+    def cut(self, at: float, *, silent: bool = False) -> int:
         """The layer set changes at plan time `at` while the frame loop's last commit before it is
         in flight: the frame loop's next commit before `at` has its answer withheld; the planning
-        tick runs just after `at`; then the answer comes and the wall runs a second and a half on.
-        The index of the first commit after the one in flight."""
+        tick runs just after `at`; then the answer comes (never, if `silent`: the display says
+        nothing from then on) and the wall runs a second and a half on. The index of the first
+        commit after the one in flight."""
         self.run(at - 4 * FRAME)
         made = len(self.screens.commits)
         while len(self.screens.commits) == made:
@@ -1412,7 +1413,7 @@ class Wall:
         self.plan.advance(at - self.now + 0.005)
         self.tick()
         assert len(self.screens.commits) == mark, "nothing is committed while the last commit is in flight"
-        self.screens.answer = True
+        self.screens.answer = not silent
         self.run(at + 1.5)
         return mark
 
@@ -1471,3 +1472,26 @@ def test_a_photo_cut_in_over_a_playing_video_is_never_dropped(tmp_path):
     first = next(index for index, planes in enumerate(shown) if planes == ["cover"])
     assert all(planes == ["cover"] for planes in shown[first:])
     assert wall.failures() == []
+
+
+def test_a_cross_fades_end_on_a_silent_display_never_fails_the_new_photo(tmp_path):
+    """A display that never answers (off, or a slow compositor at its worst) holds each commit for
+    the pacer's OVERDUE: the planning tick's new request waits "pending" that long and is committed
+    by the first present to find the slot free, within the executor's draw grace. The old photo is
+    never shown after the cut and the new one never fails."""
+    wall = Wall(tmp_path)
+    old = still("old", start=100, end=106, after_end="keep_this_photo")
+    new = still("new", start=103, end=130, media_origin=103, fade_in=3, after_end="keep_this_photo")
+    wall.play(old, new)
+    mark = wall.cut(106, silent=True)
+    assert wall.shown(mark) and all(planes == ["new"] for planes in wall.shown(mark))
+    assert wall.failures() == []
+
+
+def test_the_draw_grace_outlasts_a_commit_in_flight_and_a_planning_tick():
+    """The executor gives a "pending" request up after DRAW_GRACE; the plane renderer holds a
+    commit in flight for at most OVERDUE, and the held request is committed by the next present,
+    at worst the next planning tick. A shorter grace fails a silent Output's new photo ("decode")
+    and shows the old one again (issue #130)."""
+    from player import executor, pacing, service
+    assert pacing.OVERDUE + service.PLANNING_TICK_MS / 1000 < executor.DRAW_GRACE

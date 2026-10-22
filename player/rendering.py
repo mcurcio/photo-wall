@@ -45,9 +45,9 @@ class OutputComposition:
     def request(self) -> tuple:
         """What the composition asks to be shown, apart from how it looks at a time (each layer's
         position and alpha, the timebase): its binding (the calibration with it), whether it is a
-        fallback, and its layers' media, bottom to top. The one home of "the same composition": a
-        renderer's "presented" answers only the request it was asked (`Renderer.present`), and the
-        executor waits for a draw by it (player/executor.py)."""
+        fallback, and each layer as planned (its timing, fades, priority and crop too) with its
+        file, bottom to top. The one home of "the same composition" (`Renderer.present`; the
+        executor waits for a draw by it, player/executor.py)."""
         return self.binding, self.fallback, tuple((local.layer, local.path) for local in self.layers)
 
 
@@ -89,9 +89,8 @@ class Renderer(Protocol):
 
     def capacity(self, compositions: tuple[OutputComposition, ...]) -> CapacityResult: ...
 
-    # "presented" answers `composition`'s request alone (`OutputComposition.request`); a renderer
-    # that cannot show it yet (a commit in flight, a picture unfinished) answers "pending", never
-    # what it showed for another request.
+    # "presented" answers `composition`'s request alone (`OutputComposition.request`), never what
+    # was shown for another; one that cannot show it yet answers "pending".
     def present(self, composition: OutputComposition) -> PresentationResult: ...
 
     def release(self, assignment_id: str) -> None: ...

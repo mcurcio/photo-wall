@@ -120,6 +120,9 @@ APP_LINK_RETRY = 5.0
 # main_loop_late fault instead of waiting on a starved loop in silence (G8). Readiness
 # is left as last sent: a late loop never withdraws prepared playback (E-G8-8 decision).
 DISPATCH_DEADLINE = 2 * REPORT_INTERVAL
+# The planning tick's period (player/mainloop.py `Tick`): the executor's draw grace must outlast a
+# commit in flight plus one of them (player/executor.py `DRAW_GRACE`).
+PLANNING_TICK_MS = 33
 LOG = logging.getLogger("photo_wall.player")
 
 
@@ -1461,7 +1464,7 @@ def main():
 
     signal.signal(signal.SIGTERM, finish)
     signal.signal(signal.SIGINT, finish)
-    Tick(GLib, 33, tick)
+    Tick(GLib, PLANNING_TICK_MS, tick)
     service.start()
     # Probes are answered at control dispatch's priority (own one-slot lane), never here.
     ProbeResponder(dispatcher, on_relink=service.request_relink,

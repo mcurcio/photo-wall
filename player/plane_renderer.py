@@ -89,11 +89,9 @@ Rules this module owns (one home each):
   ("capacity"), nothing committed; a seen layer's picture (or the pattern) not finished yet:
   "pending", the screen keeps its last commit; else "presented" (that commit), its composition the
   looked one. A "presented" answers only the request asked (player/rendering.py
-  `OutputComposition.request`): while the screen's last commit is unanswered, the last answer if it
-  was made for this request, else "pending" (the frame loop and the planning tick share the one
-  commit in flight, and the frame loop's may be of another request: issue #130, the old photo
-  shown again at a cross-fade's end); a present that shows what the last commit shows answers with
-  this request's look.
+  `OutputComposition.request`; the frame loop and the planning tick share the one commit in flight):
+  while the screen's last commit is unanswered, the last answer if it was made for this request,
+  else "pending"; a present that shows what the last commit shows answers with this request's look.
 """
 from __future__ import annotations
 
@@ -586,10 +584,9 @@ class PlaneRenderer:
         one commit over the screen's ground (or its pattern ground), by its drawn Position, within
         the controller budget with every other Output's last commit (module rules, Outcomes). While
         the screen's last commit has no word from the compositor (player/pacing.py) nothing is
-        committed and the answer is the last commit's if it was made for this request, else
-        "pending" (`frame` commits the held request once the slot frees); a present that shows what
-        the last commit shows commits nothing either and answers with this request's look.
-        `composition` is held (module rule) for `frame`."""
+        committed; a present that shows what the last commit shows commits nothing either (the
+        answer in each case: module rule, Outcomes). `composition` is held (module rule) for
+        `frame`."""
         self._held[composition.binding.output_id] = composition
         return self._present(composition)
 
