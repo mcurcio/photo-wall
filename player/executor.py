@@ -904,8 +904,7 @@ class Executor:
         return False
 
     def _awaiting_draw(self, composition: OutputComposition) -> bool:
-        key = (tuple((local.layer, local.path) for local in composition.layers),
-               composition.binding, composition.calibration, composition.fallback)
+        key = composition.request
         output_id = composition.binding.output_id
         pending = self._pending_presentations.get(output_id)
         if pending is None or pending[0] != key:
@@ -926,13 +925,10 @@ class Executor:
         # A renderer's "presented" is a state (the draw still stands, however long ago it was
         # drawn: a still photo is never redrawn); only a draw time in the future is refused.
         age = self.clock.monotonic() - completed
-        if (not 0 <= age or drawn.binding != candidate.binding
-                or drawn.fallback != candidate.fallback
-                or len(drawn.layers) != len(candidate.layers)):
+        if not 0 <= age or drawn.request != candidate.request:
             return None
-        for actual, requested in zip(drawn.layers, candidate.layers, strict=True):
-            if (actual.layer != requested.layer or actual.path != requested.path
-                    or not math.isfinite(actual.position) or actual.position < 0
+        for actual in drawn.layers:
+            if (not math.isfinite(actual.position) or actual.position < 0
                     or not math.isfinite(actual.alpha) or not 0 <= actual.alpha <= 1):
                 return None
         if (result.applied_calibration is not None and result.applied_calibration.trial_id is None

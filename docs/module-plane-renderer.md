@@ -229,8 +229,14 @@ lease), presents every Output's held composition again at the frame time
   changes nothing. A still photo commits once and nothing after.
 - **One commit in flight** (`FramePacer.free`): a commit draws nothing, so it is made as soon as
   the last one is answered (presented or discarded, or overdue by `OVERDUE`, 0.25 s, for an Output
-  that says nothing). A present while the last commit is unanswered returns its last answer at
-  once, before any sweep, grant or setting work, and `due` reads each such screen's word before
+  that says nothing). A present while the last commit is unanswered commits nothing and answers
+  at once, before any sweep, grant or setting work: the last answer when it was made for the same
+  request (`OutputComposition.request`: the binding, fallback and layers' media; the look aside),
+  else "pending". The frame loop and the planning tick share the one slot, so a request may meet
+  the frame loop's commit of another (a cross-fade's end, a dip's cut, any change while a video
+  plays); answering that one's "presented" dropped the new photo and showed the Scene's kept, old
+  one (issue #130). The held request is committed by the next `frame` once the slot frees, and
+  the executor waits on "pending" as for any draw. `due` reads each such screen's word before
   judging its commit overdue: a turn that only asks a fence costs a read, not a present (the main
   thread was 87 % busy while a video's fence was pending, milestone 3). No steady-cadence slot: a commit aimed at one missed Weston's repaint deadline
   once and every one after it (tracer 2, finding E), so the old pacer's slot is gone.
@@ -254,7 +260,9 @@ lease), presents every Output's held composition again at the frame time
 on the screen, a refused trial or a refused picture, "failed" (`decode`); over the controller
 budget with every other Output's last commit, "failed" (`capacity`), nothing committed; a seen
 layer's picture or the pattern not finished yet, "pending" (the screen keeps its last commit);
-else "presented", its composition the looked one and `presented_at` the commit's time. "Presented"
+else "presented", its composition the looked one and `presented_at` the commit's time. A
+"presented" answers only the request it was asked (player/rendering.py `Renderer.present`); one
+that shows what the last commit shows answers it with this request's look. "Presented"
 is the compositor's word for that commit: application evidence, not photons. Any part that
 cannot be built at start (no Weston, no render node, a program that does not link) leaves the
 Player registrable without a picture (`UnavailableRenderer`, fault `native_initialization`).
