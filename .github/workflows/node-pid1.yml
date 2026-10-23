@@ -24,7 +24,9 @@ name: Player node real-PID1 lifecycle scenarios
 #             Node within 60 s (erratum E-E3B-FR1) and its leaf relinked
 #   dark      a frozen Player (SIGSTOP), then a killed one (kill -9): each time the debug
 #             overlay's card names the cause and the Pi-clock time within 20 s, and for 45 s
-#             nothing starts the Player again (issues #123, #125); about 3 minutes
+#             nothing starts the Player again (issues #123, #125); with Central's hub, Central
+#             records the health judge's verdict, Virtual-1 dark with app_absent (issue #126);
+#             about 3 minutes
 #
 # Each leg boots the components node-components.yml built ONCE for the run (the release roots and
 # the release writer's set, scripts/node_release_writer.py) and the PID1 fixture it derived from
@@ -142,9 +144,10 @@ jobs:
       - name: Start the disposable test database
         run: docker compose -f tests/integration/compose.test-database.yml up -d --wait
 
-      # The join's hub; the test fails, never skips, without it under PHOTO_WALL_TEST_REQUIRE_NODE_PID1.
+      # The hub of the join and of the dark leg (Central records the health line's verdict); the
+      # test fails, never skips, without it under PHOTO_WALL_TEST_REQUIRE_NODE_PID1.
       - name: Fetch the pinned nats-server
-        if: matrix.scenario == 'join'
+        if: matrix.scenario == 'join' || matrix.scenario == 'dark'
         run: |
           binary=$(python3 scripts/nats_server.py fetch --dest "$RUNNER_TEMP/nats")
           echo "PHOTO_WALL_NATS_SERVER=$binary" >> "$GITHUB_ENV"

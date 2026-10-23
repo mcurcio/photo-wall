@@ -22,6 +22,7 @@ from typing import Annotated
 from pydantic import Field
 
 from contracts.models import Model
+from contracts.node_faults import FAULTS
 from contracts.node_health import HealthReport
 from contracts.node_output import SET_TIME_PATTERN
 
@@ -39,7 +40,14 @@ def frame_dark(report: HealthReport | None, output_id: str | None) -> FrameDark 
     """The bound Output's darkness: None when `report` or `output_id` is None, when the report names
     no entry for `output_id`, or when that entry is not dark; else FrameDark(entry.code, the
     catalogue's household line for it, entry.since). Pure."""
-    ...
+    if report is None or output_id is None:
+        return None
+    entry = next((output for output in report.outputs if output.output_id == output_id), None)
+    if entry is None or not entry.dark:
+        return None
+    fault = FAULTS.get(entry.code)
+    return FrameDark(code=entry.code, line=entry.code if fault is None else fault.household_line,
+                     since=entry.since)
 
 
 __all__ = ["FrameDark", "frame_dark"]

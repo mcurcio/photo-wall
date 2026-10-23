@@ -338,7 +338,8 @@ def test_the_judge_closure_is_small_and_the_base_ships_its_unit():
     unit = (REPO / "appliance/systemd/photo-wall-health.service").read_text().splitlines()
     for line in ("User=pw-health", "Group=pw-health", "SupplementaryGroups=pw-node-feeds",
                  "RuntimeDirectory=photo-wall-health", "RuntimeDirectoryMode=0755",
-                 "RestrictAddressFamilies=AF_UNIX", "ProtectSystem=strict", "PrivateDevices=yes",
+                 "RestrictAddressFamilies=AF_UNIX AF_INET", "IPAddressDeny=any",
+                 "IPAddressAllow=localhost", "ProtectSystem=strict", "PrivateDevices=yes",
                  "NoNewPrivileges=yes", "CapabilityBoundingSet=", "MemoryMax=64M",
                  "Restart=always", "RestartSec=2", "Slice=photowallbase.slice",
                  "After=photo-wall-app-broker.service",

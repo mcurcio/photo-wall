@@ -30,6 +30,33 @@ if any("/" in cgroup_path(name) or not cgroup_path(name).endswith(".slice") for 
     raise ValueError("oom_row_not_a_slice")
 
 
+WDIOF_CARDRESET = 0x20  # linux/watchdog.h: "Card previously reset the CPU"
+WATCHDOG_BOOTSTATUS = Path("/sys/class/watchdog/watchdog0/bootstatus")
+
+
+def _sysfs_int(path: Path) -> int | None:
+    try:
+        return int(path.read_text().strip(), 0)
+    except (OSError, ValueError, UnicodeDecodeError):
+        return None
+
+
+def reset_cause(path: Path = WATCHDOG_BOOTSTATUS) -> str | None:
+    """Why this boot began, from the hardware watchdog's `bootstatus` (issue #125): "watchdog" when
+    its WDIOF_CARDRESET bit is set, "other" for another value, None when it is missing or
+    unreadable. A driver whose `options` (beside it) does not offer WDIOF_CARDRESET can never set
+    that bit (the watchdog API reports only what `options` names), so its bootstatus reads None,
+    never "other": the Pi 5's bcm2835-wdt is one (options 0x8180, bootstatus always 0; read on the
+    test Pi 75628d0c, 2026-10-23)."""
+    status = _sysfs_int(path)
+    if status is None:
+        return None
+    options = _sysfs_int(path.with_name("options"))
+    if options is not None and not options & WDIOF_CARDRESET:
+        return None
+    return "watchdog" if status & WDIOF_CARDRESET else "other"
+
+
 def _unit_name(value: str) -> bool:
     try:
         token(value, 96)

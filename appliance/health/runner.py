@@ -14,8 +14,10 @@ packet and admitted per `SO_PEERCRED` uid): `status` (uid 0 only) answers the ve
 and each feed's read position, then closes; `overlay` (uid 10005, pw-display's overlay client,
 only) stays open: the judge pushes each connected Output's `OverlayInstruction` (one packet each)
 at once, whenever one changes, and every V/3, and reads back `PresentedReport` packets into the
-ring. It never connects to the compositor, launches or kills anything, or talks to Central (its
-unit allows AF_UNIX only).
+ring. Each new verdict also goes on its Node's bus, the `health` line's HEALTH_REPORT_KEY
+(appliance/health/bus.py), from which Central records it (issue #126): the session runs on its own
+thread and the judge only queues. It never connects to the compositor, launches or kills anything,
+or talks to Central directly (its unit allows AF_UNIX, and AF_INET to localhost only: the bus).
 
 The judge is built from the published constants: T, k and S from App lifecycle
 (`appliance.kernel.probe_timing`), D from Display (`appliance.display_host.overlay.instruction`) and the
@@ -27,6 +29,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import os
 import selectors
 import socket
@@ -44,7 +47,9 @@ from appliance.display_host.overlay.instruction import (
 )
 from appliance.feed import READ_LIMIT, FeedCursor, FeedEvent
 from appliance.feed_socket import peer_uid
+from appliance.health.bus import HEALTH_SLICE, BusHealthSink, health_session
 from appliance.health.judge import HealthJudge, Presented, display_outputs
+from appliance.health.report import health_report
 from appliance.kernel.clock import boottime_ms
 from appliance.kernel.probe_timing import SHIPPED_TIMING
 from contracts.node_faults import FAULTS, catalogue_digest
@@ -72,6 +77,8 @@ MAX_OVERLAY_CLIENTS = 4  # a fifth connection replaces the oldest (a respawned c
 MAX_REPORT = 512
 REPORTS_PER_WAKE = 16
 SEQPACKET = socket.SOCK_SEQPACKET
+
+log = logging.getLogger(__name__)
 
 
 def shipped_judge() -> HealthJudge:
@@ -381,18 +388,37 @@ class HealthSocket:
 
 class HealthRunner:
     """One judge, its feed readers, its socket and the overlay clients on one thread: reads
-    and publishes every READ_PERIOD, answers requests and reads reports in between."""
+    and publishes every READ_PERIOD, answers requests and reads reports in between. With a
+    `sink`, each turn whose verdict sequence differs from the last one put hands the verdict to
+    it as a HealthReport (appliance/health/report.py); the sink only queues, so the judge never
+    waits on the bus, and a verdict the contract refuses is logged and skipped."""
 
     def __init__(self, judge: HealthJudge, readers: Sequence[FeedReader], *,
-                 clock: Callable[[], int] = boottime_ms, card: CardClock | None = None):
-        self.judge, self.readers, self.clock = judge, tuple(readers), clock
+                 clock: Callable[[], int] = boottime_ms, wall: Callable[[], int] = wall_ms,
+                 sink: BusHealthSink | None = None, card: CardClock | None = None):
+        self.judge, self.readers, self.clock, self.wall, self.sink = judge, tuple(readers), clock, wall, sink
         self.card = card or CardClock()
         self.overlay = OverlayClients(judge, card=self.card)
+        self._put_sequence: int | None = None  # the verdict sequence last handed to the sink
 
     def turn(self) -> None:
         for reader in self.readers:
             reader.drain(self.judge, self.clock)
+        self._report(self.clock())
         self.overlay.publish(self.clock())
+
+    def _report(self, now_ms: int) -> None:
+        if self.sink is None:
+            return
+        verdict = self.judge.verdict(now_ms)
+        if verdict.sequence == self._put_sequence:
+            return
+        self._put_sequence = verdict.sequence
+        try:
+            self.sink.put(health_report(verdict, now_ms=now_ms, wall_ms=self.wall(),
+                                        catalogue=catalogue_digest()))
+        except ValueError as error:   # outside the contract: the overlay still shows it
+            log.warning("health verdict %s not put on the bus: %s", verdict.sequence, error)
 
     def answer(self, operation: str) -> dict:
         if operation != "status":
@@ -422,14 +448,20 @@ class HealthRunner:
 
 
 def main() -> None:
+    # The health line's session: it connects on its own thread forever, so the judge never waits on
+    # the bus, and it is kept for the process's life.
+    session = health_session(HEALTH_SLICE.digest)
+    session.start()
     runner = HealthRunner(shipped_judge(), (FeedReader("broker", BROKER_FEED_SOCKET),
-                                            DisplayFeedReader("display", DISPLAY_FEED_SOCKET)))
+                                            DisplayFeedReader("display", DISPLAY_FEED_SOCKET)),
+                          sink=BusHealthSink(session))
     server = HealthSocket(HEALTH_SOCKET, runner.answer, stream=runner.stream)
     try:
         runner.run(server)
     finally:
         runner.overlay.close()
         server.close()
+        session.stop()
 
 
 if __name__ == "__main__":

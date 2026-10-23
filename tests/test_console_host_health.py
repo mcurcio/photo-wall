@@ -297,6 +297,10 @@ console.log(JSON.stringify({
   silent: view(row({ host: { received_at: 1000 - 3 * 3600, metrics: [], fault_code: null } }), LIMITED),
   refused: view(row({ host: { received_at: 880, metrics: [], fault_code: null }, intake_full: true }),
     LIMITED),
+  watchdog: view(row({ facts: { ...FACTS, reset_cause: "watchdog" } })),
+  otherStart: view(row({ facts: { ...FACTS, reset_cause: "other" } })),
+  watchdogSilent: view(row({ host: { received_at: 1000 - 3 * 3600, metrics: [], fault_code: null },
+    facts: { ...FACTS, reset_cause: "watchdog" } }), LIMITED),
 }));
 """
 
@@ -348,6 +352,14 @@ def test_host_facts_and_the_base_are_worded_once_per_record():
     for state in ("silent", "refused"):
         assert [item[3] for item in out[state]["items"]] == last, state
         assert out[state]["receipt"] == ["reported", "first received 3 d ago"], state
+    # Issue #125: a start after a hardware watchdog reset is shown on the Hardware page; any other
+    # start, or one not read (no reset_cause), adds no line.
+    assert out["watchdog"]["items"] == [*out["full"]["items"], [
+        "reset_cause", "Software", "reported",
+        "Host Management reported Last start: after a hardware watchdog reset"]]
+    assert out["otherStart"] == out["full"]
+    assert out["watchdogSilent"]["items"][-1][3] == (
+        "Host Management reported Last start: after a hardware watchdog reset at last report")
 
 
 TABLE_SCRIPT = r"""

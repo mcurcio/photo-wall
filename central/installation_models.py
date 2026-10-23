@@ -8,6 +8,7 @@ from typing import Annotated, Literal, Self
 from pydantic import Field, JsonValue, model_validator
 
 from central.displays.model import Readiness
+from central.fleet.frame_dark import FrameDark
 from contracts.enrollment import OutputReport
 from contracts.frame_lighting import FrameLighting
 from contracts.liveness import REPORT_INTERVAL, SILENT_AFTER_SECONDS
@@ -89,6 +90,7 @@ class FrameInventory(Model):
     screen_px: tuple[Pixels, Pixels] | None    # the bound Output's screen (central/displays/model.py `screen_px`); None: unbound or unknown
     display_mm: tuple[int, int] | None         # the Display seen there's size (its EDID's); None: none seen, or none stated
     size_mm: tuple[PositiveMm, PositiveMm] | None  # contracts.models.frame_size_mm(calibration.fit, display_mm, turn): the wall plan draws it; None: not known
+    dark: FrameDark | None = None              # its Output's debug overlay is tinted, from its Pi's health verdict (central/fleet/frame_dark.py); None: not dark, or no verdict
 
 
 class FrameOutput(Model):

@@ -25,8 +25,13 @@ compared with another clock (the owner's rule: clocks compare only to themselves
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final
+
+from contracts.node_output import decode_set_time
+from contracts.node_protocol import digest, token
+from contracts.wire_codec import decode, encode, fields_of, list_of, require, whole
 
 HEALTH_LINE: Final = "health"                # contracts.node_link.STORE_LINES["health"]
 HEALTH_COMPONENT: Final = "health"           # the component writing the line, and its birth's name
@@ -34,6 +39,7 @@ HEALTH_SCHEMA_MAJOR: Final = 1               # the major of the line's keys belo
 HEALTH_REPORT_KEY: Final = "verdict"         # the state key of a HealthReport
 HEALTH_REPORT_BYTES: Final = 4096            # its largest encoding
 MAX_HEALTH_OUTPUTS: Final = 16               # the most Outputs one report names (Display ships 16)
+_CODE: Final = re.compile(r"[a-z][a-z0-9_]{0,63}")  # a catalogue code's shape (contracts/node_faults.py)
 
 
 @dataclass(frozen=True)
@@ -53,7 +59,16 @@ class OutputHealth:
         (contracts.node_protocol `token`), dark is a bool, and either dark is False with code and
         since None, or dark is True with code a catalogue-shaped code ([a-z][a-z0-9_]{0,63}) and
         since a set time that decodes (contracts.node_output `decode_set_time`)."""
-        ...
+        try:
+            token(self.output_id, 96)
+            require(type(self.dark) is bool, "output_health")
+            if self.dark:
+                require(isinstance(self.code, str) and _CODE.fullmatch(self.code) is not None, "output_health")
+                decode_set_time(self.since)
+            else:
+                require(self.code is None and self.since is None, "output_health")
+        except ValueError as error:
+            raise ValueError("output_health") from error
 
 
 @dataclass(frozen=True)
@@ -70,19 +85,31 @@ class HealthReport:
         """ValueError("health_report") unless sequence is an int >= 0 (never a bool), catalogue is 64
         lowercase hex digits, outputs is a tuple of at most MAX_HEALTH_OUTPUTS OutputHealth with
         unique output_ids, in output_id order."""
-        ...
+        try:
+            require(whole(self.sequence, 0), "health_report")
+            digest(self.catalogue)
+            require(type(self.outputs) is tuple and len(self.outputs) <= MAX_HEALTH_OUTPUTS
+                    and all(type(output) is OutputHealth for output in self.outputs), "health_report")
+            names = [output.output_id for output in self.outputs]
+            require(names == sorted(set(names)), "health_report")
+        except ValueError as error:
+            raise ValueError("health_report") from error
 
 
 def encode_health_report(report: HealthReport) -> bytes:
     """Canonical JSON (contracts.wire_codec `encode`) of at most HEALTH_REPORT_BYTES;
     ValueError("health_report_too_large") past it."""
-    ...
+    require(type(report) is HealthReport, "health_report")
+    return encode(report, HEALTH_REPORT_BYTES, "health_report_too_large")
 
 
 def decode_health_report(raw: bytes) -> HealthReport:
     """The report `raw` encodes (contracts.wire_codec `decode` rules: strict JSON, exactly the
     dataclasses' field names); ValueError("health_report") for anything else."""
-    ...
+    def build(value: dict[str, Any]) -> HealthReport:
+        return HealthReport(**{**value, "outputs": tuple(
+            OutputHealth(**fields_of(OutputHealth, output)) for output in list_of(value["outputs"]))})
+    return decode(raw, HEALTH_REPORT_BYTES, HealthReport, build, "health_report")
 
 
 __all__ = [

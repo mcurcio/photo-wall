@@ -23,6 +23,7 @@ they fail. Each test removes its own containers, database and archive copies.
 """
 
 import asyncio
+import dataclasses
 import datetime
 import hashlib
 import json
@@ -51,10 +52,12 @@ from test_fleet_attempts import DEVICE_ID, SERIAL
 from appliance.kernel.capacity import LINES
 from appliance.kernel.display_paths import DISPLAY_UNIT, RUNTIME, WAYLAND_SOCKET
 from central.fleet.node_bus_presence import bus_links_in
+from central.infra.health_report_store import HEALTH_REPORT_SUBJECT, HEALTH_STATE_STREAM
 from central.infra.node_link_store import PgWallMarks
 from central.node_bus_wiring import WALL_TABLE
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_commands import parse_session_claim
+from contracts.node_health import decode_health_report
 from contracts.node_link import (
     NODE_BUS_GOMEMLIMIT,
     NODE_BUS_MEMORY_MAX,
@@ -1262,11 +1265,18 @@ def test_node_pid1_dark(node_pid1_inputs, node_host, registry, tmp_path):
     again: no new InvocationID, the same launch epoch, no `app_started` fact. After the kill a
     crashed Weston starts nothing either. On main (943e8e71) running out of open files is
     pressure only (no tint), the broker kills the frozen Player at K = 35 s and relaunches a dead
-    one within about 2 s, so each case fails there."""
+    one within about 2 s, so each case fails there.
+
+    Issue #126: Central runs with its hub (as in `join`), and after the kill its database holds the
+    judge's verdict from the Pi's `health` line, Virtual-1 dark with app_absent (on main the judge
+    writes no line, so nothing is recorded)."""
+    if os.environ.get(REQUIRE_VARIABLE) == "1" and not os.environ.get(NATS_SERVER_VARIABLE):
+        pytest.fail(f"{REQUIRE_VARIABLE}=1 but {NATS_SERVER_VARIABLE} is unset: the dark leg needs the hub",
+                    pytrace=False)
     phase = "dark"
     components_dir, _, image = node_pid1_inputs
     work = tmp_path
-    with central_fixture(registry, components_dir, {}, work / "central", node_host) as fixture:
+    with central_fixture(registry, components_dir, {}, work / "central", node_host, hub=True) as fixture:
         node = Node(image, work, phase)
         try:
             node.cold(fixture, components_dir)
@@ -1275,11 +1285,55 @@ def test_node_pid1_dark(node_pid1_inputs, node_host, registry, tmp_path):
             killed = node.stays_dark(
                 "SIGKILL", "app_absent", ABSENT_LINE, "dark-kill",
                 then=lambda: node.recover_display("SIGSEGV", "dark-display-crash"))
+            received = await_verdict(fixture["registry"].db, work, "dark-verdict",
+                                     lambda report: dark_with(report, DARK_OUTPUT, "app_absent"),
+                                     JOIN_SECONDS)
             (work / "dark.json").write_text(json.dumps(
-                {"limit": limit, "sigstop": frozen, "kill": killed}, sort_keys=True))
+                {"limit": limit, "sigstop": frozen, "kill": killed, "verdict": received}, sort_keys=True))
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
             node.capture_and_remove(fixture, sys.exc_info()[1])
+
+
+def verdict_rows(db):
+    """Every value of the health line's verdict key Central recorded from the Node, oldest first,
+    decoded (None for a value that does not decode)."""
+    with db.transaction() as conn:
+        rows = conn.execute(
+            "SELECT epoch,seq,data FROM node_link_records WHERE device_id=%s AND stream=%s AND subject=%s "
+            "ORDER BY recorded_at,seq", (DEVICE_ID, HEALTH_STATE_STREAM, HEALTH_REPORT_SUBJECT)).fetchall()
+    decoded = []
+    for row in rows:
+        try:
+            report = decode_health_report(bytes(row["data"]))
+        except ValueError:
+            report = None
+        decoded.append({"epoch": row["epoch"], "seq": row["seq"],
+                        "report": None if report is None else dataclasses.asdict(report)})
+    return decoded
+
+
+def dark_with(report, output_id, code):
+    """Whether a decoded verdict (dataclasses.asdict) names `output_id` dark with `code`."""
+    return report is not None and any(
+        (output["output_id"], output["dark"], output["code"]) == (output_id, True, code)
+        for output in report["outputs"])
+
+
+def await_verdict(db, work, name, until, seconds):
+    """The first recorded verdict for which `until(report)` holds, every recorded one written to
+    <name>.json; fails past `seconds` (a leaf links up to about 40 s after boot, erratum
+    E-E3D-S2-3)."""
+    deadline = time.monotonic() + seconds
+    while True:
+        rows = verdict_rows(db)
+        found = next((row for row in rows if until(row["report"])), None)
+        if found is not None or time.monotonic() > deadline:
+            break
+        time.sleep(0.5)
+    (work / f"{name}.json").write_text(json.dumps(rows, sort_keys=True, default=str))
+    assert found is not None, f"{name}: Central received no such verdict within {seconds:.0f}s; see {work / (name + '.json')}"
+    return found
 
 
 def link_rows(db):

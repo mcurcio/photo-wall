@@ -8,6 +8,9 @@ it is a host report shown beside Central's offered tag, never in its place.
 `boot` is the base boot stages' state (docs/node-4gb-memory-design.md §4.1, shape F): each
 stage's last record (`running`, `done`, `refused` with the numbers that refused it, or `failed`)
 and the `photo-wall-*` units PID1 lists as failed (None when never read on this boot).
+`reset_cause` is why this boot began as the hardware watchdog's driver tells it (RESET_CAUSES;
+issue #125): "watchdog" after a watchdog reset, None when not read (the driver cannot tell).
+
 Categorical state rides here, reported on change; numbers stay metrics
 (contracts/node_observation.py).
 """
@@ -28,7 +31,11 @@ MAX_HOST_FACTS_BYTES: Final[int] = 2048
 LINK_STATES: Final[frozenset[str]] = frozenset(
     {"up", "down", "dormant", "lowerlayerdown", "notpresent", "testing", "unknown"})
 _FIELDS: Final[tuple[str, ...]] = ("producer", "sequence", "sampled_boottime_ms", "kernel_release",
-                                   "interface", "link_state", "address", "base_tag")
+                                   "interface", "link_state", "address", "base_tag", "reset_cause")
+# Why this boot began, as the hardware watchdog's driver reports it (issue #125; the owner,
+# 2026-10-20, on keeping the watchdog: "keep", each watchdog reboot logged): "watchdog" when the
+# watchdog reset the board, "other" when the driver can tell and it did not.
+RESET_CAUSES: Final[tuple[str, ...]] = ("watchdog", "other")
 # The base boot stages, in boot order, and each stage's record states.
 BOOT_STAGES: Final[tuple[str, ...]] = ("handoff", "storage", "prepare")
 BOOT_STATES: Final[tuple[str, ...]] = ("running", "done", "refused", "failed")
@@ -72,10 +79,16 @@ def _base_tag(value: str) -> None:
     token(value, 128)
 
 
+def _reset_cause(value: str) -> None:
+    if not isinstance(value, str) or value not in RESET_CAUSES:
+        raise ValueError("invalid_host_fact_reset_cause")
+
+
 # Each optional text fact's rule, in the record's value order; the node's reader applies the
 # same rules per field.
 FACT_RULES: Final = {"kernel_release": _kernel_release, "interface": _interface,
-                     "link_state": _link_state, "address": _address, "base_tag": _base_tag}
+                     "link_state": _link_state, "address": _address, "base_tag": _base_tag,
+                     "reset_cause": _reset_cause}
 
 
 def valid_fact(name: str, value: object) -> bool:
@@ -184,6 +197,8 @@ class HostFactsV2:
     base_tag: str | None
     # None = not read (and every document from a node older than the field).
     boot: BootReportV2 | None = None
+    # One of RESET_CAUSES; None = not read this boot (no watchdog, or its driver cannot tell).
+    reset_cause: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.producer) is not NodeProducerV2 or self.producer.owner != "host_core":
@@ -228,7 +243,7 @@ def parse_host_facts(raw: bytes) -> HostFactsV2:
     boot = boot_from_document(value["boot"]) if "boot" in value else None
     try:
         return HostFactsV2(producer_from_document(value["producer"]),
-                           *(value[name] for name in _FIELDS[1:]), boot)
+                           **{name: value[name] for name in _FIELDS[1:]}, boot=boot)
     except (TypeError, KeyError, AttributeError) as exc:
         raise ValueError("invalid_host_facts") from exc
 

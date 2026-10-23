@@ -18,7 +18,14 @@ from appliance.central_session.http import NodeHTTP
 from appliance.central_session.session import REFUSED, NodeSession
 from appliance.host.bus import host_session
 from appliance.host.host import HostCore
-from appliance.host.host_linux import LinuxHostSampler, SystemdRebootDriver, boot_id, boottime_ms
+from appliance.host.host_linux import (
+    WATCHDOG_BOOTSTATUS,
+    LinuxHostSampler,
+    SystemdRebootDriver,
+    boot_id,
+    boottime_ms,
+    reset_cause,
+)
 from appliance.host.host_storage import FileRebootJournal, RebootDelivery
 from appliance.host.light_sensor import IIO_ROOT, LightMeter, start_light_meter
 from appliance.kernel.boot_stage import DIRECTORY as BOOT_STAGE_DIRECTORY
@@ -69,6 +76,8 @@ class HostRunner:
     base_tag: str | None = None
     # The base boot stages' records (boot_stage.py), folded into the facts record's `boot`.
     boot_stage_directory: Path = BOOT_STAGE_DIRECTORY
+    # The hardware watchdog's bootstatus, read into the facts record's `reset_cause` (issue #125).
+    watchdog_bootstatus: Path = WATCHDOG_BOOTSTATUS
     # PID1's failed units as last read by this process: a failed read reuses
     # the last successful one; None until one succeeds, so "not read" never reads "none failed".
     _failed_units: tuple | None = None
@@ -146,7 +155,8 @@ class HostRunner:
                 return
             self._facts_state = "pending"
         values = {**self.sampler.facts(),
-                  "base_tag": self.base_tag if valid_fact("base_tag", self.base_tag) else None}
+                  "base_tag": self.base_tag if valid_fact("base_tag", self.base_tag) else None,
+                  "reset_cause": reset_cause(self.watchdog_bootstatus)}
         boot = read_boot_report(directory=self.boot_stage_directory, units=self._read_failed_units)
         # Compared as the whole JSON-ready document (`boot` included), the same comparison
         # Central makes; the candidate's sequence is spent only when something changed.
