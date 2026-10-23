@@ -7,7 +7,7 @@ import pytest
 from node.test_node_linux_adapters import store
 from test_node_boot import environment
 
-from appliance.apps.broker import Launch, RunningApp
+from appliance.apps.broker import Launch, PurposefulRestart, RunningApp
 from appliance.apps.online_broker import OnlineEffectBroker
 from appliance.apps.stop_operation import StopCompleted, StopView
 from contracts.node_lifecycle import (
@@ -17,7 +17,9 @@ from contracts.node_lifecycle import (
     stage_digest,
 )
 from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
-from scripts.node_control_demo import MemoryRelaunchPacing
+
+# Weston incarnations, as systemctl shows an InvocationID (Display's mark holds one).
+WESTON_1, WESTON_2, WESTON_3 = "1" * 32, "2" * 32, "3" * 32
 
 
 class Driver:
@@ -28,10 +30,11 @@ class Driver:
         self.starts = []
         self.target_fails = False
         self.unknown_stop = False
-        self.display = "weston-1"  # the active display incarnation (None: down)
-        self.launch = Launch(old.app_epoch, "weston-1", 0)  # the current launch
+        self.display = WESTON_1  # the active display incarnation (None: down)
+        self.launch = Launch(old.app_epoch, WESTON_1, 0)  # the current launch
         self.collected = True  # PID1 unloaded the old app unit
         self.clock = lambda: 1000  # boottime ms, read at each start
+        self.purposeful = None  # Display's mark (PurposefulRestart), None while absent
 
     def current(self):
         return self.running
@@ -69,6 +72,9 @@ class Driver:
     def unit_collected(self):
         return self.running is None and self.collected
 
+    def purposeful_restart(self):
+        return self.purposeful
+
     def start(self, reference, operation_id):
         self.starts.append(reference)
         self.launch = Launch(self.old_epoch + len(self.starts), self.display, self.clock())
@@ -79,10 +85,8 @@ class Driver:
         return self.running
 
 
-def online_broker(store, driver, session, recovery, clock=lambda: 1000):
-    """An online broker with its own relaunch pacing on `clock` (boottime ms)."""
-    return OnlineEffectBroker(store, driver, session, recovery, pacing=MemoryRelaunchPacing(),
-                              now_ms=clock)
+def online_broker(store, driver, session, recovery):
+    return OnlineEffectBroker(store, driver, session, recovery)
 
 
 def stage(producer, old, target, fallback, *, offer_id):
@@ -107,8 +111,7 @@ def setup(tmp_path, monkeypatch):
     clock = {"ms": 1000}
     driver.clock = lambda: clock["ms"]
     broker = online_broker(journal, driver, session,
-                           SimpleNamespace(arm=lambda x: x.receipt, advance=lambda *a: None),
-                           clock=lambda: clock["ms"])
+                           SimpleNamespace(arm=lambda x: x.receipt, advance=lambda *a: None))
     broker.clock = clock  # the test's boottime, in ms
     broker.accept(command)
     yield broker, driver, command, module
@@ -134,7 +137,7 @@ def test_preparation_has_no_effect_then_verified_roots_switch_once(setup):
 
 def test_unverified_root_or_changed_old_process_never_journals_intent(setup):
     broker, driver, command, _ = setup
-    driver.verify = lambda reference: reference != command.fallback
+    driver.verify = lambda reference: reference != command.target
     with pytest.raises(ValueError, match="root_unverified"):
         broker.execute()
     driver.verify = lambda reference: True
@@ -216,147 +219,130 @@ def test_completed_switch_accepts_the_next_stage_and_keeps_unreported_events(set
     assert phases(broker) == ["intent_stop", "stopped", "starting_new", "running"]
 
 
-def test_target_failure_selects_only_frozen_accepted_fallback(setup):
+def faults(broker):
+    return [parse_app_effect_event(raw.encode()).fault for raw in broker.record["pending"]]
+
+
+def controlled(broker, command):
+    broker.store.write("local-app-control", {"operation_id": str(command.operation_id),
+                                             "progress": {"kind": "stopped"}})
+
+
+def turns(broker, count=20):
+    for _ in range(count):
+        broker.service()
+        broker.clock["ms"] += 1_000
+
+
+def test_a_target_that_fails_to_start_is_target_failed_and_nothing_falls_back(setup):
+    """Issue #125, the removed release fallback: a target whose start fails is `target_failed`,
+    then `effect_unknown` (fault target_failed); the old release never starts again and the
+    target is not tried twice. Mutation probe: start command.fallback after target_failed -> a
+    second start."""
     broker, driver, command, _ = setup
     driver.target_fails = True
     broker.execute()
-    assert driver.starts == [command.target, command.fallback]
-    assert broker.record["phase"] == "fallback_running"
+    turns(broker)
+    assert driver.starts == [command.target] and driver.running is None
+    assert broker.record["phase"] == "effect_unknown"
+    assert phases(broker)[-2:] == ["target_failed", "effect_unknown"]
+    assert faults(broker)[-2:] == ["target_start_failed", "target_failed"]
     assert driver.stop_calls == 1
 
 
-def test_a_target_that_dies_after_it_was_seen_running_falls_back_before_control(setup):
+def test_a_target_that_exits_before_control_is_target_failed_and_nothing_falls_back(setup):
+    """E-1B-17 without the fallback: a target that dies after start() saw it running, before it
+    proved control, is the switch's failure: target_failed, effect_unknown, and nothing starts,
+    whatever later turns or Weston incarnations bring."""
     broker, driver, command, _ = setup
     broker.execute()
     assert broker.record["phase"] == "running"
     driver.running = None  # the entry exited after start() observed its unit active
-    broker.service()
-    assert driver.starts == [command.target, command.fallback]
-    assert phases(broker)[-3:] == ["target_failed", "fallback_starting", "fallback_running"]
-    events = [parse_app_effect_event(raw.encode()) for raw in broker.record["pending"]]
-    assert events[-3].fault == "target_exited_before_control"
-    # The fallback dying before it proves control is reported, never a silent wait.
-    driver.running = None
-    broker.service()
-    assert broker.record["phase"] == "effect_unknown" and len(driver.starts) == 2
-    assert events[-1].phase == "fallback_running"
-    assert parse_app_effect_event(broker.record["pending"][-1].encode()).fault == "fallback_exited_before_control"
+    turns(broker)
+    driver.display = WESTON_2
+    driver.purposeful = PurposefulRestart(WESTON_1)
+    turns(broker)
+    assert driver.starts == [command.target]
+    assert phases(broker)[-2:] == ["target_failed", "effect_unknown"]
+    assert faults(broker)[-2:] == ["target_exited_before_control", "target_failed"]
 
 
-def test_an_app_that_proved_control_is_no_longer_the_switchs_to_fail(setup):
+def test_an_app_that_proved_control_and_exits_under_its_own_weston_stays_down(setup):
+    """Issue #125, the removed second relaunch: after control, the switch's app that exits while
+    its Weston lives is never started again, not on a later turn and not after a Weston restart
+    of any kind; the switch's record (Central's phase) stays `running`. Mutation probe: let
+    restarted_on_purpose ignore the mark and `exited_under` -> a start after the Weston change."""
     broker, driver, command, _ = setup
     broker.execute()
-    broker.store.write("local-app-control", {"operation_id": str(command.operation_id),
-                                             "progress": {"kind": "stopped"}})
-    driver.running = None
-    broker.reconcile()
-    assert broker.record["phase"] == "running" and driver.starts == [command.target]
-
-
-def test_a_switched_app_follows_a_new_display_incarnation_once(setup):
-    """The cold start's relaunch rule holds for the switch's launch: same root, same record."""
-    broker, driver, command, _ = setup
-    broker.execute()
-    broker.store.write("local-app-control", {"operation_id": str(command.operation_id),
-                                             "progress": {"kind": "stopped"}})
+    controlled(broker, command)
     reported = list(broker.record["pending"])
-    driver.running, driver.display, driver.collected = None, "weston-2", False
-    broker.reconcile()  # Weston restarted, but PID1 has not unloaded the old unit yet
+    driver.running = None
+    turns(broker)
+    assert broker.record["exited_under"] == WESTON_1
+    driver.display, driver.purposeful = WESTON_2, PurposefulRestart(WESTON_1)  # even on purpose
+    turns(broker)
+    driver.display, driver.purposeful = WESTON_3, None  # or a crash
+    turns(broker)
+    assert driver.starts == [command.target]
+    assert broker.record["phase"] == "running" and broker.record["pending"] == reported
+
+
+def test_a_switched_app_follows_a_weston_display_restarted_on_purpose_once(setup):
+    """The one start after the switch: Display restarted Weston itself (its mark names the
+    Weston the target was launched under), so the target starts once for the new Weston, the
+    same root and record, once PID1 unloaded the old unit."""
+    broker, driver, command, _ = setup
+    broker.execute()
+    controlled(broker, command)
+    reported = list(broker.record["pending"])
+    driver.running, driver.display, driver.collected = None, None, False  # Weston restarting
+    broker.reconcile()
+    driver.display, driver.purposeful = WESTON_2, PurposefulRestart(WESTON_1)
+    broker.reconcile()  # the new Weston is up, but PID1 has not unloaded the old unit yet
     assert driver.starts == [command.target]
     driver.collected = True
-    broker.reconcile()  # a later turn, the same incarnation
+    broker.reconcile()
     assert driver.starts == [command.target, command.target]
     assert driver.running.operation_id == command.operation_id
+    assert driver.launched().display == WESTON_2 and "exited_under" not in broker.record
+    turns(broker)
+    assert len(driver.starts) == 2
     assert broker.record["phase"] == "running" and broker.record["pending"] == reported
 
 
-def test_a_controlled_switch_app_that_exits_starts_again_with_backoff(setup):
-    """After control is proven, an exit under the same Weston is relaunched on the pacing: the
-    same root and operation, the switch's record untouched."""
+def test_a_weston_crash_never_starts_the_switched_app_again(setup):
+    """A Weston that crashed (no mark from Display) takes the app down for good."""
     broker, driver, command, _ = setup
     broker.execute()
-    broker.store.write("local-app-control", {"operation_id": str(command.operation_id),
-                                             "progress": {"kind": "stopped"}})
-    reported = list(broker.record["pending"])
-    waits = []
-    for _ in range(3):
-        broker.clock["ms"] += 2_000  # each run lasts 2 s
-        driver.running, exited_at = None, broker.clock["ms"]
-        starts = len(driver.starts)
-        for _ in range(400):  # turns 100 ms apart, bounded
-            broker.reconcile()
-            if len(driver.starts) > starts:
-                break
-            broker.clock["ms"] += 100
-        waits.append(broker.clock["ms"] - exited_at)
-    assert waits == [1_000, 5_000, 30_000]
-    assert driver.starts == [command.target] * 4
-    assert driver.running.operation_id == command.operation_id
-    assert broker.record["phase"] == "running" and broker.record["pending"] == reported
-
-
-def test_an_uncontrolled_target_that_exits_still_falls_back(setup):
-    """E-1B-17: before control, an exit under the same Weston is the switch's failure, never a
-    paced relaunch of the target."""
-    broker, driver, command, _ = setup
-    broker.execute()
-    driver.running = None
-    for _ in range(3):
-        broker.reconcile()
-        broker.clock["ms"] += 1_000
-    assert driver.starts == [command.target, command.fallback]
-    assert broker.record["phase"] == "fallback_running"
-    assert parse_app_effect_event(
-        broker.record["pending"][-3].encode()).fault == "target_exited_before_control"
-
-
-def test_a_fallback_follows_a_new_display_incarnation_and_a_failed_relaunch_is_reported(setup):
-    broker, driver, command, _ = setup
-    driver.target_fails = True
-    broker.execute()
-    assert broker.record["phase"] == "fallback_running"
-    broker.store.write("local-app-control", {"operation_id": str(command.operation_id),
-                                             "progress": {"kind": "stopped"}})
-    driver.running, driver.display = None, "weston-2"
+    controlled(broker, command)
+    driver.running, driver.display = None, None
     broker.reconcile()
-    assert driver.starts == [command.target, command.fallback, command.fallback]
-    driver.running, driver.display = None, "weston-3"
-    driver.start = lambda *args: (_ for _ in ()).throw(OSError("spawn failed"))
-    broker.reconcile()
-    assert broker.record["phase"] == "effect_unknown"
-    assert parse_app_effect_event(broker.record["pending"][-1].encode()).fault == "relaunch_outcome_unknown"
+    driver.display = WESTON_2
+    turns(broker)
+    assert driver.starts == [command.target] and broker.record["exited_under"] is None
 
 
-def test_a_failed_switch_relaunch_is_retried_on_the_pacing_until_the_app_runs(setup):
-    """E-1B-18 on the switch path: after control, one failed restart is not the Frame's end. The
-    start is asked again on the cold start's pacing (a start that raised before recording a
-    launch counts as one more short exit), and the switch's phase comes back."""
+def test_a_failed_start_for_display_is_reported_and_never_retried(setup):
+    """The removed relaunch retry: a start for Display's restart that fails is effect_unknown,
+    and no later turn asks again."""
     broker, driver, command, _ = setup
     broker.execute()
-    broker.store.write("local-app-control", {"operation_id": str(command.operation_id),
-                                             "progress": {"kind": "stopped"}})
-    driver.running, driver.display = None, "weston-2"
+    controlled(broker, command)
+    driver.running, driver.display = None, None
+    broker.reconcile()
+    driver.display, driver.purposeful = WESTON_2, PurposefulRestart(WESTON_1)
     attempts = []
 
     def failing(reference, operation_id):
-        attempts.append(broker.clock["ms"])
+        attempts.append(reference)
         raise OSError("spawn failed")
     driver.start = failing
-    for _ in range(50):   # 5 s of turns 100 ms apart, every start failing
-        broker.reconcile()
-        broker.clock["ms"] += 100
-    assert broker.record["phase"] == "effect_unknown"
-    assert attempts == [1000, 2000]   # at once (a new Weston), then after one short exit's 1 s
+    turns(broker)
     del driver.start
-    for _ in range(100):
-        broker.reconcile()
-        if driver.running is not None:
-            break
-        broker.clock["ms"] += 100
-    assert driver.starts == [command.target, command.target]
-    assert broker.clock["ms"] == 2000 + 5_000   # the second failure waited 5 s
-    assert broker.record["phase"] == "running" and "relaunch_of" not in broker.record
-    assert phases(broker)[-3:] == ["effect_unknown", "effect_unknown", "running"]
+    turns(broker)
+    assert attempts == [command.target] and driver.starts == [command.target]
+    assert broker.record["phase"] == "effect_unknown"
+    assert faults(broker)[-1] == "start_outcome_unknown"
 
 
 def test_unknown_stop_and_restart_never_repeat_stop_or_start(setup):

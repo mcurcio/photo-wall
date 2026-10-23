@@ -5,8 +5,11 @@ name: Player node real-PID1 lifecycle scenarios
 # the disposable test database. One matrix leg per scenario, so the job takes about one scenario
 # plus setup:
 #
-#   success   ordered stop-before-start effects and natural completion
-#   failure   a target whose entrypoint exits falls back to the previous environment
+#   success   ordered stop-before-start effects and natural completion; three signal range
+#             restarts each start the Player again; a crashed Player, then a crashed Weston,
+#             leave it down (issue #125)
+#   failure   a target whose entrypoint exits: target_failed, then effect_unknown, no fallback
+#             start, and the debug overlay's card shows
 #   outage    Central unreachable for at least 35 s once the target is served: the node
 #             converges locally and reports every effect on reconnect, nothing held
 #   reboot    a second kernel boot of the same device re-enrolls, supersedes the first (its
@@ -19,6 +22,9 @@ name: Player node real-PID1 lifecycle scenarios
 #             through Central's origin, a kill -9 of the bus and a reboot each end an epoch that
 #             Central records with its gap rows, and after a hub restart WALL is current on the
 #             Node within 60 s (erratum E-E3B-FR1) and its leaf relinked
+#   dark      a frozen Player (SIGSTOP), then a killed one (kill -9): each time the debug
+#             overlay's card names the cause and the Pi-clock time within 20 s, and for 45 s
+#             nothing starts the Player again (issues #123, #125); about 3 minutes
 #
 # Each leg boots the components node-components.yml built ONCE for the run (the release roots and
 # the release writer's set, scripts/node_release_writer.py) and the PID1 fixture it derived from
@@ -116,7 +122,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [success, failure, outage, reboot, refused, join]
+        scenario: [success, failure, outage, reboot, refused, join, dark]
     env:
       REVISION: ${{ inputs.revision || github.sha }}
     steps:

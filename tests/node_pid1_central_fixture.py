@@ -623,29 +623,36 @@ def _central_fixture(
 
 
 def assert_phase_completed(status, phase, target_reference):
-    """Assert reported-effect and actual-link consequences; never infer physical completion."""
+    """Assert reported-effect and actual-link consequences; never infer physical completion.
+
+    `failure` (a target whose entry exits) completes as target_failed then effect_unknown, with
+    no fallback start of the old release (issue #125): a person recovers the Frame."""
     entries = [entry for entry in status["operations"] if entry["phase"] == phase]
     assert len(entries) == 1, status
     entry = entries[0]
     before, current = entry["before"], status["current"]
     assert current is not None, status
     phases = [effect["phase"] for effect in entry["effects"]]
-    state = "fallback_running" if phase == "failure" else "target_running"
-    assert entry["state"] == state, status
-    expected = (
-        before["environment_sha256"]
-        if phase == "failure"
-        else target_reference.environment_sha256
-    )
-    assert current["environment_sha256"] == expected, status
+    if phase == "failure":
+        assert entry["state"] == "effect_unknown", status
+        order = ["intent_stop", "stopped", "target_failed", "effect_unknown"]
+        positions = [phases.index(name) for name in order]
+        assert all(left < right for left, right in zip(positions, positions[1:])), status
+        assert not {"fallback_starting", "fallback_running"} & set(phases), status
+        assert status["protocol_refusals"] == {}, status
+        return {
+            "phase": phase,
+            "state": entry["state"],
+            "operation_id": entry["operation_id"],
+            "physical_output": "unqualified",
+            "rollback_acceptance": "none: a failed release stays down until a person acts",
+        }
+    assert entry["state"] == "target_running", status
+    assert current["environment_sha256"] == target_reference.environment_sha256, status
     assert current["process"] != before["process"], status
     assert current["app_epoch"] > before["app_epoch"], status
     assert current["authority_epoch"] > before["authority_epoch"], status
-    order = (
-        ["intent_stop", "stopped", "target_failed", "fallback_starting", "fallback_running"]
-        if phase == "failure"
-        else ["intent_stop", "stopped", "starting_new", "running"]
-    )
+    order = ["intent_stop", "stopped", "starting_new", "running"]
     positions = [phases.index(name) for name in order]
     assert all(left < right for left, right in zip(positions, positions[1:])), status
     assert "effect_unknown" not in phases, status

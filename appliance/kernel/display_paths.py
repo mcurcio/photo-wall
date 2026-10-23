@@ -6,6 +6,7 @@ tmpfiles.d; docs/display-host-backend.md#units-and-weston-incarnations explains 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Final
 
 # Weston's unit; one controller runs per incarnation of it.
 DISPLAY_UNIT = "photo-wall-display.service"
@@ -27,3 +28,9 @@ SIGNAL_RANGE_REQUEST = CONTROLLER_STATE / "signal-range.json"
 # The root oneshot photo-wall-display-signal.path starts when the request changes: it restarts the
 # display unit without spending its crash start limit.
 SIGNAL_RANGE_UNIT = "photo-wall-display-signal.service"
+# Display's mark that it restarted Weston itself (issue #125): photo-wall-display-signal.service's
+# ExecStartPre= writes the InvocationID of the Weston it is about to restart, in its own
+# RuntimeDirectory (root, 0755, preserved, so it outlives the oneshot, never a reboot). The app
+# broker reads it (process_linux.SystemdAppProcessDriver.purposeful_restart): a Player that Weston
+# took down is started again only when the mark names the Weston it was launched under.
+PURPOSEFUL_RESTART: Final = Path("/run/photo-wall-display-restart/restarted")

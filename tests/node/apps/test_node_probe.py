@@ -5,7 +5,6 @@ from test_node_boot import environment
 
 from appliance.apps.broker import RunningApp
 from appliance.apps.probe import (
-    KILL_AFTER_MS,
     MISS_LIMIT,
     PROBE_PERIOD_MS,
     STARTUP_BUDGET_MS,
@@ -15,6 +14,7 @@ from appliance.apps.probe import (
 from contracts.node_protocol import NodeProcessIdentity
 
 T = PROBE_PERIOD_MS
+LONG_MS = 36000  # a long unanswered stretch, a whole number of periods (past the old K)
 RUN = AppRunKey(uuid4(), 4242, 31751781, 1)
 
 
@@ -28,7 +28,7 @@ def run_unanswered(clock, start, end, *, late=lambda now: False):
 
 
 def test_shipped_constants_are_the_frame_values():
-    assert (PROBE_PERIOD_MS, MISS_LIMIT, STARTUP_BUDGET_MS, KILL_AFTER_MS) == (2000, 5, 20000, 35000)
+    assert (PROBE_PERIOD_MS, MISS_LIMIT, STARTUP_BUDGET_MS) == (2000, 5, 20000)
 
 
 def test_run_key_is_taken_from_a_running_app_by_attribute():
@@ -62,13 +62,13 @@ def test_stale_nonce_is_not_an_answer():
     assert not clock.answered(second, 4030)  # already answered
     other = ProbeClock(AppRunKey(uuid4(), 1, 2, 1), 0)
     assert not other.answered(second, 4040)  # another run's nonce
-    # Stale answers between turns never reset the unanswered time: kill due still comes.
-    due = []
-    for now in range(4000 + T, 4000 + KILL_AFTER_MS + 2 * T, T):
+    # Stale answers between turns never reset the unanswered time.
+    counted = []
+    for now in range(4000 + T, 4000 + LONG_MS + 2 * T, T):
         assert not clock.answered(first, now - 1)
         assert not clock.answered("d" * 64, now - 1)
-        due += [now for fact in clock.turn(now, late=False) if fact.kind == "probe_kill_due"]
-    assert due == [40000]  # the first turn at least K after the last real answer (4010)
+        counted += [(now, fact.value["unanswered_ms"]) for fact in clock.turn(now, late=False)]
+    assert counted and all(unanswered == now - 4010 for now, unanswered in counted)  # since 4010
 
 
 def test_no_unanswered_fact_before_the_startup_budget():
@@ -82,15 +82,14 @@ def test_no_unanswered_fact_before_the_startup_budget():
                                   "misses": STARTUP_BUDGET_MS // T}
 
 
-def test_no_channel_since_launch_is_kill_due_once_after_k():
+def test_no_channel_since_launch_is_unanswered_every_period_and_nothing_more():
+    """Issue #125: nothing kills, so a run that never answers is only ever `probe_unanswered`,
+    every T from the startup budget on, its unanswered time growing."""
     clock = ProbeClock(RUN, 0)
-    facts = run_unanswered(clock, 0, KILL_AFTER_MS + 6 * T)
-    due = [now for now, got in facts.items() if "probe_kill_due" in kinds(got)]
-    assert due == [-(-KILL_AFTER_MS // T) * T]  # the first turn at or past K
-    [fact] = [f for f in facts[due[0]] if f.kind == "probe_kill_due"]
-    assert fact.value == {"run": RUN.document(), "unanswered_ms": due[0]}
-    # probe_unanswered every T from the budget on.
+    facts = run_unanswered(clock, 0, LONG_MS + 6 * T)
+    assert {kind for got in facts.values() for kind in kinds(got)} == {"probe_unanswered"}
     assert all("probe_unanswered" in kinds(got) for now, got in facts.items() if now >= STARTUP_BUDGET_MS)
+    assert facts[LONG_MS + 6 * T][0].value["unanswered_ms"] == LONG_MS + 6 * T
 
 
 def test_after_k_counted_misses_unanswered_every_period_until_answered():
@@ -114,23 +113,13 @@ def test_after_k_counted_misses_unanswered_every_period_until_answered():
 
 def test_late_intervals_are_not_counted():
     clock = ProbeClock(RUN, 0)
-    # Every other turn ran late: only half the time is counted, so no kill at K.
-    facts = run_unanswered(clock, 0, 2 * KILL_AFTER_MS - 2 * T, late=lambda now: now % (2 * T) == 0)
-    assert "probe_kill_due" not in [kind for got in facts.values() for kind in kinds(got)]
+    # Every other turn ran late: only half the time is counted.
+    facts = run_unanswered(clock, 0, 2 * LONG_MS, late=lambda now: now % (2 * T) == 0)
+    assert facts[2 * LONG_MS][0].value["unanswered_ms"] == LONG_MS
     late_only = ProbeClock(RUN, 0)
-    facts = run_unanswered(late_only, 0, 3 * KILL_AFTER_MS, late=lambda now: True)
+    facts = run_unanswered(late_only, 0, 3 * LONG_MS, late=lambda now: True)
     assert all(got == () for got in facts.values())
     # One very late turn (a suspended broker) is not unanswered time either.
     stalled = ProbeClock(RUN, 0)
-    assert stalled.turn(STARTUP_BUDGET_MS + 10 * KILL_AFTER_MS, late=True) == ()
-    assert stalled.turn(STARTUP_BUDGET_MS + 10 * KILL_AFTER_MS + T, late=False) == ()
-
-
-def test_an_answer_rearms_kill_due():
-    clock = ProbeClock(RUN, 0)
-    facts = run_unanswered(clock, 0, KILL_AFTER_MS + T)
-    assert sum("probe_kill_due" in kinds(got) for got in facts.values()) == 1
-    clock.sent("a" * 64, KILL_AFTER_MS + T)
-    assert clock.answered("a" * 64, KILL_AFTER_MS + T + 1)
-    later = run_unanswered(clock, KILL_AFTER_MS + T + 1, 2 * KILL_AFTER_MS + 3 * T)
-    assert sum("probe_kill_due" in kinds(got) for got in later.values()) == 1
+    assert stalled.turn(STARTUP_BUDGET_MS + 10 * LONG_MS, late=True) == ()
+    assert stalled.turn(STARTUP_BUDGET_MS + 10 * LONG_MS + T, late=False) == ()

@@ -27,7 +27,7 @@ class RecoveryTransportTests(unittest.TestCase):
         root = Path(self.temporary.name)
         self.boot = uuid4()
         self.store = BootStore(root, boot_id=self.boot, policy={})
-        self.supervisor = RecoverySupervisor(self.store, SimpleNamespace(initiate=lambda: False),
+        self.supervisor = RecoverySupervisor(self.store,
             SimpleNamespace(stopped=lambda o: True, controlled=lambda *a, **k: True))
         self.obligation = RecoveryObligation(self.boot, uuid4(), "a" * 64,
             NodeProcessIdentity(123, 456, uuid4()), 1, "a" * 64, "b" * 64, "a" * 64,

@@ -23,7 +23,6 @@ HOLD = FAULTS[APP_RESOURCE_EXHAUSTED].clear_hold_ms  # 60,000 ms
 def judge() -> HealthJudge:
     return HealthJudge(period_ms=SHIPPED_TIMING.period_ms, miss_limit=SHIPPED_TIMING.miss_limit,
                        startup_ms=SHIPPED_TIMING.startup_ms,
-                       kill_after_ms=SHIPPED_TIMING.kill_after_ms,
                        pulse_deadline_ms=PULSE_DEADLINE_MS, catalogue=FAULTS)
 
 
@@ -48,28 +47,29 @@ def test_app_exit_raises_app_absent_until_a_new_run_starts():
     connected(subject, 0)
     subject.observe(fact(APP_EXITED), 1000)
     assert states(subject, 1000) == [(APP_ABSENT, "pending")]
-    assert [i.tint for i in subject.instructions(1000 + RAISE - 1)] == [False]
+    assert [i.tint for i in subject.instructions(1000 + RAISE - 1, wall_ms=1000 + RAISE - 1)] == [False]
     assert states(subject, 1000 + RAISE) == [(APP_ABSENT, "raised")]
-    (card,) = subject.instructions(1000 + RAISE)
-    assert card.tint and card.lines == ("Photos paused — the player stopped",
+    (card,) = subject.instructions(1000 + RAISE, wall_ms=1000 + RAISE)
+    assert card.tint and card.lines == ("Photos paused — the player stopped · since 00:00",
                                         f"{APP_ABSENT} · Output HDMI-A-1")
     subject.observe(fact(APP_STARTED), 7000)  # the exited run itself: nothing changes
     assert states(subject, 7000) == [(APP_ABSENT, "raised")]
     subject.observe(fact(APP_STARTED, NEXT_RUN), 8000)
     assert states(subject, 8000) == []
-    assert [i.tint for i in subject.instructions(8000)] == [False]
+    assert [i.tint for i in subject.instructions(8000, wall_ms=8000)] == [False]
     assert [(t.code, t.state, t.reason) for t in subject.transitions()] == [
         (APP_ABSENT, "pending", "app_exited"), (APP_ABSENT, "raised", "window_elapsed"),
         (APP_ABSENT, "cleared", "started")]
 
 
-def test_a_relaunch_inside_the_window_is_never_shown():
+def test_a_run_started_again_inside_the_window_is_never_shown():
+    """Display's purposeful Weston restart: the Player exits and starts again within the window."""
     subject = judge()
     connected(subject, 0)
     subject.observe(fact(APP_EXITED), 1000)
     subject.observe(fact(APP_STARTED, NEXT_RUN), 1000 + RAISE - 1)
     assert states(subject, 1000 + RAISE) == []
-    assert [i.tint for i in subject.instructions(1000 + RAISE)] == [False]
+    assert [i.tint for i in subject.instructions(1000 + RAISE, wall_ms=1000 + RAISE)] == [False]
     assert [(t.state, t.reason) for t in subject.transitions()] == [
         ("pending", "app_exited"), ("withdrawn", "started")]
 
@@ -89,7 +89,7 @@ def test_descriptor_pressure_raises_and_clears_resource_exhausted():
     assert states(subject, 0) == []
     subject.observe(descriptors(820), 1000)  # 80.08 %: raised at once
     assert states(subject, 1000) == [(APP_RESOURCE_EXHAUSTED, "raised")]
-    (card,) = subject.instructions(1000)
+    (card,) = subject.instructions(1000, wall_ms=1000)
     assert not card.tint  # degraded: content still shows
     subject.observe(descriptors(500), 2000)  # relief starts the clear hold
     subject.observe(descriptors(900), 2000 + HOLD - 1)  # pressure again: the hold restarts

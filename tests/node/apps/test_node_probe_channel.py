@@ -25,8 +25,9 @@ from contracts.node_app_link import (
 from contracts.node_protocol import NodeProcessIdentity
 
 # Small timing so the thread's real timer is exercised in well under a second per check.
-FAST = ProbeTiming(period_ms=50, miss_limit=2, startup_ms=150, kill_after_ms=400)
-DUE = -(-FAST.kill_after_ms // FAST.period_ms) + 1  # passes until kill-due (the first is at 0)
+FAST = ProbeTiming(period_ms=50, miss_limit=2, startup_ms=150)
+# Passes until the run is long unanswered (the first is at 0): well past the misses' report.
+DUE = 9
 RUN = AppRunKey(uuid4(), 4242, 31751781, 1)
 OTHER = AppRunKey(uuid4(), 4343, 31751999, 2)
 OWED = OwedRelink(RUN, "a" * 32)  # one owed episode for RUN (one Central refusal)
@@ -112,7 +113,7 @@ def test_the_players_renderer_is_a_fact_and_keeps_the_channel_open(stepped):
     ours, theirs = packet_pair()
     theirs.settimeout(2)
     try:
-        stepped.publish_run(RUN, False)
+        stepped.publish_run(RUN)
         stepped.adopt(ours, RUN)
         now = passes(stepped, 2)
         theirs.send(encode_node_probe_answer(parse_node_probe_channel_message(theirs.recv(9000)).nonce))
@@ -131,17 +132,16 @@ def test_healthy_channel_is_answered_every_period(stepped):
     ours, theirs = packet_pair()
     theirs.settimeout(2)
     try:
-        stepped.publish_run(RUN, False)
+        stepped.publish_run(RUN)
         stepped.adopt(ours, RUN)
         now = passes(stepped, 2)  # the channel opens, then the first probe goes out
-        for _ in range(2 * DUE):  # past K: the Player answers each probe within the period
+        for _ in range(2 * DUE):  # the Player answers each probe within the period
             theirs.send(encode_node_probe_answer(parse_node_probe_channel_message(
                 theirs.recv(9000)).nonce))
             now = passes(stepped, 1, now)
         answered = facts(stepped.feed, "probe_answered")
         assert [e.value["rtt_ms"] for e in answered] == [FAST.period_ms] * 2 * DUE
         assert facts(stepped.feed, "probe_unanswered") == []
-        assert facts(stepped.feed, "probe_kill_due") == [] and stepped.take_kill_due() is None
         assert [e.value["state"] for e in facts(stepped.feed, "probe_channel")] == ["open"]
         assert all(e.audience == "node" for e in facts(stepped.feed, run=None))
     finally:
@@ -152,9 +152,9 @@ def test_stale_nonces_are_never_answers(probes):
     ours, theirs = packet_pair()
     player = Player(theirs, answer=lambda nonce: "f" * 64)  # a well-formed answer to no probe
     try:
-        probes.publish_run(RUN, False)
+        probes.publish_run(RUN)
         probes.adopt(ours, RUN)
-        assert until(lambda: facts(probes.feed, "probe_kill_due"))
+        assert until(lambda: facts(probes.feed, "probe_unanswered"))
         assert until(lambda: len([m for m in player.received if hasattr(m, "nonce")]) >= 3)
         assert facts(probes.feed, "probe_answered") == []
     finally:
@@ -162,44 +162,14 @@ def test_stale_nonces_are_never_answers(probes):
 
 
 def test_a_blocked_main_loop_does_not_stop_probe_timing(probes):
-    """The main loop publishes once and then blocks (systemctl, HTTP): misses still count.
-    The real thread's timer is the point: a stall only delays the latch, the wait is bounded."""
-    probes.publish_run(RUN, False)  # then nothing but the latch read: no publish, no adopt
-    taken = []
-    assert until(lambda: taken.append(probes.take_kill_due()) or taken[-1] is not None)
-    assert taken[-1].run == RUN and taken[-1].unanswered_ms >= FAST.kill_after_ms
+    """The main loop publishes once and then blocks (systemctl, HTTP): misses still count on
+    the thread's own timer, and the unanswered time keeps growing; nothing is handed back."""
+    probes.publish_run(RUN)  # then nothing: no publish, no adopt
+    assert until(lambda: any(e.value["unanswered_ms"] >= 8 * FAST.period_ms
+                             for e in facts(probes.feed, "probe_unanswered")))
     unanswered = facts(probes.feed, "probe_unanswered")
-    assert unanswered and unanswered[-1].value["misses"] >= FAST.miss_limit
-    [due] = facts(probes.feed, "probe_kill_due")
-    assert due.value["unanswered_ms"] >= FAST.kill_after_ms
-
-
-def test_kill_due_is_a_level_while_unanswered_and_the_fact_an_edge(probes):
-    """A kill the main loop took but withheld (an armed recovery) is offered again on later
-    turns while the run stays unanswered (E-AP2-1); `probe_kill_due` is still once."""
-    probes.publish_run(RUN, False)
-    assert until(lambda: probes.take_kill_due() is not None)
-    retaken = []
-    assert until(lambda: retaken.append(probes.take_kill_due()) or retaken[-1] is not None)
-    assert retaken[-1].run == RUN and retaken[-1].unanswered_ms >= FAST.kill_after_ms
-    time.sleep(3 * FAST.period_ms / 1000)
-    assert len(facts(probes.feed, "probe_kill_due")) == 1
-
-
-def test_an_answer_ends_the_kill_due_level(probes):
-    ours, theirs = packet_pair()
-    probes.publish_run(RUN, False)
-    assert until(lambda: probes.take_kill_due() is not None)
-    player = Player(theirs)  # the app answers again
-    try:
-        probes.adopt(ours, RUN)
-        assert until(lambda: facts(probes.feed, "probe_answered"))
-        time.sleep(2 * FAST.period_ms / 1000)
-        probes.take_kill_due()  # at most one re-assertion raced the answer
-        time.sleep(3 * FAST.period_ms / 1000)
-        assert probes.take_kill_due() is None
-    finally:
-        player.stop()
+    assert unanswered[-1].value["misses"] >= FAST.miss_limit
+    assert {e.kind for e in facts(probes.feed, run=None)} <= {"probe_unanswered"}
 
 
 @pytest.fixture
@@ -210,52 +180,18 @@ def stepped():
     probes.close()
 
 
-def test_an_answer_clears_a_kill_due_latch_set_before_it(stepped):
-    """E-B8-6: a latch set while overdue must not survive the answer that ends the episode,
-    or the main loop kills an app that recovered."""
-    ours, theirs = packet_pair()
-    theirs.setblocking(False)
-    try:
-        stepped.publish_run(RUN, False)
-        stepped.adopt(ours, RUN)
-        now = passes(stepped, DUE)  # the last pass set the latch (and the once-only fact)
-        assert facts(stepped.feed, "probe_kill_due")
-        nonces = []
-        while True:
-            try:
-                nonces.append(parse_node_probe_channel_message(theirs.recv(9000)).nonce)
-            except BlockingIOError:
-                break
-        theirs.send(encode_node_probe_answer(nonces[-1]))
-        passes(stepped, 1, now)
-        assert facts(stepped.feed, "probe_answered")
-        assert stepped.take_kill_due() is None
-    finally:
-        theirs.close()
-
-
-def test_a_run_change_drops_the_kill_due_latch(stepped):
-    stepped.publish_run(RUN, False)
-    now = passes(stepped, DUE)
-    assert facts(stepped.feed, "probe_kill_due")
-    stepped.publish_run(OTHER, False)
-    passes(stepped, 1, now)  # OTHER is inside its startup budget
-    assert stepped.take_kill_due() is None
-
-
 def test_a_late_thread_turn_is_not_counted():
     offset = [0]
     feed = Feed(512)
-    timing = ProbeTiming(period_ms=50, miss_limit=2, startup_ms=1, kill_after_ms=5000)
+    timing = ProbeTiming(period_ms=50, miss_limit=2, startup_ms=1)
     probes = ProbeThread(feed, clock=lambda: monotonic_ms() + offset[0], timing=timing)
     probes.start()
     try:
-        probes.publish_run(RUN, False)
+        probes.publish_run(RUN)
         assert until(lambda: facts(feed, "probe_unanswered"))
         offset[0] = 60_000  # the thread's clock jumps a minute: its own stall, not the app's
         time.sleep(0.4)
-        assert facts(feed, "probe_unanswered")[-1].value["unanswered_ms"] < timing.kill_after_ms
-        assert facts(feed, "probe_kill_due") == [] and probes.take_kill_due() is None
+        assert facts(feed, "probe_unanswered")[-1].value["unanswered_ms"] < 5000
     finally:
         probes.close()
 
@@ -265,7 +201,7 @@ def test_channel_adopted_before_its_run_is_published_is_kept(probes):
     player = Player(theirs)
     try:
         probes.adopt(ours, RUN)  # serve_one runs before this turn's publish
-        probes.publish_run(RUN, False)
+        probes.publish_run(RUN)
         assert until(lambda: facts(probes.feed, "probe_answered"))
         assert [e.value["state"] for e in facts(probes.feed, "probe_channel")] == ["open"]
     finally:
@@ -276,10 +212,10 @@ def test_a_channel_whose_run_is_not_published_is_closed(probes):
     ours, theirs = packet_pair()
     player = Player(theirs)
     try:
-        probes.publish_run(RUN, False)
+        probes.publish_run(RUN)
         probes.adopt(ours, RUN)
         assert until(lambda: facts(probes.feed, "probe_answered"))
-        probes.publish_run(OTHER, False)
+        probes.publish_run(OTHER)
         assert until(lambda: [e.value["state"] for e in facts(probes.feed, "probe_channel")]
                      == ["open", "closed"])
         # The new run has a fresh clock and no channel: it is probed by nobody, answered never.
@@ -291,7 +227,7 @@ def test_a_channel_whose_run_is_not_published_is_closed(probes):
 
 def test_any_packet_but_an_answer_ends_the_channel(probes):
     ours, theirs = packet_pair()
-    probes.publish_run(RUN, False)
+    probes.publish_run(RUN)
     probes.adopt(ours, RUN)
     assert until(lambda: facts(probes.feed, "probe_channel"))
     theirs.send(encode_node_app_link_result("recorded"))
@@ -302,7 +238,7 @@ def test_any_packet_but_an_answer_ends_the_channel(probes):
 
 def test_peer_eof_closes_the_channel(probes):
     ours, theirs = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
-    probes.publish_run(RUN, False)
+    probes.publish_run(RUN)
     probes.adopt(ours, RUN)
     assert until(lambda: facts(probes.feed, "probe_channel"))
     theirs.close()
@@ -318,7 +254,7 @@ def test_relink_reaches_only_the_owed_runs_channel(probes):
     ours, theirs = packet_pair()
     player = Player(theirs)
     try:
-        probes.publish_run(RUN, False)
+        probes.publish_run(RUN)
         probes.adopt(ours, RUN)
         assert until(lambda: facts(probes.feed, "probe_answered"))
         probes.owe_relink(OwedRelink(OTHER, "a" * 32))
@@ -333,7 +269,7 @@ def test_relink_reaches_only_the_owed_runs_channel(probes):
 
 def test_a_relink_owed_while_no_channel_is_open_goes_to_the_next_channel_first(probes):
     """E-B7-3: the channel is down (broker restart, Player backoff) when the relink is owed."""
-    probes.publish_run(RUN, False)
+    probes.publish_run(RUN)
     probes.owe_relink(OWED)
     time.sleep(0.15)  # several thread passes with nothing to send it on
     ours, theirs = packet_pair()
@@ -348,7 +284,7 @@ def test_a_relink_owed_while_no_channel_is_open_goes_to_the_next_channel_first(p
 
 
 def test_a_relink_is_sent_once_per_channel_instance(probes):
-    probes.publish_run(RUN, False)
+    probes.publish_run(RUN)
     first_ours, first_theirs = packet_pair()
     first = Player(first_theirs)
     try:
@@ -381,7 +317,7 @@ def test_each_owed_episode_reaches_a_long_lived_channel_once(probes):
     ours, theirs = packet_pair()
     player = Player(theirs)
     try:
-        probes.publish_run(RUN, False)
+        probes.publish_run(RUN)
         probes.adopt(ours, RUN)
         probes.owe_relink(OWED)
         assert until(lambda: len(relinks(player)) == 1)
@@ -400,7 +336,7 @@ def test_each_owed_episode_reaches_a_long_lived_channel_once(probes):
 
 
 def test_nothing_owed_sends_no_relink(probes):
-    probes.publish_run(RUN, False)
+    probes.publish_run(RUN)
     probes.owe_relink(OWED)
     probes.owe_relink(None)  # the Player proved again: the slot holds its new link
     ours, theirs = packet_pair()
@@ -415,14 +351,14 @@ def test_nothing_owed_sends_no_relink(probes):
 
 
 def test_a_run_change_drops_the_owed_relink(probes):
-    probes.publish_run(RUN, False)
+    probes.publish_run(RUN)
     probes.owe_relink(OWED)
-    probes.publish_run(OTHER, False)
+    probes.publish_run(OTHER)
     ours, theirs = packet_pair()
     player = Player(theirs)
     try:
         assert until(lambda: facts(probes.feed, "probe_unanswered", run=OTHER))
-        probes.publish_run(RUN, False)  # the old run's key again: still nothing owed
+        probes.publish_run(RUN)  # the old run's key again: still nothing owed
         probes.adopt(ours, RUN)
         assert until(lambda: facts(probes.feed, "probe_answered"))
         assert relinks(player) == []
@@ -460,7 +396,7 @@ def test_an_unsent_relink_is_retried_on_a_later_pass(probes):
     channel = Unwritable(ours, blocked=3)
     player = Player(theirs)
     try:
-        probes.publish_run(RUN, False)
+        probes.publish_run(RUN)
         probes.owe_relink(OWED)
         probes.adopt(channel, RUN)
         assert until(lambda: relinks(player))

@@ -138,20 +138,6 @@ class MemoryEffectJournal:
         self.latest = record
 
 
-class MemoryRelaunchPacing:
-    """`RelaunchPacingStore` in memory; `puts` counts the writes."""
-
-    def __init__(self):
-        self.pacing = None
-        self.puts = 0
-
-    def get(self):
-        return self.pacing
-
-    def put(self, pacing):
-        self.pacing, self.puts = pacing, self.puts + 1
-
-
 class RecordingAppDriver:
     def __init__(self, clock=lambda: 0):
         self.running = None
@@ -161,6 +147,7 @@ class RecordingAppDriver:
         self.launch = None  # the last start's Launch (epoch, display, started_ms)
         self.collected = True  # PID1 unloaded the old unit
         self.clock = clock  # boottime ms, read at each start
+        self.purposeful = None  # Display's mark (a PurposefulRestart), None while absent
 
     def display_incarnation(self):
         return self.display
@@ -171,6 +158,8 @@ class RecordingAppDriver:
     def unit_collected(self):
         return self.running is None and self.collected
 
+    def purposeful_restart(self):
+        return self.purposeful
 
     def current(self):
         return self.running
@@ -248,8 +237,7 @@ def run_demo() -> dict:
     )
     app_driver = RecordingAppDriver()
     broker = AppEffectBroker(boot_id=boot, offer_id=offer, authorized_environment=environment,
-                             journal=MemoryEffectJournal(), driver=app_driver,
-                             pacing=MemoryRelaunchPacing(), now_ms=lambda: 0)
+                             journal=MemoryEffectJournal(), driver=app_driver)
     cold = broker.cold_start(ColdStart(UUID(int=8), boot, offer, environment))
     running = cold.running
     if running is None:

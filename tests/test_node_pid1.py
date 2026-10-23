@@ -3,7 +3,11 @@
 Each scenario boots the actual sealed node in a privileged arm64 systemd container against a
 real HTTP Central on its own database: success (ordered stop-before-start, natural completion;
 before its stage, three signal range restarts of Weston under the running Player: the broker alone
-starts the Player again, never exits, and no unit fails), failure (fallback), outage (Central unreachable for 35 s once the broker holds its stage),
+starts the Player again, never exits, and no unit fails; after it, a crashed Player and then a
+crashed Weston leave the Player down, issue #125), failure (the target exits: target_failed and
+effect_unknown, no fallback start, and the debug overlay's card shows), dark (a frozen Player,
+then a killed one: the card names the cause and the Pi-clock time, and nothing starts the Player
+again; issues #123, #125), outage (Central unreachable for 35 s once the broker holds its stage),
 reboot (a second kernel boot of the same device re-enrolls, supersedes the first and is
 commandable), refused (a board below the smallest memory class: storage refuses, nothing
 after it runs, and Host Management reports the refusal with its numbers) and join (the Node API
@@ -65,7 +69,7 @@ from nodeapi.hub import WallWriter
 pytestmark = pytest.mark.node_pid1
 FIXTURE_VARIABLE = "PHOTO_WALL_NODE_PID1_FIXTURE"
 REQUIRE_VARIABLE = "PHOTO_WALL_TEST_REQUIRE_NODE_PID1"
-SCENARIOS = ("success", "failure", "outage", "reboot", "refused", "join")
+SCENARIOS = ("success", "failure", "outage", "reboot", "refused", "join", "dark")
 
 MASKS = (
     *HOST_ACTING_UNITS,
@@ -99,10 +103,41 @@ SIGNAL_UNIT = "photo-wall-display-signal.service"  # a signal range change's Wes
 DISPLAY_RESTARTS = 3
 # Weston's RestartSec and READY=1, the broker's next turn, the Player's start and its app link.
 PLAYER_RELAUNCH_SECONDS = 60
-# A Player that dies on its own: the broker's first paced relaunch (1 s), its next turn, the
-# collection of the old unit and the new unit's start.
-PLAYER_CRASH_RELAUNCH_SECONDS = 15
+# Issue #125: a Player that dies on its own stays down. The old paced relaunch started it within
+# about 2 s; this watch is long enough to see any start a turn or a unit collection would make.
+PLAYER_STAYS_DOWN_SECONDS = 15
 BROKER_LAUNCH = "/run/photo-wall-app-broker/launch.json"  # the broker's current launch record
+# The dark scenario: the debug overlay's card shows within CARD_SECONDS of the signal (k misses
+# of T plus the raise window for a frozen Player; the raise window for a dead one), and nothing
+# starts the Player again within STAYS_DARK_SECONDS of it (the removed kill came at K = 35 s).
+CARD_SECONDS = 20
+STAYS_DARK_SECONDS = 45
+DARK_OUTPUT = "Virtual-1"  # the fixture's synthetic Output (tests/node_pid1_fixture/Dockerfile)
+# Household lines of the run causes (contracts/node_faults.py), as the card's line 1 starts.
+UNRESPONSIVE_LINE = "Photos paused — the player stopped responding"
+ABSENT_LINE = "Photos paused — the player stopped"
+# The judge's `status` (uid 0) on health.sock, one SOCK_SEQPACKET request.
+HEALTH_STATUS = """import json,socket
+s=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET);s.settimeout(5)
+s.connect('/run/photo-wall-health/health.sock');s.send(b'{"op":"status"}')
+print(s.recv(1<<20).decode())"""
+# The broker's node feed (uid 0 may read it): `latest` prints the newest sequence; `after N` the
+# kind and sequence of every event after N, page by page.
+BROKER_FEED = """import json,socket,sys
+def read(after):
+ s=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET);s.settimeout(5)
+ s.connect('/run/photo-wall-app-feed/feed.sock')
+ s.send(json.dumps({'op':'events','after':after,'incarnation':None}).encode())
+ page=json.loads(s.recv(1<<17));s.close();assert page['accepted'],page;return page
+if sys.argv[1]=='latest':
+ print(json.dumps({'latest':read(0)['latest']}));raise SystemExit
+after=int(sys.argv[2]);seen=[]
+while True:
+ page=read(after);events=page['events']
+ seen+=[{'sequence':e['sequence'],'kind':e['kind']} for e in events]
+ if not events:break
+ after=events[-1]['sequence']
+print(json.dumps(seen))"""
 CONTROL_SOCKET = str(RUNTIME / "control.sock")
 # The controller's journal must never hold these: its connect to a control.sock not yet bound
 # (started before Weston's READY=1), or a sandbox set up on a vanished runtime directory.
@@ -338,26 +373,6 @@ class Node:
             time.sleep(0.5)
         self.verify_display_ready(name)
 
-    def player_follows_display(self, fixture):
-        """Weston crashes: the Player stops with it (StopPropagatedFrom=), and the broker starts
-        the same environment again for the new Weston incarnation, which links to Central again."""
-        before = unit_properties_of(self, PLAYER_UNIT, "ActiveState,InvocationID")
-        linked = status_of(fixture, self.work)["current"]
-        assert before["ActiveState"] == "active" and linked, (before, linked)
-        self.recover_display("SIGSEGV", "display-under-player")
-        deadline = time.monotonic() + PLAYER_RELAUNCH_SECONDS
-        while True:
-            now = unit_properties_of(self, PLAYER_UNIT, "ActiveState,SubState,InvocationID")
-            current = status_of(fixture, self.work)["current"]
-            if (now["InvocationID"] not in ("", before["InvocationID"])
-                    and now["SubState"] == "running"
-                    and current and current["process"] != linked["process"]):
-                break
-            assert time.monotonic() < deadline, ("no Player for the new Weston", before, now, current)
-            time.sleep(0.5)
-        (self.work / "player-after-display.json").write_text(
-            json.dumps({"before": before, "after": now, "linked": current}, sort_keys=True))
-
     def player_survives_display_restarts(self, times):
         """Incident 2026-10-13 (v0.35.0): a signal range change restarts Weston through
         photo-wall-display-signal.service. Each of `times` restarts, under the broker's running
@@ -402,28 +417,91 @@ class Node:
         assert failed == [], failed
         self.verify_display_ready("display-after-restarts")
 
-    def player_restarts_after_a_crash(self):
-        """The Player dies on its own (SIGSEGV), Weston untouched: the broker starts it again on
-        its relaunch pacing, as a new launch epoch, within the same kernel boot (1b P1b)."""
+    def player_stays_down(self, before, epoch, until, name):
+        """Until `until` (monotonic), no Player run but `before`'s: its InvocationID is the same
+        or gone, never a new one, and the broker's launch epoch is still `epoch` (issue #125)."""
+        watched = []
+        while True:
+            now = unit_properties_of(self, PLAYER_UNIT, "ActiveState,SubState,InvocationID")
+            launch = json.loads(self.run("cat", BROKER_LAUNCH))
+            watched.append({"unit": now, "epoch": launch["epoch"]})
+            assert now["InvocationID"] in ("", before["InvocationID"]), ("a new Player run", name,
+                                                                         before, now, launch)
+            assert launch["epoch"] == epoch, ("a new launch epoch", name, epoch, launch)
+            if time.monotonic() >= until:
+                break
+            time.sleep(1)
+        (self.work / (name + ".json")).write_text(json.dumps(
+            {"before": before, "epoch": epoch, "watched": watched[-3:]}, sort_keys=True))
+
+    def player_stays_down_after_crashes(self):
+        """The Player dies on its own (SIGSEGV), Weston untouched: nothing starts it again, and
+        a Weston crash after that does not either (no mark from Display names the Player's
+        Weston), within the same kernel boot (issue #125, the removed relaunches)."""
         boot = self.run("cat", "/proc/sys/kernel/random/boot_id").strip()
         before = unit_properties_of(self, PLAYER_UNIT, "ActiveState,InvocationID")
         epoch = json.loads(self.run("cat", BROKER_LAUNCH))["epoch"]
         assert before["ActiveState"] == "active", before
         self.run("systemctl", "kill", "--signal=SIGSEGV", PLAYER_UNIT)
-        deadline = time.monotonic() + PLAYER_CRASH_RELAUNCH_SECONDS
+        self.player_stays_down(before, epoch, time.monotonic() + PLAYER_STAYS_DOWN_SECONDS,
+                               "player-after-crash")
+        self.recover_display("SIGSEGV", "display-after-player-crash")
+        self.player_stays_down(before, epoch, time.monotonic() + PLAYER_STAYS_DOWN_SECONDS,
+                               "player-after-display-crash")
+        assert self.run("cat", "/proc/sys/kernel/random/boot_id").strip() == boot
+
+    def health_status(self):
+        """The health judge's `status`, read as root on health.sock."""
+        return json.loads(self.run("/usr/bin/python3", "-I", "-c", HEALTH_STATUS))
+
+    def card(self, code, line, since, name):
+        """Within CARD_SECONDS of `since` (monotonic), DARK_OUTPUT's overlay instruction is tinted
+        with `line` and its time (" · since HH:MM") on line 1 and `code` on line 2; returned."""
+        deadline = since + CARD_SECONDS
         while True:
-            now = unit_properties_of(self, PLAYER_UNIT, "ActiveState,InvocationID")
-            launch = json.loads(self.run("cat", BROKER_LAUNCH))
-            if (now["ActiveState"] == "active"
-                    and now["InvocationID"] not in ("", before["InvocationID"])
-                    and launch["running"]):
+            status = self.health_status()
+            shown = {each["output"]: each for each in status["overlay"]["instructions"]}
+            instruction = shown.get(DARK_OUTPUT)
+            if (instruction and instruction["tint"]
+                    and instruction["lines"][0].startswith(line + " · since ")
+                    and code in instruction["lines"][1]):
                 break
-            assert time.monotonic() < deadline, ("no Player after its crash", before, now, launch)
+            if time.monotonic() >= deadline:
+                (self.work / (name + "-status.json")).write_text(json.dumps(status, sort_keys=True))
+                raise AssertionError((f"no {code} card within {CARD_SECONDS} s", instruction,
+                                      status["verdict"]))
             time.sleep(0.5)
-        evidence = {"before": before, "after": now, "epochs": [epoch, launch["epoch"]]}
-        (self.work / "player-after-crash.json").write_text(json.dumps(evidence, sort_keys=True))
-        assert launch["epoch"] == epoch + 1, evidence
-        assert self.run("cat", "/proc/sys/kernel/random/boot_id").strip() == boot, evidence
+        (self.work / (name + ".json")).write_text(json.dumps(
+            {"instruction": instruction, "verdict": status["verdict"]}, sort_keys=True))
+        return instruction
+
+    def feed_latest(self):
+        return json.loads(self.run("/usr/bin/python3", "-I", "-c", BROKER_FEED, "latest"))["latest"]
+
+    def started_after(self, sequence):
+        """The broker feed's `app_started` facts after `sequence`."""
+        events = json.loads(self.run("/usr/bin/python3", "-I", "-c", BROKER_FEED, "after",
+                                     str(sequence)))
+        return [event for event in events if event["kind"] == "app_started"]
+
+    def stays_dark(self, signal, code, line, name, *, then=None):
+        """`signal` to the Player's main process: the card (`code`, `line`, its time) shows
+        within CARD_SECONDS, and until STAYS_DARK_SECONDS after the signal no new Player run, no
+        new launch epoch and no `app_started` fact (`then` runs once the card shows)."""
+        before = unit_properties_of(self, PLAYER_UNIT, "ActiveState,MainPID,InvocationID")
+        epoch = json.loads(self.run("cat", BROKER_LAUNCH))["epoch"]
+        assert before["MainPID"] not in ("", "0"), before
+        mark = self.feed_latest()
+        self.run("/usr/bin/python3", "-I", "-c", "import os,signal,sys;"
+                 "os.kill(int(sys.argv[1]),getattr(signal,sys.argv[2]))", before["MainPID"], signal)
+        since = time.monotonic()
+        instruction = self.card(code, line, since, name + "-card")
+        if then is not None:
+            then()
+        self.player_stays_down(before, epoch, since + STAYS_DARK_SECONDS, name)
+        started = self.started_after(mark)
+        assert started == [], ("app_started after the signal", name, started)
+        return instruction
 
     def cold(self, fixture, components_dir, previous=None):
         """Boot PID1, bind the exact packages, start real units; return the cold app-link."""
@@ -861,7 +939,8 @@ def stage_and_complete(fixture, node, phase, reference):
     else:
         (node.work / "status-failed.json").write_text(json.dumps(status, sort_keys=True))
         raise AssertionError("real online phase did not complete: " + str(node.work))
-    observation = node.verify_process(status["current"])
+    # A failed switch has no current process to observe: nothing runs (issue #125).
+    observation = None if phase == "failure" else node.verify_process(status["current"])
     (node.work / "result.json").write_text(
         json.dumps(
             {
@@ -960,17 +1039,21 @@ def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, ph
                 node.verify_image_mounts(components_dir)
                 node.verify_bus()
                 reported = assert_bus_memory_reported(fixture, node)
-                node.player_follows_display(fixture)
                 node.player_survives_display_restarts(DISPLAY_RESTARTS)
             stage_and_complete(fixture, node, phase, reference)
             if phase == "success":
                 node.verify_target_mount(reference)
+            if phase == "failure":
+                # No fallback start: the old release stays stopped, the target is gone, and the
+                # debug overlay's card says the Player stopped.
+                node.card("app_absent", ABSENT_LINE, time.monotonic(), "failure-card")
+                assert unit_properties_of(node, PLAYER_UNIT, "SubState")["SubState"] != "running"
             assert_memory_lines(node)
             if phase == "success":
                 # After assert_memory_lines, whose every slice reads oom_kill 0.
                 node.induce_bus_oom()
                 assert_bus_oom_reported(fixture, node, reported)
-                node.player_restarts_after_a_crash()
+                node.player_stays_down_after_crashes()
             node.stop_and_verify_roots(components_dir, reference)
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
@@ -1135,6 +1218,32 @@ def test_node_pid1_refused(node_pid1_inputs, node_host, registry, tmp_path):
             node.recover_display("SIGSTOP", "display-after-hang")
             hung = node.run("journalctl", "--no-pager", "-b", "-u", DISPLAY_UNIT)
             assert "Watchdog timeout" in hung, "a stopped Weston was not aborted by its watchdog"
+            print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
+        finally:
+            node.capture_and_remove(fixture, sys.exc_info()[1])
+
+
+def test_node_pid1_dark(node_pid1_inputs, node_host, registry, tmp_path):
+    """Issues #123 and #125 under real systemd: the cold Player is frozen (SIGSTOP), then killed
+    (kill -9 of its MainPID). Each time the debug overlay's card on Virtual-1 shows within
+    CARD_SECONDS, naming the cause (app_unresponsive, then app_absent) and the Pi-clock time it
+    began, and for STAYS_DARK_SECONDS after the signal nothing starts the Player again: no new
+    InvocationID, the same launch epoch, no `app_started` fact. After the kill a crashed Weston
+    starts nothing either. On main (943e8e71) the broker kills the frozen Player at K = 35 s and
+    relaunches a dead one within about 2 s, so each case fails there."""
+    phase = "dark"
+    components_dir, _, image = node_pid1_inputs
+    work = tmp_path
+    with central_fixture(registry, components_dir, {}, work / "central", node_host) as fixture:
+        node = Node(image, work, phase)
+        try:
+            node.cold(fixture, components_dir)
+            frozen = node.stays_dark("SIGSTOP", "app_unresponsive", UNRESPONSIVE_LINE, "dark-sigstop")
+            killed = node.stays_dark(
+                "SIGKILL", "app_absent", ABSENT_LINE, "dark-kill",
+                then=lambda: node.recover_display("SIGSEGV", "dark-display-crash"))
+            (work / "dark.json").write_text(json.dumps(
+                {"sigstop": frozen, "kill": killed}, sort_keys=True))
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
             node.capture_and_remove(fixture, sys.exc_info()[1])

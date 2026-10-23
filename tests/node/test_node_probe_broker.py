@@ -26,8 +26,9 @@ from appliance.node import app_link
 from contracts.node_app_link import parse_node_probe_channel_message
 from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
 
-FAST = ProbeTiming(period_ms=50, miss_limit=2, startup_ms=100, kill_after_ms=300)
-DUE = -(-FAST.kill_after_ms // FAST.period_ms) + 1  # turns until kill-due (the first pass is at 0)
+FAST = ProbeTiming(period_ms=50, miss_limit=2, startup_ms=100)
+# Turns until the unanswered run is reported (the first pass is at 0), with a margin.
+DUE = FAST.startup_ms // FAST.period_ms + FAST.miss_limit + 2
 LINUX = sys.platform.startswith("linux")
 
 
@@ -144,9 +145,12 @@ class Driver:
         self.calls += 1
         return self.running
 
-    def kill(self, expected):
+    def kill(self, expected):  # nothing may call it (issue #125): a test asserts it never ran
         self.kills.append(expected)
         return True
+
+    def stop_foreign(self):
+        self.kills.append("stop_foreign")
 
 
 def loop_for(tmp_path, monkeypatch, *, granted=True, producer=None, running=None, links=None):
@@ -186,7 +190,7 @@ def test_probe_facts_never_reach_a_central_request(tmp_path, monkeypatch):
         turns(loop, DUE)
         page = feed.read(0, incarnation=None, limit=8)
         kinds = {event.kind for event in page.events}
-        assert {"probe_unanswered", "probe_kill_due"} <= kinds, kinds
+        assert "probe_unanswered" in kinds, kinds
         assert page.events[0].value["run"] == AppRunKey.of(running).document()
         assert [path for _, path, _ in session.requests] == ["/v2/node/evidence"]
         for _, _, body in session.requests:
@@ -204,12 +208,27 @@ def test_each_turn_asks_the_driver_once_and_publishes_with_or_without_a_session(
             turns(loop, 3)
             assert driver.calls == 3
             assert feed.read(0, incarnation=None).events[0].value["run"] == AppRunKey.of(running).document()
-            assert loop.probes.recovery_may_be_armed is False
             if not granted:
                 assert session.requests == []
         finally:
             loop.probes.close()
             store.close()
+
+
+def test_an_unanswered_run_is_never_killed(tmp_path, monkeypatch):
+    """Issue #125, the removed kill after missed pings: a run that never answers is reported on
+    the feed (the judge's card) for as long as it stays unanswered, and nothing signals, stops or
+    restarts it. Mutation probe: put the kill-due latch and `_consume_kill_due` back -> fails."""
+    loop, feed, _, driver, _, store = loop_for(tmp_path, monkeypatch)
+    try:
+        turns(loop, DUE * 20)
+        kinds = {event.kind for event in feed.read(0, incarnation=None, limit=512).events}
+        assert "probe_unanswered" in kinds, kinds
+        assert not kinds & {"probe_kill_due", "app_killed", "kill_withheld"}, kinds
+        assert driver.kills == [] and driver.calls == DUE * 20
+    finally:
+        loop.probes.close()
+        store.close()
 
 
 def test_a_dead_probe_thread_stops_the_broker(tmp_path, monkeypatch):

@@ -1,5 +1,6 @@
 """Health judge unit: draining the broker and display feeds by cursor, the root-only `status`
 op, the pw-display-only `overlay` op, packaging."""
+import datetime
 import json
 import os
 import socket
@@ -368,7 +369,7 @@ def test_a_judge_started_after_the_display_ring_lapped_still_projects_every_outp
         health = HealthRunner(runner.shipped_judge(), (display,), clock=Clock())
         health.turn()
         assert display.gaps == 1 and display.failures == 0
-        assert [(i.output, i.tint) for i in health.judge.instructions(0)] == [
+        assert [(i.output, i.tint) for i in health.judge.instructions(0, wall_ms=0)] == [
             ("HDMI-A-2", False), ("Virtual-1", False)]
         status = health.answer("status")
         assert status["verdict"]["outputs"] == [
@@ -464,9 +465,14 @@ def judged(outputs=None, *, clock=None):
     clock = clock or Clock()
     display = local_display_reader(Feed(8), outputs or [snapshot_output()])
     broker = local_reader(Feed(64))
-    health = HealthRunner(runner.shipped_judge(), (broker, display), clock=clock)
+    # The Pi's wall clock reads the boot clock plus 07:17 UTC on 2026-10-20 (the card's time).
+    card = runner.CardClock(wall=lambda: WALL_AT_0 + clock.now, zone=lambda: datetime.UTC)
+    health = HealthRunner(runner.shipped_judge(), (broker, display), clock=clock, card=card)
     health.turn()
     return health, broker, display, clock
+
+
+WALL_AT_0 = int(datetime.datetime(2026, 10, 20, 7, 17, tzinfo=datetime.UTC).timestamp() * 1000)
 
 
 def received(connection):
@@ -518,7 +524,8 @@ def test_changes_are_pushed_each_turn_and_everything_every_v_over_3(pairs):
     health.turn()
     [tinted] = received(theirs)
     assert tinted.tint and tinted.serial > first.serial
-    assert tinted.lines[0] == FAULTS[APP_UNRESPONSIVE].household_line
+    # The evidence began at 1000 ms on the boot clock: 07:17:01 on the Pi's own clock.
+    assert tinted.lines[0] == FAULTS[APP_UNRESPONSIVE].household_line + " · since 07:17"
     clock.now = 2000 + RAISE  # a change between refreshes is pushed on its own turn
     broker.feed.append("app_link_accepted", {"run": RUN, "player_id": "player-1"})
     health.turn()

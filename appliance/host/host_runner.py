@@ -85,7 +85,7 @@ class HostRunner:
                                    offer_id=offer_id, kernel_boot_id=kernel_boot_id)
         self.core = None
         self.sampler = LinuxHostSampler()
-        self.recovery = RecoverySupervisor(store, SystemdRebootDriver(), RecoveryObserver())
+        self.recovery = RecoverySupervisor(store, RecoveryObserver())
 
     @property
     def claim(self):
