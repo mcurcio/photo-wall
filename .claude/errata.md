@@ -6961,3 +6961,20 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
   `photo-wall-display-signal.service`). The rule now splits a shell script's words and holds each `/usr/` binary
   it runs to "installed", so the rule covers more than before rather than exempting the line. The `-` prefix
   (a failed mark never holds the restart back) is kept as S2 chose and tested it.
+- **S6: a completion still takes Coordination and Runtime.** The page says the exchange takes the
+  Node lock "in place of acquire_runtime_locks"; but a handoff's completion resolves the Output's
+  loss through `Coordinator.reconcile_node_output_in`, which the inbox also writes under
+  Coordination and Runtime (and which requires them), and the page did not move that port to the
+  Node lock. So an exchange carrying `completed_decision_id` takes Coordination, Runtime, then the
+  Node lock (`acquire_node_lock`'s order); every other exchange takes the Node lock alone. While
+  Coordination is held a completion waits out `lock_timeout` and is refused 503 `lock_busy`
+  (`tests/test_node_display_lock.py` `test_a_completion_alone_waits_on_coordination_...`). Moving
+  completions off Coordination needs the inbox's loss writes under the Node lock too: a re-cut.
+- **S6 `lock_holders_in` widened.** The page named only holders some backend still waits for; the
+  request that timed out has already rolled back, so a lone timeout logged "none still held". It now
+  also names every holder of Coordination, Runtime and any Node lock in this database. A row lock's
+  holder is still not named (PostgreSQL lists one only while someone waits); `log_lock_waits` stays
+  the deploy's choice (the iac repository), not made here.
+- **S5: "Last start: after a hardware watchdog reset" has one home, `hostHealth.js`** (the Hardware
+  page), not also `bootFacts.js` as the page said. One home is the better shape; and on the Pi 5 it
+  never shows (the S5 erratum above).

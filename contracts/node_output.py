@@ -264,6 +264,9 @@ class DisplayIdentity:
                  and (self.serial is None or printable(self.serial, 1, 32)), "display_identity")
 
 
+MAX_SCREEN_SIDE: Final = 16384                  # DisplayMode's bound, and a screen's as it hangs
+
+
 @dataclass(frozen=True)
 class DisplayMode:
     """One mode the EDID offers. Refresh in millihertz, so 59.94 Hz is exact (59940)."""
@@ -273,9 +276,9 @@ class DisplayMode:
     preferred: bool = False
 
     def __post_init__(self) -> None:
-        """ValueError("display_mode") unless 1 <= width, height <= 16384 and
+        """ValueError("display_mode") unless 1 <= width, height <= MAX_SCREEN_SIDE and
         1000 <= refresh_millihertz <= 1_000_000."""
-        require(whole(self.width, 1, 16384) and whole(self.height, 1, 16384)
+        require(whole(self.width, 1, MAX_SCREEN_SIDE) and whole(self.height, 1, MAX_SCREEN_SIDE)
                  and whole(self.refresh_millihertz, 1000, 1_000_000) and type(self.preferred) is bool, "display_mode")
 
 
@@ -454,7 +457,6 @@ def decode_power_attempt(raw: bytes) -> PowerAttempt:
 # the Display when the Frames are not configured or cannot be met".
 
 REGION_DOCUMENT_BYTES: Final = 1024             # a region document's largest encoding
-MAX_SCREEN_SIDE: Final = 16384                  # DisplayMode's bound, as it hangs too
 _REGION_PREFIX: Final = "region-"               # desired bucket key: region-<output_id>
 _FRAME_ID_LONGEST: Final = 96                   # a Frame id's longest token
 

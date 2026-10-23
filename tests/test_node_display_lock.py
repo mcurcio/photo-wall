@@ -12,6 +12,7 @@ import pytest
 from test_fleet_attempts import DEVICE_ID
 from test_node_runtime_reconciliation import rig
 
+from central.fleet.models import NodeControlError
 from central.fleet.node_display import NodeDisplay
 from central.transaction_locks import (
     COORDINATION_LOCK,
@@ -80,3 +81,23 @@ def test_display_admission_needs_the_nodes_own_lock(registry):
     with registry.db.transaction() as conn:
         acquire_node_lock(conn, DEVICE_ID)
         assert coordinator.display_admission_in(conn, **arguments).allowed
+
+
+def test_a_completion_alone_waits_on_coordination_and_is_refused_as_retryable(registry):
+    """A handoff's completion resolves the Output's loss (`reconcile_node_output_in`), Runtime state
+    the Coordinator and the inbox write under Coordination and Runtime, so a completion alone still
+    takes them, before the Node lock (erratum, overlay-always fix pass). While another transaction
+    holds Coordination it waits out the transaction's lock_timeout and ends in LockNotAvailable,
+    which `mount_lock_refusal` answers 503 lock_busy, never a 500. Mutation probe: drop the
+    completion's acquire_runtime_locks -> the exchange answers display_handoff_decision_unknown."""
+    coordinator, _, _, sessions, claims, grants, facts, _, _ = rig(registry)
+    claim, grant, fact = claims["display_host"], grants["display_host"], facts[0]
+    display = NodeDisplay(sessions, runtime=coordinator)
+    raw = encode_display_exchange(DisplayExchange(grant.producer, uuid4(), 1300, fact.output, True,
+                                                  completed_decision_id=uuid4(), completed_boottime_ms=1299))
+    with psycopg.connect(registry.db.dsn) as holder:
+        holder.execute("SELECT pg_advisory_xact_lock(%s)", (COORDINATION_LOCK,))
+        with pytest.raises(psycopg.errors.LockNotAvailable):
+            display.exchange(claim.session_id, claim.credential, raw)
+    with pytest.raises(NodeControlError, match="display_handoff_decision_unknown"):
+        display.exchange(claim.session_id, claim.credential, raw)

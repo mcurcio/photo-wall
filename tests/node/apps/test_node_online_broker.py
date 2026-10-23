@@ -447,15 +447,15 @@ def test_host_ack_loss_prevents_stop_and_replay_does_not_extend_obligation(setup
     assert driver.stop_calls == 0 and driver.starts == []
 
 
-def test_reboot_intent_refuses_replacement_even_after_stop_completion(setup, monkeypatch):
+def test_a_refused_rearm_after_a_crashed_start_starts_nothing(setup, monkeypatch):
     broker, driver, _, _ = setup
     original = broker._start
     monkeypatch.setattr(broker, "_start", lambda *a, **k: (_ for _ in ()).throw(KeyboardInterrupt()))
     with pytest.raises(KeyboardInterrupt):
         broker.execute()
     monkeypatch.setattr(broker, "_start", original)
-    broker.recovery.arm = lambda *a: (_ for _ in ()).throw(ValueError("reboot_intended"))
-    with pytest.raises(ValueError, match="reboot_intended"):
+    broker.recovery.arm = lambda *a: (_ for _ in ()).throw(ValueError("arm_refused"))
+    with pytest.raises(ValueError, match="arm_refused"):
         broker.reconcile()
     assert not driver.starts and driver.stop_calls == 1
 

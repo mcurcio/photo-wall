@@ -7,8 +7,10 @@ in the display harness (tests/native_display_smoke.py, the `production` block).
 
 from __future__ import annotations
 
+import re
 import socket
 import tempfile
+from pathlib import Path
 
 import pytest
 from support.packet_pair import LINUX, PACKET_TYPE, packet_pair
@@ -26,6 +28,7 @@ from appliance.display_host.overlay.instruction import (
 )
 from appliance.feed_socket import FEED_READERS
 from appliance.health import runner
+from contracts.node_output import REGION_DOCUMENT_BYTES
 
 V = INSTRUCTION_STALE_MS
 LINES = ("Photos paused - the player stopped responding", "app_unresponsive")
@@ -461,6 +464,20 @@ def test_the_stale_page_is_drawn_by_the_loop_after_v(layer):
 
 def test_the_production_client_binds_the_manager_v5():
     assert client.MANAGER_VERSION == 5   # v3 the health layer; v4 the brightness line (1c); v5 the Frame region (#124)
+
+
+def test_the_shell_serves_the_version_and_region_size_the_contract_names():
+    """The C shell keeps its own copies of the diagnostic manager's version and the region
+    document's largest size: each must equal its one home (the protocol XML and the client's
+    MANAGER_VERSION; contracts.node_output.REGION_DOCUMENT_BYTES). Mutation probe: MAX_REGION 512
+    in shell.c -> RED."""
+    native = Path(__file__).resolve().parents[3] / "appliance/display_host/native"
+    shell = (native / "shell.c").read_text()
+    defined = dict(re.findall(r"^#define (DIAGNOSTIC_VERSION|MAX_REGION) (\d+)\b", shell, re.MULTILINE))
+    xml = re.search(r'<interface name="pw_diagnostic_manager_v1" version="(\d+)"',
+                    (native / "photo-wall-frame-v1.xml").read_text())
+    assert int(defined["DIAGNOSTIC_VERSION"]) == int(xml.group(1)) == client.MANAGER_VERSION
+    assert int(defined["MAX_REGION"]) == REGION_DOCUMENT_BYTES
 
 
 # -- the judge link -----------------------------------------------------------------------------

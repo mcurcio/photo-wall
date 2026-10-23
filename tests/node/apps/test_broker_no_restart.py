@@ -90,8 +90,11 @@ def test_restarted_on_purpose_needs_every_condition():
 def test_an_exit_under_its_own_weston_stays_down():
     """The removed relaunch after an exit: a run that exits while its own Weston lives is `down`
     (fault process_exited) and nothing starts it, on later turns, after a Weston Display restarts
-    on purpose, or after a Weston crash. Mutation probe: let restarted_on_purpose ignore the mark
-    and `exited_under` (display != launch.display) -> a start after the Weston change."""
+    on purpose, or after a Weston crash: `down` is final, the broker never asks
+    `start_for_display` again for it. Mutation probe: let a `down` record with no run take the
+    `exited` branch in `AppBroker.observe` (appliance/apps/broker.py) -> a start after the Weston
+    change. (`restarted_on_purpose`'s own conditions are held by
+    test_restarted_on_purpose_needs_every_condition: a `down` record never reaches it.)"""
     broker, driver = cold()
     driver.running = None                                   # kill -9, SIGSEGV, OOM: its own exit
     record = turns(broker)
