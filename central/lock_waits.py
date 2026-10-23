@@ -15,14 +15,34 @@ Rules this module owns (one home each):
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any, Final
 
+import psycopg
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from psycopg.rows import dict_row
 
 LOCK_RETRY_AFTER_SECONDS: Final = 1
 LOCK_QUERY_CHARS: Final = 200
 LOCK_BUSY: Final = "lock_busy"
+
+log = logging.getLogger(__name__)
+
+# The holders of every advisory lock some backend waits for: a granted row on the same lock key as
+# an ungranted one, held by another backend.
+_HOLDERS_SQL = (
+    "SELECT DISTINCT h.pid, a.application_name, "
+    "EXTRACT(EPOCH FROM (now() - a.xact_start))::float8 AS transaction_seconds, "
+    "a.state, left(a.query, %s) AS query "
+    "FROM pg_locks w JOIN pg_locks h ON h.locktype=w.locktype "
+    "AND h.database IS NOT DISTINCT FROM w.database AND h.classid=w.classid "
+    "AND h.objid=w.objid AND h.objsubid=w.objsubid AND h.granted AND h.pid<>w.pid "
+    "JOIN pg_stat_activity a ON a.pid=h.pid "
+    "WHERE w.locktype='advisory' AND NOT w.granted ORDER BY h.pid"
+)
 
 
 @dataclass(frozen=True)
@@ -42,14 +62,41 @@ def lock_holders_in(conn: Any) -> tuple[LockHolder, ...]:
     granted rows matching an ungranted row's locktype, classid, objid and objsubid), with its
     pg_stat_activity facts; read in the caller's (fresh, autocommit) connection. Never raises for
     an empty answer."""
-    ...
+    rows = conn.execute(_HOLDERS_SQL, (LOCK_QUERY_CHARS,)).fetchall()
+    return tuple(
+        LockHolder(pid=row["pid"], application=row["application_name"] or "",
+                   transaction_seconds=row["transaction_seconds"], state=row["state"],
+                   query=row["query"] or "")
+        for row in rows
+    )
+
+
+def _log_holders(db: Any) -> None:
+    """Name the holders in the log, on a connection of its own (the failed transaction's is
+    aborted). Reading them is best effort: a failure is logged and never hides the refusal."""
+    try:
+        with psycopg.connect(db.dsn, autocommit=True, row_factory=dict_row,
+                             connect_timeout=5) as conn:
+            holders = lock_holders_in(conn)
+    except Exception:
+        log.exception("lock_busy: could not read the lock holders")
+        return
+    log.warning("lock_busy: a lock wait timed out; holders: %s",
+                "; ".join(f"pid={h.pid} application={h.application!r} "
+                          f"transaction_seconds={h.transaction_seconds} state={h.state} "
+                          f"query={h.query!r}" for h in holders) or "none still held")
 
 
 def mount_lock_refusal(app: FastAPI, db: Any) -> None:
     """Register the one `LockNotAvailable` handler on `app`: log `lock_holders_in` (on a connection
     of its own from `db`; a failure to read them is logged, never raised), then answer 503
     `{"error": LOCK_BUSY}` with `Retry-After`. Mounted once in central/app.py `create_app`."""
-    ...
+
+    @app.exception_handler(psycopg.errors.LockNotAvailable)
+    async def lock_busy(request, exc):
+        await asyncio.to_thread(_log_holders, db)
+        return JSONResponse({"error": LOCK_BUSY}, status_code=503,
+                            headers={"Retry-After": str(LOCK_RETRY_AFTER_SECONDS)})
 
 
 __all__ = ["LOCK_BUSY", "LOCK_QUERY_CHARS", "LOCK_RETRY_AFTER_SECONDS", "LockHolder", "lock_holders_in",

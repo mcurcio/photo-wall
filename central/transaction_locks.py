@@ -33,9 +33,12 @@ NODE_LOCK_CLASS = 734118325
 
 def acquire_node_lock(conn, device_id: str) -> None:
     """Take the Node's transaction lock: `pg_advisory_xact_lock(NODE_LOCK_CLASS, hashtext(device_id))`.
-    Serializes that Node's display exchanges and admissions, and nothing else. Never taken while
-    holding Coordination or Runtime (those writers never take it), so no lock-order cycle exists."""
-    ...
+    Serializes that Node's display exchanges and admissions, and nothing else. Lock order:
+    Coordination, Runtime, then Node (an operator calibration trial, in
+    `NodeDisplay.current_frame_in`, and an exchange reporting a completion take the Node lock
+    after them); a holder of a Node lock never takes Coordination or Runtime after it, so no
+    lock-order cycle exists. A Node's steady exchange takes the Node lock alone."""
+    conn.execute("SELECT pg_advisory_xact_lock(%s, hashtext(%s))", (NODE_LOCK_CLASS, device_id))
 
 
 def holds_node_lock_in(conn, device_id: str) -> bool:
@@ -43,4 +46,9 @@ def holds_node_lock_in(conn, device_id: str) -> bool:
     NODE_LOCK_CLASS, objid = hashtext(device_id), objsubid = 2): the check
     `Coordinator.display_admission_in` and `display_withdrawal_in` make in place of
     `holds_runtime_locks_in`."""
-    ...
+    return conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND granted "
+        "AND pid=pg_backend_pid() AND classid=%s::oid AND objid=hashtext(%s)::oid "
+        "AND objsubid=2) AS held",
+        (NODE_LOCK_CLASS, device_id),
+    ).fetchone()["held"]

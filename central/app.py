@@ -61,6 +61,7 @@ from central.infra.tuning_history_store import PgTuningHistory
 from central.infra.why_store import PgWhy
 from central.installation_models import FrameName, InstallationInventory, WallInventory, WallNaming
 from central.library_routes import mount_library_routes
+from central.lock_waits import mount_lock_refusal
 from central.media_ports import MediaApplication
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
@@ -416,6 +417,8 @@ def create_app(
     async def invalid_command(request, exc):
         return JSONResponse({"error": "invalid_command"}, status_code=422)
 
+    # Issue #127: a lock wait that timed out is a retryable 503 on every route, operator and node.
+    mount_lock_refusal(app, db)
     # The session routes, `no-store` on every operator response, and the unhandled-500 handler.
     operator_auth.mount(app)
 
