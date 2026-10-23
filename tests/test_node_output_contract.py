@@ -10,6 +10,9 @@ document or report that still carries a picture part is refused. Schema 9 (rende
 document carries the turn, how the screen hangs, checked by contracts/display_turn.py `is_turn`; a
 document without it, or with any other value, is refused. Schema 10 (the frame box): the report
 carries the display's picture area as its EDID base block states it (`size_mm`, None when unstated).
+Schema 11 (issue #124): the report carries the mode Weston runs (`current_mode`, None when not
+known), and the Frame region document (Central's placed rectangle of the bound Frame, its own key and
+change) round-trips and refuses everything but a rectangle lying on its screen.
 """
 from __future__ import annotations
 
@@ -22,16 +25,21 @@ from contracts.node_output import (
     BEST_DETECTED,
     DISPLAY_MM_MAX,
     MAX_POWER_CHANGES,
+    MAX_SCREEN_SIDE,
     MAX_REQUEST_SECONDS,
     OUTPUT_DOCUMENT_BYTES,
+    REGION_DOCUMENT_BYTES,
     SCHEMA_MAJOR,
     Darkness,
     DisplayIdentity,
     DisplayMode,
+    FrameRegion,
+    FrameRegionDocument,
     InForce,
     InForceKind,
     OutputDocument,
     OutputPower,
+    OutputRect,
     OutputReport,
     Power,
     PowerAttempt,
@@ -39,16 +47,21 @@ from contracts.node_output import (
     PowerMethod,
     PowerRequest,
     PowerResult,
+    decode_frame_region,
     decode_output_document,
     decode_output_report,
     decode_power_attempt,
+    decode_region_document,
     decode_set_time,
+    encode_frame_region,
     encode_output_document,
     encode_output_report,
     encode_power_attempt,
+    encode_region_document,
     encode_set_time,
     output_document_key,
     output_report_key,
+    region_document_key,
 )
 
 TEST_OFF = PowerRequest("req-7", Power.OFF, for_seconds=300)
@@ -63,7 +76,7 @@ REPORT = OutputReport(
     "HDMI-A-1", True, IDENTITY,
     (DisplayMode(1920, 1080, 60000, preferred=True), DisplayMode(1280, 720, 59940)),
     (PowerMethod.DDC_CI, PowerMethod.SIGNAL_OFF), PowerMethod.DDC_CI, 3, PowerResult.CONFIRMED, TESTING,
-    (950, 540))
+    (950, 540), (3840, 2160))
 ATTEMPT = PowerAttempt("HDMI-A-1", 3, TESTING, PowerMethod.DDC_CI, PowerResult.CONFIRMED, 840)
 CANONICAL = (b'{"change":3,"method":"ddc-ci","never_off_on_other_input":true,"output_id":"HDMI-A-1",'
              b'"power":{"changes":[{"at":"2026-10-12T22:00:00Z","power":"off"},'
@@ -72,8 +85,11 @@ CANONICAL = (b'{"change":3,"method":"ddc-ci","never_off_on_other_input":true,"ou
              b'"switch_input_on_power_on":true,"turn":0}')
 
 
-def test_the_display_line_is_schema_10():
-    assert SCHEMA_MAJOR == 10
+REGION = FrameRegion("kitchen", (1080, 1920), OutputRect(0, 420, 1080, 1080))
+
+
+def test_the_display_line_is_schema_11():
+    assert SCHEMA_MAJOR == 11
 
 
 @pytest.mark.parametrize("value, encode, decode", [
@@ -93,7 +109,15 @@ def test_the_display_line_is_schema_10():
     (OutputReport("HDMI-A-2", True, None, (), (), None, 9, None,
                   InForce(InForceKind.TIMETABLE_RAN_OUT, None, None, None, None), None),
      encode_output_report, decode_output_report),
+    (OutputReport("HDMI-A-1", True, None, (), (), None, None, None, None, None, (1, MAX_SCREEN_SIDE)),
+     encode_output_report, decode_output_report),
     (ATTEMPT, encode_power_attempt, decode_power_attempt),
+    (FrameRegionDocument("HDMI-A-1", 1, REGION), encode_region_document, decode_region_document),
+    (FrameRegionDocument("Virtual-2", 7, None), encode_region_document, decode_region_document),
+    (FrameRegionDocument("HDMI-A-2", 2**63 - 1, FrameRegion(
+        "f" * 96, (MAX_SCREEN_SIDE, 1), OutputRect(MAX_SCREEN_SIDE - 1, 0, 1, 1))),
+     encode_region_document, decode_region_document),
+    (REGION, encode_frame_region, decode_frame_region),
     (PowerAttempt("HDMI-A-2", 1, InForce(InForceKind.TIMETABLE, Power.ON, None, None, None), None,
                   PowerResult.NOT_SUPPORTED, 0), encode_power_attempt, decode_power_attempt),
 ])
@@ -121,6 +145,81 @@ def test_a_report_without_its_size_is_refused():
     del raw["size_mm"]
     with pytest.raises(ValueError, match="^output_report$"):
         decode_output_report(json.dumps(raw).encode())
+
+
+def test_a_report_without_its_current_mode_is_refused():
+    """Schema 11: `current_mode` is always present on the wire (null when not known)."""
+    raw = json.loads(encode_output_report(REPORT))
+    assert raw["current_mode"] == [3840, 2160]
+    del raw["current_mode"]
+    with pytest.raises(ValueError, match="^output_report$"):
+        decode_output_report(json.dumps(raw).encode())
+
+
+def test_the_region_key_sits_beside_the_output_key():
+    assert region_document_key("HDMI-A-1") == "region-HDMI-A-1"
+    with pytest.raises(ValueError, match="^output_id$"):
+        region_document_key("DP-1")
+
+
+@pytest.mark.parametrize("build", [
+    lambda: OutputRect(-1, 0, 1, 1), lambda: OutputRect(0, MAX_SCREEN_SIDE, 1, 1),
+    lambda: OutputRect(0, 0, 0, 1), lambda: OutputRect(0, 0, 1, MAX_SCREEN_SIDE + 1),
+    lambda: OutputRect(True, 0, 1, 1), lambda: OutputRect(0, 0, 1.0, 1),
+], ids=["x-negative", "y-past-max", "width-zero", "height-past-max", "bool-x", "float-width"])
+def test_a_rect_refuses(build):
+    with pytest.raises(ValueError, match="^output_rect$"):
+        build()
+
+
+@pytest.mark.parametrize("build", [
+    lambda: FrameRegion("", (100, 100), OutputRect(0, 0, 1, 1)),
+    lambda: FrameRegion("f" * 97, (100, 100), OutputRect(0, 0, 1, 1)),
+    lambda: FrameRegion("a b", (100, 100), OutputRect(0, 0, 1, 1)),
+    lambda: FrameRegion("kitchen", (0, 100), OutputRect(0, 0, 1, 1)),
+    lambda: FrameRegion("kitchen", (100, MAX_SCREEN_SIDE + 1), OutputRect(0, 0, 1, 1)),
+    lambda: FrameRegion("kitchen", [100, 100], OutputRect(0, 0, 1, 1)),
+    lambda: FrameRegion("kitchen", (100, True), OutputRect(0, 0, 1, 1)),
+    lambda: FrameRegion("kitchen", (100, 100, 1), OutputRect(0, 0, 1, 1)),
+    lambda: FrameRegion("kitchen", (100, 100), (0, 0, 1, 1)),
+    lambda: FrameRegion("kitchen", (100, 100), OutputRect(50, 0, 51, 1)),
+    lambda: FrameRegion("kitchen", (100, 100), OutputRect(0, 99, 1, 2)),
+], ids=["empty-id", "long-id", "space-id", "screen-zero", "screen-past-max", "screen-list", "screen-bool",
+        "screen-three", "rect-tuple", "off-right", "off-bottom"])
+def test_a_region_refuses(build):
+    with pytest.raises(ValueError, match="^frame_region$"):
+        build()
+
+
+@pytest.mark.parametrize("build", [
+    lambda: FrameRegionDocument("DP-1", 1, None), lambda: FrameRegionDocument("HDMI-A-1", 0, None),
+    lambda: FrameRegionDocument("HDMI-A-1", True, None),
+    lambda: FrameRegionDocument("HDMI-A-1", 1, OutputRect(0, 0, 1, 1)),
+], ids=["unknown-output", "change-0", "bool-change", "rect-not-region"])
+def test_a_region_document_refuses(build):
+    with pytest.raises(ValueError, match="^region_document$"):
+        build()
+
+
+def test_decoding_a_region_or_its_document_refuses():
+    document = json.loads(encode_region_document(FrameRegionDocument("HDMI-A-1", 3, REGION)))
+    region = document["region"]
+    for broken in ({**document, "extra": 1}, {**document, "change": "3"},
+                   {key: value for key, value in document.items() if key != "region"},
+                   {**document, "region": {**region, "rect": {**region["rect"], "width": 2000}}},
+                   {**document, "region": {**region, "screen": [1080]}}):
+        with pytest.raises(ValueError, match="^region_document$"):
+            decode_region_document(json.dumps(broken).encode())
+    for raw in (encode_region_document(FrameRegionDocument("HDMI-A-1", 3, REGION)).ljust(REGION_DOCUMENT_BYTES + 1),
+                b"[]", b"\xff"):
+        with pytest.raises(ValueError, match="^region_document$"):
+            decode_region_document(raw)
+    for broken in ({**region, "rect": [0, 420, 1080, 1080]}, {**region, "frame_id": None},
+                   {**region, "screen": None}, {**region, "extra": 1}):
+        with pytest.raises(ValueError, match="^frame_region$"):
+            decode_frame_region(json.dumps(broken).encode())
+    with pytest.raises(ValueError, match="^frame_region$"):
+        decode_frame_region(encode_frame_region(REGION).ljust(REGION_DOCUMENT_BYTES + 1))
 
 
 def test_set_times_are_whole_utc_seconds_both_ways():
@@ -242,7 +341,7 @@ def test_an_attempt_never_carries_out_a_timetable_that_ran_out():
 def _report(**changes) -> OutputReport:
     fields = {"output_id": "HDMI-A-1", "connected": True, "identity": IDENTITY, "modes": (),
               "answers": (PowerMethod.HDMI_CEC, PowerMethod.SIGNAL_OFF), "method": PowerMethod.SIGNAL_OFF,
-              "for_change": 1, "result": None, "in_force": None, "size_mm": None}
+              "for_change": 1, "result": None, "in_force": None, "size_mm": None, "current_mode": None}
     return OutputReport(**{**fields, **changes})
 
 
@@ -259,8 +358,14 @@ def _report(**changes) -> OutputReport:
     {"size_mm": (950.0, 540)},
     {"size_mm": [950, 540]},
     {"size_mm": (950, 540, 1)},
+    {"current_mode": (0, 1080)},
+    {"current_mode": (1920, MAX_SCREEN_SIDE + 1)},
+    {"current_mode": (True, 1080)},
+    {"current_mode": [1920, 1080]},
+    {"current_mode": (1920,)},
 ], ids=["unknown-output", "method-not-answered", "answers-out-of-order", "answers-repeated", "change-0",
-        "too-many-modes", "size-zero", "size-past-max", "size-bool", "size-float", "size-list", "size-three"])
+        "too-many-modes", "size-zero", "size-past-max", "size-bool", "size-float", "size-list", "size-three",
+        "mode-zero", "mode-past-max", "mode-bool", "mode-list", "mode-one"])
 def test_a_report_refuses(changes):
     with pytest.raises(ValueError, match="^output_report$"):
         _report(**changes)

@@ -7,7 +7,9 @@ stream). Its three streams:
 
 - `KV_desired_display`, the desired bucket Central writes: one Output document per Output
   (`contracts.node_output.output_document_key`) and one picture document per Output
-  (`contracts.node_picture.picture_document_key`, decision 0022). The table leaves the rest of the line to the
+  (`contracts.node_picture.picture_document_key`, decision 0022) and one Frame region document per
+  Output (`contracts.node_output.region_document_key`, issue #124: the bound Frame's rectangle the
+  debug overlay draws inside). The table leaves the rest of the line to the
   record buffer; decision 0017 C11's later "Output layout" document joins this table as its own key
   per Output (`layout-<output_id>`), which a release that lists it applies with no new stream.
 - `KV_state_display`, the state bucket the controller writes: one Output report per Output
@@ -28,6 +30,7 @@ from contracts.node_output import (
     OUTPUT_DOCUMENT_BYTES,
     OUTPUT_IDS,
     OUTPUT_REPORT_BYTES,
+    REGION_DOCUMENT_BYTES,
     SCHEMA_MAJOR,
     OutputReport,
     PowerAttempt,
@@ -35,6 +38,7 @@ from contracts.node_output import (
     encode_power_attempt,
     output_document_key,
     output_report_key,
+    region_document_key,
 )
 from contracts.node_picture import (
     PICTURE_DOCUMENT_BYTES,
@@ -53,7 +57,8 @@ POWER_RECORD: Final = "record.power"               # emit subject of a PowerAtte
 DISPLAY_STATE: Final = KeyTable({**{output_report_key(output): OUTPUT_REPORT_BYTES for output in OUTPUT_IDS},
                                  **{picture_report_key(output): PICTURE_REPORT_BYTES for output in OUTPUT_IDS}})
 DISPLAY_DESIRED: Final = KeyTable({**{output_document_key(output): OUTPUT_DOCUMENT_BYTES for output in OUTPUT_IDS},
-                                   **{picture_document_key(output): PICTURE_DOCUMENT_BYTES for output in OUTPUT_IDS}})
+                                   **{picture_document_key(output): PICTURE_DOCUMENT_BYTES for output in OUTPUT_IDS},
+                                   **{region_document_key(output): REGION_DOCUMENT_BYTES for output in OUTPUT_IDS}})
 
 
 def _display_slice() -> Slice:

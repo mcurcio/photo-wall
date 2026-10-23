@@ -80,11 +80,13 @@ from central.displays.model import (
     Sighting,
     adopts,
     display_key,
+    frame_region,
     live_test,
     power_result,
     power_status,
     project_output,
     readiness,
+    region_digest,
     screen_px,
     serial_usable,
 )
@@ -189,6 +191,7 @@ from contracts.node_output import (
     OUTPUT_IDS,
     DisplayIdentity,
     DisplayMode,
+    FrameRegionDocument,
     OutputDocument,
     OutputReport,
     Power,
@@ -197,8 +200,10 @@ from contracts.node_output import (
     decode_output_report,
     encode_output_document,
     encode_output_report,
+    encode_region_document,
     output_document_key,
     output_report_key,
+    region_document_key,
 )
 from contracts.node_picture import (
     PICTURE_LIST,
@@ -245,9 +250,8 @@ POSITION_COLUMNS: Final = ("b.player_id IS NOT NULL AS bound, f.generation, f.po
 def frame_outputs_in(conn: Any) -> tuple[FrameOutput, ...]:
     """Every Frame's FrameOutput, ordered by frame id, in the caller's transaction (follow-ups
     2026-10-11, slice A1; frame box run fb-8): frames LEFT JOIN bindings LEFT JOIN outputs on
-    (player_id, output_id) and the Display seen there; `display_px` is `model.screen_px` of
-    `outputs.observation` width_px x height_px (the enrollment report, connected or not) and that
-    Display's modes; `turn` is `f.turn`; `output_px` is `contracts.models.frame_output` at that
+    (player_id, output_id) and the Display seen there; `display_px` is `model.screen_px` of the
+    Output report's `current_mode` (output_displays.report) and that Display's modes; `turn` is `f.turn`; `output_px` is `contracts.models.frame_output` at that
     turn; `video` is `f.video`; `size_mm` is `contracts.models.frame_size_mm` of the Position's box
     and the seen Display's size (`frame_display_mm`). The one read of Frame outputs: the media
     worker's rendition choice (PgPhotoLibrary), the Planner's slots, authoring, the source preview
@@ -271,22 +275,22 @@ def frame_outputs_in(conn: Any) -> tuple[FrameOutput, ...]:
 DISPLAY_SIZE_JOIN: Final = "LEFT JOIN displays d ON d.id=seen.display_id"
 DISPLAY_SIZE_COLUMNS: Final = "d.width_mm AS display_width_mm, d.height_mm AS display_height_mm"
 
-# A frames row `f` and its binding `b` (LEFT JOIN) and this join give SCREEN_COLUMNS: the Output's
-# report of its mode and the Display seen there (`frame_screen_px`, `frame_display_mm`).
-SCREEN_JOIN: Final = ("LEFT JOIN outputs o ON o.player_id=b.player_id AND o.output_id=b.output_id "
-                      f"{SEEN_DISPLAY_JOIN} {DISPLAY_SIZE_JOIN}")
-SCREEN_COLUMNS: Final = ("(o.observation->>'width_px')::int AS reported_width_px, "
-                         "(o.observation->>'height_px')::int AS reported_height_px, d.modes AS display_modes, "
+# A frames row `f` and its binding `b` (LEFT JOIN) and this join give SCREEN_COLUMNS: the mode
+# Weston runs on the Output, from its Output report (`seen.report`'s `current_mode`, issue #124),
+# and the Display seen there (`frame_screen_px`, `frame_display_mm`).
+SCREEN_JOIN: Final = f"{SEEN_DISPLAY_JOIN} {DISPLAY_SIZE_JOIN}"
+SCREEN_COLUMNS: Final = ("(seen.report->'current_mode'->>0)::int AS current_width_px, "
+                         "(seen.report->'current_mode'->>1)::int AS current_height_px, d.modes AS display_modes, "
                          f"{DISPLAY_SIZE_COLUMNS}")
-SCREEN_FACTS: Final = ("reported_width_px", "reported_height_px", "display_modes", "display_width_mm",
+SCREEN_FACTS: Final = ("current_width_px", "current_height_px", "display_modes", "display_width_mm",
                        "display_height_mm")
 
 
 def frame_screen_px(row: Mapping[str, Any]) -> tuple[int, int] | None:
     """`model.screen_px` of a row selected with SCREEN_COLUMNS."""
-    width, height = row["reported_width_px"], row["reported_height_px"]
-    reported = None if width is None or height is None else (width, height)
-    return screen_px(reported, tuple(DisplayMode(**mode) for mode in row["display_modes"] or ()))
+    width, height = row["current_width_px"], row["current_height_px"]
+    current = None if width is None or height is None else (width, height)
+    return screen_px(current, tuple(DisplayMode(**mode) for mode in row["display_modes"] or ()))
 
 
 def frame_display_mm(row: Mapping[str, Any]) -> tuple[int, int] | None:
@@ -812,7 +816,11 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
     (`frame_timetable` over `power_policy_in` and `house_time_in`), an unbound one
     `unbound_timetable`; each carries its bound Frame's turn (frames.turn), 0 unbound, so a turn
     raises `change` like a power edit; an Output with no Display seen gets `default_picture()` and no test
-    pattern, one seen carries its live session's test pattern (`picture.session_test_pattern`)."""
+    pattern, one seen carries its live session's test pattern (`picture.session_test_pattern`). Its
+    Frame region document (issue #124) carries `model.frame_region` of the bound Frame's Position,
+    its screen (`frame_screen_px`) and its turn, null unbound or with no screen known, raising
+    `region_change` only when `region_digest` differs: a saved Position or a new mode never raises
+    the Output document's `change`."""
     player_id = _player_of(conn, device_id, "FOR SHARE")
     if player_id is None:
         return {}
@@ -820,11 +828,13 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
     policy = power_policy_in(conn, now)
     rows = conn.execute(
         "SELECT o.output_id, b.frame_id, d.id AS d_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
-        f"{PICTURE_COLUMNS}, d.hardware_restore, {_SESSION_COLUMNS}, w.change, w.digest, pd.picture_change, "
-        f"pd.digest AS picture_digest, COALESCE(f.turn, 0) AS turn, {_TEST_COLUMNS} FROM (SELECT output_id FROM outputs WHERE player_id=%(player)s "
+        f"{PICTURE_COLUMNS}, d.hardware_restore, {_SESSION_COLUMNS}, w.change, w.digest, w.region_change, "
+        "w.region_digest, pd.picture_change, f.calibration, "
+        f"pd.digest AS picture_digest, COALESCE(f.turn, 0) AS turn, {_TEST_COLUMNS}, {SCREEN_COLUMNS} "
+        "FROM (SELECT output_id FROM outputs WHERE player_id=%(player)s "
         "UNION SELECT output_id FROM output_displays WHERE player_id=%(player)s) o "
-        "LEFT JOIN output_displays s ON s.player_id=%(player)s AND s.output_id=o.output_id "
-        "LEFT JOIN displays d ON d.id=s.display_id LEFT JOIN picture_sessions ps ON ps.display_id=d.id "
+        "LEFT JOIN output_displays seen ON seen.player_id=%(player)s AND seen.output_id=o.output_id "
+        "LEFT JOIN displays d ON d.id=seen.display_id LEFT JOIN picture_sessions ps ON ps.display_id=d.id "
         "LEFT JOIN output_documents w ON w.player_id=%(player)s AND w.output_id=o.output_id "
         "LEFT JOIN picture_documents pd ON pd.player_id=%(player)s AND pd.output_id=o.output_id "
         f"LEFT JOIN bindings b ON b.player_id=%(player)s AND b.output_id=o.output_id {_TEST_JOIN} "
@@ -848,6 +858,16 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
                 "change=EXCLUDED.change, digest=EXCLUDED.digest, document=EXCLUDED.document",
                 (player_id, output_id, change, digest, Jsonb(_document_json(document))))
         documents[output_document_key(output_id)] = encode_output_document(document)
+
+        region = None if row["frame_id"] is None else frame_region(
+            row["frame_id"], Calibration.model_validate(row["calibration"]).fit, frame_screen_px(row), row["turn"])
+        digest = region_digest(region)
+        region_change = (row["region_change"] or 0) + (row["region_digest"] != digest)
+        if region_change != row["region_change"]:
+            conn.execute("UPDATE output_documents SET region_change=%s, region_digest=%s "
+                         "WHERE player_id=%s AND output_id=%s", (region_change, digest, player_id, output_id))
+        documents[region_document_key(output_id)] = encode_region_document(
+            FrameRegionDocument(output_id, region_change, region))
 
         picture = _picture_in_force(row, now)
         pattern = None if _no_display(row) else session_test_pattern(picture_session(row), now)
