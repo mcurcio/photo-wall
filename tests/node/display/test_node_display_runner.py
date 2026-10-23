@@ -23,6 +23,7 @@ from appliance.display_host.domain import OutputState
 from appliance.display_host.runner import Controller, OutputReporter
 from appliance.display_host.weston import MAX_PACKET, CompositorPresentation
 from contracts.node_display import Surface
+from contracts.node_output import Power
 from contracts.node_protocol import NodeProcessIdentity, OutputKey
 
 LINUX = sys.platform.startswith("linux")
@@ -104,13 +105,24 @@ def surface(output: OutputKey, *, frame_id="frame-1", pid=4242) -> Surface:
     return Surface(output, NodeProcessIdentity(pid, 777, uuid4()), 5, 1, 2, frame_id)
 
 
+class FakePower:
+    """The power controller's `report`: Virtual-1 has a power in force (Night off: off)."""
+
+    def report(self, output_id):
+        if output_id != "Virtual-1":
+            return None
+        return SimpleNamespace(in_force=SimpleNamespace(power=Power.OFF))
+
+
 def test_every_events_read_carries_each_output_and_its_admission():
+    """Each entry carries the shell's `holding` and the power in force (issue #123), None for an
+    Output the power controller has no report of."""
     backend = FakeBackend()
-    controller = Controller(backend)
+    controller = Controller(backend, power=FakePower())
     host = backend.host
     admitted = surface(key(host))
     backend.states = (
-        OutputState(key(host), admitted=admitted, diagnostic="released", fault=None),
+        OutputState(key(host), admitted=admitted, holding=True, diagnostic="released", fault=None),
         OutputState(key(host, "HDMI-A-2"), connected=False, diagnostic="unknown",
                     fault="output_disconnected"),
     )
@@ -119,9 +131,9 @@ def test_every_events_read_carries_each_output_and_its_admission():
          "admitted": {"pid": 4242, "start_ticks": 777,
                       "invocation_id": str(admitted.process.invocation_id),
                       "app_epoch": 5, "frame_id": "frame-1"},
-         "diagnostic": "released", "fault": None},
+         "diagnostic": "released", "fault": None, "holding": True, "power": "off"},
         {"output_id": "HDMI-A-2", "connected": False, "admitted": None,
-         "diagnostic": "unknown", "fault": "output_disconnected"},
+         "diagnostic": "unknown", "fault": "output_disconnected", "holding": False, "power": None},
     ]
     # Ingress and feed socket alike; with no event at all (a reader that lapped the ring, or a
     # restarted judge, still learns the Output set from one read).

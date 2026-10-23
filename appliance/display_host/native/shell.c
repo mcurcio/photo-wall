@@ -1,11 +1,15 @@
 /* Base-owned Weston 14 shell. MIT; no Player/app-root imports.
  * Server-side wp_presentation events are the sole app presentation evidence.
  * A surface commit, frame callback, repaint request or ping answer is never that evidence.
- * An app's lease (LEASE_MS) is renewed by a presented commit or by its answer to Weston's
- * desktop ping, sent once a second (PING_MS): a still picture commits nothing and keeps its grant
- * while its process answers; a hung or stopped one loses it. A ping answer renews only while the
- * app's newest commit was tagged: an app that commits untagged buffers (its draws fail, it shows
- * nothing it can name) holds the Output only until the lease runs out, as before the ping.
+ * Liveness and hold are two questions, each answered once (issue #123). Liveness is the app's
+ * lease (LEASE_MS), renewed by a presented commit or by its answer to Weston's desktop ping, sent
+ * once a second (PING_MS): a still picture commits nothing and keeps its grant while its process
+ * answers; a hung or stopped one loses it (the grant goes). Hold is asked every lease_tick on the
+ * compositor's own scene (`hold_evidence`): a released Output stays the app's only while a picture
+ * plane of the app's is mapped with a buffer and a window alpha above 0, or Display draws on it
+ * (the controller's `picture` op with `drawing`, or a live trial). Without either the holding slate
+ * returns over the app (the grant kept) until one does; the app's ground and its frame tag are
+ * never evidence, so an app that answers pings and shows nothing loses the screen.
  * The shell also serves the standard window alpha (wp_alpha_modifier_v1, `struct alpha`) and turns
  * an Output's screen on the controller's `turn` op (render redesign, .claude/runs/render-planes).
  */
@@ -85,6 +89,8 @@ struct output {
     char picture_operations[MAX_OPERATIONS + 1], brightness[MAX_BRIGHTNESS + 1];
     struct app_surface *diagnostic;
     bool released;
+    bool holding;   /* released and held by hold evidence; false: the holding slate is up */
+    bool drawing;   /* the controller's latest `picture` op: Display draws a pattern or target */
     struct app_surface *app;
 };
 struct app_surface {
@@ -94,7 +100,6 @@ struct app_surface {
     struct weston_view *view;
     struct output *output;
     uint64_t commit;
-    bool untagged;           /* the newest commit carried no frame tag (`pong` renews nothing) */
     bool diagnostic;
     uint32_t diagnostic_ack;
     struct wl_listener committed, destroyed;
@@ -342,7 +347,7 @@ static void trial_notify(struct output *o) {
 static void overlay_clear(struct output *o) {
     if (!o->overlay_visible) return;
     o->overlay_visible = false;
-    if (o->released && o->diagnostic) weston_surface_unmap(o->diagnostic->view->surface);
+    if (o->released && o->holding && o->diagnostic) weston_surface_unmap(o->diagnostic->view->surface);
     if (o->shell->diagnostic_resource)
         pw_diagnostic_manager_v1_send_overlay(o->shell->diagnostic_resource, o->name,
             ++o->diagnostic_serial, "", 0);
@@ -366,7 +371,7 @@ static void invalidate(struct output *o, const char *reason) {
     json_decref(o->identity);
     o->identity = NULL;
     o->grant[0] = o->handoff[0] = 0;
-    o->released = false;
+    o->released = o->holding = false;
     o->testing = false;
     snprintf(o->reason, sizeof o->reason, "%s", reason);
     if (o->diagnostic) weston_surface_unmap(o->diagnostic->view->surface);
@@ -484,7 +489,8 @@ static void diagnostic_committed(struct wl_listener *l, void *data) {
     (void)data;
     struct app_surface *a = wl_container_of(l, a, committed);
     struct output *o = a->output;
-    if (!o || !o->weston || (o->released && !o->overlay_visible) || a->view->surface->width != o->weston->width ||
+    if (!o || !o->weston || (o->released && o->holding && !o->overlay_visible) ||
+        a->view->surface->width != o->weston->width ||
         a->view->surface->height != o->weston->height) return;
     weston_view_set_position(a->view, o->weston->pos);
     weston_view_set_output(a->view, o->weston);
@@ -501,7 +507,10 @@ static void diagnostic_surface_gone(struct wl_listener *l, void *data) {
     (void)data;
     struct app_surface *a = wl_container_of(l, a, destroyed);
     struct shell *s = a->shell;
-    if (a->output) { a->output->diagnostic = NULL; if (!a->output->released) curtain(a->output, 1.0f); }
+    if (a->output) {
+        a->output->diagnostic = NULL;
+        if (!a->output->released || !a->output->holding) curtain(a->output, 1.0f);
+    }
     for (int i = 0; i < MAX_FEEDBACK; i++) if (s->feedbacks[i].surface == a)
         memset(&s->feedbacks[i], 0, sizeof s->feedbacks[i]);
     for (int i = 0; i < MAX_SURFACES; i++) if (s->surfaces[i] == a) s->surfaces[i] = NULL;
@@ -727,6 +736,54 @@ static void bind_alpha(struct wl_client *client, void *data, uint32_t version, u
     if (!r) { wl_client_post_no_memory(client); return; }
     wl_resource_set_implementation(r, &alpha_impl, data, NULL);
 }
+/* Hold evidence (issue #123): what the compositor itself shows of a released Output's app. */
+enum hold_evidence { HOLD_NONE = 0, HOLD_PICTURE_PLANE = 1, HOLD_DISPLAY_DRAWING = 2 };
+/* A sub-surface of `surface`'s tree (never `surface` itself) that is mapped, has a buffer and a
+ * window alpha above 0: a picture plane. Authored black is a black plane, so it holds. */
+static bool picture_plane_below(struct weston_surface *surface) {
+    struct weston_subsurface *sub;
+    wl_list_for_each(sub, &surface->subsurface_list, parent_link) {
+        if (sub->surface == surface) continue;   /* the parent's own entry in its list */
+        struct alpha *a = alpha_of(sub->surface);
+        if (weston_surface_is_mapped(sub->surface) && weston_surface_has_content(sub->surface) &&
+            (!a || a->current > 0)) return true;
+        if (picture_plane_below(sub->surface)) return true;
+    }
+    return false;
+}
+static enum hold_evidence hold_evidence(struct output *o) {
+    if (o->app && picture_plane_below(o->app->view->surface)) return HOLD_PICTURE_PLANE;
+    if (o->drawing || (o->trial_json[0] && boot_ms() < o->trial_until)) return HOLD_DISPLAY_DRAWING;
+    return HOLD_NONE;
+}
+/* A released Output whose handoff completed: on hold loss the holding slate rises over the app
+ * (curtain, then the private client's page for "hold_lost"), identity and grant kept; on its
+ * return the slate goes. Each change, and each `tell` (the handoff completing), is a `hold` event.
+ * A candidate, or an Output whose handoff is still to be presented, is not judged: its empty
+ * candidate commits bring the handoff, and the app draws only once granted. */
+static void hold_sync(struct output *o, bool tell) {
+    if (!o->identity || !o->released || o->handoff[0] || !o->weston) return;
+    enum hold_evidence evidence = hold_evidence(o);
+    bool held = evidence != HOLD_NONE;
+    if (held != o->holding) {
+        o->holding = held;
+        tell = true;
+        if (held) {
+            if (o->curtain) weston_shell_utils_curtain_destroy(o->curtain);
+            o->curtain = NULL;
+            if (o->diagnostic && !o->overlay_visible) weston_surface_unmap(o->diagnostic->view->surface);
+        } else {
+            o->testing = false;
+            snprintf(o->reason, sizeof o->reason, "hold_lost");
+            curtain(o, 1.0f);
+            diagnostic_configure(o);
+        }
+    }
+    if (tell) send_event(o->shell, json_pack("{s:s,s:o,s:b,s:s?}", "event", "hold",
+        "output", output_key(o), "holding", held,
+        "evidence", evidence == HOLD_PICTURE_PLANE ? "picture_plane" :
+                    evidence == HOLD_DISPLAY_DRAWING ? "display_drawing" : NULL));
+}
 static void protocol_log(void *data, enum wl_protocol_logger_type direction,
                          const struct wl_protocol_logger_message *m) {
     struct shell *s = data;
@@ -767,7 +824,6 @@ static void protocol_log(void *data, enum wl_protocol_logger_type direction,
             memcpy(f->tag, a->pending_tag, sizeof f->tag);
             memcpy(f->picture_change, a->pending_picture, sizeof f->picture_change);
         }
-        a->untagged = !a->pending_tag[0];
         a->pending_grant[0] = a->pending_tag[0] = a->pending_picture[0] = 0;
         a->overlay_grant[0] = a->overlay_tag[0] = a->primitives[0] = 0;
         a->diagnostic_ack = 0;
@@ -836,6 +892,7 @@ static void protocol_log(void *data, enum wl_protocol_logger_type direction,
                     "identity", o->identity, "handoff_id", o->handoff));
                 o->handoff[0] = 0;
                 grant_notify(o, 1);
+                hold_sync(o, true);   /* the empty candidate commit holds nothing: slate till a plane */
             }
         }
         memset(f, 0, sizeof *f);
@@ -910,12 +967,12 @@ static void set_parent(struct weston_desktop_surface *d, struct weston_desktop_s
     weston_desktop_surface_close(d); /* no popups/transients may bypass a slot */
 }
 /* The app answered Weston's ping: it is alive, so each Output whose app surface it owns, with a
- * matching process and a tagged newest commit, keeps its lease. Never presentation evidence. */
+ * matching process, keeps its lease. Liveness only: never presentation or hold evidence. */
 static void pong(struct weston_desktop_client *client, void *data) {
     struct shell *s = data;
     for (int i = 0; i < MAX_OUTPUTS; i++) {
         struct output *o = &s->outputs[i];
-        if (o->identity && o->app && !o->app->untagged &&
+        if (o->identity && o->app &&
             weston_desktop_surface_get_client(o->app->desktop) == client && matches_process(o, o->app))
             o->lease_until = now_ms() + LEASE_MS;
     }
@@ -986,11 +1043,14 @@ static bool command(struct shell *s, json_t *j) {
         return true;
     }
     /* Picture (1c P2): the controller's operations for the Output's app and its base page line for
-     * the private client, stored and forwarded verbatim; the shell never parses `operations`. */
+     * the private client, stored and forwarded verbatim; the shell never parses `operations`.
+     * `drawing` (required, issue #123): Display draws a pattern or target, which holds the Output. */
     if (!strcmp(op, "picture")) {
         const char *operations = string(j, "operations"), *brightness = string(j, "brightness");
+        json_t *drawing = json_object_get(j, "drawing");
         if (!operations || !*operations || strlen(operations) > MAX_OPERATIONS ||
-            !brightness || strlen(brightness) > MAX_BRIGHTNESS) return false;
+            !brightness || strlen(brightness) > MAX_BRIGHTNESS || !json_is_boolean(drawing)) return false;
+        o->drawing = json_is_true(drawing);
         snprintf(o->picture_operations, sizeof o->picture_operations, "%s", operations);
         snprintf(o->brightness, sizeof o->brightness, "%s", brightness);
         for (int i = 0; i < MAX_SURFACES; i++) if (s->frame_resources[i]) picture_to(o, s->frame_resources[i]);
@@ -1102,7 +1162,7 @@ static bool command(struct shell *s, json_t *j) {
             !recent || !o->last_presented || now_ms() >= o->lease_until ||
             !o->app || !matches_process(o, o->app)) return false;
         if (o->curtain) weston_shell_utils_curtain_destroy(o->curtain);
-        o->curtain = NULL; o->released = true;
+        o->curtain = NULL; o->released = o->holding = true;   /* judged once the handoff is presented */
         o->handoff_after = s->serial;
         if (o->diagnostic) weston_surface_unmap(o->diagnostic->view->surface);
         snprintf(o->handoff, sizeof o->handoff, "%s", handoff);
@@ -1256,6 +1316,7 @@ static int lease_tick(void *data) {
         }
         if (o->identity && (now_ms() >= o->lease_until || process_start(o->pid) != o->start_ticks))
             invalidate(o, "surface_lease_or_process_lost");
+        hold_sync(o, false);   /* the compositor's scene now: a picture plane or Display's drawing */
     }
     wl_event_source_timer_update(s->timer, 200);
     return 0;

@@ -8,6 +8,11 @@ and the client library's header are read there, to build the test probe against 
 library. This executes a real headless compositor, not a recorded callback simulator. It uses
 fixture controller authority and does not qualify systemd, GTK or HDMI. Output pixels are read
 back through Weston's own weston_capture_v1 (enabled by --debug).
+
+Issue #123: the shell keeps a handed-off Output with its app only on hold evidence (a picture plane
+the compositor shows, or Display's own drawing). The probe draws its ground alone, so the steps
+that look at its pixels hold the Output by Display's drawing (the `picture` op's `drawing`, as a
+test pattern does); the hold's own cases are below (`hold_cases`) and in native_screen_harness.py.
 """
 
 import json
@@ -580,9 +585,13 @@ def picture_v4():
     read_until(lambda e: e["event"] == "diagnostic_presented", limit=6)
     time.sleep(0.5)
     before = capture_box(*BRIGHTNESS_BOX)
-    assert request("picture", operations=OPERATIONS, brightness="Brightness: display 46 %")["accepted"]
-    assert not request("picture", operations="x" * 1025, brightness="")["accepted"]
-    assert not request("picture", operations=OPERATIONS, brightness="b" * 129)["accepted"]
+    assert request("picture", operations=OPERATIONS, brightness="Brightness: display 46 %",
+                   drawing=True)["accepted"]
+    assert not request("picture", operations="x" * 1025, brightness="", drawing=True)["accepted"]
+    assert not request("picture", operations=OPERATIONS, brightness="b" * 129, drawing=True)["accepted"]
+    assert not request("picture", operations=OPERATIONS, brightness="")["accepted"]   # no `drawing`
+    assert not request("picture", operations=OPERATIONS, brightness="", drawing="yes")["accepted"]
+    print("PASS picture_op_refuses_a_missing_or_non_boolean_drawing", flush=True)
     end = time.monotonic() + 5
     while capture_box(*BRIGHTNESS_BOX) == before:
         assert time.monotonic() < end, "slate brightness line not drawn"
@@ -601,7 +610,7 @@ def picture_v4():
     tagged = read_until(lambda e: e["event"] == "presented" and e["identity"] == identity)
     assert tagged["frame_tag"] == "picture-probe" and tagged["picture_change"] == "6", tagged
     print("PASS tag_picture_echoes_the_picture_change", flush=True)
-    assert request("picture", operations=NOT_JSON, brightness="")["accepted"]
+    assert request("picture", operations=NOT_JSON, brightness="", drawing=True)["accepted"]
     picture_lines(app, NOT_JSON)
     print("PASS picture_op_reaches_the_v4_app_verbatim", flush=True)
     app.terminate()
@@ -643,14 +652,22 @@ def window_alpha_and_turn():
     and the Output is its mode turned; transform 4 is refused."""
     global app, output
     pathlib.Path(PROBE_ALPHA_RESET).unlink(missing_ok=True)
+    # Hold (issue #123): with no drawing of Display's, the probe's sub-surface (a picture plane at
+    # alpha 0.5) holds the handed-off Output. Mutation probe: no picture plane evidence in
+    # `hold_evidence` -> the slate covers it and the half white is never captured.
+    assert request("picture", operations=OPERATIONS, brightness="", drawing=False)["accepted"]
     admit(["alpha"], "alpha-frame")
+    held = read_until(lambda e: e["event"] == "hold" and e["output"] == output)
+    assert (held["holding"], held["evidence"]) == (True, "picture_plane"), held
     half = await_pixel(200, 175, (127.5, 127.5, 127.5), 3, tolerance=0.5)   # 127 or 128
     assert_pixel(40, 40, (0, 0, 0), tolerance=0)
     assert_pixel(99, 175, (0, 0, 0), tolerance=0)                           # just left of it
     print("PASS window_alpha_multiplier_halves_the_sub_surface", half, flush=True)
+    print("PASS a_picture_plane_holds_the_handed_off_output", flush=True)
     pathlib.Path(PROBE_ALPHA_RESET).write_text("")
     print("PASS window_alpha_object_destroyed_resets_to_opaque",
           await_pixel(200, 175, (255, 255, 255), 3, tolerance=0), flush=True)
+    assert not any(e["event"] == "hold" and not e["holding"] for e in events[events.index(held):])
     probe_line(app, "TRANSFORM 0")
     sent = len(events)
     assert not request("turn", transform=4)["accepted"]
@@ -741,6 +758,9 @@ try:
                            capture_output=True, text=True, timeout=20)
     assert words.returncode == 0, (words.returncode, words.stderr)
     print("PASS frame_client_word_for_every_new_surface", flush=True)
+    # The probe draws its ground alone: Display's drawing holds the Output for the steps that
+    # look at the probe's pixels (module docstring).
+    assert request("picture", operations=OPERATIONS, brightness="", drawing=True)["accepted"]
     app = subprocess.Popen(["/tmp/probe"], env=env, preexec_fn=user)
     ticks = int(pathlib.Path(f"/proc/{app.pid}/stat").read_text().rpartition(") ")[2].split()[19])
     identity = {"frame_id": "native-frame",
@@ -774,6 +794,8 @@ try:
     assert result["accepted"], result
     release = read_until(lambda e: e["event"] == "handoff_presented")
     assert release["handoff_id"] == handoff
+    held = read_until(lambda e: e["event"] == "hold")
+    assert (held["holding"], held["evidence"]) == (True, "display_drawing"), held
     read_until(lambda e: e["event"] == "presented" and e["frame_tag"] == "authored-probe")
     print("PASS separate_handoff_ack_then_admitted_grant", flush=True)
     print("PASS handed_off_app_pixel_captured", assert_pixel(320, 240, PROBE_APP), flush=True)
@@ -1010,22 +1032,37 @@ try:
     assert not any(e["event"] in ("invalidated", "presented") for e in still_events), \
         still_events[-12:]
     print("PASS still_app_keeps_its_grant_on_ping_answers_with_no_commit", flush=True)
-    # An app whose draws fail commits untagged buffers while it still answers every ping: what it
-    # shows is no frame it can name, so its answers keep no lease and the diagnostic returns within
-    # LEASE_MS, as it did before the ping. Mutation probe: renew on a pong whatever the newest
-    # commit (`untagged` dropped from `pong`): the grant is kept.
-    pathlib.Path(PROBE_UNTAGGED).write_text("")
-    pathlib.Path(PROBE_STILL).unlink()
-    untagged = time.monotonic()
-    lost = read_until(lambda e: e["event"] == "invalidated", limit=8)
-    assert lost["reason"] == "surface_lease_or_process_lost", lost
-    assert time.monotonic() - untagged < 7, time.monotonic() - untagged
-    read_until(lambda e: e["event"] == "diagnostic_presented")
+    # Hold (issue #123), liveness and hold apart. An app whose draws fail commits untagged buffers
+    # while it still answers every ping: it is alive, so it keeps its grant, but its ground holds
+    # nothing, so without Display's drawing the holding slate covers it (`hold` false) within a
+    # tick, and Display's drawing takes it back off. Mutation probe: `hold_evidence` returns
+    # HOLD_PICTURE_PLANE unconditionally -> no `hold` false, read_until times out.
+    pathlib.Path(PROBE_STILL).unlink()      # the replacement candidate draws again: hand it off
+    shown = read_until(lambda e: e["event"] == "presented" and e["identity"] == replacement)
+    handoff = str(uuid.uuid4())
+    assert request("handoff", grant_id=replacement_grant, handoff_id=handoff,
+                   buffer_id=shown["buffer_id"])["accepted"]
+    read_until(lambda e: e["event"] == "handoff_presented" and e["handoff_id"] == handoff)
+    pathlib.Path(PROBE_UNTAGGED).write_text("")   # its commits name nothing from here on
+    hold_from = len(events)
+    assert request("picture", operations=OPERATIONS, brightness="", drawing=False)["accepted"]
+    lost = read_until(lambda e: e["event"] == "hold" and not e["holding"], limit=3)
+    assert lost["evidence"] is None and lost["output"] == output, lost
+    print("PASS a_ground_only_app_loses_the_screen_to_the_slate",
+          await_pixel(40, 40, SLATE, 2, drained=True), flush=True)
+    quiet = time.monotonic() + 6.5          # past LEASE_MS: its ping answers keep the grant
+    while time.monotonic() < quiet:
+        time.sleep(0.25)
+        drain()
+    assert not any(e["event"] == "invalidated" for e in events[hold_from:]), events[-12:]
+    assert_pixel(40, 40, SLATE)
+    print("PASS an_app_answering_pings_keeps_its_grant_under_the_slate", flush=True)
+    assert request("picture", operations=OPERATIONS, brightness="", drawing=True)["accepted"]
+    back = read_until(lambda e: e["event"] == "hold" and e["holding"], limit=3)
+    assert back["evidence"] == "display_drawing", back
+    print("PASS displays_drawing_takes_the_slate_back_off",
+          await_pixel(320, 240, PROBE_APP, 2, drained=True), flush=True)
     pathlib.Path(PROBE_UNTAGGED).unlink()
-    print("PASS untagged_app_loses_its_grant_on_ping_answers_and_the_diagnostic_returns", flush=True)
-    regranted = {**replacement, "frame_id": "regranted-frame"}
-    assert request("candidate", identity=regranted, grant_id=str(uuid.uuid4()), uid=10004)["accepted"]
-    read_until(lambda e: e["event"] == "presented" and e["identity"] == regranted)
     pathlib.Path(PROBE_STILL).write_text("")
     time.sleep(0.3)
     drain()

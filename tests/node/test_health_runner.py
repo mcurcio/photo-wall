@@ -71,7 +71,8 @@ def local_reader(feed, *, name="broker"):
 def snapshot_output(name="Virtual-1", run=RUN, *, connected=True):
     admitted = None if run is None else {**run, "frame_id": "frame-1"}
     return {"output_id": name, "connected": connected, "admitted": admitted,
-            "diagnostic": "released", "fault": "app_absent"}
+            "diagnostic": "released", "fault": "app_absent", "holding": run is not None,
+            "power": "on"}
 
 
 def local_display_reader(feed, outputs):
@@ -373,8 +374,8 @@ def test_a_judge_started_after_the_display_ring_lapped_still_projects_every_outp
             ("HDMI-A-2", False), ("Virtual-1", False)]
         status = health.answer("status")
         assert status["verdict"]["outputs"] == [
-            {"output": "HDMI-A-2", "underlay": "slate", "codes": []},
-            {"output": "Virtual-1", "underlay": "live", "codes": []}]
+            {"output": "HDMI-A-2", "underlay": "slate", "codes": [], "card": None, "card_age_ms": None},
+            {"output": "Virtual-1", "underlay": "live", "codes": [], "card": None, "card_age_ms": None}]
         assert [(i["output"], i["tint"]) for i in status["overlay"]["instructions"]] == [
             ("HDMI-A-2", False), ("Virtual-1", False)]
 
@@ -427,7 +428,7 @@ def test_the_reader_drains_the_display_controllers_real_feed_socket(tmp_path):
     key = OutputKey(host.boot_id, host.incarnation_id, "Virtual-1", 2, 3)
     process = NodeProcessIdentity(4242, 777, uuid4())
     backend.states = (OutputState(key, admitted=Surface(key, process, 5, 1, 2, "frame-1"),
-                                  diagnostic="released", fault="app_absent"),)
+                                  holding=True, diagnostic="released", fault="app_absent"),)
     for index in range(20):
         controller.feed.append("Observed", {"index": index})
     directory = tmp_path / "display-feed"
@@ -455,6 +456,8 @@ def test_the_reader_drains_the_display_controllers_real_feed_socket(tmp_path):
     assert reader.cursor.after == 20 and reader.failures == 0
     run = AppRunKey(process.invocation_id, 4242, 777, 5).document()
     assert health.judge._outputs["Virtual-1"].admitted == run
+    assert (health.judge._outputs["Virtual-1"].holding, health.judge._outputs["Virtual-1"].power) == (
+        True, None)   # no power controller: no power in force
     assert [(o.output, o.underlay) for o in health.judge.verdict(0).outputs] == [
         ("Virtual-1", "live")]
 

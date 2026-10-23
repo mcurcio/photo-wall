@@ -13,8 +13,14 @@ the harness falls back to the GL renderer on llvmpipe, which imports them. The s
 client is the harness health client in its `bare` mode (alive, its health layer unmapped), so
 nothing but the app is on screen.
 
-1. the_handed_off_screen_shows_black: the candidate's empty presents (tagged
-   "candidate-<grant id>") bring the handoff; then every pixel of the Output is black.
+1. handed_off_then_slate_until_a_plane (issue #123: the screen is held only by what the compositor
+   shows): the candidate's empty presents (tagged "candidate-<grant id>") bring the handoff; the
+   shell then says `hold` false (no evidence) and the holding slate covers the Output, the grant
+   kept. A red plane holds it (`hold` true, `picture_plane`: red inside, black outside); a present
+   of no plane, even with a ground, loses it to the slate again (the ground is never evidence); a
+   pattern (the `picture` op with `drawing` true) holds it (`display_drawing`, the ground shows)
+   until `drawing` is false; a live trial holds it the same way until it ends. Mutation probe:
+   `hold_evidence` returns HOLD_PICTURE_PLANE unconditionally -> no `hold` false, pump_timeout.
 2. two_planes_mix_their_stored_values: red under green, green at strength 0.5: inside them the
    capture is the stored-value mix (127.5, 127.5, 0) within 2 levels, outside black; the pictures
    are busy after the commit that shows them.
@@ -92,6 +98,7 @@ APP_LOG = pathlib.Path("/tmp/pw-screen-app.log")
 APP_ENV = {"XDG_RUNTIME_DIR": str(ROOT), "WAYLAND_DISPLAY": SOCKET, "HOME": "/tmp/pw-screen-home"}
 XR24, LINEAR = 0x34325258, 0
 RED, GREEN, BLUE, WHITE, BLACK = (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255), (0, 0, 0)
+SLATE = (10, 15, 23)    # the holding slate: overlay/render.py's background, the shell's curtain alike
 QUADRANTS = (RED, GREEN, BLUE, WHITE)       # top-left, top-right, bottom-left, bottom-right as it hangs
 TOLERANCE = 2
 SOAK_COMMITS, SOAK_CHUNK = 320, 40         # case 6; the harness drains the shell between chunks
@@ -451,6 +458,7 @@ def main() -> None:
     from appliance.display_host.weston import (
         CompositorPresentation,
         DiagnosticRelease,
+        HoldFact,
         OverlayPresentation,
         SurfaceGrant,
         WestonBackend,
@@ -459,6 +467,8 @@ def main() -> None:
     from contracts.models import Calibration, PositionBox
     from contracts.node_calibration import TrialCandidate, candidate_hash, canonical, encode_trial
     from contracts.node_display import Surface
+    from contracts.node_frame import encode_picture_operations, neutral_operations
+    from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
     from contracts.node_protocol import NodeProcessIdentity, OutputKey
 
     shutil.copyfile("/smoke/display_harness_health_client.py", DISPLAY + "/diagnostic-client")
@@ -497,8 +507,11 @@ def main() -> None:
         presented_tags: list[str] = []
         overlay_tags: list[str] = []    # each overlay_presented's frame tag (case 9)
         keys: list = []                 # the Output's keys, as the shell announces them
+        holds: list = []                # every HoldFact, in order (case 1)
 
         def observe(observed) -> None:
+            if isinstance(observed, HoldFact):
+                holds.append(observed)
             if isinstance(observed, CompositorPresentation):
                 presented_tags.append(observed.frame_tag)
             if isinstance(observed, OverlayPresentation):
@@ -581,21 +594,82 @@ def main() -> None:
             ask(op="candidate", on=False)
             return surface
 
-        # 1. the_handed_off_screen_shows_black
-        hand_off(0)
+        # 1. handed_off_then_slate_until_a_plane
+        first = hand_off(0)
 
-        def all_black(frame) -> int:
+        def hold(holding: bool, evidence=None, seconds: float = 5.0) -> HoldFact:
+            """Until the shell's latest `hold` (it may have come with an earlier drain) says this."""
+            end = time.monotonic() + seconds
+            while not holds or (holds[-1].holding, holds[-1].evidence) != (holding, evidence):
+                assert time.monotonic() < end, ("hold_timeout", holding, evidence, holds[-3:])
+                drain()
+                time.sleep(0.01)
+            return holds[-1]
+
+        def slate(frame):
             width, height, _ = frame
-            samples = [pixel(frame, x, y) for y in range(0, height, 5) for x in range(0, width, 5)]
-            assert all(colour == BLACK for colour in samples), ("not_black", histogram(frame))
-            return len(samples)
+            assert pixel(frame, 40, 40) == SLATE, ("not_slate", pixel(frame, 40, 40), histogram(frame))
+            return frame
 
-        print(f"BLACK samples={await_frame(all_black)}", flush=True)
-        print("PASS the_handed_off_screen_shows_black", flush=True)
+        def ground_shows(frame):
+            assert pixel(frame, 40, 40) == GREY, ("ground_hidden", pixel(frame, 40, 40), histogram(frame))
+            return frame
+
+        hold(False)
+        await_frame(slate)
+        assert host.state(OUTPUT).holding is False and host.state(OUTPUT).admitted == first
+        print("PASS a_ground_only_app_loses_the_screen_to_the_slate_its_grant_kept", flush=True)
+        left, top, width, height = RECTANGLE
+        ask(op="present", tag="hold-plane", planes=[["red", RED, left, top, width, height, 1.0]])
+        hold(True, "picture_plane")
+        await_frame(lambda frame: rectangle_check(RED, frame))
+        assert host.state(OUTPUT).holding is True
+        print("PASS a_picture_plane_holds_the_screen", flush=True)
+        ask(op="present", tag="hold-ground", planes=[], ground=list(GREY))
+        hold(False)
+        await_frame(slate)
+        mark, settle = len(holds), time.monotonic() + 1.0
+        while time.monotonic() < settle:
+            drain()
+            time.sleep(0.01)
+        assert not any(seen.holding for seen in holds[mark:]), ("a ground held the screen", holds[mark:])
+        await_frame(slate)
+        print("PASS a_ground_is_never_hold_evidence", flush=True)
+        operations = encode_picture_operations(neutral_operations(OUTPUT, 1, UPGRADE_DISPLAY_LIGHT))
+        assert backend.picture(OUTPUT, operations, "", drawing=True, timeout=5.0), "picture_refused"
+        hold(True, "display_drawing")
+        await_frame(ground_shows)
+        assert backend.picture(OUTPUT, operations, "", drawing=False, timeout=5.0), "picture_refused"
+        hold(False)
+        await_frame(slate)
+        print("PASS a_pattern_of_displays_holds_the_screen_while_it_draws", flush=True)
+
+        def trial_for(admitted, sequence=1):
+            """A Position trial candidate of `admitted`'s, live for 30 s (as case 9 sets one)."""
+            boot_ms = time.clock_gettime_ns(time.CLOCK_BOOTTIME) // 1_000_000
+            trial_id, lighting = uuid.uuid4(), frame_lighting()
+            calibration = canonical(Calibration(fit=PositionBox(left=0.25, top=0.25, width=0.5,
+                                                                height=0.5)).model_dump(mode="json"))
+            return TrialCandidate(
+                trial_id=trial_id, generation=1, sequence=sequence, baseline=admitted,
+                calibration_json=calibration,
+                candidate_sha256=candidate_hash(trial_id, 1, sequence, admitted, calibration, lighting),
+                expires_boottime_ms=boot_ms + 30_000, hard_expires_boottime_ms=boot_ms + 60_000,
+                lighting=lighting)
+
+        backend.trial(first.output, encode_trial(trial_for(first)))
+        hold(True, "display_drawing")
+        await_frame(ground_shows)
+        backend.trial(first.output, None)
+        hold(False)
+        await_frame(slate)
+        print("PASS a_live_trial_holds_the_screen_until_it_ends", flush=True)
+        ask(op="present", tag="hold-again", planes=[["red", RED, left, top, width, height, 1.0]])
+        hold(True, "picture_plane")
+        print("PASS handed_off_then_slate_until_a_plane", flush=True)
 
         # 2. two_planes_mix_their_stored_values
         sequences = []
-        left, top, width, height = RECTANGLE
         mixed = ask(op="present", tag="mix", planes=[["red", RED, left, top, width, height, 1.0],
                                                       ["green", GREEN, left, top, width, height, 0.5]])
         assert isinstance(mixed["result"], int), mixed
@@ -690,6 +764,10 @@ def main() -> None:
         while (screen := ask(op="screen")["screen"]) != [WIDTH_PX, HEIGHT_PX, 0] and time.monotonic() < end:
             time.sleep(0.05)
         assert screen == [WIDTH_PX, HEIGHT_PX, 0], screen
+        # Handed off, the slate is up until a plane holds the screen: a soak presented under the
+        # slate would wait for its first answer until the next tick lowered it.
+        ask(op="present", tag="held-for-the-soak", planes=[["red", RED, left, top, width, height, 1.0]])
+        hold(True, "picture_plane")
         answers: dict[str, int] = {}
         for chunk in range(SOAK_COMMITS // SOAK_CHUNK):
             soaked = ask(op="soak", count=SOAK_CHUNK, tag=f"soak{chunk}")
@@ -789,13 +867,7 @@ def main() -> None:
                 drain()
                 time.sleep(0.01)
 
-        boot_ms = time.clock_gettime_ns(time.CLOCK_BOOTTIME) // 1_000_000
-        trial_id, lighting = uuid.uuid4(), frame_lighting()
-        calibration = canonical(Calibration(fit=PositionBox(left=0.25, top=0.25, width=0.5, height=0.5)).model_dump(mode="json"))
-        trial = TrialCandidate(
-            trial_id=trial_id, generation=1, sequence=1, baseline=admitted, calibration_json=calibration,
-            candidate_sha256=candidate_hash(trial_id, 1, 1, admitted, calibration, lighting),
-            expires_boottime_ms=boot_ms + 30_000, hard_expires_boottime_ms=boot_ms + 60_000, lighting=lighting)
+        trial = trial_for(admitted)
         backend.trial(admitted.output, encode_trial(trial))
         plain = ask(op="trial_present", overlay=False)
         assert isinstance(plain["result"], int) and plain["tag"] == trial.frame_tag, plain

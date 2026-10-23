@@ -188,7 +188,7 @@ def _ring_document(entry, now_ms: int) -> dict:
 
 def status_document(judge: HealthJudge, readers: Sequence[FeedReader], now_ms: int, *,
                     overlay_clients: int = 0, card: CardClock | None = None) -> dict:
-    """The `status` answer: verdict (with each Output's underlay), the overlay instructions,
+    """The `status` answer: verdict (with each Output's underlay and card), the overlay instructions,
     the ring (ages on the judge's clock) and feed positions."""
     card = card or CardClock()
     verdict = judge.verdict(now_ms)
@@ -197,7 +197,8 @@ def status_document(judge: HealthJudge, readers: Sequence[FeedReader], now_ms: i
             {"code": condition.code, "run": condition.run, "state": condition.state,
              "age_ms": condition.age_ms} for condition in verdict.conditions],
             "outputs": [{"output": output.output, "underlay": output.underlay,
-                         "codes": list(output.codes)} for output in verdict.outputs]},
+                         "codes": list(output.codes), "card": output.card,
+                         "card_age_ms": output.card_age_ms} for output in verdict.outputs]},
         "overlay": {"instructions": [_instruction_document(instruction)
                                      for instruction in card.instructions(judge, now_ms)],
                     "clients": overlay_clients},

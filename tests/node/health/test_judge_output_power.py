@@ -1,6 +1,7 @@
 """Guard (1b D2, E-1B-5): an Output that drops out for a hot-plug blip, or for the whole of a
 requested off (some displays drop hot-plug through standby), raises no display-affecting code.
-Green before and after D2: the judge reads no display power, and must not start to."""
+Green before and after D2. Since issue #123 the judge reads the power in force from Display's
+snapshot, only to keep `nothing_to_show` from opening while it is off; a blip raises nothing."""
 from uuid import uuid4
 
 from appliance.apps.probe import SHIPPED_TIMING, AppRunKey
@@ -21,7 +22,8 @@ def judge() -> HealthJudge:
 
 
 def outputs(subject: HealthJudge, now: int, *, connected: bool) -> None:
-    subject.observe_outputs([{"output_id": "HDMI-A-1", "connected": connected, "admitted": None}], now)
+    subject.observe_outputs([{"output_id": "HDMI-A-1", "connected": connected, "admitted": None,
+                              "holding": False, "power": "on"}], now)
 
 
 def display_affecting(subject: HealthJudge, now: int) -> list[str]:

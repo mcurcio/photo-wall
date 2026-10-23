@@ -50,7 +50,7 @@ from appliance.display_host.picture_list import FileOfferedCache
 from appliance.display_host.runner import document_feed
 from appliance.display_host.signal_range import DrmConnectorRanges, FileRangeRequests
 from appliance.host.bus import HOST_SLICE, host_session
-from contracts.node_frame import decode_picture_operations, encode_picture_operations
+from contracts.node_frame import decode_picture_operations
 from contracts.node_link import CENTRAL_WRITER, NODE_MAX_STREAMS, Pipe, account_id
 from contracts.node_output import (
     BEST_DETECTED,
@@ -129,8 +129,8 @@ class TextShell:
     def __init__(self) -> None:
         self.texts: list[str] = []
 
-    def picture(self, operations, *, timeout, brightness):
-        self.texts.append(encode_picture_operations(operations))
+    def picture(self, output_id, operations, brightness, *, drawing, timeout):
+        self.texts.append(operations)
         return True
 
 

@@ -39,7 +39,9 @@ def states(subject, now):
 
 
 def connected(subject, now):
-    subject.observe_outputs([{"output_id": "HDMI-A-1", "connected": True, "admitted": None}], now)
+    """HDMI-A-1 on, the run admitted and holding it (a picture plane: it shows something)."""
+    subject.observe_outputs([{"output_id": "HDMI-A-1", "connected": True, "admitted": RUN,
+                              "holding": True, "power": "on"}], now)
 
 
 def test_app_exit_raises_app_absent_until_a_new_run_starts():
@@ -99,7 +101,7 @@ def test_descriptor_pressure_raises_and_clears_resource_exhausted():
     assert [(t.state, t.reason) for t in subject.transitions()] == [
         ("raised", "descriptor_pressure"), ("cleared", "descriptor_relief")]
     # Another raise clears with its run's exit; another run's samples never touch it.
-    subject.observe(descriptors(1000), 200_000)
+    subject.observe(descriptors(950), 200_000)  # under pressure, short of the limit
     subject.observe(descriptors(10, NEXT_RUN), 200_001)
     assert states(subject, 200_000 + 2 * HOLD) == [(APP_RESOURCE_EXHAUSTED, "raised")]
     subject.observe(fact(APP_EXITED), 400_000)

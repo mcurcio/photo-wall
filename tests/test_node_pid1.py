@@ -5,9 +5,9 @@ real HTTP Central on its own database: success (ordered stop-before-start, natur
 before its stage, three signal range restarts of Weston under the running Player: the broker alone
 starts the Player again, never exits, and no unit fails; after it, a crashed Player and then a
 crashed Weston leave the Player down, issue #125), failure (the target exits: target_failed and
-effect_unknown, no fallback start, and the debug overlay's card shows), dark (a frozen Player,
-then a killed one: the card names the cause and the Pi-clock time, and nothing starts the Player
-again; issues #123, #125), outage (Central unreachable for 35 s once the broker holds its stage),
+effect_unknown, no fallback start, and the debug overlay's card shows), dark (a Player at its
+open-file limit, then a frozen one, then a killed one: the card names the cause and the Pi-clock
+time, and nothing starts the Player again; issues #123, #125), outage (Central unreachable for 35 s once the broker holds its stage),
 reboot (a second kernel boot of the same device re-enrolls, supersedes the first and is
 commandable), refused (a board below the smallest memory class: storage refuses, nothing
 after it runs, and Host Management reports the refusal with its numbers) and join (the Node API
@@ -116,6 +116,11 @@ DARK_OUTPUT = "Virtual-1"  # the fixture's synthetic Output (tests/node_pid1_fix
 # Household lines of the run causes (contracts/node_faults.py), as the card's line 1 starts.
 UNRESPONSIVE_LINE = "Photos paused — the player stopped responding"
 ABSENT_LINE = "Photos paused — the player stopped"
+LIMIT_LINE = "Photos paused — the player ran out of open files"
+NOTHING_LINE = "Nothing to show on this Frame"
+# Issue #123's lowered limit: this many above what the Player holds open, inside the judge's
+# DESCRIPTOR_LIMIT_HEADROOM (16), so its next descriptor sample (every 10 s) is at the limit.
+LIMIT_ABOVE_OPEN = 8
 # The judge's `status` (uid 0) on health.sock, one SOCK_SEQPACKET request.
 HEALTH_STATUS = """import json,socket
 s=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET);s.settimeout(5)
@@ -454,17 +459,19 @@ class Node:
         """The health judge's `status`, read as root on health.sock."""
         return json.loads(self.run("/usr/bin/python3", "-I", "-c", HEALTH_STATUS))
 
-    def card(self, code, line, since, name):
+    def card(self, code, line, since, name, *, alternatives=()):
         """Within CARD_SECONDS of `since` (monotonic), DARK_OUTPUT's overlay instruction is tinted
-        with `line` and its time (" · since HH:MM") on line 1 and `code` on line 2; returned."""
+        with `line` and its time (" · since HH:MM") on line 1 and `code` on line 2 (or one of the
+        `alternatives`' (code, line) pairs); returned."""
         deadline = since + CARD_SECONDS
+        wanted = ((code, line), *alternatives)
         while True:
             status = self.health_status()
             shown = {each["output"]: each for each in status["overlay"]["instructions"]}
             instruction = shown.get(DARK_OUTPUT)
-            if (instruction and instruction["tint"]
-                    and instruction["lines"][0].startswith(line + " · since ")
-                    and code in instruction["lines"][1]):
+            if instruction and instruction["tint"] and any(
+                    instruction["lines"][0].startswith(each_line + " · since ")
+                    and each_code in instruction["lines"][1] for each_code, each_line in wanted):
                 break
             if time.monotonic() >= deadline:
                 (self.work / (name + "-status.json")).write_text(json.dumps(status, sort_keys=True))
@@ -502,6 +509,29 @@ class Node:
         started = self.started_after(mark)
         assert started == [], ("app_started after the signal", name, started)
         return instruction
+
+    def at_open_file_limit(self, name):
+        """Issue #123, the fireplace's 2026-10-20 in a minute: the Player's open-file limit lowered
+        to LIMIT_ABOVE_OPEN above what it holds open (`prlimit` on its MainPID). Within
+        CARD_SECONDS the card shows app_descriptor_limit (or nothing_to_show) with its time. The
+        limit is then put back, so the same run is there for the cases that follow; the cause stays
+        on the card until another run starts (below the run causes, by the judge's precedence)."""
+        pid = unit_properties_of(self, PLAYER_UNIT, "MainPID")["MainPID"]
+        assert pid not in ("", "0"), pid
+        soft, hard = self.run("prlimit", "--pid", pid, "--nofile", "--noheadings",
+                              "--output=SOFT,HARD").split()
+        held = int(self.run("/usr/bin/python3", "-I", "-c",
+                            "import os,sys;print(len(os.listdir('/proc/'+sys.argv[1]+'/fd')))", pid))
+        lowered = held + LIMIT_ABOVE_OPEN
+        self.run("prlimit", "--pid", pid, f"--nofile={lowered}:{lowered}")
+        since = time.monotonic()
+        try:
+            instruction = self.card("app_descriptor_limit", LIMIT_LINE, since, name + "-card",
+                                    alternatives=(("nothing_to_show", NOTHING_LINE),))
+        finally:
+            self.run("prlimit", "--pid", pid, f"--nofile={soft}:{hard}")
+        assert unit_properties_of(self, PLAYER_UNIT, "MainPID")["MainPID"] == pid, "the Player restarted"
+        return {"instruction": instruction, "open": held, "limit": lowered}
 
     def cold(self, fixture, components_dir, previous=None):
         """Boot PID1, bind the exact packages, start real units; return the cold app-link."""
@@ -1224,13 +1254,15 @@ def test_node_pid1_refused(node_pid1_inputs, node_host, registry, tmp_path):
 
 
 def test_node_pid1_dark(node_pid1_inputs, node_host, registry, tmp_path):
-    """Issues #123 and #125 under real systemd: the cold Player is frozen (SIGSTOP), then killed
-    (kill -9 of its MainPID). Each time the debug overlay's card on Virtual-1 shows within
-    CARD_SECONDS, naming the cause (app_unresponsive, then app_absent) and the Pi-clock time it
-    began, and for STAYS_DARK_SECONDS after the signal nothing starts the Player again: no new
-    InvocationID, the same launch epoch, no `app_started` fact. After the kill a crashed Weston
-    starts nothing either. On main (943e8e71) the broker kills the frozen Player at K = 35 s and
-    relaunches a dead one within about 2 s, so each case fails there."""
+    """Issues #123 and #125 under real systemd: the cold Player's open-file limit is lowered to
+    just above what it holds open (`prlimit`), then it is frozen (SIGSTOP), then killed (kill -9
+    of its MainPID). Each time the debug overlay's card on Virtual-1 shows within CARD_SECONDS,
+    naming the cause (app_descriptor_limit, then app_unresponsive, then app_absent) and the
+    Pi-clock time it began; after the signals, for STAYS_DARK_SECONDS nothing starts the Player
+    again: no new InvocationID, the same launch epoch, no `app_started` fact. After the kill a
+    crashed Weston starts nothing either. On main (943e8e71) running out of open files is
+    pressure only (no tint), the broker kills the frozen Player at K = 35 s and relaunches a dead
+    one within about 2 s, so each case fails there."""
     phase = "dark"
     components_dir, _, image = node_pid1_inputs
     work = tmp_path
@@ -1238,12 +1270,13 @@ def test_node_pid1_dark(node_pid1_inputs, node_host, registry, tmp_path):
         node = Node(image, work, phase)
         try:
             node.cold(fixture, components_dir)
+            limit = node.at_open_file_limit("dark-limit")
             frozen = node.stays_dark("SIGSTOP", "app_unresponsive", UNRESPONSIVE_LINE, "dark-sigstop")
             killed = node.stays_dark(
                 "SIGKILL", "app_absent", ABSENT_LINE, "dark-kill",
                 then=lambda: node.recover_display("SIGSEGV", "dark-display-crash"))
             (work / "dark.json").write_text(json.dumps(
-                {"sigstop": frozen, "kill": killed}, sort_keys=True))
+                {"limit": limit, "sigstop": frozen, "kill": killed}, sort_keys=True))
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
             node.capture_and_remove(fixture, sys.exc_info()[1])

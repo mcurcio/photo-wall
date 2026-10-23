@@ -90,7 +90,7 @@ def test_independent_reboot_observation_does_not_execute_or_manufacture_command(
 
 def display_values():
     backend = RecordingDisplayBackend()
-    display = DisplayHost(boot_id=UUID(int=1), incarnation_id=UUID(int=2), backend=backend, lease_ms=100)
+    display = DisplayHost(boot_id=UUID(int=1), incarnation_id=UUID(int=2), backend=backend)
     state = display.connect("HDMI-A-1")
     surface = Surface(state.key, NodeProcessIdentity(100, 10, UUID(int=3)), 1, 1, 0, "test-frame")
     return display, surface, backend
@@ -117,16 +117,21 @@ def test_replacement_candidate_invalidates_previous_handoff_evidence():
         display.authorize_handoff(first, now_ms=1)
 
 
-def test_surface_lease_renewal_then_expiry_and_output_aba():
+def test_one_lease_rule_the_shells_and_output_aba():
+    """Issue #123: the domain keeps no lease of its own. A handoff names a presented buffer and
+    the shell's `handoff` op checks it was presented within the shell's lease, so a late handoff
+    is the shell's refusal, not the domain's; the hold is the shell's word, reset with the grant."""
     display, surface, _ = display_values()
     display.offer(surface)
     display.presented(surface, buffer_token="first", now_ms=0)
     assert display.state("HDMI-A-1").admitted is None
-    display.authorize_handoff(surface, now_ms=1)
-    display.presented(surface, buffer_token="renewal", now_ms=99)
-    assert display.expire(now_ms=100) == ()
-    assert display.expire(now_ms=199)[0].state == "invalidated"
-    assert display.state("HDMI-A-1").admitted is None
+    assert not hasattr(display, "expire") and not hasattr(display, "lease_ms")
+    display.authorize_handoff(surface, now_ms=60_000)
+    assert display.state("HDMI-A-1").admitted == surface
+    assert display.hold("HDMI-A-1", holding=True).holding is True
+    with pytest.raises(ValueError, match="^hold_invalid$"):
+        display.hold("HDMI-A-1", holding=1)
+    assert display.authorized_withdrawal("HDMI-A-1").holding is False
     display.disconnect("HDMI-A-1")
     display.connect("HDMI-A-1")
     with pytest.raises(ValueError):

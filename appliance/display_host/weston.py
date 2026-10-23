@@ -17,11 +17,11 @@ import threading
 import time
 from collections import deque
 from dataclasses import asdict, dataclass
-from typing import Callable, Protocol
+from typing import Callable, Literal, Protocol
 from uuid import UUID, uuid4
 
 from contracts.display_turn import DisplayTurn, wayland_transform
-from contracts.node_frame import PictureOperations, encode_picture_operations, parse_picture_change
+from contracts.node_frame import parse_picture_change
 from contracts.node_output import Power
 from contracts.node_protocol import NodeProcessIdentity, OutputKey, SurfaceFact
 
@@ -123,6 +123,18 @@ class OverlayPresentation:
 class DiagnosticRelease:
     surface: Surface
     handoff_id: UUID
+
+
+@dataclass(frozen=True)
+class HoldFact:
+    """The shell's `hold` event (issue #123): whether the released Output is held, and by what.
+    `picture_plane`: a mapped sub-surface of the app's with a buffer and a window alpha above 0;
+    `display_drawing`: Display's own pattern, target (the `picture` op's `drawing`) or a live
+    trial. None: neither, so the holding slate covers the Output (the grant kept)."""
+
+    output_id: str
+    holding: bool
+    evidence: Literal["picture_plane", "display_drawing"] | None
 
 
 class WestonBackend:
@@ -301,17 +313,21 @@ class WestonBackend:
         except (OSError, ValueError, KeyError, TimeoutError):
             return False
 
-    def picture(self, operations: PictureOperations, *, timeout: float, brightness: str) -> bool:
-        """Hand one Output's picture operations and base page brightness line to the shell (control
-        op `picture`; frame protocol v4 forwards them to the Player and the overlay client); whether
-        the shell took them. Called from the picture controller's workers."""
+    def picture(self, output_id: str, operations: str, brightness: str, *, drawing: bool,
+                timeout: float = 2) -> bool:
+        """Hand one Output's encoded picture operations (contracts/node_frame.py
+        `encode_picture_operations`) and base page brightness line to the shell (control op
+        `picture`; frame protocol v4 forwards them to the Player and the overlay client), with
+        `drawing`: whether Display itself draws on the Output (a test pattern or calibration
+        target), which holds it with no picture plane (issue #123); whether the shell took them.
+        Called from the picture controller's workers."""
         try:
             with self._channel_lock:
-                if self.host is None:
+                if self.host is None or type(drawing) is not bool:
                     return False
-                key = self.host.state(operations.output_id).key
+                key = self.host.state(output_id).key
                 self._request("picture", key, timeout=timeout,
-                              operations=encode_picture_operations(operations), brightness=brightness)
+                              operations=operations, brightness=brightness, drawing=drawing)
                 return True
         except (OSError, ValueError, KeyError, TimeoutError):
             return False
@@ -425,6 +441,7 @@ class WestonBackend:
         CompositorPresentation
         | DiagnosticPresentation
         | DiagnosticRelease
+        | HoldFact
         | RoleRemoval
         | SurfaceFact
         | OutputKey
@@ -490,6 +507,16 @@ class WestonBackend:
                     key, value["serial"], value["buffer_id"], value["frame_tag"]
                 )
             return None
+        if event == "hold":
+            key = _output(value["output"])
+            holding, evidence = value["holding"], value["evidence"]
+            if type(holding) is not bool or evidence not in (
+                    (None,) if not holding else ("picture_plane", "display_drawing")):
+                raise ValueError("display_message_invalid")
+            if self.host.state(key.output_id).key != key:
+                return None   # a hold of an Output key since replaced
+            self.host.hold(key.output_id, holding=holding)
+            return HoldFact(key.output_id, holding, evidence)
         if event == "diagnostic_presented":
             key = _output(value["output"])
             state = self.host.state(key.output_id)

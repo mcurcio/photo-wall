@@ -116,9 +116,13 @@ def verify_process(grant: SurfaceGrant) -> bool:
         return False
 
 
-def _output_document(state) -> dict:
-    """One `OutputState` as the feed snapshot shows it (JSON-native values only)."""
+def _output_document(state, power: OutputPowerController | None = None) -> dict:
+    """One `OutputState` as the feed snapshot shows it (JSON-native values only), with `holding`
+    (the shell's hold, issue #123) and `power`: the power in force on the Output as the power
+    controller's report says it (`in_force.power`), None without a report or a power in force."""
     admitted = state.admitted
+    report = None if power is None else power.report(state.key.output_id)
+    in_force = None if report is None or report.in_force is None else report.in_force.power
     return {
         "output_id": state.key.output_id,
         "connected": state.connected,
@@ -133,6 +137,8 @@ def _output_document(state) -> dict:
         },
         "diagnostic": state.diagnostic,
         "fault": state.fault,
+        "holding": state.holding,
+        "power": None if in_force is None else in_force.value,
     }
 
 
@@ -277,8 +283,10 @@ def picture_controller(backend: WestonBackend, sink: PictureReports, ddc: DdcCha
 
 
 class Controller:
-    def __init__(self, backend: WestonBackend, *, reports: OutputReporter | None = None):
+    def __init__(self, backend: WestonBackend, *, reports: OutputReporter | None = None,
+                 power: OutputPowerController | None = None):
         self.backend = backend
+        self._power = power   # each Output's power in force, for the feed snapshot
         self.host = backend.initialize()
         self.feed = Feed(256)
         self.service = None
@@ -306,7 +314,7 @@ class Controller:
     def outputs_snapshot(self) -> list[dict]:
         """Every Output the host knows (bounded by its `max_outputs`) with its admission, so a
         reader that lapped the ring or restarted learns the Output set from any one read."""
-        return [_output_document(state) for state in self.host.states()]
+        return [_output_document(state, self._power) for state in self.host.states()]
 
     def feed_events(self, value: dict) -> dict:
         """The feed socket's one operation: `events` (an absent `op` reads as `events`)."""
@@ -412,7 +420,8 @@ def main() -> None:
             for key in (output_document_key(output_id), picture_document_key(output_id)):
                 if (present := session.desired.get(key)) is not None:
                     feed(key, present)
-        controller = Controller(backend, reports=OutputReporter(PowerObservations(power, picture, turns)))
+        controller = Controller(backend, reports=OutputReporter(PowerObservations(power, picture, turns)),
+                                power=power)
         if config:
             from .service import DisplayService
 

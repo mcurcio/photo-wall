@@ -70,6 +70,17 @@ FAULTS: Mapping[str, Fault] = _catalogue(
     # minute below it, or when that run exits.
     Fault("app_resource_exhausted", False, "The player is running out of open files",
           raise_window_ms=0, clear_hold_ms=60000),
+    # Issue #123: per Output. Opened while the Output is on (not Night off or Resting) and no run
+    # holds it (no picture plane the compositor sees, no pattern or trial of Display's own); its
+    # outcome window lets a healthy run find its first photo untinted (a placeholder of r2's). It
+    # clears at once when the Output is held again, powered off or gone.
+    Fault("nothing_to_show", True, "Nothing to show on this Frame",
+          raise_window_ms=120000, clear_hold_ms=0),
+    # Issue #123: the run at its open-file limit (within the judge's DESCRIPTOR_LIMIT_HEADROOM)
+    # can open no photo, so it tints at once, unlike the pressure above; a run cause, it stays
+    # until another run starts.
+    Fault("app_descriptor_limit", True, "Photos paused — the player ran out of open files",
+          raise_window_ms=0, clear_hold_ms=0),
 )
 
 
