@@ -13,8 +13,14 @@ Two documents ride the Node bus's `display` store line, one key per Output (HDMI
 - The **Output report** (Pi -> Central, the display line's state bucket, key
   `output_report_key(output_id)`): whether a display is connected, its identity and modes as its
   EDID says, which power methods answered a read-only check, the method in use, and the result of
-  the last power attempt for the change number it names. The Pi reports; Central alone decides
-  whether two identities are the same Display.
+  the last power attempt for the change number it names, and the mode Weston runs on the port
+  (`current_mode`, schema major 11). The Pi reports; Central alone decides whether two identities
+  are the same Display.
+- The **Frame region document** (Central -> Pi, the display line's desired bucket, key
+  `region_document_key(output_id)`; issue #124, schema major 11): the bound Frame's rectangle in
+  whole pixels on the screen as it hangs, placed by Central, with its own `change`, so a saved
+  Position or a new mode never raises the Output document's. The Pi never computes it (decision
+  0030); the debug overlay draws inside it.
 
 Each power attempt is also one event on `display.record.power` (`PowerAttempt`), so Central records
 every attempt, not only the latest.
@@ -65,7 +71,7 @@ from contracts.wire_codec import (
     whole,
 )
 
-SCHEMA_MAJOR: Final = 10                        # the display line's schema major (birth, envelope); 10 from the frame box (the Display's size)
+SCHEMA_MAJOR: Final = 11                        # the display line's schema major (birth, envelope); 11 from the Frame region and the current mode (#124)
 DISPLAY_MM_MAX: Final = 2550                    # an EDID base block states at most 255 cm a side
 
 # Every Output a Node can have: the Pi 5's two HDMI connectors, and the two virtual connectors the
@@ -307,7 +313,9 @@ class OutputReport:
     = the last attempt's result for that change (None: no attempt for it yet, e.g. the display was
     already in the wanted state at start and was left alone); `in_force` = the request the Pi is
     carrying out (None without a document); `size_mm` = the display's picture area as built, in whole
-    millimetres (width, height), as its EDID base block states it (None: not stated, or no EDID)."""
+    millimetres (width, height), as its EDID base block states it (None: not stated, or no EDID);
+    `current_mode` = the mode Weston runs on the port (width, height) as the display is built, never
+    turned (None: disconnected, or not known)."""
     output_id: str
     connected: bool
     identity: DisplayIdentity | None
@@ -318,12 +326,14 @@ class OutputReport:
     result: PowerResult | None
     in_force: InForce | None
     size_mm: tuple[int, int] | None
+    current_mode: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         """ValueError("output_report") unless output_id is in OUTPUT_IDS, modes has at most
         MAX_DISPLAY_MODES entries, answers are unique and in METHOD_PRECEDENCE order, method is in
-        answers when set, for_change >= 1 when set, and size_mm is None or a tuple of two ints (never
-        bools) each in 1..DISPLAY_MM_MAX. `for_change` names power changes only."""
+        answers when set, for_change >= 1 when set, size_mm is None or a tuple of two ints (never
+        bools) each in 1..DISPLAY_MM_MAX, and current_mode is None or a tuple of two ints (never
+        bools) each in 1..MAX_SCREEN_SIDE. `for_change` names power changes only."""
         answers = self.answers
         require(self.output_id in OUTPUT_IDS and type(self.connected) is bool
                  and (self.identity is None or isinstance(self.identity, DisplayIdentity))
@@ -336,7 +346,10 @@ class OutputReport:
                  and (self.result is None or isinstance(self.result, PowerResult))
                  and (self.in_force is None or isinstance(self.in_force, InForce))
                  and (self.size_mm is None or (isinstance(self.size_mm, tuple) and len(self.size_mm) == 2
-                                               and all(whole(side, 1, DISPLAY_MM_MAX) for side in self.size_mm))),
+                                               and all(whole(side, 1, DISPLAY_MM_MAX) for side in self.size_mm)))
+                 and (self.current_mode is None or (isinstance(self.current_mode, tuple) and len(self.current_mode) == 2
+                                                    and all(whole(side, 1, MAX_SCREEN_SIDE)
+                                                            for side in self.current_mode))),
                  "output_report")
 
 
@@ -402,6 +415,7 @@ def decode_output_report(raw: bytes) -> OutputReport:
     """ValueError("output_report") for anything but a valid encoding."""
     def build(value: dict[str, Any]) -> OutputReport:
         identity, in_force, size_mm = value["identity"], value["in_force"], value["size_mm"]
+        current_mode = value["current_mode"]
         return OutputReport(**{
             **value,
             "identity": None if identity is None else DisplayIdentity(**fields_of(DisplayIdentity, identity)),
@@ -410,7 +424,8 @@ def decode_output_report(raw: bytes) -> OutputReport:
             "method": optional(PowerMethod, value["method"]),
             "result": optional(PowerResult, value["result"]),
             "in_force": None if in_force is None else _in_force(in_force),
-            "size_mm": None if size_mm is None else tuple(list_of(size_mm))})
+            "size_mm": None if size_mm is None else tuple(list_of(size_mm)),
+            "current_mode": None if current_mode is None else tuple(list_of(current_mode))})
     return decode(raw, OUTPUT_REPORT_BYTES, OutputReport, build, "output_report")
 
 
@@ -441,6 +456,7 @@ def decode_power_attempt(raw: bytes) -> PowerAttempt:
 REGION_DOCUMENT_BYTES: Final = 1024             # a region document's largest encoding
 MAX_SCREEN_SIDE: Final = 16384                  # DisplayMode's bound, as it hangs too
 _REGION_PREFIX: Final = "region-"               # desired bucket key: region-<output_id>
+_FRAME_ID_LONGEST: Final = 96                   # a Frame id's longest token
 
 
 @dataclass(frozen=True)
@@ -455,7 +471,9 @@ class OutputRect:
     def __post_init__(self) -> None:
         """ValueError("output_rect") unless x and y are ints (never bools) in 0..MAX_SCREEN_SIDE - 1
         and width and height ints in 1..MAX_SCREEN_SIDE."""
-        ...
+        require(whole(self.x, 0, MAX_SCREEN_SIDE - 1) and whole(self.y, 0, MAX_SCREEN_SIDE - 1)
+                 and whole(self.width, 1, MAX_SCREEN_SIDE) and whole(self.height, 1, MAX_SCREEN_SIDE),
+                 "output_rect")
 
 
 @dataclass(frozen=True)
@@ -472,7 +490,12 @@ class FrameRegion:
         `token`, at most 96 characters), screen is a tuple of two ints (never bools) in
         1..MAX_SCREEN_SIDE, rect is an OutputRect, and rect lies wholly on screen
         (rect.x + rect.width <= screen[0] and rect.y + rect.height <= screen[1])."""
-        ...
+        screen, rect = self.screen, self.rect
+        require(_is_token(self.frame_id, _FRAME_ID_LONGEST)
+                 and isinstance(screen, tuple) and len(screen) == 2
+                 and all(whole(side, 1, MAX_SCREEN_SIDE) for side in screen)
+                 and isinstance(rect, OutputRect)
+                 and rect.x + rect.width <= screen[0] and rect.y + rect.height <= screen[1], "frame_region")
 
 
 @dataclass(frozen=True)
@@ -487,38 +510,44 @@ class FrameRegionDocument:
     def __post_init__(self) -> None:
         """ValueError("region_document") unless output_id is in OUTPUT_IDS, change is an int >= 1
         (never a bool) and region is None or a FrameRegion."""
-        ...
+        require(self.output_id in OUTPUT_IDS and whole(self.change, 1)
+                 and (self.region is None or isinstance(self.region, FrameRegion)), "region_document")
 
 
 def region_document_key(output_id: str) -> str:
     """The desired-bucket key of `output_id`'s region document: "region-HDMI-A-1".
     ValueError("output_id") for an id outside OUTPUT_IDS."""
-    ...
+    if output_id not in OUTPUT_IDS:
+        raise ValueError("output_id")
+    return _REGION_PREFIX + output_id
 
 
 def encode_region_document(document: FrameRegionDocument) -> bytes:
     """Canonical JSON (contracts.wire_codec `encode`) of at most REGION_DOCUMENT_BYTES;
     ValueError("region_document_too_large") past it."""
-    ...
+    return encode(document, REGION_DOCUMENT_BYTES, "region_document_too_large")
 
 
 def decode_region_document(raw: bytes) -> FrameRegionDocument:
     """The document `raw` encodes (strict, exactly the dataclasses' field names); ValueError(
     "region_document") for anything else. A refused document refuses only itself: the Pi keeps
     power and turn as they are and the debug overlay falls back to the whole Output."""
-    ...
+    def build(value: dict[str, Any]) -> FrameRegionDocument:
+        region = value["region"]
+        return FrameRegionDocument(**{**value, "region": None if region is None else _frame_region(region)})
+    return decode(raw, REGION_DOCUMENT_BYTES, FrameRegionDocument, build, "region_document")
 
 
 def encode_frame_region(region: FrameRegion) -> bytes:
     """Canonical JSON of `region` alone: the text the display controller hands the shell's `region`
     op and the shell forwards verbatim to the overlay client (frame protocol v5)."""
-    ...
+    return encode(region, REGION_DOCUMENT_BYTES, "frame_region_too_large")
 
 
 def decode_frame_region(raw: bytes) -> FrameRegion:
     """The region `raw` encodes (strict, at most REGION_DOCUMENT_BYTES); ValueError("frame_region")
     for anything else. The overlay client's one parser of what the shell forwarded."""
-    ...
+    return decode(raw, REGION_DOCUMENT_BYTES, FrameRegion, _frame_region, "frame_region")
 
 
 # The checks and the codec above share these: one home for the wire's rules.
@@ -526,10 +555,10 @@ def decode_frame_region(raw: bytes) -> FrameRegion:
 _MAKER: Final = re.compile(r"[A-Z]{3}")
 
 
-def _is_token(value: object) -> bool:
-    """A node token (contracts.node_protocol.token)."""
+def _is_token(value: object, longest: int = 128) -> bool:
+    """A node token (contracts.node_protocol.token) of at most `longest` characters."""
     try:
-        token(value)
+        token(value, longest)
     except ValueError:
         return False
     return True
@@ -560,6 +589,12 @@ def _output_power(value: object) -> OutputPower:
         "changes": tuple(PowerChange(**{**(change := fields_of(PowerChange, item)), "power": Power(change["power"])})
                          for item in list_of(power["changes"])),
         "test": None if test is None else _power_request(test)})
+
+
+def _frame_region(value: object) -> FrameRegion:
+    region = fields_of(FrameRegion, value)
+    return FrameRegion(**{**region, "screen": tuple(list_of(region["screen"])),
+                          "rect": OutputRect(**fields_of(OutputRect, region["rect"]))})
 
 
 def _in_force(value: object) -> InForce:

@@ -6871,3 +6871,31 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
 - **The large-Frame setting is still a diagonal in inches** (0030 decision 7, requirements :186
   "a 40-inch Frame"). The design review asks for a width; R2 says the diagonal is "a weird
   concept". Left for the owner: which measure the threshold uses is his call.
+
+## Overlay-always S3 (issue #124, Central half), 2026-10-23: stopped
+
+- **The frozen page's "the Player's enrolment report (outputs.observation width_px) is no longer
+  read" breaks 88 DB-tier tests in 22 files outside S3's owned paths.** Every test that enrolls a
+  Pi through `tests/test_registry.py` `enroll(size=...)` (82 importers) or
+  `tests/test_display_identity.py` `enroll_pi` got its Frame's screen size from that enrolment
+  report; with the rule as frozen (and as r2-final.md:103 states) such a Frame has no screen until
+  an Output report states `current_mode` or a Display with a preferred mode is seen, so it gets no
+  Frame output and no photos. A/B: with only SCREEN_COLUMNS put back on `outputs.observation`, all
+  88 pass. Red files: test_after_end_migration, test_authored_compatibility, test_authored_scene,
+  test_coordination, test_exposed_settings_roundtrip, test_fit_analysis_budget,
+  test_fit_analysis_store, test_fit_settings_store, test_frame_fit_settings, test_frame_output,
+  test_frame_output_wiring, test_frame_video, test_node_acceptance, test_photo_library_routes,
+  test_player_service, test_registry, test_restart_content_locks, test_scene_apply_now,
+  test_scene_transition_migration, test_shown_history, test_wall_copy_sizing, test_wall_plan_tracer.
+  Re-cut needed: give S3 `tests/test_registry.py` (its `enroll` should also record each Output's
+  report with `current_mode=size` through the real judge, `OutputReportJudge`) plus whichever of
+  the above still seed a size another way, or keep the enrolment as screen_px's last fallback
+  (an owner/design call: r2-final says it is no longer read).
+- **Smaller spec slips found on the way:** `frame_placement` returns a `Placement` dataclass, not a
+  tuple, so `OutputRect(*frame_placement(...))` does not run (WIP uses its four attributes); a saved
+  Position (`registry.commit_calibration_trial_in`) wakes no Node's document source, so the region
+  document reaches the Pi only at the next wake (a report, a deadline, house midnight) unless the
+  Position write calls `notify_nodes_in` (registry.py, not S3's); stored Output reports lack
+  `current_mode`, so migration 109 also needs 103's `UPDATE output_displays SET report = report ||
+  '{"current_mode": null}'` (WIP has it; the page says "no other schema change"); r2-final's
+  "migration 104's SQL copy of the rule follows" cannot apply (104 is applied, forward-only).
