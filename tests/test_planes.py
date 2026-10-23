@@ -9,6 +9,7 @@ from test_executor import layer, media
 
 from contracts.frame_fit import Placement
 from contracts.models import PhotoCrop
+from contracts.photo_crop import crop_window
 from player.geometry import encode_srgb
 from player.planes import MIN_STRENGTH, FrameLayers, Screen, compose, finish_size, plane_strength
 from player.rendering import LocalLayer
@@ -191,6 +192,21 @@ def test_the_finish_size_keeps_the_frames_aspect_whatever_the_crop():
         local = sized("wide", 4000, 1000, crop=PhotoCrop(offset=offset))       # its crop: 1778 x 1000
         assert finish_size(local.layer, FULL) == (1778, 1000)
         assert finish_size(local.layer, HD) == (1778, 1000)
+
+
+@pytest.mark.parametrize("at", [Placement(0, 0, 720, 1080), Placement(0, 0, 1080, 1080),
+                                Placement(0, 0, 1280, 1600)])
+def test_the_finish_size_is_the_crop_window_taken_at_the_placements_own_aspect(at):
+    """A 1,500 x 1,000 photo is smaller than each of these Frames' placements, so its crop window
+    limits the scale: the picture is finished at the window's own pixels, and the window is the one
+    taken at the placement's width : height, not the screen's.
+    Mutation probe: take the window at a fixed 16 : 9 -> each size here changes."""
+    local = sized("small", 1500, 1000, crop=PhotoCrop(offset=0.3))
+    left, top, right, bottom = crop_window(PhotoCrop(offset=0.3), 1500, 1000, at.width / at.height)
+    scale = min((right - left) * 1500 / at.width, (bottom - top) * 1000 / at.height)
+    assert scale < 1
+    assert finish_size(local.layer, at) == (round(at.width * scale), round(at.height * scale))
+    assert finish_size(local.layer, at) == {720: (667, 1000), 1080: (1000, 1000), 1280: (800, 1000)}[at.width]
 
 
 def test_a_black_layer_is_finished_at_its_placement():
