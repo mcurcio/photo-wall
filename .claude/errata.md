@@ -6899,3 +6899,26 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
   `current_mode`, so migration 109 also needs 103's `UPDATE output_displays SET report = report ||
   '{"current_mode": null}'` (WIP has it; the page says "no other schema change"); r2-final's
   "migration 104's SQL copy of the rule follows" cannot apply (104 is applied, forward-only).
+
+## Overlay-always S3 re-cut (issue #124, Central half), 2026-10-23: stopped again, one test
+
+- **`tests/test_display_picture_settings.py::test_a_1b_report_and_document_still_answer_after_075_and_092`
+  turns red and is outside S3's owned paths (not in the 22-file list, no slice owns it).** The
+  test replays migrations 075, 092, 094 and 096 on a current database (`_migrate`), and 075
+  rewrites every `frames.calibration` to the 1c shape (`fit: {mode: "cover", corners, rotation}`)
+  that migration 104 later turned into the box; 104 is not replayed. Its last line,
+  `_picture(registry)`, runs the worker's `output_documents`, which now reads the bound Frame's
+  Position for the region (`Calibration.model_validate(f.calibration).fit`) and raises
+  `ValidationError` on that shape. A real database always runs 104 after 075, so the state is
+  one only the replay can build; the product read is right (`frame_outputs_in` parses the same
+  column the same way). Fix (one test line, not mine to make; tried and reverted: the test then
+  passes): in that test, after `_migrate(registry)`, put the Frame's Position back on the current
+  shape:
+  `_sql(registry, "UPDATE frames SET calibration = jsonb_build_object('revision', 3, 'fit', '{}'::jsonb)")`.
+  Re-cut: add that file to S3's owned paths.
+- **Decision 1's `enroll_pi` half is not done, on purpose.** Recording a report for each Output in
+  `test_display_identity.enroll_pi` adds an `output_displays` row per Output and breaks tests that
+  expect one row (`test_migration_092`, `test_migration_094`, `test_display_picture_settings`,
+  `test_display_identity`'s undecodable-report test), none owned. Every `enroll_pi` caller but
+  `test_frame_output` (owned via the 22 list, now seeded explicitly) then reports a Display with a
+  preferred mode, so nothing else needs it; `enroll` (test_registry) does record the reports.

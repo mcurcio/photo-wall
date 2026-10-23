@@ -1,9 +1,10 @@
 """The Display's size and the screen-size rule (frame box run, .claude/runs/frame-box/page.md, bead
 fb-2).
 
-`screen_px` is the one rule of a Frame's screen size: the Pi's report of the Output's mode when at
-least 1 x 1, else the preferred mode of the Display seen there (Weston, given no mode, runs the
-preferred one), else unknown. Central keeps the Display's size (its EDID base block's, on the
+`screen_px` is the one rule of a Frame's screen size: the mode Weston runs on the Output, from its
+Output report's `current_mode` (issue #124), when at least 1 x 1, else the preferred mode of the
+Display seen there (Weston, given no mode, runs the preferred one), else unknown; the Pi's enrolment
+report is not read. Central keeps the Display's size (its EDID base block's, on the
 display line's Output report) following the latest sighting that states one. Every report travels
 the real path: a `PgLinkStore` commit on the display line's state bucket, judged by the
 `OutputReportJudge` in the same transaction; reads go through the operator API and the one read of
@@ -38,12 +39,12 @@ UHD = DisplayMode(3840, 2160, 60000, preferred=True)
 
 # screen_px: pure.
 
-def test_the_pis_report_of_the_mode_wins_when_it_is_at_least_one_pixel():
+def test_the_mode_weston_runs_wins_when_it_is_at_least_one_pixel():
     assert screen_px((3840, 2160), (P720, P1080)) == (3840, 2160)
     assert screen_px((1, 1), (P1080,)) == (1, 1)
 
 
-def test_an_output_enrolled_at_0_by_0_takes_its_displays_first_preferred_mode():
+def test_an_output_with_no_mode_known_takes_its_displays_first_preferred_mode():
     assert screen_px((0, 0), (P720, P1080)) == (1920, 1080)
     assert screen_px((1920, 0), (P1080,)) == (1920, 1080)
     assert screen_px(None, (P720, P1080, UHD)) == (1920, 1080)
@@ -102,18 +103,13 @@ def test_a_display_first_seen_pending_takes_its_size_when_its_output_is_bound(re
 
 # The screen size of a Frame's Output, and the inventory.
 
-def _enrolled_at_0_by_0(registry, player_id: str) -> None:
-    """Every Pi before the frame box enrolled its Outputs at 0 x 0."""
-    _sql(registry, "UPDATE outputs SET observation = observation || '{\"width_px\": 0, \"height_px\": 0}'::jsonb "
-                   "WHERE player_id=%s", (player_id,))
-
-
-def test_a_frame_whose_output_enrolled_at_0_by_0_takes_its_displays_preferred_mode(registry):
+def test_a_frame_whose_output_states_no_mode_takes_its_displays_preferred_mode(registry):
+    """The enrolment report says 1920 x 1080, but it is not read: with no Output report stating the
+    mode Weston runs and no Display seen, the screen is unknown; then the Display's preferred mode."""
     pi = enroll_pi(registry, "pi-a")
     frame = "kitchen"
     registry.create_frame(frame_create(frame))
     _bind(registry, frame, pi, "HDMI-A-1")
-    _enrolled_at_0_by_0(registry, pi)
     with registry.db.transaction() as conn:
         [before] = frame_outputs_in(conn)
     assert (before.display_px, before.output_px) == (None, None)     # no Display seen yet: unknown
@@ -131,7 +127,6 @@ def test_the_inventory_carries_each_frames_screen_and_display_size(registry):
     pi = enroll_pi(registry, "pi-a")
     bound, unbound = _frame(registry, "kitchen"), _frame(registry, "hall")
     _bind(registry, bound, pi, "HDMI-A-1")
-    _enrolled_at_0_by_0(registry, pi)
     _sized(registry, "pi-a", "HDMI-A-1", (950, 540))
     frames = {frame.id: frame for frame in registry.inventory().frames}
     assert (frames[bound].screen_px, frames[bound].display_mm) == ((1920, 1080), (950, 540))
@@ -141,3 +136,18 @@ def test_the_inventory_carries_each_frames_screen_and_display_size(registry):
     by_id = {frame["id"]: frame for frame in body["frames"]}
     assert (by_id[bound]["screen_px"], by_id[bound]["display_mm"]) == ([1920, 1080], [950, 540])
     assert (by_id[unbound]["screen_px"], by_id[unbound]["display_mm"]) == (None, None)
+
+
+def test_the_mode_weston_runs_wins_over_the_displays_preferred_mode(registry):
+    """(e) The Display prefers 1920 x 1080 but Weston runs 1280 x 720 (the Output report's
+    `current_mode`): the Frame's screen is 1280 x 720, through the one read of Frame outputs and the
+    inventory. Mutation probe: `screen_px` skips `current_mode` -> 1920 x 1080."""
+    pi = enroll_pi(registry, "pi-a")
+    frame = _frame(registry, "kitchen")
+    _bind(registry, frame, pi, "HDMI-A-1")
+    report = OutputReport("HDMI-A-1", True, NO_SERIAL, MODE, (), None, None, None, None, (950, 540), (1280, 720))
+    _report(registry, "pi-a", "HDMI-A-1", NO_SERIAL, data=encode_output_report(report))
+    with registry.db.transaction() as conn:
+        [output] = frame_outputs_in(conn)
+    assert output.display_px == (1280, 720)
+    assert {f.id: f for f in registry.inventory().frames}[frame].screen_px == (1280, 720)
