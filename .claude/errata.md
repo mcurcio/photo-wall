@@ -6948,3 +6948,16 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
   the watchdog's reset) needs a forced watchdog reset on the test Pi (a kernel hang with
   `kernel.panic=0`) and a read after it. Not done: the test Pi was shared with sibling slices' bench
   runs. Re-cut if wanted: a reader for that source in `host_linux.reset_cause`.
+
+## Overlay-always fix pass (PR #135 CI and review), 2026-10-23: three reds outside the slices' paths
+- **S3 left three test files that still seed a Frame's screen through `outputs.observation`** (none owned):
+  `tests/browser/test_operator_showrunner_browser.py` `_seed`, `tests/browser/test_frame_photo_fit_browser.py`
+  `_wide_frame` and `tests/browser/test_frame_fit_browser.py`'s no-known-size test. Since `screen_px` reads the
+  Output report's `current_mode` and `enroll` records it, they now pass `enroll(..., size=)` and clear with
+  `report_modes(..., None)`. 15 browser tests were red on 358624e9 and are green with this.
+- **`tests/integration/test_central_display_picture.py` pinned `SCHEMA_MAJOR == 10`** (room light's major); S3
+  moved the display line to 11. It now asserts `>= 10`: the test is about the sliders being gone since 10.
+- **`tests/debs/test_node_package.py` read a unit's `/bin/sh -ec '...'` script as one path** (S2's mark write in
+  `photo-wall-display-signal.service`). The rule now splits a shell script's words and holds each `/usr/` binary
+  it runs to "installed", so the rule covers more than before rather than exempting the line. The `-` prefix
+  (a failed mark never holds the restart back) is kept as S2 chose and tested it.
