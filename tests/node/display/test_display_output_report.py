@@ -301,6 +301,23 @@ def test_the_power_controller_the_one_writer_of_the_report_carries_the_size_on()
     assert report is not None and report.size_mm == (950, 540)
 
 
+def test_the_power_controller_carries_the_mode_weston_runs_on_the_line():
+    """Issue #124: the Output report states the mode Weston runs (`current_mode`, as built, never
+    turned), the one size Central reads for a Frame's screen; a new mode re-puts the report, and an
+    Output whose mode is not known states none."""
+    run = Reporting()
+    power = OutputPowerController({}, run.sink, clock=None, black=None)   # never started: no look runs
+    power.output("HDMI-A-1", connected=True, identity=SPIKE_IDENTITY, modes=(P1080,), current_mode=(1920, 1080))
+    report = run.on_line("HDMI-A-1")
+    assert report is not None and report.current_mode == (1920, 1080)
+    power.output("HDMI-A-1", connected=True, identity=SPIKE_IDENTITY, modes=(P1080,), current_mode=(1280, 720))
+    report = run.on_line("HDMI-A-1")
+    assert report is not None and report.current_mode == (1280, 720)
+    power.output("HDMI-A-2", connected=False, identity=None, modes=())
+    report = run.on_line("HDMI-A-2")
+    assert report is not None and report.current_mode is None
+
+
 class Ignored:
     """The picture controller and the screen turns: not what this test is about."""
 

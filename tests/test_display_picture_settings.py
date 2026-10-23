@@ -694,6 +694,8 @@ def test_a_1b_report_and_document_still_answer_after_075_and_092(registry):
     _before_075(registry)
     _sql(registry, "UPDATE output_documents SET document = document - 'picture' - 'picture_change'")
     _migrate(registry)
+    # A real database runs 104 after 075, which leaves every Frame's calibration in revision 3.
+    _sql(registry, "UPDATE frames SET calibration = jsonb_build_object('revision', 3, 'fit', '{}'::jsonb)")
 
     with _client(registry) as client:
         assert client.get("/v1/operator/frames/kitchen/power", headers=AUTH).status_code == 200

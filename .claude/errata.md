@@ -6871,3 +6871,63 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
 - **The large-Frame setting is still a diagonal in inches** (0030 decision 7, requirements :186
   "a 40-inch Frame"). The design review asks for a width; R2 says the diagonal is "a weird
   concept". Left for the owner: which measure the threshold uses is his call.
+
+## Overlay-always S3 (issue #124, Central half), 2026-10-23: stopped
+
+- **The frozen page's "the Player's enrolment report (outputs.observation width_px) is no longer
+  read" breaks 88 DB-tier tests in 22 files outside S3's owned paths.** Every test that enrolls a
+  Pi through `tests/test_registry.py` `enroll(size=...)` (82 importers) or
+  `tests/test_display_identity.py` `enroll_pi` got its Frame's screen size from that enrolment
+  report; with the rule as frozen (and as r2-final.md:103 states) such a Frame has no screen until
+  an Output report states `current_mode` or a Display with a preferred mode is seen, so it gets no
+  Frame output and no photos. A/B: with only SCREEN_COLUMNS put back on `outputs.observation`, all
+  88 pass. Red files: test_after_end_migration, test_authored_compatibility, test_authored_scene,
+  test_coordination, test_exposed_settings_roundtrip, test_fit_analysis_budget,
+  test_fit_analysis_store, test_fit_settings_store, test_frame_fit_settings, test_frame_output,
+  test_frame_output_wiring, test_frame_video, test_node_acceptance, test_photo_library_routes,
+  test_player_service, test_registry, test_restart_content_locks, test_scene_apply_now,
+  test_scene_transition_migration, test_shown_history, test_wall_copy_sizing, test_wall_plan_tracer.
+  Re-cut needed: give S3 `tests/test_registry.py` (its `enroll` should also record each Output's
+  report with `current_mode=size` through the real judge, `OutputReportJudge`) plus whichever of
+  the above still seed a size another way, or keep the enrolment as screen_px's last fallback
+  (an owner/design call: r2-final says it is no longer read).
+- **Smaller spec slips found on the way:** `frame_placement` returns a `Placement` dataclass, not a
+  tuple, so `OutputRect(*frame_placement(...))` does not run (WIP uses its four attributes); a saved
+  Position (`registry.commit_calibration_trial_in`) wakes no Node's document source, so the region
+  document reaches the Pi only at the next wake (a report, a deadline, house midnight) unless the
+  Position write calls `notify_nodes_in` (registry.py, not S3's); stored Output reports lack
+  `current_mode`, so migration 109 also needs 103's `UPDATE output_displays SET report = report ||
+  '{"current_mode": null}'` (WIP has it; the page says "no other schema change"); r2-final's
+  "migration 104's SQL copy of the rule follows" cannot apply (104 is applied, forward-only).
+
+## Overlay-always S3 re-cut (issue #124, Central half), 2026-10-23: stopped again, one test
+
+- **`tests/test_display_picture_settings.py::test_a_1b_report_and_document_still_answer_after_075_and_092`
+  turns red and is outside S3's owned paths (not in the 22-file list, no slice owns it).** The
+  test replays migrations 075, 092, 094 and 096 on a current database (`_migrate`), and 075
+  rewrites every `frames.calibration` to the 1c shape (`fit: {mode: "cover", corners, rotation}`)
+  that migration 104 later turned into the box; 104 is not replayed. Its last line,
+  `_picture(registry)`, runs the worker's `output_documents`, which now reads the bound Frame's
+  Position for the region (`Calibration.model_validate(f.calibration).fit`) and raises
+  `ValidationError` on that shape. A real database always runs 104 after 075, so the state is
+  one only the replay can build; the product read is right (`frame_outputs_in` parses the same
+  column the same way). Fix (one test line, not mine to make; tried and reverted: the test then
+  passes): in that test, after `_migrate(registry)`, put the Frame's Position back on the current
+  shape:
+  `_sql(registry, "UPDATE frames SET calibration = jsonb_build_object('revision', 3, 'fit', '{}'::jsonb)")`.
+  Re-cut: add that file to S3's owned paths.
+- **Decision 1's `enroll_pi` half is not done, on purpose.** Recording a report for each Output in
+  `test_display_identity.enroll_pi` adds an `output_displays` row per Output and breaks tests that
+  expect one row (`test_migration_092`, `test_migration_094`, `test_display_picture_settings`,
+  `test_display_identity`'s undecodable-report test), none owned. Every `enroll_pi` caller but
+  `test_frame_output` (owned via the 22 list, now seeded explicitly) then reports a Display with a
+  preferred mode, so nothing else needs it; `enroll` (test_registry) does record the reports.
+
+## Overlay-always S3 re-cut 2 (issue #124, Central half), 2026-10-23: resolved, landed
+
+- Both S3 stops above are resolved by the main loop's re-cuts, not by a page change: `enroll`
+  (tests/test_registry.py) records each Output's report with `current_mode=size` through
+  `OutputReportJudge`; `tests/test_display_picture_settings.py`'s 075/092 replay test puts the
+  Frame's Position back on the current shape after `_migrate` (a real database runs 104 after 075);
+  `enroll_pi` stays unchanged (accepted). Migration 109 keeps 103's stored-report UPDATE
+  (`current_mode: null`); `commit_calibration_trial_in` calls `notify_nodes_in`.

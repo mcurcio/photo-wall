@@ -140,7 +140,8 @@ class FrameTurnChange(Model):
 
 def _wake_nodes_of(conn, *player_ids: str | None) -> None:
     """Wake the Output document source of each named Player's Node (None skipped), on commit: every
-    write that changes which Frame an Output carries, or a bound Frame's turn, calls it."""
+    write that changes which Frame an Output carries, a bound Frame's turn, or its Position (the
+    Frame region document, issue #124) calls it."""
     for player_id in dict.fromkeys(player_id for player_id in player_ids if player_id is not None):
         notify_nodes_in(conn, "SELECT device_id FROM players WHERE id=%s", (player_id,))
 
@@ -774,7 +775,9 @@ class Registry:
         first, then the Save's kept-saved entry
         (the trial's `session_id`, and `restored_from` when its draft came from a Restore), in this
         transaction. A box always lies on its screen (contracts/frame_fit.py `FrameBox`), so Save
-        reads no screen size and checks nothing about where the box lies.
+        reads no screen size and checks nothing about where the box lies. It wakes the bound Player's
+        Node's document source on commit, so its Frame region document (issue #124) carries the saved
+        box without waiting for a deadline.
         """
         if not holds_runtime_locks_in(conn):
             raise RegistryError("calibration_runtime_locks_required")
@@ -796,6 +799,7 @@ class Registry:
         write_position_in(conn, frame_id, saved_record(position_values(committed, lighting), session_id=session_id,
                                                        restored_from=restored_from), calibration=committed)
         commit_position(conn, frame_id)
+        _wake_nodes_of(conn, player_id)
         self._audit(conn, "calibration_trial_commit", frame_id)
         return committed
 
