@@ -10,10 +10,11 @@ import subprocess
 import sys
 
 import pytest
+from support.overlay_text import fake_text_width
 from support.repo import REPO
 
 from appliance.display_host.overlay import client, health, render
-from appliance.display_host.overlay.area import FrameArea, OutputArea
+from appliance.display_host.overlay.area import MIN_AREA, FrameArea, OutputArea
 from appliance.display_host.overlay.render import (
     REASON_DEFAULT,
     REASON_TEXT,
@@ -29,6 +30,7 @@ from appliance.display_host.overlay.render import (
     render_trial,
 )
 from appliance.display_host.picture import DisplayBrightness, brightness_line
+from contracts.node_faults import FAULTS
 from contracts.node_output import FrameRegion, OutputRect, encode_frame_region
 
 # The base page's lines as the picture controller words them (picture.py `brightness_line`, their one home).
@@ -47,7 +49,7 @@ def test_render_path_imports_neither_cairo_nor_pywayland():
             "whole = area.OutputArea('no_region')\n"
             "render.render_slate('HDMI-A-1', 1920, 1080, 'starting_new', True, area=whole)\n"
             "render.render_trial(640, 480, ((0, 0), (1, 0), (1, 1), (0, 1)))\n"
-            "render.render_health(640, 480, health.STALE_PAGE, area=whole)\n"
+            "render.render_health(640, 480, health.STALE_PAGE, area=whole, measure=lambda t, s, f: 0.0)\n"
             "assert not {'cairo', 'pywayland', '_cffi_backend'} & set(sys.modules), sys.modules\n")
     subprocess.run([sys.executable, "-c", code], check=True, cwd=REPO)
 
@@ -338,9 +340,51 @@ def test_the_card_lies_inside_the_explain_area_in_todays_proportions():
     assert card_rect((480, 135, 960, 810)) == (480 + 192, 135 + 810 - 122 - 40, 576, 122)
 
 
+# The card's longest real lines (appliance/health/judge.py `_card`): the longest household line and
+# code in the catalogue, a Player id as Central names one (34 characters), the Output's name.
+PLAYER_ID = "p-5c85e236873353bec06574c31ee5aae6"
+LONGEST_LINES = (
+    max((f"{fault.household_line} · since 12:09" for fault in FAULTS.values()), key=len),
+    f"{max(FAULTS, key=len)} · Player {PLAYER_ID} · Output HDMI-A-1",
+)
+
+
+@pytest.mark.parametrize("area", [
+    FrameArea(OutputRect(402, 20, *MIN_AREA)),       # the smallest Frame region the overlay takes
+    FrameArea(OutputRect(402, 20, 3004, 2140)),      # the bench's Frame region
+    OutputArea("no_region"),                         # the whole-Display fallback
+])
+def test_every_line_of_the_card_fits_its_card_and_the_card_fits_the_area(area):
+    """Bench P0 (the test Pi, 2026-10-23): line 2 inked past its card and past the Frame region.
+    Mutation probe: `fit_size` returning `size` unchanged -> the smallest Frame's line 2 overflows."""
+    assert len(PLAYER_ID) == 34
+    ops = render.render_health(3840, 2160, health.HealthPage(2, True, LONGEST_LINES), area=area,
+                               measure=fake_text_width)
+    left, top, width, height = render.area_rect(area, (3840, 2160))
+    (card,) = [op for op in ops if isinstance(op, Rect) and op.rgba == render.CARD_RGBA]
+    assert left <= card.x and card.x + card.width <= left + width
+    assert top <= card.y and card.y + card.height <= top + height
+    texts = [op for op in ops if isinstance(op, Text)]
+    assert [op.text for op in texts] == list(LONGEST_LINES)
+    for op in texts:
+        assert card.x < op.x and op.x + fake_text_width(op.text, op.size, op.face) <= card.x + card.width
+        assert card.y < op.y - op.size and op.y + 0.3 * op.size <= card.y + card.height
+
+
+def test_a_short_card_keeps_todays_width_and_a_long_one_grows_to_its_text():
+    short = render.render_health(1920, 1080, health.HealthPage(2, True, ("a", "b")),
+                                 area=FrameArea(FRAME), measure=fake_text_width)
+    (card,) = [op for op in short if isinstance(op, Rect) and op.rgba == render.CARD_RGBA]
+    assert (card.x, card.y, card.width, card.height) == card_rect((480, 135, 960, 810))
+    long = render.render_health(1920, 1080, health.HealthPage(2, True, LONGEST_LINES),
+                                area=FrameArea(FRAME), measure=fake_text_width)
+    (card,) = [op for op in long if isinstance(op, Rect) and op.rgba == render.CARD_RGBA]
+    assert card.width > card_rect((480, 135, 960, 810))[2]
+
+
 def test_the_health_page_darkens_the_frame_area_black_outside_and_its_card_inside():
     page = health.HealthPage(3, True, ("Player stopped", "code 1"))
-    ops = render.render_health(1920, 1080, page, area=FrameArea(FRAME))
+    ops = render.render_health(1920, 1080, page, area=FrameArea(FRAME), measure=fake_text_width)
     assert ops[0] == Paint(render.HEALTH_TINT_RGBA, source=True)
     bands = [op for op in ops if isinstance(op, Rect) and op.rgba == BLACK]
     assert {(band.x, band.y, band.width, band.height) for band in bands} == outside_bands(
@@ -349,7 +393,8 @@ def test_the_health_page_darkens_the_frame_area_black_outside_and_its_card_insid
     x, y, w, h = card_rect((480, 135, 960, 810))
     assert (card.x, card.y, card.width, card.height) == (x, y, w, h)
     assert 480 <= x and x + w <= 480 + 960 and 135 <= y and y + h <= 135 + 810
-    assert render.render_health(1920, 1080, health.HealthPage(4, False, ("", "")), area=FrameArea(FRAME)) == (
+    assert render.render_health(1920, 1080, health.HealthPage(4, False, ("", "")), area=FrameArea(FRAME),
+                                measure=fake_text_width) == (
         Paint((0.0, 0.0, 0.0, 0.0), source=True),)          # tint off: unchanged, nothing drawn
 
 
@@ -382,14 +427,16 @@ def test_the_health_layer_draws_in_the_same_area_and_redraws_when_the_region_com
     lines = ("Player stopped", "app_unresponsive")
     painted = []
     hook = client.HealthLayer(clock=lambda: 1000, link=_Link(),
-                              painter=lambda ops, surface: painted.append(ops))
+                              painter=lambda ops, surface: painted.append(ops),
+                              measure=fake_text_width)
     overlay, wayland, _ = overlay_client(lambda draw_list, surface: None, hooks=(hook,))
     wayland.viewporter.get_viewport = lambda surface: _Proxy(wayland.log, "viewport")
     wayland.manager.dispatcher["output"](wayland.manager, "HDMI-A-1", 1920, 1080, 1, "", 0)
     hook.instruction(OverlayInstruction("HDMI-A-1", 7, True, lines), 1001)
-    assert painted[-1] == render.render_health(1920, 1080, health.HealthPage(7, True, lines), area=WHOLE)
+    assert painted[-1] == render.render_health(1920, 1080, health.HealthPage(7, True, lines), area=WHOLE,
+                                               measure=fake_text_width)
     wayland.manager.dispatcher["region"](
         wayland.manager, "HDMI-A-1", encode_frame_region(FrameRegion("frame-1", (1920, 1080), FRAME)).decode())
     assert painted[-1] == render.render_health(1920, 1080, health.HealthPage(7, True, lines),
-                                               area=FrameArea(FRAME))
+                                               area=FrameArea(FRAME), measure=fake_text_width)
     assert overlay.outputs["HDMI-A-1"].area() == FrameArea(FRAME)       # the slate's area too

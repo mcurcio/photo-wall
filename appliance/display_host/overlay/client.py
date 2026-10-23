@@ -65,8 +65,16 @@ from .instruction import (
     encode_presented_report,
     parse_overlay_instruction,
 )
-from .paint import paint, surface_for
-from .render import DrawList, Point, parse_trial_points, render_health, render_slate, render_trial
+from .paint import paint, surface_for, text_width
+from .render import (
+    DrawList,
+    Point,
+    TextMeasure,
+    parse_trial_points,
+    render_health,
+    render_slate,
+    render_trial,
+)
 
 MAX_OUTPUTS = 16
 MAX_SIDE = 8192
@@ -448,8 +456,9 @@ class HealthLayer:
 
     def __init__(self, *, path: str | None = None, clock: Callable[[], int] = monotonic_ms,
                  painter: Callable[[DrawList, object], None] = paint,
+                 measure: TextMeasure = text_width,
                  link: JudgeLink | None = None) -> None:
-        self.clock, self.painter = clock, painter
+        self.clock, self.painter, self.measure = clock, painter, measure
         self.board = HealthBoard(limit=MAX_OUTPUTS)
         self.link = link if link is not None else JudgeLink(
             path or health_socket_path(), on_instruction=self.instruction,
@@ -588,7 +597,8 @@ class HealthLayer:
         try:
             surface = surface_for(pixels, width, height)
             try:
-                self.painter(render_health(width, height, page, area=area), surface)
+                self.painter(render_health(width, height, page, area=area, measure=self.measure),
+                             surface)
             finally:
                 surface.finish()
                 del surface            # drops cairo's export of `pixels`, so release can close it

@@ -16,6 +16,19 @@ def surface_for(pixels: object, width: int, height: int):
                                               width * 4)
 
 
+def text_width(text: str, size: float, face: str) -> float:
+    """render.TextMeasure with cairo: how far right of its origin `text` inks at `size` in `face`
+    (its ink's right edge or its advance, whichever is further), on the same kind of surface the
+    page is painted on, so the layout and the pixels agree."""
+    import cairo
+
+    context = cairo.Context(cairo.ImageSurface(cairo.FORMAT_ARGB32, 1, 1))
+    context.select_font_face(face, cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
+    context.set_font_size(size)
+    x_bearing, _, ink_width, _, x_advance, _ = context.text_extents(text)
+    return math.ceil(max(x_advance, x_bearing + ink_width))
+
+
 def paint(draw_list: DrawList, surface) -> None:
     import cairo
 

@@ -7,12 +7,14 @@ in the display harness (tests/native_display_smoke.py, the `production` block).
 
 from __future__ import annotations
 
+import math
 import re
 import socket
 import tempfile
 from pathlib import Path
 
 import pytest
+from support.overlay_text import fake_text_width
 from support.packet_pair import LINUX, PACKET_TYPE, packet_pair
 
 from appliance.display_host.overlay import client, health, render
@@ -165,11 +167,14 @@ def test_card_rect(width, height, rect):
 
 
 def test_a_tint_on_page_darkens_the_output_then_draws_the_opaque_card_with_both_lines():
-    ops = render.render_health(640, 480, HealthPage(3, True, LINES), area=OutputArea("no_region"))
+    ops = render.render_health(640, 480, HealthPage(3, True, LINES), area=OutputArea("no_region"),
+                               measure=fake_text_width)
     assert ops[0] == render.Paint((0.0, 0.0, 0.0, 0.45), source=True)
-    assert ops[1] == render.Rect(128, 384, 384, 72, (0.04, 0.06, 0.09, 1.0))
+    first = fake_text_width(LINES[0], 19, "sans")               # the wider line, at 0.26 x 72 px
+    width = math.ceil(first) + 2 * 15
+    assert ops[1] == render.Rect((640 - width) // 2, 384, width, 72, (0.04, 0.06, 0.09, 1.0))
     assert [op.text for op in ops[2:]] == list(LINES)
-    assert all(op.x > 128 + 2 and op.y - op.size > 384 + 2 for op in ops[2:])  # card corner clear
+    assert all(op.x > ops[1].x + 2 and op.y - op.size > 384 + 2 for op in ops[2:])  # corner clear
 
 
 # -- the hook over fake Wayland -----------------------------------------------------------------
@@ -296,7 +301,8 @@ def layer(monkeypatch, tmp_path):
     painted = []
     wayland, link, now = _Wayland(), _Link(), [1000]
     hook = client.HealthLayer(clock=lambda: now[0], link=link,
-                              painter=lambda ops, surface: painted.append(ops))
+                              painter=lambda ops, surface: painted.append(ops),
+                              measure=fake_text_width)
     overlay = client.OverlayClient(compositor=wayland.compositor, shm=wayland.shm,
                                    presentation=wayland.presentation, manager=wayland.manager,
                                    viewporter=wayland.viewporter,
@@ -348,7 +354,8 @@ def test_tint_on_draws_the_whole_output_and_tint_off_unmaps_the_layer(layer):
     configure(wayland.manager, "Virtual-1", 640, 480, 1, "", 0)
     hook.instruction(instruction(7), 1001)
     assert wayland.health()[-3:] == tinted()
-    assert painted[-1] == render.render_health(640, 480, HealthPage(7, True, LINES), area=OutputArea("no_region"))
+    assert painted[-1] == render.render_health(640, 480, HealthPage(7, True, LINES),
+                                               area=OutputArea("no_region"), measure=fake_text_width)
     release(wayland)
     hook.instruction(instruction(8, tint=False), 1002)
     assert wayland.health()[-3:] == cleared()

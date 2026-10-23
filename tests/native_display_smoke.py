@@ -49,6 +49,7 @@ from display_harness_judge_feeder import JudgeFeeder  # noqa: E402
 from overlay.instruction import INSTRUCTION_STALE_MS  # noqa: E402
 from overlay.render import card_rect  # noqa: E402
 
+from contracts.node_faults import FAULTS  # noqa: E402
 from contracts.node_output import FrameRegion, OutputRect, encode_frame_region  # noqa: E402
 
 HEALTH_MARKER = "/tmp/pw-health-client-marker"  # display_harness_health_client.py MARKER_FILE
@@ -663,6 +664,43 @@ def await_black_outside(rect, limit):
         time.sleep(0.1)
 
 
+def card_ink_stays_in_the_explain_area():
+    """Bench P0 (the test Pi, 2026-10-23, 3840 x 2160): the card's line 2 (a 34-character Player
+    id) inked from x 1079 to 3654, past its card (1005..2805) and the Frame region (right edge
+    3406). The installed overlay's own render, measure and cairo paint, the card's longest real
+    lines (appliance/health/judge.py `_card`), its text alone on a clear surface: every inked pixel
+    lies inside the card, and the card inside the area, in the smallest Frame region the overlay
+    takes (MIN_AREA), the bench's region and the whole-Display fallback. Mutation probe:
+    render.py `fit_size` returning `size` unchanged -> the MIN_AREA case inks past its card."""
+    import cairo
+    from overlay.area import MIN_AREA, FrameArea, OutputArea, area_rect
+    from overlay.health import HealthPage
+    from overlay.paint import paint, text_width
+    from overlay.render import CARD_RGBA, Rect, Text, render_health
+
+    width, height = 3840, 2160
+    lines = (max((f"{fault.household_line} · since 12:09" for fault in FAULTS.values()), key=len),
+             f"{max(FAULTS, key=len)} · Player p-5c85e236873353bec06574c31ee5aae6 · Output HDMI-A-1")
+    for area in (FrameArea(OutputRect(402, 20, *MIN_AREA)), FrameArea(OutputRect(402, 20, 3004, 2140)),
+                 OutputArea("no_region")):
+        ops = render_health(width, height, HealthPage(1, True, lines), area=area, measure=text_width)
+        (card,) = [op for op in ops if isinstance(op, Rect) and op.rgba == CARD_RGBA]
+        left, top, area_width, area_height = area_rect(area, (width, height))
+        assert (left <= card.x and card.x + card.width <= left + area_width and top <= card.y
+                and card.y + card.height <= top + area_height), (area, card)
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
+        paint(tuple(op for op in ops if isinstance(op, Text)), surface)
+        alpha, stride = bytes(surface.get_data())[3::4], surface.get_stride() // 4
+        inked = [(width - len(row.lstrip(b"\0")), len(row.rstrip(b"\0")) - 1, y)
+                 for y in range(height) if (row := alpha[y * stride:y * stride + width]).strip(b"\0")]
+        assert inked, area
+        ink = (min(x for x, _, _ in inked), max(x for _, x, _ in inked),
+               min(y for _, _, y in inked), max(y for _, _, y in inked))
+        assert (card.x <= ink[0] and ink[1] < card.x + card.width and card.y <= ink[2]
+                and ink[3] < card.y + card.height), (area, card, ink)
+        print("PASS card_ink_stays_in_the_explain_area", area, (card.x, card.width), ink, flush=True)
+
+
 def explain_area_cases():
     """The production private client (manager v5) with the slate up (app absent): the slate, then
     the health card, inside the Frame region and black outside it; a region placed on another
@@ -1172,6 +1210,7 @@ try:
     print("PASS health_layer_survives_invalidate", assert_pixel(*HEALTH, health_over(SLATE)),
           flush=True)
     explain_area_cases()
+    card_ink_stays_in_the_explain_area()
     killed = kill_private_client()
     # While no private client is bound (the shell respawns it 2 s after it is gone), the
     # client-identity check alone refuses a foreign bind: no held resource masks it here.

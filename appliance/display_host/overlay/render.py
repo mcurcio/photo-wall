@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING
@@ -51,6 +51,10 @@ MAX_PRIMITIVES = 512          # the trial event's primitives text, as the shell 
 HEALTH_TINT_RGBA: RGBA = (0.0, 0.0, 0.0, 0.45)
 CARD_RGBA: RGBA = (*SLATE_RGB, 1.0)
 OUTSIDE_RGBA: RGBA = (0.0, 0.0, 0.0, 1.0)     # the Output outside the explain area
+TEXT_FACE = "sans"
+# How far right of its origin `text` inks at `size` in `face` (pixels): the layout's one question
+# about a font. paint.py `text_width` answers it with cairo; render.py never imports cairo.
+TextMeasure = Callable[[str, float, str], float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,31 +164,57 @@ def render_trial(width: int, height: int, points: tuple[Point, Point, Point, Poi
     )
 
 
-def card_rect(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
-    """The health card's (x, y, w, h) inside `rect` (x, y, w, h: the explain area): 60 % of its
-    width, centred, its bottom 5 % of its height above its bottom edge, at least 48 px tall."""
+def card_pad(area_width: int) -> int:
+    """The health card's inner margin in an explain area `area_width` wide."""
+    return max(8, round(0.024 * area_width))
+
+
+def card_rect(rect: tuple[int, int, int, int], content: float = 0.0) -> tuple[int, int, int, int]:
+    """The health card's (x, y, w, h) inside `rect` (x, y, w, h: the explain area): as wide as its
+    `content` (its widest line's ink) plus its margins, at least 60 % of the area's width and never
+    wider than the area, centred; its bottom 5 % of the area's height above its bottom edge, at
+    least 48 px tall."""
     left, top, width, height = rect
-    w = round(0.6 * width)
+    w = min(width, max(round(0.6 * width), math.ceil(content) + 2 * card_pad(width)))
     h = max(48, round(0.15 * height))
     return left + (width - w) // 2, top + height - h - round(0.05 * height), w, h
 
 
-def render_health(width: int, height: int, page: HealthPage, *, area: ExplainArea) -> DrawList:
+def fit_size(text: str, size: float, room: float, measure: TextMeasure) -> float:
+    """`size`, or the largest size found below it at which `text` inks within `room` pixels:
+    shrink to fit, so no line of the card leaves the explain area."""
+    for _ in range(32):
+        used = measure(text, size, TEXT_FACE)
+        if used <= room:
+            return size
+        size *= 0.98 * room / used
+    return size
+
+
+def render_health(width: int, height: int, page: HealthPage, *, area: ExplainArea,
+                  measure: TextMeasure) -> DrawList:
     """A health page (overlay.health.HealthPage) on a width x height Output with the explain area
     `area`. Tint on: the area darkened, opaque black outside it, then the opaque card with the
-    page's two lines inside the area. Tint off: fully transparent (the layer unmapped)."""
+    page's two lines inside the area: each line at its size for the card's height, shrunk until
+    its measured ink fits the area's width less the margins, and the card as wide as the wider
+    line (card_rect). Tint off: fully transparent (the layer unmapped)."""
     if not page.tint:
         return (Paint((0.0, 0.0, 0.0, 0.0), source=True),)
     rect = area_rect(area, (width, height))
-    x, y, w, h = card_rect(rect)
-    pad = max(8, round(0.04 * w))
+    pad = card_pad(rect[2])
+    room = max(1, rect[2] - 2 * pad)
+    h = card_rect(rect)[3]
     first, second = page.lines
+    first_size = fit_size(first, max(12, round(0.26 * h)), room, measure)
+    second_size = fit_size(second, max(10, round(0.18 * h)), room, measure)
+    content = max(measure(first, first_size, TEXT_FACE), measure(second, second_size, TEXT_FACE))
+    x, y, w, h = card_rect(rect, content)
     return (
         Paint(HEALTH_TINT_RGBA, source=True),
         *outside(rect, width, height),
         Rect(x, y, w, h, CARD_RGBA),
-        Text(x + pad, y + round(0.45 * h), max(12, round(0.26 * h)), first, TEXT_RGBA, "sans"),
-        Text(x + pad, y + round(0.8 * h), max(10, round(0.18 * h)), second, TEXT_RGBA, "sans"),
+        Text(x + pad, y + round(0.45 * h), first_size, first, TEXT_RGBA, TEXT_FACE),
+        Text(x + pad, y + round(0.8 * h), second_size, second, TEXT_RGBA, TEXT_FACE),
     )
 
 
