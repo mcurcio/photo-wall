@@ -107,6 +107,20 @@ bottom to top in `stack_order`.
   Weston patch that keeps each picture on the overlay it had; not done.
 - **Removed, never transparent.** A plane under `MIN_STRENGTH` (1/255) is left out, never shown
   at alpha 0; a plane's blend mode is always pre-multiplied, never None (bench T3).
+- **A Frame is never shown as nothing** (issue #123: "Dark on purpose (Night off, Resting) is drawn
+  as a black plane by the Player so it is never mistaken for 'nothing to show'"). A Frame none of
+  whose layers has a plane (an empty fallback, nothing kept and nothing playing; a moment of a dip
+  too dark for any plane) gets its **dark plane**: the black picture of its placement, over the
+  whole placement at full strength (`compose`; `Plane.layer` None, its picture key `#dark:<frame>`,
+  which no assignment id can take). Over the screen's black ground it changes no pixel, but it is a
+  picture plane, which Display Host's shell keeps the Output with ([hold](display-host-backend.md#the-hold-what-the-compositor-shows));
+  the ground alone never is. It is the Player's drawing, not a layer: the presented composition
+  stays the looked one, so no assignment is invented or reported presented. A test pattern, a
+  calibration target or the commissioning grid is the ground and has no planes (Display's own
+  drawing holds the Output), and a candidate's commit stays the bare ground (a candidate is not
+  judged). Cost: the shell cannot tell this black from a Player that falls back because it can
+  show none of its photos; only that run's cause faults (`app_descriptor_limit`,
+  `app_unresponsive`, `app_absent`) put the card up then.
 - **The cost the owner accepted** (Q2, 2026-10-17): a cross-fade is darker mid-way than a
   linear-light mix, by up to 74 levels of 256 at worst and 8-11 on average on real photos; its
   ends are identical, and a dip to black matches within 6.
@@ -119,8 +133,8 @@ So a picture (a still photo or a video's frame) is finished at `player/planes.py
 the Frame's placement scaled by `min(1, cropped width / placement width, cropped height /
 placement height)`, each side rounded half up, where the cropped size is Central's crop window on
 the prepared copy's pixels. The Frame's aspect is kept; the picture is never larger than its
-placement and never larger than its source's crop. A black layer is the placement's size; the
-ground is the screen's. Each plane carries both (`Plane.size`, its source; `Plane.at`, its
+placement and never larger than its source's crop. A black layer and a dark plane are the
+placement's size; the ground is the screen's. Each plane carries both (`Plane.size`, its source; `Plane.at`, its
 destination, the sub-window's `wp_viewport` destination), so the display controller enlarges a
 smaller picture or shows it 1:1 and never shrinks one (bench T2: shrinking large sources glitches).
 

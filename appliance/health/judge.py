@@ -37,7 +37,8 @@ Night off and Resting are power off) and that no run holds (nothing admitted, or
 `holding` false: no picture plane and no drawing of Display's own) opens it pending; it is raised
 after the catalogue's window and withdrawn (pending) or cleared (raised) once the Output is held
 again, powered off or gone. Its transitions name the Output as their `run` (`{"output": name}`).
-Authored black is the Player's black layer, a picture plane, so it holds.
+Authored black is the Player's black layer, a picture plane, so it holds; so is a Frame with
+nothing kept and nothing playing, drawn as the Player's dark plane (player/planes.py `compose`).
 
 `software_renderer` (degraded, never display-affecting) follows the run's `app_renderer` fact:
 a software rasterizer (llvmpipe, softpipe, swrast) raises it at once for that run; a GPU

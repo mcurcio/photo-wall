@@ -200,9 +200,9 @@ def app() -> None:
                 assert pictures[key] is not None, ("import_refused", name, size)
             shown.append((plane, pictures[key]))
         result = screens.present(Composition(screen, tuple(plane for plane, _ in shown)),
-                                 {plane.layer.layer.assignment_id: picture for plane, picture in shown},
+                                 {plane.key: picture for plane, picture in shown},
                                  grant, tag, None, ground, overlay)
-        return {"result": result, "busy": {plane.layer.layer.assignment_id: screens.busy(picture)
+        return {"result": result, "busy": {plane.key: screens.busy(picture)
                                            for plane, picture in shown}}
 
     def trial_present(with_overlay: bool):
