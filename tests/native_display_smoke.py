@@ -53,6 +53,7 @@ from contracts.node_faults import FAULTS  # noqa: E402
 from contracts.node_output import FrameRegion, OutputRect, encode_frame_region  # noqa: E402
 
 HEALTH_MARKER = "/tmp/pw-health-client-marker"  # display_harness_health_client.py MARKER_FILE
+SLATE_REASONS = "/tmp/pw-slate-reasons"  # display_harness_health_client.py REASONS_FILE
 PROBE_STILL = "/tmp/pw-probe-still"  # native_display_probe.c: while it exists, the probe commits nothing
 PROBE_UNTAGGED = "/tmp/pw-probe-untagged"  # while it exists, the probe's commits carry no tag
 PROBE_ALPHA_RESET = "/tmp/pw-probe-alpha-reset"  # native_display_probe.c ALPHA_RESET
@@ -310,6 +311,12 @@ def read_until(predicate, limit=8):
         if predicate(e):
             return e
     raise AssertionError("event_timeout")
+
+
+def slate_reason(name):
+    """The reason of the slate's latest configure for Output `name`, as the private client got it."""
+    lines = pathlib.Path(SLATE_REASONS).read_text().splitlines()
+    return next(line.split(" ", 1)[1] for line in reversed(lines) if line.split(" ", 1)[0] == name)
 
 
 def drain():
@@ -1200,12 +1207,27 @@ try:
     assert lost["reason"] == "surface_lease_or_process_lost", lost
     assert time.monotonic() - stopped < 7, time.monotonic() - stopped
     read_until(lambda e: e["event"] == "diagnostic_presented")
+    assert slate_reason(output["output_id"]) == "surface_lease_or_process_lost"
+    print("PASS stopped_app_loses_its_grant_within_the_lease_and_the_diagnostic_returns", flush=True)
+    # Bench P2 (the test Pi, 2026-10-23): Central offers the same stopped run again (no candidate,
+    # none admitted), the shell takes it, and the slate read "Starting Player - waiting for
+    # authorized handoff" for as long as the run stayed frozen. The offer is still taken (a run
+    # that resumes can hand off again), but the slate keeps the lease-lost reason, offer after
+    # offer. Mutation probe: shell.c `candidate` always setting "starting_new" -> the reason reads
+    # starting_new.
+    assert request("candidate", identity=replacement, grant_id=str(uuid.uuid4()), uid=10004)["accepted"]
+    read_until(lambda e: e["event"] == "diagnostic_presented")
+    assert slate_reason(output["output_id"]) == "surface_lease_or_process_lost"
+    again = read_until(lambda e: e["event"] == "invalidated", limit=8)
+    assert again["reason"] == "surface_lease_or_process_lost", again
+    read_until(lambda e: e["event"] == "diagnostic_presented")
+    assert slate_reason(output["output_id"]) == "surface_lease_or_process_lost"
+    print("PASS a_stopped_run_offered_again_keeps_the_lease_lost_reason", flush=True)
     os.kill(app.pid, signal.SIGCONT)
     pathlib.Path(PROBE_STILL).unlink()
     app.terminate()
     app.wait(timeout=3)
     app = None
-    print("PASS stopped_app_loses_its_grant_within_the_lease_and_the_diagnostic_returns", flush=True)
     picture_v4()
     print("PASS health_layer_survives_invalidate", assert_pixel(*HEALTH, health_over(SLATE)),
           flush=True)

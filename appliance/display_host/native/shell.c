@@ -82,6 +82,11 @@ struct output {
     uid_t uid;
     pid_t pid;
     uint64_t start_ticks, lease_until, last_presented, handoff_after, pinged;
+    /* The run whose lease expired here (bench P2): offered again while it stays frozen, its slate
+     * keeps the lease-lost reason, never "starting_new". Cleared by its handoff, another run's
+     * candidate or any other invalidation. */
+    pid_t lost_pid;
+    uint64_t lost_ticks;
     struct { uint64_t serial, at; } recent_presented[128];
     unsigned recent_next;
     uint32_t diagnostic_serial;
@@ -374,7 +379,11 @@ static void trial_end(struct output *o) {
     o->trial_json[0] = o->trial_tag[0] = 0; o->trial_terminal = true;
     trial_notify(o); overlay_clear(o);
 }
+static const char LEASE_LOST[] = "surface_lease_or_process_lost";
 static void invalidate(struct output *o, const char *reason) {
+    bool lost = o->identity && !strcmp(reason, LEASE_LOST);
+    o->lost_pid = lost ? o->pid : 0;
+    o->lost_ticks = lost ? o->start_ticks : 0;
     trial_end(o);
     revision_clear(o, true);
     grant_notify(o, 2);
@@ -1110,9 +1119,14 @@ static bool command(struct shell *s, json_t *j) {
         o->pid = (pid_t)pid; o->uid = (uid_t)uid; o->start_ticks = (uint64_t)ticks;
         o->lease_until = now_ms() + LEASE_MS;
         /* Synthetic test content only: starting_new authorization is required
-         * upstream. The translucent cover permits genuine compositor feedback. */
+         * upstream. The translucent cover permits genuine compositor feedback. A run whose lease
+         * expired here and is offered again (Central sees no candidate and none admitted) is
+         * still taken, so a run that resumes can hand off, but its slate keeps saying it
+         * stopped: it is not starting. */
         o->testing = true;
-        snprintf(o->reason, sizeof o->reason, "starting_new");
+        bool relost = o->lost_pid == (pid_t)pid && o->lost_ticks == (uint64_t)ticks;
+        if (!relost) { o->lost_pid = 0; o->lost_ticks = 0; }
+        snprintf(o->reason, sizeof o->reason, "%s", relost ? LEASE_LOST : "starting_new");
         if (o->diagnostic) weston_surface_unmap(o->diagnostic->view->surface);
         curtain(o, 0.96f);
         diagnostic_configure(o);
@@ -1189,6 +1203,7 @@ static bool command(struct shell *s, json_t *j) {
             !o->app || !matches_process(o, o->app)) return false;
         if (o->curtain) weston_shell_utils_curtain_destroy(o->curtain);
         o->curtain = NULL; o->released = o->holding = true;   /* judged once the handoff is presented */
+        o->lost_pid = 0; o->lost_ticks = 0;                    /* the run answers again */
         o->handoff_after = s->serial;
         if (o->diagnostic) weston_surface_unmap(o->diagnostic->view->surface);
         snprintf(o->handoff, sizeof o->handoff, "%s", handoff);
@@ -1341,7 +1356,7 @@ static int lease_tick(void *data) {
             weston_desktop_client_ping(weston_desktop_surface_get_client(o->app->desktop));
         }
         if (o->identity && (now_ms() >= o->lease_until || process_start(o->pid) != o->start_ticks))
-            invalidate(o, "surface_lease_or_process_lost");
+            invalidate(o, LEASE_LOST);
         hold_sync(o, false);   /* the compositor's scene now: a picture plane or Display's drawing */
     }
     wl_event_source_timer_update(s->timer, 200);
