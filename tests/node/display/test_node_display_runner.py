@@ -702,7 +702,8 @@ def test_the_backend_sends_the_region_op_keeps_the_mode_and_tells_its_output_lis
         playing.join(5)
         assert (asked[0]["op"], asked[0]["output"]) == ("region", output)
         assert decode_frame_region(asked[0]["region"].encode()) == region
-        send({"event": "output", "output": output, "connected": False, "width": 0, "height": 0,
+        unplugged = {**output, "connection_generation": 2, "mode_generation": 2}
+        send({"event": "output", "output": unplugged, "connected": False, "width": 0, "height": 0,
               "mode": None})
         backend.dispatch()
         assert told == ["HDMI-A-1"] and backend.current_mode("HDMI-A-1") is None
