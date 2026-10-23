@@ -18,7 +18,9 @@ ABI check alone is not the release package lock.
 The shell owns per-Output constrained app views, a protected diagnostic layer,
 connection/mode generations, process checks, the five-second renewable surface
 lease (renewed by a presented tagged commit or by the app's answer to Weston's ping; see
-[the lease](#the-lease-presentation-or-a-ping-answer)), the standard window alpha the Player's
+[the lease](#the-lease-presentation-or-a-ping-answer)), the hold (whether a handed-off Output
+stays the app's, judged on the compositor's own scene; see [the hold](#the-hold-what-the-compositor-shows)),
+the standard window alpha the Player's
 pictures fade by, and each Output's turn ([the Player's screens](#the-players-screens)). The controller owns portable DisplayHost admission and receives protected
 root-only lifecycle/configuration requests. The app never receives that socket.
 The shell and its Cairo diagnostic client run from the base, independently of app
@@ -29,11 +31,13 @@ The diagnostic client is launched by the shell at the fixed base path
 `WAYLAND_SOCKET`; the compositor retains that exact `wl_client` as the capability
 to bind the diagnostic protocol. A public client with the same app ID, UID, or
 claimed PID cannot obtain that role. Client failure restores a compositor-owned
-solid curtain and triggers bounded restart attempts. The curtain is cover, not
+solid curtain, raises the amber over the whole Output ([the health layer](#the-health-layer-and-the-amber-tint))
+and triggers bounded restart attempts. The curtain is cover, not
 proof of a readable error page. Actual diagnostic presentation is reported only
 from presentation feedback for the private client's committed page buffer.
 
-The page shows bounded predefined status text, the physical Output ID and actual
+The page (with the health card, the debug overlay; [Player architecture](player-architecture.md#the-debug-overlay))
+shows bounded predefined status text, the physical Output ID and actual
 pixel dimensions, `Frame binding unconfirmed`, and, since 1c, brightness with where it
 acts (the controller's line, sent with the `picture` op below; nothing when it has none).
 Registry binding-name/freshness adoption and Identify/calibration overlays remain
@@ -79,18 +83,17 @@ libweston's `weston_desktop_client_ping` and the desktop API's `pong`), sent onc
 `PING_MS` (1 s) while the Output holds an identity and an app surface (Weston keeps at most one
 outstanding). The Player's frame client answers the ping when its frame turn reads the screens'
 connection, on the Player's main loop, so a hung or stopped loop loses the grant within the lease, while a still photo, an Output forced off (`output_power`) or under
-the black curtain (`black`) keeps it with no commit. A ping answer renews only while the app's
-newest commit on that Output was tagged: an app that commits untagged buffers (its draws fail,
-or it shows nothing it can name) holds the Output only until the lease runs out, and the
-diagnostic returns, as before the ping. A pong is evidence only that the app is
+the black curtain (`black`) keeps it with no commit. A pong renews the lease of every Output
+whose app process matches, whatever the app last committed: the lease answers only whether the
+app is alive. Whether it shows anything is the hold's question ([below](#the-hold-what-the-compositor-shows)),
+so an app that answers pings and shows nothing keeps its grant and loses the screen. A pong is evidence only that the app is
 alive: handoff, `presented`, `handoff_presented` and revision adoption still need a real
 presented commit, and the handoff still names a buffer presented within `LEASE_MS` (the
 Player commits its screen's ground under the candidate tag on every present its pacer allows,
 until it is admitted). The Player's
 own copy of the presentation feedback paces its commits ([plane renderer](module-plane-renderer.md#the-frame-loop-and-pacing));
 it is never evidence. `tests/native_display_smoke.py` proves both sides: a probe that stops
-committing keeps its grant past `LEASE_MS`, one committing untagged buffers loses it, and a
-stopped (SIGSTOP) one loses it. Central's display exchange keeps a receipt however old (a still
+committing keeps its grant past `LEASE_MS`, and a stopped (SIGSTOP) one loses it. Central's display exchange keeps a receipt however old (a still
 picture is presented once); only a handoff, its completion, a removal recognized from an issued
 role and a calibration trial's presentation need a receipt under 5 s old
 (`central/fleet/node_display.py` `NodeDisplay.recent`).
@@ -109,6 +112,37 @@ process loss and lease expiry invalidate affected authority. Mode/connection
 generations and the compositor incarnation fence connector reuse. A new controller
 connection explicitly invalidates old grants rather than inventing recovered
 presentation evidence. Compositor loss remains Output unknown until recovery.
+
+## The hold: what the compositor shows
+
+Issue #123 (2026-10-20: a Player out of open files answered every ping and committed empty
+frames for 10 hours, so the lease kept a dark screen its own). Liveness and hold are two
+questions, each answered once: liveness is the lease (above); the hold is asked every
+`lease_tick` (200 ms) on the compositor's current scene, never on anything the app says
+(`shell.c` `hold_evidence`, `hold_sync`). The rule's product meaning lives in the
+[Player architecture](player-architecture.md#the-debug-overlay).
+
+- **Evidence.** `picture_plane`: a sub-surface anywhere in the app surface's tree (never the
+  surface itself) that is mapped, has a buffer and a `wp_alpha_modifier_v1` multiplier above 0.
+  `display_drawing`: the controller's latest `picture` op carried `drawing: true`, or a trial is
+  live (its primitives stored and its time not run out). The app's main surface (the ground) and
+  its frame tag are never evidence.
+- **Judged only once handed off.** A candidate, or an Output whose handoff is still to be
+  presented, is not judged: the Player's empty candidate commits still bring the handoff. The
+  handoff sets `holding` true, and the first judgement follows its presentation.
+- **Hold loss** on a released Output: `holding` false, the curtain at 1.0 and the private client's
+  page configured with reason `hold_lost` ("Waiting for a picture"), identity and grant kept, so
+  the lease and the handoff are untouched. **Hold return** lowers the slate.
+- **Event `hold`** on every change and when the handoff completes:
+  `{"event":"hold","output":<OutputKey>,"holding":bool,"evidence":"picture_plane"|"display_drawing"|null}`.
+  The controller keeps it (`weston.py` `HoldFact`, `domain.py` `DisplayHost.hold`) and puts
+  `holding` and the in-force `power` in each display feed snapshot, from which the health judge
+  raises `nothing_to_show`.
+
+CI: `tests/native_display_smoke.py` (a picture plane holds; a ground-only app loses the screen to
+the slate and keeps its grant on ping answers; Display's drawing takes the slate off),
+`tests/native_screen_harness.py` (the Player's real screens: handed off, then the slate until a
+plane), `tests/node/display/test_display_hold.py`.
 
 ## Units and Weston incarnations
 
@@ -151,15 +185,19 @@ unit ever starts it (`BindsTo=`, `Requires=`, `Requisite=` and `PartOf=` would e
 a restart of Weston into a restart of the Player; the broker is its one owner). The broker
 judges Weston up only while the display unit is active with no job pending, so a restart
 in progress never counts as the Player's own exit. Each launch records the display's
-`InvocationID`. One rule, `relaunch_absent`
-([`broker.py`](../appliance/apps/broker.py); [the restart rule](player-architecture.md)), serves whichever launch is current:
-the boot's (`AppEffectBroker.reconcile`) or an online switch's
-(`OnlineEffectBroker.reconcile`, for its target or fallback). When the Player is
-absent while a newer incarnation runs, the same environment starts again under the
-same operation, once for that incarnation. Until PID1 has unloaded the old unit
-nothing starts, and the next turn asks again. A switch still completes only at the
-control proof. The node-pid1 success scenario crashes Weston under a linked Player
-and requires a new Player to link.
+`InvocationID`. No automatic restarts ([Player architecture](player-architecture.md#processes-and-supervision),
+issue #125): one rule, `start_for_display` ([`broker.py`](../appliance/apps/broker.py)),
+serves whichever launch is current, and it starts the same environment again under the same
+operation only when Display restarted Weston on purpose under that launch. Before its restart,
+`photo-wall-display-signal.service` writes the stopped incarnation's `InvocationID` to
+`/run/photo-wall-display-restart/restarted` (`display_paths.py` `PURPOSEFUL_RESTART`, written to
+`restarted.partial`, then renamed); the run starts again only when that mark names the launch's
+Weston, a newer incarnation is up, and the run was not first seen absent under its own Weston.
+Until PID1 has unloaded the old unit nothing starts, and the next turn asks again. A Weston
+crash, or a Player that died while its Weston lived, starts nothing: the Player stays down under
+the debug overlay's card until a person reboots. The node-pid1 success scenario runs three signal
+range restarts under a linked Player (each starts it again), then crashes the Player and then
+Weston and requires that nothing starts it.
 
 **The signal range is set before Weston starts** ([0024](decisions/0024-display-tuning.md), Q2 option C).
 Weston never sends the HDMI connector's "Broadcast RGB" property and holds the DRM master while it
@@ -177,7 +215,7 @@ Pi gains a privilege:
   run of range changes never spends a crash start limit: only crashes count against it. The restart ends the incarnation, and with it the controller
   and the Player, under the rules above: the next incarnation sets the range first, then Weston
   takes the screen, a new controller reads the connector and reports, and the broker starts the
-  Player again.
+  Player again (`display_restarted_on_purpose`, the one restart Display's mark allows).
 - The controller (`appliance/display_host/signal_range.py`, unprivileged) only reads the connector
   and writes the request file, and only when the document's range differs from the connector's,
   so applying is idempotent and a Weston, Player or controller restart changes nothing (the
@@ -189,7 +227,8 @@ through the units' own dependencies. Every scenario then checks that `control.so
 existed before the controller's main process started, that the controller never
 restarted, and that its journal holds no `FileNotFoundError` or `226/NAMESPACE`.
 The `refused` scenario also sends Weston SIGSEGV, then SIGSTOP (its watchdog aborts
-it), and requires a new Weston and a new clean controller each time.
+it), and requires a new Weston and a new clean controller each time. Weston and the controller
+are base units and keep their systemd restarts; only the Player is never restarted automatically.
 
 ## Base controller ingress
 
@@ -307,8 +346,10 @@ and [alpha modifier protocol](https://gitlab.freedesktop.org/wayland/wayland-pro
 
 ## Picture operations (frame protocol v4)
 
-Since 1c the shell offers `pw_frame_manager_v1` and `pw_diagnostic_manager_v1` at
-version 4 ([`photo-wall-frame-v1.xml`](../appliance/display_host/native/photo-wall-frame-v1.xml)).
+Since 1c the shell offers `pw_frame_manager_v1` at version 4 (`FRAME_VERSION`, the Player's,
+unchanged since) and `pw_diagnostic_manager_v1` at version 5 since issue #124
+(`DIAGNOSTIC_VERSION`: v4 the brightness line, v5 [the Frame region](#the-frame-region-diagnostic-manager-v5))
+([`photo-wall-frame-v1.xml`](../appliance/display_host/native/photo-wall-frame-v1.xml)).
 Display Host carries a Display's picture settings and talks DDC/CI; the Player renderer
 is the only picture pipeline, so the shell forwards picture operations and never
 interprets them. The rules for what the operations are and when they are sent belong
@@ -316,8 +357,12 @@ to the [Player architecture](player-architecture.md#picture-settings-1c).
 
 - **Control op `picture`** (base-only control socket): `output_id`, `output`, `operations`
   (a string of at most 1024 bytes: picture operations v8, decision 0028, carry the Display's
-  white balance, contrast, gamma and light) and `brightness` (the base page's line naming the
-  display's own brightness, at most 128).
+  white balance, contrast, gamma and light), `brightness` (the base page's line naming the
+  display's own brightness, at most 128) and `drawing` (a required boolean, issue #123; missing
+  or not a boolean is refused): true exactly while the Output's picture document carries a test
+  pattern or calibration target (`picture.py`). A pattern is drawn on the screen's ground, never
+  a picture plane, so this flag, Display's own word, is what
+  [holds](#the-hold-what-the-compositor-shows) the Output while one shows.
   The shell stores both per Output, sends `picture(output_id, operations)` to every
   version-4 frame manager of that Output's app client and `brightness(output_id, text)`
   to the diagnostic client. It sends the stored values again on a version-4 bind and
@@ -370,12 +415,14 @@ page that cannot be drawn shows the shell's amber as a pre-multiplied `wp_single
 over the whole Output, never nothing.
 
 **The shell's amber keys on the private client being alive** (`fallback_sync` in `shell.c`): it is
-up exactly while the Output is handed off and the private client is not connected, or connected
-without having bound `pw_diagnostic_manager_v1` at version 3 or later. It no longer keys on a mapped
+up exactly while the private client is not connected, or connected without having bound
+`pw_diagnostic_manager_v1` at version 3 or later, on every Output Weston drives, handed off or not
+(issue #124: with the client dead no debug overlay can show, neither the slate's page nor the card,
+so the amber covers the whole Output whatever the Frame region). It no longer keys on a mapped
 health surface, which the clear layer no longer has. Cost: a hung but connected health client shows
 no amber. `tests/native_display_smoke.py` proves both: with the client alive and nothing to show,
 no health view is mapped and the capture equals the app's pixels exactly; with it killed, the amber
-shows over the released Output and goes when the restarted client binds.
+covers the whole Output and goes when the restarted client binds.
 
 Why a solid buffer and not a small `wl_shm` one for the fallback: the solid buffer holds no pixels,
 and Weston returns before its plane search for it. Weston's DRM backend treats a small ARGB8888 shm
@@ -387,6 +434,40 @@ upstream's Weston 14 build that mask as `1 << plane_idx` in 32 bits, so on the P
 the cursor's bit wraps to an overlay plane's and `drm_output_find_plane_for_view` aborts Weston on
 `assert(fb)`; Weston 15 removes that assertion (upstream commit d3ead778) but keeps 32-bit masks.
 CI cannot exercise this path: its headless Weston has no DRM planes, so the Pi bench is the proof.
+
+## The Frame region (diagnostic manager v5)
+
+Issue #124: the debug overlay draws inside the Frame region when it can be met, else on the whole
+Output ([Player architecture](player-architecture.md#the-debug-overlay) owns the rule's meaning).
+The region is Central's: Display Host computes no Frame geometry ([0030](decisions/0030-frame-box.md)),
+and the shell never interprets it.
+
+- **Document.** Central writes `region-<port>` in the display line's desired bucket
+  ([`contracts/node_output.py`](../contracts/node_output.py) `FrameRegionDocument`: the Output, its
+  own change number and a `FrameRegion` of the Frame id, the screen it was placed on and an
+  `OutputRect` in whole pixels, or none). The controller decodes it (`runner.py` `document_feed`);
+  a refused document gives the Output no region, logged once per change, and touches neither power
+  nor the turn. `ShellRegions` sends each Output's newest region on its own worker thread and again
+  when the shell announces the Output (after a Weston restart, as the picture is).
+- **Control op `region`** (base-only control socket): `output_id`, `output` and `region`, the
+  canonical JSON of the `FrameRegion` (at most 1024 bytes) or `""` for none; a missing or longer
+  `region` is refused. The shell stores it on the Output.
+- **Event `region(output_id, region)`** (`pw_diagnostic_manager_v1`, since version 5): the stored
+  text, forwarded verbatim to the private client on the op, on the client's bind, and right after
+  every `configure`, so a configure is always followed by its region.
+- **The overlay client** (`overlay/client.py`, manager version 5) keeps it (malformed or empty is
+  none) and redraws. [`overlay/area.py`](../appliance/display_host/overlay/area.py) `explain_area`
+  is the one layout rule for the slate and the card: the region's rectangle, or the whole Output
+  when there is no region, the screen differs from the Output's size now, or the rectangle is
+  under 448 x 252. `overlay/render.py` draws opaque black outside the area, the slate's page or
+  the tint inside it, and the card in `card_rect` of the area.
+- **The `output` event carries `mode`**, Weston's current mode as built (`[w, h]`), which the
+  controller reports as the Output report's `current_mode`; Central places the region on it.
+
+CI: `tests/native_display_smoke.py` (the slate and the card inside the region and black outside,
+a region placed on another screen on the whole Output, oversize and missing `region` refused),
+`tests/node/display/test_display_explain_area.py`, `tests/node/display/test_display_overlay_render.py`,
+`tests/test_frame_region.py` (Central's side).
 
 ## Frame-scoped replacement and explicit withdrawal
 
