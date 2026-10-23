@@ -718,9 +718,16 @@ class Node:
             "photo-wall-app-broker.service",
             "photo-wall-manager-supervisor.service",
         )
-        run(
-            "systemctl", "stop", "photo-wall-node-player.service", "photo-wall-node-manager.service"
-        )
+        # The Player is a collected transient unit (`systemd-run --collect`): once it has died
+        # and nothing started it again (issue #125: the failure phase's stopped release, the
+        # success phase's crash), systemd has unloaded it and `systemctl stop` would fail on it.
+        units = ["photo-wall-node-manager.service"]
+        player = unit_properties_of(self, PLAYER_UNIT, "LoadState,ActiveState")
+        if player["LoadState"] == "loaded":
+            units.append(PLAYER_UNIT)
+        else:
+            assert player["ActiveState"] == "inactive", player
+        run("systemctl", "stop", *units)
         components = json.loads((components_dir / "components.json").read_text())
         # Every root is an image (E2c): staged by the predicate the Node itself uses, and its
         # pool image re-hashed.
