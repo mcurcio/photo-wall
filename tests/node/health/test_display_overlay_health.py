@@ -14,6 +14,7 @@ import pytest
 from support.packet_pair import LINUX, PACKET_TYPE, packet_pair
 
 from appliance.display_host.overlay import client, health, render
+from appliance.display_host.overlay.area import OutputArea
 from appliance.display_host.overlay.health import STALE_PAGE, HealthBoard, HealthOutput, HealthPage
 from appliance.display_host.overlay.instruction import (
     INSTRUCTION_STALE_MS,
@@ -157,11 +158,11 @@ def test_the_board_keeps_instructions_for_outputs_not_configured_yet_within_its_
     (320, 200, (64, 142, 192, 48)),                             # never under 48 px tall
 ])
 def test_card_rect(width, height, rect):
-    assert render.card_rect(width, height) == rect
+    assert render.card_rect((0, 0, width, height)) == rect
 
 
 def test_a_tint_on_page_darkens_the_output_then_draws_the_opaque_card_with_both_lines():
-    ops = render.render_health(640, 480, HealthPage(3, True, LINES))
+    ops = render.render_health(640, 480, HealthPage(3, True, LINES), area=OutputArea("no_region"))
     assert ops[0] == render.Paint((0.0, 0.0, 0.0, 0.45), source=True)
     assert ops[1] == render.Rect(128, 384, 384, 72, (0.04, 0.06, 0.09, 1.0))
     assert [op.text for op in ops[2:]] == list(LINES)
@@ -344,7 +345,7 @@ def test_tint_on_draws_the_whole_output_and_tint_off_unmaps_the_layer(layer):
     configure(wayland.manager, "Virtual-1", 640, 480, 1, "", 0)
     hook.instruction(instruction(7), 1001)
     assert wayland.health()[-3:] == tinted()
-    assert painted[-1] == render.render_health(640, 480, HealthPage(7, True, LINES))
+    assert painted[-1] == render.render_health(640, 480, HealthPage(7, True, LINES), area=OutputArea("no_region"))
     release(wayland)
     hook.instruction(instruction(8, tint=False), 1002)
     assert wayland.health()[-3:] == cleared()
@@ -458,8 +459,8 @@ def test_the_stale_page_is_drawn_by_the_loop_after_v(layer):
     assert link.sent == []
 
 
-def test_the_production_client_binds_the_manager_v4():
-    assert client.MANAGER_VERSION == 4   # v3 the health layer; v4 the base page's brightness line (1c)
+def test_the_production_client_binds_the_manager_v5():
+    assert client.MANAGER_VERSION == 5   # v3 the health layer; v4 the brightness line (1c); v5 the Frame region (#124)
 
 
 # -- the judge link -----------------------------------------------------------------------------

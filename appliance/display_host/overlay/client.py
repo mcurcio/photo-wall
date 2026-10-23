@@ -5,7 +5,9 @@ WAYLAND_SOCKET set and binds `pw_diagnostic_manager_v1` only for this client. Pe
 one surface: an `output` configure paints the slate (render_slate), an `overlay` configure the
 calibration trial (render_trial). Before every commit it asks for `wp_presentation` feedback and
 acks the configure serial, so the shell can report `diagnostic_presented` / `overlay_presented`
-from the real presentation of that exact commit. Caps as the retired C client: at most 2 buffers
+from the real presentation of that exact commit. A `region` event (manager v5, sent after every
+`output` configure) carries the Output's Frame region as Central sent it; the slate and the health
+card both draw in the explain area it gives (overlay/area.py, issue #124), black outside it. Caps as the retired C client: at most 2 buffers
 per Output, 128 MB of buffers in all, 8192 px a side and 4096 x 2160 px in area, 16 Outputs.
 
 The health layer (manager v3): `HealthLayer`, the production hook, takes one health surface per
@@ -14,7 +16,8 @@ the layer stays unmapped while there is nothing to show, so the Player's picture
 display controller's planes. The shell's amber fallback tint keys on this client being alive (bound
 at manager v3 or later), never on a mapped layer (render redesign S1, bead B2). It reads the judge's
 overlay instructions on `health.sock` (`JudgeLink`) and draws each page `overlay.health` decides:
-tint on = one whole-Output ARGB buffer (darkening plus the card), mapped 1:1 through the viewport;
+tint on = one whole-Output ARGB buffer (darkening in the explain area, black outside it, plus the
+card in the area), mapped 1:1 through the viewport;
 tint off = a NULL buffer (the layer unmapped). A tint-on page it cannot draw (over the size caps, a
 failed paint) shows the shell's amber as a pre-multiplied single-pixel buffer
 (`wp_single_pixel_buffer_manager_v1`) scaled over the whole Output, never nothing. The layer never
@@ -44,6 +47,9 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from contracts.node_output import FrameRegion, decode_frame_region
+
+from .area import ExplainArea, explain_area
 from .health import (
     JUDGE_UIDS,
     RECONNECT_MS,
@@ -68,7 +74,7 @@ MAX_PIXELS = 4096 * 2160
 MAX_MEMORY = 128 * 1024 * 1024
 MAX_BUFFERS = 2                     # per Output: one on screen, one being drawn
 MAX_NAME = 96
-MANAGER_VERSION = 4                 # v3: the health layer (get_health_layer); v4: `brightness`
+MANAGER_VERSION = 5                 # v3: the health layer (get_health_layer); v4: `brightness`; v5: `region`
 MAX_BRIGHTNESS = 128                # the shell's bound on a `brightness` line
 OOM_SCORE_ADJ = 900                 # the first thing the kernel kills, never Weston (-500)
 WL_SHM_FORMAT_ARGB8888 = 0
@@ -113,6 +119,7 @@ class OutputState:
     serial: int = 0
     testing: bool = False
     brightness: str = ""            # the base page's brightness line (manager v4); "" draws none
+    region: FrameRegion | None = None   # the Frame region the shell last sent (manager v5); None: none
     overlay: bool = False
     points: tuple[Point, Point, Point, Point] = ((0.0, 0.0),) * 4
     dirty: bool = False
@@ -121,16 +128,20 @@ class OutputState:
     # Live proxies: pywayland destroys a proxy whose Python object is collected.
     held: set = field(default_factory=set)
 
+    def area(self) -> ExplainArea:
+        """Where the debug overlay (slate and health card) draws on this Output now."""
+        return explain_area(self.region, (self.width, self.height))
+
     def draw_list(self) -> DrawList:
         if self.overlay:
             return render_trial(self.width, self.height, self.points)
         return render_slate(self.name, self.width, self.height, self.reason, self.testing,
-                            self.brightness)
+                            self.brightness, area=self.area())
 
 
 class OutputHook(Protocol):
     def output_configured(self, client: OverlayClient, output: OutputState) -> None:
-        """After the client handled an Output's configure (its surface exists)."""
+        """After the client handled an Output's configure or a new region (its surface exists)."""
         ...
 
 
@@ -153,6 +164,7 @@ class OverlayClient:
         manager.dispatcher["output"] = self._output_configure
         manager.dispatcher["overlay"] = self._overlay_configure
         manager.dispatcher["brightness"] = self._brightness
+        manager.dispatcher["region"] = self._region
 
     def _output_configure(self, manager, name: str, width: int, height: int, serial: int,
                           reason: str, testing: int) -> None:
@@ -196,6 +208,24 @@ class OverlayClient:
         if not output.overlay:
             output.dirty = True
             self.draw(output)
+
+    def _region(self, manager, name: str, text: str) -> None:
+        """The Output's Frame region (canonical JSON of a FrameRegion, or empty: none), kept; a
+        malformed one reads as none. A change redraws the slate and tells the hooks."""
+        try:
+            region = decode_frame_region(text.encode()) if text else None
+        except ValueError:
+            log.warning("malformed region for %s; drawing on the whole Output", name)
+            region = None
+        output = self.outputs.get(name)
+        if output is None or output.region == region:
+            return
+        output.region = region
+        if not output.overlay:
+            output.dirty = True
+            self.draw(output)
+        for hook in self.hooks:
+            hook.output_configured(self, output)
 
     def draw(self, output: OutputState) -> None:
         """Paint the Output's current page into a fresh buffer and commit it, or wait: a buffer
@@ -407,6 +437,7 @@ class HealthSurface:
     buffers: int = 0                    # ARGB buffers held by the compositor (not the solid one)
     shown: HealthPage | None = None
     size: tuple[int, int] = (0, 0)      # the Output size `shown` was drawn for
+    area: ExplainArea | None = None     # and the explain area
     commits: dict[int, int] = field(default_factory=dict)   # commit id -> committed at (ms)
     held: set = field(default_factory=set)
 
@@ -445,7 +476,7 @@ class HealthLayer:
                 output, self.board.configure(output.name, now), surface, viewport)
             state.held.update((surface, layer, viewport))
         elif (state.shown is not None and state.shown.tint
-              and state.size != (output.width, output.height)):
+              and (state.size, state.area) != ((output.width, output.height), output.area())):
             state.health.repaint()
         self.draw(state, now)
 
@@ -490,8 +521,9 @@ class HealthLayer:
             return True
         if not buffer_admissible(width, height, state.buffers, client.memory):
             return False
+        area = output.area()
         buffer, pixels, size = client.allocate(width, height, "photo-wall-health")
-        if not self._paint(page, pixels, width, height):
+        if not self._paint(page, pixels, width, height, area):
             buffer.destroy()
             pixels.close()
             self._fail_visible(state, page, "paint failed")
@@ -509,7 +541,7 @@ class HealthLayer:
         client.memory += size
         state.held.add(buffer)
         buffer.dispatcher["release"] = lambda proxy: self._release(state, proxy, pixels, size)
-        state.shown, state.size = page, (width, height)
+        state.shown, state.size, state.area = page, (width, height), area
         return True
 
     def _attach(self, state: HealthSurface, buffer) -> None:
@@ -551,11 +583,12 @@ class HealthLayer:
         self._attach(state, self.amber)
         state.shown, state.size = page, (state.output.width, state.output.height)
 
-    def _paint(self, page: HealthPage, pixels: mmap.mmap, width: int, height: int) -> bool:
+    def _paint(self, page: HealthPage, pixels: mmap.mmap, width: int, height: int,
+               area: ExplainArea) -> bool:
         try:
             surface = surface_for(pixels, width, height)
             try:
-                self.painter(render_health(width, height, page), surface)
+                self.painter(render_health(width, height, page, area=area), surface)
             finally:
                 surface.finish()
                 del surface            # drops cairo's export of `pixels`, so release can close it

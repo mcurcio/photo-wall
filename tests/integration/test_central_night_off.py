@@ -65,8 +65,8 @@ class CentralClock:
 
 
 class NotUnderTest:
-    """The picture controller and the screen turns of the display host's document feed: not under
-    test here."""
+    """The picture controller, the screen turns and the regions of the display host's document
+    feed: not under test here."""
 
     def document(self, output_id, document) -> None:
         return None
@@ -111,7 +111,7 @@ def test_the_pi_keeps_night_off_while_central_is_away(database, tmp_path):
     async def run(client: TestClient) -> None:
         session.start()
         assert await asyncio.to_thread(session.wait_attached, 15)
-        session.desired.on_change(document_feed(power, NotUnderTest(), NotUnderTest()))
+        session.desired.on_change(document_feed(power, NotUnderTest(), NotUnderTest(), NotUnderTest()))
         power.start()
         power.output(OUTPUT, connected=True, identity=None, modes=())
 

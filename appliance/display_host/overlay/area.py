@@ -66,13 +66,21 @@ def explain_area(region: FrameRegion | None, output: tuple[int, int]) -> Explain
 
     Never raises for a well-formed FrameRegion (its own check keeps rect on region.screen, so a
     FrameArea always lies on the Output)."""
-    ...
+    if region is None:
+        return OutputArea("no_region")
+    if region.screen != output:
+        return OutputArea("screen_differs")
+    if region.rect.width < MIN_AREA[0] or region.rect.height < MIN_AREA[1]:
+        return OutputArea("too_small")
+    return FrameArea(region.rect)
 
 
 def area_rect(area: ExplainArea, output: tuple[int, int]) -> tuple[int, int, int, int]:
     """PURE. The area as (x, y, width, height) on an Output of size `output`: the rect of a
     FrameArea, (0, 0, *output) for an OutputArea. What render.py lays out in."""
-    ...
+    if isinstance(area, FrameArea):
+        return area.rect.x, area.rect.y, area.rect.width, area.rect.height
+    return 0, 0, *output
 
 
 __all__ = ["MIN_AREA", "ExplainArea", "FallbackReason", "FrameArea", "OutputArea", "area_rect",

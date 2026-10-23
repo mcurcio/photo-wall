@@ -12,20 +12,24 @@ import sys
 import pytest
 from support.repo import REPO
 
-from appliance.display_host.overlay import client, render
+from appliance.display_host.overlay import client, health, render
+from appliance.display_host.overlay.area import FrameArea, OutputArea
 from appliance.display_host.overlay.render import (
     REASON_DEFAULT,
     REASON_TEXT,
     Arc,
     Line,
     Paint,
+    Rect,
     Text,
+    card_rect,
     parse_trial_points,
     reason_text,
     render_slate,
     render_trial,
 )
 from appliance.display_host.picture import DisplayBrightness, brightness_line
+from contracts.node_output import FrameRegion, OutputRect, encode_frame_region
 
 # The base page's lines as the picture controller words them (picture.py `brightness_line`, their one home).
 BOTH = brightness_line(DisplayBrightness(46, True, True))               # "Brightness: display 46 %"
@@ -33,25 +37,30 @@ AS_IT_HAS_IT = brightness_line(DisplayBrightness(None, False, True))
 
 WHITE = (0.94, 0.96, 1.0, 1.0)
 YELLOW = (1.0, 1.0, 0.0, 1.0)
+BLACK = (0.0, 0.0, 0.0, 1.0)
+WHOLE = OutputArea("no_region")
 
 
 def test_render_path_imports_neither_cairo_nor_pywayland():
     code = ("import sys\n"
-            "from appliance.display_host.overlay import render, client, health\n"
-            "render.render_slate('HDMI-A-1', 1920, 1080, 'starting_new', True)\n"
+            "from appliance.display_host.overlay import render, client, health, area\n"
+            "whole = area.OutputArea('no_region')\n"
+            "render.render_slate('HDMI-A-1', 1920, 1080, 'starting_new', True, area=whole)\n"
             "render.render_trial(640, 480, ((0, 0), (1, 0), (1, 1), (0, 1)))\n"
-            "render.render_health(640, 480, health.STALE_PAGE)\n"
+            "render.render_health(640, 480, health.STALE_PAGE, area=whole)\n"
             "assert not {'cairo', 'pywayland', '_cffi_backend'} & set(sys.modules), sys.modules\n")
     subprocess.run([sys.executable, "-c", code], check=True, cwd=REPO)
 
 
-def test_reason_text_is_the_c_clients_map_with_its_default():
+def test_reason_text_says_what_happened_and_never_restarting():
     assert dict(REASON_TEXT) == {
         "starting_new": "Starting Player - waiting for authorized handoff",
         "output_mode_changed": "Display mode changed - checking Player output",
-        "surface_lease_or_process_lost": "Player output unavailable - management remains separate",
-        "authorized_withdrawal": "Player restarting - waiting for new output",
+        "surface_lease_or_process_lost": "Player stopped - recover with Hardware > Reboot",
+        "authorized_withdrawal": "Player output withdrawn",
+        "hold_lost": "Waiting for a picture",
     }
+    assert not any("restarting" in text.lower() for text in (*REASON_TEXT.values(), REASON_DEFAULT))
     assert REASON_DEFAULT == "Player output unavailable"
     assert reason_text("app_absent") == REASON_DEFAULT
     assert reason_text("") == REASON_DEFAULT
@@ -61,12 +70,12 @@ def test_reason_text_is_the_c_clients_map_with_its_default():
 
 @pytest.mark.parametrize(("testing", "alpha"), [(False, 1.0), (True, 0.96)])
 def test_slate_background_is_opaque_or_the_testing_alpha(testing, alpha):
-    page = render_slate("Virtual-1", 640, 480, "starting_new", testing)
+    page = render_slate("Virtual-1", 640, 480, "starting_new", testing, area=WHOLE)
     assert page[0] == Paint((0.04, 0.06, 0.09, alpha), source=True)
 
 
 def test_slate_base_page_text_and_geometry_at_1280():
-    page = render_slate("HDMI-A-1", 1280, 720, "output_mode_changed", False)
+    page = render_slate("HDMI-A-1", 1280, 720, "output_mode_changed", False, area=WHOLE)
     assert page[1:] == (
         Text(48, 90, 36, "Photo Wall", WHITE, "sans"),
         Text(48, 150, 24, "Display mode changed - checking Player output", WHITE, "sans"),
@@ -75,16 +84,16 @@ def test_slate_base_page_text_and_geometry_at_1280():
         Text(48, 305, 18, "Base display service - app content is independently supervised",
              WHITE, "sans"),
     )                                                  # no brightness line until the controller sends one
-    lit = render_slate("HDMI-A-1", 1280, 720, "output_mode_changed", False, BOTH)
+    lit = render_slate("HDMI-A-1", 1280, 720, "output_mode_changed", False, BOTH, area=WHOLE)
     assert lit[1:] == (*page[1:], Text(48, 345, 18, BOTH, WHITE, "sans"))
     assert not any("Panel brightness unavailable" in getattr(op, "text", "") for op in page + lit)
 
 
 @pytest.mark.parametrize(("width", "scale"), [(1920, 1.5), (640, 0.5), (320, 0.35), (100, 0.35)])
 def test_slate_scales_with_the_output_width_never_below_035(width, scale):
-    title = render_slate("Virtual-1", width, 480, "app_absent", False)[1]
+    title = render_slate("Virtual-1", width, 480, "app_absent", False, area=WHOLE)[1]
     assert (title.x, title.y, title.size) == pytest.approx((48 * scale, 90 * scale, 36 * scale))
-    assert render_slate("Virtual-1", width, 480, "app_absent", False)[2].text == REASON_DEFAULT
+    assert render_slate("Virtual-1", width, 480, "app_absent", False, area=WHOLE)[2].text == REASON_DEFAULT
 
 
 def test_trial_overlay_is_transparent_with_a_closed_quad_numbered_rings_and_title():
@@ -209,13 +218,13 @@ def overlay_client(monkeypatch, tmp_path):
     monkeypatch.setattr(client, "surface_for",
                         lambda pixels, width, height: surfaces.append(_Surface(pixels)) or surfaces[-1])
 
-    def make(painter, **wayland_options):
+    def make(painter, hooks=(), **wayland_options):
         wayland = _Wayland(**wayland_options)
         return (client.OverlayClient(compositor=wayland.compositor, shm=wayland.shm,
                                      presentation=wayland.presentation, manager=wayland.manager,
                                      viewporter=wayland.viewporter,
                                      single_pixel=wayland.single_pixel,
-                                     painter=painter), wayland, surfaces)
+                                     hooks=hooks, painter=painter), wayland, surfaces)
     return make
 
 
@@ -288,3 +297,99 @@ def test_the_brightness_event_redraws_the_slate_with_its_line(overlay_client):
     brightness(wayland.manager, "HDMI-A-1", BOTH)                        # unchanged: no redraw
     brightness(wayland.manager, "HDMI-A-1", "x" * 129)                            # past the shell's bound
     assert len(drawn) == 2
+
+
+# --- The explain area (issue #124): the slate and the card inside the Frame region, black outside --
+
+
+FRAME = OutputRect(480, 135, 960, 810)            # a 1920 x 1080 Output's Frame
+
+
+def outside_bands(rect, width, height):
+    x, y, w, h = rect
+    return {(0, 0, width, y), (0, y + h, width, height - y - h), (0, y, x, h), (x + w, y, width - x - w, h)}
+
+
+def test_the_slate_draws_inside_the_frame_area_and_black_outside_it():
+    page = render_slate("HDMI-A-1", 1920, 1080, "hold_lost", False, BOTH, area=FrameArea(FRAME))
+    texts = [op for op in page if isinstance(op, Text)]
+    scale = 960 / 1280
+    assert (texts[0].x, texts[0].y, texts[0].size) == pytest.approx((480 + 48 * scale, 135 + 90 * scale, 36 * scale))
+    assert texts[1].text == "Waiting for a picture"
+    assert texts[2].text == "Output HDMI-A-1  |  1920 x 1080 pixels"      # the Output, not the Frame
+    assert all(480 <= text.x < 480 + 960 and 135 <= text.y <= 135 + 810 for text in texts)
+    bands = page[-4:]                                  # last, so nothing of the page spills past the area
+    assert all(isinstance(band, Rect) and band.rgba == BLACK for band in bands)
+    assert {(band.x, band.y, band.width, band.height) for band in bands} == outside_bands(
+        (480, 135, 960, 810), 1920, 1080)
+
+
+def test_the_slate_on_the_whole_output_draws_no_black_band():
+    assert not any(isinstance(op, Rect) for op in render_slate("HDMI-A-1", 1920, 1080, "", False, area=WHOLE))
+
+
+def test_a_frame_flush_with_an_edge_draws_only_the_bands_it_leaves():
+    page = render_slate("HDMI-A-1", 1920, 1080, "", False, area=FrameArea(OutputRect(0, 0, 960, 1080)))
+    assert [(op.x, op.y, op.width, op.height) for op in page if isinstance(op, Rect)] == [(960, 0, 960, 1080)]
+
+
+def test_the_card_lies_inside_the_explain_area_in_todays_proportions():
+    assert card_rect((0, 0, 640, 480)) == (128, 384, 384, 72)
+    assert card_rect((480, 135, 960, 810)) == (480 + 192, 135 + 810 - 122 - 40, 576, 122)
+
+
+def test_the_health_page_darkens_the_frame_area_black_outside_and_its_card_inside():
+    page = health.HealthPage(3, True, ("Player stopped", "code 1"))
+    ops = render.render_health(1920, 1080, page, area=FrameArea(FRAME))
+    assert ops[0] == Paint(render.HEALTH_TINT_RGBA, source=True)
+    bands = [op for op in ops if isinstance(op, Rect) and op.rgba == BLACK]
+    assert {(band.x, band.y, band.width, band.height) for band in bands} == outside_bands(
+        (480, 135, 960, 810), 1920, 1080)
+    (card,) = [op for op in ops if isinstance(op, Rect) and op.rgba == render.CARD_RGBA]
+    x, y, w, h = card_rect((480, 135, 960, 810))
+    assert (card.x, card.y, card.width, card.height) == (x, y, w, h)
+    assert 480 <= x and x + w <= 480 + 960 and 135 <= y and y + h <= 135 + 810
+    assert render.render_health(1920, 1080, health.HealthPage(4, False, ("", "")), area=FrameArea(FRAME)) == (
+        Paint((0.0, 0.0, 0.0, 0.0), source=True),)          # tint off: unchanged, nothing drawn
+
+
+def test_the_region_event_lays_the_slate_out_in_the_frame_and_a_bad_one_falls_back(overlay_client):
+    drawn = []
+    overlay, wayland, _ = overlay_client(lambda draw_list, surface: drawn.append(draw_list))
+    wayland.manager.dispatcher["output"](wayland.manager, "HDMI-A-1", 1920, 1080, 1, "", 0)
+    output = overlay.outputs["HDMI-A-1"]
+    assert output.area() == OutputArea("no_region")
+    region = wayland.manager.dispatcher["region"]
+    region(wayland.manager, "HDMI-A-1", encode_frame_region(FrameRegion("frame-1", (1920, 1080), FRAME)).decode())
+    assert output.area() == FrameArea(FRAME) and len(drawn) == 2 and wayland.acks() == [1, 1]
+    assert {(op.x, op.y, op.width, op.height) for op in drawn[-1] if isinstance(op, Rect)} == outside_bands(
+        (480, 135, 960, 810), 1920, 1080)
+    region(wayland.manager, "HDMI-A-1", '{"frame_id":"frame-1"}')            # malformed: none
+    assert output.region is None and output.area() == OutputArea("no_region")
+    region(wayland.manager, "HDMI-A-1", "")                                   # empty: none, unchanged
+    region(wayland.manager, "HDMI-A-2", "")                                   # an Output it has not seen
+    assert "HDMI-A-2" not in overlay.outputs
+
+
+class _Link:
+    def send(self, report):
+        return True
+
+
+def test_the_health_layer_draws_in_the_same_area_and_redraws_when_the_region_comes(overlay_client):
+    from appliance.display_host.overlay.instruction import OverlayInstruction
+
+    lines = ("Player stopped", "app_unresponsive")
+    painted = []
+    hook = client.HealthLayer(clock=lambda: 1000, link=_Link(),
+                              painter=lambda ops, surface: painted.append(ops))
+    overlay, wayland, _ = overlay_client(lambda draw_list, surface: None, hooks=(hook,))
+    wayland.viewporter.get_viewport = lambda surface: _Proxy(wayland.log, "viewport")
+    wayland.manager.dispatcher["output"](wayland.manager, "HDMI-A-1", 1920, 1080, 1, "", 0)
+    hook.instruction(OverlayInstruction("HDMI-A-1", 7, True, lines), 1001)
+    assert painted[-1] == render.render_health(1920, 1080, health.HealthPage(7, True, lines), area=WHOLE)
+    wayland.manager.dispatcher["region"](
+        wayland.manager, "HDMI-A-1", encode_frame_region(FrameRegion("frame-1", (1920, 1080), FRAME)).decode())
+    assert painted[-1] == render.render_health(1920, 1080, health.HealthPage(7, True, lines),
+                                               area=FrameArea(FRAME))
+    assert overlay.outputs["HDMI-A-1"].area() == FrameArea(FRAME)       # the slate's area too

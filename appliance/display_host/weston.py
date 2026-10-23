@@ -22,7 +22,7 @@ from uuid import UUID, uuid4
 
 from contracts.display_turn import DisplayTurn, wayland_transform
 from contracts.node_frame import parse_picture_change
-from contracts.node_output import Power
+from contracts.node_output import MAX_SCREEN_SIDE, FrameRegion, Power, encode_frame_region
 from contracts.node_protocol import NodeProcessIdentity, OutputKey, SurfaceFact
 
 from .domain import DisplayHost, Surface
@@ -181,7 +181,11 @@ class WestonBackend:
         self._powered: dict[str, Power] = {}   # the compositor's own output power, per Output
         self._black: dict[str, bool] = {}      # whether the shell's black curtain is up, per Output
         self._turned: dict[str, int] = {}      # the transform the shell's last `turn` event said, per Output
+        self._modes: dict[str, tuple[int, int]] = {}   # the mode Weston runs, per connected Output
         self.picture_events: PictureEvents | None = None   # set by the runner (roadmap 1c)
+        # Told each Output id the shell (re)creates (a Weston restart or hot-plug), from `dispatch`;
+        # each never blocks. The runner's region forwarder re-sends the Frame region (issue #124).
+        self.output_listeners: list[Callable[[str], None]] = []
 
     def _receive(self) -> dict:
         raw, _ancillary, flags, _address = self.channel.recvmsg(MAX_PACKET)
@@ -331,6 +335,28 @@ class WestonBackend:
                 return True
         except (OSError, ValueError, KeyError, TimeoutError):
             return False
+
+    def region(self, output_id: str, region: FrameRegion | None, *, timeout: float = 2) -> bool:
+        """Hand one Output's Frame region (issue #124) to the shell (control op `region`: its
+        canonical JSON, contracts/node_output.py `encode_frame_region`, or "" for none), which keeps
+        it and forwards it verbatim to the overlay client; whether the shell took it. False for an
+        Output the shell does not have (yet), a refusal or a timeout."""
+        text = "" if region is None else encode_frame_region(region).decode()
+        try:
+            with self._channel_lock:
+                if self.host is None:
+                    return False
+                key = self.host.state(output_id).key
+                self._request("region", key, timeout=timeout, region=text)
+                return True
+        except (OSError, ValueError, KeyError, TimeoutError):
+            return False
+
+    def current_mode(self, output_id: str) -> tuple[int, int] | None:
+        """The mode Weston runs on `output_id` (width, height), as the shell's last `output` event
+        said; None while the Output is not connected or Weston states none."""
+        with self._channel_lock:
+            return self._modes.get(output_id)
 
     def allow(self, grant: SurfaceGrant) -> UUID:
         """Called by protected lifecycle/configuration ingress, never by Player IPC."""
@@ -485,19 +511,31 @@ class WestonBackend:
         if event == "output":
             key = _output(value["output"])
             self.host.observe_output(key, connected=value["connected"])
+            mode = value.get("mode")
+            if mode is not None and not (type(mode) is list and len(mode) == 2
+                                         and all(type(side) is int for side in mode)):
+                raise ValueError("display_message_invalid")
             if value["connected"]:
                 self._powered[key.output_id] = Power(value.get("power", Power.ON.value))
                 self._black[key.output_id] = value.get("black") is True   # the shell says
+                if mode is None or not all(1 <= side <= MAX_SCREEN_SIDE for side in mode):
+                    self._modes.pop(key.output_id, None)   # none, or none the report can carry
+                else:
+                    self._modes[key.output_id] = (mode[0], mode[1])
             else:
                 self._powered.pop(key.output_id, None)
                 self._black.pop(key.output_id, None)
                 self._turned.pop(key.output_id, None)
+                self._modes.pop(key.output_id, None)
             self.grants.pop(key.output_id, None)
             self.revisions.pop(key.output_id, None)
             self.withdrawals.pop(key.output_id, None)
             self.trials.pop(key.output_id, None)
             if value["connected"] and self.picture_events is not None:
                 self.picture_events.shell_output(key.output_id)
+            if value["connected"]:
+                for listener in self.output_listeners:
+                    listener(key.output_id)
             return key
         if event == "overlay_presented":
             key = _output(value["output"])

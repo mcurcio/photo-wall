@@ -4,7 +4,12 @@
 over a starting candidate: `testing`); `render_trial` is the live-calibration overlay; `render_health`
 is a tint-on health page (the health layer, above everything, app included). `paint.paint`
 executes a draw-list with cairo; tests read the draw-list directly. Text, colours and geometry are
-the retired C client's (native/diagnostic-client.c), so the slate is pixel-identical.
+the retired C client's (native/diagnostic-client.c), so the slate on a whole Output is
+pixel-identical.
+
+The slate and the health card are one debug overlay (issue #124), laid out in the explain area
+(overlay/area.py, its one rule): inside it the page as before, scaled to the area; outside it opaque
+black, drawn last so nothing of the page spills past the area's edge.
 """
 
 from __future__ import annotations
@@ -15,6 +20,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING
+
+from .area import ExplainArea, area_rect
 
 if TYPE_CHECKING:
     from .health import HealthPage
@@ -30,16 +37,20 @@ TESTING_ALPHA = 0.96
 TRIAL_ALPHA = 0.0
 TEXT_RGBA: RGBA = (0.94, 0.96, 1.0, 1.0)
 TRIAL_RGBA: RGBA = (1.0, 1.0, 0.0, 1.0)
+# The shell's reasons (native/shell.c `invalidate`, `hold_lost`) as the slate words them. No line
+# says "restarting": nothing restarts the Player on its own (issue #125).
 REASON_TEXT: Mapping[str, str] = MappingProxyType({
     "starting_new": "Starting Player - waiting for authorized handoff",
     "output_mode_changed": "Display mode changed - checking Player output",
-    "surface_lease_or_process_lost": "Player output unavailable - management remains separate",
-    "authorized_withdrawal": "Player restarting - waiting for new output",
+    "surface_lease_or_process_lost": "Player stopped - recover with Hardware > Reboot",
+    "authorized_withdrawal": "Player output withdrawn",
+    "hold_lost": "Waiting for a picture",
 })
 REASON_DEFAULT = "Player output unavailable"
 MAX_PRIMITIVES = 512          # the trial event's primitives text, as the shell bounds it
 HEALTH_TINT_RGBA: RGBA = (0.0, 0.0, 0.0, 0.45)
 CARD_RGBA: RGBA = (*SLATE_RGB, 1.0)
+OUTSIDE_RGBA: RGBA = (0.0, 0.0, 0.0, 1.0)     # the Output outside the explain area
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,16 +108,29 @@ def reason_text(reason: str) -> str:
     return REASON_TEXT.get(reason, REASON_DEFAULT)
 
 
+def outside(rect: tuple[int, int, int, int], width: int, height: int) -> DrawList:
+    """Opaque black over the width x height Output outside `rect` (x, y, w, h): up to four bands
+    (above, below, left, right), none for a rect that is the whole Output."""
+    x, y, w, h = rect
+    bands = ((0, 0, width, y), (0, y + h, width, height - y - h),
+             (0, y, x, h), (x + w, y, width - x - w, h))
+    return tuple(Rect(*band, OUTSIDE_RGBA) for band in bands if band[2] > 0 and band[3] > 0)
+
+
 def render_slate(name: str, width: int, height: int, reason: str, testing: bool,
-                 brightness: str = "") -> DrawList:
-    """The base page: background, then up to six lines laid out on a 1280-wide page scaled to the
-    Output (never below 0.35). The sixth is `brightness`, the display controller's line (where
-    brightness acts and its value, frame protocol v4 `brightness`), or nothing while it is empty."""
+                 brightness: str = "", *, area: ExplainArea) -> DrawList:
+    """The base page in the explain area `area` of a width x height Output: background, then up to
+    six lines laid out on a 1280-wide page scaled to the area's width (never below 0.35) from its
+    corner, then opaque black outside the area. The sixth line is `brightness`, the display
+    controller's line (where brightness acts and its value, frame protocol v4 `brightness`), or
+    nothing while it is empty."""
     alpha = TESTING_ALPHA if testing else OPAQUE_ALPHA
-    scale = max(width / 1280.0, 0.35)
+    rect = area_rect(area, (width, height))
+    left, top, area_width, _ = rect
+    scale = max(area_width / 1280.0, 0.35)
 
     def line(x: float, y: float, size: float, text: str) -> Text:
-        return Text(x * scale, y * scale, size * scale, text, TEXT_RGBA, "sans")
+        return Text(left + x * scale, top + y * scale, size * scale, text, TEXT_RGBA, "sans")
 
     return (
         Paint((*SLATE_RGB, alpha), source=True),
@@ -116,6 +140,7 @@ def render_slate(name: str, width: int, height: int, reason: str, testing: bool,
         line(48, 260, 20, "Frame binding unconfirmed"),
         line(48, 305, 18, "Base display service - app content is independently supervised"),
         *((line(48, 345, 18, brightness),) if brightness else ()),
+        *outside(rect, width, height),
     )
 
 
@@ -135,25 +160,28 @@ def render_trial(width: int, height: int, points: tuple[Point, Point, Point, Poi
     )
 
 
-def card_rect(width: int, height: int) -> tuple[int, int, int, int]:
-    """The health card's (x, y, w, h) on a width x height Output: 60 % wide, centred, its bottom
-    5 % of the height above the Output's bottom edge, at least 48 px tall."""
+def card_rect(rect: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    """The health card's (x, y, w, h) inside `rect` (x, y, w, h: the explain area): 60 % of its
+    width, centred, its bottom 5 % of its height above its bottom edge, at least 48 px tall."""
+    left, top, width, height = rect
     w = round(0.6 * width)
     h = max(48, round(0.15 * height))
-    return (width - w) // 2, height - h - round(0.05 * height), w, h
+    return left + (width - w) // 2, top + height - h - round(0.05 * height), w, h
 
 
-def render_health(width: int, height: int, page: HealthPage) -> DrawList:
-    """A health page (overlay.health.HealthPage) at the Output's size. Tint on: the whole Output
-    darkened, then the opaque card with the page's two lines. Tint off: fully transparent (the
-    client commits it as a 1 x 1 buffer)."""
+def render_health(width: int, height: int, page: HealthPage, *, area: ExplainArea) -> DrawList:
+    """A health page (overlay.health.HealthPage) on a width x height Output with the explain area
+    `area`. Tint on: the area darkened, opaque black outside it, then the opaque card with the
+    page's two lines inside the area. Tint off: fully transparent (the layer unmapped)."""
     if not page.tint:
         return (Paint((0.0, 0.0, 0.0, 0.0), source=True),)
-    x, y, w, h = card_rect(width, height)
+    rect = area_rect(area, (width, height))
+    x, y, w, h = card_rect(rect)
     pad = max(8, round(0.04 * w))
     first, second = page.lines
     return (
         Paint(HEALTH_TINT_RGBA, source=True),
+        *outside(rect, width, height),
         Rect(x, y, w, h, CARD_RGBA),
         Text(x + pad, y + round(0.45 * h), max(12, round(0.26 * h)), first, TEXT_RGBA, "sans"),
         Text(x + pad, y + round(0.8 * h), max(10, round(0.18 * h)), second, TEXT_RGBA, "sans"),

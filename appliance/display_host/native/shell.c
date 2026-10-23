@@ -47,7 +47,9 @@
 #define MAX_PACKET 16384
 #define LEASE_MS 5000
 #define PING_MS 1000         /* how often an app holding an Output is pinged */
-#define FRAME_VERSION 4      /* pw_frame_manager_v1 and pw_diagnostic_manager_v1: v4 carries the picture (1c) */
+#define FRAME_VERSION 4      /* pw_frame_manager_v1: v4 carries the picture (1c) */
+#define DIAGNOSTIC_VERSION 5 /* pw_diagnostic_manager_v1: v4 the brightness line, v5 the Frame region (#124) */
+#define MAX_REGION 1024      /* contracts.node_output.REGION_DOCUMENT_BYTES */
 #define MAX_OPERATIONS 1024  /* contracts.node_frame.PICTURE_OPERATIONS_BYTES (picture operations v5) */
 #define MAX_BRIGHTNESS 128
 #define MAX_PICTURE_CHANGE 20
@@ -87,6 +89,9 @@ struct output {
     bool testing;
     /* The controller's latest `picture` op, forwarded verbatim and never parsed (1c). */
     char picture_operations[MAX_OPERATIONS + 1], brightness[MAX_BRIGHTNESS + 1];
+    /* The controller's latest `region` op: the Frame region's canonical JSON, or empty (none);
+     * forwarded verbatim to the private client, never parsed (#124). Kept across a hot-plug. */
+    char region[MAX_REGION + 1];
     struct app_surface *diagnostic;
     bool released;
     bool holding;   /* released and held by hold evidence; false: the holding slate is up */
@@ -217,18 +222,29 @@ static json_t *output_key(struct output *o) {
 static const char *output_power_state(struct output *o) {
     return o->weston && o->weston->power_state == WESTON_OUTPUT_POWER_FORCED_OFF ? "off" : "on";
 }
+/* `mode`: the mode Weston runs on the Output as the display is built (unturned), or null. */
 static void output_event(struct output *o) {
-    send_event(o->shell, json_pack("{s:s,s:o,s:b,s:i,s:i,s:s,s:b}", "event", "output",
+    struct weston_mode *mode = o->weston ? o->weston->current_mode : NULL;
+    send_event(o->shell, json_pack("{s:s,s:o,s:b,s:i,s:i,s:s,s:b,s:o}", "event", "output",
         "output", output_key(o), "connected", o->weston != NULL,
         "width", o->weston ? o->weston->width : 0,
         "height", o->weston ? o->weston->height : 0,
-        "power", output_power_state(o), "black", o->black != NULL));
+        "power", output_power_state(o), "black", o->black != NULL,
+        "mode", mode ? json_pack("[i,i]", mode->width, mode->height) : json_null()));
 }
+/* The Output's stored Frame region to the private client (manager v5), verbatim. */
+static void region_to(struct output *o) {
+    struct wl_resource *r = o->shell->diagnostic_resource;
+    if (r && wl_resource_get_version(r) >= 5)
+        pw_diagnostic_manager_v1_send_region(r, o->name, o->region);
+}
+/* Every configure is followed by its region, so the client lays the page out in the right area. */
 static void diagnostic_configure(struct output *o) {
-    if (o->shell->diagnostic_resource)
-        pw_diagnostic_manager_v1_send_output(o->shell->diagnostic_resource, o->name,
-            o->weston ? o->weston->width : 0, o->weston ? o->weston->height : 0,
-            ++o->diagnostic_serial, o->reason[0] ? o->reason : "app_absent", o->testing);
+    if (!o->shell->diagnostic_resource) return;
+    pw_diagnostic_manager_v1_send_output(o->shell->diagnostic_resource, o->name,
+        o->weston ? o->weston->width : 0, o->weston ? o->weston->height : 0,
+        ++o->diagnostic_serial, o->reason[0] ? o->reason : "app_absent", o->testing);
+    region_to(o);
 }
 static void curtain(struct output *o, float alpha) {
     if (o->curtain) weston_shell_utils_curtain_destroy(o->curtain);
@@ -252,11 +268,12 @@ static bool private_client_alive(struct shell *s) {
     return s->diagnostic_client && s->diagnostic_resource &&
         wl_resource_get_version(s->diagnostic_resource) >= 3;
 }
-/* Raised exactly while the Output is handed off and the private client is not alive: no health
- * layer could show then. Never keyed on a mapped health surface (render redesign S1). */
+/* Raised exactly while the private client is not alive, released or not: no debug overlay could
+ * show then, so the amber covers the whole Output (issue #124). Never keyed on a mapped health
+ * surface (render redesign S1). */
 static void fallback_sync(struct output *o) {
     struct shell *s = o->shell;
-    bool wanted = o->weston && o->released && !private_client_alive(s) && !s->shutting_down;
+    bool wanted = o->weston && !private_client_alive(s) && !s->shutting_down;
     if (!wanted && o->fallback) { weston_shell_utils_curtain_destroy(o->fallback); o->fallback = NULL; }
     if (!wanted || o->fallback) return;
     struct weston_curtain_params p = { /* RGBA (0.55, 0.35, 0, 0.5); Weston wants premultiplied */
@@ -626,7 +643,7 @@ static void bind_diagnostic(struct wl_client *client, void *data, uint32_t versi
         wl_client_post_implementation_error(client, "private_diagnostic_role"); return;
     }
     struct wl_resource *r = wl_resource_create(client, &pw_diagnostic_manager_v1_interface,
-        version < FRAME_VERSION ? version : FRAME_VERSION, id);
+        version < DIAGNOSTIC_VERSION ? version : DIAGNOSTIC_VERSION, id);
     if (!r) { wl_client_post_no_memory(client); return; }
     s->diagnostic_resource = r;
     wl_resource_set_implementation(r, &diagnostic_impl, s, diagnostic_resource_gone);
@@ -1057,6 +1074,15 @@ static bool command(struct shell *s, json_t *j) {
         brightness_to(o);
         return true;
     }
+    /* The Frame region (#124): canonical JSON of contracts.node_output.FrameRegion, or "" (none),
+     * stored and forwarded verbatim to the private client; the shell never interprets geometry. */
+    if (!strcmp(op, "region")) {
+        const char *region = string(j, "region");
+        if (!region || strlen(region) > MAX_REGION) return false;
+        snprintf(o->region, sizeof o->region, "%s", region);
+        region_to(o);
+        return true;
+    }
     if (!strcmp(op, "withdraw")) {
         json_t *identity = json_object_get(j, "identity");
         const char *decision = string(j, "decision_id");
@@ -1401,8 +1427,8 @@ WL_EXPORT int wet_shell_init(struct weston_compositor *ec, int *argc, char *argv
     s->desktop = weston_desktop_create(ec, &desktop_api, s);
     if (!s->desktop) return -1;
     s->frame_global = wl_global_create(ec->wl_display, &pw_frame_manager_v1_interface, FRAME_VERSION, s, bind_frame);
-    s->diagnostic_global = wl_global_create(ec->wl_display, &pw_diagnostic_manager_v1_interface, FRAME_VERSION, s,
-        bind_diagnostic);
+    s->diagnostic_global = wl_global_create(ec->wl_display, &pw_diagnostic_manager_v1_interface, DIAGNOSTIC_VERSION,
+        s, bind_diagnostic);
     s->alpha_global = wl_global_create(ec->wl_display, &wp_alpha_modifier_v1_interface, 1, s, bind_alpha);
     s->logger = wl_display_add_protocol_logger(ec->wl_display, protocol_log, s);
     if (!s->frame_global || !s->diagnostic_global || !s->alpha_global || !s->logger) return -1;

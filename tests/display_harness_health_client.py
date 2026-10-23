@@ -23,6 +23,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(1, "/usr/lib/photo-wall/common")   # contracts (photo-wall-common): the Frame region
 
 from overlay.client import main  # noqa: E402
 

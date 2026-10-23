@@ -17,10 +17,12 @@ import socket
 import struct
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
+from typing import Final, Protocol
 from uuid import UUID
 
 from appliance.feed import Feed, answer_feed_read
@@ -34,10 +36,13 @@ from appliance.kernel.display_paths import (
 from appliance.kernel.unix_credentials import receive_credential_packet
 from contracts.node_output import (
     OUTPUT_IDS,
+    FrameRegion,
     OutputReport,
     PowerAttempt,
     decode_output_document,
+    decode_region_document,
     output_document_key,
+    region_document_key,
 )
 from contracts.node_picture import decode_picture_document, picture_document_key
 from contracts.node_protocol import OutputKey
@@ -166,11 +171,15 @@ class OutputReporter:
     hotplug raises the connection generation, or its connection), and a report is put only when it
     differs from the Output's last, so an unchanged Output costs nothing on the bus. An Output id
     outside the wire's OUTPUT_IDS has no key on the line and is not reported. Power fields stay
-    empty here: the power controller (slice D2) fills them."""
+    empty here: the power controller (slice D2) fills them. `mode` gives the mode Weston runs on a
+    connected Output (WestonBackend.current_mode; issue #124), its `current_mode`; a new mode is a
+    new Output key, so it is read again then."""
 
-    def __init__(self, sink: ReportSink, *, read: Callable[[str], bytes | None] = read_edid) -> None:
+    def __init__(self, sink: ReportSink, *, read: Callable[[str], bytes | None] = read_edid,
+                 mode: Callable[[str], tuple[int, int] | None] = lambda output_id: None) -> None:
         self._sink = sink
         self._read = read
+        self._mode = mode
         self._seen: dict[str, tuple[OutputKey, bool]] = {}
         self._reports: dict[str, OutputReport] = {}
 
@@ -185,7 +194,8 @@ class OutputReporter:
             reading = parse_edid(raw) if raw is not None else EdidReading(None, (), None)
             report = OutputReport(output_id, state.connected, reading.identity, reading.modes, answers=(),
                                   method=None, for_change=None, result=None, in_force=None,
-                                  size_mm=reading.size_mm)
+                                  size_mm=reading.size_mm,
+                                  current_mode=self._mode(output_id) if state.connected else None)
             if self._reports.get(output_id) != report:
                 self._reports[output_id] = report
                 self._sink.put_report(report)
@@ -206,7 +216,8 @@ class PowerObservations:
 
     def put_report(self, report: OutputReport) -> None:
         self._power.output(report.output_id, connected=report.connected, identity=report.identity,
-                           modes=report.modes, size_mm=report.size_mm)
+                           modes=report.modes, size_mm=report.size_mm,
+                           current_mode=None if report.current_mode is None else tuple(report.current_mode))
         self._picture.output(report.output_id, connected=report.connected, identity=report.identity)
         self._turns.output(report.output_id, connected=report.connected)
 
@@ -214,16 +225,112 @@ class PowerObservations:
         raise TypeError("the OutputReporter makes no power attempt")
 
 
+REGION_SECONDS: Final = 2.0    # one `region` op's answer from the shell
+
+
+class RegionShell(Protocol):
+    """The shell's `region` op, as WestonBackend carries it."""
+
+    def region(self, output_id: str, region: FrameRegion | None, *, timeout: float) -> bool: ...
+
+
+class ShellRegions:
+    """Carries each Output's Frame region (issue #124) to the shell's `region` op on its own worker
+    thread, so neither the bus's document callback nor the dispatch loop waits on the shell.
+
+    Newest wins per Output. The shell (re)creating an Output (a Weston restart or hot-plug;
+    WestonBackend.output_listeners) sends that Output's region again, as the picture is. A send the
+    shell refuses is not retried: the shell refuses one only for an Output it does not have yet or
+    under an Output key since replaced, and every new key arrives with the shell's `output` event,
+    which sends it again. An Output whose region never reaches the shell keeps the debug overlay on
+    the whole Display, the safe side of the rule."""
+
+    def __init__(self, shell: RegionShell, *, timeout: float = REGION_SECONDS) -> None:
+        self._shell, self._timeout = shell, timeout
+        self._changed = threading.Condition()
+        self._wanted: dict[str, FrameRegion | None] = {}
+        self._due: dict[str, None] = {}              # Outputs whose region is to be sent, in order
+        self._stopping = False
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        with self._changed:
+            if self._thread is not None:
+                return
+            self._thread = threading.Thread(target=self._run, name="shell-regions", daemon=True)
+        self._thread.start()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        with self._changed:
+            self._stopping = True
+            self._changed.notify_all()
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+    def document(self, output_id: str, region: FrameRegion | None) -> None:
+        """`output_id`'s newest region (None: none, or its document was refused). Never blocks."""
+        with self._changed:
+            if output_id in self._wanted and self._wanted[output_id] == region:
+                return
+            self._wanted[output_id] = region
+            self._due[output_id] = None
+            self._changed.notify_all()
+
+    def shell_output(self, output_id: str) -> None:
+        """The shell (re)created `output_id`: its region, if any came, is sent again. Never blocks."""
+        with self._changed:
+            if output_id in self._wanted:
+                self._due[output_id] = None
+                self._changed.notify_all()
+
+    def _run(self) -> None:
+        while True:
+            with self._changed:
+                while not self._due and not self._stopping:
+                    self._changed.wait()
+                if self._stopping:
+                    return
+                output_id = next(iter(self._due))
+                del self._due[output_id]
+                region = self._wanted[output_id]
+            if not self._shell.region(output_id, region, timeout=self._timeout):
+                log.info("region for %s not taken by the shell; sent again when it announces the Output",
+                         output_id)
+
+
 def document_feed(power: OutputPowerController, picture: PictureController,
-                  turns: ScreenTurns) -> Callable[[str, Document], None]:
+                  turns: ScreenTurns, regions: ShellRegions) -> Callable[[str, Document], None]:
     """The desired view's callback, routed by key: an Output document (`output-…`), decoded, to the
     power controller and to the screen turns (its `turn`, render redesign S3); a picture document (`picture-…`, decision 0022), decoded, to the picture
-    controller (each acts on its own change number). A document that does not decode, sits under
-    another Output's key, or under a key of neither kind, is logged and ignored."""
+    controller (each acts on its own change number); a region document (`region-…`, issue #124),
+    decoded, its region to the shell's regions. A document that does not decode, sits under
+    another Output's key, or under a key of none of these kinds, is logged and ignored; a refused
+    region document gives its Output no region (the debug overlay on the whole Display), logged
+    once per change, and touches neither power nor the turn."""
     output_keys = {output_document_key(output_id) for output_id in OUTPUT_IDS}
     picture_keys = {picture_document_key(output_id) for output_id in OUTPUT_IDS}
+    region_keys = {region_document_key(output_id): output_id for output_id in OUTPUT_IDS}
+    refused: dict[str, bytes] = {}       # region key -> the refused document last logged
+
+    def on_region(key: str, document: Document) -> None:
+        try:
+            wanted = decode_region_document(document.value)
+            if region_document_key(wanted.output_id) != key:
+                raise ValueError("region_document_key")
+        except ValueError as error:
+            if refused.get(key) != document.value:
+                refused[key] = document.value
+                log.warning("region document under %s refused (%s); the debug overlay uses the whole Display",
+                            key, error)
+            regions.document(region_keys[key], None)
+            return
+        refused.pop(key, None)
+        regions.document(wanted.output_id, wanted.region)
 
     def on_document(key: str, document: Document) -> None:
+        if key in region_keys:
+            on_region(key, document)
+            return
         try:
             if key in output_keys:
                 decoded = decode_output_document(document.value)
@@ -356,12 +463,12 @@ class Controller:
 
 
 class _stopping:
-    """Stops the controllers' and the screen turns' workers and gives back the CEC addresses on the
-    way out."""
+    """Stops the controllers', the screen turns' and the regions' workers and gives back the CEC
+    addresses on the way out."""
 
     def __init__(self, power: OutputPowerController, picture: PictureController, turns: ScreenTurns,
-                 cec: HdmiCecAdapter) -> None:
-        self._power, self._picture, self._turns, self._cec = power, picture, turns, cec
+                 regions: ShellRegions, cec: HdmiCecAdapter) -> None:
+        self._power, self._picture, self._turns, self._regions, self._cec = power, picture, turns, regions, cec
 
     def __enter__(self) -> None:
         return None
@@ -370,6 +477,7 @@ class _stopping:
         self._power.stop()
         self._picture.stop()
         self._turns.stop()
+        self._regions.stop()
         self._cec.close()
 
 
@@ -411,16 +519,21 @@ def main() -> None:
         power, cec = power_controller(backend, BusReportSink(session), ddc)
         picture = picture_controller(backend, BusPictureSink(session), ddc)
         turns = ScreenTurns(backend)        # the shell's `turn` op (WestonBackend.turn)
+        regions = ShellRegions(backend)     # the shell's `region` op (WestonBackend.region)
+        backend.output_listeners.append(regions.shell_output)
         power.start()
         picture.start()
         turns.start()
-        feed = document_feed(power, picture, turns)
+        regions.start()
+        feed = document_feed(power, picture, turns, regions)
         session.desired.on_change(feed)
         for output_id in OUTPUT_IDS:     # what arrived before the callback, once more (idempotent)
-            for key in (output_document_key(output_id), picture_document_key(output_id)):
+            for key in (output_document_key(output_id), picture_document_key(output_id),
+                        region_document_key(output_id)):
                 if (present := session.desired.get(key)) is not None:
                     feed(key, present)
-        controller = Controller(backend, reports=OutputReporter(PowerObservations(power, picture, turns)),
+        controller = Controller(backend, reports=OutputReporter(PowerObservations(power, picture, turns),
+                                                                mode=backend.current_mode),
                                 power=power)
         if config:
             from .service import DisplayService
@@ -433,7 +546,7 @@ def main() -> None:
                 runtime=args.runtime,
             )
         with (
-            _stopping(power, picture, turns, cec),
+            _stopping(power, picture, turns, regions, cec),
             feed_listener(controller) as feeds,
             socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as ingress,
         ):

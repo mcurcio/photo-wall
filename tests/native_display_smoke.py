@@ -9,6 +9,11 @@ library. This executes a real headless compositor, not a recorded callback simul
 fixture controller authority and does not qualify systemd, GTK or HDMI. Output pixels are read
 back through Weston's own weston_capture_v1 (enabled by --debug).
 
+Issue #124: the debug overlay (the slate and the health card) draws inside the Frame region the
+controller sends (the `region` op), black outside it, and on the whole Output when the region's
+screen is not the Output's; with the private client dead the amber covers the whole Output
+(`explain_area_cases`).
+
 Issue #123: the shell keeps a handed-off Output with its app only on hold evidence (a picture plane
 the compositor shows, or Display's own drawing). The probe draws its ground alone, so the steps
 that look at its pixels hold the Output by Display's drawing (the `picture` op's `drawing`, as a
@@ -38,10 +43,13 @@ HEALTH_MODE = "/tmp/pw-health-client-mode"  # display_harness_health_client.py M
 # The production client's health drawing (overlay/render.py card_rect), as installed, and its
 # fake judge.
 sys.path.append(DISPLAY)
+sys.path.append("/usr/lib/photo-wall/common")  # contracts, as the installed overlay reads them
 from display_harness_judge_feeder import PATH as JUDGE_SOCKET  # noqa: E402
 from display_harness_judge_feeder import JudgeFeeder  # noqa: E402
 from overlay.instruction import INSTRUCTION_STALE_MS  # noqa: E402
 from overlay.render import card_rect  # noqa: E402
+
+from contracts.node_output import FrameRegion, OutputRect, encode_frame_region  # noqa: E402
 
 HEALTH_MARKER = "/tmp/pw-health-client-marker"  # display_harness_health_client.py MARKER_FILE
 PROBE_STILL = "/tmp/pw-probe-still"  # native_display_probe.c: while it exists, the probe commits nothing
@@ -249,7 +257,7 @@ FALLBACK = over(tuple(int(c * 0.5 * 0xFFFF) >> 8 for c in (0.55, 0.35, 0.0)),
 # The production health page (overlay/render.py render_health): black at 0.45 over the app, and
 # its opaque card, slate-coloured.
 HEALTH_TINT = cairo_over((0.0, 0.0, 0.0), 0.45, PROBE_APP)
-CARD_X, CARD_Y, _, _ = card_rect(640, 480)
+CARD_X, CARD_Y, _, _ = card_rect((0, 0, 640, 480))
 CARD_PIXEL = (CARD_X + 2, CARD_Y + 2)
 CARD_LINES = ("Photos paused - the player stopped responding", "app_unresponsive")
 # DRM fourcc -> wl_shm format: only the two 32-bit formats differ (wl_shm keeps the rest).
@@ -623,6 +631,86 @@ def picture_v4():
     await_pixel(*HEALTH, health_over(SLATE), 6.0 - (time.monotonic() - killed), drained=True)
     time.sleep(0.5)
     drain()     # the respawn's own presentations: later steps wait for new ones
+
+
+# Issue #124: a Frame on the 640 x 480 Output (larger than the slate's smallest page, 448 x 252).
+FRAME_RECT = (100, 90, 480, 300)
+
+
+def region_text(screen, rect=FRAME_RECT):
+    return encode_frame_region(FrameRegion("frame-1", screen, OutputRect(*rect))).decode()
+
+
+def outside_not_black(rect):
+    """The first captured pixel outside `rect` (x, y, w, h) on the 640 x 480 Output that is not
+    black, as (x, y, rgb); None when every one is."""
+    pixels = capture_box(0, 0, 640, 480)
+    x0, y0, w, h = rect
+    for i in range(0, len(pixels), 4):
+        x, y = (i // 4) % 640, (i // 4) // 640
+        if x0 <= x < x0 + w and y0 <= y < y0 + h:
+            continue
+        if pixels[i:i + 3] != bytes(3):
+            return x, y, tuple(reversed(pixels[i:i + 3]))
+    return None
+
+
+def await_black_outside(rect, limit):
+    end = time.monotonic() + limit
+    while (wrong := outside_not_black(rect)) is not None:
+        assert time.monotonic() < end, ("not black outside the Frame", rect, wrong)
+        drain()
+        time.sleep(0.1)
+
+
+def explain_area_cases():
+    """The production private client (manager v5) with the slate up (app absent): the slate, then
+    the health card, inside the Frame region and black outside it; a region placed on another
+    screen puts the card on the whole Output; with the client dead, the amber covers the whole
+    Output. Mutation probe (area.py `area_rect` returning the whole Output): the black-outside
+    captures fail."""
+    name = output["output_id"]
+    pathlib.Path(HEALTH_MODE).write_text("production")
+    opened = judge.opened
+    killed = kill_private_client()
+    read_until(lambda e: e["event"] == "diagnostic_presented", limit=6)
+    assert time.monotonic() - killed < 6
+    assert not request("region", region="r" * 1025)["accepted"]               # past the shell's bound
+    assert not request("region")["accepted"]                                  # no region at all
+    assert request("region", region=region_text((640, 480)))["accepted"]
+    await_black_outside(FRAME_RECT, 3)
+    assert_pixel(FRAME_RECT[0] + 2, FRAME_RECT[1] + 2, SLATE)
+    print("PASS slate_inside_the_frame_region_black_outside", flush=True)
+    judge.await_client(opened + 1, 4, drain)
+    judge.send(name, 1, True, CARD_LINES)
+    judge.await_report(name, 1, 3, drain)
+    card_x, card_y, card_w, card_h = card_rect(FRAME_RECT)
+    x, y, w, h = FRAME_RECT
+    assert x <= card_x and card_x + card_w <= x + w and y <= card_y and card_y + card_h <= y + h
+    await_pixel(card_x + 2, card_y + 2, SLATE, 2)                       # the card, inside the Frame
+    await_black_outside(FRAME_RECT, 2)
+    tinted = assert_pixel(x + 2, y + 2, cairo_over((0.0, 0.0, 0.0), 0.45, SLATE))
+    print("PASS health_card_inside_the_frame_region_black_outside", tinted, flush=True)
+    # Placed on a turned screen (480 x 640) that is not the Output as it hangs: the whole Output.
+    assert request("region", region=region_text((480, 640), (0, 0, 460, 300)))["accepted"]
+    await_pixel(5, 5, cairo_over((0.0, 0.0, 0.0), 0.45, SLATE), 2, drained=True)
+    print("PASS mismatched_screen_puts_the_card_on_the_whole_output",
+          assert_pixel(CARD_X + 2, CARD_Y + 2, SLATE), flush=True)
+    assert request("region", region=region_text((640, 480)))["accepted"]
+    await_black_outside(FRAME_RECT, 3)
+    # The client dead (released or not): the shell's amber over the whole Output, until it binds
+    # again (2 s). The next spawn is the magenta test client again (the mode file is consumed).
+    killed = kill_private_client()
+    amber = await_pixel(320, 240, over(tuple(int(c * 0.5 * 0xFFFF) >> 8 for c in (0.55, 0.35, 0.0)),
+                                       int(0.5 * 0xFFFF) >> 8, SLATE), 1.0 - (time.monotonic() - killed))
+    assert_whole_output(amber)
+    assert time.monotonic() - killed < 1.8, "the respawn came before the whole Output was read"
+    print("PASS amber_covers_the_whole_output_while_the_overlay_client_is_dead", amber, flush=True)
+    assert request("region", region="")["accepted"]                           # none, for the steps that follow
+    read_until(lambda e: e["event"] == "diagnostic_presented", limit=6)
+    await_pixel(*HEALTH, health_over(SLATE), 6.0 - (time.monotonic() - killed), drained=True)
+    time.sleep(0.5)
+    drain()
 
 
 def admit(args, frame_id):
@@ -1083,6 +1171,7 @@ try:
     picture_v4()
     print("PASS health_layer_survives_invalidate", assert_pixel(*HEALTH, health_over(SLATE)),
           flush=True)
+    explain_area_cases()
     killed = kill_private_client()
     # While no private client is bound (the shell respawns it 2 s after it is gone), the
     # client-identity check alone refuses a foreign bind: no held resource masks it here.
