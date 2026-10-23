@@ -23,3 +23,24 @@ def holds_runtime_locks_in(conn) -> bool:
         ([COORDINATION_LOCK, RUNTIME_LOCK],),
     ).fetchone()["n"]
     return held == 2
+
+
+# Issue #127: the Node's own lock, so a Node's display exchange never waits on the fleet-wide
+# Coordination lock (owner, 2026-10-13: "remove fleet-wide lock serialization + per-poll delivery
+# churn"). The two-key advisory form: this class and hashtext(device_id), so Nodes never contend.
+NODE_LOCK_CLASS = 734118325
+
+
+def acquire_node_lock(conn, device_id: str) -> None:
+    """Take the Node's transaction lock: `pg_advisory_xact_lock(NODE_LOCK_CLASS, hashtext(device_id))`.
+    Serializes that Node's display exchanges and admissions, and nothing else. Never taken while
+    holding Coordination or Runtime (those writers never take it), so no lock-order cycle exists."""
+    ...
+
+
+def holds_node_lock_in(conn, device_id: str) -> bool:
+    """Whether this backend holds `device_id`'s Node lock (pg_locks, advisory, granted, classid =
+    NODE_LOCK_CLASS, objid = hashtext(device_id), objsubid = 2): the check
+    `Coordinator.display_admission_in` and `display_withdrawal_in` make in place of
+    `holds_runtime_locks_in`."""
+    ...

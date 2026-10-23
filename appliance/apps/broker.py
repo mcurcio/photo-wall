@@ -10,7 +10,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from threading import RLock
-from typing import Final, Protocol
+from typing import Final, Literal, Protocol
 from uuid import UUID
 
 from contracts.app_environment import AppEnvironmentRefV2
@@ -170,6 +170,44 @@ class RelaunchPacingStore(Protocol):
     def put(self, pacing: RelaunchPacing) -> None:
         """Persist before returning."""
         ...
+
+
+# -- Issue #125: no automatic Player restart (frozen; bodies in the tracer slice) ---------------
+# The owner, 2026-10-20: "a human. dont do automated reboots yet. i want to see every time it fails
+# for now"; asked whether that covers the Player program alone: "No auto-restarts at all". Three
+# causes start a run, and nothing else does: an exit, a missed ping, open files, a Weston crash, a
+# failed release or a foreign unit never starts one (a foreign unit is stopped, nothing in its place).
+StartCause = Literal[
+    "cold_start",                    # once per boot (AppEffectBroker.cold_start)
+    "display_restarted_on_purpose",  # Display restarted Weston itself (a signal range change) under a live run
+    "release_switch",                # a person applied a release: the new release starts once (online_broker)
+]
+
+
+@dataclass(frozen=True)
+class PurposefulRestart:
+    """Display's mark that it restarted Weston itself (appliance/kernel/display_paths.py
+    PURPOSEFUL_RESTART, written by photo-wall-display-signal.service before its restart): the
+    InvocationID of the Weston incarnation it stopped."""
+
+    restarted: str
+
+    def __post_init__(self) -> None:
+        """ValueError("purposeful_restart_invalid") unless `restarted` is 32 lowercase hex digits
+        (a systemd InvocationID)."""
+        ...
+
+
+def restarted_on_purpose(launch: Launch | None, display: str | None,
+                         purposeful: PurposefulRestart | None, *, exited_under: str | None) -> bool:
+    """PURE. The one rule for starting a run again within a boot: True iff the absent run is the
+    victim of Display's own Weston restart, not of its own failure. All of: `launch` is not None;
+    `display` (the Weston up now, `AppProcessDriver.display_incarnation`) is not None and differs
+    from `launch.display`; `purposeful` is not None and names `launch.display`; and the run's exit
+    was not first seen under its own Weston (`exited_under`, the incarnation up when the broker
+    first saw the run absent, None while none was up, is not `launch.display`). A run that died
+    while its Weston lived stays down whatever Display does later; a person recovers it."""
+    ...
 
 
 def display_took_app(launch: Launch | None, display: str | None) -> bool:

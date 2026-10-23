@@ -47,10 +47,12 @@ from uuid import UUID
 from central.power.timetable import Timetable
 from contracts.display_turn import DisplayTurn
 from contracts.frame_fit import OutputSize
+from contracts.models import PositionBox
 from contracts.node_output import (
     BEST_DETECTED,
     DisplayIdentity,
     DisplayMode,
+    FrameRegion,
     InForceKind,
     OutputDocument,
     OutputPower,
@@ -165,6 +167,24 @@ def screen_px(reported: OutputSize | None, modes: Sequence[DisplayMode]) -> Outp
         return reported
     preferred = next((mode for mode in modes if mode.preferred), None)
     return None if preferred is None else (preferred.width, preferred.height)
+
+
+def frame_region(frame_id: str | None, fit: PositionBox | None, screen: OutputSize | None,
+                 turn: DisplayTurn) -> FrameRegion | None:
+    """The Frame region Central sends one Output (issue #124; the debug overlay draws inside it):
+    None when no Frame is bound (`frame_id` or `fit` None) or no screen size is known (`screen`
+    None: `screen_px`'s answer, as built); else FrameRegion(frame_id, hanging(screen, turn),
+    OutputRect of contracts/models.py `frame_placement(fit, screen, turn)`). The one place Central
+    turns a Frame's box into the overlay's rectangle: the placement rule itself stays
+    `frame_placement`'s (decision 0030). Pure."""
+    ...
+
+
+def region_digest(region: FrameRegion | None) -> str:
+    """sha256 hex of `region`'s canonical encoding (contracts.node_output `encode_frame_region`), or
+    of b"null" for None: the region document's change rises exactly when this differs from the
+    digest recorded with the last change (output_documents.region_digest). Pure."""
+    ...
 
 
 def adopts(position: FramePosition, seen_before: UUID | None, seen_now: UUID) -> bool:

@@ -428,6 +428,99 @@ def decode_power_attempt(raw: bytes) -> PowerAttempt:
     return decode(raw, POWER_ATTEMPT_BYTES, PowerAttempt, build, "power_attempt")
 
 
+# --- The Frame region (issue #124; debug overlay design revision 2, "Design-it-twice" A) ----------
+#
+# Central -> Pi, the display line's desired bucket, key `region_document_key(output_id)`, beside the
+# Output and picture documents with its own change number (0022's precedent), so a saved Position
+# never raises the Output document's `change`. Central places the Frame (contracts/models.py
+# `frame_placement`) and sends the whole pixels; the Pi only checks the fit and falls back (decision
+# 0030: Display Host never computes a Frame's geometry). The owner, 2026-10-20: "make sure that the
+# debug overlay shows within the configured Frame regions when available, and only falls back to
+# the Display when the Frames are not configured or cannot be met".
+
+REGION_DOCUMENT_BYTES: Final = 1024             # a region document's largest encoding
+MAX_SCREEN_SIDE: Final = 16384                  # DisplayMode's bound, as it hangs too
+_REGION_PREFIX: Final = "region-"               # desired bucket key: region-<output_id>
+
+
+@dataclass(frozen=True)
+class OutputRect:
+    """A rectangle in whole pixels on a screen as it hangs: the wire copy of a contracts/frame_fit.py
+    `Placement`'s four numbers (`appliance` may not import frame_fit). Top-left corner and size."""
+    x: int
+    y: int
+    width: int
+    height: int
+
+    def __post_init__(self) -> None:
+        """ValueError("output_rect") unless x and y are ints (never bools) in 0..MAX_SCREEN_SIDE - 1
+        and width and height ints in 1..MAX_SCREEN_SIDE."""
+        ...
+
+
+@dataclass(frozen=True)
+class FrameRegion:
+    """One Output's Frame rectangle: the bound Frame, the screen as it hangs (width, height) that
+    Central placed it on (central/displays/model.py `screen_px` turned by the Frame's turn), and the
+    Frame's `rect` on that screen."""
+    frame_id: str
+    screen: tuple[int, int]
+    rect: OutputRect
+
+    def __post_init__(self) -> None:
+        """ValueError("frame_region") unless frame_id is a node token (contracts.node_protocol
+        `token`, at most 96 characters), screen is a tuple of two ints (never bools) in
+        1..MAX_SCREEN_SIDE, rect is an OutputRect, and rect lies wholly on screen
+        (rect.x + rect.width <= screen[0] and rect.y + rect.height <= screen[1])."""
+        ...
+
+
+@dataclass(frozen=True)
+class FrameRegionDocument:
+    """What Central wants the debug overlay to know about one HDMI port's Frame. `change` rises
+    whenever `region` differs from the one last sent for this Output, and only then. `region` None:
+    no Frame is bound to the Output, or Central knows no screen size for it."""
+    output_id: str
+    change: int
+    region: FrameRegion | None
+
+    def __post_init__(self) -> None:
+        """ValueError("region_document") unless output_id is in OUTPUT_IDS, change is an int >= 1
+        (never a bool) and region is None or a FrameRegion."""
+        ...
+
+
+def region_document_key(output_id: str) -> str:
+    """The desired-bucket key of `output_id`'s region document: "region-HDMI-A-1".
+    ValueError("output_id") for an id outside OUTPUT_IDS."""
+    ...
+
+
+def encode_region_document(document: FrameRegionDocument) -> bytes:
+    """Canonical JSON (contracts.wire_codec `encode`) of at most REGION_DOCUMENT_BYTES;
+    ValueError("region_document_too_large") past it."""
+    ...
+
+
+def decode_region_document(raw: bytes) -> FrameRegionDocument:
+    """The document `raw` encodes (strict, exactly the dataclasses' field names); ValueError(
+    "region_document") for anything else. A refused document refuses only itself: the Pi keeps
+    power and turn as they are and the debug overlay falls back to the whole Output."""
+    ...
+
+
+def encode_frame_region(region: FrameRegion) -> bytes:
+    """Canonical JSON of `region` alone: the text the display controller hands the shell's `region`
+    op and the shell forwards verbatim to the overlay client (frame protocol v5)."""
+    ...
+
+
+def decode_frame_region(raw: bytes) -> FrameRegion:
+    """The region `raw` encodes (strict, at most REGION_DOCUMENT_BYTES); ValueError("frame_region")
+    for anything else. The overlay client's one parser of what the shell forwarded."""
+    ...
+
+
 # The checks and the codec above share these: one home for the wire's rules.
 
 _MAKER: Final = re.compile(r"[A-Z]{3}")
@@ -484,4 +577,7 @@ __all__ = [
     "decode_output_document", "decode_output_report", "decode_power_attempt", "decode_set_time",
     "encode_output_document", "encode_output_report", "encode_power_attempt", "encode_set_time",
     "output_document_key", "output_report_key",
+    "MAX_SCREEN_SIDE", "REGION_DOCUMENT_BYTES", "FrameRegion", "FrameRegionDocument", "OutputRect",
+    "decode_frame_region", "decode_region_document", "encode_frame_region", "encode_region_document",
+    "region_document_key",
 ]
