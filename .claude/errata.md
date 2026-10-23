@@ -6931,3 +6931,20 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
   Frame's Position back on the current shape after `_migrate` (a real database runs 104 after 075);
   `enroll_pi` stays unchanged (accepted). Migration 109 keeps 103's stored-report UPDATE
   (`current_mode: null`); `commit_calibration_trial_in` calls `notify_nodes_in`.
+## Overlay-always S5 (issues #126, #125), 2026-10-23: the Pi 5's watchdog cannot tell a watchdog reset
+- **The page's reset source does not exist on the Pi 5.** S5's `reset_cause` reads
+  `/sys/class/watchdog/watchdog0/bootstatus` for WDIOF_CARDRESET (0x20). On the test Pi 75628d0c
+  (kernel 6.18.50+rpt-rpi-2712, read 2026-10-23) the watchdog is `bcm2835-wdt` ("Broadcom BCM2835
+  Watchdog timer"): `options` = 0x8180 (SETTIMEOUT | MAGICCLOSE | KEEPALIVEPING, no CARDRESET) and
+  `bootstatus` = 0. The driver source (raspberrypi/linux rpi-6.12.y drivers/watchdog/bcm2835_wdt.c)
+  never sets `bootstatus` and never reads PM_RSTS for a reset reason. So, as the page allows,
+  `reset_cause` ships and reads None on a Pi 5: `appliance/host/host_linux.py` returns None whenever
+  the driver's `options` does not offer WDIOF_CARDRESET (the watchdog API reports only bits `options`
+  names), never "other". The Hardware page's "Last start: after a hardware watchdog reset" line is
+  therefore never shown on today's Pis.
+- **A possible source, unverified:** the Pi 5 bootloader exposes PM_RSTS at boot as
+  `/proc/device-tree/chosen/bootloader/rsts` (4 bytes; 0 on the test Pi after this boot). Whether a
+  watchdog reset sets a bit there distinctly from a software reboot (which on the Pi also goes through
+  the watchdog's reset) needs a forced watchdog reset on the test Pi (a kernel hang with
+  `kernel.panic=0`) and a read after it. Not done: the test Pi was shared with sibling slices' bench
+  runs. Re-cut if wanted: a reader for that source in `host_linux.reset_cause`.
