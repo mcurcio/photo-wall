@@ -21,8 +21,8 @@ DARK = OutputHealth("HDMI-A-1", True, "app_absent", SINCE)
 LIT = OutputHealth("Virtual-1", False, None, None)
 
 
-def _report(*outputs: OutputHealth, sequence: int = 7) -> HealthReport:
-    return HealthReport(sequence, catalogue_digest(), outputs)
+def _report(*outputs: OutputHealth) -> HealthReport:
+    return HealthReport(catalogue_digest(), outputs)
 
 
 def test_a_report_round_trips_through_its_canonical_bytes():
@@ -51,13 +51,11 @@ def test_an_output_entry_is_refused_outside_its_rule(fields):
 
 
 @pytest.mark.parametrize("build", [
-    lambda: HealthReport(-1, catalogue_digest(), ()),
-    lambda: HealthReport(True, catalogue_digest(), ()),
-    lambda: HealthReport(0, "ABC", ()),
-    lambda: HealthReport(0, catalogue_digest(), [DARK]),
-    lambda: HealthReport(0, catalogue_digest(), (LIT, DARK)),     # not in output_id order
-    lambda: HealthReport(0, catalogue_digest(), (DARK, DARK)),    # an Output twice
-    lambda: HealthReport(0, catalogue_digest(), tuple(
+    lambda: HealthReport("ABC", ()),
+    lambda: HealthReport(catalogue_digest(), [DARK]),
+    lambda: HealthReport(catalogue_digest(), (LIT, DARK)),     # not in output_id order
+    lambda: HealthReport(catalogue_digest(), (DARK, DARK)),    # an Output twice
+    lambda: HealthReport(catalogue_digest(), tuple(
         OutputHealth(f"HDMI-A-{index:02}", False, None, None) for index in range(MAX_HEALTH_OUTPUTS + 1))),
 ])
 def test_a_report_is_refused_outside_its_rule(build):
@@ -68,16 +66,17 @@ def test_a_report_is_refused_outside_its_rule(build):
 def test_the_largest_report_fits_its_key():
     widest = tuple(OutputHealth(f"{index:02}" + "O" * 94, True, "a" * 64, SINCE)
                    for index in range(MAX_HEALTH_OUTPUTS))
-    assert len(encode_health_report(_report(*widest, sequence=2**63 - 1))) <= HEALTH_REPORT_BYTES
+    assert len(encode_health_report(_report(*widest))) <= HEALTH_REPORT_BYTES
 
 
 @pytest.mark.parametrize("raw", [
     b"not json",
     b"{}",
-    json.dumps({"sequence": 1, "catalogue": catalogue_digest(), "outputs": [], "extra": 1}).encode(),
-    json.dumps({"sequence": 1, "catalogue": catalogue_digest(), "outputs": [{"output_id": "HDMI-A-1"}]}).encode(),
-    json.dumps({"sequence": 1, "catalogue": catalogue_digest(), "outputs": {}}).encode(),
-    b'{"sequence": 1, "sequence": 2, "catalogue": "", "outputs": []}',
+    json.dumps({"catalogue": catalogue_digest(), "outputs": [], "extra": 1}).encode(),
+    json.dumps({"catalogue": catalogue_digest(), "outputs": [{"output_id": "HDMI-A-1"}]}).encode(),
+    json.dumps({"catalogue": catalogue_digest(), "outputs": {}}).encode(),
+    b'{"catalogue": "", "catalogue": "", "outputs": []}',
+    json.dumps({"sequence": 1, "catalogue": catalogue_digest(), "outputs": []}).encode(),  # the dropped field
     b" " * (HEALTH_REPORT_BYTES + 1),
 ])
 def test_anything_but_a_report_decodes_to_the_one_refusal(raw):
@@ -87,4 +86,4 @@ def test_anything_but_a_report_decodes_to_the_one_refusal(raw):
 
 def test_encoding_takes_only_a_report():
     with pytest.raises(ValueError, match="^health_report$"):
-        encode_health_report({"sequence": 1})
+        encode_health_report({"outputs": []})

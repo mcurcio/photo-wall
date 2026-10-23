@@ -49,7 +49,7 @@ from appliance.feed import READ_LIMIT, FeedCursor, FeedEvent
 from appliance.feed_socket import peer_uid
 from appliance.health.bus import HEALTH_SLICE, BusHealthSink, health_session
 from appliance.health.judge import HealthJudge, Presented, display_outputs
-from appliance.health.report import health_report
+from appliance.health.report import health_report, report_key
 from appliance.kernel.clock import boottime_ms
 from appliance.kernel.probe_timing import SHIPPED_TIMING
 from contracts.node_faults import FAULTS, catalogue_digest
@@ -389,8 +389,8 @@ class HealthSocket:
 class HealthRunner:
     """One judge, its feed readers, its socket and the overlay clients on one thread: reads
     and publishes every READ_PERIOD, answers requests and reads reports in between. With a
-    `sink`, each turn whose verdict sequence differs from the last one put hands the verdict to
-    it as a HealthReport (appliance/health/report.py); the sink only queues, so the judge never
+    `sink`, each turn whose report differs from the last one put (appliance/health/report.py
+    `report_key`) hands the verdict to it as a HealthReport (appliance/health/report.py); the sink only queues, so the judge never
     waits on the bus, and a verdict the contract refuses is logged and skipped."""
 
     def __init__(self, judge: HealthJudge, readers: Sequence[FeedReader], *,
@@ -399,7 +399,7 @@ class HealthRunner:
         self.judge, self.readers, self.clock, self.wall, self.sink = judge, tuple(readers), clock, wall, sink
         self.card = card or CardClock()
         self.overlay = OverlayClients(judge, card=self.card)
-        self._put_sequence: int | None = None  # the verdict sequence last handed to the sink
+        self._put_key: tuple | None = None  # what the report last handed to the sink said
 
     def turn(self) -> None:
         for reader in self.readers:
@@ -411,9 +411,10 @@ class HealthRunner:
         if self.sink is None:
             return
         verdict = self.judge.verdict(now_ms)
-        if verdict.sequence == self._put_sequence:
+        key = report_key(verdict, now_ms)
+        if key == self._put_key:
             return
-        self._put_sequence = verdict.sequence
+        self._put_key = key
         try:
             self.sink.put(health_report(verdict, now_ms=now_ms, wall_ms=self.wall(),
                                         catalogue=catalogue_digest()))

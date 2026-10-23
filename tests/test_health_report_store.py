@@ -35,7 +35,7 @@ def _commit(registry, value: bytes, seq: int, headers: dict | None = None) -> No
 
 
 def _verdict(sequence: int, *outputs: OutputHealth) -> bytes:
-    return encode_health_report(HealthReport(sequence, catalogue_digest(), outputs))
+    return encode_health_report(HealthReport(catalogue_digest(), outputs))
 
 
 def _dark(registry, frame_id: str):

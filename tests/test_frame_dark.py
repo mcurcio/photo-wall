@@ -10,7 +10,7 @@ SINCE = "2026-10-20T08:10:00Z"
 
 
 def _report(*outputs: OutputHealth) -> HealthReport:
-    return HealthReport(5, catalogue_digest(), outputs)
+    return HealthReport(catalogue_digest(), outputs)
 
 
 def test_the_bound_outputs_dark_entry_is_the_frames_with_its_household_line():

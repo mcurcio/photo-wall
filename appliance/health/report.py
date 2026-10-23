@@ -27,8 +27,19 @@ def health_report(verdict: Verdict, *, now_ms: int, wall_ms: int, catalogue: str
     `wall_ms` the wall clock, read together). ValueError("health_report") or
     ValueError("output_health") when the verdict does not fit the contract (an Output name that is
     not a node token, more than MAX_HEALTH_OUTPUTS Outputs)."""
-    return HealthReport(verdict.sequence, catalogue,
+    return HealthReport(catalogue,
                         tuple(_output_health(output, now_ms, wall_ms) for output in verdict.outputs))
 
 
-__all__ = ["health_report"]
+def report_key(verdict: Verdict, now_ms: int) -> tuple:
+    """What `health_report(verdict, ...)` says, on the judge's boot clock alone: each Output with
+    its card and the boot-clock millisecond its evidence opened (None when it shows no card). Two
+    verdicts with the same key give the same report (its `since` is that opening on the wall
+    clock), so the runner puts a report only when this key changes, never on a judge transition
+    that changes nothing an Output shows."""
+    return tuple((output.output, None, None) if output.card is None or output.card_age_ms is None
+                 else (output.output, output.card, now_ms - output.card_age_ms)
+                 for output in verdict.outputs)
+
+
+__all__ = ["health_report", "report_key"]

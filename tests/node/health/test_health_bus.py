@@ -44,14 +44,14 @@ def test_a_dark_output_carries_its_card_and_when_its_evidence_began_on_the_wall_
     verdict = _verdict(4, OutputVerdict("HDMI-A-1", "slate", ("app_absent",), "app_absent", 65_000),
                        OutputVerdict("HDMI-A-2", "live", ("app_descriptor_pressure",), None, None))
     report = health_report(verdict, now_ms=NOW_MS, wall_ms=WALL_MS, catalogue=catalogue_digest())
-    assert report == HealthReport(4, catalogue_digest(), (
+    assert report == HealthReport(catalogue_digest(), (
         OutputHealth("HDMI-A-1", True, "app_absent", encode_set_time((WALL_MS - 65_000) // 1000)),
         OutputHealth("HDMI-A-2", False, None, None)))
 
 
 def test_the_sink_holds_the_encoded_report_on_the_session_without_a_bus():
     session = health_session("digest")          # never started: no bus at all
-    report = HealthReport(1, catalogue_digest(), (OutputHealth("Virtual-1", True, "app_absent",
+    report = HealthReport(catalogue_digest(), (OutputHealth("Virtual-1", True, "app_absent",
                                                                "2026-10-20T08:10:00Z"),))
     began = time.monotonic()
     BusHealthSink(session).put(report)
@@ -80,17 +80,29 @@ class _Sink:
         self.put_reports.append(report)
 
 
-def test_the_runner_puts_each_new_verdict_once():
-    judge, sink = _Judge(), _Sink()
-    health = runner.HealthRunner(judge, (), clock=lambda: NOW_MS, wall=lambda: WALL_MS, sink=sink)
+def test_the_runner_puts_a_report_only_when_what_it_says_changes():
+    """A judge transition that changes nothing an Output shows (a pending condition opening or
+    withdrawn bumps the verdict sequence) puts nothing: Central keeps every value it reads. A new
+    card, or the same card's evidence opening again, puts one. Mutation probe: put on every new
+    verdict sequence -> four reports."""
+    judge, now = _Judge(), [NOW_MS]
+    sink = _Sink()
+    health = runner.HealthRunner(judge, (), clock=lambda: now[0], wall=lambda: WALL_MS, sink=sink)
+    lit = OutputVerdict("Virtual-1", "live", (), None, None)
+    judge.current = _verdict(0, lit)
     health.turn()
+    judge.current = _verdict(1, OutputVerdict("Virtual-1", "live", ("app_descriptor_pressure",), None, None))
+    health.turn()                                   # pending, nothing shown: no put
+    judge.current = _verdict(2, OutputVerdict("Virtual-1", "slate", ("app_absent",), "app_absent", 1_000))
     health.turn()
-    assert [report.sequence for report in sink.put_reports] == [0]
-    judge.current = _verdict(3, OutputVerdict("Virtual-1", "slate", ("app_absent",), "app_absent", 1_000))
+    now[0] += 5_000                                 # the same card, its age grown with the clock
+    judge.current = _verdict(3, OutputVerdict("Virtual-1", "slate", ("app_absent",), "app_absent", 6_000))
     health.turn()
-    health.turn()
-    assert [report.sequence for report in sink.put_reports] == [0, 3]
-    assert sink.put_reports[-1].outputs[0].dark is True
+    assert [report.outputs[0].dark for report in sink.put_reports] == [False, True]
+    judge.current = _verdict(4, OutputVerdict("Virtual-1", "slate", ("app_absent",), "app_absent", 10))
+    health.turn()                                   # the condition opened again: a new `since`
+    assert [report.outputs[0].dark for report in sink.put_reports] == [False, True, True]
+    assert sink.put_reports[1].outputs[0].since != sink.put_reports[2].outputs[0].since
 
 
 def test_a_verdict_outside_the_contract_is_skipped_and_the_judge_keeps_running():
@@ -100,7 +112,7 @@ def test_a_verdict_outside_the_contract_is_skipped_and_the_judge_keeps_running()
     health.turn()
     judge.current = _verdict(2, OutputVerdict("HDMI-A-1", "live", (), None, None))
     health.turn()
-    assert [report.sequence for report in sink.put_reports] == [2]
+    assert [report.outputs[0].output_id for report in sink.put_reports] == ["HDMI-A-1"]
 
 
 def test_without_a_sink_the_runner_puts_nothing_and_still_turns():

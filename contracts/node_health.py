@@ -8,8 +8,9 @@ crash timestamp and reason", and boot and app failures "reach Central and the co
 
 One key rides the node bus's `health` store line (contracts/node_link.py STORE_LINES, fleet pipe),
 in its state bucket: HEALTH_REPORT_KEY, a `HealthReport`. The health judge (appliance/health)
-writes it whenever its verdict's sequence moves, and again at every attach (a bus restart starts
-empty). Central records every value it reads (node_link_records) and reads the newest one for the
+writes it whenever what it says changes (an Output's darkness, code or the opening of its
+evidence), and again at every attach (a bus restart starts empty), so Central, which keeps every
+value it reads, keeps one per change. Central records every value it reads (node_link_records) and reads the newest one for the
 Frame page's status; Home Assistant may read it through the Pi's read-only door.
 
 Rules this module owns (one home each):
@@ -31,7 +32,7 @@ from typing import Any, Final
 
 from contracts.node_output import decode_set_time
 from contracts.node_protocol import digest, token
-from contracts.wire_codec import decode, encode, fields_of, list_of, require, whole
+from contracts.wire_codec import decode, encode, fields_of, list_of, require
 
 HEALTH_LINE: Final = "health"                # contracts.node_link.STORE_LINES["health"]
 HEALTH_COMPONENT: Final = "health"           # the component writing the line, and its birth's name
@@ -73,20 +74,16 @@ class OutputHealth:
 
 @dataclass(frozen=True)
 class HealthReport:
-    """The judge's verdict for every connected Output of Display's latest snapshot. `sequence`: the
-    judge's verdict sequence (per judge process: it restarts at 0 when the judge
-    restarts, so a reader orders reports by the bus record, never by this number). `catalogue`:
-    contracts.node_faults `catalogue_digest()` of the catalogue the codes come from."""
-    sequence: int
+    """The judge's verdict for every connected Output of Display's latest snapshot (a reader orders
+    reports by the bus record). `catalogue`: contracts.node_faults `catalogue_digest()` of the
+    catalogue the codes come from."""
     catalogue: str
     outputs: tuple[OutputHealth, ...]
 
     def __post_init__(self) -> None:
-        """ValueError("health_report") unless sequence is an int >= 0 (never a bool), catalogue is 64
-        lowercase hex digits, outputs is a tuple of at most MAX_HEALTH_OUTPUTS OutputHealth with
+        """ValueError("health_report") unless catalogue is 64 lowercase hex digits, outputs is a tuple of at most MAX_HEALTH_OUTPUTS OutputHealth with
         unique output_ids, in output_id order."""
         try:
-            require(whole(self.sequence, 0), "health_report")
             digest(self.catalogue)
             require(type(self.outputs) is tuple and len(self.outputs) <= MAX_HEALTH_OUTPUTS
                     and all(type(output) is OutputHealth for output in self.outputs), "health_report")
