@@ -34,6 +34,13 @@ from player.rendering import (
 )
 from player.visibility import beneath_shown, shed, shown_within, visible_now
 
+DRAW_GRACE = 0.5
+"""Seconds a request the renderer answers "pending" is waited on before its layers fail ("decode").
+It must exceed the longest a renderer holds a commit in flight (player/pacing.py `OVERDUE`) plus
+one planning tick (player/service.py `PLANNING_TICK_MS`), or a held request on a silent Output is
+given up before it can be committed ([plane renderer](../docs/module-plane-renderer.md), "One
+commit in flight"; held by tests/test_plane_renderer.py)."""
+
 
 class AuthorityError(ValueError):
     """A message cannot establish current execution authority."""
@@ -904,14 +911,13 @@ class Executor:
         return False
 
     def _awaiting_draw(self, composition: OutputComposition) -> bool:
-        key = (tuple((local.layer, local.path) for local in composition.layers),
-               composition.binding, composition.calibration, composition.fallback)
+        key = composition.request
         output_id = composition.binding.output_id
         pending = self._pending_presentations.get(output_id)
         if pending is None or pending[0] != key:
             pending = (key, self.clock.monotonic())
             self._pending_presentations[output_id] = pending
-        return self.clock.monotonic() - pending[1] < .5
+        return self.clock.monotonic() - pending[1] < DRAW_GRACE
 
     def _acknowledgment(self, candidate: OutputComposition,
                         result: PresentationResult) -> tuple[OutputComposition, float] | None:
@@ -926,13 +932,10 @@ class Executor:
         # A renderer's "presented" is a state (the draw still stands, however long ago it was
         # drawn: a still photo is never redrawn); only a draw time in the future is refused.
         age = self.clock.monotonic() - completed
-        if (not 0 <= age or drawn.binding != candidate.binding
-                or drawn.fallback != candidate.fallback
-                or len(drawn.layers) != len(candidate.layers)):
+        if not 0 <= age or drawn.request != candidate.request:
             return None
-        for actual, requested in zip(drawn.layers, candidate.layers, strict=True):
-            if (actual.layer != requested.layer or actual.path != requested.path
-                    or not math.isfinite(actual.position) or actual.position < 0
+        for actual in drawn.layers:
+            if (not math.isfinite(actual.position) or actual.position < 0
                     or not math.isfinite(actual.alpha) or not 0 <= actual.alpha <= 1):
                 return None
         if (result.applied_calibration is not None and result.applied_calibration.trial_id is None

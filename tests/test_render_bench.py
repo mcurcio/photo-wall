@@ -248,6 +248,46 @@ def test_one_level_off_still_passes():
     assert verdict(FIRST, [moment(picture(1.0, 0), picture(0.3 + 1 / 255, 1)), OVERLOAD], RENDERER).passed
 
 
+def test_a_dissolve_passes_in_either_plane_order_that_mixes_the_same_screen():
+    """The plan's order (outgoing beneath at 1, incoming on top at s) and the Player's (incoming
+    beneath at 1, outgoing on top at 1 - s) show the same picture; the bench judges the picture."""
+    expected = {"photo-1": 1.0, "photo-2": 0.027}
+    plan_order = moment(picture(1.0, 0), picture(0.027, 1), expected=expected)
+    kept_planes = moment(picture(1.0, 0), picture(63766 / 0xFFFF, 1), expected=expected)    # recorded on the Pi
+    assert verdict(FIRST, [plan_order, kept_planes, OVERLOAD], RENDERER).passed
+
+
+def test_a_dip_passes_in_either_order_over_the_ground_and_fails_with_every_strength_forced_to_1():
+    """A dip: the black layer at 1 beneath the picture at 0.229, or the picture at 1 beneath the
+    black at 0.771, mix the same screen. Every strength forced to 1 (the runbook's mutation) shows
+    the top layer alone and fails `alpha`."""
+    expected = {"dip-black": 1.0, "photo-3": 0.229}
+    swapped = moment(picture(1.0, 0), picture(1 - 0.229, 1), expected=expected)
+    assert verdict(FIRST, [moment(picture(1.0, 0), picture(0.229, 1), expected=expected), swapped, OVERLOAD],
+                   RENDERER).passed
+    forced = moment(picture(1.0, 0), picture(1.0, 1), expected=expected, step="dip")
+    assert verdict(FIRST, [swapped, forced, OVERLOAD], RENDERER).failures == ("alpha at 10.000",)
+
+
+@pytest.mark.parametrize("top", [0.5, 1 - 0.027 - 2 / 255, 0.027 + 2 / 255])
+def test_a_dissolve_at_a_wrong_strength_fails_in_either_order(top):
+    expected = {"photo-1": 1.0, "photo-2": 0.027}
+    assert verdict(FIRST, [moment(picture(1.0, 0), picture(top, 1), expected=expected), OVERLOAD],
+                   RENDERER).failures == ("alpha at 10.000",)
+
+
+def test_the_overloads_three_pictures_over_the_ground_are_judged_by_their_mix():
+    """Three planes over the ground: a stack mixing the plan's shares passes in another order of
+    the same shares only when every share holds; one plane off fails."""
+    expected = {"o2": 0.735, "o3": 0.5, "o4": 0.5}
+    shown = moment(picture(0.735, 1), picture(0.5, 2), picture(0.5, 3), step="overload", expected=expected,
+                   ground=True)
+    assert verdict(FIRST, [shown], RENDERER).passed
+    off = moment(picture(0.735, 1), picture(0.6, 2), picture(0.5, 3), step="overload", expected=expected,
+                 ground=True)
+    assert verdict(FIRST, [off], RENDERER).failures == ("alpha at 10.000",)
+
+
 def test_a_run_that_could_not_see_a_failure_fails():
     assert verdict(FIRST, [], RENDERER).failures == ("no_moments",)
     assert verdict(FIRST, [GOOD], RENDERER).failures == ("overload_unseen",)
