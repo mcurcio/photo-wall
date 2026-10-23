@@ -96,6 +96,10 @@ Rules this module owns (one home each):
 - **A test pattern never moves DDC/CI:** the ask is the shell worker's alone; the bound's end
   neither sets `pending` nor wakes the hardware worker (a document carrying a new ask is carried
   out as any change, and its unchanged hardware writes nothing).
+- **Display draws while a pattern rides** (issue #123): the shell op carries `drawing`, True
+  exactly while the operations sent carry a test pattern or calibration target (the pattern in
+  force, within the Pi's bound). The Player draws those on its ground, not a picture plane, so
+  `drawing` is what holds the Output then; the bound's end sends `drawing` False with the photos.
 - **The pattern shown** (the report's `test_pattern_shown`): the port's ask when the operations
   the Player last presented (`presented_values`) carry its pattern and the ask is in force; None
   otherwise. `_values` compares every operation field, the pattern too, so a change that turns a
@@ -116,7 +120,7 @@ from pathlib import Path
 from typing import Final, Protocol
 
 from contracts.kelvin import kelvin_white
-from contracts.node_frame import PictureOperations
+from contracts.node_frame import PictureOperations, encode_picture_operations
 from contracts.node_output import OUTPUT_IDS, DisplayIdentity
 from contracts.node_picture import (
     GAMMA_TENTHS_NEUTRAL,
@@ -232,10 +236,13 @@ class PictureDdc(Protocol):
 
 
 class PictureShell(Protocol):
-    """The shell's `picture` control op (weston.WestonBackend.picture). `brightness` is the base
-    page's line (`brightness_line`), forwarded by the shell to the overlay client."""
+    """The shell's `picture` control op (weston.WestonBackend.picture). `operations` is the encoded
+    PictureOperations, `brightness` the base page's line (`brightness_line`), forwarded by the
+    shell to the overlay client, and `drawing` whether Display draws on the Output itself (a test
+    pattern or calibration target in force), which holds the Output with no picture plane."""
 
-    def picture(self, operations: PictureOperations, *, timeout: float, brightness: str) -> bool: ...   # the shell took it
+    def picture(self, output_id: str, operations: str, brightness: str, *, drawing: bool,
+                timeout: float) -> bool: ...   # the shell took it
 
 
 class PictureReports(Protocol):
@@ -784,7 +791,13 @@ class PictureController:
             if port.presented_values == _values(operations):
                 self._presented(port, document.picture_change)
             self._report(output_id, port)               # the pattern shown ends with its bound
-        if self._shell.picture(operations, timeout=SHELL_SECONDS, brightness=line):
+        try:
+            encoded = encode_picture_operations(operations)
+        except ValueError:
+            log.warning("picture: %s's operations do not encode", output_id)
+            return False
+        if self._shell.picture(output_id, encoded, line, drawing=operations.test_pattern is not None,
+                               timeout=SHELL_SECONDS):
             with self._wake:
                 port.sent = (operations, line)
             return True

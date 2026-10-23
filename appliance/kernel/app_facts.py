@@ -14,7 +14,7 @@ live here, the lowest layer both reach. Stdlib only.
 - `app_descriptors`: every `appliance.apps.descriptors.DESCRIPTOR_SAMPLE_MS` while a run is
   current, how many file descriptors it holds against its soft limit, read from /proc.
 
-The probe facts (`probe_*`, `app_killed`, `app_renderer`, ...) keep their names where they are
+The probe facts (`probe_*`, `app_renderer`, ...) keep their names where they are
 written today; moving them here is a residual, not 1b's.
 """
 from __future__ import annotations

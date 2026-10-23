@@ -55,7 +55,6 @@ from operator_harness import (
 )
 from photo_seed import begin, connected, filled, in_pool, library_of, saved_source, step
 from playwright.sync_api import expect
-from psycopg.types.json import Jsonb
 from public_media import MediaCache, public_photo, publish_photo, request_photo
 from schedule_page import card, remove_button, remove_dialog, said
 from support.console_words import SCHEDULE, scene_words, schedule
@@ -165,15 +164,12 @@ def _seed(registry):
 
     Two separate players so each frame binds a connected HDMI-A-1 of its own.
     """
-    id_a, _key_a, _req_a = enroll(registry, count=1)
-    id_b, _key_b, _req_b = enroll(registry, count=1)
     # Follow-ups B1: the photo fit rule measures a photo against its Frame output (the Frame's
-    # picture on its Display), so the Displays here report PORTRAIT's own size and the small
-    # public photos fill the Frames drawn full screen on them.
-    with registry.db.transaction() as conn:
-        conn.execute("UPDATE outputs SET observation = observation || %s WHERE player_id = ANY(%s)",
-                     (Jsonb({"width_px": PORTRAIT.width_px, "height_px": PORTRAIT.height_px}),
-                      [id_a["player_id"], id_b["player_id"]]))
+    # picture on its Display), so each Output's report runs PORTRAIT's own size (the mode Weston
+    # runs, issue #124) and the small public photos fill the Frames drawn full screen on them.
+    size = (PORTRAIT.width_px, PORTRAIT.height_px)
+    id_a, _key_a, _req_a = enroll(registry, count=1, size=size)
+    id_b, _key_b, _req_b = enroll(registry, count=1, size=size)
 
     registry.create_frame(frame_create(VALID_FRAME, x_mm=100, y_mm=100))
     registry.create_frame(frame_create(INVALID_FRAME, x_mm=500, y_mm=100))

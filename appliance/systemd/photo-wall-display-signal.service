@@ -2,13 +2,21 @@
 Description=Photo Wall display restart for a signal range change
 # Started by photo-wall-display-signal.path. A range change restarts Weston and with it the
 # controller (BindsTo= it); the Player is only stopped (StopPropagatedFrom=) and its broker starts
-# it again for the new Weston. PID1 counts every start, a requested restart included, against a
-# unit's start limit (StartLimitBurst=10 in 10 min), so reset-failed first, on the display unit and
-# on every unit bound to it, so no run of range changes spends a crash start limit; only crashes
-# count. The Player is not listed: only the broker starts it, each time a new transient unit.
-# --no-block, so this oneshot never waits on the restart.
+# it again for the new Weston, because this unit marks the restart as Display's own first: the
+# ExecStartPre= writes the InvocationID of the Weston it is about to restart to
+# /run/photo-wall-display-restart/restarted (appliance/kernel/display_paths.py PURPOSEFUL_RESTART),
+# whole or not at all (a rename). The broker starts nothing else again (issue #125). PID1 counts
+# every start, a requested restart included, against a unit's start limit (StartLimitBurst=10 in
+# 10 min), so reset-failed first, on the display unit and on every unit bound to it, so no run of
+# range changes spends a crash start limit; only crashes count. The Player is not listed: only the
+# broker starts it, each time a new transient unit. --no-block, so this oneshot never waits on the
+# restart.
 
 [Service]
 Type=oneshot
+RuntimeDirectory=photo-wall-display-restart
+RuntimeDirectoryPreserve=yes
+RuntimeDirectoryMode=0755
+ExecStartPre=-/bin/sh -ec '/usr/bin/systemctl show -p InvocationID --value photo-wall-display.service > /run/photo-wall-display-restart/restarted.partial && /usr/bin/mv -f /run/photo-wall-display-restart/restarted.partial /run/photo-wall-display-restart/restarted'
 ExecStart=-/usr/bin/systemctl reset-failed photo-wall-display.service photo-wall-display-controller.service
 ExecStart=/usr/bin/systemctl --no-block restart photo-wall-display.service

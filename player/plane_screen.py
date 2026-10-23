@@ -370,7 +370,7 @@ class PlaneScreens:
                 tag: str, picture_change: int | None, ground: ScreenPicture | None = None,
                 overlay: OverlayCorners | None = None) -> int | PresentRefused:
         """One commit of `composition`'s screen (module rule): each plane shows
-        `pictures[plane.layer.layer.assignment_id]` (its finished picture, `plane.size` as it hangs)
+        `pictures[plane.key]` (its finished picture, a dark plane's its black one, `plane.size` as it hangs)
         over its placement (`plane.at`: the sub-window's position and viewport destination, so the
         display controller enlarges a picture finished smaller), bottom to top, with buffer
         transform `wayland_transform(composition.screen.turn)` and its strength; sub-windows beyond
@@ -394,7 +394,7 @@ class PlaneScreens:
         screen = composition.screen
         states = (_PlaneState * max(1, len(planes)))()
         for state, plane in zip(states, planes, strict=False):
-            picture = pictures.get(plane.layer.layer.assignment_id)
+            picture = pictures.get(plane.key)
             if (picture is None or picture.handle not in self._pictures
                     or picture.size != target_size(plane.size, screen.turn)):
                 return "picture_refused"

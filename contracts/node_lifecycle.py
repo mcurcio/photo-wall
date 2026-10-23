@@ -24,9 +24,11 @@ from contracts.node_protocol import (
 from contracts.strict_json import loads_object
 
 MAX_LIFECYCLE_BYTES = 16384
+# Issue #125: a target that fails to start ends `target_failed`; no Node starts the old release
+# again on its own, so no fallback phase exists.
 EFFECT_PHASES = frozenset({"intent_stop", "stopped", "starting_new", "running", "target_failed",
-                           "fallback_starting", "fallback_running", "effect_unknown"})
-RUNNING_PHASES = frozenset({"starting_new", "running", "fallback_starting", "fallback_running"})
+                           "effect_unknown"})
+RUNNING_PHASES = frozenset({"starting_new", "running"})
 
 
 def _broker(producer):

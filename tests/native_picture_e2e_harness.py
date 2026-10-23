@@ -24,6 +24,8 @@ Every comparison samples the capture clear of the placement's edges: inside, the
 case's reference at that picture point (player/geometry.py `placement_uv`); outside, it is exactly
 black (the screen's ground).
 
+0. the_players_photo_holds_the_output (issue #123): once handed off, the shell says `hold` true by
+   a picture plane, the Player's photo (an empty candidate commit holds nothing).
 1. a_picture_document_changes_the_pixels_and_comes_back_presented: before any picture document,
    pixels inside the placement are the neutral reference and outside are black. A document with
    software contrast 25 % (100 % changes nothing; picture change 3) and no hardware value makes the
@@ -399,6 +401,7 @@ def main() -> None:
     from appliance.display_host.weston import (
         CompositorPresentation,
         DiagnosticRelease,
+        HoldFact,
         SurfaceGrant,
         WestonBackend,
     )
@@ -485,6 +488,11 @@ def main() -> None:
                 continue
         pump(lambda seen: isinstance(seen, DiagnosticRelease))
         print("PASS the_player_is_handed_the_output", flush=True)
+        # Issue #123: the Player's photo is a picture plane the compositor shows, so the shell
+        # holds the Output with it (the empty candidate commit that brought the handoff held none).
+        pump(lambda seen: isinstance(seen, HoldFact) and seen.holding and seen.evidence == "picture_plane")
+        assert host.state(OUTPUT).holding is True
+        print("PASS the_players_photo_holds_the_output", flush=True)
 
         stand_in = neutral_operations(OUTPUT, 1, UPGRADE_DISPLAY_LIGHT)
         inside, outside = await_compare(stand_in, drain)

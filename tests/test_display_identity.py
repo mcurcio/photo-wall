@@ -43,6 +43,7 @@ from contracts.node_output import (
     encode_output_report,
     output_document_key,
     output_report_key,
+    region_document_key,
 )
 from contracts.node_output import OutputReport as WireReport
 from contracts.node_picture import picture_document_key
@@ -94,10 +95,10 @@ def _unbind(registry, frame_id: str) -> None:
 
 
 def _report(registry, serial: str, output_id: str, identity: DisplayIdentity | None, *, connected: bool = True,
-            data: bytes | None = None) -> None:
+            data: bytes | None = None, current_mode: tuple[int, int] | None = None) -> None:
     """The Pi's Output report, recorded by Central's link store on the display line's state bucket."""
     report = WireReport(output_id, connected, identity, MODE if identity else (), (), None, None, None, None,
-                        None)
+                        None, current_mode)
     token = Token(EPOCH, next(_SEQ))
     read = Read(token, "$KV.state_display." + output_report_key(output_id), {},
                 encode_output_report(report) if data is None else data)
@@ -235,14 +236,18 @@ def test_the_output_document_changes_only_when_its_body_does(registry):
     _bind(registry, _frame(registry, "kitchen"), pi, "HDMI-A-1")
     first = _documents(registry, "pi-a")
     assert sorted(first) == [output_document_key("HDMI-A-1"), output_document_key("HDMI-A-2"),
-                             picture_document_key("HDMI-A-1"), picture_document_key("HDMI-A-2")]
+                             picture_document_key("HDMI-A-1"), picture_document_key("HDMI-A-2"),
+                             region_document_key("HDMI-A-1"), region_document_key("HDMI-A-2")]
     document = decode_output_document(first[output_document_key("HDMI-A-1")])
     assert (document.change, document.method, document.power.now, document.power.test) == (
         1, BEST_DETECTED, Power.ON, None)
     assert _documents(registry, "pi-a") == first                     # unchanged: the same bytes, change 1
 
     _report(registry, "pi-a", "HDMI-A-1", NO_SERIAL)
-    assert _documents(registry, "pi-a") == first                     # a Display with default settings
+    seen = _documents(registry, "pi-a")
+    # A Display with default settings: only the region moves (its preferred mode is the screen now).
+    assert {key: seen[key] for key in first if not key.startswith("region-")} == {
+        key: first[key] for key in first if not key.startswith("region-")}
     _sql(registry, "UPDATE displays SET power_method='signal-off'")
     changed = decode_output_document(_documents(registry, "pi-a")[output_document_key("HDMI-A-1")])
     assert (changed.change, changed.method) == (2, PowerMethod.SIGNAL_OFF)

@@ -5,7 +5,8 @@ After=photo-wall-app-broker.service
 [Service]
 User=pw-health
 Group=pw-health
-# Reads the node feeds (sockets 0660 root:pw-node-feeds); nothing else.
+# Reads the node feeds (sockets 0660 root:pw-node-feeds), and writes its verdict on the Node's bus
+# (127.0.0.1, contracts.node_link NODE_BUS_URL); nothing else.
 SupplementaryGroups=pw-node-feeds
 ExecStart=/usr/bin/python3 -I -B /usr/lib/photo-wall/node/health-judge
 Restart=always
@@ -14,7 +15,9 @@ RuntimeDirectory=photo-wall-health
 RuntimeDirectoryMode=0755
 Slice=photowallbase.slice
 MemoryMax=64M
-RestrictAddressFamilies=AF_UNIX
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressDeny=any
+IPAddressAllow=localhost
 ProtectSystem=strict
 PrivateDevices=yes
 NoNewPrivileges=yes

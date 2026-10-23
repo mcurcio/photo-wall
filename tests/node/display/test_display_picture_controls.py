@@ -44,6 +44,7 @@ from contracts.kelvin import kelvin_white
 from contracts.node_frame import (
     PictureOperations,
     decode_picture_operations,
+    encode_picture_operations,
     neutral_operations,
 )
 from contracts.node_output import DisplayIdentity
@@ -71,15 +72,20 @@ CHARITY = {3000: (1.0000, 0.4870, 0.1411), 6500: (1.0000, 0.9436, 0.9621), 9300:
 
 
 class Shell:
-    """The shell's `picture` control op: keeps every call."""
+    """The shell's `picture` control op: keeps every call, its operations decoded, and each call's
+    `drawing` beside it."""
 
     def __init__(self) -> None:
         self.sent: list[tuple[PictureOperations, str]] = []
+        self.drawing: list[bool] = []
         self.lock = threading.Lock()
 
-    def picture(self, operations, *, timeout, brightness):
+    def picture(self, output_id, operations, brightness, *, drawing, timeout):
+        decoded = decode_picture_operations(operations)
+        assert decoded.output_id == output_id
         with self.lock:
-            self.sent.append((operations, brightness))
+            self.sent.append((decoded, brightness))
+            self.drawing.append(drawing)
         return True
 
     def last(self) -> tuple[PictureOperations, str]:
@@ -594,13 +600,16 @@ def test_the_backend_sends_the_picture_op_and_hands_the_shells_events_on():
         playing = threading.Thread(target=play_shell)
         playing.start()
         operations = PictureOperations(OUTPUT, 6, (1.0, 0.5, 0.25), 0.8, 1.0, LIGHT)
-        assert backend.picture(operations, timeout=2, brightness="Brightness: as the display has it")
+        assert backend.picture(OUTPUT, encode_picture_operations(operations), "Brightness: as the display has it",
+                               drawing=False, timeout=2)
         playing.join(5)
         request = asked[0]
         assert (request["op"], request["output_id"], request["output"]) == ("picture", OUTPUT, output)
         assert decode_picture_operations(request["operations"]) == operations
         assert request["brightness"] == "Brightness: as the display has it"
-        assert not backend.picture(neutral_operations("HDMI-A-2", 1, LIGHT), timeout=1, brightness="")   # no such Output
+        assert request["drawing"] is False
+        assert not backend.picture("HDMI-A-2", encode_picture_operations(neutral_operations("HDMI-A-2", 1, LIGHT)),
+                                   "", drawing=False, timeout=1)   # no such Output
 
 
 # List settings, the list kept, the re-read (slice S3) ---------------------------------------------

@@ -19,6 +19,7 @@ from pydantic import Field, StrictBool
 from central.db import Database
 from central.fleet.acceptance_evidence import applied_is_latest
 from central.fleet.device_fence import fence_in, retire_in
+from central.fleet.frame_dark import frame_dark
 from central.fleet.models import TrialRefusal, TrialRefused
 from central.fleet.position_history import (
     created_record,
@@ -38,6 +39,7 @@ from central.infra.display_store import (
     frame_screen_px,
     resolve_output,
 )
+from central.infra.health_report_store import health_reports_in
 from central.infra.output_wakes import notify_nodes_in
 from central.infra.position_history_store import record_created_in, write_position_in, write_turn_in
 from central.infra.power_store import forget_frame_in
@@ -68,6 +70,7 @@ from contracts.models import (
     TargetIdentifier,
     frame_size_mm,
 )
+from contracts.node_health import HealthReport
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.player_control import (
     SCHEMA,
@@ -82,15 +85,17 @@ from contracts.player_control import (
 from contracts.time import Clock
 
 
-def _frame_inventory(row: Mapping[str, Any]) -> FrameInventory:
+def _frame_inventory(row: Mapping[str, Any], health: Mapping[str, HealthReport]) -> FrameInventory:
     """One Frame's inventory row from a frames row selected with POSITION_COLUMNS and SCREEN_COLUMNS:
     its readiness, its screen, the Display's size and the Frame's size on the wall
-    (`frame_size_mm` of its box and that size, as its screen hangs; None when no size is known)."""
+    (`frame_size_mm` of its box and that size, as its screen hangs; None when no size is known), and
+    whether its bound Output is dark by its Pi's newest health verdict (`health`, by player id)."""
     display_mm = frame_display_mm(row)
     return FrameInventory.model_validate(
         {**{key: value for key, value in row.items() if key not in POSITION_FACTS + SCREEN_FACTS},
          "generation": row["generation"], "readiness": frame_readiness(row), "screen_px": frame_screen_px(row), "display_mm": display_mm,
-         "size_mm": frame_size_mm(Calibration.model_validate(row["calibration"]).fit, display_mm, row["turn"])})
+         "size_mm": frame_size_mm(Calibration.model_validate(row["calibration"]).fit, display_mm, row["turn"]),
+         "dark": frame_dark(health.get(row["player_id"]), row["output_id"])})
 
 
 class RegistryError(Exception):
@@ -140,7 +145,8 @@ class FrameTurnChange(Model):
 
 def _wake_nodes_of(conn, *player_ids: str | None) -> None:
     """Wake the Output document source of each named Player's Node (None skipped), on commit: every
-    write that changes which Frame an Output carries, or a bound Frame's turn, calls it."""
+    write that changes which Frame an Output carries, a bound Frame's turn, or its Position (the
+    Frame region document, issue #124) calls it."""
     for player_id in dict.fromkeys(player_id for player_id in player_ids if player_id is not None):
         notify_nodes_in(conn, "SELECT device_id FROM players WHERE id=%s", (player_id,))
 
@@ -774,7 +780,9 @@ class Registry:
         first, then the Save's kept-saved entry
         (the trial's `session_id`, and `restored_from` when its draft came from a Restore), in this
         transaction. A box always lies on its screen (contracts/frame_fit.py `FrameBox`), so Save
-        reads no screen size and checks nothing about where the box lies.
+        reads no screen size and checks nothing about where the box lies. It wakes the bound Player's
+        Node's document source on commit, so its Frame region document (issue #124) carries the saved
+        box without waiting for a deadline.
         """
         if not holds_runtime_locks_in(conn):
             raise RegistryError("calibration_runtime_locks_required")
@@ -796,6 +804,7 @@ class Registry:
         write_position_in(conn, frame_id, saved_record(position_values(committed, lighting), session_id=session_id,
                                                        restored_from=restored_from), calibration=committed)
         commit_position(conn, frame_id)
+        _wake_nodes_of(conn, player_id)
         self._audit(conn, "calibration_trial_commit", frame_id)
         return committed
 
@@ -831,11 +840,12 @@ class Registry:
                               f"b.player_id,b.output_id,{POSITION_COLUMNS},{SCREEN_COLUMNS} FROM frames f "
                               f"LEFT JOIN bindings b ON b.frame_id=f.id {SCREEN_JOIN} ORDER BY f.id").fetchall()
         bound_player_ids = {frame["player_id"] for frame in frames if frame["player_id"] is not None}
+        health = health_reports_in(conn)
         return InstallationInventory(
             players=tuple(PlayerInventory.model_validate({**row, "is_bound": row["id"] in bound_player_ids})
                          for row in players),
             outputs=tuple(OutputInventory.model_validate(row) for row in outputs),
-            frames=tuple(_frame_inventory(row) for row in frames),
+            frames=tuple(_frame_inventory(row, health) for row in frames),
             walls=tuple(WallInventory.model_validate(row) for row in conn.execute(
                 "SELECT surface_id, name, room FROM walls ORDER BY surface_id").fetchall()),
         )

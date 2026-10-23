@@ -57,7 +57,7 @@ PHOTO_WALL_NODE_PID1_FIXTURE="$WORK/fixture" PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1
 
 `REVISION` is the commit the packages were built from (`build-repo.sh` and `build-root.sh` read the committed tree at `HEAD`) and `INPUTS_SHA256` any 64-hex digest naming the inputs (CI passes the roots' cache key from `node_release_writer key`).
 
-`SCENARIO` is `success`, `failure`, `outage`, `reboot`, `refused` or `join`. Put `$WORK` on a volume
+`SCENARIO` is `success`, `failure`, `outage`, `reboot`, `refused`, `join` or `dark`. Put `$WORK` on a volume
 with about 10 GB free. Collection alone does not execute privileged Docker work.
 
 ## Scenarios, evidence and limits
@@ -65,8 +65,19 @@ with about 10 GB free. Collection alone does not execute privileged Docker work.
 - **success**: the durable effect order `intent_stop`, `stopped`, `starting_new`, `running`,
   Central's projected `target_running`, the exact selected process/environment and higher
   app/authority epochs.
-- **failure**: `intent_stop`, `stopped`, `target_failed`, `fallback_starting`,
-  `fallback_running`, back on the previous environment.
+- **success** also runs three signal range restarts of Weston under the running Player (the
+  broker starts it again each time, the one restart Display's mark allows), and after its stage a
+  crashed Player and then a crashed Weston leave the Player down (issue #125: no automatic
+  restarts).
+- **failure**: `intent_stop`, `stopped`, `target_failed`, then `effect_unknown`; no fallback start
+  (the old release stays stopped), and the debug overlay's card shows (issue #125).
+- **dark** (issues #123, #125, #126): the cold Player's open-file limit is lowered just above what
+  it holds open, then it is frozen (SIGSTOP), then killed (kill -9). Each time the debug overlay's
+  card on Virtual-1 shows within the leg's limit, naming the cause (`app_descriptor_limit`,
+  `app_unresponsive`, `app_absent`) and its Pi-clock time, read on `health.sock`; afterwards
+  nothing starts the Player again, and a crashed Weston starts nothing either. With Central's hub,
+  Central's database then holds the judge's verdict from the Pi's `health` line, Virtual-1 dark
+  with `app_absent`.
 - **outage**: once Central has served the target artifact, every node exchange is dropped for
   at least 35 s and until the test has watched the node's own Player unit run the target
   root with no effect yet reported. Afterwards every effect must be reported in order.

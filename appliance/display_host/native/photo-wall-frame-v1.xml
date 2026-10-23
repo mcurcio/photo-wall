@@ -83,7 +83,7 @@
       <arg name="picture_change" type="string"/>
     </request>
   </interface>
-  <interface name="pw_diagnostic_manager_v1" version="4">
+  <interface name="pw_diagnostic_manager_v1" version="5">
     <description summary="Base-private diagnostic surfaces">
       Only the compositor-created private diagnostic client may bind this global.
       Output events name physical Output pixels. Serial is acknowledged before
@@ -129,6 +129,18 @@
       </description>
       <arg name="output_id" type="string"/>
       <arg name="text" type="string"/>
+    </event>
+    <event name="region" since="5">
+      <description summary="The Output's Frame region for the debug overlay (issue #124)">
+        Canonical JSON of contracts.node_output.FrameRegion, at most 1024 bytes,
+        or empty: none. Forwarded verbatim; the shell never interprets geometry.
+        Sent by the base controller through the shell, re-sent when the diagnostic
+        client binds and right after every output event, so a configure is always
+        followed by its region. The client draws the slate and the health card
+        inside the region when it can be met, on the whole Output otherwise.
+      </description>
+      <arg name="output_id" type="string"/>
+      <arg name="region" type="string"/>
     </event>
   </interface>
   <interface name="pw_health_layer_v1" version="1">

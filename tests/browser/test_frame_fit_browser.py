@@ -23,7 +23,9 @@ from console_tasks import open_frame
 from operator_harness import operator_server, sign_in
 from playwright.sync_api import expect
 from test_console_frame_page_browser import (
+    DEVICE,
     FRAME,
+    OUTPUT,
     PRESENTED,
     SAVED_X,
     FakeSessions,
@@ -33,6 +35,7 @@ from test_console_frame_page_browser import (
     _saved,
     _seed,
 )
+from test_registry import report_modes
 
 from central.displays.model import Readiness
 
@@ -157,8 +160,7 @@ def test_with_no_known_screen_size_the_drawing_stands_in_at_16_9_never_the_profi
     screen, no pixels or shape are claimed and a step is 1/1,920 of its width. Mutation probe: stand
     in by 1600 x 1200 -> the 10 px step moves the left edge 10/1600 of the width -> RED."""
     _seed(registry)
-    with registry.db.transaction() as conn:
-        conn.execute("""UPDATE outputs SET observation = observation || '{"width_px": 0, "height_px": 0}'""")
+    report_modes(registry, DEVICE, (OUTPUT,), None)   # the Output's report: no mode, no Display seen
     assert next(frame for frame in registry.inventory().frames if frame.id == FRAME).screen_px is None
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)

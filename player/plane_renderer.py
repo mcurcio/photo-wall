@@ -60,7 +60,8 @@ Rules this module owns (one home each):
   presents it again at each frame time (a fade's strengths, a newly finished picture, a trial's edit
   reach the screen with no planning tick) until all its layers are released or the renderer closes.
 - **The screen's ground**: every commit shows, beneath its planes, the Output's black picture laid
-  out for the whole screen (the one black picture of that size, shared with black layers), so
+  out for the whole screen (the one black picture of that size, shared with black layers; a Frame's
+  dark plane, player/planes.py, shows the black picture of its placement's size), so
   the display controller can always scan out what the planes leave uncovered and the compositor
   never needs its renderer for the screen's black. An Output keeps black pictures of two sizes at
   most, its present's ground and its Frame's placement: a present retires the others (freed once
@@ -630,12 +631,13 @@ class PlaneRenderer:
             if ground == "pending":
                 return _PENDING                     # the screen keeps its last commit
         for plane in composed.planes:
-            picture = self._ready(plane.layer, composition.binding, setting, live=True)
+            picture = (self._black(output_id, setting.size) if plane.layer is None
+                       else self._ready(plane.layer, composition.binding, setting, live=True))
             if picture == "failed":
                 return _FAILED
             if picture == "pending":
                 return _PENDING                     # the screen keeps its last commit
-            pictures[plane.layer.layer.assignment_id] = picture
+            pictures[plane.key] = picture
         drawn = setting.drawn
         tag = commit_tag(looked, visible_now(looked.layers), drawn.trial)
         overlay = None if drawn.trial is None else overlay_corners(setting.placement, setting.screen.size)
@@ -812,9 +814,8 @@ class PlaneRenderer:
     def _shown(self, plane: Plane, pictures: Mapping[str, ScreenPicture]) -> tuple:
         """What `plane` shows (module rule, Nothing changed): its Frame and layer, its picture and
         that picture's finish, its placement and strength; never the layer's play position."""
-        assignment_id = plane.layer.layer.assignment_id
-        entry = self._layers.get(assignment_id)
-        return (plane.frame_id, assignment_id, pictures[assignment_id].handle, 0 if entry is None else entry.serial,
+        entry = None if plane.layer is None else self._layers.get(plane.key)
+        return (plane.frame_id, plane.key, pictures[plane.key].handle, 0 if entry is None else entry.serial,
                 plane.at, plane.strength)
 
     def _candidate(self, state: _Output, screen: Screen, grant: FrameGrant, ground: ScreenPicture | None,

@@ -36,6 +36,22 @@ producer's row (`NodeSessions.authenticate_producer_in`), so one producer's post
 time and a retry finds the first post's rows. Operator device reads take none and read one READ
 ONLY snapshot. The release writer takes its own lock, alone. There is no fleet-wide lock.
 
+A Node's display exchange (`POST /v2/node/display`, `central/fleet/node_display.py`) takes only
+that Node's lock (issue #127; `central/transaction_locks.py` `acquire_node_lock`, the two-key
+advisory lock `NODE_LOCK_CLASS` and `hashtext(device_id)`), never Coordination or Runtime, so one
+Node's exchange never waits on another's. `Coordinator.display_admission_in` and
+`display_withdrawal_in` refuse (`node_display_node_lock_required`) unless the caller holds it, and
+read the Player row `FOR SHARE`, so a binding write on that one Player (`FOR UPDATE`) orders
+against it. Lock order: Coordination, Runtime, then a Node lock (an operator calibration trial
+and an exchange reporting a completion take it after them); a holder of a Node lock never takes
+Coordination or Runtime after it. The exchange keeps `lock_timeout` 5 s for its own statements.
+
+**A lock that times out is a retryable refusal** (`central/lock_waits.py` `mount_lock_refusal`,
+mounted once by `create_app` over the operator and node routes): any request whose transaction
+hit `LockNotAvailable` answers 503 `{"error": "lock_busy"}` with `Retry-After: 1`, never a raw
+500, after logging the holders of every advisory lock someone waits for, read on a connection of
+its own. What an operator does with it: [runbook › Node control](runbook.md#node-control).
+
 A row, and a projected Commit, changes only when its meaning changes. A readiness report writes
 the Player's feedback row; it rewrites a grant (`execution_commits`), a group's status or the
 Player's configuration only when that changed. A delivery projects one Commit per grant (group,

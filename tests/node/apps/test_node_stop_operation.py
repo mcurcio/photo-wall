@@ -179,52 +179,67 @@ def recovery(tmp_path):
     old = NodeProcessIdentity(123, 456, uuid4())
     obligation = RecoveryObligation(boot, uuid4(), "a" * 64, old, 1, "a" * 64, "b" * 64, "a" * 64,
                                    1000, 1000 + STOP_BUDGET_MS, 1000 + STOP_BUDGET_MS + RESTORE_BUDGET_MS)
-    calls = []
     state = {"stopped": False, "controlled": False}
     observer = SimpleNamespace(stopped=lambda o: state["stopped"], controlled=lambda *a, **k: state["controlled"])
-    driver = SimpleNamespace(initiate=lambda: calls.append(journal.read("local-recovery")) or True)
-    supervisor = RecoverySupervisor(journal, driver, observer)
-    yield supervisor, obligation, state, calls
+    supervisor = RecoverySupervisor(journal, observer)
+    yield supervisor, obligation, state
     journal.close()
 
 
-def test_host_restarts_keep_deadlines_and_reboot_intent_once(recovery):
-    supervisor, obligation, _, calls = recovery
+def phase(supervisor, obligation):
+    row = supervisor._load()["records"][str(obligation.operation_id)]
+    return row["phase"], row["diagnostic"]
+
+
+def test_a_missed_stop_deadline_is_a_fault_kept_across_host_restarts_never_a_reboot(recovery):
+    """Issue #125, the removed deadline reboot: a stop deadline missed moves the obligation to
+    `deadline_missed` (diagnostic stop_deadline) and telemetry answers its fault; the supervisor
+    holds no reboot port at all, and a host restart keeps the deadlines and the fault."""
+    supervisor, obligation, _ = recovery
     receipt = supervisor.arm(obligation, now_ms=1000)
     for _ in range(3):
-        supervisor = RecoverySupervisor(supervisor.store, supervisor.driver, supervisor.observer)
+        supervisor = RecoverySupervisor(supervisor.store, supervisor.observer)
         assert supervisor.arm(obligation, now_ms=2000) == receipt
         supervisor.service(now_ms=obligation.stop_deadline_ms - 1)
-    assert not calls
+    assert phase(supervisor, obligation) == ("armed", None)
     supervisor.service(now_ms=obligation.stop_deadline_ms)
-    assert list(calls[0]["records"].values())[0]["phase"] == "reboot_intent"
-    supervisor.service(now_ms=obligation.restore_deadline_ms + 1)
-    assert len(calls) == 1
-    with pytest.raises(ValueError, match="already_intended"):
-        supervisor.arm(obligation, now_ms=2000)
+    assert phase(supervisor, obligation) == ("deadline_missed", "stop_deadline")
+    restarted = RecoverySupervisor(supervisor.store, supervisor.observer)
+    restarted.service(now_ms=obligation.restore_deadline_ms + 1)
+    assert phase(restarted, obligation) == ("deadline_missed", "stop_deadline")
+    metrics, fault = restarted.telemetry()
+    assert fault == "local_recovery_stop_deadline"
+    assert metrics == (("local_recovery_active", 1, "count", "base_recovery"),
+                       ("local_recovery_reboot", 1, "count", "base_recovery"))
+    with pytest.raises(ValueError, match="deadline_missed"):
+        restarted.arm(obligation, now_ms=2000)
+    with pytest.raises(ValueError, match="deadline_missed"):
+        restarted.advance(obligation.operation_id, receipt, {"kind": "stopped"}, now_ms=2000)
 
 
 def test_late_stop_advances_to_original_restore_deadline(recovery):
-    supervisor, obligation, state, calls = recovery
+    supervisor, obligation, state = recovery
     supervisor.arm(obligation, now_ms=1000)
     state["stopped"] = True
     supervisor.service(now_ms=obligation.stop_deadline_ms)
-    assert not calls
+    assert phase(supervisor, obligation) == ("stopped", None)
     supervisor.service(now_ms=obligation.restore_deadline_ms)
-    assert len(calls) == 1
+    assert phase(supervisor, obligation) == ("deadline_missed", "restore_deadline")
+    assert supervisor.telemetry()[1] == "local_recovery_restore_deadline"
 
 
 def test_local_control_disarms_without_central(recovery):
-    supervisor, obligation, state, calls = recovery
+    supervisor, obligation, state = recovery
     receipt = supervisor.arm(obligation, now_ms=1000)
     state["controlled"] = True
     supervisor.advance(obligation.operation_id, receipt, {"kind": "controlled"}, now_ms=1100)
     supervisor.service(now_ms=obligation.restore_deadline_ms + 1)
-    assert calls == []
+    assert phase(supervisor, obligation) == ("controlled", None)
+    assert supervisor.telemetry()[1] is None
 
 
 def test_registration_conflicts_and_foreign_boot_refuse(recovery):
-    supervisor, obligation, _, _ = recovery
+    supervisor, obligation, _ = recovery
     supervisor.arm(obligation, now_ms=1000)
     with pytest.raises(ValueError, match="conflict"):
         supervisor.arm(replace(obligation, target="c" * 64), now_ms=1000)
@@ -234,10 +249,10 @@ def test_registration_conflicts_and_foreign_boot_refuse(recovery):
         replace(obligation, restore_deadline_ms=obligation.restore_deadline_ms + 1)
 
 
-def test_unarmed_network_failure_cannot_reboot(recovery):
-    supervisor, obligation, _, calls = recovery
+def test_unarmed_network_failure_is_no_fault(recovery):
+    supervisor, obligation, _ = recovery
     supervisor.service(now_ms=obligation.restore_deadline_ms + 1)
-    assert calls == []
+    assert supervisor._load()["records"] == {} and supervisor.telemetry()[1] is None
 
 
 def test_crash_after_adapter_intent_never_resubmits(stopped, monkeypatch):
@@ -270,22 +285,8 @@ def test_completed_record_survives_restart_and_cannot_change_request(stopped):
     assert sum("stop" in call for call in calls) == 1
 
 
-def test_owner_restart_after_reboot_intent_cannot_repeat_dispatch(recovery, monkeypatch):
-    supervisor, obligation, _, calls = recovery
-    supervisor.arm(obligation, now_ms=1000)
-    def crash():
-        raise KeyboardInterrupt()
-    monkeypatch.setattr(supervisor.driver, "initiate", crash)
-    with pytest.raises(KeyboardInterrupt):
-        supervisor.service(now_ms=obligation.stop_deadline_ms)
-    restarted = RecoverySupervisor(supervisor.store, supervisor.driver, supervisor.observer)
-    restarted.service(now_ms=obligation.restore_deadline_ms + 1)
-    assert calls == []
-    assert next(iter(supervisor._load()["records"].values()))["phase"] == "reboot_intent"
-
-
-def test_journal_failure_prevents_reboot_effect(recovery, monkeypatch):
-    supervisor, obligation, _, calls = recovery
+def test_journal_failure_raises_to_the_host(recovery, monkeypatch):
+    supervisor, obligation, _ = recovery
     supervisor.arm(obligation, now_ms=1000)
     def failed(*a):
         supervisor.store.failed = True
@@ -293,7 +294,6 @@ def test_journal_failure_prevents_reboot_effect(recovery, monkeypatch):
     monkeypatch.setattr(supervisor.store, "write", failed)
     with pytest.raises(OSError):
         supervisor.service(now_ms=obligation.stop_deadline_ms)
-    assert calls == []
 
 
 @pytest.mark.parametrize("field,value", [("schema", True), ("completed_ms", True), ("identity", {}), ("fault", 5)])
@@ -308,14 +308,14 @@ def test_invalid_adapter_journal_cannot_complete(stopped, field, value):
 
 
 def test_empty_recovery_journal_is_corruption_not_fresh_authority(recovery):
-    supervisor, obligation, _, _ = recovery
+    supervisor, obligation, _ = recovery
     supervisor.store.write("local-recovery", {})
     with pytest.raises(ValueError, match="journal"):
         supervisor.arm(obligation, now_ms=1000)
 
 
 def test_recovery_cause_is_reportable_without_remote_authority(recovery):
-    supervisor, obligation, _, _ = recovery
+    supervisor, obligation, _ = recovery
     supervisor.arm(obligation, now_ms=1000)
     supervisor.service(now_ms=obligation.stop_deadline_ms)
     metrics, fault = supervisor.telemetry()

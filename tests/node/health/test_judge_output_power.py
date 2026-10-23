@@ -1,6 +1,7 @@
 """Guard (1b D2, E-1B-5): an Output that drops out for a hot-plug blip, or for the whole of a
 requested off (some displays drop hot-plug through standby), raises no display-affecting code.
-Green before and after D2: the judge reads no display power, and must not start to."""
+Green before and after D2. Since issue #123 the judge reads the power in force from Display's
+snapshot, only to keep `nothing_to_show` from opening while it is off; a blip raises nothing."""
 from uuid import uuid4
 
 from appliance.apps.probe import SHIPPED_TIMING, AppRunKey
@@ -17,12 +18,12 @@ TEST_OFF_MS = 300_000           # central.displays TEST_SECONDS: the console's T
 def judge() -> HealthJudge:
     return HealthJudge(period_ms=SHIPPED_TIMING.period_ms, miss_limit=SHIPPED_TIMING.miss_limit,
                        startup_ms=SHIPPED_TIMING.startup_ms,
-                       kill_after_ms=SHIPPED_TIMING.kill_after_ms,
                        pulse_deadline_ms=PULSE_DEADLINE_MS, catalogue=FAULTS)
 
 
 def outputs(subject: HealthJudge, now: int, *, connected: bool) -> None:
-    subject.observe_outputs([{"output_id": "HDMI-A-1", "connected": connected, "admitted": None}], now)
+    subject.observe_outputs([{"output_id": "HDMI-A-1", "connected": connected, "admitted": None,
+                              "holding": False, "power": "on"}], now)
 
 
 def display_affecting(subject: HealthJudge, now: int) -> list[str]:
@@ -43,7 +44,7 @@ def test_a_hot_plug_blip_raises_nothing_display_affecting():
     assert display_affecting(subject, 1_100) == []
     outputs(subject, 1_250, connected=True)
     assert display_affecting(subject, 10_000) == []
-    assert [instruction.tint for instruction in subject.instructions(10_000)] == [False]
+    assert [instruction.tint for instruction in subject.instructions(10_000, wall_ms=10_000)] == [False]
 
 
 def test_an_output_gone_for_a_requested_off_raises_nothing_display_affecting():

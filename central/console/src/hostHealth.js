@@ -466,6 +466,8 @@ function classify(row, read, absent) {
 
 // The host facts record (G13) and the boot's base (§62): text a box's current boot carries.
 const FACTS_LABEL = "Host facts";
+/** The facts record's `reset_cause` "watchdog" (contracts/node_host_facts.py RESET_CAUSES). */
+export const WATCHDOG_START = "Last start: after a hardware watchdog reset";
 const BASE_SOURCE = "this boot's node session";
 
 /**
@@ -539,6 +541,9 @@ function factItems(row, read, absent, health) {
   items.push(entry("base_reported", "Software",
     reportedBase === null ? couldNot("base tag") : reported(`base ${reportedBase}`)));
   items.push(base);
+  // Issue #125: the hardware watchdog stays, and each reboot it makes is shown. Only a watchdog
+  // reset is worded; any other start, or a driver that cannot tell, adds no line.
+  if (facts.reset_cause === "watchdog") items.push(entry("reset_cause", "Software", reported(WATCHDOG_START)));
   if (reportedBase !== null && offered !== null && reportedBase !== offered) {
     items.push(entry("base_mismatch", "Software", fact({ kind: "derived",
       value: `Base differs: ${HOST} reported ${reportedBase}, Central's offer ${offered}`,
