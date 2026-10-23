@@ -2,7 +2,6 @@
 
 import base64
 import hashlib
-import itertools
 import re
 import time
 import uuid
@@ -14,12 +13,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
 from support.frames import frame_create
+from support.output_report import report_modes
 from support.position import PORTRAIT_ON_WIDE, save_position
 
 from central.app import create_app
 from central.coordination import Coordinator
 from central.db import Database
-from central.infra.display_store import REPORT_STREAM, DisplayWakes, OutputReportJudge
 from central.installation_models import InstallationInventory
 from central.registry import (
     Enrollment,
@@ -37,11 +36,7 @@ from contracts.models import (
     Calibration,
     PositionBox,
 )
-from contracts.node_output import OutputReport as WireReport
-from contracts.node_output import encode_output_report, output_report_key
 from contracts.player_control import ControlHello
-from nodeapi.epoch import Token
-from nodeapi.pull import Read
 
 ADMIN = "test-operator-" + "x" * 40
 # A Position of the portrait Frame (`frame`) on a 1920 x 1080 screen that differs from
@@ -49,7 +44,9 @@ ADMIN = "test-operator-" + "x" * 40
 SKEWED = Calibration(fit=PositionBox(left=0.275, top=0.1, width=0.25, height=0.79))
 
 
-def enroll(registry, key=None, count=2, device_id=None, size=(1920, 1080)):
+def enroll(registry, key=None, count=2, device_id=None, size=(1920, 1080), report=True):
+    """Enroll a Player whose Outputs are `size`; with `report`, each Output's report (`report_modes`)
+    states that mode, as a Node's display line would; without it, as a Player with no Node."""
     key = key or Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes_raw().hex()
     device_id = device_id or "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
@@ -62,28 +59,9 @@ def enroll(registry, key=None, count=2, device_id=None, size=(1920, 1080)):
                          signature=base64.b64encode(key.sign(enrollment_message(
                              nonce, outputs, device_id, boot_id))).decode())
     identity = registry.enroll(request)
-    if size[0] >= 1 and size[1] >= 1:
+    if report and size[0] >= 1 and size[1] >= 1:
         report_modes(registry, device_id, tuple(output.output_id for output in outputs), size)
     return identity, key, request
-
-
-_REPORT_SEQ = itertools.count(1)
-
-
-def report_modes(registry, device_id: str, output_ids: tuple[str, ...], mode: tuple[int, int] | None) -> None:
-    """Each Output's report on the Node's display line, stating the mode Weston runs (`current_mode`,
-    with the seen Display's preferred mode the one source of a Frame's screen size, issue #124), or
-    disconnected with none when `mode` is None, recorded by Central's real OutputReportJudge in one
-    transaction, as the hub's link store commits it. A database migrated only part way (the upgrade
-    history tests) has no display line yet: nothing is recorded there."""
-    reads = tuple(
-        Read(Token("0123456789abcdef", next(_REPORT_SEQ)), "$KV.state_display." + output_report_key(output_id), {},
-             encode_output_report(WireReport(output_id, mode is not None, None, (), (), None, None, None, None, None,
-                                             current_mode=mode)))
-        for output_id in output_ids)
-    with registry.db.transaction() as conn:
-        if conn.execute("SELECT to_regclass('output_displays') AS line").fetchone()["line"] is not None:
-            OutputReportJudge(DisplayWakes()).judge_in(conn, device_id, REPORT_STREAM, reads)
 
 
 def hello(registry, identity, capabilities=()):
