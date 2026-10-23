@@ -33,7 +33,8 @@ def test_stage_effect_roundtrip_and_exact_digest():
     assert parse_app_effect_event(encode_app_effect_event(event)) == event
     with pytest.raises(ValueError, match="process_required"):
         replace(event, phase="running")
-    for retired in ("no_stop_quiescent", "cancelled_before_stop"):
+    # Issue #125: no Node starts the old release on its own, so no fallback phase is reported.
+    for retired in ("no_stop_quiescent", "cancelled_before_stop", "fallback_starting", "fallback_running"):
         with pytest.raises(ValueError, match="phase_invalid"):
             replace(event, phase=retired)
     with pytest.raises(ValueError, match="app_effect_producer_required"):

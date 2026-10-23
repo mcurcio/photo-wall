@@ -435,10 +435,7 @@ def _central_fixture(
             ).fetchall()
             events = [parse_app_effect_event(bytes(e["payload"])) for e in effects]
             event = events[-1] if events else None
-            result["terminal_effect"] = event is not None and event.phase in (
-                "running",
-                "fallback_running",
-            )
+            result["terminal_effect"] = event is not None and event.phase == "running"
             cuts = {
                 phase: min((e.sequence for e in events if e.phase == phase), default=0)
                 for phase in ("intent_stop", "stopped")

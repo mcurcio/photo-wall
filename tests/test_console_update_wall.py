@@ -71,7 +71,7 @@ out.steps = {
   stagingHeldInProgress: step(r(readOf(), { operations: ops([op("o-1", "switching")]) }), "p-1", held({ stageId: "o-1" })),
   // A stage this page does not hold, switching: not provably the target's, so Stage is offered.
   stagingOtherSwitching: step(r(readOf(), { operations: ops([op("o-x", "switching")]) }), "p-1"),
-  lookingHeld: step(r(readOf(), { operations: ops([op("o-1", "fallback_running")]) }), "p-1", held({ stageId: "o-1" })),
+  lookingHeld: step(r(readOf(), { operations: ops([op("o-1", "target_running")]) }), "p-1", held({ stageId: "o-1" })),
   lookingUnknown: step(r(readOf(), { operations: ops([op("o-1", "effect_unknown")]) }), "p-1", held({ stageId: "o-1" })),
   // After a reload: target_running with the target's app linked is the target's stage.
   lookingRederived: step(r(readOf(), { operations: ops([op("o-2", "target_running")], NEW_APP) }), "p-1"),

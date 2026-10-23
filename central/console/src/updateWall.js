@@ -78,7 +78,7 @@ export const TRY_BASE_CHANGES = "This release changes the base, so it cannot be 
 export const TRY_NO_APP = "This release has no app, so there is nothing to try live; putting it on "
   + "the wall reboots each Player onto it";
 
-const LOOKING = new Set(["target_running", "fallback_running", "effect_unknown"]);
+const LOOKING = new Set(["target_running", "effect_unknown"]);
 const IN_PROGRESS = new Set(["staged", "switching"]);
 const ENDED = new Set(["interrupted_by_reboot", "ended_by_later_boot"]);
 // A bound Output is live when its Frame's health is past every liveness and Output cause;
