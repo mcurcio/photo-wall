@@ -6919,3 +6919,4 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
 - **scripts/check_docs.py checks file links only, never anchors** (it drops `#…` before checking): a
   renamed heading leaves every `#room-lights-and-home-assistant` link silently broken. The mutation
   probe used a broken relative file link instead.
+- **Resolved:** the half-up rounding above landed in 893eeffb (PLAYER lane) before this lane's push.
