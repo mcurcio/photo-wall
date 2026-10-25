@@ -134,8 +134,9 @@ def inside(box, window) -> bool:
 ])
 def test_one_photo_on_two_frames_gets_a_crop_of_each_frames_shape(first: str, second: str) -> None:
     """The photo is planned on both Frames within the hour; each Frame's crop window has that
-    Frame's shape, the two crops differ, every face is whole in each, and the Player's renderer,
-    finishing the photo for each Frame on its screen, draws exactly that window.
+    Frame's shape, the two windows differ (two shapes at one offset are still two crops), every
+    face is whole in each, and the Player's renderer, finishing the photo for each Frame on its
+    screen, draws exactly that window.
     Mutation probes: judge with the screen's size instead of the Frame output -> each Frame
     draws an offset chosen for another shape, which cuts a face; let a window cut a face -> the
     rule slides to the interest and a face falls outside the window; the renderer asks for the
@@ -149,6 +150,7 @@ def test_one_photo_on_two_frames_gets_a_crop_of_each_frames_shape(first: str, se
     faces = faces_judged(subject.analysis.key, SETTINGS)
     assert len(faces) == len(OFF_CENTRE_FACES)
     width, height = PHOTO_SIZE
+    windows = {}
     for frame, box in frames.items():
         assert len(crops[frame]) == 1, crops[frame]
         (crop,) = crops[frame]
@@ -173,7 +175,8 @@ def test_one_photo_on_two_frames_gets_a_crop_of_each_frames_shape(first: str, se
         drawn = (*fit_source_uv(0, 0, request.aspect, request.source.size, request.crop),
                  *fit_source_uv(1, 1, request.aspect, request.source.size, request.crop))
         assert drawn == pytest.approx(window), (frame, drawn, window)
-    assert len({crop for frame_crops in crops.values() for crop in frame_crops}) == 2
+        windows[frame] = tuple(round(edge, 9) for edge in drawn)
+    assert windows[first] != windows[second], windows
 
 
 @pytest.mark.parametrize("faces, refused, taken", [
