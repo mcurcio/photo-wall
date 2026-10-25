@@ -8,7 +8,7 @@ from typing import Final
 from scripts.render_bench.kms_state import OPAQUE_ALPHA, PREMULTIPLIED, KmsPlane
 from scripts.render_bench.registers import RegisterSample, blind, glitched
 
-ALPHA_TOLERANCE: Final = 1 / 255    # a strength and the kernel's 16-bit alpha agree within one level
+ALPHA_TOLERANCE: Final = 1 / 255    # a picture's share of the screen, planes against strengths, within one level
 GPU_IDLE: Final = 0.05              # the GPU's busy share that counts as idle
 
 
@@ -36,8 +36,8 @@ class Moment:
 class Verdict:
     """The tracer's checks (s1-page.md, the tracer, and the fix rounds): no framebuffer of
     Weston's renderer on screen (the compositor composited nothing); the screen's ground on the
-    bottom plane whenever it shows; every expected picture on its own plane above it; each plane's alpha within ALPHA_TOLERANCE of its strength
-    and its blend mode Pre-multiplied; no glitch; the GPU below GPU_IDLE whenever nothing is
+    bottom plane whenever it shows; every expected picture on its own plane above it; the planes' alphas mixing the screen
+    the strengths do, each picture's share within ALPHA_TOLERANCE, and every blend mode Pre-multiplied; no glitch; the GPU below GPU_IDLE whenever nothing is
     `drawing`; the overload step cut to fit, without a glitch. `failures` names each failed check
     with its first moment's plan time."""
     passed: bool
@@ -47,6 +47,29 @@ class Verdict:
 def _ground(plane: KmsPlane, mode: tuple[int, int]) -> bool:
     """Whether `plane` is the screen's ground: the Player's opaque picture of the whole screen."""
     return plane.position == (0, 0) and plane.source_size == mode and plane.alpha == OPAQUE_ALPHA
+
+
+def _shares(alphas: Sequence[float]) -> list[float]:
+    """Each layer's share of the screen when `alphas` (bottom to top, 0..1) are stacked with
+    pre-multiplied blending, each over everything beneath it: a layer's alpha times what every layer
+    above it lets through. The rest is the ground's (or black's)."""
+    shares, through = [], 1.0
+    for alpha in reversed(alphas):
+        shares.append(alpha * through)
+        through *= 1.0 - alpha
+    return shares[::-1]
+
+
+def _mix_matches(alphas: Sequence[float], strengths: Sequence[float], slack: float) -> bool:
+    """Whether planes at `alphas` (bottom to top) mix the picture `strengths` (compose's order, bottom
+    to top) must: each picture's share of the screen within `slack`. The kernel's planes name no
+    picture, so the shares are compared as sets, smallest with smallest (which pairs them as closely
+    as any pairing can): a dissolve whose incoming picture is beneath at full strength and outgoing
+    on top at 1 - s mixes the same screen as the plan's order, and passes; a share off by more than
+    `slack` fails. The cost: a mix whose shares are right but swapped between its two pictures (the
+    fade run backwards) passes too."""
+    return all(abs(shown - wanted) <= slack
+               for shown, wanted in zip(sorted(_shares(alphas)), sorted(_shares(strengths)), strict=True))
 
 
 def _failed_checks(first: RegisterSample, moment: Moment, renderer: Collection[int]) -> list[str]:
@@ -67,8 +90,8 @@ def _failed_checks(first: RegisterSample, moment: Moment, renderer: Collection[i
     if len(pictures) != len(strengths):
         failed.append("plane")
     slack = ALPHA_TOLERANCE + 0.5 / OPAQUE_ALPHA        # one level, and the property's own rounding
-    if any(abs(plane.alpha / OPAQUE_ALPHA - strength) > slack
-           for plane, strength in zip(pictures, strengths, strict=False)):
+    if len(pictures) == len(strengths) and not _mix_matches(
+            [plane.alpha / OPAQUE_ALPHA for plane in pictures], strengths, slack):
         failed.append("alpha")
     if any(plane.blend != PREMULTIPLIED for plane in pictures):
         failed.append("blend")

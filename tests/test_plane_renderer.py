@@ -16,6 +16,7 @@ from uuid import uuid4
 
 import pytest
 from test_executor import LIGHTING, binding, layer, media
+from test_executor import Rig as PlanRig
 
 from contracts.calibration_target import TargetCode
 from contracts.frame_fit import Placement, place_box
@@ -273,8 +274,8 @@ class FakeVideo:
 
 
 class Rig:
-    def __init__(self, **screens) -> None:
-        self.clock = Clock()
+    def __init__(self, clock=None, **screens) -> None:
+        self.clock = clock or Clock()
         self.screens = FakeScreens(self.clock, **screens)
         self.log: list[str] = []
         self.screens.log = self.log
@@ -1325,3 +1326,172 @@ def test_a_prepared_video_has_all_its_targets_before_its_first_fade_frame():
         decode.on_frame()
         rig.renderer.finish()
     assert "target" not in rig.log and rig.log.count("import") >= 3
+
+
+class MonotonicClock:
+    """The executor rig's ManualClock's monotonic seconds, as the renderer and its fakes read them."""
+
+    def __init__(self, manual) -> None:
+        self.manual = manual
+
+    def __call__(self) -> float:
+        return self.manual.monotonic()
+
+
+class Wall:
+    """The real Executor driving the real PlaneRenderer over this module's fakes, on one clock (plan
+    time = monotonic + 100): the frame loop (player/mainloop.py `FrameLoop`: `frame`, then `finish`)
+    every refresh and the planning tick (player/service.py: `prepare_imminent`, then `tick`) every
+    TICK refreshes. Each video's decoder hands over a new frame every refresh."""
+
+    TICK = 2
+
+    def __init__(self, directory: Path) -> None:
+        self.plan = PlanRig(directory, bindings=(framed(),))
+        self.planes = Rig(MonotonicClock(self.plan.clock))
+        self.screens, self.renderer = self.planes.screens, self.planes.renderer
+        self.plan.renderer = self.plan.executor.renderer = self.renderer
+        self.observations: list = []
+        self.refreshes = 0
+
+    @property
+    def now(self) -> float:
+        """Plan time."""
+        return self.plan.clock.utc()
+
+    def play(self, *layers) -> None:
+        """Offer `layers` (each one's media its key's bytes), secure each, prepare them through the
+        frame loop and commit them all."""
+        self.plan.offer(*layers)
+        for item in layers:
+            self.plan.secure(item.assignment_id, item.assignment_id.encode())
+        keys = tuple(item.assignment_id for item in layers)
+        for _ in range(200):
+            self.plan.executor.prepare_imminent()
+            if set(self.plan.executor.readiness().prepared) == set(keys):
+                break
+            self.refresh(tick=False)
+        else:
+            raise AssertionError("never prepared")
+        self.plan.commit(*keys)
+
+    def refresh(self, *, tick: bool = True) -> None:
+        """One refresh: decoders hand over a frame, the frame loop's turn, the planning tick on its
+        cadence."""
+        self.plan.advance(FRAME)
+        self.refreshes += 1
+        for decode in self.planes.videos:
+            decode.push(self.refreshes + 1)
+            decode.on_frame()
+        self.renderer.frame()
+        self.renderer.finish()
+        if tick and self.refreshes % self.TICK == 0:
+            self.tick()
+
+    def tick(self) -> None:
+        self.plan.executor.prepare_imminent()
+        self.observations += self.plan.executor.tick()
+
+    def run(self, until: float) -> None:
+        """Refreshes until plan time `until`."""
+        while self.now + FRAME <= until:
+            self.refresh()
+
+    def cut(self, at: float, *, silent: bool = False) -> int:
+        """The layer set changes at plan time `at` while the frame loop's last commit before it is
+        in flight: the frame loop's next commit before `at` has its answer withheld; the planning
+        tick runs just after `at`; then the answer comes (never, if `silent`: the display says
+        nothing from then on) and the wall runs a second and a half on. The index of the first
+        commit after the one in flight."""
+        self.run(at - 4 * FRAME)
+        made = len(self.screens.commits)
+        while len(self.screens.commits) == made:
+            assert self.now + FRAME < at, "the frame loop commits before the cut"
+            self.refresh(tick=False)
+        self.screens.answer = False
+        mark = len(self.screens.commits)
+        self.plan.advance(at - self.now + 0.005)
+        self.tick()
+        assert len(self.screens.commits) == mark, "nothing is committed while the last commit is in flight"
+        self.screens.answer = not silent
+        self.run(at + 1.5)
+        return mark
+
+    def shown(self, since: int) -> list[list[str]]:
+        """Each commit's planes from commit `since` on, by assignment."""
+        return [[plane.layer.layer.assignment_id for plane in composition.planes]
+                for composition, *_ in self.screens.commits[since:]]
+
+    def failures(self) -> list[tuple[str, str, str]]:
+        return [(o.assignment_id, o.status, o.detail) for o in self.observations
+                if o.status in ("failed", "fallback")]
+
+
+def still(key: str, **fields):
+    """A JPEG layer on the wall's Frame, its media its key's bytes."""
+    return layer(key, data=key.encode(), variant=media(key.encode()).model_copy(update={"media_type": "image/jpeg"}),
+                 **fields)
+
+
+def test_a_cross_fades_end_never_shows_the_old_photo_again(tmp_path):
+    """Issue #130: Central plans the old photo at full strength until the new one has faded in, so
+    the old one leaves the plan at the fade's end, just after the frame loop's last fade commit,
+    while that commit is unanswered. Every commit after it shows the new photo alone (never the
+    old one, kept by its Scene, nor black), and the new photo never fails."""
+    wall = Wall(tmp_path)
+    old = still("old", start=100, end=106, after_end="keep_this_photo")
+    new = still("new", start=103, end=130, media_origin=103, fade_in=3, after_end="keep_this_photo")
+    wall.play(old, new)
+    mark = wall.cut(106)
+    assert wall.shown(mark) and all(planes == ["new"] for planes in wall.shown(mark))
+    assert wall.failures() == []
+
+
+def test_a_dips_cut_never_shows_the_old_photo_again(tmp_path):
+    """The dip (fade out, then in): the old photo fades out to its end, where the new one starts
+    fading in. No commit after the cut shows the old photo, and the new one never fails."""
+    wall = Wall(tmp_path)
+    old = still("old", start=100, end=106, fade_out=1, after_end="keep_this_photo")
+    new = still("new", start=106, end=130, media_origin=106, fade_in=1, after_end="keep_this_photo")
+    wall.play(old, new)
+    mark = wall.cut(106)
+    assert all("old" not in planes for planes in wall.shown(mark))
+    assert wall.shown(mark)[-1] == ["new"]
+    assert wall.failures() == []
+
+
+def test_a_photo_cut_in_over_a_playing_video_is_never_dropped(tmp_path):
+    """A video commits every frame, so its screen's last commit is in flight at almost every
+    planning tick: a photo that starts over it is shown from its first commit on and never fails."""
+    wall = Wall(tmp_path)
+    clip = layer("clip", data=b"clip", video=True, start=100, end=130)
+    cover = still("cover", start=103, end=130, media_origin=103)
+    wall.play(clip, cover)
+    mark = wall.cut(103)
+    shown = wall.shown(mark)
+    first = next(index for index, planes in enumerate(shown) if planes == ["cover"])
+    assert all(planes == ["cover"] for planes in shown[first:])
+    assert wall.failures() == []
+
+
+def test_a_cross_fades_end_on_a_silent_display_never_fails_the_new_photo(tmp_path):
+    """A display that never answers (off, or a slow compositor at its worst) holds each commit for
+    the pacer's OVERDUE: the planning tick's new request waits "pending" that long and is committed
+    by the first present to find the slot free, within the executor's draw grace. The old photo is
+    never shown after the cut and the new one never fails."""
+    wall = Wall(tmp_path)
+    old = still("old", start=100, end=106, after_end="keep_this_photo")
+    new = still("new", start=103, end=130, media_origin=103, fade_in=3, after_end="keep_this_photo")
+    wall.play(old, new)
+    mark = wall.cut(106, silent=True)
+    assert wall.shown(mark) and all(planes == ["new"] for planes in wall.shown(mark))
+    assert wall.failures() == []
+
+
+def test_the_draw_grace_outlasts_a_commit_in_flight_and_a_planning_tick():
+    """The executor gives a "pending" request up after DRAW_GRACE; the plane renderer holds a
+    commit in flight for at most OVERDUE, and the held request is committed by the next present,
+    at worst the next planning tick. A shorter grace fails a silent Output's new photo ("decode")
+    and shows the old one again (issue #130)."""
+    from player import executor, pacing, service
+    assert pacing.OVERDUE + service.PLANNING_TICK_MS / 1000 < executor.DRAW_GRACE
