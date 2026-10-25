@@ -1,8 +1,10 @@
 import {
-  CONSTANTS, type HeardEntityView, type Measured, PATTERNS, type PlayerDrawnView, type RefusedReportView,
-  type ReportedColourSource, type ReportRefusal, type RoomLight, type RoomLightRefusal, type RoomLightsView,
-  type RoomLightView, type Sensor, type SensorView, type Unavailable,
+  type ColourLineView, type ColourSensor, type ColourSensorView, CONSTANTS, type HeardEntityView, type LightColour,
+  type Measured, PATTERNS, type PlayerDrawnView, type RefusedReportView, type ReportedColourSource, type ReportRefusal,
+  type RoomLight, type RoomLightRefusal, type RoomLightsView, type RoomLightView, type Sensor, type SensorView,
+  type Unavailable,
 } from "../../generated/contract";
+import type { TruthKind } from "../../design/tokens";
 import { unitWords } from "../../patterns/units";
 
 /*
@@ -61,27 +63,114 @@ export function lightNames(view: RoomLightsView | null): Readonly<Record<string,
   return Object.fromEntries((view?.lights ?? []).map((light) => [light.id, light.light.name]));
 }
 
-/** Where a light's colour comes from: "2700 K" (typed), "Its bulb's (2700 K until it says)", "From
- * colour sensor sky" (the colour sensor's id). */
-export function colourWords(colour: RoomLight["colour"]): string {
-  switch (colour.kind) {
-    case "typed":
-      return unitWords(colour.kelvin, "K");
-    case "its-bulb":
-      return `Its bulb's (${unitWords(colour.typed_kelvin, "K")} until it says)`;
-    default:
-      return `From colour sensor ${colour.sensor}`;
-  }
+/** Every colour sensor's name by its id (none read yet: no names). */
+export function colourSensorNames(view: RoomLightsView | null): Readonly<Record<string, string>> {
+  return Object.fromEntries((view?.colour_sensors ?? []).map((each) => [each.id, each.sensor.name]));
+}
+
+/** Where a light's colour comes from, as its line names it: "its bulb", or the colour sensor's name
+ * (else its id); null for a typed colour. */
+function sourceWords(line: ColourLineView, names: Readonly<Record<string, string>>): string | null {
+  if (line.source === "its-bulb") return "its bulb";
+  if (line.source === "colour-sensor") return line.sensor === null ? "its colour sensor" : names[line.sensor] ?? line.sensor;
+  return null;
+}
+
+/** The kelvin the screen draws a stated kelvin at, as the line names it: bounded to the screen's
+ * colour table (the Pi also rounds it to the table's step: player/geometry.py `drawn_kelvin`). */
+export function drawnKelvin(kelvin: number): number {
+  return Math.min(CONSTANTS.KELVIN_TABLE_MAX, Math.max(CONSTANTS.KELVIN_TABLE_MIN, kelvin));
+}
+
+/** " · outside what the screen draws (drawn at 10,000 K)" for a kelvin outside the screen's colour
+ * table, else "". */
+function outsideWords(colour: LightColour): string {
+  if (colour.kind !== "kelvin") return "";
+  const drawn = drawnKelvin(colour.kelvin);
+  return drawn === colour.kelvin ? "" : ` · outside what the screen draws (drawn at ${unitWords(drawn, "K")})`;
+}
+
+/** A fact kept while its source can't tell: "Can't tell since 18:42 (keeping 3,400 K)" (`clock` says
+ * the time); `kept` null (nothing was ever stated): "Can't tell since 18:42". */
+export function keptWords(cantTellSince: number, kept: string | null, clock: (epochSeconds: number) => string): string {
+  const since = `Can't tell since ${clock(cantTellSince)}`;
+  return kept === null ? since : `${since} (keeping ${kept})`;
+}
+
+/**
+ * A light's colour line, from Central's ColourLineView: "Typed 5,500 K"; "Following its bulb 3,400 K",
+ * "Following Sky colour 3,400 K" (a colour sensor, named by `names`), "Following its bulb (colour)" (a
+ * bulb in a colour mode); "Typed 5,500 K until its bulb says" (its source never stated one); while
+ * its source can't tell, "Can't tell since 18:42 (keeping 3,400 K)". A kelvin outside the screen's
+ * colour table adds " · outside what the screen draws (drawn at 10,000 K)". `clock` says a time.
+ */
+export function colourLineWords(line: ColourLineView, names: Readonly<Record<string, string>>,
+  clock: (epochSeconds: number) => string): string {
+  const source = sourceWords(line, names);
+  const kelvin = line.colour.kind === "kelvin" ? unitWords(line.colour.kelvin, "K") : null;
+  let said: string;
+  if (source === null) said = `Typed ${kelvin ?? "(colour)"}`;
+  else if (line.cant_tell_since !== null) said = keptWords(line.cant_tell_since, kelvin ?? "its colour", clock);
+  else if (line.colour_from === "following") said = `Following ${source} ${kelvin ?? "(colour)"}`;
+  else if (line.colour_from === "never-stated") said = `Typed ${kelvin ?? "(colour)"} until ${source} says`;
+  else said = `Typed ${kelvin ?? "(colour)"}`;
+  return said + outsideWords(line.colour);
+}
+
+/** The truth kind a colour line is shown in: can't tell is unknown, following is what its source
+ * reported, typed (also until its source says) is what was set. */
+function colourLineTone(line: ColourLineView): TruthKind {
+  if (line.source !== "typed" && line.cant_tell_since !== null) return "unknown";
+  return line.source !== "typed" && line.colour_from === "following" ? "reported" : "set";
+}
+
+/** A light's colour line, said where a Frame's Lighting tab shows it: its words and truth kind. */
+export function colourLineSaid(line: ColourLineView, names: Readonly<Record<string, string>>,
+  clock: (epochSeconds: number) => string): { words: string; tone: TruthKind } {
+  return { words: colourLineWords(line, names, clock), tone: colourLineTone(line) };
+}
+
+/** A light's state now: its entry's words ("On, 60 %"), or while its reporter can't tell, the kept
+ * state, "Can't tell since 18:42 (keeping On, 60 %)". */
+export function brightnessWords(view: RoomLightView, clock: (epochSeconds: number) => string): string {
+  const said = entryWords(view.entry);
+  if (view.cant_tell_since === null) return said;
+  const stated = view.entry.kind !== "fixed" && view.entry.state.kind !== "not-reported";
+  return keptWords(view.cant_tell_since, stated ? said : null, clock);
+}
+
+/** A Sensor's reading now: "320 lx", or while it can't tell, "Can't tell since 18:42 (keeping 320 lx)". */
+export function sensorReadingWords(view: SensorView, clock: (epochSeconds: number) => string): string {
+  if (view.cant_tell_since === null) return readingWords(view.reading);
+  return keptWords(view.cant_tell_since, view.reading === null ? null : readingWords(view.reading), clock);
+}
+
+/** A colour sensor's last colour: "3,400 K", "Not reported yet", or while it can't tell, "Can't tell
+ * since 18:42 (keeping 3,400 K)". */
+export function colourReadingWords(view: ColourSensorView, clock: (epochSeconds: number) => string): string {
+  const said = view.colour === null ? null : unitWords(view.colour.kelvin, "K");
+  if (view.cant_tell_since !== null) return keptWords(view.cant_tell_since, said, clock);
+  return said ?? "Not reported yet";
+}
+
+/** The lights that take their colour from a colour sensor, by name ("Daylight, Hall lamp"), or "No light". */
+export function followedWords(view: ColourSensorView, names: Readonly<Record<string, string>>): string {
+  return view.followed_by.length === 0 ? "No light" : view.followed_by.map((id) => names[id] ?? id).join(", ");
+}
+
+/** A colour sensor named `name` whose colour smart-home colour-temperature entity `entity` reports. */
+export function smartColourSensor(name: string, entity: string): ColourSensor {
+  return { name, at: { source: CONSTANTS.HOME_ASSISTANT_SOURCE, address: entity } };
 }
 
 /** The Pi a Sensor is wired to (its player id), or null for a Sensor another source reports. */
-export function piOf(sensor: Sensor): string | null {
+export function piOf(sensor: Sensor | ColourSensor): string | null {
   return sensor.at.source === CONSTANTS.PI_SOURCE ? sensor.at.address : null;
 }
 
 /** Where a Sensor is, in light terms: "Wired to Player …1a2b3c" (`piName` names the Pi), or "In the
  * smart home" for one the house's other systems report. */
-export function whereWords(sensor: Sensor, piName: (playerId: string) => string): string {
+export function whereWords(sensor: Sensor | ColourSensor, piName: (playerId: string) => string): string {
   const pi = piOf(sensor);
   return pi === null ? "In the smart home" : `Wired to ${piName(pi)}`;
 }
@@ -145,7 +234,7 @@ export const REFUSAL_WORDS: Record<RoomLightRefusal, string> = {
   sensor_reports_a_light: "This Sensor measures a room light. Change or remove that light first; a Sensor measures one light at most.",
   colour_sensor_followed: "A room light takes its colour from this colour sensor. Change that light's colour first.",
   named_by_a_frame: "A Frame's lighting uses this light. Remove it from those Frames' lighting first.",
-  too_many: "The house has as many lights or Sensors as Photo Wall keeps. Remove one first.",
+  too_many: "The house has as many lights, Sensors or colour sensors as Photo Wall keeps. Remove one first.",
 };
 const UNREACHABLE = "Central did not answer. Try again.";
 const INVALID = "Photo Wall refused these values. Check the name and the numbers.";
@@ -170,8 +259,9 @@ export function drawnOf(players: readonly PlayerDrawnView[], playerId: string): 
   return players.find((player) => player.player_id === playerId);
 }
 
-/** The smart home's entities a light or a Sensor may be reported by (Home Assistant's states as
- * Central last heard them): a light from a light entity only, a Sensor from an illuminance entity only. */
+/** The smart home's entities a light, a Sensor or a colour sensor may be reported by (Home
+ * Assistant's states as Central last heard them): a light from a light entity only, a Sensor from an
+ * illuminance entity only, a colour sensor from a colour-temperature entity only. */
 export function entitiesFor<K extends HeardEntityView["kind"]>(heard: readonly HeardEntityView[], kind: K):
   Extract<HeardEntityView, { kind: K }>[] {
   return heard.filter((entity): entity is Extract<HeardEntityView, { kind: K }> => entity.kind === kind);

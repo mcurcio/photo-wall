@@ -4,7 +4,7 @@ import type { RoomLightsView } from "../../generated/contract";
 import { Note } from "../../patterns/fact-row";
 import { Section } from "../../ui/section";
 import { type Adjustment, LiveAdjustment } from "../live-adjustment";
-import { FrameLighting } from "./frame-lighting";
+import { FrameLighting, type FrameLightingProps } from "./frame-lighting";
 import type { PaperProfileChoice } from "./model";
 
 export interface FrameLightingTabProps {
@@ -15,6 +15,8 @@ export interface FrameLightingTabProps {
   rooms: RoomLightsView | null;
   /** The paper profiles on the list (null: not read yet). */
   profiles: readonly PaperProfileChoice[] | null;
+  /** A room light's colour line, as the page composes it (FrameLighting). */
+  colourOf: FrameLightingProps["colourOf"];
   /** What the Frame's Pi draws with, as the page composes it. */
   drawn?: React.ReactNode;
 }
@@ -23,14 +25,14 @@ export interface FrameLightingTabProps {
  * The Frame page's Lighting tab: the Frame's lights, mat and paper (FrameLighting), live on the wall
  * through the Frame's live session, which the Position tab shares, and what its Pi draws with.
  */
-export function FrameLightingTab({ adjustment, piHref, rooms, profiles, drawn }: FrameLightingTabProps) {
+export function FrameLightingTab({ adjustment, piHref, rooms, profiles, colourOf, drawn }: FrameLightingTabProps) {
   const { lighting } = adjustment.draft;
   return (
     <Section title="Lighting">
       {drawn}
       <LiveAdjustment adjustment={adjustment} noun="lighting" piHref={piHref}>
         {lighting === null ? <Note>Reading this Frame&apos;s lighting…</Note> : (
-          <FrameLighting lighting={lighting} onChange={adjustment.changeLighting} rooms={rooms} profiles={profiles}
+          <FrameLighting lighting={lighting} onChange={adjustment.changeLighting} rooms={rooms} profiles={profiles} colourOf={colourOf}
             disabled={adjustment.busy || adjustment.phase === "stopped"} />
         )}
       </LiveAdjustment>

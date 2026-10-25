@@ -1,6 +1,8 @@
 """Room lights in the console's words: central/console/src/domain/room-lights/model.ts, the one home
-of a room light's state line, who reports it in light terms, its colour, a Sensor's reading and the
-id a name gives, bundled by the console's own esbuild and run under Node (it is pure). The ids it
+of a room light's state line, who reports it in light terms, its colour line (Central's
+ColourLineView in words: typed, following its bulb or a colour sensor, typed until its source says,
+"Can't tell since …" with the colour kept, and "outside what the screen draws" past the screen's
+colour table), a Sensor's reading and the id a name gives, bundled by the console's own esbuild and run under Node (it is pure). The ids it
 derives are checked against contracts/room_light.py's own rule. Every refusal code having words is
 the typecheck's (a `Record` over the generated refusal union).
 
@@ -10,7 +12,9 @@ name with its entity id as the detail, and the light or Sensor it saves names th
 
 Mutation probes: "Off" for a not-reported state -> the state case fails; the id keeps
 upper case or a trailing hyphen -> the contract rejects it; `entitiesFor` keeps illuminance entities
-for a light -> the picker case fails.
+for a light -> the picker case fails; `drawnKelvin` bounded by KELVIN_STATED_MAX instead of
+KELVIN_TABLE_MAX -> the 34,000 K line loses "outside what the screen draws (drawn at 10,000 K)" and
+the colour line case fails.
 """
 
 import json
@@ -32,11 +36,45 @@ HEARD = [
     {"entity": "light.kitchen", "kind": "light", "name": "Kitchen", "reports": None, "heard_at": 1},
     {"entity": "sensor.porch_illuminance", "kind": "illuminance", "name": "Porch", "reports": None, "heard_at": 1},
     {"entity": "light.hall", "kind": "light", "name": None, "reports": "hall", "heard_at": None},
+    {"entity": "sensor.sky_colour", "kind": "colour-temperature", "name": "Sky", "reports": None, "heard_at": 1},
+]
+# Central's instants: the clock the test hands the model says 18:42 for CANT_TELL.
+CANT_TELL = 1_791_000_000
+SKY = {"sky": "Sky colour"}
+
+
+def _line(kelvin=None, rgb=None, *, source="typed", sensor=None, colour_from="typed", cant_tell_since=None):
+    """A ColourLineView, as Central sends it."""
+    colour = {"kind": "rgb", "rgb": rgb} if rgb is not None else {"kind": "kelvin", "kelvin": kelvin}
+    return {"colour": colour, "source": source, "sensor": sensor, "colour_from": colour_from,
+            "stated_at": None if colour_from != "following" else CANT_TELL - 60, "cant_tell_since": cant_tell_since}
+
+
+BULB = {"source": "its-bulb"}
+SENSOR = {"source": "colour-sensor", "sensor": "sky"}
+# Each ColourLineView kind and the line the console says for it.
+LINES = [
+    (_line(5500), "Typed 5,500 K"),
+    (_line(3400, **BULB, colour_from="following"), "Following its bulb 3,400 K"),
+    (_line(3400, **SENSOR, colour_from="following"), "Following Sky colour 3,400 K"),
+    (_line(rgb=[1, 0.8, 0.6], **BULB, colour_from="following"), "Following its bulb (colour)"),
+    (_line(5500, **BULB, colour_from="never-stated"), "Typed 5,500 K until its bulb says"),
+    (_line(5500, **SENSOR, colour_from="never-stated"), "Typed 5,500 K until Sky colour says"),
+    (_line(3400, **SENSOR, colour_from="following", cant_tell_since=CANT_TELL), "Can't tell since 18:42 (keeping 3,400 K)"),
+    (_line(3400, **BULB, colour_from="following", cant_tell_since=CANT_TELL), "Can't tell since 18:42 (keeping 3,400 K)"),
+    (_line(34000, **BULB, colour_from="following"),
+     "Following its bulb 34,000 K · outside what the screen draws (drawn at 10,000 K)"),
+    (_line(1500, **SENSOR, colour_from="following"),
+     "Following Sky colour 1,500 K · outside what the screen draws (drawn at 2,000 K)"),
+    (_line(10000, **BULB, colour_from="following"), "Following its bulb 10,000 K"),
+    (_line(2000), "Typed 2,000 K"),
 ]
 
 SCRIPT = r"""
 const words = await import(process.argv[1]);
 const input = JSON.parse(process.argv[2]);
+const clock = (at) => (at === input.cantTell ? "18:42" : `at ${at}`);
+const light = (cant_tell_since, state) => ({ entry: { kind: "reported", colour: input.kelvin, state }, cant_tell_since });
 const white = (state) => words.entryWords({ kind: "reported", colour: input.kelvin, state });
 const sensors = [{ id: "window-meter", sensor: { name: "Window meter", at: { source: "x", address: "y" } },
                    reading: null, heard_at: null, reports: null }];
@@ -56,11 +94,30 @@ process.stdout.write(JSON.stringify({
     words.reporterWords({ kind: "measured", name: "Daylight", sensor: "window-meter", colour: input.fixed }, sensors),
     words.reporterWords({ kind: "fixed", name: "Lamp", colour: input.fixed }, sensors),
   ],
-  colours: [words.colourWords(input.fixed), words.colourWords({ kind: "its-bulb", typed_kelvin: 2700 })],
+  lines: input.lines.map((line) => words.colourLineWords(line, input.sky, clock)),
+  brightness: [
+    words.brightnessWords(light(null, { kind: "dimmer", on: true, brightness: 0.6 }), clock),
+    words.brightnessWords(light(input.cantTell, { kind: "dimmer", on: true, brightness: 0.6 }), clock),
+    words.brightnessWords(light(input.cantTell, { kind: "dimmer", on: false, brightness: 0 }), clock),
+    words.brightnessWords(light(input.cantTell, { kind: "not-reported" }), clock),
+  ],
+  sensorReadings: [
+    words.sensorReadingWords({ reading: { kind: "measured", lux: 320 }, cant_tell_since: input.cantTell }, clock),
+    words.sensorReadingWords({ reading: null, cant_tell_since: input.cantTell }, clock),
+  ],
+  colourSensors: [
+    words.colourReadingWords({ colour: { kind: "kelvin", kelvin: 3400 }, cant_tell_since: null }, clock),
+    words.colourReadingWords({ colour: { kind: "kelvin", kelvin: 3400 }, cant_tell_since: input.cantTell }, clock),
+    words.colourReadingWords({ colour: null, cant_tell_since: null }, clock),
+    words.followedWords({ followed_by: ["daylight", "porch"] }, { daylight: "Daylight" }),
+    words.followedWords({ followed_by: [] }, {}),
+  ],
   ids: input.names.map((name) => words.idFromName(name)),
   picker: {
     lights: words.entitiesFor(input.heard, "light").map((entity) => words.entityLabel(entity)),
     sensors: words.entitiesFor(input.heard, "illuminance").map((entity) => words.entityLabel(entity)),
+    colourSensors: words.entitiesFor(input.heard, "colour-temperature").map((entity) => words.entityLabel(entity)),
+    colourSensor: words.smartColourSensor("Sky colour", "sensor.sky_colour"),
     light: words.reportedThrough("Kitchen", "light.kitchen", input.fixed),
     sensor: words.smartSensor("Porch", "sensor.porch_illuminance"),
     reporter: [words.reporterOf(words.reportedThrough("Kitchen", "light.kitchen", input.fixed)),
@@ -78,7 +135,8 @@ def said(tmp_path_factory):
     subprocess.run([str(ESBUILD), str(MODEL), "--bundle", "--format=esm", "--platform=node", f"--outfile={bundle}",
                     "--log-level=error"], check=True, timeout=60)
     result = subprocess.run(["node", "--input-type=module", "-e", SCRIPT, bundle.as_uri(),
-                             json.dumps({"names": NAMES, "fixed": FIXED, "kelvin": KELVIN, "heard": HEARD})],
+                             json.dumps({"names": NAMES, "fixed": FIXED, "kelvin": KELVIN, "heard": HEARD,
+                                         "lines": [line for line, _ in LINES], "sky": SKY, "cantTell": CANT_TELL})],
                             capture_output=True, text=True, check=True, timeout=30)
     return json.loads(result.stdout)
 
@@ -90,7 +148,20 @@ def test_a_state_reads_from_the_entry_alone(said):
 
 def test_who_reports_a_light_is_said_in_light_terms(said):
     assert said["reporters"] == ["Reports itself", "Measured by Window meter", "Always on"]
-    assert said["colours"] == ["2700 K", "Its bulb's (2700 K until it says)"]
+
+
+def test_a_colour_line_says_its_colour_and_where_it_comes_from(said):
+    """Every ColourLineView kind in words, with "outside what the screen draws" only past the screen's
+    colour table (2,000..10,000 K), the drawn kelvin the table's bound."""
+    assert said["lines"] == [words for _, words in LINES]
+
+
+def test_what_a_source_cant_tell_is_kept_and_said(said):
+    assert said["brightness"] == ["On, 60 %", "Can't tell since 18:42 (keeping On, 60 %)",
+                                  "Can't tell since 18:42 (keeping Off)", "Can't tell since 18:42"]
+    assert said["sensorReadings"] == ["Can't tell since 18:42 (keeping 320 lx)", "Can't tell since 18:42"]
+    assert said["colourSensors"] == ["3,400 K", "Can't tell since 18:42 (keeping 3,400 K)", "Not reported yet",
+                                     "Daylight, porch", "No light"]
 
 
 def test_a_name_gives_an_id_the_contract_takes(said):
@@ -101,10 +172,14 @@ def test_a_name_gives_an_id_the_contract_takes(said):
     assert ids[4] == "a" * len(ids[4]) and re.fullmatch(ROOM_LIGHT_ID_PATTERN, ids[4] + "a") is None   # as long as an id goes
 
 
-def test_the_picker_offers_light_entities_for_a_light_and_illuminance_entities_for_a_sensor(said):
+def test_the_picker_offers_each_kind_of_entity_for_its_own_setup_item(said):
+    """A light picks from light entities, a Sensor from illuminance entities, a colour sensor from
+    colour-temperature entities."""
     picker = said["picker"]
     assert picker["lights"] == ["Kitchen (light.kitchen)", "light.hall"]
     assert picker["sensors"] == ["Porch (sensor.porch_illuminance)"]
+    assert picker["colourSensors"] == ["Sky (sensor.sky_colour)"]
+    assert picker["colourSensor"] == {"name": "Sky colour", "at": {"source": "home-assistant", "address": "sensor.sky_colour"}}
     assert picker["light"] == {"kind": "reported", "name": "Kitchen", "colour": FIXED,
                                "reporter": {"source": "home-assistant", "address": "light.kitchen"}}
     assert picker["sensor"] == {"name": "Porch", "at": {"source": "home-assistant", "address": "sensor.porch_illuminance"}}

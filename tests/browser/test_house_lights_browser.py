@@ -1,9 +1,11 @@
 """House › Lights and Settings › Home Assistant on the production app: House › Lights speaks only of
-lights, Sensors and readings (no integration, transport, topic or entity name) and picks a smart
-light from Home Assistant's light entities and a smart Sensor from its illuminance entities, by name
-with the entity id as the detail; Home Assistant's own page says when Central last heard its states,
-every entity and the room light or Sensor it reports, and the states it could not record, with no
-MQTT or broker word (GET, PUT and DELETE /v1/operator/house/lights and /sensors, GET
+lights, Sensors, colour sensors and readings (no integration, transport, topic or entity name) and
+picks a smart light from Home Assistant's light entities, a smart Sensor from its illuminance
+entities and a colour sensor from its colour-temperature entities, by name with the entity id as the
+detail; a light's colour line says where its colour comes from; Home Assistant's own page says when
+Central last heard its states, Galleria's version beside Central's, every entity and the room light,
+Sensor or colour sensor it reports, and the states it could not record, with no MQTT or broker word
+(GET, PUT and DELETE /v1/operator/house/lights, /sensors and /colour-sensors, GET
 /v1/operator/integrations/home-assistant), each refusal said in words.
 
 Central serves the house's lights; Home Assistant's states (HomeAssistantStatesView) are the central
@@ -13,7 +15,8 @@ Mutation probes: render a Sensor's or a light's reference (its entity) on House 
 no-integration case fails; the state line worked out from `heard_at` instead of the entry -> the
 always-on lamp, never heard, reads "Not reported yet" and the state case fails; a remove that
 ignores Central's 409 -> the Sensor's refusal is never said; the picker lists illuminance entities
-for a light -> the picker case fails.
+for a light -> the picker case fails; the colour column shows the light's typed kelvin instead of
+Central's colour line -> the colour sensor case never reads "Following Sky colour".
 """
 
 import json
@@ -28,8 +31,8 @@ from test_frame_picture_browser import _off_thread
 
 from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.room_light_store import PgRoomLights
-from central.room_light.model import ReporterRef
-from contracts.room_light import Dimmer
+from central.room_light.model import ColourSensorRef, ReporterRef
+from contracts.room_light import Dimmer, KelvinColour
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -42,8 +45,11 @@ WINDOW_METER = {"name": "Window meter", "at": {"source": HOME_ASSISTANT, "addres
 SPOT = {"kind": "reported", "name": "Bookshelf spot", "reporter": {"source": HOME_ASSISTANT, "address": "light.bookshelf"},
         "colour": {"kind": "its-bulb", "typed_kelvin": 2700}}
 # Words House › Lights never shows: the integration, its transport, its topics and its entities.
-INTEGRATION_WORDS = re.compile(r"home assistant|mqtt|topic|light\.bookshelf|sensor\.window_illuminance", re.I)
+INTEGRATION_WORDS = re.compile(r"home assistant|mqtt|topic|light\.bookshelf|sensor\.window_illuminance|sensor\.sky_colour",
+                               re.I)
 HEARD_AT = 1_791_000_000
+GALLERIA = {"version": "v0.40.0", "kinds": ["light", "illuminance", "colour-temperature"], "heard_at": HEARD_AT,
+            "central_version": "0.40.0", "update": False}
 # Home Assistant's states as Central last heard them (HomeAssistantStatesView).
 STATES = {
     "heard_at": HEARD_AT,
@@ -54,7 +60,10 @@ STATES = {
          "reports": "window-meter", "heard_at": HEARD_AT},
         {"entity": "sensor.porch_illuminance", "kind": "illuminance", "name": "Porch illuminance", "reports": None,
          "heard_at": HEARD_AT},
+        {"entity": "sensor.sky_colour", "kind": "colour-temperature", "name": "Sky colour temperature", "reports": None,
+         "heard_at": HEARD_AT},
     ],
+    "galleria": GALLERIA,
     "refused": [{"source": HOME_ASSISTANT, "address": "light.porch", "reason": "unknown_address", "at": HEARD_AT}],
 }
 
@@ -127,7 +136,7 @@ def test_house_lights_speaks_only_of_lights_sensors_and_readings(page, registry)
         assert lamp.status == 200, lamp.text()
         daylight = _row(page, "In the house", "Daylight")
         expect(daylight).to_contain_text("Measured by Window meter")
-        expect(daylight).to_contain_text("6500 K")
+        expect(daylight).to_contain_text("Typed 6,500 K")
         expect(daylight).to_contain_text("Not reported yet")
         expect(daylight).to_contain_text("Never")
         expect(_row(page, "In the house", "Reading lamp")).to_contain_text("On, 100 %")
@@ -163,17 +172,31 @@ def test_home_assistant_says_when_its_states_were_last_heard_and_what_each_entit
         expect(_row(page, "From Home Assistant", "Window illuminance")).to_contain_text("Sensor: Window meter")
         expect(_row(page, "From Home Assistant", "Kitchen ceiling")).to_contain_text("Nothing yet")
         expect(_row(page, "Newest first", "light.porch")).to_contain_text(
-            "No room light or Sensor is linked to this entity yet. Pick it on House › Lights.")
+            "No room light, Sensor or colour sensor is linked to this entity yet. Pick it on House › Lights.")
+        expect(shown).to_contain_text("Versions: Galleria v0.40.0 · Central 0.40.0")
+        expect(shown).not_to_contain_text("Update Galleria")
         expect(shown.get_by_role("link", name="Room lights and Sensors", exact=True)).to_have_attribute("href", "#/lights")
         assert not re.search(r"mqtt|broker|topic", shown.inner_text(), re.I), shown.inner_text()
 
 
 def test_home_assistant_not_heard_yet(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
-        _states(page, {"heard_at": None, "entities": [], "refused": []})
+        _states(page, {"heard_at": None, "entities": [], "refused": [],
+                       "galleria": {**GALLERIA, "version": None, "kinds": [], "heard_at": None, "update": True}})
         signed_in(page, origin)
         go(page, "home-assistant")
         expect(visible_page(page)).to_contain_text("States last heard: Not heard yet")
+        expect(visible_page(page)).to_contain_text("Galleria has not said its version: update it in HACS")
+
+
+def test_home_assistant_says_to_update_galleria_that_cannot_send_colour_sensors(page, registry):
+    with operator_server(registry.db, registry.clock) as origin:
+        _states(page, {**STATES, "galleria": {**GALLERIA, "version": "v0.39.0", "update": True}})
+        signed_in(page, origin)
+        go(page, "home-assistant")
+        shown = visible_page(page)
+        expect(shown).to_contain_text("Versions: Galleria v0.39.0 · Central 0.40.0")
+        expect(shown).to_contain_text("Update Galleria in HACS: this version cannot send colour sensors yet")
 
 
 def _options(select):
@@ -218,4 +241,61 @@ def test_the_picker_offers_light_entities_for_a_light_and_illuminance_entities_f
         assert sent.value.request.post_data_json["at"] == {"source": HOME_ASSISTANT,
                                                            "address": "sensor.porch_illuminance"}
         expect(_row(page, "Sensors in the house", "Porch meter")).to_contain_text("In the smart home")
+        assert not INTEGRATION_WORDS.search(visible_page(page).inner_text()), visible_page(page).inner_text()
+
+
+def test_a_light_follows_a_colour_sensor_and_the_sensor_cannot_go_while_followed(page, registry):
+    """Add a colour sensor, picked from Home Assistant's colour-temperature entities only; set daylight
+    (measured by the window Sensor) to take its colour from it; once the sky's colour is heard at
+    3,400 K, daylight's colour line reads "Following Sky colour 3,400 K" and the colour sensor lists
+    daylight as following it; removing the colour sensor is refused in words while daylight follows
+    it (409 colour_sensor_followed)."""
+    with operator_server(registry.db, registry.clock) as origin:
+        _states(page)
+        signed_in(page, origin)
+        put(page, origin, "/v1/operator/house/sensors/window-meter", WINDOW_METER)
+        put(page, origin, "/v1/operator/house/lights/daylight",
+            {"kind": "measured", "name": "Daylight", "sensor": "window-meter", "colour": {"kind": "typed", "kelvin": 5500}})
+        go(page, "lights")
+        expect(_row(page, "In the house", "Daylight")).to_contain_text("Typed 5,500 K")
+
+        page.get_by_role("button", name="Add a colour sensor", exact=True).click()
+        dialog = _dialog(page, "Add a colour sensor")
+        dialog.get_by_role("textbox", name="Name", exact=True).fill("Sky colour")
+        entity = dialog.get_by_role("combobox", name="Smart colour temperature sensor", exact=True)
+        assert _options(entity) == ["Sky colour temperature (sensor.sky_colour)"]
+        with page.expect_response(lambda r: "/house/colour-sensors/" in r.url and r.request.method == "PUT") as sent:
+            dialog.get_by_role("button", name="Add colour sensor", exact=True).click()
+        assert (sent.value.status, sent.value.url.rsplit("/", 1)[-1]) == (200, "sky-colour"), sent.value.text()
+        assert sent.value.request.post_data_json == {
+            "name": "Sky colour", "at": {"source": HOME_ASSISTANT, "address": "sensor.sky_colour"}}
+        expect(_row(page, "Colour sensors in the house", "Sky colour")).to_contain_text("Not reported yet")
+
+        _row(page, "In the house", "Daylight").get_by_role("button", name="Change Daylight", exact=True).click()
+        dialog = _dialog(page, "Change Daylight")
+        dialog.get_by_role("radio", name="A colour sensor", exact=True).click()
+        dialog.get_by_role("combobox", name="Colour sensor", exact=True).select_option(label="Sky colour")
+        with page.expect_response(lambda r: r.url.endswith("/house/lights/daylight") and r.request.method == "PUT") as sent:
+            dialog.get_by_role("button", name="Save light", exact=True).click()
+        assert sent.value.status == 200, sent.value.text()
+        assert sent.value.request.post_data_json["colour"] == {"kind": "colour-sensor", "sensor": "sky-colour",
+                                                               "typed_kelvin": 5500}
+        expect(_row(page, "In the house", "Daylight")).to_contain_text("Typed 5,500 K until Sky colour says")
+
+        lights = PgRoomLights(registry.db, PgHouseLock())
+        _off_thread(lambda: lights.record_colour_reading(
+            ColourSensorRef(source=HOME_ASSISTANT, address="sensor.sky_colour"), KelvinColour(kelvin=3400)))
+        expect(_row(page, "In the house", "Daylight")).to_contain_text("Following Sky colour 3,400 K")
+        sky = _row(page, "Colour sensors in the house", "Sky colour")
+        expect(sky).to_contain_text("3,400 K")
+        expect(sky).to_contain_text("Daylight")
+
+        sky.get_by_role("button", name="Remove Sky colour", exact=True).click()
+        dialog = _dialog(page, "Remove Sky colour?")
+        with page.expect_response(lambda r: "/house/colour-sensors/" in r.url and r.request.method == "DELETE") as sent:
+            dialog.get_by_role("button", name="Confirm remove", exact=True).click()
+        assert (sent.value.status, sent.value.json()["error"]) == (409, "colour_sensor_followed")
+        expect(dialog).to_contain_text("Not removed: A room light takes its colour from this colour sensor.")
+        dialog.get_by_role("button", name="Cancel", exact=True).click()
+        expect(_row(page, "Colour sensors in the house", "Sky colour")).to_be_visible()
         assert not INTEGRATION_WORDS.search(visible_page(page).inner_text()), visible_page(page).inner_text()

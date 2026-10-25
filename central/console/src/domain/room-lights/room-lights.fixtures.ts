@@ -1,9 +1,9 @@
 import { CONSTANTS, type FrameLighting, type HomeAssistantStatesView, type RoomLightsView } from "../../generated/contract";
 
 /*
- * One house's lights for the stories: daylight a window Sensor measures, the colour overheads that
- * report themselves, the bookshelf spotlight not heard yet, and a lamp nobody reports. Instants are
- * fixed, so the screenshots never move.
+ * One house's lights for the stories: daylight a window Sensor measures, its colour following the
+ * sky's colour sensor, the colour overheads that report themselves, the bookshelf spotlight not
+ * heard yet, and a lamp nobody reports. Instants are fixed, so the screenshots never move.
  */
 
 export const HEARD = 1_791_000_000;
@@ -14,11 +14,14 @@ export const ROOMS: RoomLightsView = {
   lights: [
     {
       id: "daylight",
-      light: { kind: "measured", name: "Daylight", sensor: "window-meter", colour: { kind: "typed", kelvin: 6500 } },
-      entry: { kind: "measured", colour: { kind: "kelvin", kelvin: 6500 }, state: { kind: "measured", lux: 320 } },
+      light: {
+        kind: "measured", name: "Daylight", sensor: "window-meter",
+        colour: { kind: "colour-sensor", sensor: "sky", typed_kelvin: 5500 },
+      },
+      entry: { kind: "measured", colour: { kind: "kelvin", kelvin: 3400 }, state: { kind: "measured", lux: 320 } },
       heard_at: HEARD, cant_tell_since: null, named_by: ["lobby"],
-      colour: { colour: { kind: "kelvin", kelvin: 6500 }, source: "typed", sensor: null, colour_from: "typed", stated_at: null,
-        cant_tell_since: null },
+      colour: { colour: { kind: "kelvin", kelvin: 3400 }, source: "colour-sensor", sensor: "sky", colour_from: "following",
+        stated_at: HEARD, cant_tell_since: null },
     },
     {
       id: "overheads",
@@ -66,13 +69,19 @@ export const ROOMS: RoomLightsView = {
       reading: null, heard_at: null, cant_tell_since: null, reports: null,
     },
   ],
-  colour_sensors: [],
+  colour_sensors: [
+    {
+      id: "sky",
+      sensor: { name: "Sky colour", at: { source: CONSTANTS.HOME_ASSISTANT_SOURCE, address: "sensor.sun_sky_color_temperature" } },
+      colour: { kind: "kelvin", kelvin: 3400 }, heard_at: HEARD, cant_tell_since: null, followed_by: ["daylight"],
+    },
+  ],
 };
 
 export const PI_NAMES: Readonly<Record<string, string>> = { "player-1": "Player …1a2b3c" };
 
-/** Home Assistant's states as Central last heard them: the two lights and the window meter the house
- * names, the kitchen light nothing names yet, and the porch meter. */
+/** Home Assistant's states as Central last heard them: the two lights, the window meter and the sky's
+ * colour the house names, the kitchen light nothing names yet, and the porch meter. */
 export const HOME_ASSISTANT_STATES: HomeAssistantStatesView = {
   galleria: { version: "v0.40.0", kinds: ["light", "illuminance", "colour-temperature"], heard_at: HEARD,
     central_version: "0.40.0", update: false },
@@ -83,6 +92,8 @@ export const HOME_ASSISTANT_STATES: HomeAssistantStatesView = {
     { entity: "sensor.window_illuminance", kind: "illuminance", name: "Window illuminance", reports: "window-meter", heard_at: HEARD },
     { entity: "light.kitchen", kind: "light", name: "Kitchen", reports: null, heard_at: HEARD - 2 * MINUTE },
     { entity: "sensor.porch_illuminance", kind: "illuminance", name: "Porch illuminance", reports: null, heard_at: HEARD },
+    { entity: "sensor.sun_sky_color_temperature", kind: "colour-temperature", name: "Sun Sky colour temperature",
+      reports: "sky", heard_at: HEARD },
   ],
   refused: [],
 };

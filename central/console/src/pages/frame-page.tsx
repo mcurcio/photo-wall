@@ -20,7 +20,7 @@ import type { Turn } from "../domain/turn-words";
 import type { HostsRead } from "../domain/hosts-read";
 import { readDrawn, readRoomLights } from "../domain/room-lights/api";
 import { DrawnLine } from "../domain/room-lights/drawn-line";
-import { drawnOf, lightNames } from "../domain/room-lights/model";
+import { colourLineSaid, colourSensorNames, drawnOf, lightNames } from "../domain/room-lights/model";
 import type { DrawnView, RoomLightsView } from "../generated/contract";
 import { frameHealth } from "../health.js";
 import { isBound } from "../join.js";
@@ -34,6 +34,7 @@ import { useMutate } from "../useMutate.js";
 import { playerPageHref } from "../players.js";
 import { usePolledRead } from "../polledRead.js";
 import { formatRoute, routeIdName, type Tab } from "../routes.js";
+import { sinceTime } from "../timeWords.js";
 import { Tabs } from "../ui/tabs";
 import { FramePageHeader, type RenameAnswer } from "./frame-page-header";
 
@@ -227,6 +228,10 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
         )}
         {tab === "lighting" && (
           <FrameLightingTab adjustment={adjustment} piHref={piHref} rooms={rooms} profiles={profiles}
+            colourOf={(id) => {
+              const line = rooms?.lights.find((each) => each.id === id)?.colour;
+              return line === undefined ? null : colourLineSaid(line, colourSensorNames(rooms), (at) => sinceTime(at));
+            }}
             drawn={isBound(frame) && drawn !== null
               ? <DrawnLine drawn={drawnOf(drawn.players, frame.player_id as string)} /> : undefined} />
         )}

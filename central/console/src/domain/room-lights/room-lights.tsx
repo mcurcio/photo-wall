@@ -1,8 +1,8 @@
 import { useState } from "react";
 
 import {
-  type HeardEntityView, LIMITS, type RoomLight, type RoomLightsView, type RoomLightView,
-  type Sensor, type SensorView,
+  type ColourSensor, type ColourSensorView, type HeardEntityView, LIMITS, type RoomLight, type RoomLightsView,
+  type RoomLightView, type Sensor, type SensorView,
 } from "../../generated/contract";
 import { EntityList } from "../../patterns/entity-list";
 import { Note } from "../../patterns/fact-row";
@@ -16,13 +16,15 @@ import { SegmentedControl } from "../../ui/segmented-control";
 import { Select } from "../../ui/select";
 import { Inline, Stack } from "../../ui/stack";
 import {
-  colourWords, entitiesFor, entityLabel, entryWords, heardWords, lightNames, NEW_KELVIN, newId, readingWords,
-  reportedThrough, reporterOf, reporterWords, smartSensor, whereWords,
+  brightnessWords, colourLineWords, colourReadingWords, colourSensorNames, entitiesFor, entityLabel, followedWords, heardWords,
+  lightNames, NEW_KELVIN, newId, reportedThrough, reporterOf, reporterWords, sensorReadingWords, smartColourSensor,
+  smartSensor, whereWords,
 } from "./model";
 
 export interface RoomLightsProps {
   view: RoomLightsView;
-  /** The smart home's light and illuminance entities as Central last heard them: the picker's choices. */
+  /** The smart home's light, illuminance and colour-temperature entities as Central last heard them:
+   * the pickers' choices. */
   heard: readonly HeardEntityView[];
   /** A Pi's name by its player id. */
   piName: (playerId: string) => string;
@@ -34,6 +36,8 @@ export interface RoomLightsProps {
   onRemoveLight: (light: RoomLightView) => Outcome;
   onSaveSensor: (id: string, sensor: Sensor) => Outcome;
   onRemoveSensor: (sensor: SensorView) => Outcome;
+  onSaveColourSensor: (id: string, sensor: ColourSensor) => Outcome;
+  onRemoveColourSensor: (sensor: ColourSensorView) => Outcome;
 }
 
 const KELVIN = LIMITS.TypedColour.kelvin;
@@ -41,6 +45,10 @@ const SENSOR_PLACEMENT = "A Sensor reads every light that reaches it. Put it whe
   + "strongest, and never facing the wall: the wall's own glow would read as room light.";
 const NO_SMART_LIGHT = "No smart light has been heard yet: one that reports itself is offered here once it has.";
 const NO_SMART_SENSOR = "No smart light sensor has been heard yet: one is offered here once it has.";
+const NO_COLOUR_ENTITY = "No smart colour temperature sensor has been heard yet: one is offered here once it has.";
+const NO_COLOUR_SENSOR = "Add a colour sensor first, then choose it here.";
+const COLOUR_SENSOR_NOTE = "A colour sensor tells the colour of a light no bulb reports, as daylight through the "
+  + "windows. A light a Sensor measures, or one always on, can take its colour from one.";
 
 type Kind = RoomLight["kind"];
 const KIND_LABELS: Record<Kind, string> = { reported: "Reports itself", measured: "Measured by a Sensor", fixed: "Always on" };
@@ -50,27 +58,49 @@ const KIND_HELP: Record<Kind, string> = {
   fixed: "Always on, at full: a light nobody switches.",
 };
 
+type ColourSource = RoomLight["colour"]["kind"];
+/** The colour sources each kind of light takes, its default first. */
+const COLOUR_SOURCES: Record<Kind, readonly { value: ColourSource; label: string }[]> = {
+  reported: [{ value: "its-bulb", label: "Its bulb's own" }, { value: "typed", label: "Typed" }],
+  measured: [{ value: "typed", label: "Typed" }, { value: "colour-sensor", label: "A colour sensor" }],
+  fixed: [{ value: "typed", label: "Typed" }, { value: "colour-sensor", label: "A colour sensor" }],
+};
+const UNTIL: Record<ColourSource, string> = {
+  typed: "Colour temperature",
+  "its-bulb": "Colour temperature until the bulb says",
+  "colour-sensor": "Colour temperature until the colour sensor says",
+};
+
 interface LightDraft {
   name: string;
   kind: Kind;
   /** The smart light it reports itself through ("" before one is chosen). */
   entity: string;
   sensor: string;
-  /** Where its colour comes from: the typed kelvin, or (a light that reports itself) its bulb's own. */
-  colour: "typed" | "its-bulb";
+  /** Where its colour comes from: typed, its bulb's own (a light that reports itself) or a colour
+   * sensor (a light a Sensor measures, or one always on). */
+  colour: ColourSource;
+  /** The colour sensor it follows ("" before one is chosen). */
+  colourSensor: string;
   kelvin: number;
 }
 
-const lightDraft = (view: RoomLightView | null, sensors: readonly SensorView[],
+/** `colour` if a light of `kind` takes it, else that kind's default source. */
+const colourFor = (kind: Kind, colour: ColourSource): ColourSource =>
+  (COLOUR_SOURCES[kind].some((each) => each.value === colour) ? colour : COLOUR_SOURCES[kind][0].value);
+
+const lightDraft = (view: RoomLightView | null, house: RoomLightsView,
   lights: readonly HeardEntityView[]): LightDraft => {
   const light = view?.light ?? null;
   const colour = light?.colour ?? null;
+  const kind = light?.kind ?? "fixed";
   return {
     name: light?.name ?? "",
-    kind: light?.kind ?? "fixed",
+    kind,
     entity: reporterOf(light) ?? lights[0]?.entity ?? "",
-    sensor: light?.kind === "measured" ? light.sensor : sensors[0]?.id ?? "",
-    colour: colour?.kind === "its-bulb" || (colour === null && light === null) ? "its-bulb" : "typed",
+    sensor: light?.kind === "measured" ? light.sensor : house.sensors[0]?.id ?? "",
+    colour: colourFor(kind, colour?.kind ?? "typed"),
+    colourSensor: colour?.kind === "colour-sensor" ? colour.sensor : house.colour_sensors[0]?.id ?? "",
     kelvin: colour === null ? NEW_KELVIN : colour.kind === "typed" ? colour.kelvin : colour.typed_kelvin,
   };
 };
@@ -79,17 +109,20 @@ const lightDraft = (view: RoomLightView | null, sensors: readonly SensorView[],
 function lightOf(draft: LightDraft): { light: RoomLight } | { problem: string } {
   const name = draft.name.trim();
   if (name === "") return { problem: "Give the light a name, as Bookshelf spot." };
-  const fixed = { kind: "typed", kelvin: draft.kelvin } as const;
-  if (draft.kind === "measured") {
-    if (draft.sensor === "") return { problem: "A Sensor measures this light: add one first, then choose it here." };
-    return { light: { kind: "measured", name, sensor: draft.sensor, colour: fixed } };
-  }
+  const typed = { kind: "typed", kelvin: draft.kelvin } as const;
   if (draft.kind === "reported") {
     if (draft.entity === "") return { problem: "Choose the smart light that reports it." };
-    if (draft.colour === "typed") return { light: reportedThrough(name, draft.entity, fixed) };
-    return { light: reportedThrough(name, draft.entity, { kind: "its-bulb", typed_kelvin: draft.kelvin }) };
+    const own = { kind: "its-bulb", typed_kelvin: draft.kelvin } as const;
+    return { light: reportedThrough(name, draft.entity, draft.colour === "its-bulb" ? own : typed) };
   }
-  return { light: { kind: "fixed", name, colour: fixed } };
+  if (draft.colour === "colour-sensor" && draft.colourSensor === "") return { problem: NO_COLOUR_SENSOR };
+  const colour = draft.colour === "colour-sensor"
+    ? { kind: "colour-sensor", sensor: draft.colourSensor, typed_kelvin: draft.kelvin } as const : typed;
+  if (draft.kind === "measured") {
+    if (draft.sensor === "") return { problem: "A Sensor measures this light: add one first, then choose it here." };
+    return { light: { kind: "measured", name, sensor: draft.sensor, colour } };
+  }
+  return { light: { kind: "fixed", name, colour } };
 }
 
 function LightDialog({ view, house, heard, onClose, onSave }: {
@@ -97,7 +130,8 @@ function LightDialog({ view, house, heard, onClose, onSave }: {
   onSave: RoomLightsProps["onSaveLight"];
 }) {
   const smartLights = entitiesFor(heard, "light");
-  const [draft, setDraft] = useState(() => lightDraft(view, house.sensors, smartLights));
+  const [first] = useState(() => lightDraft(view, house, smartLights));
+  const [draft, setDraft] = useState(first);
   const before = view?.light ?? null;
   const kinds = (before?.kind === "reported" || smartLights.length > 0 ? ["reported", "measured", "fixed"] as const
     : ["measured", "fixed"] as const).map((kind) => ({ value: kind, label: KIND_LABELS[kind] }));
@@ -124,8 +158,10 @@ function LightDialog({ view, house, heard, onClose, onSave }: {
               <TextInput value={draft.name} onChange={(name) => change({ name })} disabled={busy} />
             </Field>
             <Field label="How Photo Wall knows it is on" help={KIND_HELP[draft.kind]}>
+              {/* Another kind takes its default colour source (its bulb's own for a light that reports
+                  itself); back to the light's own kind, its own source. */}
               <SegmentedControl label="How Photo Wall knows it is on" value={draft.kind} options={kinds} disabled={busy}
-                onChange={(kind) => change({ kind, colour: kind === "reported" ? draft.colour : "typed" })} />
+                onChange={(kind) => change({ kind, colour: kind === before?.kind ? first.colour : COLOUR_SOURCES[kind][0].value })} />
             </Field>
             {smartLights.length === 0 && before?.kind !== "reported" && <Note>{NO_SMART_LIGHT}</Note>}
             {reported && (
@@ -141,15 +177,19 @@ function LightDialog({ view, house, heard, onClose, onSave }: {
                   onChange={(sensor) => change({ sensor })} />
               </Field>
             ))}
-            {reported && (
-              <Field label="Colour">
-                <SegmentedControl label="Colour" value={draft.colour} disabled={busy}
-                  options={[{ value: "its-bulb", label: "Its bulb's own" }, { value: "typed", label: "Typed, in kelvin" }]}
-                  onChange={(colour) => change({ colour })} />
+            <Field label="Colour">
+              <SegmentedControl label="Colour" value={draft.colour} disabled={busy} options={COLOUR_SOURCES[draft.kind]}
+                onChange={(colour) => change({ colour })} />
+            </Field>
+            {draft.colour === "colour-sensor" && (house.colour_sensors.length === 0 ? <Note>{NO_COLOUR_SENSOR}</Note> : (
+              <Field label="Colour sensor">
+                <Select value={draft.colourSensor === "" ? null : draft.colourSensor} disabled={busy}
+                  options={house.colour_sensors.map((each) => ({ value: each.id, label: each.sensor.name }))}
+                  onChange={(colourSensor) => change({ colourSensor })} />
               </Field>
-            )}
-            <TypedNumber label={reported && draft.colour === "its-bulb" ? "Colour temperature until the bulb says" : "Colour temperature"}
-              help="2700 K is a warm bulb, 6500 K daylight" value={draft.kelvin}
+            ))}
+            <TypedNumber label={UNTIL[draft.colour]}
+              help="2,700 K is a warm bulb, 6,500 K daylight" value={draft.kelvin}
               min={KELVIN.minimum} max={KELVIN.maximum} step={KELVIN.multipleOf} unit="K" disabled={busy}
               onChange={(kelvin) => change({ kelvin })} />
           </>
@@ -211,26 +251,68 @@ function SmartSensorDialog({ house, heard, onClose, onSave }: {
   );
 }
 
+function ColourSensorDialog({ house, heard, onClose, onSave }: {
+  house: RoomLightsView; heard: readonly HeardEntityView[]; onClose: () => void; onSave: RoomLightsProps["onSaveColourSensor"];
+}) {
+  const entities = entitiesFor(heard, "colour-temperature");
+  const [name, setName] = useState("");
+  const [entity, setEntity] = useState(entities[0]?.entity ?? "");
+  const save = async () => {
+    if (name.trim() === "") return "Give the colour sensor a name, as Sky colour.";
+    if (entity === "") return NO_COLOUR_ENTITY;
+    const named = newId(name, house.colour_sensors.map((each) => each.id));
+    if ("problem" in named) return named.problem;
+    return onSave(named.id, smartColourSensor(name.trim(), entity));
+  };
+  return (
+    <SaveDialog title="Add a colour sensor" action="Add colour sensor" onSave={save} onClose={onClose}>
+      {({ busy, edited }) => (
+        <>
+          <Field label="Name">
+            <TextInput value={name} onChange={(next) => { setName(next); edited(); }} disabled={busy} />
+          </Field>
+          {entities.length === 0 ? <Note>{NO_COLOUR_ENTITY}</Note> : (
+            <Field label="Smart colour temperature sensor" help="Its colour comes from this from now on">
+              <Select value={entity === "" ? null : entity} disabled={busy} width="fit"
+                options={entities.map((each) => ({ value: each.entity, label: entityLabel(each) }))}
+                onChange={(next) => { setEntity(next); edited(); }} />
+            </Field>
+          )}
+        </>
+      )}
+    </SaveDialog>
+  );
+}
+
 type LightRow = RoomLightView & { key: string; severity: null };
 type SensorRow = SensorView & { key: string; severity: null };
+type ColourSensorRow = ColourSensorView & { key: string; severity: null };
 type Editing = { kind: "light"; light: RoomLightView | null } | { kind: "sensor"; sensor: SensorView } | { kind: "smart-sensor" }
-  | null;
-type Removing = { kind: "light"; light: RoomLightView } | { kind: "sensor"; sensor: SensorView } | null;
+  | { kind: "colour-sensor" } | null;
+type Removing = { kind: "light"; light: RoomLightView } | { kind: "sensor"; sensor: SensorView }
+  | { kind: "colour-sensor"; sensor: ColourSensorView } | null;
 
 /**
- * House › Lights: the house's real lights, each with how Photo Wall knows it is on, its colour, its
- * last state and when it was last heard; the Sensors, each with where it is, its last reading and
- * the light it measures. Lights are added, changed and removed here, a smart light picked from
- * the smart home's light entities; a smart Sensor is added here from its illuminance entities, a
- * wired one on its Pi's Hardware page; a Sensor is renamed or removed here. Central's refusals in
- * words. The page reads and writes; this is what a story draws.
+ * House › Lights: the house's real lights, each with how Photo Wall knows it is on, its colour line
+ * (its colour and where it comes from), its last state and when it was last heard; the Sensors, each
+ * with where it is, its last reading and the light it measures; the colour sensors, each with where
+ * it is, its last colour and the lights that follow it. Lights are added, changed and removed here,
+ * a smart light picked from the smart home's light entities; a smart Sensor is added here from its
+ * illuminance entities, a wired one on its Pi's Hardware page; a colour sensor from its
+ * colour-temperature entities. A fact its source can't tell is kept: "Can't tell since …". Central's
+ * refusals in words. The page reads and writes; this is what a story draws.
  */
-export function RoomLights({ view, heard, piName, since, note, onSaveLight, onRemoveLight, onSaveSensor, onRemoveSensor }: RoomLightsProps) {
+export function RoomLights({
+  view, heard, piName, since, note, onSaveLight, onRemoveLight, onSaveSensor, onRemoveSensor, onSaveColourSensor,
+  onRemoveColourSensor,
+}: RoomLightsProps) {
   const [editing, setEditing] = useState<Editing>(null);
   const [removing, setRemoving] = useState<Removing>(null);
   const names = lightNames(view);
+  const colourNames = colourSensorNames(view);
   const lights: LightRow[] = view.lights.map((light) => ({ ...light, key: light.id, severity: null }));
   const sensors: SensorRow[] = view.sensors.map((sensor) => ({ ...sensor, key: sensor.id, severity: null }));
+  const colourSensors: ColourSensorRow[] = view.colour_sensors.map((sensor) => ({ ...sensor, key: sensor.id, severity: null }));
   return (
     <Stack>
       <Note>
@@ -243,8 +325,8 @@ export function RoomLights({ view, heard, piName, since, note, onSaveLight, onRe
           columns={[
             { id: "name", header: "Name", rowHeader: true, cell: (row) => row.light.name },
             { id: "reporter", header: "How it is known", cell: (row) => reporterWords(row.light, view.sensors) },
-            { id: "colour", header: "Colour", cell: (row) => colourWords(row.light.colour) },
-            { id: "state", header: "Now", cell: (row) => entryWords(row.entry) },
+            { id: "colour", header: "Colour", cell: (row) => colourLineWords(row.colour, colourNames, since) },
+            { id: "state", header: "Now", cell: (row) => brightnessWords(row, since) },
             { id: "heard", header: "Last heard", cell: (row) => heardWords(row, since) },
             {
               id: "actions", header: "Actions",
@@ -269,7 +351,7 @@ export function RoomLights({ view, heard, piName, since, note, onSaveLight, onRe
           columns={[
             { id: "name", header: "Name", rowHeader: true, cell: (row) => row.sensor.name },
             { id: "at", header: "Where", cell: (row) => whereWords(row.sensor, piName) },
-            { id: "reading", header: "Reading", cell: (row) => readingWords(row.reading) },
+            { id: "reading", header: "Reading", cell: (row) => sensorReadingWords(row, since) },
             { id: "heard", header: "Last heard", cell: (row) => (row.heard_at === null ? "Never" : since(row.heard_at)) },
             { id: "reports", header: "Measures", cell: (row) => (row.reports === null ? "No light" : names[row.reports] ?? row.reports) },
             {
@@ -291,6 +373,31 @@ export function RoomLights({ view, heard, piName, since, note, onSaveLight, onRe
         <Note>{SENSOR_PLACEMENT}</Note>
         <OwnerLinks links={[{ text: "Pis and their Sensors", href: formatRoute({ section: "hardware" }) }]} />
       </Stack>
+      <Stack>
+        <EntityList<ColourSensorRow>
+          label="Colour sensors"
+          columns={[
+            { id: "name", header: "Name", rowHeader: true, cell: (row) => row.sensor.name },
+            { id: "at", header: "Where", cell: (row) => whereWords(row.sensor, piName) },
+            { id: "colour", header: "Colour", cell: (row) => colourReadingWords(row, since) },
+            { id: "heard", header: "Last heard", cell: (row) => (row.heard_at === null ? "Never" : since(row.heard_at)) },
+            { id: "followed", header: "Followed by", cell: (row) => followedWords(row, names) },
+            {
+              id: "actions", header: "Actions",
+              cell: (row) => (
+                <Button variant="ghost" aria-label={`Remove ${row.sensor.name}`}
+                  onClick={() => setRemoving({ kind: "colour-sensor", sensor: row })}>Remove</Button>
+              ),
+            },
+          ]}
+          groups={[{ title: "Colour sensors in the house", rows: colourSensors }]}
+          empty="No colour sensors. Add one to give daylight, or a light no bulb reports, its colour as it changes."
+        />
+        <Inline label="Colour sensor actions">
+          <Button onClick={() => setEditing({ kind: "colour-sensor" })}>Add a colour sensor</Button>
+        </Inline>
+        <Note>{COLOUR_SENSOR_NOTE}</Note>
+      </Stack>
       {note !== null && <Note live>{note}</Note>}
       {editing?.kind === "light" && (
         <LightDialog view={editing.light} house={view} heard={heard} onClose={() => setEditing(null)} onSave={onSaveLight} />
@@ -301,6 +408,9 @@ export function RoomLights({ view, heard, piName, since, note, onSaveLight, onRe
       {editing?.kind === "smart-sensor" && (
         <SmartSensorDialog house={view} heard={heard} onClose={() => setEditing(null)} onSave={onSaveSensor} />
       )}
+      {editing?.kind === "colour-sensor" && (
+        <ColourSensorDialog house={view} heard={heard} onClose={() => setEditing(null)} onSave={onSaveColourSensor} />
+      )}
       {removing?.kind === "light" && (
         <RemoveDialog name={removing.light.light.name} what="Photo Wall forgets this light." onClose={() => setRemoving(null)}
           onRemove={() => onRemoveLight(removing.light)} />
@@ -308,6 +418,10 @@ export function RoomLights({ view, heard, piName, since, note, onSaveLight, onRe
       {removing?.kind === "sensor" && (
         <RemoveDialog name={removing.sensor.sensor.name} what="Photo Wall forgets this Sensor and its readings."
           onClose={() => setRemoving(null)} onRemove={() => onRemoveSensor(removing.sensor)} />
+      )}
+      {removing?.kind === "colour-sensor" && (
+        <RemoveDialog name={removing.sensor.sensor.name} what="Photo Wall forgets this colour sensor and its colour."
+          onClose={() => setRemoving(null)} onRemove={() => onRemoveColourSensor(removing.sensor)} />
       )}
     </Stack>
   );
