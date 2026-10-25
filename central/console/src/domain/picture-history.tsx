@@ -34,6 +34,8 @@ const EMPTY = "No changes yet. They appear here when you adjust this display, pr
 const OPEN_FIRST = "Open while the editor runs";
 const AS_IT_HAS_IT = "As the display has it";
 const SAME = "Same values as the change below";
+/** A value the entry never recorded: the Display's light in an entry from before migration 099. */
+const NOT_RECORDED = "Not recorded";
 
 /** Each kind of entry in the glossary's words (Done, Revert, Copy), never "snapshot" or "draft". */
 export const WHAT: Record<PictureEntryKind, string> = {
@@ -76,11 +78,12 @@ function hardwareLabel(rows: Rows, code: string): string {
 /**
  * Every value of one entry, in the Picture tab's order and units: each display setting set in
  * Photo Wall (by its picture-list name), the three Photo Wall values, the Display's light, the
- * signal range, and the test pattern when one was up.
+ * signal range, and the test pattern when one was up. An entry from before the Display had a light
+ * (`picture.light` null) says its light was not recorded.
  */
 export function entryDetails(entry: PictureEntryView, rows: Rows): { label: string; value: string }[] {
   const { picture } = entry;
-  const software = picture.software;
+  const { software, light } = picture;
   return [
     ...Object.entries(picture.hardware).map(([code, value]) => ({
       label: hardwareLabel(rows, code), value: hardwareValue(rows, code, value),
@@ -88,18 +91,23 @@ export function entryDetails(entry: PictureEntryView, rows: Rows): { label: stri
     { label: "Contrast", value: `${software.contrast_percent} %` },
     { label: "Colour temperature", value: `${software.colour_temperature_kelvin} K` },
     { label: "Gamma", value: (software.gamma_tenths / 10).toFixed(1) },
-    { label: "Matched light", value: unitWords(picture.light.matched_lux, "lx") },
-    { label: "Display black", value: panelBlackWords(picture.light.black) },
+    { label: "Matched light", value: light === null ? NOT_RECORDED : unitWords(light.matched_lux, "lx") },
+    { label: "Display black", value: light === null ? NOT_RECORDED : panelBlackWords(light.black) },
     { label: "Signal range", value: RANGES[picture.signal_range] },
     ...(entry.test_pattern === null ? [] : [{ label: "Test pattern", value: PATTERN_NAMES[entry.test_pattern] }]),
   ];
 }
 
 /** The pattern's one summary rule (`changedSummary`) with the Picture tab's words: a display setting
- * absent is "as the display has it", a test pattern absent Off. */
+ * absent is "as the display has it", a test pattern absent Off. A value either entry did not record
+ * is no change to or from it, so neither side says it. */
 export function summary(details: readonly { label: string; value: string }[],
   below: readonly { label: string; value: string }[] | null): string {
-  return changedSummary(details, below, {
+  const unrecorded = new Set(below === null ? [] : [...details, ...below]
+    .filter(({ value }) => value === NOT_RECORDED).map(({ label }) => label));
+  const recorded = (values: readonly { label: string; value: string }[]) =>
+    values.filter(({ label }) => !unrecorded.has(label));
+  return changedSummary(recorded(details), below === null ? null : recorded(below), {
     absent: (label) => (label === "Test pattern" ? "Off" : AS_IT_HAS_IT), same: SAME,
   });
 }

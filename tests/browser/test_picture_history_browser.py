@@ -19,6 +19,9 @@ Mutation probes (each fails the named case):
 - K1-no-notice: no `unrecorded_change` Note -> the unrecorded case.
 - Light-dropped (decision 0028): `entryDetails` without the Display's light -> the tracer's Matched
   light and Display black lines.
+- Light-unrecorded: read an entry's light without its null case (an entry from before migration 099)
+  -> the typecheck fails, and the pre-0028 case's page is blank; "Not recorded" compared as a value
+  -> its summary claims a light change.
 - U1-label (calibration targets): drop "target-pre-software" from frame-picture.tsx's PATTERN_NAMES
   -> the typecheck fails (Record<TestPattern, string>), and the target try's Details lack its name.
 """
@@ -31,6 +34,7 @@ import pytest
 from console_tasks import connect, open_frame
 from operator_harness import operator_server
 from playwright.sync_api import expect
+from test_display_identity import _sql
 from test_frame_picture_browser import (
     DISPLAY,
     PHOTO_WALL,
@@ -203,3 +207,29 @@ def test_values_changed_outside_photo_wall_are_said_until_the_next_done(page, re
 
         _store(registry, software_contrast_percent=90)
         expect(_history(page)).to_contain_text(notice)
+
+
+def test_an_entry_from_before_the_displays_light_says_its_light_was_not_recorded(page, registry):
+    """An entry written before migration 099 has no light (Central answers `picture.light` null): its
+    Details say Matched light and Display black were not recorded, and the change above it claims no
+    light change (production, 2026-10-25: the tab went blank on such an entry)."""
+    _seen(registry)
+    with FakePi(registry), operator_server(registry.db, registry.clock) as origin:
+        connect(page, origin, "wall")
+        open_frame(page, FRAME, "picture")
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        _kept_contrast(page)
+        # Every entry but the newest kept one as written before the Display had a light.
+        unrecorded = "SET picture = picture - 'matched_lux' - 'panel_black'"
+        _sql(registry, f"UPDATE picture_sent_entries {unrecorded}")
+        _sql(registry, f"UPDATE picture_kept_entries {unrecorded} WHERE number < "
+                       "(SELECT max(number) FROM picture_kept_entries)")
+
+        page.reload()
+        kept = _rows(page, KEPT)
+        expect(kept).to_have_count(1)
+        expect(kept.first).to_contain_text("Same values as the change below")
+        tried = _rows(page, TRIED).first
+        _values(tried)
+        expect(tried).to_contain_text(re.compile(r"Matched light\s*Not recorded"))
+        expect(tried).to_contain_text(re.compile(r"Display black\s*Not recorded"))
