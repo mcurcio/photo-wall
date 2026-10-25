@@ -50,8 +50,8 @@ BOXES = {
     "two_to_three": PositionBox(left=0, top=0, width=0.1875, height=0.5),           # 720 x 1080
 }
 # The photo: 3 : 2. Its interest is weighted to its top and left, and its faces sit right of and
-# below centre, so each Frame's crop slides towards the interest only as far as its own shape lets
-# it keep the faces: the offset depends on the Frame's shape.
+# below centre, so each Frame's crop is placed on the faces (central/wall_plan/fit.py `place`) and
+# has the Frame's own shape: two Frames of one photo draw two different windows, even at one offset.
 PHOTO_SIZE = (4500, 3000)
 OFF_CENTRE_FACES = (face(0.70, 0.55, 0.82, 0.80), face(0.60, 0.50, 0.68, 0.70))
 # Faces at its two side edges: no window narrower than the photo holds both whole.
@@ -134,12 +134,11 @@ def inside(box, window) -> bool:
 ])
 def test_one_photo_on_two_frames_gets_a_crop_of_each_frames_shape(first: str, second: str) -> None:
     """The photo is planned on both Frames within the hour; each Frame's crop window has that
-    Frame's shape, the two windows differ (two shapes at one offset are still two crops), every
-    face is whole in each, and the Player's renderer, finishing the photo for each Frame on its
-    screen, draws exactly that window.
+    Frame's shape, every face is whole in each, and the Player's renderer, finishing the photo
+    for each Frame on its screen, draws exactly that window (two shapes, so two windows, even at
+    one offset). That no window cuts a face is held by tests/test_photo_fit.py.
     Mutation probes: judge with the screen's size instead of the Frame output -> each Frame
-    draws an offset chosen for another shape, which cuts a face; let a window cut a face -> the
-    rule slides to the interest and a face falls outside the window; the renderer asks for the
+    draws an offset chosen for another shape, which cuts a face; the renderer asks for the
     screen's aspect instead of the Frame's placement's -> it draws another window."""
     frames = {first: BOXES[first], second: BOXES[second]}
     subject = candidate("subject", OFF_CENTRE_FACES, captured=100,
@@ -150,7 +149,6 @@ def test_one_photo_on_two_frames_gets_a_crop_of_each_frames_shape(first: str, se
     faces = faces_judged(subject.analysis.key, SETTINGS)
     assert len(faces) == len(OFF_CENTRE_FACES)
     width, height = PHOTO_SIZE
-    windows = {}
     for frame, box in frames.items():
         assert len(crops[frame]) == 1, crops[frame]
         (crop,) = crops[frame]
@@ -175,8 +173,6 @@ def test_one_photo_on_two_frames_gets_a_crop_of_each_frames_shape(first: str, se
         drawn = (*fit_source_uv(0, 0, request.aspect, request.source.size, request.crop),
                  *fit_source_uv(1, 1, request.aspect, request.source.size, request.crop))
         assert drawn == pytest.approx(window), (frame, drawn, window)
-        windows[frame] = tuple(round(edge, 9) for edge in drawn)
-    assert windows[first] != windows[second], windows
 
 
 @pytest.mark.parametrize("faces, refused, taken", [

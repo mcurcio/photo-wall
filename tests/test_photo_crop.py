@@ -5,8 +5,9 @@ import math
 
 import pytest
 
+from contracts.frame_fit import FreeAxis, free_axis
 from contracts.models import PhotoCrop
-from contracts.photo_crop import CENTRED, FreeAxis, crop_window, free_axis
+from contracts.photo_crop import CENTRED, crop_window
 
 
 def _close(actual, expected) -> None:

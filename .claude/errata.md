@@ -6871,3 +6871,18 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
 - **The large-Frame setting is still a diagonal in inches** (0030 decision 7, requirements :186
   "a 40-inch Frame"). The design review asks for a width; R2 says the diagonal is "a weird
   concept". Left for the owner: which measure the threshold uses is his call.
+
+## PR 138 fix round (odd crop, faces only, 2026-10-25)
+
+- **design-w2-final.md §Reconcile: `interest_kept` reading the axis from `FreeAxis`** is not done.
+  It takes a window today (`interest_kept(grid, window)`, also called by `judge`'s rule 4 for each
+  window and by the tests); reading the axis means a new signature. Deferred: it still tests the
+  window's edges (`left <= 0 and right >= 1`), the one place besides `free_axis` that works out
+  the slide direction. `crop_share`, `window_holds` and `crop_window` are built on
+  `contracts.frame_fit.free_axis`, as the design says.
+- **design-w2-final.md §Tests values are skew 0.2's.** Built without skew (owner's pick,
+  2026-10-25, "faces only"), the values are: Mickey 11/64 = 0.172, Easter 9/64 = 0.141 (BRIEF
+  Round 3); big + small face 24/64 = 0.375 (design 0.359); four faces 33/64 = 0.516 (design
+  0.484); two runs 6/64 = 0.094 (design 0.047). Without skew the design's "choose only within the
+  run holding the nearest window" and "clamp the aim to the photo" change no result, so neither is
+  built and the "choose among every passing offset" probe cannot fail.

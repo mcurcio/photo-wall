@@ -56,9 +56,9 @@ from central.installation_models import FrameOutput, Pixels, PositiveMm
 from central.photo_library.rendition import FrameNeed, copy_edge
 from central.wall_plan.fit_settings import FIT_SETTING_RANGES, FitSettings
 from central.wall_plan.key_content import InterestGrid, KeyContent, UnitBox
-from contracts.frame_fit import window_holds
+from contracts.frame_fit import FreeAxis, free_axis, window_holds
 from contracts.models import Fraction, Model, PhotoCrop
-from contracts.photo_crop import CENTRED, FreeAxis, Window, crop_window, free_axis
+from contracts.photo_crop import CENTRED, Window, crop_window
 
 # Float slack for the rule's comparisons: a boundary case (4:3 on 16:9 at a 25 % limit, a photo of
 # exactly the Frame's pixels) is judged as its exact arithmetic says.
@@ -141,12 +141,10 @@ FitVerdict = Fits | DoesNotFit
 
 def crop_share(width: int, height: int, aspect: float) -> float:
     """The share of the photo's area the largest window of the Frame's `aspect` (width / height)
-    removes: 1 - (the smaller of the two aspects / the larger). 0 for equal aspects. Pure;
-    ValueError for a non-positive size."""
-    if width <= 0 or height <= 0:
-        raise ValueError("positive photo dimensions required")
-    photo = width / height
-    return 1 - min(photo, aspect) / max(photo, aspect)
+    removes: 1 - the window's length on its free axis (contracts/frame_fit.py `free_axis`), which
+    is the smaller of the two aspects / the larger. 0 for equal aspects. Pure; ValueError for a
+    non-positive size or aspect."""
+    return 1 - free_axis(width, height, aspect).length
 
 
 def shape_fit(kind: MediaKind, width: int, height: int, target: FitTarget, crop_limit: float,
@@ -291,23 +289,21 @@ def place(passing: Sequence[tuple[float, float]], axis: FreeAxis,
     """The offset of the window a photo takes among `passing`, its windows past rules 3 and 4 as
     (offset, interest kept), on its `axis`, with its judged `faces` (`faces_judged`: padded and
     clamped). The one home of placement:
-    - equal shapes (`axis.length` 1): the centred offset 0.5, every window being the same;
     - no faces: the window keeping the most interest (rounded to 9 digits); ties go to the
       offset nearest 0.5, then the lower;
     - faces: the faces' window. The faces span [lo, hi] along the axis, its spare room is
       length - (hi - lo), and F is the mean of their centres weighted by area, t = (F - lo) /
       (hi - lo); the faces' window is centred at hi - length / 2 + t x room, so the room before
       the faces and after them stand (1 - t) : t (a lone face is centred, a bigger face gets more
-      room on its side), clamped to the windows the photo holds. The passing offset whose window
-      centre is nearest it wins, distances rounded to 9 digits; ties go to the offset nearest
-      0.5, then the lower. The interest does not move it (the owner's pick of 2026-10-25,
-      "faces only", a revisable design choice: saliency scores texture such as a floor or
-      foliage, which pulled windows off the faces).
+      room on its side). The passing offset whose window centre is nearest it wins, distances
+      rounded to 9 digits; ties go to the offset nearest 0.5, then the lower. So an aim beyond
+      the photo's windows takes the window at that edge, and equal shapes (`axis.length` 1,
+      every window the same) the centred offset 0.5. The interest does not move it (the owner's
+      pick of 2026-10-25, "faces only", a revisable design choice: saliency scores texture such
+      as a floor or foliage, which pulled windows off the faces).
     Pure; ValueError when `passing` is empty."""
     if not passing:
         raise ValueError("no passing window to place")
-    if axis.length >= 1:
-        return CENTRED.offset
     if not faces:
         return max(passing, key=lambda pair: (round(pair[1], 9), -abs(pair[0] - 0.5),
                                               -pair[0]))[0]
@@ -319,7 +315,7 @@ def place(passing: Sequence[tuple[float, float]], axis: FreeAxis,
                        for area, (start, end) in zip(areas, spans, strict=True)) / math.fsum(areas)
     share = (centre - low) / (high - low)
     half = axis.length / 2
-    aim = min(max(high - half + share * (axis.length - (high - low)), half), 1 - half)
+    aim = high - half + share * (axis.length - (high - low))
     return min((offset for offset, _ in passing),
                key=lambda offset: (round(abs(axis.centre(offset) - aim), 9), abs(offset - 0.5),
                                    offset))

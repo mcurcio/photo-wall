@@ -22,6 +22,7 @@ from central.wall_plan.fit import (
     crop_share,
     faces_judged,
     fit_target,
+    interest_judged,
     interest_kept,
     judge,
     large_frame,
@@ -30,8 +31,9 @@ from central.wall_plan.fit import (
 )
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import KeyContent, UnitBox
+from contracts.frame_fit import FreeAxis, free_axis
 from contracts.models import Calibration, PhotoCrop, PositionBox, frame_output, frame_size_mm
-from contracts.photo_crop import crop_window, free_axis
+from contracts.photo_crop import crop_window
 
 UHD = target_of(3840, 2160, inches=55)
 UHD_40 = target_of(3840, 2160, inches=40)
@@ -392,11 +394,15 @@ def _inside(box: UnitBox, window) -> bool:
 def test_the_two_photos_cropped_badly_on_the_fireplace_frame_sit_on_their_faces(size, key,
                                                                                 offset) -> None:
     """Their stored key content on the fireplace Frame: each window sits on the faces, with room
-    on both sides of them.
-    Mutation probe: choose the window keeping the most interest -> Mickey 0.453, Easter 0."""
+    on both sides of them, and the verdict's interest kept is that window's.
+    Mutation probes: choose the window keeping the most interest -> Mickey 0.453, Easter 0;
+    report the most interest any passing window keeps -> another window's share."""
     placed, before, after = _placed(*size, key, FIREPLACE)
     assert placed == offset
     assert before > .05 and after > .05
+    verdict = judge("image", *size, key, FIREPLACE, .6, HOUSE)
+    window = crop_window(verdict.crop, *size, FIREPLACE.aspect)
+    assert verdict.interest_kept == interest_kept(interest_judged(key, HOUSE), window)
 
 
 @pytest.mark.parametrize(("size", "key", "offset"), [
@@ -481,3 +487,16 @@ def test_place_needs_a_window_and_centres_an_equal_shape() -> None:
         place((), free_axis(4000, 3000, 1), ())
     assert place(((0.0, 1.0), (.5, 1.0), (1.0, 1.0)), free_axis(1600, 900, 16 / 9),
                  (face(0, 0, .1, .1),)) == .5
+
+
+@pytest.mark.parametrize(("passing", "centre", "offset"), [
+    (((.0, 1.0), (.5, .2)), .375, .5),      # windows centred .25 and .5: the one nearer 0.5
+    (((.75, 1.0), (.25, .2)), .5, .25),     # windows centred .625 and .375: the lower offset
+])
+def test_a_face_midway_between_two_windows_takes_the_central_then_the_lower(passing, centre,
+                                                                            offset) -> None:
+    """A lone face midway between two passing windows' centres, the interest favouring the other:
+    the window whose offset is nearer 0.5 wins, then the lower offset.
+    Mutation probes: drop the nearest-0.5 tie -> 0; drop the lower-offset tie -> 0.75."""
+    lone = face(.45, centre - .05, .55, centre + .05)
+    assert place(passing, FreeAxis("y", .5), (lone,)) == offset

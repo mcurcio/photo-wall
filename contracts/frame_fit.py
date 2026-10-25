@@ -10,6 +10,11 @@ Rules this module owns (one home each):
 - **The box's pixels** (`FrameBox`, `place_box`): a Frame's box on its screen as it hangs becomes
   whole pixels by rounding each edge half up (floor(v + 0.5)); a box always lies on its screen.
 - **The box's physical size** (`box_size_mm`): its share of the Display's picture area.
+- **The free axis** (`free_axis`): the one axis the largest window of the Frame's aspect cut from an
+  image slides along, and the window's length on it as a share of the image. Everything that asks
+  which way a window slides or how long it is reads it here: the crop window
+  (contracts/photo_crop.py `crop_window`), the share a crop removes and the placement of a photo's
+  window (central/wall_plan/fit.py `crop_share`, `place`) and `window_holds` below.
 - **A photo holds the Frame output** (`window_holds`): the largest window of the Frame's aspect
   cut from an image holds the Frame output's pixels on both axes.
 
@@ -23,7 +28,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Final
+from typing import Final, Literal, NamedTuple
 
 OutputSize = tuple[int, int]                            # (width, height) in output pixels, each >= 1
 # The Frame output (owner, 2026-10-11: compatibility "measuring against the Frame output and not
@@ -37,6 +42,41 @@ ScreenMm = tuple[int, int]
 BOX_SLACK: Final = 1e-9
 
 
+class FreeAxis(NamedTuple):
+    """The axis a crop window slides along (`along`: "x" across the image's width, "y" down its
+    height) and the window's length on it (`length`, a share of the image; 1.0 when the shapes are
+    equal and the window cannot move, then `along` is "y")."""
+
+    along: Literal["x", "y"]
+    length: float
+
+    def start(self, offset: float) -> float:
+        """The window's first edge on the axis at `offset`: offset x (1 - length)."""
+        return offset * (1 - self.length)
+
+    def centre(self, offset: float) -> float:
+        """The window's centre on the axis at `offset`."""
+        return self.start(offset) + self.length / 2
+
+
+def free_axis(width: int, height: int, aspect: float) -> FreeAxis:
+    """The free axis of a `width` x `height` image for a window of width-to-height `aspect`: an
+    image wider than the window slides along "x" with a window aspect / image_aspect of its width;
+    a taller one along "y", image_aspect / aspect of its height; equal aspects ("y", 1.0). Never a
+    landscape or portrait label: the axis follows from the two ratios. Pure; ValueError for a
+    non-positive or non-finite aspect or a non-positive size."""
+    if not math.isfinite(aspect) or aspect <= 0:
+        raise ValueError("positive finite Frame aspect required")
+    if width <= 0 or height <= 0:
+        raise ValueError("positive source dimensions required")
+    image_aspect = width / height
+    if image_aspect > aspect:
+        return FreeAxis("x", aspect / image_aspect)
+    if image_aspect < aspect:
+        return FreeAxis("y", image_aspect / aspect)
+    return FreeAxis("y", 1.0)
+
+
 def window_holds(width: int, height: int, aspect: float, need: PictureSize) -> bool:
     """Whether the largest window of width-to-height `aspect` cut from a `width` x `height` image
     (the window the Player draws: the whole short side along the cut, contracts/photo_crop.py in
@@ -44,17 +84,19 @@ def window_holds(width: int, height: int, aspect: float, need: PictureSize) -> b
     each. The one home of "a photo, or a copy of it, is at least the Frame output" (owner,
     2026-10-09: Immich's downsampled copy "only if it is at least the visible Frame size"): the
     rendition choice (media/library_client.py `covers`) and the photo fit rule's pixel floor
-    (roadmap 5a, central/wall_plan/fit.py) both ask here. Pure; ValueError("window_size") unless
-    every size is >= 1 and `aspect` is finite and above 0."""
+    (roadmap 5a, central/wall_plan/fit.py) both ask here. The window is `free_axis`'s: its length
+    times the image's side along the axis, the whole other side. Pure; ValueError("window_size")
+    unless every size is >= 1 and `aspect` is finite and above 0."""
     need_width, need_height = need
     if not (all(type(side) is int and side >= 1 for side in (width, height, need_width, need_height))
             and isinstance(aspect, (int, float)) and not isinstance(aspect, bool)
             and math.isfinite(aspect) and aspect > 0):
         raise ValueError("window_size")
-    if width / height > aspect:              # wider than the window: it spans the whole height
-        window_width, window_height = aspect * height, float(height)
-    else:                                    # taller, or the same shape: the whole width
-        window_width, window_height = float(width), width / aspect
+    axis = free_axis(width, height, aspect)
+    if axis.along == "x":
+        window_width, window_height = axis.length * width, float(height)
+    else:
+        window_width, window_height = float(width), axis.length * height
     return window_width >= need_width - 1e-9 and window_height >= need_height - 1e-9
 
 
