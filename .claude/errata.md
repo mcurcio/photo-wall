@@ -6899,3 +6899,23 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
 - **The milestone carries minimal bodies** (the two holds in policy.py, the store's facts columns,
   Galleria's colour by mode, the Pi's `drawn_kelvin` and rgb light) so the build and the existing
   tests stay green on the new wire shape; each lane owns its tests, probes and the rest.
+
+## Light colour follows Home Assistant, DOCS lane (feat/light-colour-follows, 2026-10-25)
+
+- **`drawn_kelvin` rounds halves to even, the brief says halves up.** player/geometry.py at b2f67f4c
+  uses Python's `round(bounded / 100)`, banker's rounding: 2,450 K draws at 2,400 K, 2,550 K at
+  2,600 K. 0028's amendment states the brief's rule (nearest 100 K, a half up); the PLAYER lane owns
+  the fix (`math.floor(x / 100 + 0.5)`), and the console's "drawn at" label must use the same rule.
+- **The runbook names the colour sensor refusals' statuses by analogy:** 409 `colour_sensor_followed`,
+  404 `unknown_colour_sensor` (as `sensor_reports_a_light` and `unknown_sensor`). `REFUSAL_STATUS`
+  (central/room_light_routes.py) at b2f67f4c maps neither, and the routes table there lists no colour
+  sensor route: the CENTRAL lane maps them so, or the runbook changes.
+- **The runbook's refusal table said 422 `unknown_sensor`** for a measured light naming no Sensor; the
+  routes answer 404 (`REFUSAL_STATUS`). Fixed in the runbook.
+- **"Kept facts are never trimmed while named"** (0028 amendment row j, from the gate page's costs and
+  the brief's DB test) is a claim on central/infra/room_light_store.py `_kept_in`, which at b2f67f4c
+  trims the newest WORDS_KEPT_PER_SOURCE per source with no exception for a named reference (read,
+  not run); the CENTRAL lane's DB test proves or fixes it.
+- **scripts/check_docs.py checks file links only, never anchors** (it drops `#…` before checking): a
+  renamed heading leaves every `#room-lights-and-home-assistant` link silently broken. The mutation
+  probe used a broken relative file link instead.
