@@ -34,10 +34,9 @@ from homeassistant.helpers.entity_registry import RegistryEntry
 from .const import DOMAIN
 from .contract import (
     ENTITY_NAME_MAX,
-    KELVIN_MAX,
-    KELVIN_MIN,
     LEVEL_MAX,
     STATES_EPOCH_KEY,
+    HomeAssistantColour,
     HomeAssistantState,
     decode_central_state,
 )
@@ -45,6 +44,9 @@ from .door import CentralDoor, DoorUnavailable
 
 _LOGGER = logging.getLogger(__name__)
 _DOMAINS = ("light", "sensor")
+# Home Assistant's light colour modes, by the colour each states (homeassistant.components.light ColorMode).
+_KELVIN_MODES = frozenset({"color_temp"})
+_RGB_MODES = frozenset({"hs", "xy", "rgb", "rgbw", "rgbww"})
 
 
 def _level(value: object) -> int | None:
@@ -53,9 +55,11 @@ def _level(value: object) -> int | None:
     return min(LEVEL_MAX, max(0, round(value)))
 
 
-def _kelvin(value: object) -> int | None:
-    level = None if isinstance(value, bool) or not isinstance(value, int | float) else value
-    return round(level) if level is not None and math.isfinite(level) and KELVIN_MIN <= level <= KELVIN_MAX else None
+def _kelvin(value: object) -> float | None:
+    """Home Assistant's kelvin as it states it (any finite positive number; Central judges the range)."""
+    if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value) or value <= 0:
+        return None
+    return float(value)
 
 
 def _rgb(value: object) -> list[int] | None:
@@ -71,6 +75,22 @@ def _lux(text: str) -> float | None:
     except ValueError:
         return None
     return lux if math.isfinite(lux) and lux >= 0 else None
+
+
+def _colour(state: State) -> HomeAssistantColour | None:
+    """The colour a light's `color_mode` states: color_temp, its kelvin; hs, xy, rgb, rgbw, rgbww,
+    its rgb; any other mode (brightness, onoff, white, unknown), off or none, no colour. Never a
+    colour worked out from another mode's attributes."""
+    mode = state.attributes.get("color_mode")
+    if state.state != STATE_ON or not isinstance(mode, str):
+        return None
+    if mode in _KELVIN_MODES:
+        kelvin = _kelvin(state.attributes.get("color_temp_kelvin"))
+        return None if kelvin is None else {"kind": "kelvin", "kelvin": kelvin}
+    if mode in _RGB_MODES:
+        rgb = _rgb(state.attributes.get("rgb_color"))
+        return None if rgb is None or not any(rgb) else {"kind": "rgb", "rgb": rgb}
+    return None
 
 
 def _name(state: State) -> str:
@@ -93,9 +113,7 @@ def home_assistant_state(state: State) -> HomeAssistantState | None:
         return {"kind": "illuminance", "name": name, "lux": _lux(state.state)}
     attributes = state.attributes
     return {"kind": "light", "name": name, "on": state.state == STATE_ON,
-            "brightness": _level(attributes.get("brightness")),
-            "kelvin": _kelvin(attributes.get("color_temp_kelvin")),
-            "rgb": _rgb(attributes.get("rgb_color"))}
+            "brightness": _level(attributes.get("brightness")), "colour": _colour(state)}
 
 
 def is_published(entity_id: str, entry: RegistryEntry | None) -> bool:

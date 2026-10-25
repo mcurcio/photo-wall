@@ -6871,3 +6871,31 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
 - **The large-Frame setting is still a diagonal in inches** (0030 decision 7, requirements :186
   "a 40-inch Frame"). The design review asks for a width; R2 says the diagonal is "a weird
   concept". Left for the owner: which measure the threshold uses is his call.
+
+## Light colour follows Home Assistant, interfaces milestone (feat/light-colour-follows, 2026-10-25)
+
+- **The brief names no channel for "Galleria's version"** (Settings › Home Assistant). Added
+  `GalleriaBirth` (contracts/home_assistant.py) at the states bucket's one non-entity key
+  `GALLERIA_BIRTH_KEY = "galleria"`: version plus the entity kinds Galleria publishes. A Galleria older
+  than this release sends none, so Central says "update Galleria" (`settings.galleria_view`). The
+  bucket's newest-1024 trim could drop the key in a house past 1024 entities; Galleria puts it again
+  with every publish of all states.
+- **"Passes HA's value as is (contract range only)" was read as:** the HA contract carries a kelvin
+  as any finite number above 0 (as it carries lux), and Central's adapter refuses one outside
+  contracts/kelvin.py KELVIN_STATED_MIN..MAX (OUT_OF_RANGE, the one refusal log). A light's colour
+  refused that way is refused alone: its on/off and brightness are still recorded.
+- **Audit fields (global rule, 2026-10-24) are absent from the room-light schema** (099 has none) and
+  this delivery's new tables (colour_sensors, colour_words, galleria_birth) follow 099. "By whom" has
+  no actor to name (no accounts, 2026-10-23). Left for the owner with the schema consolidation (#117).
+- **Upgrade data (109):** every reported light becomes "its bulb" with its old kelvin typed (6500 for
+  an old reported-colour light: its channel shares have no kelvin), per Q2. Production `room`
+  (Insteon, brightness only) never states a colour, so it keeps drawing at 5000 K. A light word that
+  was "unavailable" keeps no state and can't tell since it was heard. The document's change rises.
+- **Listening grows by the colour sensors:** LISTENED_MAX 64 -> 96 and the Listening key's largest
+  value 24 -> 32 KiB (96 entity ids of up to 255 bytes).
+- **central/app.py now imports central.node_bus_wiring** for `central_version()` (the settings page
+  shows Central's version beside Galleria's). Kept by import-linter; moving `central_version` to a
+  lighter module is the CENTRAL lane's call.
+- **The milestone carries minimal bodies** (the two holds in policy.py, the store's facts columns,
+  Galleria's colour by mode, the Pi's `drawn_kelvin` and rgb light) so the build and the existing
+  tests stay green on the new wire shape; each lane owns its tests, probes and the rest.

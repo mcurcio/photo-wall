@@ -23,10 +23,10 @@ from central.room_light.model import (
     ReporterRef,
     Sensor,
     SensorRef,
+    TypedColour,
 )
 from contracts.frame_lighting import FrameLighting
 from contracts.node_calibration import candidate_hash, parse_trial
-from contracts.room_light import FixedColour
 
 FRAME = "node-f0"
 HEADERS = {"Authorization": "Bearer " + ADMIN}
@@ -61,9 +61,9 @@ def test_a_frames_lighting_through_positions_trial(registry):
     _, request, exchange = setup_trial(registry)
     lights = PgRoomLights(registry.db, PgHouseLock())
     lights.save_room_light("bookshelf-spot", ReportedLight(
-        name="Spot", colour=FixedColour(kelvin=4000), reporter=ReporterRef(source="home-assistant", address="light.spot")))
+        name="Spot", colour=TypedColour(kelvin=4000), reporter=ReporterRef(source="home-assistant", address="light.spot")))
     lights.save_sensor("meter", Sensor(name="Meter", at=SensorRef(source="home-assistant", address="sensor.lux")))
-    lights.save_room_light("window", MeasuredLight(name="Window", colour=FixedColour(kelvin=6500), sensor="meter"))
+    lights.save_room_light("window", MeasuredLight(name="Window", colour=TypedColour(kelvin=6500), sensor="meter"))
     with _client(registry) as client:
         for body, code in (({"lighting": _lighting({**SPOT, "light": "cellar"})}, "unknown_room_light"),
                            ({"lighting": _lighting({**SPOT, "light": "window"})}, "reference_mismatch"),
@@ -103,7 +103,7 @@ def test_a_frames_lighting_through_positions_trial(registry):
         assert (removed.status_code, removed.json()) == (409, {"error": "named_by_a_frame"})
         assert client.get(LIGHTS, headers=HEADERS).json()["lights"][1]["named_by"] == [FRAME]
         remeasured = client.put(f"{LIGHTS}/window", headers=HEADERS, json={
-            "kind": "fixed", "name": "Window", "colour": {"kind": "fixed", "kelvin": 6500}})
+            "kind": "fixed", "name": "Window", "colour": {"kind": "typed", "kelvin": 6500}})
         assert (remeasured.status_code, remeasured.json()) == (409, {"error": "named_by_a_frame"})
 
 
@@ -114,7 +114,7 @@ def test_a_new_frame_names_a_fixed_room_light_that_is_there(registry):
     lights = PgRoomLights(registry.db, PgHouseLock())
     lights.remove_room_light("room")
     frame(registry, "bare")
-    lights.save_room_light("lamp", FixedLight(name="Lamp", colour=FixedColour(kelvin=3000)))
+    lights.save_room_light("lamp", FixedLight(name="Lamp", colour=TypedColour(kelvin=3000)))
     frame(registry, "lit")
     frames = {each.id: each for each in registry.inventory().frames}
     assert frames["bare"].lighting.lights == ()

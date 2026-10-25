@@ -10,14 +10,16 @@ import pytest
 
 from central.infra.home_assistant import messages, references
 from central.infra.home_assistant.states import HomeAssistantListener
-from central.room_light.model import ReporterRef, ReportRefusal, SensorRef
+from central.room_light.model import LightStated, ReporterRef, ReportRefusal, SensorRef
 from contracts.home_assistant import (
     HomeAssistantIlluminance,
+    HomeAssistantKelvin,
     HomeAssistantLight,
+    HomeAssistantRgb,
     HomeAssistantUnavailable,
     encode_home_assistant_state,
 )
-from contracts.room_light import ColourDimmer, Dimmer, Measured, Unavailable
+from contracts.room_light import Dimmer, KelvinColour, Measured, RgbColour, Unavailable
 from nodeapi.hub import Heard
 
 
@@ -29,20 +31,30 @@ def test_a_reference_names_an_entity():
     assert references.illuminance_sensor("sensor.lux") == SensorRef(source=references.SOURCE, address="sensor.lux")
 
 
-def _light(on=True, brightness=None, rgb=None, kelvin=None) -> HomeAssistantLight:
-    return HomeAssistantLight(name="Spot", on=on, brightness=brightness, kelvin=kelvin, rgb=rgb)
+def _light(on=True, brightness=None, colour=None) -> HomeAssistantLight:
+    return HomeAssistantLight(name="Spot", on=on, brightness=brightness, colour=colour)
 
 
-@pytest.mark.parametrize("state, word", [
-    (_light(brightness=255), Dimmer(on=True, brightness=1.0)),
-    (_light(), Dimmer(on=True, brightness=1.0)),
-    (_light(on=False), Dimmer(on=False, brightness=0.0)),
-    (_light(brightness=51, rgb=(255, 0, 51), kelvin=2700), ColourDimmer(on=True, brightness=0.2, rgb=(1.0, 0.0, 0.2))),
-    (_light(brightness=51, kelvin=2700), Dimmer(on=True, brightness=0.2)),   # kelvin is not read
+def _stated(on: bool, brightness: float, colour=None) -> LightStated:
+    return LightStated(state=Dimmer(on=on, brightness=brightness), colour=colour)
+
+
+@pytest.mark.parametrize("state, report", [
+    (_light(brightness=255), _stated(True, 1.0)),
+    (_light(), _stated(True, 1.0)),
+    (_light(on=False), _stated(False, 0.0)),
+    (_light(brightness=51, colour=HomeAssistantRgb(rgb=(255, 0, 51))), _stated(True, 0.2, RgbColour(rgb=(1.0, 0.0, 0.2)))),
+    (_light(brightness=51, colour=HomeAssistantKelvin(kelvin=2700)), _stated(True, 0.2, KelvinColour(kelvin=2700))),
     (HomeAssistantUnavailable(entity_kind="light", name="Spot"), Unavailable()),
 ])
-def test_a_light_state_reads_as_its_word(state, word):
-    assert messages.light_word(state) == word
+def test_a_light_state_reads_as_its_report(state, report):
+    assert messages.light_report(state) == (report, None)
+
+
+def test_a_colour_out_of_range_is_refused_and_the_brightness_kept():
+    report, refused = messages.light_report(_light(brightness=51, colour=HomeAssistantKelvin(kelvin=50_000)))
+    assert report == _stated(True, 0.2)
+    assert refused is not None and refused.reason is ReportRefusal.OUT_OF_RANGE
 
 
 def test_an_illuminance_state_reads_as_its_reading():
@@ -89,7 +101,7 @@ def test_each_state_is_recorded_under_its_kinds_reference_or_refused():
         Heard("light.removed", None))))
     source = references.SOURCE
     assert reports.told == [
-        ("light", ReporterRef(source=source, address="light.spot"), Dimmer(on=True, brightness=1.0)),
+        ("light", ReporterRef(source=source, address="light.spot"), _stated(True, 1.0)),
         ("heard", "light.spot", "light", "Spot"),
         ("reading", SensorRef(source=source, address="sensor.lux"), Measured(lux=12.0)),
         ("heard", "sensor.lux", "illuminance", "Lux"),

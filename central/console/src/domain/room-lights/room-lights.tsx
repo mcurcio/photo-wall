@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import {
-  type FixedColour, type HeardEntityView, LIMITS, type ReportedColour, type RoomLight, type RoomLightsView, type RoomLightView,
+  type HeardEntityView, LIMITS, type RoomLight, type RoomLightsView, type RoomLightView,
   type Sensor, type SensorView,
 } from "../../generated/contract";
 import { EntityList } from "../../patterns/entity-list";
@@ -11,7 +11,7 @@ import { type Outcome, RemoveDialog, SaveDialog } from "../../patterns/save-dial
 import { TypedNumber } from "../../patterns/typed-number";
 import { formatRoute } from "../../routes.js";
 import { Button } from "../../ui/button";
-import { Field, NumberInput, TextInput } from "../../ui/field";
+import { Field, TextInput } from "../../ui/field";
 import { SegmentedControl } from "../../ui/segmented-control";
 import { Select } from "../../ui/select";
 import { Inline, Stack } from "../../ui/stack";
@@ -36,9 +36,7 @@ export interface RoomLightsProps {
   onRemoveSensor: (sensor: SensorView) => Outcome;
 }
 
-const KELVIN = LIMITS.FixedColour.kelvin;
-const PERCENT = 100;
-const EVEN_SHARES = ["34", "33", "33"] as const;
+const KELVIN = LIMITS.TypedColour.kelvin;
 const SENSOR_PLACEMENT = "A Sensor reads every light that reaches it. Put it where the light it measures is the "
   + "strongest, and never facing the wall: the wall's own glow would read as room light.";
 const NO_SMART_LIGHT = "No smart light has been heard yet: one that reports itself is offered here once it has.";
@@ -58,9 +56,9 @@ interface LightDraft {
   /** The smart light it reports itself through ("" before one is chosen). */
   entity: string;
   sensor: string;
-  colour: (FixedColour | ReportedColour)["kind"];
+  /** Where its colour comes from: the typed kelvin, or (a light that reports itself) its bulb's own. */
+  colour: "typed" | "its-bulb";
   kelvin: number;
-  shares: readonly [string, string, string];
 }
 
 const lightDraft = (view: RoomLightView | null, sensors: readonly SensorView[],
@@ -72,11 +70,8 @@ const lightDraft = (view: RoomLightView | null, sensors: readonly SensorView[],
     kind: light?.kind ?? "fixed",
     entity: reporterOf(light) ?? lights[0]?.entity ?? "",
     sensor: light?.kind === "measured" ? light.sensor : sensors[0]?.id ?? "",
-    colour: colour?.kind ?? "fixed",
-    kelvin: colour?.kind === "fixed" ? colour.kelvin : NEW_KELVIN,
-    shares: colour?.kind === "reported"
-      ? colour.channel_shares.map((share) => String(Math.round(share * PERCENT))) as unknown as LightDraft["shares"]
-      : EVEN_SHARES,
+    colour: colour?.kind === "its-bulb" || (colour === null && light === null) ? "its-bulb" : "typed",
+    kelvin: colour === null ? NEW_KELVIN : colour.kind === "typed" ? colour.kelvin : colour.typed_kelvin,
   };
 };
 
@@ -84,20 +79,15 @@ const lightDraft = (view: RoomLightView | null, sensors: readonly SensorView[],
 function lightOf(draft: LightDraft): { light: RoomLight } | { problem: string } {
   const name = draft.name.trim();
   if (name === "") return { problem: "Give the light a name, as Bookshelf spot." };
-  const fixed: FixedColour = { kind: "fixed", kelvin: draft.kelvin };
+  const fixed = { kind: "typed", kelvin: draft.kelvin } as const;
   if (draft.kind === "measured") {
     if (draft.sensor === "") return { problem: "A Sensor measures this light: add one first, then choose it here." };
     return { light: { kind: "measured", name, sensor: draft.sensor, colour: fixed } };
   }
   if (draft.kind === "reported") {
     if (draft.entity === "") return { problem: "Choose the smart light that reports it." };
-    if (draft.colour === "fixed") return { light: reportedThrough(name, draft.entity, fixed) };
-    const shares = draft.shares.map(Number);
-    if (shares.some((share) => !Number.isFinite(share) || share < 0 || share > PERCENT) || shares.every((share) => share === 0)) {
-      return { problem: `Each colour share is a percent from 0 to ${PERCENT}, and they cannot all be 0.` };
-    }
-    const channel_shares = shares.map((share) => share / PERCENT) as [number, number, number];
-    return { light: reportedThrough(name, draft.entity, { kind: "reported", channel_shares }) };
+    if (draft.colour === "typed") return { light: reportedThrough(name, draft.entity, fixed) };
+    return { light: reportedThrough(name, draft.entity, { kind: "its-bulb", typed_kelvin: draft.kelvin }) };
   }
   return { light: { kind: "fixed", name, colour: fixed } };
 }
@@ -135,7 +125,7 @@ function LightDialog({ view, house, heard, onClose, onSave }: {
             </Field>
             <Field label="How Photo Wall knows it is on" help={KIND_HELP[draft.kind]}>
               <SegmentedControl label="How Photo Wall knows it is on" value={draft.kind} options={kinds} disabled={busy}
-                onChange={(kind) => change({ kind, colour: kind === "reported" ? draft.colour : "fixed" })} />
+                onChange={(kind) => change({ kind, colour: kind === "reported" ? draft.colour : "typed" })} />
             </Field>
             {smartLights.length === 0 && before?.kind !== "reported" && <Note>{NO_SMART_LIGHT}</Note>}
             {reported && (
@@ -154,24 +144,14 @@ function LightDialog({ view, house, heard, onClose, onSave }: {
             {reported && (
               <Field label="Colour">
                 <SegmentedControl label="Colour" value={draft.colour} disabled={busy}
-                  options={[{ value: "fixed", label: "White, in kelvin" }, { value: "reported", label: "Its own colour" }]}
+                  options={[{ value: "its-bulb", label: "Its bulb's own" }, { value: "typed", label: "Typed, in kelvin" }]}
                   onChange={(colour) => change({ colour })} />
               </Field>
             )}
-            {reported && draft.colour === "reported" ? (
-              <Inline label="Each screen colour's share of the light's white">
-                {(["Red", "Green", "Blue"] as const).map((name, index) => (
-                  <Field key={name} label={`${name} share`} help="%">
-                    <NumberInput min={0} max={PERCENT} step={1} value={draft.shares[index]} disabled={busy}
-                      onChange={(raw) => change({ shares: draft.shares.map((share, at) => (at === index ? raw : share)) as unknown as LightDraft["shares"] })} />
-                  </Field>
-                ))}
-              </Inline>
-            ) : (
-              <TypedNumber label="Colour temperature" help="2700 K is a warm bulb, 6500 K daylight" value={draft.kelvin}
-                min={KELVIN.minimum} max={KELVIN.maximum} step={KELVIN.multipleOf} unit="K" disabled={busy}
-                onChange={(kelvin) => change({ kelvin })} />
-            )}
+            <TypedNumber label={reported && draft.colour === "its-bulb" ? "Colour temperature until the bulb says" : "Colour temperature"}
+              help="2700 K is a warm bulb, 6500 K daylight" value={draft.kelvin}
+              min={KELVIN.minimum} max={KELVIN.maximum} step={KELVIN.multipleOf} unit="K" disabled={busy}
+              onChange={(kelvin) => change({ kelvin })} />
           </>
         );
       }}

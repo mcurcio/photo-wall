@@ -39,7 +39,7 @@ from test_registry import enroll, frame, hello
 
 from central.content_catalog.catalog import device_id_for_serial
 from central.infra.home_assistant.references import light_reporter
-from central.room_light.model import ReportedLight
+from central.room_light.model import ReportedLight, TypedColour
 from central.room_light_routes import HOUSE_LIGHTS
 from contracts.central_api import CENTRAL_STATE_PREFIX, INSTALLATION_KEY, STATES_EPOCH_KEY, DrivenBy
 from contracts.home_assistant import HomeAssistantLight
@@ -51,7 +51,6 @@ from contracts.node_state import (
     decode_frame_reports,
     encode_frame_reports,
 )
-from contracts.room_light import FixedColour
 from nodeapi.buffers import state_prefix, state_stream
 
 SERIAL = "serial-home-assistant"
@@ -63,7 +62,7 @@ SECONDS = 10         # every later step
 
 
 def _light(on: bool) -> HomeAssistantLight:
-    return HomeAssistantLight(name="Test light", on=on, brightness=255 if on else None, kelvin=None, rgb=None)
+    return HomeAssistantLight(name="Test light", on=on, brightness=255 if on else None, colour=None)
 
 
 def test_a_home_assistant_light_reaches_its_frame_read_through_the_pis_door(registry, tmp_path):
@@ -90,7 +89,7 @@ def test_a_home_assistant_light_reaches_its_frame_read_through_the_pis_door(regi
             (b.frame_id, b.generation, [frame_light.light for frame_light in b.lighting.lights]) for b in bindings]
         assert (frame_id, generation) == (FRAME, 2)
         await asyncio.to_thread(central.call, "PUT", f"{HOUSE_LIGHTS}/{light}", json=ReportedLight(
-            name="Test light", reporter=light_reporter(ENTITY), colour=FixedColour(kelvin=3000)).model_dump(mode="json"))
+            name="Test light", reporter=light_reporter(ENTITY), colour=TypedColour(kelvin=3000)).model_dump(mode="json"))
 
         running = worker(database.dsn, hub, tmp_path)
         running.start()

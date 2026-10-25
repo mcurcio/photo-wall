@@ -23,7 +23,7 @@ from contracts.room_light import (
 AUTH = {"Authorization": "Bearer " + ADMIN}
 LIGHTS = "/v1/operator/house/lights"
 SENSORS = "/v1/operator/house/sensors"
-WHITE = {"kind": "fixed", "kelvin": 4000}
+WHITE = {"kind": "typed", "kelvin": 4000}
 
 
 def _client(registry) -> TestClient:
@@ -40,7 +40,7 @@ def test_house_lights_refuse_with_one_vocabulary_at_its_status(registry):
     with _client(registry) as client:
         saved = client.put(f"{LIGHTS}/x", headers=AUTH, json=_reported("light.x"))
         assert saved.status_code == 200, saved.text
-        assert saved.json()["entry"] == {"kind": "white", "colour": WHITE, "state": {"kind": "not-reported"}}
+        assert saved.json()["entry"] == {"kind": "reported", "colour": {"kind": "kelvin", "kelvin": 4000.0}, "state": {"kind": "not-reported"}}
         assert saved.json()["light"]["reporter"] == {"source": "home-assistant", "address": "light.x"}
         for path, body, status, code in (
                 (f"{LIGHTS}/y", _reported("light.x"), 409, "reference_taken"),
@@ -65,7 +65,7 @@ def test_house_lights_refuse_with_one_vocabulary_at_its_status(registry):
             assert (gone.status_code, gone.json()) == (404, {"error": code})
         assert client.put(f"{LIGHTS}/Bad_Id", headers=AUTH, json=_reported("light.z")).status_code == 422
         assert client.put(f"{LIGHTS}/z", headers=AUTH, json={**_reported("light.z"), "colour": {
-            "kind": "fixed", "kelvin": 4050}}).status_code == 422
+            "kind": "typed", "kelvin": 4050}}).status_code == 422
         named = client.delete(f"{LIGHTS}/room", headers=AUTH)
         assert named.status_code == 204                       # no Frame names it here
         assert client.delete(f"{LIGHTS}/w", headers=AUTH).status_code == 204

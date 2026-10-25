@@ -17,7 +17,12 @@ const WHOLE = ["full-page"];
 /** Heard: three entities linked, the kitchen light not linked yet (listed first). */
 export const Heard: Story = { tags: WHOLE };
 /** Nothing heard yet: the Galleria integration has not published. */
-export const NotHeardYet: Story = { args: { view: { heard_at: null, entities: [], refused: [] } } };
+export const NotHeardYet: Story = {
+  args: {
+    view: { galleria: { version: null, kinds: [], heard_at: null, central_version: "0.40.0", update: true },
+      heard_at: null, entities: [], refused: [] },
+  },
+};
 /** States Central could not record, kept with the reason. */
 export const StatesNotRecorded: Story = {
   tags: WHOLE,

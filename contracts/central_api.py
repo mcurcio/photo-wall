@@ -26,7 +26,8 @@ value is read from the same Central services the console's routes call.
 - BIRTH_KEY `CentralBirth`: Central's version.
 - INSTALLATION_KEY `Installation`: every Frame with the Pi that drives it (serial, HDMI port and the
   binding generation its Player's report must carry), and every Pi with its name and address.
-- LISTENING_KEY `Listening`: the entities Central's room-light setup names as reporters.
+- LISTENING_KEY `Listening`: the entities Central's room-light setup names as reporters (room lights,
+  Sensors and colour sensors).
 - ROOM_LIGHTS_KEY `RoomLightsListing`: each room light as the wall draws it (the room-lights
   document's entries, with their names).
 - RELEASES_KEY `Releases`: Central's catalog, newest first.
@@ -106,7 +107,7 @@ STATES_EPOCH_KEY: Final = "states-epoch"
 CENTRAL_STATE_TABLE: Final = MappingProxyType({
     BIRTH_KEY: 256,
     INSTALLATION_KEY: 64 * 1024,
-    LISTENING_KEY: 24 * 1024,
+    LISTENING_KEY: 32 * 1024,
     ROOM_LIGHTS_KEY: 24 * 1024,
     RELEASES_KEY: 8 * 1024,
     VERSIONS_KEY: 32 * 1024,
@@ -114,7 +115,7 @@ CENTRAL_STATE_TABLE: Final = MappingProxyType({
 })
 FRAMES_MAX: Final = 256                   # Frames one Installation lists
 PLAYERS_MAX: Final = 128                  # Pis one Installation lists (the fleet's ceiling)
-LISTENED_MAX: Final = 64                  # entities the setup names (room lights + Sensors)
+LISTENED_MAX: Final = 96                  # entities the setup names (room lights + Sensors + colour sensors)
 RELEASES_LISTED: Final = 20               # the newest releases Central lists
 NAME_MAX: Final = 128
 
@@ -163,8 +164,8 @@ class Installation(Model):
 
 
 class Listening(Model):
-    """The Home Assistant entities Central's room-light setup names as reporters; the rest of what
-    Home Assistant publishes Central ignores."""
+    """The Home Assistant entities Central's room-light setup names as reporters (a room light's, a
+    Sensor's, a colour sensor's); the rest of what Home Assistant publishes Central ignores."""
     entities: tuple[EntityId, ...] = Field(max_length=LISTENED_MAX)
 
 

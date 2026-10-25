@@ -18,23 +18,25 @@ from central.infra.node_link_store import PgLinkStores, PgWallMarks
 from central.infra.room_light_store import PgRoomLights
 from central.room_light.model import (
     ADDRESS_MAX,
+    LightStated,
     MeasuredLight,
     ReportedLight,
     ReporterRef,
     ReportRefusal,
     Sensor,
     SensorRef,
+    TypedColour,
 )
 from contracts.node_link import Pipe
 from contracts.room_light import (
     LIGHT_SENSOR_KEY,
     Dimmer,
-    FixedColour,
+    KelvinColour,
     LightSensorReading,
     Measured,
     MeasuredEntry,
     NotReported,
-    WhiteEntry,
+    ReportedEntry,
     encode_light_sensor,
 )
 from nodeapi.buffers import state_prefix
@@ -43,7 +45,12 @@ from nodeapi.pull import Batch, Read
 
 X = ReporterRef(source="home-assistant", address="light.x")
 Y = ReporterRef(source="home-assistant", address="light.y")
-WHITE = FixedColour(kelvin=4000)
+WHITE = TypedColour(kelvin=4000)
+KELVIN = KelvinColour(kelvin=4000)
+
+
+def _said(on: bool, brightness: float) -> LightStated:
+    return LightStated(state=Dimmer(on=on, brightness=brightness), colour=None)
 SERIAL = "10000000c0ffee01"
 
 
@@ -57,13 +64,13 @@ def test_a_word_heard_before_its_light_exists_shows_at_once(registry):
     """A2. Mutation probe M1: entry_of ignoring the word -> the light reads not reported."""
     lights = PgRoomLights(registry.db, PgHouseLock())
     change = lights.current().change
-    assert lights.record_light_state(X, Dimmer(on=True, brightness=0.5)) == "unchanged"     # no light names it yet
+    assert lights.record_light_state(X, _said(True, 0.5)) == "unchanged"     # no light names it yet
     assert lights.current().change == change
     view = lights.save_room_light("x", ReportedLight(name="X", reporter=X, colour=WHITE))
-    assert view.entry == WhiteEntry(colour=WHITE, state=Dimmer(on=True, brightness=0.5)) and view.heard_at is not None
+    assert view.entry == ReportedEntry(colour=KELVIN, state=Dimmer(on=True, brightness=0.5)) and view.heard_at is not None
     assert lights.current().lights["x"] == view.entry and lights.current().change == change + 1
-    assert lights.record_light_state(X, Dimmer(on=True, brightness=0.5)) == "unchanged"     # a repeat
-    assert lights.record_light_state(X, Dimmer(on=False, brightness=0.0)) == "recorded"
+    assert lights.record_light_state(X, _said(True, 0.5)) == "unchanged"     # a repeat
+    assert lights.record_light_state(X, _said(False, 0.0)) == "recorded"
     assert lights.current().change == change + 2
 
 
@@ -77,14 +84,14 @@ def test_a_pi_reading_heard_before_its_sensor_exists_shows_at_once(registry):
                                                                                 address=player["player_id"])))
     assert sensor.reading == Measured(lux=180.0) and sensor.heard_at is not None and sensor.reports is None
     window = lights.save_room_light("window", MeasuredLight(name="Window", sensor="pi-meter", colour=WHITE))
-    assert window.entry == MeasuredEntry(colour=WHITE, state=Measured(lux=180.0))
+    assert window.entry == MeasuredEntry(colour=KELVIN, state=Measured(lux=180.0))
     assert next(each for each in lights.lights().sensors if each.id == "pi-meter").reports == "window"
 
 
 def test_a_changed_reporter_reads_its_new_references_last_word(registry):
     """A3: no reset; the light takes whatever its new reference last said."""
     lights = PgRoomLights(registry.db, PgHouseLock())
-    lights.record_light_state(Y, Dimmer(on=True, brightness=0.25))
+    lights.record_light_state(Y, _said(True, 0.25))
     lights.save_room_light("x", ReportedLight(name="X", reporter=X, colour=WHITE))
     assert lights.current().lights["x"].state == NotReported()
     lights.save_room_light("x", ReportedLight(name="X", reporter=Y, colour=WHITE))
@@ -125,16 +132,16 @@ def test_a_reading_that_fails_never_rolls_back_the_host_lines_record(registry, m
     def failing(conn, *_):
         conn.execute("SELECT 1/0")
 
-    monkeypatch.setattr(room_light_store, "_word_in", failing)
+    monkeypatch.setattr(room_light_store, "_reading_in", failing)
     _record_host_line(registry, LightSensorJudge(PgRoomLights(registry.db, PgHouseLock())),
                       encode_light_sensor(LightSensorReading(reading=Measured(lux=5.0))))
     assert _sql(registry, "SELECT seq FROM node_link_records WHERE stream=%s", (HOST_STATE_STREAM,)) == [{"seq": 1}]
     monkeypatch.undo()
-    assert _sql(registry, "SELECT word FROM reading_words WHERE source=%s", (PI_SOURCE,)) == []
+    assert _sql(registry, "SELECT reading FROM reading_words WHERE source=%s", (PI_SOURCE,)) == []
     lights = PgRoomLights(registry.db, PgHouseLock())
     lights.current()
-    assert _sql(registry, "SELECT address, word FROM reading_words WHERE source=%s", (PI_SOURCE,)) == [
-        {"address": player["player_id"], "word": {"kind": "measured", "lux": 5.0}}]
+    assert _sql(registry, "SELECT address, reading FROM reading_words WHERE source=%s", (PI_SOURCE,)) == [
+        {"address": player["player_id"], "reading": {"kind": "measured", "lux": 5.0}}]
     change = lights.current().change
     assert lights.current().change == change           # taken once: the word is now newer than the record
     _record_host_line(registry, LightSensorJudge(lights), b"not a reading", seq=2)
@@ -159,11 +166,11 @@ def test_the_home_assistant_page_reads_when_each_entity_was_heard_and_its_name(r
     """"States last heard": the newest heard_at; every entity Home Assistant published, by its name,
     newest heard first; a room light's entity never published reads with no name and no time."""
     lights = PgRoomLights(registry.db, PgHouseLock())
-    settings = PgHomeAssistantSettings(registry.db)
+    settings = PgHomeAssistantSettings(registry.db, "0.40.0")
     assert settings.view().heard_at is None
     lights.save_room_light("spot", ReportedLight(name="Spot", reporter=ReporterRef(source="home-assistant",
                                                                                    address="light.unheard"),
-                                                 colour=FixedColour(kelvin=4000)))
+                                                 colour=TypedColour(kelvin=4000)))
     lights.record_heard("light.hall", "light", "Hall")
     lights.record_heard("sensor.lux", "illuminance", "Hall lux")
     view = settings.view()

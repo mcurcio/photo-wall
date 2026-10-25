@@ -73,22 +73,22 @@ from contracts.frame_lighting import (
     Paper,
     WashLight,
 )
-from contracts.kelvin import kelvin_white
+from contracts.kelvin import KELVIN_TABLE_MAX, KELVIN_TABLE_MIN, KELVIN_TABLE_STEP, kelvin_white
 from contracts.lut import LUT_GRID, lut_offset
 from contracts.models import PhotoCrop
 from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
 from contracts.photo_crop import CENTRED, crop_window
 from contracts.room_light import (
-    ColourDimmer,
-    ColourEntry,
     Dimmer,
     FixedEntry,
+    KelvinColour,
+    LightColour,
     Measured,
     MeasuredEntry,
+    ReportedEntry,
     RoomLightEntry,
     RoomLightsDocument,
-    WhiteEntry,
 )
 from contracts.tuning import SIGNAL_LEVELS, TARGET_PATTERNS, TestPattern
 
@@ -154,6 +154,26 @@ def rolled_off(value: float, knee: float, peak: float) -> float:
     t = (min(value, peak) - knee) / (1 - knee)
     w = (peak - knee) / (1 - knee)
     return 1 - (1 - knee) * (w - t) * (w + t) / (w * w * (1 + t))
+
+
+def drawn_kelvin(kelvin: float) -> int:
+    """The table row a stated colour temperature is drawn at: `kelvin` bounded to
+    KELVIN_TABLE_MIN..KELVIN_TABLE_MAX and rounded to the nearest KELVIN_TABLE_STEP (contracts/kelvin.py).
+    The Pi's rule alone (2026-10-25: bounding colour temperature is the node's): Central passes the
+    stated value as is. Pure."""
+    bounded = min(max(kelvin, KELVIN_TABLE_MIN), KELVIN_TABLE_MAX)
+    return int(round(bounded / KELVIN_TABLE_STEP)) * KELVIN_TABLE_STEP
+
+
+def colour_light(colour: LightColour) -> Linear:
+    """A light's stated colour as light of luminance 1: a kelvin at its drawn row (`drawn_kelvin`,
+    `light_colour`); a bulb's rgb (sRGB-encoded shares) taken to linear light and scaled so its
+    luminance is 1. Pure."""
+    if isinstance(colour, KelvinColour):
+        return light_colour(drawn_kelvin(colour.kelvin))
+    linear = tuple(srgb_to_linear(channel) for channel in colour.rgb)
+    luminance = sum(weight * channel for weight, channel in zip(LUMA, linear, strict=True))
+    return tuple(channel / luminance for channel in linear)
 
 
 def light_colour(kelvin: int) -> Linear:
@@ -433,33 +453,26 @@ class FrameLights:
 
 def light_on_frame(light: WashLight | FarLight | CloseLight, entry: RoomLightEntry | None) -> Linear:
     """The rgb lux `light` puts on the Frame (at its centre, for a close light), its shape aside.
-    No light (0, 0, 0) for an absent entry, NotReported, Unavailable, an off dimmer, or a reference
-    that does not fit the entry (AtFull on a measured light, AtReading on any other): a total rule.
-    A fixed light: lux, coloured by its kelvin at luminance 1 (`light_colour`). A dimmer on: lux x
-    brightness, coloured the same way. A colour dimmer on: drive_c = rgb_c x brightness and
-    E_c = lux x drive_c x share_c / LUMA_c, so luminance is lux x sum_c drive_c x share_c. A
-    measured light: lux x reading / the reference's reading, coloured as a fixed light. Pure."""
+    No light (0, 0, 0) for an absent entry, NotReported, an off dimmer, or a reference that does not
+    fit the entry (AtFull on a measured light, AtReading on any other): a total rule. A fixed light:
+    lux, coloured by its colour at luminance 1 (`colour_light`). A reported dimmer on: lux x
+    brightness, coloured the same way. A measured light: lux x reading / the reference's reading,
+    coloured the same way. Pure."""
     if entry is None:
         return NO_LIGHT
     reference = light.reference
     if isinstance(entry, MeasuredEntry):
         if not (isinstance(entry.state, Measured) and isinstance(reference, AtReading)):
             return NO_LIGHT
-        return _white(light.lux * entry.state.lux / reference.lux, entry.colour.kelvin)
+        return _coloured(light.lux * entry.state.lux / reference.lux, entry.colour)
     if not isinstance(reference, AtFull):
         return NO_LIGHT
     if isinstance(entry, FixedEntry):
-        return _white(light.lux, entry.colour.kelvin)
-    if isinstance(entry, WhiteEntry):
-        state = entry.state
-        return _white(light.lux * state.brightness, entry.colour.kelvin) if isinstance(state, Dimmer) and state.on \
-            else NO_LIGHT
-    assert isinstance(entry, ColourEntry)
+        return _coloured(light.lux, entry.colour)
+    assert isinstance(entry, ReportedEntry)
     state = entry.state
-    if not (isinstance(state, ColourDimmer) and state.on):
-        return NO_LIGHT
-    shares = entry.colour.channel_shares
-    return tuple(light.lux * state.rgb[index] * state.brightness * shares[index] / LUMA[index] for index in range(3))
+    return _coloured(light.lux * state.brightness, entry.colour) if isinstance(state, Dimmer) and state.on \
+        else NO_LIGHT
 
 
 def light_lux_on_frame(lighting: FrameLighting, document: RoomLightsDocument | None) -> float | None:
@@ -476,9 +489,9 @@ def light_lux_on_frame(lighting: FrameLighting, document: RoomLightsDocument | N
     return total
 
 
-def _white(lux: float, kelvin: int) -> Linear:
-    """`lux` of a white light of `kelvin`, at luminance 1 per lux."""
-    return tuple(lux * channel for channel in light_colour(kelvin))
+def _coloured(lux: float, colour: LightColour) -> Linear:
+    """`lux` of a light of `colour`, at luminance 1 per lux."""
+    return tuple(lux * channel for channel in colour_light(colour))
 
 
 def _lit(light: WashLight | FarLight | CloseLight, rgb: Linear, depth: float, size: tuple[float, float]) -> LitLight:

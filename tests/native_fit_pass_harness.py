@@ -83,7 +83,7 @@ from contracts.lut import LUT_BYTES, LUT_GRID, lut_offset  # noqa: E402
 from contracts.models import PhotoCrop  # noqa: E402
 from contracts.node_frame import PictureOperations  # noqa: E402
 from contracts.node_picture import DisplayLight  # noqa: E402
-from contracts.room_light import FixedColour, FixedEntry, RoomLightsDocument  # noqa: E402
+from contracts.room_light import FixedEntry, KelvinColour, RoomLightsDocument  # noqa: E402
 from contracts.tuning import TARGET_PATTERNS, TestPattern  # noqa: E402
 from player.calibration_target import target_modules  # noqa: E402
 from player.fit_pass import FitPass, FitRequest, FitSource, target_size  # noqa: E402
@@ -118,7 +118,7 @@ LIGHTING = FrameLighting(mat_depth_mm=8, paper=Paper(whiteness=0.9, ink_density=
     WashLight(light="room", lux=200, reference=AT_FULL),
     FarLight(light="lamp", lux=600, reference=AT_FULL, from_degrees=20, steep_degrees=30, softness_degrees=20)))
 ROOM = RoomLightsDocument(change=1, lights={
-    "room": FixedEntry(colour=FixedColour(kelvin=6500)), "lamp": FixedEntry(colour=FixedColour(kelvin=3000))})
+    "room": FixedEntry(colour=KelvinColour(kelvin=6500)), "lamp": FixedEntry(colour=KelvinColour(kelvin=3000))})
 
 
 def turning_table() -> bytes:

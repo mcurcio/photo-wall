@@ -24,7 +24,7 @@ from contracts.frame_lighting import AT_FULL, FarLight, FrameLighting, Paper, Wa
 from contracts.models import Calibration, PositionBox
 from contracts.node_frame import neutral_operations
 from contracts.node_picture import DisplayLight
-from contracts.room_light import FixedColour, FixedEntry, RoomLightsDocument
+from contracts.room_light import FixedEntry, KelvinColour, RoomLightsDocument
 from contracts.tuning import TestPattern
 from player import geometry as geometry_module
 from player import plane_renderer as plane_renderer_module
@@ -421,9 +421,9 @@ def test_what_a_still_depends_on_finishes_it_again_and_nothing_else_does():
     assert draws_after(lambda: None) == 1               # the first finish
     assert draws_after(lambda: None) == 0
     assert draws_after(lambda: rig.renderer.set_room_lights(RoomLightsDocument(change=1, lights={
-        "room": FixedEntry(colour=FixedColour(kelvin=6500))}))) == 1
+        "room": FixedEntry(colour=KelvinColour(kelvin=6500))}))) == 1
     assert draws_after(lambda: rig.renderer.set_room_lights(RoomLightsDocument(change=2, lights={
-        "room": FixedEntry(colour=FixedColour(kelvin=3000))}))) == 1
+        "room": FixedEntry(colour=KelvinColour(kelvin=3000))}))) == 1
     operations = neutral_operations(OUTPUT, 7, DisplayLight(200, .01))
     assert draws_after(lambda: setattr(rig.screens, "operations", operations)) == 1
     assert rig.screens.commits[-1][3] == 7              # the tag names the change drawn
@@ -453,8 +453,8 @@ def test_a_frames_lights_are_worked_out_only_when_what_they_read_changes(monkeyp
                  softness_degrees=5)))
     rig = Rig()
     rig.renderer.set_room_lights(RoomLightsDocument(change=1, lights={
-        "memo-wash": FixedEntry(colour=FixedColour(kelvin=4000)),
-        "memo-far": FixedEntry(colour=FixedColour(kelvin=5000))}))
+        "memo-wash": FixedEntry(colour=KelvinColour(kelvin=4000)),
+        "memo-far": FixedEntry(colour=KelvinColour(kelvin=5000))}))
     still = photo("still", start=0)
     frame = framed(lighting=lighting, display_mm=(950, 540))
 
@@ -471,8 +471,8 @@ def test_a_frames_lights_are_worked_out_only_when_what_they_read_changes(monkeyp
     assert turns() == first and len(worked) == 1
 
     rig.renderer.set_room_lights(RoomLightsDocument(change=2, lights={
-        "memo-wash": FixedEntry(colour=FixedColour(kelvin=4000)),
-        "memo-far": FixedEntry(colour=FixedColour(kelvin=3000))}))
+        "memo-wash": FixedEntry(colour=KelvinColour(kelvin=4000)),
+        "memo-far": FixedEntry(colour=KelvinColour(kelvin=3000))}))
     warmer = turns()
     assert len(worked) == 2 and warmer.lights != first.lights
 

@@ -14,50 +14,59 @@ export const ROOMS: RoomLightsView = {
   lights: [
     {
       id: "daylight",
-      light: { kind: "measured", name: "Daylight", sensor: "window-meter", colour: { kind: "fixed", kelvin: 6500 } },
-      entry: { kind: "measured", colour: { kind: "fixed", kelvin: 6500 }, state: { kind: "measured", lux: 320 } },
-      heard_at: HEARD, named_by: ["lobby"],
+      light: { kind: "measured", name: "Daylight", sensor: "window-meter", colour: { kind: "typed", kelvin: 6500 } },
+      entry: { kind: "measured", colour: { kind: "kelvin", kelvin: 6500 }, state: { kind: "measured", lux: 320 } },
+      heard_at: HEARD, cant_tell_since: null, named_by: ["lobby"],
+      colour: { colour: { kind: "kelvin", kelvin: 6500 }, source: "typed", sensor: null, colour_from: "typed", stated_at: null,
+        cant_tell_since: null },
     },
     {
       id: "overheads",
       light: {
         kind: "reported", name: "Overheads", reporter: { source: CONSTANTS.HOME_ASSISTANT_SOURCE, address: "light.living_room" },
-        colour: { kind: "reported", channel_shares: [0.42, 0.36, 0.22] },
+        colour: { kind: "its-bulb", typed_kelvin: 2700 },
       },
       entry: {
-        kind: "colour", colour: { kind: "reported", channel_shares: [0.42, 0.36, 0.22] },
-        state: { kind: "colour-dimmer", on: true, brightness: 0.6, rgb: [1, 0.8, 0.6] },
+        kind: "reported", colour: { kind: "rgb", rgb: [1, 0.8, 0.6] },
+        state: { kind: "dimmer", on: true, brightness: 0.6 },
       },
-      heard_at: HEARD - MINUTE, named_by: ["lobby"],
+      heard_at: HEARD - MINUTE, cant_tell_since: null, named_by: ["lobby"],
+      colour: { colour: { kind: "rgb", rgb: [1, 0.8, 0.6] }, source: "its-bulb", sensor: null, colour_from: "following",
+        stated_at: HEARD - MINUTE, cant_tell_since: null },
     },
     {
       id: "bookshelf-spot",
       light: {
         kind: "reported", name: "Bookshelf spot", reporter: { source: CONSTANTS.HOME_ASSISTANT_SOURCE, address: "light.bookshelf" },
-        colour: { kind: "fixed", kelvin: 2700 },
+        colour: { kind: "its-bulb", typed_kelvin: 2700 },
       },
-      entry: { kind: "white", colour: { kind: "fixed", kelvin: 2700 }, state: { kind: "not-reported" } },
-      heard_at: null, named_by: [],
+      entry: { kind: "reported", colour: { kind: "kelvin", kelvin: 2700 }, state: { kind: "not-reported" } },
+      heard_at: null, cant_tell_since: null, named_by: [],
+      colour: { colour: { kind: "kelvin", kelvin: 2700 }, source: "its-bulb", sensor: null, colour_from: "never-stated",
+        stated_at: null, cant_tell_since: null },
     },
     {
       id: "lamp",
-      light: { kind: "fixed", name: "Reading lamp", colour: { kind: "fixed", kelvin: 3000 } },
-      entry: { kind: "fixed", colour: { kind: "fixed", kelvin: 3000 } },
-      heard_at: null, named_by: [],
+      light: { kind: "fixed", name: "Reading lamp", colour: { kind: "typed", kelvin: 3000 } },
+      entry: { kind: "fixed", colour: { kind: "kelvin", kelvin: 3000 } },
+      heard_at: null, cant_tell_since: null, named_by: [],
+      colour: { colour: { kind: "kelvin", kelvin: 3000 }, source: "typed", sensor: null, colour_from: "typed", stated_at: null,
+        cant_tell_since: null },
     },
   ],
   sensors: [
     {
       id: "window-meter",
       sensor: { name: "Window meter", at: { source: CONSTANTS.HOME_ASSISTANT_SOURCE, address: "sensor.window_illuminance" } },
-      reading: { kind: "measured", lux: 320 }, heard_at: HEARD, reports: "daylight",
+      reading: { kind: "measured", lux: 320 }, heard_at: HEARD, cant_tell_since: null, reports: "daylight",
     },
     {
       id: "hall-pi",
       sensor: { name: "Hall Pi meter", at: { source: CONSTANTS.PI_SOURCE, address: "player-1" } },
-      reading: null, heard_at: null, reports: null,
+      reading: null, heard_at: null, cant_tell_since: null, reports: null,
     },
   ],
+  colour_sensors: [],
 };
 
 export const PI_NAMES: Readonly<Record<string, string>> = { "player-1": "Player …1a2b3c" };
@@ -65,6 +74,8 @@ export const PI_NAMES: Readonly<Record<string, string>> = { "player-1": "Player 
 /** Home Assistant's states as Central last heard them: the two lights and the window meter the house
  * names, the kitchen light nothing names yet, and the porch meter. */
 export const HOME_ASSISTANT_STATES: HomeAssistantStatesView = {
+  galleria: { version: "v0.40.0", kinds: ["light", "illuminance", "colour-temperature"], heard_at: HEARD,
+    central_version: "0.40.0", update: false },
   heard_at: HEARD,
   entities: [
     { entity: "light.living_room", kind: "light", name: "Living room", reports: "overheads", heard_at: HEARD - MINUTE },

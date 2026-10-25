@@ -34,7 +34,7 @@ def _contract() -> ModuleType:
 contract = _contract()
 
 _TAG = "v0.35.0"
-_ENTRY = r.WhiteEntry(colour=r.FixedColour(kelvin=2700), state=r.Dimmer(on=True, brightness=0.5))
+_ENTRY = r.ReportedEntry(colour=r.KelvinColour(kelvin=2712.5), state=r.Dimmer(on=True, brightness=0.5))
 
 # One sample per wire value Galleria reads, each under the repository's own encoder.
 CENTRAL_STATES: dict[str, Any] = {
@@ -48,11 +48,11 @@ CENTRAL_STATES: dict[str, Any] = {
     c.LISTENING_KEY: c.Listening(entities=("light.test", "sensor.lux")),
     c.ROOM_LIGHTS_KEY: c.RoomLightsListing(change=4, lights=(
         c.RoomLightListing(id="overheads", name="Overheads", entry=_ENTRY),
-        c.RoomLightListing(id="lamp", name="Lamp", entry=r.ColourEntry(
-            colour=r.ReportedColour(channel_shares=(0.5, 0.3, 0.2)), state=r.NotReported())),
+        c.RoomLightListing(id="lamp", name="Lamp", entry=r.ReportedEntry(
+            colour=r.RgbColour(rgb=(1.0, 0.6, 0.2)), state=r.NotReported())),
         c.RoomLightListing(id="daylight", name="Daylight", entry=r.MeasuredEntry(
-            colour=r.FixedColour(kelvin=6500), state=r.Measured(lux=812.5))),
-        c.RoomLightListing(id="sconce", name="Sconce", entry=r.FixedEntry(colour=r.FixedColour(kelvin=3000))))),
+            colour=r.KelvinColour(kelvin=34000.0), state=r.Measured(lux=812.5))),
+        c.RoomLightListing(id="sconce", name="Sconce", entry=r.FixedEntry(colour=r.KelvinColour(kelvin=3000))))),
     c.RELEASES_KEY: c.Releases(releases=(
         c.ReleaseListing(version="v0.36.0-rc.1", stable=False, readiness="ready"),
         c.ReleaseListing(version=_TAG, stable=True, readiness="downloading"))),
@@ -61,11 +61,15 @@ CENTRAL_STATES: dict[str, Any] = {
     c.STATES_EPOCH_KEY: c.StatesEpoch(epoch="0123456789abcdef0123456789abcdef"),
 }
 HOME_ASSISTANT_STATES = (
-    h.HomeAssistantLight(name="Test", on=True, brightness=128, kelvin=2700, rgb=(255, 200, 10)),
-    h.HomeAssistantLight(name="Off", on=False, brightness=None, kelvin=None, rgb=None),
+    h.HomeAssistantLight(name="Test", on=True, brightness=128, colour=h.HomeAssistantKelvin(kelvin=2700)),
+    h.HomeAssistantLight(name="Hue", on=True, brightness=40, colour=h.HomeAssistantRgb(rgb=(255, 200, 10))),
+    h.HomeAssistantLight(name="Off", on=False, brightness=None, colour=None),
     h.HomeAssistantIlluminance(name="Lux", lux=12.5),
     h.HomeAssistantIlluminance(name="Lux", lux=None),
+    h.HomeAssistantColourTemperature(name="Sky", kelvin=4321.5),
+    h.HomeAssistantColourTemperature(name="Sky", kelvin=None),
     h.HomeAssistantUnavailable(entity_kind="light", name="Gone"),
+    h.HomeAssistantUnavailable(entity_kind="colour-temperature", name="Gone"),
 )
 BIRTH = node_state.Birth(component="player", version="1.0.0", pipe="show", release_digest="sha256:ab",
                          schema_majors={"player": 1}, slice_digest="0" * 64)
@@ -145,10 +149,12 @@ def test_install_round_trips_both_ways(answer: Any) -> None:
 
 
 @pytest.mark.parametrize("raw", [
-    b'{"state":{"kind":"light","name":"x","on":1,"brightness":null,"kelvin":null,"rgb":null}}',   # int for bool
-    b'{"state":{"kind":"light","name":"x","on":true,"brightness":true,"kelvin":null,"rgb":null}}',  # bool for int
-    b'{"state":{"kind":"light","name":"x","on":true,"brightness":256,"kelvin":null,"rgb":null}}',   # past LEVEL_MAX
-    b'{"state":{"kind":"light","name":"x","on":true,"brightness":1,"kelvin":null,"rgb":[1,2]}}',    # short rgb
+    b'{"state":{"kind":"light","name":"x","on":1,"brightness":null,"colour":null}}',               # int for bool
+    b'{"state":{"kind":"light","name":"x","on":true,"brightness":true,"colour":null}}',            # bool for int
+    b'{"state":{"kind":"light","name":"x","on":true,"brightness":256,"colour":null}}',             # past LEVEL_MAX
+    b'{"state":{"kind":"light","name":"x","on":true,"brightness":1,"colour":{"kind":"rgb","rgb":[1,2]}}}',  # short rgb
+    b'{"state":{"kind":"light","name":"x","on":true,"brightness":1,"colour":{"kind":"kelvin","kelvin":0}}}',  # not > 0
+    b'{"state":{"kind":"colour-temperature","name":"x","kelvin":-1}}',                             # not > 0
     b'{"state":{"kind":"illuminance","name":"x","lux":1,"extra":1}}',                               # unknown field
     b'{"state":{"kind":"illuminance","name":"x"}}',                                                 # missing field
     b'{"state":{"kind":"illuminance","name":"","lux":1}}',                                          # empty name

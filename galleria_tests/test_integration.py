@@ -89,14 +89,15 @@ async def test_a_pi_central_lists_later_gets_its_devices(hass: HomeAssistant, en
 
 async def test_a_light_turned_on_is_published_under_its_entity_id(hass: HomeAssistant, entry: MockConfigEntry,
                                                                    door: FakeDoor) -> None:
-    hass.states.async_set("light.test", STATE_ON, {"brightness": 128, "color_temp_kelvin": 2700,
-                                                   "rgb_color": (255, 180, 100), "friendly_name": "Test"})
+    hass.states.async_set("light.test", STATE_ON, {"brightness": 128, "color_mode": "color_temp",
+                                                   "color_temp_kelvin": 2700, "rgb_color": (255, 180, 100),
+                                                   "friendly_name": "Test"})
     hass.states.async_set("sensor.lux", "12.5", {"device_class": "illuminance", "friendly_name": "Lux"})
     hass.states.async_set("sensor.temperature", "21", {"device_class": "temperature"})
     hass.states.async_set("switch.fan", STATE_ON)
     await settle(hass)
-    assert ("light.test", {"kind": "light", "name": "Test", "on": True, "brightness": 128, "kelvin": 2700,
-                           "rgb": [255, 180, 100]}) in door.published
+    assert ("light.test", {"kind": "light", "name": "Test", "on": True, "brightness": 128,
+                           "colour": {"kind": "kelvin", "kelvin": 2700.0}}) in door.published
     assert ("sensor.lux", {"kind": "illuminance", "name": "Lux", "lux": 12.5}) in door.published
     published = {entity for entity, _ in door.published}
     assert "sensor.temperature" not in published and "switch.fan" not in published
@@ -106,8 +107,7 @@ async def test_a_light_turned_on_is_published_under_its_entity_id(hass: HomeAssi
     hass.states.async_set("sensor.lux", STATE_UNAVAILABLE, {"device_class": "illuminance", "friendly_name": "Lux"})
     await settle(hass)
     assert door.published == [
-        ("light.test", {"kind": "light", "name": "Test", "on": False, "brightness": None, "kelvin": None,
-                        "rgb": None}),
+        ("light.test", {"kind": "light", "name": "Test", "on": False, "brightness": None, "colour": None}),
         ("sensor.lux", {"kind": "unavailable", "entity_kind": "illuminance", "name": "Lux"})]
 
 
@@ -152,8 +152,8 @@ async def test_a_publish_the_hub_did_not_take_publishes_every_state_at_the_next_
     door.down = False
     door.published.clear()
     await read_all(hass, entry)
-    assert ("light.test", {"kind": "light", "name": "Test", "on": True, "brightness": 200, "kelvin": None,
-                           "rgb": None}) in door.published
+    assert ("light.test", {"kind": "light", "name": "Test", "on": True, "brightness": 200,
+                           "colour": None}) in door.published
     assert entry.runtime_data.publisher.published_epoch == EPOCH
 
 

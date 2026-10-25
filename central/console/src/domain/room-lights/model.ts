@@ -1,6 +1,6 @@
 import {
-  CONSTANTS, type FixedColour, type HeardEntityView, type Measured, PATTERNS, type PlayerDrawnView, type RefusedReportView,
-  type ReportedColour, type ReportRefusal, type RoomLight, type RoomLightRefusal, type RoomLightsView,
+  CONSTANTS, type HeardEntityView, type Measured, PATTERNS, type PlayerDrawnView, type RefusedReportView,
+  type ReportedColourSource, type ReportRefusal, type RoomLight, type RoomLightRefusal, type RoomLightsView,
   type RoomLightView, type Sensor, type SensorView, type Unavailable,
 } from "../../generated/contract";
 import { unitWords } from "../../patterns/units";
@@ -23,18 +23,15 @@ export const NEW_KELVIN = 2700;
 const ID_FORM = new RegExp(PATTERNS.RoomLightId);
 
 /** A light's last state, said from its entry alone (never from when it was heard): "On, 60 %",
- * "Off", "320 lx", "Unavailable", "Not reported yet"; a light nobody reports is "On, 100 %". */
+ * "Off", "320 lx", "Not reported yet"; a light nobody reports is "On, 100 %". */
 export function entryWords(entry: RoomLightEntry): string {
   if (entry.kind === "fixed") return `On, ${PERCENT} %`;
   const { state } = entry;
   switch (state.kind) {
     case "dimmer":
-    case "colour-dimmer":
       return state.on ? `On, ${Math.round(state.brightness * PERCENT)} %` : "Off";
     case "measured":
       return unitWords(state.lux, "lx");
-    case "unavailable":
-      return "Unavailable";
     default:
       return "Not reported yet";
   }
@@ -64,11 +61,17 @@ export function lightNames(view: RoomLightsView | null): Readonly<Record<string,
   return Object.fromEntries((view?.lights ?? []).map((light) => [light.id, light.light.name]));
 }
 
-/** A light's colour: "2700 K", or "Its own colour (red 50 %, green 30 %, blue 20 %)". */
-export function colourWords(colour: FixedColour | ReportedColour): string {
-  if (colour.kind === "fixed") return unitWords(colour.kelvin, "K");
-  const [red, green, blue] = colour.channel_shares.map((share) => Math.round(share * PERCENT));
-  return `Its own colour (red ${red} %, green ${green} %, blue ${blue} %)`;
+/** Where a light's colour comes from: "2700 K" (typed), "Its bulb's (2700 K until it says)", "From
+ * colour sensor sky" (the colour sensor's id). */
+export function colourWords(colour: RoomLight["colour"]): string {
+  switch (colour.kind) {
+    case "typed":
+      return unitWords(colour.kelvin, "K");
+    case "its-bulb":
+      return `Its bulb's (${unitWords(colour.typed_kelvin, "K")} until it says)`;
+    default:
+      return `From colour sensor ${colour.sensor}`;
+  }
 }
 
 /** The Pi a Sensor is wired to (its player id), or null for a Sensor another source reports. */
@@ -136,9 +139,11 @@ export function heardWords(view: RoomLightView, since: (epochSeconds: number) =>
 export const REFUSAL_WORDS: Record<RoomLightRefusal, string> = {
   unknown_room_light: "That light is no longer there.",
   unknown_sensor: "That Sensor is no longer there. Choose another.",
+  unknown_colour_sensor: "That colour sensor is no longer there. Choose another.",
   unknown_address: "Photo Wall does not know where that report comes from.",
   reference_taken: "Another light or Sensor already reports from there. Each reports one.",
   sensor_reports_a_light: "This Sensor measures a room light. Change or remove that light first; a Sensor measures one light at most.",
+  colour_sensor_followed: "A room light takes its colour from this colour sensor. Change that light's colour first.",
   named_by_a_frame: "A Frame's lighting uses this light. Remove it from those Frames' lighting first.",
   too_many: "The house has as many lights or Sensors as Photo Wall keeps. Remove one first.",
 };
@@ -182,8 +187,8 @@ export function reporterOf(light: RoomLight | null): string | null {
   return light?.kind === "reported" && light.reporter.source === CONSTANTS.HOME_ASSISTANT_SOURCE ? light.reporter.address : null;
 }
 
-/** A light named `name` that reports itself through smart-home entity `entity`, in `colour`. */
-export function reportedThrough(name: string, entity: string, colour: FixedColour | ReportedColour): RoomLight {
+/** A light named `name` that reports itself through smart-home entity `entity`, its colour from `colour`. */
+export function reportedThrough(name: string, entity: string, colour: ReportedColourSource): RoomLight {
   return { kind: "reported", name, reporter: { source: CONSTANTS.HOME_ASSISTANT_SOURCE, address: entity }, colour };
 }
 

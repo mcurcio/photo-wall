@@ -48,8 +48,8 @@ pytestmark = pytest.mark.skipif(
 CONSOLE = {"X-Photo-Wall-Console": "1"}
 PI = "pi"
 SPOT = {"kind": "reported", "name": "Bookshelf spot",
-        "reporter": {"source": "home-assistant", "address": "light.bookshelf"}, "colour": {"kind": "fixed", "kelvin": 2700}}
-DAYLIGHT = {"kind": "measured", "name": "Daylight", "sensor": "window-meter", "colour": {"kind": "fixed", "kelvin": 6500}}
+        "reporter": {"source": "home-assistant", "address": "light.bookshelf"}, "colour": {"kind": "its-bulb", "typed_kelvin": 2700}}
+DAYLIGHT = {"kind": "measured", "name": "Daylight", "sensor": "window-meter", "colour": {"kind": "typed", "kelvin": 6500}}
 READING = 320.0
 
 

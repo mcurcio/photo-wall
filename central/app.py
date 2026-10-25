@@ -64,6 +64,7 @@ from central.library_routes import mount_library_routes
 from central.media_ports import MediaApplication
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
+from central.node_bus_wiring import central_version
 from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from central.operator_auth import OperatorAuth
 from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
@@ -853,7 +854,7 @@ def create_app(
     mount_house_routes(app, admin=admin, queries=house, commands=house)
     room_lights = PgRoomLights(db, house_lock)
     mount_room_light_routes(app, admin=admin, lights=room_lights, sources=REPORT_SOURCES)
-    mount_home_assistant_routes(app, admin=admin, settings=PgHomeAssistantSettings(db))
+    mount_home_assistant_routes(app, admin=admin, settings=PgHomeAssistantSettings(db, central_version()))
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
     mount_tuning_history_routes(app, admin=admin, queries=PgTuningHistory(db))

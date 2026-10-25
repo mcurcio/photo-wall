@@ -11,6 +11,11 @@ export interface AtReading {
   lux: LuxOnFrame;
 }
 
+export interface BulbColour {
+  kind: "its-bulb";
+  typed_kelvin: TypedKelvin;
+}
+
 export interface Calibration {
   fit?: PositionBox;
   revision?: number;
@@ -28,17 +33,34 @@ export interface CloseLight {
   up_mm: number;
 }
 
-export interface ColourDimmer {
-  brightness: number;
-  kind: "colour-dimmer";
-  on: boolean;
-  rgb: [number, number, number];
+export interface ColourLineView {
+  cant_tell_since: number | null;
+  colour: LightColour;
+  colour_from: "typed" | "following" | "never-stated";
+  sensor: ColourSensorId | null;
+  source: "typed" | "its-bulb" | "colour-sensor";
+  stated_at: number | null;
 }
 
-export interface ColourEntry {
-  colour: ReportedColour;
-  kind: "colour";
-  state: ColourDimmer | Unavailable | NotReported;
+export interface ColourSensor {
+  at: ColourSensorRef;
+  name: string;
+}
+
+export type ColourSensorId = string;
+
+export interface ColourSensorRef {
+  address: string;
+  source: string;
+}
+
+export interface ColourSensorView {
+  cant_tell_since: number | null;
+  colour: KelvinColour | null;
+  followed_by: RoomLightId[];
+  heard_at: number | null;
+  id: ColourSensorId;
+  sensor: ColourSensor;
 }
 
 export interface Dimmer {
@@ -63,18 +85,13 @@ export interface FarLight {
   steep_degrees: number;
 }
 
-export interface FixedColour {
-  kelvin: number;
-  kind: "fixed";
-}
-
 export interface FixedEntry {
-  colour: FixedColour;
+  colour: KelvinColour;
   kind: "fixed";
 }
 
 export interface FixedLight {
-  colour: FixedColour;
+  colour: SensedColourSource;
   kind: "fixed";
   name: string;
 }
@@ -99,7 +116,23 @@ export interface FrameVideoChange {
   video: boolean;
 }
 
-export type HeardEntityView = HeardLightView | HeardSensorView;
+export interface GalleriaView {
+  central_version: string;
+  heard_at: number | null;
+  kinds: ("light" | "illuminance" | "colour-temperature")[];
+  update: boolean;
+  version: string | null;
+}
+
+export interface HeardColourSensorView {
+  entity: EntityId;
+  heard_at: number | null;
+  kind: "colour-temperature";
+  name: string | null;
+  reports: ColourSensorId | null;
+}
+
+export type HeardEntityView = HeardLightView | HeardSensorView | HeardColourSensorView;
 
 export interface HeardLightView {
   entity: EntityId;
@@ -119,6 +152,7 @@ export interface HeardSensorView {
 
 export interface HomeAssistantStatesView {
   entities: HeardEntityView[];
+  galleria: GalleriaView;
   heard_at: number | null;
   refused: RefusedReportView[];
 }
@@ -130,12 +164,17 @@ export interface InstallStarted {
   version: ReleaseTag;
 }
 
+export interface KelvinColour {
+  kelvin: StatedKelvin;
+  kind: "kelvin";
+}
+
+export type LightColour = KelvinColour | RgbColour;
+
 export interface LightView {
   black: number;
   matched_lux: number;
 }
-
-export type LightWord = Dimmer | ColourDimmer | Unavailable;
 
 export interface LutRef {
   profile_sha256: string;
@@ -157,13 +196,13 @@ export interface Measured {
 }
 
 export interface MeasuredEntry {
-  colour: FixedColour;
+  colour: KelvinColour;
   kind: "measured";
-  state: Measured | Unavailable | NotReported;
+  state: Measured | NotReported;
 }
 
 export interface MeasuredLight {
-  colour: FixedColour;
+  colour: SensedColourSource;
   kind: "measured";
   name: string;
   sensor: SensorId;
@@ -283,13 +322,16 @@ export interface ReleasesView {
 
 export type ReportRefusal = "unknown_address" | "unreadable" | "out_of_range";
 
-export interface ReportedColour {
-  channel_shares: [number, number, number];
+export type ReportedColourSource = TypedColour | BulbColour;
+
+export interface ReportedEntry {
+  colour: LightColour;
   kind: "reported";
+  state: Dimmer | NotReported;
 }
 
 export interface ReportedLight {
-  colour: FixedColour | ReportedColour;
+  colour: ReportedColourSource;
   kind: "reported";
   name: string;
   reporter: ReporterRef;
@@ -300,12 +342,19 @@ export interface ReporterRef {
   source: string;
 }
 
+export interface RgbColour {
+  kind: "rgb";
+  rgb: [number, number, number];
+}
+
 export type RoomLight = ReportedLight | MeasuredLight | FixedLight;
 
 export type RoomLightId = string;
 
 export interface RoomLightView {
-  entry: FixedEntry | WhiteEntry | ColourEntry | MeasuredEntry;
+  cant_tell_since: number | null;
+  colour: ColourLineView;
+  entry: FixedEntry | ReportedEntry | MeasuredEntry;
   heard_at: number | null;
   id: RoomLightId;
   light: RoomLight;
@@ -313,9 +362,18 @@ export interface RoomLightView {
 }
 
 export interface RoomLightsView {
+  colour_sensors: ColourSensorView[];
   lights: RoomLightView[];
   sensors: SensorView[];
 }
+
+export interface SensedColour {
+  kind: "colour-sensor";
+  sensor: ColourSensorId;
+  typed_kelvin: TypedKelvin;
+}
+
+export type SensedColourSource = TypedColour | SensedColour;
 
 export interface Sensor {
   at: SensorRef;
@@ -330,12 +388,15 @@ export interface SensorRef {
 }
 
 export interface SensorView {
+  cant_tell_since: number | null;
   heard_at: number | null;
   id: SensorId;
-  reading: Reading | null;
+  reading: Measured | null;
   reports: RoomLightId | null;
   sensor: Sensor;
 }
+
+export type StatedKelvin = number;
 
 export interface TrialBegin {
   calibration?: Calibration | null;
@@ -354,6 +415,13 @@ export interface TrialStep {
   operation: "save" | "end" | "status" | "keepalive";
 }
 
+export interface TypedColour {
+  kelvin: TypedKelvin;
+  kind: "typed";
+}
+
+export type TypedKelvin = number;
+
 export interface Unavailable {
   kind: "unavailable";
 }
@@ -369,17 +437,19 @@ export interface WashLight {
   reference: AtFull | AtReading;
 }
 
-export interface WhiteEntry {
-  colour: FixedColour;
-  kind: "white";
-  state: Dimmer | Unavailable | NotReported;
-}
-
 export const LIMITS = {
   AtReading: {
     lux: {
       exclusiveMinimum: 0,
       maximum: 200000,
+    },
+  },
+  BulbColour: {
+    typed_kelvin: {
+      integer: true,
+      maximum: 10000,
+      minimum: 2000,
+      multipleOf: 100,
     },
   },
   Calibration: {
@@ -417,14 +487,29 @@ export const LIMITS = {
       minimum: -5000,
     },
   },
-  ColourDimmer: {
-    brightness: {
-      maximum: 1,
-      minimum: 0,
+  ColourSensor: {
+    name: {
+      maxLength: 64,
+      minLength: 1,
     },
-    rgb: {
-      maxItems: 3,
-      minItems: 3,
+  },
+  ColourSensorId: {
+    value: {
+      pattern: "^[a-z0-9][a-z0-9-]{0,31}$",
+    },
+  },
+  ColourSensorRef: {
+    address: {
+      maxLength: 255,
+      minLength: 1,
+    },
+    source: {
+      pattern: "^[a-z][a-z0-9-]{0,31}$",
+    },
+  },
+  ColourSensorView: {
+    id: {
+      pattern: "^[a-z0-9][a-z0-9-]{0,31}$",
     },
   },
   Dimmer: {
@@ -463,14 +548,6 @@ export const LIMITS = {
       minimum: 5,
     },
   },
-  FixedColour: {
-    kelvin: {
-      integer: true,
-      maximum: 10000,
-      minimum: 2000,
-      multipleOf: 100,
-    },
-  },
   FixedLight: {
     name: {
       maxLength: 64,
@@ -498,6 +575,12 @@ export const LIMITS = {
       minimum: 0,
     },
   },
+  HeardColourSensorView: {
+    entity: {
+      maxLength: 255,
+      pattern: "^[a-z0-9_]+\\.[a-z0-9_]+$",
+    },
+  },
   HeardLightView: {
     entity: {
       maxLength: 255,
@@ -517,6 +600,12 @@ export const LIMITS = {
     version: {
       maxLength: 128,
       pattern: "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$",
+    },
+  },
+  KelvinColour: {
+    kelvin: {
+      maximum: 40000,
+      minimum: 1000,
     },
   },
   LightView: {
@@ -636,12 +725,6 @@ export const LIMITS = {
       pattern: "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$",
     },
   },
-  ReportedColour: {
-    channel_shares: {
-      maxItems: 3,
-      minItems: 3,
-    },
-  },
   ReportedLight: {
     name: {
       maxLength: 64,
@@ -657,6 +740,12 @@ export const LIMITS = {
       pattern: "^[a-z][a-z0-9-]{0,31}$",
     },
   },
+  RgbColour: {
+    rgb: {
+      maxItems: 3,
+      minItems: 3,
+    },
+  },
   RoomLightId: {
     value: {
       pattern: "^[a-z0-9][a-z0-9-]{0,31}$",
@@ -665,6 +754,17 @@ export const LIMITS = {
   RoomLightView: {
     id: {
       pattern: "^[a-z0-9][a-z0-9-]{0,31}$",
+    },
+  },
+  SensedColour: {
+    sensor: {
+      pattern: "^[a-z0-9][a-z0-9-]{0,31}$",
+    },
+    typed_kelvin: {
+      integer: true,
+      maximum: 10000,
+      minimum: 2000,
+      multipleOf: 100,
     },
   },
   Sensor: {
@@ -692,6 +792,12 @@ export const LIMITS = {
       pattern: "^[a-z0-9][a-z0-9-]{0,31}$",
     },
   },
+  StatedKelvin: {
+    value: {
+      maximum: 40000,
+      minimum: 1000,
+    },
+  },
   TrialEdit: {
     expected_sequence: {
       integer: true,
@@ -702,6 +808,22 @@ export const LIMITS = {
     expected_sequence: {
       integer: true,
       minimum: 1,
+    },
+  },
+  TypedColour: {
+    kelvin: {
+      integer: true,
+      maximum: 10000,
+      minimum: 2000,
+      multipleOf: 100,
+    },
+  },
+  TypedKelvin: {
+    value: {
+      integer: true,
+      maximum: 10000,
+      minimum: 2000,
+      multipleOf: 100,
     },
   },
   VersionChoice: {
@@ -722,6 +844,7 @@ export const LIMITS = {
 } as const;
 
 export const PATTERNS = {
+  ColourSensorId: "^[a-z0-9][a-z0-9-]{0,31}$",
   EntityId: "^[a-z0-9_]+\\.[a-z0-9_]+$",
   ReleaseTag: "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$",
   RoomLightId: "^[a-z0-9][a-z0-9-]{0,31}$",
@@ -731,11 +854,14 @@ export const PATTERNS = {
 export const CONSTANTS = {
   BEAM_DEGREES_MAX: 170,
   CLOSE_REACH_MM: 5000,
+  COLOUR_SENSORS_MAX: 32,
   FRAME_LIGHTS_MAX: 4,
   GLOSS_INK: 2.3,
   HOME_ASSISTANT_SOURCE: "home-assistant",
   INK_DENSITY_MAX: 5,
   INK_DENSITY_MIN: 0.5,
+  KELVIN_STATED_MAX: 40000,
+  KELVIN_STATED_MIN: 1000,
   KELVIN_TABLE_MAX: 10000,
   KELVIN_TABLE_MIN: 2000,
   KELVIN_TABLE_STEP: 100,
@@ -791,9 +917,11 @@ export const REFUSALS = {
   RoomLightRefusal: [
     "unknown_room_light",
     "unknown_sensor",
+    "unknown_colour_sensor",
     "unknown_address",
     "reference_taken",
     "sensor_reports_a_light",
+    "colour_sensor_followed",
     "named_by_a_frame",
     "too_many",
   ],

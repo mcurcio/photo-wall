@@ -26,7 +26,7 @@ VERSIONS_KEY: Final = 'versions'
 STATES_EPOCH_KEY: Final = 'states-epoch'
 CENTRAL_STATE_TABLE: Final = {'birth': 256,
  'installation': 65536,
- 'listening': 24576,
+ 'listening': 32768,
  'releases': 8192,
  'room-lights': 24576,
  'states-epoch': 128,
@@ -40,8 +40,8 @@ HOME_ASSISTANT_STATE_BYTES: Final = 512
 ENTITY_ID_PATTERN: Final = '[a-z0-9_]+\\.[a-z0-9_]+'
 ENTITY_NAME_MAX: Final = 255
 LEVEL_MAX: Final = 255
-KELVIN_MIN: Final = 1000
-KELVIN_MAX: Final = 40000
+GALLERIA_BIRTH_KEY: Final = 'galleria'
+GALLERIA_BIRTH_BYTES: Final = 256
 NODE_DOOR_PORT: Final = 4280
 NODE_DOOR_API_PREFIX: Final = 'ACC.NODE.API'
 SERIAL_PATTERN: Final = '[A-Za-z0-9:_.-]{1,128}'
@@ -63,8 +63,9 @@ PLAYER_COMPONENT: Final = 'player'
 PLAYER_SCHEMA_MAJOR: Final = 1
 
 
-type HomeAssistantState = HomeAssistantLight | HomeAssistantIlluminance | HomeAssistantUnavailable
+type HomeAssistantState = HomeAssistantLight | HomeAssistantIlluminance | HomeAssistantColourTemperature | HomeAssistantUnavailable
 type InstallAnswer = InstallStarted | InstallRefused
+type LightColour = KelvinColour | RgbColour
 
 
 class Birth(TypedDict):
@@ -81,19 +82,6 @@ class CentralBirth(TypedDict):
     version: str
 
 
-class ColourDimmer(TypedDict):
-    kind: Literal['colour-dimmer']
-    on: bool
-    brightness: float
-    rgb: list[float]
-
-
-class ColourEntry(TypedDict):
-    kind: Literal['colour']
-    colour: ReportedColour
-    state: ColourDimmer | Unavailable | NotReported
-
-
 class Dimmer(TypedDict):
     kind: Literal['dimmer']
     on: bool
@@ -106,14 +94,9 @@ class DrivenBy(TypedDict):
     generation: int
 
 
-class FixedColour(TypedDict):
-    kind: Literal['fixed']
-    kelvin: int
-
-
 class FixedEntry(TypedDict):
     kind: Literal['fixed']
-    colour: FixedColour
+    colour: KelvinColour
 
 
 class FrameListing(TypedDict):
@@ -134,10 +117,27 @@ class FrameReports(TypedDict):
     frames: list[FrameReport]
 
 
+class GalleriaBirth(TypedDict):
+    component: Literal['galleria']
+    version: str
+    kinds: list[Literal['light', 'illuminance', 'colour-temperature']]
+
+
+class HomeAssistantColourTemperature(TypedDict):
+    kind: Literal['colour-temperature']
+    name: str
+    kelvin: float | None
+
+
 class HomeAssistantIlluminance(TypedDict):
     kind: Literal['illuminance']
     name: str
     lux: float | None
+
+
+class HomeAssistantKelvin(TypedDict):
+    kind: Literal['kelvin']
+    kelvin: float
 
 
 class HomeAssistantLight(TypedDict):
@@ -145,8 +145,12 @@ class HomeAssistantLight(TypedDict):
     name: str
     on: bool
     brightness: int | None
-    kelvin: int | None
-    rgb: list[int] | None
+    colour: HomeAssistantKelvin | HomeAssistantRgb | None
+
+
+class HomeAssistantRgb(TypedDict):
+    kind: Literal['rgb']
+    rgb: list[int]
 
 
 class HomeAssistantStateValue(TypedDict):
@@ -155,7 +159,7 @@ class HomeAssistantStateValue(TypedDict):
 
 class HomeAssistantUnavailable(TypedDict):
     kind: Literal['unavailable']
-    entity_kind: Literal['light', 'illuminance']
+    entity_kind: Literal['light', 'illuminance', 'colour-temperature']
     name: str
 
 
@@ -192,6 +196,11 @@ class Installation(TypedDict):
     players: list[PlayerListing]
 
 
+class KelvinColour(TypedDict):
+    kind: Literal['kelvin']
+    kelvin: float
+
+
 class LightSensorReading(TypedDict):
     reading: Measured | Unavailable
 
@@ -207,8 +216,8 @@ class Measured(TypedDict):
 
 class MeasuredEntry(TypedDict):
     kind: Literal['measured']
-    colour: FixedColour
-    state: Measured | Unavailable | NotReported
+    colour: KelvinColour
+    state: Measured | NotReported
 
 
 class NotReported(TypedDict):
@@ -237,15 +246,21 @@ class Releases(TypedDict):
     releases: list[ReleaseListing]
 
 
-class ReportedColour(TypedDict):
+class ReportedEntry(TypedDict):
     kind: Literal['reported']
-    channel_shares: list[float]
+    colour: LightColour
+    state: Dimmer | NotReported
+
+
+class RgbColour(TypedDict):
+    kind: Literal['rgb']
+    rgb: list[float]
 
 
 class RoomLightListing(TypedDict):
     id: str
     name: str
-    entry: FixedEntry | WhiteEntry | ColourEntry | MeasuredEntry
+    entry: FixedEntry | ReportedEntry | MeasuredEntry
 
 
 class RoomLightsListing(TypedDict):
@@ -263,12 +278,6 @@ class Unavailable(TypedDict):
 
 class Versions(TypedDict):
     pis: dict[str, PiVersion]
-
-
-class WhiteEntry(TypedDict):
-    kind: Literal['white']
-    colour: FixedColour
-    state: Dimmer | Unavailable | NotReported
 
 
 _CENTRAL_STATE_ROOTS: Final = {'birth': 'CentralBirth',
@@ -293,26 +302,6 @@ _SCHEMAS: Final[dict[str, Any]] = {'Birth': {'additionalProperties': False,
                                  'version': {'maxLength': 64, 'minLength': 1, 'type': 'string'}},
                   'required': ['version'],
                   'type': 'object'},
- 'ColourDimmer': {'additionalProperties': False,
-                  'properties': {'brightness': {'maximum': 1, 'minimum': 0, 'type': 'number'},
-                                 'kind': {'const': 'colour-dimmer', 'type': 'string'},
-                                 'on': {'type': 'boolean'},
-                                 'rgb': {'maxItems': 3,
-                                         'minItems': 3,
-                                         'prefixItems': [{'maximum': 1, 'minimum': 0, 'type': 'number'},
-                                                         {'maximum': 1, 'minimum': 0, 'type': 'number'},
-                                                         {'maximum': 1, 'minimum': 0, 'type': 'number'}],
-                                         'type': 'array'}},
-                  'required': ['on', 'brightness', 'rgb'],
-                  'type': 'object'},
- 'ColourEntry': {'additionalProperties': False,
-                 'properties': {'colour': {'$ref': 'ReportedColour'},
-                                'kind': {'const': 'colour', 'type': 'string'},
-                                'state': {'oneOf': [{'$ref': 'ColourDimmer'},
-                                                    {'$ref': 'Unavailable'},
-                                                    {'$ref': 'NotReported'}]}},
-                 'required': ['colour', 'state'],
-                 'type': 'object'},
  'Dimmer': {'additionalProperties': False,
             'properties': {'brightness': {'maximum': 1, 'minimum': 0, 'type': 'number'},
                            'kind': {'const': 'dimmer', 'type': 'string'},
@@ -326,16 +315,8 @@ _SCHEMAS: Final[dict[str, Any]] = {'Birth': {'additionalProperties': False,
                              'serial': {'pattern': '^[A-Za-z0-9:_.-]{1,128}$', 'type': 'string'}},
               'required': ['serial', 'output_id', 'generation'],
               'type': 'object'},
- 'FixedColour': {'additionalProperties': False,
-                 'properties': {'kelvin': {'maximum': 10000,
-                                           'minimum': 2000,
-                                           'multipleOf': 100,
-                                           'type': 'integer'},
-                                'kind': {'const': 'fixed', 'type': 'string'}},
-                 'required': ['kelvin'],
-                 'type': 'object'},
  'FixedEntry': {'additionalProperties': False,
-                'properties': {'colour': {'$ref': 'FixedColour'},
+                'properties': {'colour': {'$ref': 'KelvinColour'},
                                'kind': {'const': 'fixed', 'type': 'string'}},
                 'required': ['colour'],
                 'type': 'object'},
@@ -362,6 +343,25 @@ _SCHEMAS: Final[dict[str, Any]] = {'Birth': {'additionalProperties': False,
                                             'type': 'array'}},
                   'required': ['frames'],
                   'type': 'object'},
+ 'GalleriaBirth': {'additionalProperties': False,
+                   'properties': {'component': {'const': 'galleria', 'type': 'string'},
+                                  'kinds': {'items': {'enum': ['light', 'illuminance', 'colour-temperature'],
+                                                      'type': 'string'},
+                                            'maxItems': 8,
+                                            'type': 'array'},
+                                  'version': {'maxLength': 64, 'minLength': 1, 'type': 'string'}},
+                   'required': ['version', 'kinds'],
+                   'type': 'object'},
+ 'HomeAssistantColourTemperature': {'additionalProperties': False,
+                                    'properties': {'kelvin': {'anyOf': [{'exclusiveMinimum': 0,
+                                                                         'type': 'number'},
+                                                                        {'type': 'null'}]},
+                                                   'kind': {'const': 'colour-temperature', 'type': 'string'},
+                                                   'name': {'maxLength': 255,
+                                                            'minLength': 1,
+                                                            'type': 'string'}},
+                                    'required': ['name', 'kelvin'],
+                                    'type': 'object'},
  'HomeAssistantIlluminance': {'additionalProperties': False,
                               'properties': {'kind': {'const': 'illuminance', 'type': 'string'},
                                              'lux': {'anyOf': [{'minimum': 0, 'type': 'number'},
@@ -369,41 +369,51 @@ _SCHEMAS: Final[dict[str, Any]] = {'Birth': {'additionalProperties': False,
                                              'name': {'maxLength': 255, 'minLength': 1, 'type': 'string'}},
                               'required': ['name', 'lux'],
                               'type': 'object'},
+ 'HomeAssistantKelvin': {'additionalProperties': False,
+                         'properties': {'kelvin': {'exclusiveMinimum': 0, 'type': 'number'},
+                                        'kind': {'const': 'kelvin', 'type': 'string'}},
+                         'required': ['kelvin'],
+                         'type': 'object'},
  'HomeAssistantLight': {'additionalProperties': False,
                         'properties': {'brightness': {'anyOf': [{'maximum': 255,
                                                                  'minimum': 0,
                                                                  'type': 'integer'},
                                                                 {'type': 'null'}]},
-                                       'kelvin': {'anyOf': [{'maximum': 40000,
-                                                             'minimum': 1000,
-                                                             'type': 'integer'},
+                                       'colour': {'anyOf': [{'oneOf': [{'$ref': 'HomeAssistantKelvin'},
+                                                                       {'$ref': 'HomeAssistantRgb'}]},
                                                             {'type': 'null'}]},
                                        'kind': {'const': 'light', 'type': 'string'},
                                        'name': {'maxLength': 255, 'minLength': 1, 'type': 'string'},
-                                       'on': {'type': 'boolean'},
-                                       'rgb': {'anyOf': [{'maxItems': 3,
-                                                          'minItems': 3,
-                                                          'prefixItems': [{'maximum': 255,
-                                                                           'minimum': 0,
-                                                                           'type': 'integer'},
-                                                                          {'maximum': 255,
-                                                                           'minimum': 0,
-                                                                           'type': 'integer'},
-                                                                          {'maximum': 255,
-                                                                           'minimum': 0,
-                                                                           'type': 'integer'}],
-                                                          'type': 'array'},
-                                                         {'type': 'null'}]}},
-                        'required': ['name', 'on', 'brightness', 'kelvin', 'rgb'],
+                                       'on': {'type': 'boolean'}},
+                        'required': ['name', 'on', 'brightness', 'colour'],
                         'type': 'object'},
+ 'HomeAssistantRgb': {'additionalProperties': False,
+                      'properties': {'kind': {'const': 'rgb', 'type': 'string'},
+                                     'rgb': {'maxItems': 3,
+                                             'minItems': 3,
+                                             'prefixItems': [{'maximum': 255,
+                                                              'minimum': 0,
+                                                              'type': 'integer'},
+                                                             {'maximum': 255,
+                                                              'minimum': 0,
+                                                              'type': 'integer'},
+                                                             {'maximum': 255,
+                                                              'minimum': 0,
+                                                              'type': 'integer'}],
+                                             'type': 'array'}},
+                      'required': ['rgb'],
+                      'type': 'object'},
  'HomeAssistantStateValue': {'additionalProperties': False,
                              'properties': {'state': {'oneOf': [{'$ref': 'HomeAssistantLight'},
                                                                 {'$ref': 'HomeAssistantIlluminance'},
+                                                                {'$ref': 'HomeAssistantColourTemperature'},
                                                                 {'$ref': 'HomeAssistantUnavailable'}]}},
                              'required': ['state'],
                              'type': 'object'},
  'HomeAssistantUnavailable': {'additionalProperties': False,
-                              'properties': {'entity_kind': {'enum': ['light', 'illuminance'],
+                              'properties': {'entity_kind': {'enum': ['light',
+                                                                      'illuminance',
+                                                                      'colour-temperature'],
                                                              'type': 'string'},
                                              'kind': {'const': 'unavailable', 'type': 'string'},
                                              'name': {'maxLength': 255, 'minLength': 1, 'type': 'string'}},
@@ -449,6 +459,11 @@ _SCHEMAS: Final[dict[str, Any]] = {'Birth': {'additionalProperties': False,
                                              'type': 'array'}},
                   'required': ['frames', 'players'],
                   'type': 'object'},
+ 'KelvinColour': {'additionalProperties': False,
+                  'properties': {'kelvin': {'maximum': 40000, 'minimum': 1000, 'type': 'number'},
+                                 'kind': {'const': 'kelvin', 'type': 'string'}},
+                  'required': ['kelvin'],
+                  'type': 'object'},
  'LightSensorReading': {'additionalProperties': False,
                         'properties': {'reading': {'oneOf': [{'$ref': 'Measured'}, {'$ref': 'Unavailable'}]}},
                         'required': ['reading'],
@@ -457,7 +472,7 @@ _SCHEMAS: Final[dict[str, Any]] = {'Birth': {'additionalProperties': False,
                'properties': {'entities': {'items': {'maxLength': 255,
                                                      'pattern': '^[a-z0-9_]+\\.[a-z0-9_]+$',
                                                      'type': 'string'},
-                                           'maxItems': 64,
+                                           'maxItems': 96,
                                            'type': 'array'}},
                'required': ['entities'],
                'type': 'object'},
@@ -467,11 +482,9 @@ _SCHEMAS: Final[dict[str, Any]] = {'Birth': {'additionalProperties': False,
               'required': ['lux'],
               'type': 'object'},
  'MeasuredEntry': {'additionalProperties': False,
-                   'properties': {'colour': {'$ref': 'FixedColour'},
+                   'properties': {'colour': {'$ref': 'KelvinColour'},
                                   'kind': {'const': 'measured', 'type': 'string'},
-                                  'state': {'oneOf': [{'$ref': 'Measured'},
-                                                      {'$ref': 'Unavailable'},
-                                                      {'$ref': 'NotReported'}]}},
+                                  'state': {'oneOf': [{'$ref': 'Measured'}, {'$ref': 'NotReported'}]}},
                    'required': ['colour', 'state'],
                    'type': 'object'},
  'NotReported': {'additionalProperties': False,
@@ -509,26 +522,25 @@ _SCHEMAS: Final[dict[str, Any]] = {'Birth': {'additionalProperties': False,
                                           'type': 'array'}},
               'required': ['releases'],
               'type': 'object'},
- 'ReportedColour': {'additionalProperties': False,
-                    'properties': {'channel_shares': {'maxItems': 3,
-                                                      'minItems': 3,
-                                                      'prefixItems': [{'maximum': 1,
-                                                                       'minimum': 0,
-                                                                       'type': 'number'},
-                                                                      {'maximum': 1,
-                                                                       'minimum': 0,
-                                                                       'type': 'number'},
-                                                                      {'maximum': 1,
-                                                                       'minimum': 0,
-                                                                       'type': 'number'}],
-                                                      'type': 'array'},
-                                   'kind': {'const': 'reported', 'type': 'string'}},
-                    'required': ['channel_shares'],
-                    'type': 'object'},
+ 'ReportedEntry': {'additionalProperties': False,
+                   'properties': {'colour': {'oneOf': [{'$ref': 'KelvinColour'}, {'$ref': 'RgbColour'}]},
+                                  'kind': {'const': 'reported', 'type': 'string'},
+                                  'state': {'oneOf': [{'$ref': 'Dimmer'}, {'$ref': 'NotReported'}]}},
+                   'required': ['colour', 'state'],
+                   'type': 'object'},
+ 'RgbColour': {'additionalProperties': False,
+               'properties': {'kind': {'const': 'rgb', 'type': 'string'},
+                              'rgb': {'maxItems': 3,
+                                      'minItems': 3,
+                                      'prefixItems': [{'maximum': 1, 'minimum': 0, 'type': 'number'},
+                                                      {'maximum': 1, 'minimum': 0, 'type': 'number'},
+                                                      {'maximum': 1, 'minimum': 0, 'type': 'number'}],
+                                      'type': 'array'}},
+               'required': ['rgb'],
+               'type': 'object'},
  'RoomLightListing': {'additionalProperties': False,
                       'properties': {'entry': {'oneOf': [{'$ref': 'FixedEntry'},
-                                                         {'$ref': 'WhiteEntry'},
-                                                         {'$ref': 'ColourEntry'},
+                                                         {'$ref': 'ReportedEntry'},
                                                          {'$ref': 'MeasuredEntry'}]},
                                      'id': {'pattern': '^[a-z0-9][a-z0-9-]{0,31}$', 'type': 'string'},
                                      'name': {'maxLength': 128, 'minLength': 1, 'type': 'string'}},
@@ -553,15 +565,7 @@ _SCHEMAS: Final[dict[str, Any]] = {'Birth': {'additionalProperties': False,
                                      'patternProperties': {'^[A-Za-z0-9:_.-]{1,128}$': {'$ref': 'PiVersion'}},
                                      'type': 'object'}},
               'required': ['pis'],
-              'type': 'object'},
- 'WhiteEntry': {'additionalProperties': False,
-                'properties': {'colour': {'$ref': 'FixedColour'},
-                               'kind': {'const': 'white', 'type': 'string'},
-                               'state': {'oneOf': [{'$ref': 'Dimmer'},
-                                                   {'$ref': 'Unavailable'},
-                                                   {'$ref': 'NotReported'}]}},
-                'required': ['colour', 'state'],
-                'type': 'object'}}
+              'type': 'object'}}
 
 
 CentralStateValue = CentralBirth | Installation | Listening | RoomLightsListing | Releases | Versions | StatesEpoch
@@ -697,6 +701,12 @@ def encode_home_assistant_state(state: HomeAssistantState) -> bytes:
 def decode_home_assistant_state(raw: bytes) -> HomeAssistantState:
     """ValueError("home_assistant_state") for anything but a state."""
     return _decoded("HomeAssistantStateValue", raw, HOME_ASSISTANT_STATE_BYTES, "home_assistant_state")["state"]
+
+
+def encode_galleria_birth(birth: GalleriaBirth) -> bytes:
+    """Canonical JSON; ValueError("galleria_birth") for an invalid birth,
+    ValueError("galleria_birth_too_large") past GALLERIA_BIRTH_BYTES."""
+    return _encoded("GalleriaBirth", birth, GALLERIA_BIRTH_BYTES, "galleria_birth", "galleria_birth_too_large")
 
 
 def encode_install_player(request: InstallPlayer) -> bytes:

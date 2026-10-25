@@ -13,7 +13,7 @@ lights), drawing on a recording renderer.
 
 E1. A state published before the worker starts (while Central is away) reaches the callback.
 E2. Ten switches reach the callback, and the Player's control State delivery does not move. Home
-    Assistant's own "unavailable" reads Unavailable; a key that is not an entity id and a value that
+    Assistant's own "unavailable" keeps the last stated brightness and Central marks that it can't tell; a key that is not an entity id and a value that
     is not a state are refused (UNKNOWN_ADDRESS, UNREADABLE); the Home Assistant page shows when
     Central last heard the entity, by its name.
 E3. A reading the Pi sent before its Sensor existed is that Sensor's light once the Sensor and the
@@ -43,7 +43,7 @@ from central.content_catalog.catalog import device_id_for_serial
 from central.infra.home_assistant.references import light_reporter
 from central.infra.light_sensor_judge import PI_SOURCE
 from central.node_bus_wiring import HUB_CONFIG_ENV, HUB_URL_ENV, WALL_RECHECK_SECONDS
-from central.room_light.model import MeasuredLight, ReportedLight, Sensor, SensorRef
+from central.room_light.model import MeasuredLight, ReportedLight, Sensor, SensorRef, TypedColour
 from central.room_light.views import RoomLightsView
 from central.room_light_routes import HOUSE_LIGHTS, HOUSE_SENSORS
 from contracts.central_api import STATES_EPOCH_KEY
@@ -51,12 +51,11 @@ from contracts.home_assistant import HomeAssistantLight, HomeAssistantUnavailabl
 from contracts.room_light import (
     LIGHT_SENSOR_KEY,
     Dimmer,
-    FixedColour,
+    KelvinColour,
     Measured,
     MeasuredEntry,
+    ReportedEntry,
     RoomLightsDocument,
-    Unavailable,
-    WhiteEntry,
 )
 from contracts.wire_model import Model
 from nodeapi.buffers import state_prefix, state_stream
@@ -64,8 +63,8 @@ from nodeapi.buffers import state_prefix, state_stream
 SERIAL = "serial-room-light"
 ENTITY = "light.bookshelf_spot"
 NAME = "Bookshelf spot"
-ON = HomeAssistantLight(name=NAME, on=True, brightness=255, kelvin=None, rgb=None)
-OFF = HomeAssistantLight(name=NAME, on=False, brightness=None, kelvin=None, rgb=None)
+ON = HomeAssistantLight(name=NAME, on=True, brightness=255, colour=None)
+OFF = HomeAssistantLight(name=NAME, on=False, brightness=None, colour=None)
 FULL = Dimmer(on=True, brightness=1.0)
 LUX = 240.0
 ADMIN_HEADERS = {"Authorization": "Bearer " + ADMIN}
@@ -75,7 +74,7 @@ SECONDS = WALL_RECHECK_SECONDS / 2   # every later step: a wake, never the WALL 
 
 def _spot(document: RoomLightsDocument) -> Dimmer | None:
     entry = document.lights.get("bookshelf-spot")
-    return entry.state if isinstance(entry, WhiteEntry) and isinstance(entry.state, Dimmer) else None
+    return entry.state if isinstance(entry, ReportedEntry) and isinstance(entry.state, Dimmer) else None
 
 
 def test_room_light_reaches_the_player_through_the_real_composition(registry, tmp_path, monkeypatch):
@@ -123,7 +122,7 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
         async def run() -> None:
             # House > Lights: the spot Home Assistant reports.
             await asyncio.to_thread(call, "PUT", f"{HOUSE_LIGHTS}/bookshelf-spot", json=ReportedLight(
-                name=NAME, reporter=light_reporter(ENTITY), colour=FixedColour(kelvin=4000)))
+                name=NAME, reporter=light_reporter(ENTITY), colour=TypedColour(kelvin=4000)))
             await asyncio.to_thread(hub.start)
             await asyncio.to_thread(node.start)
             await house.__aenter__()
@@ -161,13 +160,16 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
             assert _spot(followed.latest()) == FULL
             assert await asyncio.to_thread(control_state) == before
 
-            # Home Assistant's own unavailable; a key that is no entity id and a value that is no state.
+            # Home Assistant's own unavailable: the spot keeps its last stated brightness and Central
+            # marks that it can't tell; a key that is no entity id and a value that is no state.
             await house.publish(ENTITY, HomeAssistantUnavailable(entity_kind="light", name=NAME))
 
-            def unavailable(document):
-                entry = document.lights.get("bookshelf-spot")
-                return isinstance(entry, WhiteEntry) and isinstance(entry.state, Unavailable)
-            await until(latest(unavailable, followed), SECONDS, "the Player sees the spot unavailable")
+            async def cant_tell():
+                view = RoomLightsView.model_validate(await asyncio.to_thread(call, "GET", HOUSE_LIGHTS))
+                [spot] = [light for light in view.lights if light.id == "bookshelf-spot"]
+                return spot.cant_tell_since is not None
+            await until(cant_tell, SECONDS, "Central marks that the spot can't tell")
+            assert _spot(followed.latest()) == FULL
             await house.publish("Not_An_Entity", ON)
             await house.publish("light.garbage", b"not a state")
 
@@ -197,24 +199,24 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
             await asyncio.to_thread(call, "PUT", f"{HOUSE_SENSORS}/hall-meter", json=Sensor(
                 name="Hall meter", at=SensorRef(source=PI_SOURCE, address=player["player_id"])))
             await asyncio.to_thread(call, "PUT", f"{HOUSE_LIGHTS}/window", json=MeasuredLight(
-                name="Window", sensor="hall-meter", colour=FixedColour(kelvin=6500)))
-            window = MeasuredEntry(colour=FixedColour(kelvin=6500), state=Measured(lux=LUX))
+                name="Window", sensor="hall-meter", colour=TypedColour(kelvin=6500)))
+            window = MeasuredEntry(colour=KelvinColour(kelvin=6500), state=Measured(lux=LUX))
             await until(latest(lambda d: d.lights.get("window") == window, followed), SECONDS,
                         "the Player sees the window at the Pi's reading")
 
             # E4a: a change while the hub is away (its WALL put fails) reaches the Player once it is back.
             await asyncio.to_thread(hub.stop)
             await asyncio.to_thread(call, "PUT", f"{HOUSE_LIGHTS}/bookshelf-spot", json=ReportedLight(
-                name=NAME, reporter=light_reporter(ENTITY), colour=FixedColour(kelvin=3000)))
+                name=NAME, reporter=light_reporter(ENTITY), colour=TypedColour(kelvin=3000)))
 
             def warmer(document):
                 entry = document.lights.get("bookshelf-spot")
-                return isinstance(entry, WhiteEntry) and entry.colour == FixedColour(kelvin=3000)
+                return isinstance(entry, ReportedEntry) and entry.colour == KelvinColour(kelvin=3000)
 
             async def recorded_warmer():
                 view = RoomLightsView.model_validate(await asyncio.to_thread(call, "GET", HOUSE_LIGHTS))
                 [spot] = [light.light for light in view.lights if light.id == "bookshelf-spot"]
-                return spot.colour == FixedColour(kelvin=3000)
+                return spot.colour == TypedColour(kelvin=3000)
             await until(recorded_warmer, SECONDS, "Central records the edit while the hub is away")
             await asyncio.to_thread(hub.start)
             await until(latest(warmer, followed), RESTART_SECONDS,

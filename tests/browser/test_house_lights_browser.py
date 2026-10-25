@@ -40,7 +40,7 @@ CONSOLE = {"X-Photo-Wall-Console": "1"}
 HOME_ASSISTANT = "home-assistant"
 WINDOW_METER = {"name": "Window meter", "at": {"source": HOME_ASSISTANT, "address": "sensor.window_illuminance"}}
 SPOT = {"kind": "reported", "name": "Bookshelf spot", "reporter": {"source": HOME_ASSISTANT, "address": "light.bookshelf"},
-        "colour": {"kind": "fixed", "kelvin": 2700}}
+        "colour": {"kind": "its-bulb", "typed_kelvin": 2700}}
 # Words House › Lights never shows: the integration, its transport, its topics and its entities.
 INTEGRATION_WORDS = re.compile(r"home assistant|mqtt|topic|light\.bookshelf|sensor\.window_illuminance", re.I)
 HEARD_AT = 1_791_000_000

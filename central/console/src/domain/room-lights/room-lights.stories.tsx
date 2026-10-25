@@ -22,20 +22,20 @@ const WHOLE = ["full-page"];
  * not heard yet, a lamp always on; two Sensors, one never heard. */
 export const House: Story = { tags: WHOLE };
 /** Nothing set up yet. */
-export const Empty: Story = { args: { view: { lights: [], sensors: [] } } };
+export const Empty: Story = { args: { view: { lights: [], sensors: [], colour_sensors: [] } } };
 /** A remove Central refused, said in words. */
 export const RemoveRefused: Story = { tags: WHOLE, args: { note: refusalWords("Not removed", "sensor_reports_a_light") } };
-/** Off and unavailable lights. */
+/** An off light, and one that can't tell (its last brightness kept). */
 export const OffAndUnavailable: Story = {
   tags: WHOLE,
   args: {
     view: {
       ...ROOMS,
       lights: [
-        { ...ROOMS.lights[1], entry: { kind: "colour", colour: { kind: "reported", channel_shares: [0.42, 0.36, 0.22] },
-          state: { kind: "colour-dimmer", on: false, brightness: 0, rgb: [0, 0, 0] } } },
-        { ...ROOMS.lights[2], entry: { kind: "white", colour: { kind: "fixed", kelvin: 2700 }, state: { kind: "unavailable" } },
-          heard_at: 1_791_000_000 },
+        { ...ROOMS.lights[1], entry: { kind: "reported", colour: { kind: "rgb", rgb: [1, 0.8, 0.6] },
+          state: { kind: "dimmer", on: false, brightness: 0 } } },
+        { ...ROOMS.lights[2], entry: { kind: "reported", colour: { kind: "kelvin", kelvin: 2700 },
+          state: { kind: "dimmer", on: true, brightness: 0.4 } }, heard_at: 1_791_000_000, cant_tell_since: 1_791_000_000 },
       ],
     },
   },
@@ -45,12 +45,11 @@ export const Phone: Story = { tags: WHOLE, parameters: { phone: true } };
 
 /** The state line is the entry's, never when it was heard: a pure check the catalogue runs before any story renders. */
 const checks: [string, string][] = [
-  [entryWords({ kind: "white", colour: { kind: "fixed", kelvin: 2700 }, state: { kind: "dimmer", on: true, brightness: 0.6 } }), "On, 60 %"],
-  [entryWords({ kind: "white", colour: { kind: "fixed", kelvin: 2700 }, state: { kind: "dimmer", on: false, brightness: 0 } }), "Off"],
-  [entryWords({ kind: "measured", colour: { kind: "fixed", kelvin: 6500 }, state: { kind: "measured", lux: 1234.4 } }), "1,234 lx"],
-  [entryWords({ kind: "white", colour: { kind: "fixed", kelvin: 2700 }, state: { kind: "unavailable" } }), "Unavailable"],
-  [entryWords({ kind: "white", colour: { kind: "fixed", kelvin: 2700 }, state: { kind: "not-reported" } }), "Not reported yet"],
-  [entryWords({ kind: "fixed", colour: { kind: "fixed", kelvin: 3000 } }), "On, 100 %"],
+  [entryWords({ kind: "reported", colour: { kind: "kelvin", kelvin: 2700 }, state: { kind: "dimmer", on: true, brightness: 0.6 } }), "On, 60 %"],
+  [entryWords({ kind: "reported", colour: { kind: "kelvin", kelvin: 2700 }, state: { kind: "dimmer", on: false, brightness: 0 } }), "Off"],
+  [entryWords({ kind: "measured", colour: { kind: "kelvin", kelvin: 6500 }, state: { kind: "measured", lux: 1234.4 } }), "1,234 lx"],
+  [entryWords({ kind: "reported", colour: { kind: "kelvin", kelvin: 2700 }, state: { kind: "not-reported" } }), "Not reported yet"],
+  [entryWords({ kind: "fixed", colour: { kind: "kelvin", kelvin: 3000 } }), "On, 100 %"],
   [readingWords(null), "Not reported yet"],
   [idFromName("Café lamp"), "cafe-lamp"],
   [idFromName("Spot-"), "spot"],

@@ -55,10 +55,10 @@ def central_state(epoch: str = EPOCH) -> dict[str, bytes]:
                         {"serial": "p2", "name": "Stairs Pi", "address": "10.0.0.2"}]}),
         contract.ROOM_LIGHTS_KEY: wire(contract.ROOM_LIGHTS_KEY, {"change": 2, "lights": [
             {"id": "overheads", "name": "Overheads", "entry": {
-                "kind": "white", "colour": {"kind": "fixed", "kelvin": 2700},
+                "kind": "reported", "colour": {"kind": "kelvin", "kelvin": 2700},
                 "state": {"kind": "dimmer", "on": True, "brightness": 0.5}}},
             {"id": "lamp", "name": "Lamp", "entry": {
-                "kind": "white", "colour": {"kind": "fixed", "kelvin": 3000}, "state": {"kind": "not-reported"}}}]}),
+                "kind": "reported", "colour": {"kind": "kelvin", "kelvin": 3000}, "state": {"kind": "not-reported"}}}]}),
         contract.RELEASES_KEY: wire(contract.RELEASES_KEY, {"releases": [
             {"version": "v0.36.0-rc.1", "stable": False, "readiness": "ready"},
             {"version": "v0.36.0", "stable": True, "readiness": "downloading"},
