@@ -27,10 +27,11 @@ some window with the Frame's aspect (its Frame output's shape, the Position's bo
    content is on the left and the right is benign, then it would be reasonable to crop the
    picture so that the left edge is preserved"); one holding key content may not ("if it has key
    content on the sides then it can't be cropped to fit"). An even spread of interest passes.
-Among the windows passing 3 and 4, `place` picks one: on a photo with faces, the window nearest the
-faces' window (the faces in it, its spare room shared before and after them by their size, so a
-lone face is centred and a bigger face gets more room on its side); on a photo without faces, the
-one keeping the most interest. Windows are tried at offsets k / `window_steps` for
+Among the windows passing 3 and 4, `place` picks one: on a photo with faces, the window nearest
+the one that keeps the faces' centre at its place in the photo (owner, 2026-10-25: "A lone face
+should sit “in the same relative position within the image as the original (if possible), and
+cropped only as much as needed to fit the scaled image into the frame."); on a photo without
+faces, the one keeping the most interest. Windows are tried at offsets k / `window_steps` for
 k = 0..`window_steps`, plus 0.5.
 
 Every tuning value is a `FitSettings` field (central/wall_plan/fit_settings.py; owner,
@@ -291,16 +292,17 @@ def place(passing: Sequence[tuple[float, float]], axis: FreeAxis,
     clamped). The one home of placement:
     - no faces: the window keeping the most interest (rounded to 9 digits); ties go to the
       offset nearest 0.5, then the lower;
-    - faces: the faces' window. The faces span [lo, hi] along the axis, its spare room is
-      length - (hi - lo), and F is the mean of their centres weighted by area, t = (F - lo) /
-      (hi - lo); the faces' window is centred at hi - length / 2 + t x room, so the room before
-      the faces and after them stand (1 - t) : t (a lone face is centred, a bigger face gets more
-      room on its side). The passing offset whose window centre is nearest it wins, distances
-      rounded to 9 digits; ties go to the offset nearest 0.5, then the lower. So an aim beyond
-      the photo's windows takes the window at that edge, and equal shapes (`axis.length` 1,
-      every window the same) the centred offset 0.5. The interest does not move it (the owner's
-      pick of 2026-10-25, "faces only", a revisable design choice: saliency scores texture such
-      as a floor or foliage, which pulled windows off the faces).
+    - faces: the window keeping the faces' centre at its place in the photo. F is the mean of
+      the faces' centres along the axis weighted by their area (a share of the photo, so a bigger
+      face pulls harder), and the window at offset F holds F at the same share of its own length
+      (its first edge is F x (1 - length)). The passing offset nearest F wins, measured as the
+      distance between the two windows' first edges and rounded to 9 digits; ties go to the
+      offset nearest 0.5, then the lower. So a face too near the photo's edge for that window
+      moves only as far as keeping it whole needs, and equal shapes (`axis.length` 1, every
+      window the same) take the centred offset 0.5. The window stays the largest (owner,
+      2026-10-25, his pick "Nothing: least crop": no zoom). The interest does not move it (the
+      owner's pick of 2026-10-25, "faces only", a revisable design choice: saliency scores
+      texture such as a floor or foliage, which pulled windows off the faces).
     Pure; ValueError when `passing` is empty."""
     if not passing:
         raise ValueError("no passing window to place")
@@ -309,16 +311,12 @@ def place(passing: Sequence[tuple[float, float]], axis: FreeAxis,
                                               -pair[0]))[0]
     spans = [(face.left, face.right) if axis.along == "x" else (face.top, face.bottom)
              for face in faces]
-    low, high = min(start for start, _ in spans), max(end for _, end in spans)
     areas = [(face.right - face.left) * (face.bottom - face.top) for face in faces]
-    centre = math.fsum(area * (start + end) / 2
-                       for area, (start, end) in zip(areas, spans, strict=True)) / math.fsum(areas)
-    share = (centre - low) / (high - low)
-    half = axis.length / 2
-    aim = high - half + share * (axis.length - (high - low))
+    aim = math.fsum(area * (start + end) / 2
+                    for area, (start, end) in zip(areas, spans, strict=True)) / math.fsum(areas)
     return min((offset for offset, _ in passing),
-               key=lambda offset: (round(abs(axis.centre(offset) - aim), 9), abs(offset - 0.5),
-                                   offset))
+               key=lambda offset: (round(abs(axis.start(offset) - axis.start(aim)), 9),
+                                   abs(offset - 0.5), offset))
 
 
 @lru_cache(maxsize=4096)

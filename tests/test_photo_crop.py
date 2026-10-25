@@ -45,9 +45,8 @@ def test_equal_aspects_have_no_free_axis(offset) -> None:
     (300, 200, 1.5, FreeAxis("y", 1.0)),
 ])
 def test_the_free_axis_is_the_one_the_window_slides_along(width, height, aspect, axis) -> None:
-    """The axis follows from the two ratios; the window's centre on it at an offset."""
+    """The axis follows from the two ratios; the window's first edge on it at an offset."""
     assert free_axis(width, height, aspect) == axis
-    assert axis.centre(1) == pytest.approx(1 - axis.length / 2)
     left, top, right, bottom = crop_window(PhotoCrop(offset=.3), width, height, aspect)
     start, end = (left, right) if axis.along == "x" else (top, bottom)
     _close((start, end), (axis.start(.3), axis.start(.3) + axis.length))

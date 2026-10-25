@@ -54,10 +54,6 @@ class FreeAxis(NamedTuple):
         """The window's first edge on the axis at `offset`: offset x (1 - length)."""
         return offset * (1 - self.length)
 
-    def centre(self, offset: float) -> float:
-        """The window's centre on the axis at `offset`."""
-        return self.start(offset) + self.length / 2
-
 
 def free_axis(width: int, height: int, aspect: float) -> FreeAxis:
     """The free axis of a `width` x `height` image for a window of width-to-height `aspect`: an
