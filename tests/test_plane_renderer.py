@@ -489,6 +489,30 @@ def test_a_frames_lights_are_worked_out_only_when_what_they_read_changes(monkeyp
     assert len(worked) == 5 and larger.size_mm != wash_only.size_mm
 
 
+@pytest.mark.parametrize(("stated", "row"), [(1000.0, 2000), (40000.0, 10000), (3456.7, 3500)])
+def test_the_renderer_draws_a_stated_kelvin_past_the_table_at_its_drawn_row(stated, row):
+    """The document carries a light's colour as stated (real kelvin); the renderer finishes the
+    Frame with the lights of the row the Pi bounds and rounds it to (player/geometry.py
+    `drawn_kelvin`), never refusing it. Mutation probe: no bound in `drawn_kelvin` -> 1000 K and
+    40000 K raise ValueError("kelvin")."""
+    lighting = FrameLighting(mat_depth_mm=0, paper=Paper(whiteness=.9, ink_density=2),
+                             lights=(WashLight(light="room", lux=200, reference=AT_FULL),))
+    frame = framed(lighting=lighting, display_mm=(950, 540))
+    still = photo("still", start=0)
+
+    def finished(kelvin: float):
+        rig = Rig()
+        rig.renderer.set_room_lights(RoomLightsDocument(change=1, lights={
+            "room": FixedEntry(colour=KelvinColour(kelvin=kelvin))}))
+        rig.renderer.prepare(still, frame)
+        rig.settle(still, frame=frame)
+        rig.clock.tick()
+        return rig.fitter.draws[-1][0].lights
+
+    drawn = finished(stated)
+    assert len(drawn.lights) == 1 and drawn == finished(float(row))
+
+
 def test_a_covered_layer_keeps_its_picture():
     rig = Rig()
     under, over = photo("under", start=0), photo("over", start=1)

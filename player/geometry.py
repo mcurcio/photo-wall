@@ -158,11 +158,12 @@ def rolled_off(value: float, knee: float, peak: float) -> float:
 
 def drawn_kelvin(kelvin: float) -> int:
     """The table row a stated colour temperature is drawn at: `kelvin` bounded to
-    KELVIN_TABLE_MIN..KELVIN_TABLE_MAX and rounded to the nearest KELVIN_TABLE_STEP (contracts/kelvin.py).
-    The Pi's rule alone (2026-10-25: bounding colour temperature is the node's): Central passes the
-    stated value as is. Pure."""
+    KELVIN_TABLE_MIN..KELVIN_TABLE_MAX and rounded to the nearest KELVIN_TABLE_STEP (contracts/kelvin.py),
+    a half up (3,450 K draws at 3,500 K, 3,449.9 K at 3,400 K; never Python's round, which takes a
+    half to the even row). The Pi's rule alone (2026-10-25: bounding colour temperature is the
+    node's): Central passes the stated value as is. Pure."""
     bounded = min(max(kelvin, KELVIN_TABLE_MIN), KELVIN_TABLE_MAX)
-    return int(round(bounded / KELVIN_TABLE_STEP)) * KELVIN_TABLE_STEP
+    return math.floor(bounded / KELVIN_TABLE_STEP + 0.5) * KELVIN_TABLE_STEP
 
 
 def colour_light(colour: LightColour) -> Linear:
