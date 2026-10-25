@@ -6920,3 +6920,20 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
   renamed heading leaves every `#room-lights-and-home-assistant` link silently broken. The mutation
   probe used a broken relative file link instead.
 - **Resolved:** the half-up rounding above landed in 893eeffb (PLAYER lane) before this lane's push.
+
+## Light colour follows Home Assistant, CENTRAL lane (feat/light-colour-follows, 2026-10-25)
+
+- **The interfaces commit left Galleria unimportable:** `custom_components/galleria/states.py` imported
+  `HomeAssistantColour` from its generated `contract.py`, which never carries it (scripts/galleria_contract.py
+  names a titled union only when it is a field's type directly; under `| None` it is inlined). Fixed in
+  states.py by naming the two TypedDicts (`HomeAssistantKelvin | HomeAssistantRgb`); the generator is unchanged.
+- **The listener's third port reaches one file outside the lane's list:** `HomeAssistantListener(reports,
+  heard, births)`; tests/integration/test_central_leaf_bridge.py constructs it, so it changed too, with two lines
+  the interfaces commit left stale there (a light state still in the old `kelvin`/`rgb` shape, and
+  `PgHomeAssistantSettings` without Central's version): that test failed at b2f67f4c.
+- **Galleria's birth goes through a new door method** (`CentralDoor.publish_birth`, the same states-bucket
+  publish under GALLERIA_BIRTH_KEY), so the birth never passes through the entity-state encoder.
+- **Resolved (the DOCS lane's notes above):** `REFUSAL_STATUS` maps `unknown_colour_sensor` 404 and
+  `colour_sensor_followed` 409, as the runbook says; `_kept_in` now trims only references no room
+  light, Sensor or colour sensor names (tests/test_room_light_store.py
+  `test_a_named_reference_is_never_trimmed` fails without it).

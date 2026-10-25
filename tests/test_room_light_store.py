@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
 from test_registry import enroll
 
 from central.content_catalog.catalog import device_id_for_serial
@@ -18,15 +19,23 @@ from central.infra.node_link_store import PgLinkStores, PgWallMarks
 from central.infra.room_light_store import PgRoomLights
 from central.room_light.model import (
     ADDRESS_MAX,
+    BulbColour,
+    ColourSensor,
+    ColourSensorRef,
+    FixedLight,
     LightStated,
     MeasuredLight,
     ReportedLight,
     ReporterRef,
     ReportRefusal,
+    RoomLightRefusal,
+    RoomLightRefused,
+    SensedColour,
     Sensor,
     SensorRef,
     TypedColour,
 )
+from contracts.home_assistant import GalleriaBirth
 from contracts.node_link import Pipe
 from contracts.room_light import (
     LIGHT_SENSOR_KEY,
@@ -37,6 +46,8 @@ from contracts.room_light import (
     MeasuredEntry,
     NotReported,
     ReportedEntry,
+    RgbColour,
+    Unavailable,
     encode_light_sensor,
 )
 from nodeapi.buffers import state_prefix
@@ -191,8 +202,100 @@ def test_words_are_kept_per_source_newest_first(registry, monkeypatch):
     monkeypatch.setattr(room_light_store, "WORDS_KEPT_PER_SOURCE", 2)
     lights = PgRoomLights(registry.db, PgHouseLock())
     for name in ("a", "b", "c"):
-        lights.record_light_state(ReporterRef(source="home-assistant", address=f"light.{name}"), Dimmer(on=True, brightness=1.0))
-    lights.record_light_state(ReporterRef(source="other", address="light.a"), Dimmer(on=True, brightness=1.0))
+        lights.record_light_state(ReporterRef(source="home-assistant", address=f"light.{name}"), _said(True, 1.0))
+    lights.record_light_state(ReporterRef(source="other", address="light.a"), _said(True, 1.0))
     kept = _sql(registry, "SELECT source, address FROM light_words ORDER BY source, address")
     assert [(row["source"], row["address"]) for row in kept] == [
         ("home-assistant", "light.b"), ("home-assistant", "light.c"), ("other", "light.a")]
+
+
+
+def test_a_named_reference_is_never_trimmed(registry, monkeypatch):
+    """A room light's, Sensor's or colour sensor's reference keeps its facts however many others speak."""
+    monkeypatch.setattr(room_light_store, "WORDS_KEPT_PER_SOURCE", 1)
+    lights = PgRoomLights(registry.db, PgHouseLock())
+    lights.save_room_light("x", ReportedLight(name="X", reporter=X, colour=WHITE))
+    lights.save_sensor("lux", Sensor(name="Lux", at=SensorRef(source="home-assistant", address="sensor.lux")))
+    lights.save_colour_sensor("sky", ColourSensor(name="Sky", at=SKY_AT))
+    lights.record_light_state(X, _said(True, 0.5))
+    lights.record_reading(SensorRef(source="home-assistant", address="sensor.lux"), Measured(lux=70.0))
+    lights.record_colour_reading(SKY_AT, KelvinColour(kelvin=4100.0))
+    for name in ("a", "b", "c"):
+        lights.record_light_state(ReporterRef(source="home-assistant", address=f"light.{name}"), _said(True, 1.0))
+        lights.record_reading(SensorRef(source="home-assistant", address=f"sensor.{name}"), Measured(lux=1.0))
+        lights.record_colour_reading(ColourSensorRef(source="home-assistant", address=f"sensor.k{name}"),
+                                     KelvinColour(kelvin=3000.0))
+    assert [row["address"] for row in _sql(registry, "SELECT address FROM light_words ORDER BY address")] == [
+        "light.c", "light.x"]
+    assert [row["address"] for row in _sql(registry, "SELECT address FROM reading_words ORDER BY address")] == [
+        "sensor.c", "sensor.lux"]
+    assert [row["address"] for row in _sql(registry, "SELECT address FROM colour_words ORDER BY address")] == [
+        "sensor.kc", "sensor.sun_sky_color_temperature"]
+    view = lights.lights()
+    assert next(each for each in view.lights if each.id == "x").entry.state == Dimmer(on=True, brightness=0.5)
+    assert view.sensors[0].reading == Measured(lux=70.0) and view.colour_sensors[0].colour == KelvinColour(kelvin=4100.0)
+
+
+SKY_AT = ColourSensorRef(source="home-assistant", address="sensor.sun_sky_color_temperature")
+
+
+def test_kept_brightness_and_colour_survive_cant_tell_and_a_restart(registry):
+    """Owner, 2026-10-25 Q1 and Q3: the last stated brightness and colour stand through "unavailable",
+    and a Central restart (a new PgRoomLights over the same database) keeps them."""
+    lights = PgRoomLights(registry.db, PgHouseLock())
+    lights.save_colour_sensor("sky", ColourSensor(name="Sky", at=SKY_AT))
+    lights.save_room_light("x", ReportedLight(name="X", reporter=X, colour=BulbColour(typed_kelvin=2700)))
+    lights.save_room_light("sun", FixedLight(name="Sun", colour=SensedColour(sensor="sky", typed_kelvin=5500)))
+    red = RgbColour(rgb=(1.0, 0.0, 0.0))
+    assert lights.record_light_state(X, LightStated(state=Dimmer(on=True, brightness=0.4), colour=red)) == "recorded"
+    assert lights.record_colour_reading(SKY_AT, KelvinColour(kelvin=3456.5)) == "recorded"
+    assert lights.record_light_state(X, Unavailable()) == "unchanged"
+    assert lights.record_colour_reading(SKY_AT, Unavailable()) == "unchanged"
+    restarted = PgRoomLights(registry.db, PgHouseLock())
+    document = restarted.current()
+    assert document.lights["x"] == ReportedEntry(colour=red, state=Dimmer(on=True, brightness=0.4))
+    assert document.lights["sun"].colour == KelvinColour(kelvin=3456.5)
+    view = {each.id: each for each in restarted.lights().lights}
+    assert view["x"].cant_tell_since is not None and view["x"].colour.cant_tell_since is not None
+    assert (view["x"].colour.colour_from, view["sun"].colour.colour_from) == ("following", "following")
+    assert restarted.lights().colour_sensors[0].cant_tell_since is not None
+    # off is stated (adds no light) and keeps the colour; a stated value clears "can't tell"
+    assert restarted.record_light_state(X, _said(False, 0.0)) == "recorded"
+    after = {each.id: each for each in restarted.lights().lights}["x"]
+    assert after.entry == ReportedEntry(colour=red, state=Dimmer(on=False, brightness=0.0))
+    assert after.cant_tell_since is None
+
+
+def test_colour_sensors_are_saved_and_kept_while_followed(registry):
+    lights = PgRoomLights(registry.db, PgHouseLock())
+    saved = lights.save_colour_sensor("sky", ColourSensor(name="Sky", at=SKY_AT))
+    assert (saved.colour, saved.heard_at, saved.followed_by) == (None, None, ())
+    lights.save_room_light("sun", FixedLight(name="Sun", colour=SensedColour(sensor="sky", typed_kelvin=5500)))
+    with pytest.raises(RoomLightRefused) as followed:
+        lights.remove_colour_sensor("sky")
+    assert followed.value.code is RoomLightRefusal.COLOUR_SENSOR_FOLLOWED
+    with pytest.raises(RoomLightRefused) as taken:
+        lights.save_colour_sensor("other", ColourSensor(name="Other", at=SKY_AT))
+    assert taken.value.code is RoomLightRefusal.REFERENCE_TAKEN
+    with pytest.raises(RoomLightRefused) as unknown:
+        lights.save_room_light("lamp", FixedLight(name="Lamp", colour=SensedColour(sensor="nope", typed_kelvin=5500)))
+    assert unknown.value.code is RoomLightRefusal.UNKNOWN_COLOUR_SENSOR
+    lights.save_room_light("sun", FixedLight(name="Sun", colour=TypedColour(kelvin=5500)))
+    lights.remove_colour_sensor("sky")
+    assert lights.lights().colour_sensors == ()
+    with pytest.raises(RoomLightRefused) as gone:
+        lights.remove_colour_sensor("sky")
+    assert gone.value.code is RoomLightRefusal.UNKNOWN_COLOUR_SENSOR
+
+
+def test_galleria_s_birth_reaches_the_settings_page(registry):
+    lights = PgRoomLights(registry.db, PgHouseLock())
+    settings = PgHomeAssistantSettings(registry.db, "0.40.0")
+    before = settings.view().galleria
+    assert (before.version, before.update, before.central_version) == (None, True, "0.40.0")
+    lights.record_galleria_birth(GalleriaBirth(version="0.39.0", kinds=("light", "illuminance")))
+    old = settings.view().galleria
+    assert (old.version, old.update) == ("0.39.0", True) and old.heard_at is not None
+    lights.record_galleria_birth(GalleriaBirth(version="0.41.0", kinds=("light", "illuminance", "colour-temperature")))
+    new = settings.view().galleria
+    assert (new.version, new.kinds, new.update) == ("0.41.0", ("light", "illuminance", "colour-temperature"), False)

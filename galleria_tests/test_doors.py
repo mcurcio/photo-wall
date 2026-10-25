@@ -197,6 +197,11 @@ async def test_central_s_door_reads_publishes_and_installs(hub: Server) -> None:
             await door.publish("light.test", light)
             entry = await states.get("light.test")
             assert contract.decode_home_assistant_state(entry.value) == light
+            galleria = {"component": "galleria", "version": "1.2.3",
+                        "kinds": ["light", "illuminance", "colour-temperature"]}
+            await door.publish_birth(galleria)
+            entry = await states.get(contract.GALLERIA_BIRTH_KEY)
+            assert entry.value == contract.encode_galleria_birth(galleria)
 
             async def answer(message: nats.aio.msg.Msg) -> None:
                 request = json.loads(message.data)

@@ -189,14 +189,18 @@ def _now_in(conn: Any) -> float:
 
 def _kept_in(conn: Any, house: HouseLock, table: str, source: str, address: str,
              write: Any) -> Recorded:
-    """Under the house's lock: `write(now)` upserts (source, address)'s facts in `table`; then the
-    newest WORDS_KEPT_PER_SOURCE of that source are kept; "recorded" when the document changed."""
+    """Under the house's lock: `write(now)` upserts (source, address)'s facts in `table`; then of that
+    source's references no room light, Sensor or colour sensor names, only those among its newest
+    WORDS_KEPT_PER_SOURCE stay (a named reference's facts are never trimmed); "recorded" when the
+    document changed."""
     house.changing_within(PgTransaction(conn))
     before = document_in(conn)
     write(_now_in(conn))
-    conn.execute(f"DELETE FROM {table} WHERE source=%(source)s AND address NOT IN "  # noqa: S608
-                 f"(SELECT address FROM {table} WHERE source=%(source)s ORDER BY heard_at DESC, address "
-                 "LIMIT %(keep)s)", {"source": source, "keep": WORDS_KEPT_PER_SOURCE})
+    named = sorted({reference.address for reference in named_in(conn, source)})
+    conn.execute(f"DELETE FROM {table} WHERE source=%(source)s AND NOT (address = ANY(%(named)s)) "  # noqa: S608
+                 f"AND address NOT IN (SELECT address FROM {table} WHERE source=%(source)s "
+                 "ORDER BY heard_at DESC, address LIMIT %(keep)s)",
+                 {"source": source, "named": named, "keep": WORDS_KEPT_PER_SOURCE})
     return "recorded" if _changed_in(conn, before) else "unchanged"
 
 

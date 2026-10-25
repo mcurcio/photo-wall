@@ -77,6 +77,7 @@ class FakeDoor:
     def __init__(self) -> None:
         self.state = central_state()
         self.published: list[tuple[str, dict[str, Any]]] = []
+        self.births: list[dict[str, Any]] = []
         self.installs: list[tuple[str, str]] = []
         self.answer: dict[str, Any] = {"kind": "started", "serial": "p1", "version": LATEST, "install": "downloading"}
         self.connected = True
@@ -92,6 +93,12 @@ class FakeDoor:
             raise DoorUnavailable("down")
         contract.encode_home_assistant_state(state)   # the contract's own check of what goes on the wire
         self.published.append((entity_id, state))
+
+    async def publish_birth(self, birth: dict[str, Any]) -> None:
+        if self.down:
+            raise DoorUnavailable("down")
+        contract.encode_galleria_birth(birth)   # the contract's own check
+        self.births.append(birth)
 
     async def install_player(self, serial: str, version: str) -> dict[str, Any]:
         self.installs.append((serial, version))

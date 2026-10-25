@@ -241,6 +241,6 @@ def build_node_bus(dsn: str, env: Mapping[str, str]) -> NodeBus | None:
 
     def hub_session(stop: asyncio.Event) -> Awaitable[None]:
         return serve_hub(hub_url, stop, version=central_version(), state=central_state(reads, state_wakes),
-                         listened=HomeAssistantListener(room_lights, room_lights), methods=hub_methods(versions))
+                         listened=HomeAssistantListener(room_lights, room_lights, room_lights), methods=hub_methods(versions))
 
     return NodeBus(db, fleet, links, wakes, wall, hub_session=hub_session, state_wakes=state_wakes)

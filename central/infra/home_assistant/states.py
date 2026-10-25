@@ -40,6 +40,7 @@ from central.infra.home_assistant.references import (
 from central.room_light.model import ReportRefusal
 from central.room_light.ports import RoomLightReports
 from contracts.home_assistant import (
+    GALLERIA_BIRTH_KEY,
     EntityId,
     EntityKind,
     EntityName,
@@ -48,6 +49,7 @@ from contracts.home_assistant import (
     HomeAssistantIlluminance,
     HomeAssistantLight,
     HomeAssistantState,
+    decode_galleria_birth,
     decode_home_assistant_state,
 )
 from nodeapi.hub import Heard
@@ -73,11 +75,12 @@ class GalleriaBirths(Protocol):
 
 
 class HomeAssistantListener:
-    """nodeapi.hub ListenedStates over room lights' reports and the heard entities."""
+    """nodeapi.hub ListenedStates over room lights' reports, the heard entities and Galleria's births."""
 
-    def __init__(self, reports: RoomLightReports, heard: HeardEntities) -> None:
+    def __init__(self, reports: RoomLightReports, heard: HeardEntities, births: GalleriaBirths) -> None:
         self._reports = reports
         self._heard = heard
+        self._births = births
 
     async def heard(self, epoch: str, items: Sequence[Heard]) -> None:
         """Record each item, in order, in a thread (the stores block); see the module's rules."""
@@ -89,6 +92,9 @@ class HomeAssistantListener:
 
     def record(self, entity: str, value: bytes | None) -> None:
         """One newest value of Home Assistant's states bucket under the key `entity`."""
+        if entity == GALLERIA_BIRTH_KEY:
+            self._birth(value)
+            return
         if not is_entity(entity):
             self._reports.record_refused(SOURCE, entity, ReportRefusal.UNKNOWN_ADDRESS)
             return
@@ -119,6 +125,17 @@ class HomeAssistantListener:
         except MessageRefused as refused:
             self._reports.record_refused(SOURCE, entity, refused.reason)
         self._heard.record_heard(entity, kind, state.name)
+
+
+    def _birth(self, value: bytes | None) -> None:
+        if value is None:   # removed by its publisher: the last birth heard stands
+            return
+        try:
+            birth = decode_galleria_birth(value)
+        except ValueError:
+            self._reports.record_refused(SOURCE, GALLERIA_BIRTH_KEY, ReportRefusal.UNREADABLE)
+            return
+        self._births.record_galleria_birth(birth)
 
 
 def _kind_of(state: HomeAssistantState) -> EntityKind:

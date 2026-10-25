@@ -169,18 +169,23 @@ class AuthoredSceneRequest(AuthoredCandidatesRequest):
 
 class ReportSourceForms:
     """room_light.ports.ReportSources over each source Central runs and its adapter's own check of an
-    address's form."""
+    address's form; `colour` names the sources that report colour temperatures."""
 
-    def __init__(self, forms: Mapping[str, Callable[[str], bool]]) -> None:
+    def __init__(self, forms: Mapping[str, Callable[[str], bool]], *, colour: frozenset[str]) -> None:
         self._forms = dict(forms)
+        self._colour = colour
 
     def address_refusal(self, source: str, address: str) -> RoomLightRefusal | None:
         form = self._forms.get(source)
         return None if form is not None and form(address) else RoomLightRefusal.UNKNOWN_ADDRESS
 
+    def colour_address_refusal(self, source: str, address: str) -> RoomLightRefusal | None:
+        return self.address_refusal(source, address) if source in self._colour else RoomLightRefusal.UNKNOWN_ADDRESS
+
 
 REPORT_SOURCES: Final = ReportSourceForms({home_assistant_references.SOURCE: home_assistant_references.is_entity,
-                                           PI_SOURCE: is_player})
+                                           PI_SOURCE: is_player},
+                                          colour=frozenset({home_assistant_references.SOURCE}))
 
 
 def create_app(

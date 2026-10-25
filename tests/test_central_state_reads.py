@@ -18,6 +18,8 @@ from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.player_versions import PgPlayerVersions
 from central.infra.room_light_store import PgRoomLights
 from central.room_light.model import (
+    ColourSensor,
+    ColourSensorRef,
     FixedLight,
     MeasuredLight,
     ReportedLight,
@@ -52,7 +54,9 @@ def test_listening_names_every_home_assistant_entity_the_setup_names_and_nothing
                                                  reporter=ReporterRef(source="home-assistant", address="light.spot")))
     lights.save_sensor("meter", Sensor(name="Meter", at=SensorRef(source="home-assistant", address="sensor.lux")))
     lights.save_room_light("window", MeasuredLight(name="Window", colour=TypedColour(kelvin=6500), sensor="meter"))
-    assert reads.listening().entities == ("light.spot", "sensor.lux")
+    lights.save_colour_sensor("sky", ColourSensor(name="Sky", at=ColourSensorRef(
+        source="home-assistant", address="sensor.sun_sky_color_temperature")))
+    assert reads.listening().entities == ("light.spot", "sensor.lux", "sensor.sun_sky_color_temperature")
 
 
 def test_room_lights_list_each_light_by_name_with_the_entry_the_wall_draws(registry):

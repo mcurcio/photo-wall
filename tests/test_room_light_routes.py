@@ -11,10 +11,17 @@ from central.app import create_app
 from central.fleet.node_sessions import NodeControlConfig
 from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.room_light_store import PgRoomLights
-from central.room_light.model import ReporterRef, ReportRefusal, SensorRef
+from central.room_light.model import (
+    ColourSensorRef,
+    LightStated,
+    ReporterRef,
+    ReportRefusal,
+    SensorRef,
+)
 from contracts.room_light import (
     ROOM_LIGHTS_DRAWN_PATH,
     Dimmer,
+    KelvinColour,
     Measured,
     RoomLightsDrawn,
     room_lights_digest,
@@ -23,6 +30,8 @@ from contracts.room_light import (
 AUTH = {"Authorization": "Bearer " + ADMIN}
 LIGHTS = "/v1/operator/house/lights"
 SENSORS = "/v1/operator/house/sensors"
+COLOUR_SENSORS = "/v1/operator/house/colour-sensors"
+SKY = {"name": "Sky", "at": {"source": "home-assistant", "address": "sensor.sun_sky_color_temperature"}}
 WHITE = {"kind": "typed", "kelvin": 4000}
 
 
@@ -78,7 +87,8 @@ def test_refused_reports_and_the_home_assistant_page(registry):
     lights = PgRoomLights(registry.db, PgHouseLock())
     lights.record_refused("home-assistant", "Cellar.Light", ReportRefusal.UNKNOWN_ADDRESS)
     lights.record_refused("pi", "p-1", ReportRefusal.UNREADABLE)
-    lights.record_light_state(ReporterRef(source="home-assistant", address="light.heard"), Dimmer(on=True, brightness=1.0))
+    lights.record_light_state(ReporterRef(source="home-assistant", address="light.heard"),
+                              LightStated(state=Dimmer(on=True, brightness=1.0), colour=None))
     lights.record_heard("light.heard", "light", "Heard light")
     lights.record_reading(SensorRef(source="home-assistant", address="sensor.lux"), Measured(lux=80.0))
     lights.record_heard("sensor.lux", "illuminance", "Lux")
@@ -114,3 +124,40 @@ def test_a_players_drawn_report_is_judged_against_the_document_now(registry):
         bearer = {"Authorization": "Bearer " + player["token"]}   # the Player's former route is gone
         assert client.put(ROOM_LIGHTS_DRAWN_PATH, headers=bearer, json={"drawn": now, "following": True}
                           ).status_code in (404, 405)
+
+
+def test_colour_sensors_and_the_lights_that_follow_them(registry):
+    """A colour sensor is a Home Assistant entity, never a Pi's light meter; a light follows it; it
+    stays while a light follows it; the light's line and entry carry its last stated kelvin as is."""
+    lights = PgRoomLights(registry.db, PgHouseLock())
+    lights.record_colour_reading(ColourSensorRef(source="home-assistant", address="sensor.sun_sky_color_temperature"),
+                                 KelvinColour(kelvin=3456.5))
+    follows = {"kind": "fixed", "name": "Daylight", "colour": {"kind": "colour-sensor", "sensor": "sky",
+                                                                "typed_kelvin": 5500}}
+    with _client(registry) as client:
+        unknown = client.put(f"{LIGHTS}/daylight", headers=AUTH, json=follows)
+        assert (unknown.status_code, unknown.json()) == (404, {"error": "unknown_colour_sensor"})
+        for body in ({"name": "Pi", "at": {"source": "pi", "address": "p-1"}},                 # a Pi's light meter
+                     {"name": "Bad", "at": {"source": "home-assistant", "address": "Not An Entity"}},
+                     {"name": "Zig", "at": {"source": "zigbee", "address": "sensor.k"}}):
+            refused = client.put(f"{COLOUR_SENSORS}/c", headers=AUTH, json=body)
+            assert (refused.status_code, refused.json()) == (422, {"error": "unknown_address"}), body
+        saved = client.put(f"{COLOUR_SENSORS}/sky", headers=AUTH, json=SKY)
+        assert saved.status_code == 200, saved.text
+        assert (saved.json()["colour"], saved.json()["followed_by"]) == ({"kind": "kelvin", "kelvin": 3456.5}, [])
+        taken = client.put(f"{COLOUR_SENSORS}/sun", headers=AUTH, json=SKY)
+        assert (taken.status_code, taken.json()) == (409, {"error": "reference_taken"})
+        light = client.put(f"{LIGHTS}/daylight", headers=AUTH, json=follows)
+        assert light.status_code == 200, light.text
+        assert light.json()["entry"]["colour"] == {"kind": "kelvin", "kelvin": 3456.5}
+        assert {key: light.json()["colour"][key] for key in ("source", "sensor", "colour_from")} == {
+            "source": "colour-sensor", "sensor": "sky", "colour_from": "following"}
+        followed = client.delete(f"{COLOUR_SENSORS}/sky", headers=AUTH)
+        assert (followed.status_code, followed.json()) == (409, {"error": "colour_sensor_followed"})
+        view = client.get(LIGHTS, headers=AUTH).json()
+        assert [(each["id"], each["followed_by"]) for each in view["colour_sensors"]] == [("sky", ["daylight"])]
+        assert client.delete(f"{LIGHTS}/daylight", headers=AUTH).status_code == 204
+        assert client.delete(f"{COLOUR_SENSORS}/sky", headers=AUTH).status_code == 204
+        gone = client.delete(f"{COLOUR_SENSORS}/sky", headers=AUTH)
+        assert (gone.status_code, gone.json()) == (404, {"error": "unknown_colour_sensor"})
+        assert client.put(f"{COLOUR_SENSORS}/Bad_Id", headers=AUTH, json=SKY).status_code == 422
