@@ -445,6 +445,16 @@ def test_a_lone_face_keeps_its_place_in_the_photo() -> None:
         assert abs(_where(.3, offset, axis) - .3) <= STEP * (1 - axis.length) / axis.length / 2
 
 
+def test_a_stranger_in_the_background_does_not_move_the_window() -> None:
+    """The lone face at 30 % of the photo's height with a stranger's face (0.12 % of the photo,
+    under `min_face_share`) at 85 %: the window is the lone face's, 19/64.
+    Mutation probe: aim from every face found, not the judged ones -> their centre 0.469, 30/64."""
+    width, height = 4500, 6000
+    offset, _ = _placed(width, height, key_content(width, height, faces=(
+        _head(.3, .06), _head(.85, .04, x=.7))), FIREPLACE)
+    assert offset == 19 / 64
+
+
 @pytest.mark.parametrize(("centre", "offset", "toward"), [(.05, 1 / 64, 1), (.95, 63 / 64, -1)])
 def test_a_face_near_an_edge_moves_only_as_far_as_keeping_it_whole_needs(centre, offset,
                                                                          toward) -> None:

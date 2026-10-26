@@ -6886,3 +6886,20 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
   0.484); two runs 6/64 = 0.094 (design 0.047). Without skew the design's "choose only within the
   run holding the nearest window" and "clamp the aim to the photo" change no result, so neither is
   built and the "choose among every passing offset" probe cannot fail.
+
+## PR 138 round 4 (odd crop, a face keeps its place, 2026-10-25)
+
+- **design-w2-final.md's faces' window `c_F` (the room shared by the faces' size) is superseded.**
+  Owner, 2026-10-25 (verbatim), on "a lone face sits in the middle": "That’s not quite right. A
+  lone face should sit “in the same relative position within the image as the original (if
+  possible), and cropped only as much as needed to fit the scaled image into the frame." Asked
+  what scaling vs cropping should change, he picked "Nothing: least crop" (the largest window
+  stays; a pick, revisable). Built: the faces' area-weighted centre F along the free axis aims the
+  window at offset F (its first edge F x (1 - length)), then the nearest passing offset wins
+  (central/wall_plan/fit.py `place`).
+- **The previous entry's values bullet is superseded.** The values now are: Mickey 22/64 = 0.344,
+  Easter 21/64 = 0.328 (BRIEF Round 4); big + small face 25/64; four faces 30/64; two runs 6/64
+  (unchanged). Its notes on `c_F` ("choose only within the run holding the nearest window", "clamp
+  the aim to the photo") no longer apply: the aim F always lies inside the photo, so there is
+  nothing to clamp. Its `interest_kept` deferral still holds (named in contracts/frame_fit.py's
+  docstring).

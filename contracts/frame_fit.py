@@ -14,7 +14,9 @@ Rules this module owns (one home each):
   image slides along, and the window's length on it as a share of the image. Everything that asks
   which way a window slides or how long it is reads it here: the crop window
   (contracts/photo_crop.py `crop_window`), the share a crop removes and the placement of a photo's
-  window (central/wall_plan/fit.py `crop_share`, `place`) and `window_holds` below.
+  window (central/wall_plan/fit.py `crop_share`, `place`) and `window_holds` below. One exception
+  is deferred: central/wall_plan/fit.py `interest_kept` still reads a window's edges to tell which
+  axis it spans (.claude/errata.md, PR 138 fix round).
 - **A photo holds the Frame output** (`window_holds`): the largest window of the Frame's aspect
   cut from an image holds the Frame output's pixels on both axes.
 
