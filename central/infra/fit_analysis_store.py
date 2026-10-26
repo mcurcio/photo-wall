@@ -5,9 +5,10 @@
 are the in-pool rows of its Sources' and drafts' pools, each revision (`asset_id`) counted once
 however many pools hold it, with its kind from its Immich asset (`library_assets`) and its
 upright size from its revision (`asset_revisions`): owner item 6, the facts live once. Key content
-counts as measured only while it is not due a new measurement (the key-content store's due rule,
-central/infra/key_content_store.py `due_sql`). Read-only; each read is one statement
-in its own transaction. The answers carry no Immich id (R22).
+counts as checked only while it is not due a new measurement (the key-content store's due rule,
+central/infra/key_content_store.py `due_sql`), but the sample judges any key the Planner places
+with (`usable_key`, due or not), so what the board shows is what the wall is cropped from.
+Read-only; each read is one statement in its own transaction. The answers carry no Immich id (R22).
 
 Follow-up S1: a photo is judged at its readable size, the largest copy of it Photo Wall can read
 (central/photo_library/rendition.py `readable_of`, the one home of that rule). The reads here
@@ -21,8 +22,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any, Final
 
-from pydantic import ValidationError
-
 from central.db import Database, TransactionClock
 from central.infra.display_store import (
     SCREEN_COLUMNS,
@@ -30,7 +29,7 @@ from central.infra.display_store import (
     frame_display_mm,
     frame_outputs_in,
 )
-from central.infra.key_content_store import due_params, due_sql
+from central.infra.key_content_store import due_params, due_sql, usable_key
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.installation_models import FrameOutput
 from central.photo_library.rendition import Size, readable_of
@@ -42,7 +41,6 @@ from central.wall_plan.fit_analysis import (
     SelectionSizes,
     SizeGroup,
 )
-from central.wall_plan.key_content import KeyContent
 
 # The selection's in-pool revisions, once each (`%(keys)s`: its pools' keys).
 _MEMBERS: Final = ("WITH members AS (SELECT DISTINCT asset_id FROM photo_pool_rows "
@@ -61,12 +59,12 @@ _FACT_COLUMNS: Final = ("kind", "width", "height", "edited", "original_media_typ
                         "full_size_copies", "preview_width", "preview_height", "fullsize_width",
                         "fullsize_height")
 _GROUP_BY: Final = "GROUP BY " + ", ".join(str(n) for n in range(1, len(_FACT_COLUMNS) + 1))
-# Each member's kind, size, readable-size facts and its measured key content not due again.
+# Each member's kind, size, readable-size facts and its measured key content, due or not.
 _FACTS: Final = ("FROM members m JOIN asset_revisions a USING (asset_id) "
                  "JOIN library_assets l ON l.connection_ref = a.connection_ref "
                  "AND l.upstream_id = a.upstream_id " + READABLE_JOINS +
                  "LEFT JOIN photo_key_content k ON k.asset_id = m.asset_id "
-                 "AND k.status = 'measured' AND NOT " + due_sql("k") + " ")
+                 "AND k.status = 'measured' ")
 # A row's facts equal to one of the arrays' (`%(f_<column>)s`; NULL equals NULL).
 _FACTS_IN: Final = (
     "EXISTS (SELECT 1 FROM unnest(%(f_kind)s::text[], %(f_width)s::int[], %(f_height)s::int[], "
@@ -121,7 +119,8 @@ class PgFitAnalysisReader:
             read_at = self.times.now_in(conn)
             facts = conn.execute(
                 _MEMBERS + "SELECT " + READABLE_FACTS + ", count(*) AS photos, "
-                "count(k.asset_id) AS measured " + _FACTS + _GROUP_BY,
+                "count(k.asset_id) FILTER (WHERE NOT " + due_sql("k") + ") AS measured " + _FACTS +
+                _GROUP_BY,
                 {"keys": keys} | due_params(read_at)).fetchall()
             others = conn.execute(
                 "SELECT outcome, count(DISTINCT (p.connection_ref, r.upstream_id)) AS n "
@@ -149,12 +148,13 @@ class PgFitAnalysisReader:
     def sample(self, selection: FitSelection, sizes: frozenset[tuple[MediaKind, int, int]], *,
                seed: int, limit: int, measured_only: bool) -> tuple[SamplePhoto, ...]:
         """FitAnalysisReader.sample: ordered by md5(asset id and seed), so the same seed and pool
-        give the same photos. A stored key that no longer reads as KeyContent is not measured."""
+        give the same photos, each with the key the Planner places it by (`usable_key`, due or
+        not; None when it has none)."""
         if not sizes or limit <= 0:
             return ()
         with self.db.transaction() as conn:
             keys, _ = self._pools_in(conn, selection)
-            params = {"keys": keys} | due_params(self.times.now_in(conn))
+            params = {"keys": keys}
             # The fact groups whose readable size is asked (`selection_sizes`' grouping, read
             # again in this transaction), so the sample filters by the rule's own answer.
             wanted = [row for row in conn.execute(
@@ -173,7 +173,8 @@ class PgFitAnalysisReader:
             size = readable_of_row(row)
             if size is not None:
                 photos.append(SamplePhoto(asset_id=row["asset_id"], kind=row["kind"],
-                                          width=size[0], height=size[1], key=_key(row["key"])))
+                                          width=size[0], height=size[1],
+                                          key=usable_key(row["key"])))
         return tuple(photo for photo in photos if photo.key is not None or not measured_only)
 
     def frame_outputs(self) -> tuple[FrameOutput, ...]:
@@ -223,12 +224,3 @@ class PgFitAnalysisReader:
 
 def _reading(pool: dict) -> bool:
     return pool["check_state"] == "checking" or pool["last_complete_at"] is None
-
-
-def _key(stored: object) -> KeyContent | None:
-    if stored is None:
-        return None
-    try:
-        return KeyContent.model_validate(stored)
-    except ValidationError:
-        return None

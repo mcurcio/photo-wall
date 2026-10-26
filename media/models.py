@@ -13,10 +13,12 @@ Kind = Literal["image", "video"]
 
 
 class MediaError(Exception):
-    """Only bounded codes cross the worker boundary; no chained transport exception."""
+    """Only bounded codes cross the worker boundary; no chained transport exception. `reason`,
+    also a bounded code, tells apart the causes one code covers (the worker prints it at boot)."""
 
-    def __init__(self, code: str, status: Status = "unavailable") -> None:
-        if not re.fullmatch(r"[a-z_]{1,64}", code):
+    def __init__(self, code: str, status: Status = "unavailable", *,
+                 reason: str | None = None) -> None:
+        if not all(re.fullmatch(r"[a-z_]{1,64}", one) for one in (code, reason or code)):
             raise ValueError("invalid media failure code")
-        self.code, self.status = code, status
+        self.code, self.status, self.reason = code, status, reason
         super().__init__(code)

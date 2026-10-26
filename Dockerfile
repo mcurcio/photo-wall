@@ -95,7 +95,7 @@ COPY --link --from=console-builder /console/dist /app/central/console/dist
 # SHA-256 is not the pin's, so a wrong download fails the build. Only the worker gets it.
 FROM python-system AS subject-model
 COPY --link media/subject_model.env /pin/media/subject_model.env
-COPY --link scripts/subject_model.py /pin/scripts/subject_model.py
+COPY --link scripts/pinned_fetch.py scripts/subject_model.py /pin/scripts/
 RUN model=$(python3 /pin/scripts/subject_model.py fetch --dest /fetch) \
     && install -D -m 0644 "$model" /models/u2netp.onnx
 

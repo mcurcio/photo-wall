@@ -321,12 +321,13 @@ def build_repository(dsn: str, clock: Clock | None = None, *,
 
 
 async def _entry():
+    # A required dependency, like cv2 itself: no loadable model, no worker (worker_config),
+    # checked before anything else.
+    subjects = subject_map_from(os.environ)
     try:
         dsn = os.environ["PHOTO_WALL_DATABASE_URL"]
     except KeyError:
         raise MediaError("worker_config", "incompatible") from None
-    # A required dependency, like cv2 itself: no loadable model, no worker (worker_config).
-    subjects = subject_map_from(os.environ)
     clock = SystemClock()
     repository = build_repository(dsn, clock, queue=ProcrastinateMediaQueue(dsn))
     db = repository.db
@@ -399,7 +400,9 @@ def main() -> int:
     except Exception as error:
         while isinstance(error, ExceptionGroup):  # the loop that failed first, not the group
             error = error.exceptions[0]
-        print(json.dumps({"error": MediaWorker._code(error)}), file=sys.stderr)
+        reason = error.reason if isinstance(error, MediaError) else None
+        print(json.dumps({"error": MediaWorker._code(error)} | ({"reason": reason} if reason else {})),
+              file=sys.stderr)
         return 1
 
 

@@ -159,9 +159,10 @@ def test_a_flat_grey_thumbnail_has_almost_no_spread_on_the_real_model_and_is_jud
 
 
 def test_the_real_model_answers_concurrent_photos_each_as_it_answers_it_alone():
-    """Design erratum E1: one Net behind a lock; four threads measuring four photos at once each
-    get the map the photo gets alone.
-    Mutation probe: drop the lock around setInput and forward -> maps of other photos."""
+    """Design erratum E1, on the real model: four threads measuring four photos at once each get
+    the map the photo gets alone (the lock itself is proven by the overlapping-calls test below).
+    Mutation probe: drop the lock around setInput and forward -> maps of other photos, or an
+    OpenCV error (a race, so this probe can pass on a lucky schedule)."""
     subjects = real_subjects()
     images = [cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR) for data in (
         red_disc_left(), red_disc_left(240, 320),
@@ -173,7 +174,7 @@ def test_the_real_model_answers_concurrent_photos_each_as_it_answers_it_alone():
 
     def run(index: int) -> None:
         start.wait()
-        for _ in range(8):
+        for _ in range(2):
             together[index].append(subjects.of(images[index]))
 
     threads = [threading.Thread(target=run, args=(index,)) for index in range(len(images))]
@@ -182,9 +183,53 @@ def test_the_real_model_answers_concurrent_photos_each_as_it_answers_it_alone():
     for thread in threads:
         thread.join()
     for index, answers in enumerate(together):
-        assert len(answers) == 8
+        assert len(answers) == 2
         for answer in answers:
             assert np.array_equal(answer, alone[index]), index
+
+
+class _OverlapNet:
+    """A stand-in `cv2.dnn.Net` that notes a second `setInput` arriving while one call's
+    setInput and forward are in progress; the first call holds its turn until another enters or
+    `wait` passes, so calls that can overlap do."""
+
+    def __init__(self, wait: float) -> None:
+        self.wait, self.overlapped = wait, False
+        self._busy, self._entered = threading.Lock(), threading.Event()
+
+    def setInput(self, blob) -> None:  # noqa: N802 (cv2's name)
+        if not self._busy.acquire(blocking=False):
+            self.overlapped = True
+            self._entered.set()
+            return
+        self._entered.wait(self.wait)
+        self.wait = 0               # only the first call holds its turn open
+
+    def forward(self, name):
+        if self._busy.locked():
+            self._busy.release()
+        return np.zeros((1, 1, 320, 320), np.float32)
+
+
+def test_one_net_takes_one_measurement_at_a_time():
+    """Design erratum E1, deterministic: no thread's setInput comes between another's setInput
+    and forward. Mutation probe: drop the lock in `U2NetpMap.of` -> overlapped."""
+    from media.subject_map import U2NetpMap
+    net = _OverlapNet(wait=.2)
+    subjects = U2NetpMap(net)
+    image = np.zeros((24, 32, 3), np.uint8)
+    start = threading.Barrier(2)
+
+    def run() -> None:
+        start.wait()
+        subjects.of(image)
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not net.overlapped
 
 
 # 4. undecodable bytes, and a photo the model cannot read ----------------------------------------

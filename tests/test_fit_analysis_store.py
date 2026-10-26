@@ -76,7 +76,9 @@ def test_a_photo_in_two_sources_counts_once(registry):
 def test_a_photo_due_a_new_measurement_is_not_counted_as_checked_until_it_is_measured(registry):
     """Settings › Photo fit's "checked N of M" reads the key-content store's due rule: after an
     analysis version bump the count dips, and it climbs back as each photo is measured again.
-    Mutation probe: count any measured row, whatever its version -> 2 checked at once."""
+    The sample still judges the due photo by the key the Planner places it with meanwhile.
+    Mutation probes: count any measured row, whatever its version -> 2 checked at once; leave
+    due keys out of the sample -> 1 photo sampled."""
     photos = tuple(photo(name, taken_at=900 + index, width=3840, height=2160)
                    for index, name in enumerate(("older", "current")))
     seed_pool(registry, "family:1", photos)
@@ -87,6 +89,9 @@ def test_a_photo_due_a_new_measurement_is_not_counted_as_checked_until_it_is_mea
     selection = FitSelection(sources=("family:1",))
     (group,) = _reader(registry).selection_sizes(selection).groups
     assert (group.photos, group.measured) == (2, 1)
+    sample = _reader(registry).sample(selection, frozenset({("image", 3840, 2160)}), seed=3,
+                                      limit=10, measured_only=True)
+    assert sorted(item.asset_id for item in sample) == sorted(p.asset_id for p in photos)
     measure_all(registry, photos[:1])
     (group,) = _reader(registry).selection_sizes(selection).groups
     assert (group.photos, group.measured) == (2, 2)

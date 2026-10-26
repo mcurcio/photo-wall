@@ -14,7 +14,11 @@ that found no face is provisional: Immich detects faces in a background job some
 upload, so it is measured once more after FACELESS_REMEASURE_SECONDS (`retry_at` on a measured
 row), and that measurement is final. A failed measurement of a photo that already has a measured
 key keeps that key, and only its retry time is recorded (MEASURE_RETRY_SECONDS ahead), so the
-photo stays placeable.
+photo stays placeable; a stored key that no longer reads as KeyContent is not kept, so the
+failure is recorded and retried like a first measurement's.
+
+A row's key is used, by hydration and by the fit analysis's sample alike, when its status is
+`measured` and it reads as KeyContent (`usable_key`), whether or not it is due.
 
 The due rule has one home, `due_sql`: a row is due a measurement when its retry time has come,
 or, with no retry time set, when it is at an older analysis version. Hydration, the measurement
@@ -62,6 +66,17 @@ def due_params(now: float) -> dict[str, Any]:
     return {"due_now": now, "due_version": ANALYSIS_VERSION}
 
 
+def usable_key(stored: object) -> KeyContent | None:
+    """A measured row's stored key as KeyContent, or None when it no longer reads as one (the
+    one rule for a key that can be used; module docstring)."""
+    if stored is None:
+        return None
+    try:
+        return KeyContent.model_validate(stored)
+    except ValidationError:
+        return None
+
+
 # One row per asset, replaced by each new measurement; nothing when the asset row is gone.
 _WRITE = ("INSERT INTO photo_key_content(asset_id,analysis_version,status,key,failure,"
           "measured_at,retry_at) SELECT asset_id,%s,%s,%s,%s,%s,%s FROM asset_revisions "
@@ -98,12 +113,9 @@ class PgKeyContent:
                 found[row["asset_id"]] = (
                     None if due else MeasureFailed(reason=row["failure"]), due)
                 continue
-            try:
-                key = KeyContent.model_validate(row["key"])
-            except ValidationError:
-                found[row["asset_id"]] = (None, True)
-                continue
-            found[row["asset_id"]] = (Measured(key=key, due=due), due)
+            key = usable_key(row["key"])
+            found[row["asset_id"]] = (None, True) if key is None else (Measured(key=key, due=due),
+                                                                        due)
         return found
 
     def request_in(self, conn: Any, asset_ids: Iterable[str], *, now: float) -> int:
@@ -145,12 +157,15 @@ class PgKeyContent:
 
     def record_failed(self, asset_id: str, reason: MeasureFailure) -> None:
         """KeyContentWriter.record_failed; nothing when the asset is gone. A photo with a
-        measured key keeps it: only its retry time is recorded (module docstring)."""
+        measured key it can use keeps it: only its retry time is recorded (module docstring)."""
         with self.db.transaction() as conn:
             now = self.times.now_in(conn)
-            kept = conn.execute(
-                "UPDATE photo_key_content SET retry_at=%s WHERE asset_id=%s AND status='measured'",
-                (now + MEASURE_RETRY_SECONDS, asset_id)).rowcount
-            if not kept:
+            stored = conn.execute(
+                "SELECT key FROM photo_key_content WHERE asset_id=%s AND status='measured' "
+                "FOR UPDATE", (asset_id,)).fetchone()
+            if stored is not None and usable_key(stored["key"]) is not None:
+                conn.execute("UPDATE photo_key_content SET retry_at=%s WHERE asset_id=%s",
+                             (now + MEASURE_RETRY_SECONDS, asset_id))
+            else:
                 conn.execute(_WRITE, (ANALYSIS_VERSION, "failed", None, reason, now,
                                       now + MEASURE_RETRY_SECONDS, asset_id))

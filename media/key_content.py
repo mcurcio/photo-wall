@@ -30,7 +30,6 @@ is stored (central/infra/key_content_store.py); when a photo is measured (the Pl
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Final
 
 import cv2
 import numpy as np
@@ -42,11 +41,10 @@ from central.wall_plan.key_content import (
     KeyContent,
     MeasureFailure,
     UnitBox,
+    interest_rows,
 )
 from media.library_client import FaceBox
 from media.subject_map import SubjectMap
-
-_MAX_ROWS: Final = 64           # InterestGrid's bound
 
 
 class MeasureError(Exception):
@@ -81,7 +79,7 @@ def interest_of(thumbnail: bytes, subjects: SubjectMap) -> tuple[InterestGrid, f
     if image is None or image.size == 0:
         raise MeasureError("decode")
     height, width = image.shape[:2]
-    rows = min(_MAX_ROWS, max(1, round(INTEREST_COLUMNS * height / width)))
+    rows = interest_rows(width, height)
     try:
         stands_out = subjects.of(image)
     except cv2.error:
@@ -93,7 +91,7 @@ def interest_of(thumbnail: bytes, subjects: SubjectMap) -> tuple[InterestGrid, f
     cells = np.clip(cells, 0.0, None)
     total = float(cells.sum())
     if not np.isfinite(total) or total <= 0:
-        return _uniform(rows), spread
+        return InterestGrid.uniform(INTEREST_COLUMNS, rows), spread
     return InterestGrid(columns=INTEREST_COLUMNS, rows=rows,
                         weights=tuple(float(w) for w in (cells / total).ravel())), spread
 
@@ -105,7 +103,3 @@ def measure(boxes: Sequence[FaceBox], thumbnail: bytes, subjects: SubjectMap) ->
     return KeyContent(analysis_version=ANALYSIS_VERSION, faces=faces_of(boxes),
                       interest=grid, spread=spread)
 
-
-def _uniform(rows: int) -> InterestGrid:
-    cells = INTEREST_COLUMNS * rows
-    return InterestGrid(columns=INTEREST_COLUMNS, rows=rows, weights=(1.0 / cells,) * cells)

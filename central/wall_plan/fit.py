@@ -255,9 +255,7 @@ def interest_judged(key: KeyContent, settings: FitSettings) -> JudgedInterest:
     grid = key.interest
     if key.spread >= settings.min_salience_spread:
         return JudgedInterest(grid, False)
-    cells = grid.columns * grid.rows
-    return JudgedInterest(InterestGrid(columns=grid.columns, rows=grid.rows,
-                                       weights=(1.0 / cells,) * cells), True)
+    return JudgedInterest(InterestGrid.uniform(grid.columns, grid.rows), True)
 
 
 def interest_centre(grid: InterestGrid, along: Literal["x", "y"]) -> float:

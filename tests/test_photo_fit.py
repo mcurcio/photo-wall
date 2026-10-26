@@ -611,6 +611,28 @@ def test_a_lone_face_above_its_own_body_keeps_its_headroom() -> None:
     assert judge("image", 4500, 6000, key, FIREPLACE, .6, FACES_ONLY).crop.offset == 10 / 64
 
 
+def test_a_lone_face_below_what_stands_out_keeps_its_room_at_the_bottom() -> None:
+    """The mirror of the lone face above its body: one face at 78-90 % of a 3 : 4 photo's
+    height, the person standing out from 5 % to 92 %, so the interest pulls the window up (toward
+    offset 0). The face is already near the window's bottom, so the room bound keeps PR 138's
+    window, 0.84375, and the face keeps at least 1 - skew of its room below.
+    Mutation probes: bound by the room above the faces, not below -> 0.8125; no room bound
+    -> 0.8125, the face's room below nearly halved."""
+    key = key_content(4500, 6000, faces=(face(.42, .78, .58, .90),),
+                      grid=_rows_grid(21, .05, .92, columns=range(5, 11)))
+    skewed = judge("image", 4500, 6000, key, FIREPLACE, .6, HOUSE).crop.offset
+    faces_only = judge("image", 4500, 6000, key, FIREPLACE, .6, FACES_ONLY).crop.offset
+    assert interest_centre(key.interest, "y") < .5
+    assert (skewed, faces_only) == (54 / 64, 54 / 64)
+    faces = faces_judged(key, HOUSE)
+
+    def below(offset: float) -> float:
+        bottom = crop_window(PhotoCrop(offset=offset), 4500, 6000, FIREPLACE.aspect)[3]
+        return min(bottom - one.bottom for one in faces)
+
+    assert below(skewed) >= (1 - HOUSE.interest_skew) * below(faces_only) - 1e-9
+
+
 def test_an_even_grid_has_no_side_to_lean_toward() -> None:
     """Mickey's faces and U-2-Netp grid with its spread under `min_salience_spread`: judged
     even (`interest_judged`, the one home of "even"), so the faces alone place it, 0.34375.

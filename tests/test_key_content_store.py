@@ -167,6 +167,24 @@ def test_a_failed_new_measurement_keeps_the_older_key_placeable_and_retries_in_a
     assert analyses(registry, store, [older]) == {older: Measured(key=KEY)}
 
 
+def test_a_failed_measurement_of_an_unreadable_key_waits_for_its_retry(registry):
+    """A stored key that no longer reads as KeyContent is not kept when its new measurement
+    fails: the failure is recorded, so the photo is not requested again until its retry.
+    Mutation probe: keep any measured row's key on a failure -> requested again at once."""
+    queue = Queue()
+    store = store_of(registry, queue)
+    (unreadable,) = seeded(registry, "unreadable")
+    store.record_measured(unreadable, KEY)
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE photo_key_content SET key='{\"interest\": 1}' WHERE asset_id=%s",
+                     (unreadable,))
+    store.record_failed(unreadable, "decode")
+    assert analyses(registry, store, [unreadable]) == {unreadable: MeasureFailed(reason="decode")}
+    assert request(registry, store, [unreadable]) == 0
+    registry.clock.advance(MEASURE_RETRY_SECONDS)
+    assert request(registry, store, [unreadable]) == 1 and queue.waiting == [unreadable]
+
+
 def test_the_asset_row_carries_its_key_content_with_it(registry):
     store = store_of(registry)
     (gone,) = seeded(registry, "gone")

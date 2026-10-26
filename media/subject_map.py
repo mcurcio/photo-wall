@@ -84,15 +84,16 @@ class U2NetpMap:
 
 def subject_map_from(env: Mapping[str, str]) -> SubjectMap:
     """The worker's SubjectMap from PHOTO_WALL_SUBJECT_MODEL. MediaError("worker_config") when
-    the variable is unset or its file is missing or unreadable: checked at boot, before any job
-    is claimed."""
+    the variable is unset or its file is missing or unreadable, its `reason` saying which
+    (`subject_model_unset`, `subject_model_missing`, `subject_model_unreadable`): checked at
+    boot, before any job is claimed."""
     path = env.get(MODEL_VARIABLE)
     if not path:
-        raise MediaError("worker_config", "incompatible")
+        raise MediaError("worker_config", "incompatible", reason="subject_model_unset")
     try:
         return U2NetpMap.load(Path(path))
-    except ValueError:
-        raise MediaError("worker_config", "incompatible") from None
+    except ValueError as error:
+        raise MediaError("worker_config", "incompatible", reason=str(error)) from None
 
 
 __all__ = ["MODEL_VARIABLE", "SubjectMap", "U2NetpMap", "subject_map_from"]

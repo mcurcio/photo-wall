@@ -444,8 +444,8 @@ SUITES: Final = (
                  "tests/test_node_boot.py", "tests/test_registry.py",
                  # the join's hub harness and its pinned nats-server
                  "tests/integration/bus_servers.py", "tests/systemd_environment.py",
-                 "scripts/nats_server.py", "debian-packaging/nats-server.env",
-                 "scripts/node_release_artifacts.py",
+                 "scripts/nats_server.py", "scripts/pinned_fetch.py",
+                 "debian-packaging/nats-server.env", "scripts/node_release_artifacts.py",
                  "scripts/package_release_artifacts.py", "scripts/galleria_zip.py",
                  "scripts/container_build.py",
                  "scripts/initrd_mount_probe.py", "scripts/verify_netboot_initrd.py",

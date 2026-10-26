@@ -17,7 +17,7 @@ from support.frame_media import a_frame
 from support.frame_outputs import frame_output_of
 from support.library_store_fake import FakeLibraryStore, RevisionRecord
 from support.photo_pools import photo, seed_pool
-from support.subject_model import FakeSubjects, even_subjects
+from support.subject_model import FakeSubjects, even_subjects, subject_model_path
 
 from central.assets.layout import CacheLayout
 from central.assets.store import CacheStore
@@ -245,6 +245,7 @@ def test_hung_client_close_is_bounded(worker_storage):
 def test_command_startup_error_contains_no_environment_or_raw_exception(monkeypatch, capsys):
     import media.worker as module
     monkeypatch.setattr(module.sys, "argv", ["media.worker"])
+    monkeypatch.setenv("PHOTO_WALL_SUBJECT_MODEL", str(subject_model_path()))
     monkeypatch.delenv("PHOTO_WALL_DATABASE_URL", raising=False)
     assert module.main() == 1
     output = capsys.readouterr()
@@ -252,12 +253,16 @@ def test_command_startup_error_contains_no_environment_or_raw_exception(monkeypa
     assert not output.out
 
 
-@pytest.mark.parametrize("model", [None, "missing.onnx", "not-a-model.onnx"])
+@pytest.mark.parametrize(("model", "reason"), [
+    (None, "subject_model_unset"), ("missing.onnx", "subject_model_missing"),
+    ("not-a-model.onnx", "subject_model_unreadable")])
 def test_a_worker_without_a_loadable_subject_model_stops_at_boot_before_any_job(
-        monkeypatch, capsys, tmp_path, model):
+        monkeypatch, capsys, tmp_path, model, reason):
     """Subject detection: the model is a required dependency; without it the worker reports
-    worker_config before it reaches the database (here one that does not exist), so it claims no
-    job. Mutation probe: load the model after the database work -> another error."""
+    worker_config, with the reason that tells the three causes apart, before it reaches the
+    database (here one that does not exist), so it claims no job.
+    Mutation probes: load the model after the database work -> another error; drop the reason
+    -> the causes read alike."""
     import media.worker as module
     monkeypatch.setattr(module.sys, "argv", ["media.worker"])
     monkeypatch.setenv("PHOTO_WALL_DATABASE_URL", "postgresql://nobody@127.0.0.1:1/none")
@@ -269,7 +274,7 @@ def test_a_worker_without_a_loadable_subject_model_stops_at_boot_before_any_job(
         monkeypatch.setenv("PHOTO_WALL_SUBJECT_MODEL", str(tmp_path / model))
     assert module.main() == 1
     output = capsys.readouterr()
-    assert json.loads(output.err) == {"error": "worker_config"}
+    assert json.loads(output.err) == {"error": "worker_config", "reason": reason}
     assert not (tmp_path / "cache").exists()
 
 
