@@ -67,7 +67,7 @@ One severity scale (`ok`, `todo`, `notice`, `alarm`, `unknown`) replaces the fou
 
 S3's palette clearing alone is not a check: an unknown class is dropped without an error, so the lint is what fails. S2 and S3 lint the five layer directories only; the legacy modules at the top of `src/` are exempt until the end condition below.
 
-The catalog is browsed in Storybook and tested by `tests/browser/test_console_catalog_browser.py` walking its static build (render, axe-core, screenshot diff), in its own CI leg `console-catalog`. The leg's time is measured by the tracer and sharded by layer to stay under about 4 minutes. The console's static checks (`npm run typecheck`, `npm run lint`) run on Node 22.
+The catalog is browsed in Storybook and tested by `tests/browser/test_console_catalog_browser.py` walking its static build (render, axe-core, screenshot diff), in its own CI leg `console-catalog`. The leg runs as shards, each story and colour scheme hashed to one of them (`shard_each_case`, `tests/support/shards.py`), to stay under about 4 minutes. The console's static checks (`npm run typecheck`, `npm run lint`) run on Node 22.
 
 ## Migration
 
