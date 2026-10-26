@@ -9,9 +9,16 @@ reads as KeyContent counts as not measured, so it is measured again and replaced
 
 Content first (owner, 2026-10-11: frames always have content; C7, the pool plays on while Immich
 is down): a measurement at an older analysis version is still read until a new one replaces it,
-and is requested again. A photo's first measurement that found no face is provisional: Immich
-detects faces in a background job some time after the upload, so it is measured once more after
-FACELESS_REMEASURE_SECONDS (`retry_at` on a measured row), and that measurement is final.
+marked `due` (`Measured.due`), and the Planner requests it again. A photo's first measurement
+that found no face is provisional: Immich detects faces in a background job some time after the
+upload, so it is measured once more after FACELESS_REMEASURE_SECONDS (`retry_at` on a measured
+row), and that measurement is final. A failed measurement of a photo that already has a measured
+key keeps that key, and only its retry time is recorded (MEASURE_RETRY_SECONDS ahead), so the
+photo stays placeable.
+
+The due rule has one home, `due_sql`: a row is due a measurement when its retry time has come,
+or, with no retry time set, when it is at an older analysis version. Hydration, the measurement
+requests and the fit analysis's "checked" count (central/infra/fit_analysis_store.py) all read it.
 """
 from __future__ import annotations
 
@@ -41,6 +48,20 @@ MEASURE_RETRY_SECONDS: Final = 3600
 # after the upload; after a large import it can lag by hours). A placeholder to tune.
 FACELESS_REMEASURE_SECONDS: Final = 6 * 3600
 
+
+
+def due_sql(alias: str) -> str:
+    """The due rule (module docstring) over `photo_key_content` row `alias`, as an SQL boolean;
+    its parameters are `due_params`'."""
+    return (f"COALESCE({alias}.retry_at <= %(due_now)s, "
+            f"{alias}.analysis_version <> %(due_version)s)")
+
+
+def due_params(now: float) -> dict[str, Any]:
+    """The named parameters `due_sql` reads, at database time `now`."""
+    return {"due_now": now, "due_version": ANALYSIS_VERSION}
+
+
 # One row per asset, replaced by each new measurement; nothing when the asset row is gone.
 _WRITE = ("INSERT INTO photo_key_content(asset_id,analysis_version,status,key,failure,"
           "measured_at,retry_at) SELECT asset_id,%s,%s,%s,%s,%s,%s FROM asset_revisions "
@@ -59,7 +80,7 @@ class PgKeyContent:
     def analyses_in(self, conn: Any, asset_ids: Iterable[str], *,
                     now: float) -> dict[str, Analysis]:
         """KeyContentReader.analyses_in: a measurement at any analysis version (an older one
-        holds until it is replaced), a failure until its retry."""
+        holds until it is replaced), with whether it is due; a failure until its retry."""
         return {asset_id: analysis for asset_id, (analysis, _) in
                 self._read(conn, asset_ids, now=now).items() if analysis is not None}
 
@@ -67,23 +88,22 @@ class PgKeyContent:
               now: float) -> dict[str, tuple[Analysis | None, bool]]:
         """Each stored row's analysis (None: none to use) and whether it is due a measurement."""
         rows = conn.execute(
-            "SELECT asset_id,analysis_version,status,key,failure,retry_at FROM photo_key_content "
-            "WHERE asset_id = ANY(%s)", (list(dict.fromkeys(asset_ids)),)).fetchall()
+            "SELECT k.asset_id,k.status,k.key,k.failure," + due_sql("k") + " AS due "
+            "FROM photo_key_content k WHERE k.asset_id = ANY(%(ids)s)",
+            {"ids": list(dict.fromkeys(asset_ids))} | due_params(now)).fetchall()
         found: dict[str, tuple[Analysis | None, bool]] = {}
         for row in rows:
+            due = bool(row["due"])
             if row["status"] == "failed":
-                waiting = row["retry_at"] > now
                 found[row["asset_id"]] = (
-                    MeasureFailed(reason=row["failure"]) if waiting else None, not waiting)
+                    None if due else MeasureFailed(reason=row["failure"]), due)
                 continue
             try:
                 key = KeyContent.model_validate(row["key"])
             except ValidationError:
                 found[row["asset_id"]] = (None, True)
                 continue
-            due = (row["analysis_version"] != ANALYSIS_VERSION
-                   or (row["retry_at"] is not None and row["retry_at"] <= now))
-            found[row["asset_id"]] = (Measured(key=key), due)
+            found[row["asset_id"]] = (Measured(key=key, due=due), due)
         return found
 
     def request_in(self, conn: Any, asset_ids: Iterable[str], *, now: float) -> int:
@@ -124,8 +144,13 @@ class PgKeyContent:
                                   asset_id))
 
     def record_failed(self, asset_id: str, reason: MeasureFailure) -> None:
-        """KeyContentWriter.record_failed; nothing when the asset is gone."""
+        """KeyContentWriter.record_failed; nothing when the asset is gone. A photo with a
+        measured key keeps it: only its retry time is recorded (module docstring)."""
         with self.db.transaction() as conn:
             now = self.times.now_in(conn)
-            conn.execute(_WRITE, (ANALYSIS_VERSION, "failed", None, reason, now,
-                                  now + MEASURE_RETRY_SECONDS, asset_id))
+            kept = conn.execute(
+                "UPDATE photo_key_content SET retry_at=%s WHERE asset_id=%s AND status='measured'",
+                (now + MEASURE_RETRY_SECONDS, asset_id)).rowcount
+            if not kept:
+                conn.execute(_WRITE, (ANALYSIS_VERSION, "failed", None, reason, now,
+                                      now + MEASURE_RETRY_SECONDS, asset_id))

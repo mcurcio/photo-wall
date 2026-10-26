@@ -384,6 +384,31 @@ def test_unmeasured_photos_are_never_placed_and_are_requested_in_rank_order():
     assert {entry.asset_id for entry in projection.plan} == {"ready"}
 
 
+def due(candidate: Candidate) -> Candidate:
+    """`candidate` with its key due a new measurement (an older analysis version, or a
+    provisional faceless one past its retry: the key-content store's rule)."""
+    return candidate.model_copy(update={"analysis": candidate.analysis.model_copy(
+        update={"due": True})})
+
+
+def test_a_photo_due_a_new_measurement_is_placed_meanwhile_and_requested_after_the_unmeasured():
+    """Subject detection's re-measuring: a new analysis version marks every stored key due; the
+    Planner keeps placing those photos with their old keys (the wall never empties) and requests
+    them after the unmeasured ones, the placed ones first, within `max_measurements`.
+    Mutation probes: request only the unmeasured -> the due never queued; skip a due photo as
+    unmeasured -> it is not placed."""
+    frames = {"left": FrameSetup("wide")}
+    photos = [due(photo("old-key", "wide", captured=5)), photo("raw", "wide", captured=4,
+                                                                  is_measured=False),
+              due(photo("old-faceless", "wide", captured=3)), photo("current", "wide", captured=2)]
+    projection = plan(scene(frames), frames, photos, plan_seconds=60)
+    assert "old-key" in {entry.asset_id for entry in projection.plan}
+    assert [m.asset_id for m in projection.measurements] == ["raw", "old-key", "old-faceless"]
+    capped = plan(scene(frames), frames, photos, plan_seconds=60,
+                  limits=PlannerLimits(max_measurements=2))
+    assert [m.asset_id for m in capped.measurements] == ["raw", "old-key"]
+
+
 def test_the_layer_carries_the_crop_that_keeps_the_faces():
     """Case 9: a 2:3 photo with a face at its left edge on a 9:16 Frame becomes a layer whose
     crop keeps the left (offset 0)."""

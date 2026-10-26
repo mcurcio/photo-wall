@@ -5,7 +5,8 @@
 are the in-pool rows of its Sources' and drafts' pools, each revision (`asset_id`) counted once
 however many pools hold it, with its kind from its Immich asset (`library_assets`) and its
 upright size from its revision (`asset_revisions`): owner item 6, the facts live once. Key content
-counts as measured only at the current ANALYSIS_VERSION. Read-only; each read is one statement
+counts as measured only while it is not due a new measurement (the key-content store's due rule,
+central/infra/key_content_store.py `due_sql`). Read-only; each read is one statement
 in its own transaction. The answers carry no Immich id (R22).
 
 Follow-up S1: a photo is judged at its readable size, the largest copy of it Photo Wall can read
@@ -29,6 +30,7 @@ from central.infra.display_store import (
     frame_display_mm,
     frame_outputs_in,
 )
+from central.infra.key_content_store import due_params, due_sql
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.installation_models import FrameOutput
 from central.photo_library.rendition import Size, readable_of
@@ -40,7 +42,7 @@ from central.wall_plan.fit_analysis import (
     SelectionSizes,
     SizeGroup,
 )
-from central.wall_plan.key_content import ANALYSIS_VERSION, KeyContent
+from central.wall_plan.key_content import KeyContent
 
 # The selection's in-pool revisions, once each (`%(keys)s`: its pools' keys).
 _MEMBERS: Final = ("WITH members AS (SELECT DISTINCT asset_id FROM photo_pool_rows "
@@ -59,12 +61,12 @@ _FACT_COLUMNS: Final = ("kind", "width", "height", "edited", "original_media_typ
                         "full_size_copies", "preview_width", "preview_height", "fullsize_width",
                         "fullsize_height")
 _GROUP_BY: Final = "GROUP BY " + ", ".join(str(n) for n in range(1, len(_FACT_COLUMNS) + 1))
-# Each member's kind, size, readable-size facts and (current version, measured) key content.
+# Each member's kind, size, readable-size facts and its measured key content not due again.
 _FACTS: Final = ("FROM members m JOIN asset_revisions a USING (asset_id) "
                  "JOIN library_assets l ON l.connection_ref = a.connection_ref "
                  "AND l.upstream_id = a.upstream_id " + READABLE_JOINS +
                  "LEFT JOIN photo_key_content k ON k.asset_id = m.asset_id "
-                 "AND k.analysis_version = %(version)s AND k.status = 'measured' ")
+                 "AND k.status = 'measured' AND NOT " + due_sql("k") + " ")
 # A row's facts equal to one of the arrays' (`%(f_<column>)s`; NULL equals NULL).
 _FACTS_IN: Final = (
     "EXISTS (SELECT 1 FROM unnest(%(f_kind)s::text[], %(f_width)s::int[], %(f_height)s::int[], "
@@ -116,16 +118,16 @@ class PgFitAnalysisReader:
         """FitAnalysisReader.selection_sizes."""
         with self.db.transaction() as conn:
             keys, reading = self._pools_in(conn, selection)
+            read_at = self.times.now_in(conn)
             facts = conn.execute(
                 _MEMBERS + "SELECT " + READABLE_FACTS + ", count(*) AS photos, "
                 "count(k.asset_id) AS measured " + _FACTS + _GROUP_BY,
-                {"keys": keys, "version": ANALYSIS_VERSION}).fetchall()
+                {"keys": keys} | due_params(read_at)).fetchall()
             others = conn.execute(
                 "SELECT outcome, count(DISTINCT (p.connection_ref, r.upstream_id)) AS n "
                 "FROM photo_pool_rows r JOIN photo_pools p USING (pool_key) "
                 "WHERE r.pool_key = ANY(%s) AND r.outcome <> 'in_pool' GROUP BY outcome",
                 (keys,)).fetchall()
-            read_at = self.times.now_in(conn)
         outside = {row["outcome"]: row["n"] for row in others}
         grouped: dict[tuple[str, int, int], list[int]] = {}
         unsized = 0
@@ -152,7 +154,7 @@ class PgFitAnalysisReader:
             return ()
         with self.db.transaction() as conn:
             keys, _ = self._pools_in(conn, selection)
-            params = {"keys": keys, "version": ANALYSIS_VERSION}
+            params = {"keys": keys} | due_params(self.times.now_in(conn))
             # The fact groups whose readable size is asked (`selection_sizes`' grouping, read
             # again in this transaction), so the sample filters by the rule's own answer.
             wanted = [row for row in conn.execute(

@@ -50,14 +50,15 @@ class KeyContentReader(Protocol):
 
     def analyses_in(self, conn: Any, asset_ids: Iterable[str], *,
                     now: float) -> dict[str, Analysis]:
-        """Each asset's analysis at the current ANALYSIS_VERSION: measured, or failed while its
-        retry is not yet due. An asset with neither is absent (not measured)."""
+        """Each asset's analysis: measured at any analysis version, with whether it is `due` a
+        new measurement (the store's due rule: an older version, or a retry time come), or
+        failed while its retry is not yet due. An asset with neither is absent (not measured)."""
         ...
 
     def request_in(self, conn: Any, asset_ids: Iterable[str], *, now: float) -> int:
-        """Queue a measurement for each asset that has a pool row and no current analysis (a
-        failed one only once its retry is due); one queued measurement per asset at a time.
-        Returns how many were queued."""
+        """Queue a measurement for each asset that has a pool row and no analysis, or one due a
+        measurement (the same due rule); one queued measurement per asset at a time. Returns how
+        many were queued."""
         ...
 
 
@@ -100,7 +101,7 @@ class FitAnalysisReader(Protocol):
 
     def selection_sizes(self, selection: FitSelection) -> SelectionSizes:
         """One grouped read: in-pool photos by (kind, width, height) with how many have key
-        content at the current ANALYSIS_VERSION; the waiting and left-out counts; whether any
+        content not due a new measurement (the key-content store's due rule); the waiting and left-out counts; whether any
         pool is still being read. AnalysisRefused "source_unknown" or "draft_unknown" (404)."""
         ...
 

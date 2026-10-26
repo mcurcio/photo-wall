@@ -30,9 +30,11 @@ some window with the Frame's aspect (its Frame output's shape, the Position's bo
 Among the windows passing 3 and 4, `place` picks one: on a photo with faces, the window nearest
 the one that keeps the faces' centre at its place in the photo (owner, 2026-10-25: "A lone face
 should sit “in the same relative position within the image as the original (if possible), and
-cropped only as much as needed to fit the scaled image into the frame."); on a photo without
-faces, the one keeping the most interest. Windows are tried at offsets k / `window_steps` for
-k = 0..`window_steps`, plus 0.5.
+cropped only as much as needed to fit the scaled image into the frame."), then moved toward what
+stands out by at most `interest_skew` of the gap and of the faces' room (owner, 2026-10-25: "It
+could bias towards face centering but also allow a skew to include extra content"); on a photo
+without faces, the one keeping the most interest. Windows are tried at offsets k /
+`window_steps` for k = 0..`window_steps`, plus 0.5.
 
 Every tuning value is a `FitSettings` field (central/wall_plan/fit_settings.py; owner,
 2026-10-11: "Agreed that these should be configurable, and not hardcoded."), passed in by the
@@ -51,7 +53,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from functools import lru_cache
-from typing import Final, Literal
+from typing import Final, Literal, NamedTuple
 
 from central.installation_models import FrameOutput, Pixels, PositiveMm
 from central.photo_library.rendition import FrameNeed, copy_edge
@@ -239,14 +241,31 @@ def faces_judged(key: KeyContent, settings: FitSettings) -> tuple[UnitBox, ...]:
     return tuple(faces)
 
 
-def interest_judged(key: KeyContent, settings: FitSettings) -> InterestGrid:
-    """The grid rule 4 judges: `key.interest`, or the uniform grid of its size when the saliency
+class JudgedInterest(NamedTuple):
+    """The interest grid as the rule judges it, and whether it is even (no part stands out): the
+    one home of "even", read by rule 4 and by `place` alike."""
+
+    grid: InterestGrid
+    even: bool
+
+
+def interest_judged(key: KeyContent, settings: FitSettings) -> JudgedInterest:
+    """The grid rule 4 judges: `key.interest`, or the uniform grid of its size, `even`, when the
     map's `spread` is under `settings.min_salience_spread` (no part stands out). Pure."""
     grid = key.interest
     if key.spread >= settings.min_salience_spread:
-        return grid
+        return JudgedInterest(grid, False)
     cells = grid.columns * grid.rows
-    return InterestGrid(columns=grid.columns, rows=grid.rows, weights=(1.0 / cells,) * cells)
+    return JudgedInterest(InterestGrid(columns=grid.columns, rows=grid.rows,
+                                       weights=(1.0 / cells,) * cells), True)
+
+
+def interest_centre(grid: InterestGrid, along: Literal["x", "y"]) -> float:
+    """The grid's centre of mass along `along`, a share of the photo (0..1): each column's (or
+    row's) total weight at its middle. Pure."""
+    rows, columns = _marginals(grid)
+    totals = columns if along == "x" else rows
+    return math.fsum(total * (index + 0.5) / len(totals) for index, total in enumerate(totals))
 
 
 def judge(kind: MediaKind, width: int, height: int, key: KeyContent | None, target: FitTarget,
@@ -275,34 +294,40 @@ def judge(kind: MediaKind, width: int, height: int, key: KeyContent | None, targ
              if all(_inside(face, window) for face in faces)]
     if not whole:
         return DoesNotFit(reason="face_cut")
-    grid = interest_judged(key, settings)
+    interest = interest_judged(key, settings)
     allowed = settings.max_lost_interest_density * share + _SLACK
     passing = {offset: kept for offset, window in whole
-               if 1 - (kept := interest_kept(grid, window)) <= allowed}
+               if 1 - (kept := interest_kept(interest.grid, window)) <= allowed}
     if not passing:
         return DoesNotFit(reason="interest_cut")
-    offset = place(tuple(passing.items()), free_axis(width, height, aspect), faces)
+    offset = place(tuple(passing.items()), free_axis(width, height, aspect), faces, interest,
+                   settings.interest_skew)
     return Fits(crop=PhotoCrop(offset=offset), crop_share=share, interest_kept=passing[offset])
 
 
-def place(passing: Sequence[tuple[float, float]], axis: FreeAxis,
-          faces: tuple[UnitBox, ...]) -> float:
+def place(passing: Sequence[tuple[float, float]], axis: FreeAxis, faces: tuple[UnitBox, ...],
+          interest: JudgedInterest, skew: float) -> float:
     """The offset of the window a photo takes among `passing`, its windows past rules 3 and 4 as
     (offset, interest kept), on its `axis`, with its judged `faces` (`faces_judged`: padded and
-    clamped). The one home of placement:
+    clamped) and judged `interest` (`interest_judged`). The one home of placement:
     - no faces: the window keeping the most interest (rounded to 9 digits); ties go to the
       offset nearest 0.5, then the lower;
-    - faces: the window keeping the faces' centre at its place in the photo. F is the mean of
-      the faces' centres along the axis weighted by their area (a share of the photo, so a bigger
-      face pulls harder), and the window at offset F holds F at the same share of its own length
-      (its first edge is F x (1 - length)). The passing offset nearest F wins, measured as the
-      distance between the two windows' first edges and rounded to 9 digits; ties go to the
-      offset nearest 0.5, then the lower. So a face too near the photo's edge for that window
-      moves only as far as keeping it whole needs, and equal shapes (`axis.length` 1, every
-      window the same) take the centred offset 0.5. The window stays the largest (owner,
-      2026-10-25, his pick "Nothing: least crop": no zoom). The interest does not move it (the
-      owner's pick of 2026-10-25, "faces only", a revisable design choice: saliency scores
-      texture such as a floor or foliage, which pulled windows off the faces).
+    - faces: first the window keeping the faces' centre at its place in the photo. F is the mean
+      of the faces' centres along the axis weighted by their area (a share of the photo, so a
+      bigger face pulls harder), and the window at offset F holds F at the same share of its own
+      length (its first edge is F x (1 - length)). The passing offset nearest F, o0, is that
+      window (`_nearest`). So a face too near the photo's edge for that window moves only as far
+      as keeping it whole needs, and equal shapes (`axis.length` 1, every window the same) take
+      the centred offset 0.5. The window stays the largest (owner, 2026-10-25, his pick
+      "Nothing: least crop": no zoom).
+    - then the skew (owner, 2026-10-25: "bias towards face centering but also allow a skew to
+      include extra content"): with G the judged grid's centre of mass (`interest_centre`), the
+      aim is o0 + `skew` x (G - F), in offset units, but the window's first edge moves at most
+      `skew` x r, where r is the least room in o0's window between a judged face and the edge the
+      faces move toward (so the offset moves at most `skew` x r / (1 - length)): every face keeps
+      at least 1 - `skew` of the room o0 gave it. The window taken is the passing offset nearest
+      that aim among those between o0 and the aim (never past it). `skew` 0, or an even grid
+      (no part stands out, so it has no side), leaves o0.
     Pure; ValueError when `passing` is empty."""
     if not passing:
         raise ValueError("no passing window to place")
@@ -312,11 +337,29 @@ def place(passing: Sequence[tuple[float, float]], axis: FreeAxis,
     spans = [(face.left, face.right) if axis.along == "x" else (face.top, face.bottom)
              for face in faces]
     areas = [(face.right - face.left) * (face.bottom - face.top) for face in faces]
-    aim = math.fsum(area * (start + end) / 2
-                    for area, (start, end) in zip(areas, spans, strict=True)) / math.fsum(areas)
-    return min((offset for offset, _ in passing),
-               key=lambda offset: (round(abs(axis.start(offset) - axis.start(aim)), 9),
-                                   abs(offset - 0.5), offset))
+    centre = math.fsum(area * (start + end) / 2
+                       for area, (start, end) in zip(areas, spans, strict=True)) / math.fsum(areas)
+    offsets = [offset for offset, _ in passing]
+    kept = _nearest(offsets, axis, centre)
+    if skew <= 0 or interest.even or axis.length >= 1:
+        return kept
+    pull = skew * (interest_centre(interest.grid, axis.along) - centre)
+    if pull == 0:
+        return kept
+    first = axis.start(kept)
+    room = (min(start for start, _ in spans) - first if pull > 0
+            else first + axis.length - max(end for _, end in spans))
+    aim = kept + math.copysign(min(abs(pull), skew * max(room, 0.0) / (1 - axis.length)), pull)
+    low, high = min(kept, aim), max(kept, aim)
+    return _nearest([offset for offset in offsets if low - _SLACK <= offset <= high + _SLACK],
+                    axis, aim)
+
+
+def _nearest(offsets: Sequence[float], axis: FreeAxis, aim: float) -> float:
+    """The offset whose window's first edge is nearest the window at `aim`'s, rounded to 9
+    digits; ties go to the offset nearest 0.5, then the lower."""
+    return min(offsets, key=lambda offset: (round(abs(axis.start(offset) - axis.start(aim)), 9),
+                                            abs(offset - 0.5), offset))
 
 
 @lru_cache(maxsize=4096)

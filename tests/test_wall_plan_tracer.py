@@ -33,7 +33,7 @@ from test_registry import enroll
 
 from central.catalog import SourcePool
 from central.coordination import Coordinator
-from central.db import ProcessTransactionClock
+from central.db import DatabaseTransactionClock, ProcessTransactionClock
 from central.infra.key_content_store import PgKeyContent
 from central.media_queue import QueueReceipt
 from central.media_repository import MediaRepository
@@ -280,9 +280,10 @@ def test_the_wall_through_the_real_advance_measures_crops_and_remembers_what_was
                                times=ProcessTransactionClock(registry.clock))
     assert requests.request_measurements(first.measurements) == 1
     assert queue.waiting == [four_three]
+    # The worker's store on the database's clock, the one the Coordinator reads key content by
+    # (a faceless first measurement's retry is compared on it).
     measurer = worker(worker_storage, FakeFaces(_grey_jpeg()),
-                      key_content=PgKeyContent(registry.db,
-                                               times=ProcessTransactionClock(registry.clock)))
+                      key_content=PgKeyContent(registry.db, times=DatabaseTransactionClock()))
     for asset_id in queue.waiting:
         asyncio.run(measurer.measure(asset_id))
 
