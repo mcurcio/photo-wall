@@ -25,7 +25,7 @@ from typing import Final
 from pydantic import BaseModel, TypeAdapter
 
 from central.content_catalog.views import ReleasesView, VersionChoice
-from central.displays.views import LightView
+from central.displays.views import LightView, PictureHistoryView
 from central.fleet.models import TrialRefusal
 from central.fleet.node_calibration import TrialBegin, TrialEdit, TrialStep
 from central.fleet.position_history import PositionRestoreRefusal
@@ -90,7 +90,7 @@ CONSOLE_BODIES: Final[tuple[type[BaseModel], ...]] = (   # bodies the console se
     FrameVideoChange)
 CONSOLE_VIEWS: Final[tuple[type[BaseModel], ...]] = (    # answers the console reads
     RoomLightsView, DrawnView, RefusedReportsView, PaperProfileView, PaperProfilesView,
-    PositionHistoryView, LightView, HomeAssistantStatesView, ReleasesView, InstallStarted)
+    PositionHistoryView, PictureHistoryView, LightView, HomeAssistantStatesView, ReleasesView, InstallStarted)
 CONSOLE_ALIASES: Final[Mapping[str, object]] = {     # named types a view's fields take, by their name
     "Lux": Lux, "LightColour": LightColour, "Reading": Reading}
 CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {

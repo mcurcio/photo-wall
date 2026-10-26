@@ -12,27 +12,14 @@ import { usePolledRead } from "./polledRead.js";
  * `bad_range`); a lost request answers `unreachable`. Every `at` is
  * UTC (ISO 8601 with its zone), PostgreSQL's clock when the entry was written.
  *
- * @typedef {import("./pictureApi.js").SoftwarePictureView} SoftwarePictureView
- * @typedef {import("./pictureApi.js").SignalRange} SignalRange
- * @typedef {import("./pictureApi.js").TestPattern} TestPattern
- * @typedef {import("./pictureApi.js").VcpCode} VcpCode
- * @typedef {{id: string, name: string}} DisplayRefView   A Display by id and its name today.
- * @typedef {import("./generated/contract").FrameRefView} FrameRefView
- * @typedef {"kept-done"|"kept-copied"|"kept-unrecorded"|"sent-draft"|"sent-back"|"sent-kept"} PictureEntryKind
- *   Why an entry was written: kept by Done, by Copy from another display, or found changed outside
- *   Photo Wall; sent as a session's draft (not kept), put back by Revert or a lapse, or the kept
- *   values sent anew.
- * @typedef {import("./generated/contract").LightView} DisplayLightView
- * @typedef {{hardware: Record<VcpCode, number>, software: SoftwarePictureView, signal_range: SignalRange,
- *            light: DisplayLightView}} PictureValuesView
- *   The hardware codes set in Photo Wall (a code absent is "as the display has it"), the Photo Wall
- *   values, the signal range and the Display's light.
- * @typedef {{entry_id: string, display: DisplayRefView, kind: PictureEntryKind, number: number, at: string,
- *            frame: FrameRefView|null, session_id: string|null, restored_from: string|null,
- *            picture: PictureValuesView, test_pattern: TestPattern|null}} PictureEntryView
- * @typedef {{display: DisplayRefView, unrecorded_change: boolean, entries: PictureEntryView[]}} PictureHistoryView
- *   Newest first by `at`, then number. `unrecorded_change`: the display's stored values differ from
- *   its newest kept entry.
+ * @typedef {import("./generated/contract").PictureEntryKind} PictureEntryKind   Why an entry was
+ *   written: kept by Done, by Copy from another display, or found changed outside Photo Wall; sent
+ *   as a session's draft (not kept), put back by Revert or a lapse, or the kept values sent anew.
+ * @typedef {import("./generated/contract").PictureEntryView} PictureEntryView   One entry; its
+ *   `picture.light` is null for an entry written before the Display had a light (migration 099).
+ * @typedef {import("./generated/contract").PictureHistoryView} PictureHistoryView   A Display's
+ *   picture history, Central's shape (central/displays/views.py): newest first by `at`, then
+ *   number; `unrecorded_change`: the display's stored values differ from its newest kept entry.
  * @typedef {import("./generated/contract").PositionHistoryView} PositionHistoryView   A Frame's
  *   Position history, Central's shape (central/fleet/position_views.py).
  */
