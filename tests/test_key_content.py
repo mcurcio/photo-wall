@@ -7,12 +7,15 @@ tests/test_immich_library.py); thumbnails are drawn here with Pillow, no binary 
 from __future__ import annotations
 
 import io
-import random
+import threading
 
+import cv2
+import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
+from support.subject_model import FakeSubjects, even_subjects, real_subjects
 
-from central.wall_plan.fit import interest_judged
+from central.wall_plan.fit import interest_centre, interest_judged
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import ANALYSIS_VERSION, INTEREST_COLUMNS, KeyContent
 from media.key_content import (
@@ -34,16 +37,20 @@ def encoded(image: Image.Image, kind: str = "JPEG") -> bytes:
     return output.getvalue()
 
 
-def textured_left(width: int = 320, height: int = 240) -> bytes:
-    """Grey, with one bright textured square in its left third."""
-    image = Image.new("L", (width, height), 128)
-    noise = random.Random(5)
-    side = width // 4
-    top = (height - side) // 2
-    for x in range(10, 10 + side):
-        for y in range(top, top + side):
-            image.putpixel((x, y), 160 + noise.randrange(96))
-    return encoded(image)
+def red_disc_left(width: int = 320, height: int = 240) -> bytes:
+    """Grey, with one red disc in its left third (a subject on a plain ground)."""
+    image = Image.new("RGB", (width, height), (128, 128, 128))
+    radius, x, y = 60, width // 6, height // 2
+    ImageDraw.Draw(image).ellipse((x - radius, y - radius, x + radius, y + radius),
+                                  fill=(220, 30, 30))
+    return encoded(image, "PNG")
+
+
+def left_third(height: int, width: int) -> np.ndarray:
+    """A map where only the left third stands out."""
+    stands_out = np.zeros((height, width))
+    stands_out[:, :width // 3] = 1.0
+    return stands_out
 
 
 def column_share(grid, first: int, last: int) -> float:
@@ -89,55 +96,174 @@ def test_every_face_is_kept_and_only_a_degenerate_box_is_left_out():
     assert len(faces_of((tiny, box(300, 300, 500, 500)))) == 2
 
 
-# 3. the interest grid -------------------------------------------------------------------------
+# 3. the interest grid: where the photo's subjects stand out (media/subject_map.py) ---------------
 
 
-def test_a_bright_textured_square_on_the_left_holds_most_of_the_interest():
-    grid, spread = interest_of(textured_left())
-    assert spread > 0.05
+def test_a_map_standing_out_in_the_left_third_holds_most_of_the_interest():
+    """Subject detection: the grid sums the map at the thumbnail's own size, rows by its aspect.
+    Mutation probe: sum the map at the network's 320 x 320 -> 16 rows."""
+    subjects = FakeSubjects(left_third)
+    grid, spread = interest_of(encoded(Image.new("RGB", (320, 240), (90, 90, 90))), subjects)
+    assert subjects.calls == 1
     assert (grid.columns, grid.rows) == (INTEREST_COLUMNS, 12)
-    assert len(grid.weights) == grid.columns * grid.rows
     assert sum(grid.weights) == pytest.approx(1.0, abs=1e-6)
     assert all(weight >= 0 for weight in grid.weights)
-    left_third = column_share(grid, 0, INTEREST_COLUMNS // 3) + column_share(
-        grid, INTEREST_COLUMNS // 3, INTEREST_COLUMNS // 3 + 1) / 3
-    assert left_third > 0.5
+    assert column_share(grid, 0, 5) + column_share(grid, 5, 6) / 3 > 0.9
+    assert spread == 1.0
 
 
-@pytest.mark.parametrize("kind", ["JPEG", "PNG", "WEBP"])
-def test_a_flat_grey_thumbnail_has_almost_no_spread_and_is_judged_as_even(kind):
-    """Follow-ups B1: the spread is measured, the threshold applied when judged."""
-    grid, spread = interest_of(encoded(Image.new("RGB", (320, 180), (128, 128, 128)), kind))
-    assert (grid.columns, grid.rows) == (16, 9)
-    assert spread < FitSettings().min_salience_spread
-    key = KeyContent(analysis_version=ANALYSIS_VERSION, interest=grid, spread=spread)
-    assert interest_judged(key, FitSettings()).weights == pytest.approx((1 / 144,) * 144)
+def test_a_map_with_nothing_standing_out_gives_the_uniform_grid():
+    """A map that is zero everywhere has no mass to share: the uniform grid, spread 0.
+    Mutation probe: divide by the zero total -> the grid fails validation."""
+    grid, spread = interest_of(encoded(Image.new("RGB", (320, 240), (90, 90, 90))),
+                               FakeSubjects(lambda height, width: np.zeros((height, width))))
+    assert grid.weights == pytest.approx((1 / 192,) * 192)
+    assert spread == 0.0
 
 
 def test_rows_follow_the_aspect_within_the_grid_bounds():
-    assert interest_of(encoded(Image.new("L", (320, 12), 90)))[0].rows == 1
-    assert interest_of(encoded(Image.new("L", (40, 400), 90)))[0].rows == 64
+    subjects = even_subjects()
+    assert interest_of(encoded(Image.new("L", (320, 12), 90)), subjects)[0].rows == 1
+    assert interest_of(encoded(Image.new("L", (40, 400), 90)), subjects)[0].rows == 64
 
 
-# 4. undecodable bytes -------------------------------------------------------------------------
+def test_a_red_disc_on_the_left_of_a_grey_ground_stands_out_on_the_real_model():
+    """The pinned U-2-Netp through cv2.dnn: the disc holds nearly all of the interest, its
+    centre where the disc is (a sixth across, half down).
+    Mutation probe: nearest-neighbour resampling into the network -> the centre moves down
+    0.001."""
+    grid, spread = interest_of(red_disc_left(), real_subjects())
+    assert (grid.columns, grid.rows) == (INTEREST_COLUMNS, 12)
+    assert column_share(grid, 0, 5) + column_share(grid, 5, 6) / 3 == pytest.approx(.9557,
+                                                                                    abs=.005)
+    assert interest_centre(grid, "x") == pytest.approx(.1721, abs=3e-4)
+    assert interest_centre(grid, "y") == pytest.approx(.5019, abs=3e-4)
+    assert spread > .99
+
+
+@pytest.mark.parametrize("kind", ["JPEG", "PNG", "WEBP"])
+def test_a_flat_grey_thumbnail_has_almost_no_spread_on_the_real_model_and_is_judged_as_even(
+        kind):
+    """Follow-ups B1: the spread is measured, the threshold applied when judged; on U-2-Netp a
+    flat frame spreads 0.0015, under `min_salience_spread` 0.05 as the saliency map's did.
+    The value pins the rule (media/subject_map.py): mutation probes: no divide by the maximum,
+    or no ImageNet mean and deviation -> 0.0017; nearest-neighbour resampling either way
+    -> 0.0022; the second output -> another spread."""
+    grid, spread = interest_of(encoded(Image.new("RGB", (320, 180), (128, 128, 128)), kind),
+                               real_subjects())
+    assert (grid.columns, grid.rows) == (16, 9)
+    assert spread == pytest.approx(.0015369, abs=2e-5)
+    key = KeyContent(analysis_version=ANALYSIS_VERSION, interest=grid, spread=spread)
+    judged = interest_judged(key, FitSettings())
+    assert judged.even and judged.grid.weights == pytest.approx((1 / 144,) * 144)
+
+
+def test_the_real_model_answers_concurrent_photos_each_as_it_answers_it_alone():
+    """Design erratum E1, on the real model: four threads measuring four photos at once each get
+    the map the photo gets alone (the lock itself is proven by the overlapping-calls test below).
+    Mutation probe: drop the lock around setInput and forward -> maps of other photos, or an
+    OpenCV error (a race, so this probe can pass on a lucky schedule)."""
+    subjects = real_subjects()
+    images = [cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR) for data in (
+        red_disc_left(), red_disc_left(240, 320),
+        encoded(Image.new("RGB", (320, 180), (128, 128, 128))),
+        encoded(Image.new("RGB", (200, 200), (20, 160, 40))))]
+    alone = [subjects.of(image) for image in images]
+    together: list[list[np.ndarray]] = [[] for _ in images]
+    start = threading.Barrier(len(images))
+
+    def run(index: int) -> None:
+        start.wait()
+        for _ in range(2):
+            together[index].append(subjects.of(images[index]))
+
+    threads = [threading.Thread(target=run, args=(index,)) for index in range(len(images))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    for index, answers in enumerate(together):
+        assert len(answers) == 2
+        for answer in answers:
+            assert np.array_equal(answer, alone[index]), index
+
+
+class _OverlapNet:
+    """A stand-in `cv2.dnn.Net` that notes a second `setInput` arriving while one call's
+    setInput and forward are in progress; the first call holds its turn until another enters or
+    `wait` passes, so calls that can overlap do."""
+
+    def __init__(self, wait: float) -> None:
+        self.wait, self.overlapped = wait, False
+        self._busy, self._entered = threading.Lock(), threading.Event()
+
+    def setInput(self, blob) -> None:  # noqa: N802 (cv2's name)
+        if not self._busy.acquire(blocking=False):
+            self.overlapped = True
+            self._entered.set()
+            return
+        self._entered.wait(self.wait)
+        self.wait = 0               # only the first call holds its turn open
+
+    def forward(self, name):
+        if self._busy.locked():
+            self._busy.release()
+        return np.zeros((1, 1, 320, 320), np.float32)
+
+
+def test_one_net_takes_one_measurement_at_a_time():
+    """Design erratum E1, deterministic: no thread's setInput comes between another's setInput
+    and forward. Mutation probe: drop the lock in `U2NetpMap.of` -> overlapped."""
+    from media.subject_map import U2NetpMap
+    net = _OverlapNet(wait=.2)
+    subjects = U2NetpMap(net)
+    image = np.zeros((24, 32, 3), np.uint8)
+    start = threading.Barrier(2)
+
+    def run() -> None:
+        start.wait()
+        subjects.of(image)
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert not net.overlapped
+
+
+# 4. undecodable bytes, and a photo the model cannot read ----------------------------------------
 
 
 @pytest.mark.parametrize("data", [b"", b"not an image at all", b"\xff\xd8\xff\xe0broken"])
 def test_bytes_that_are_not_an_image_fail_to_decode(data):
+    subjects = even_subjects()
     with pytest.raises(MeasureError) as caught:
-        interest_of(data)
+        interest_of(data, subjects)
+    assert caught.value.reason == "decode" and subjects.calls == 0
+
+
+def test_a_photo_the_model_cannot_read_fails_as_decode():
+    """A forward that raises on one photo is that photo's failure (`decode`, retried later),
+    never the worker's. Mutation probe: let cv2.error escape -> the error, not MeasureError."""
+    def broken(height: int, width: int) -> np.ndarray:
+        raise cv2.error("the network refused this photo")
+
+    with pytest.raises(MeasureError) as caught:
+        interest_of(red_disc_left(), FakeSubjects(broken))
     assert caught.value.reason == "decode"
 
 
 # 5. one measurement ---------------------------------------------------------------------------
 
 
-def test_a_measurement_stores_unpadded_boxes_and_the_spread_at_version_two():
-    """Follow-ups B1 case 10: `measure` stores the boxes as Immich found them and the saliency
-    map's spread; ANALYSIS_VERSION is "2"."""
-    key = measure((box(0, 0, 200, 200),), textured_left())
-    assert ANALYSIS_VERSION == "2" and key.analysis_version == ANALYSIS_VERSION
+def test_a_measurement_stores_unpadded_boxes_and_the_spread_at_version_three():
+    """Follow-ups B1 case 10: `measure` stores the boxes as Immich found them and the map's
+    spread; ANALYSIS_VERSION is "3" (subject detection: the grid is what stands out).
+    Mutation probe: keep the constant at "2" -> fails."""
+    key = measure((box(0, 0, 200, 200),), red_disc_left(), FakeSubjects(left_third))
+    assert ANALYSIS_VERSION == "3" and key.analysis_version == ANALYSIS_VERSION
     (face,) = key.faces
     assert (face.right, face.bottom) == pytest.approx((200 / 1440, 200 / 1080))
     assert key.interest.columns == INTEREST_COLUMNS
-    assert key.spread == interest_of(textured_left())[1] > 0
+    assert key.spread == 1.0

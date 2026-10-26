@@ -59,6 +59,8 @@ jobs:
       - uses: ./.github/actions/python-uv
       - run: uv sync --frozen
       - uses: ./.github/actions/console-bundle
+      # The key-content measurement's tests run the real model (tests/support/subject_model.py).
+      - uses: ./.github/actions/subject-model
       - name: Run the unit tier, with no database
         env:
           PHOTO_WALL_TEST_SHARD: ${{ matrix.shard }}/2
@@ -149,6 +151,8 @@ jobs:
         run: |
           binary=$(python3 scripts/nats_server.py fetch --dest "$RUNNER_TEMP/nats")
           echo "PHOTO_WALL_NATS_SERVER=$binary" >> "$GITHUB_ENV"
+      # The real `python -m media.worker` processes it boots need the model (tests/support/workers.py).
+      - uses: ./.github/actions/subject-model
       - name: Start the disposable test database
         run: docker compose -f tests/integration/compose.test-database.yml up -d --wait
       - name: Run the database tier
@@ -357,6 +361,7 @@ jobs:
       - run: curl --fail http://127.0.0.1:8000/ | grep -q '/console/assets/'
       # The worker keeps the hub (E3d S5): Fleet's and WallWriter's clients are on the hub, and
       # WallWriter created WALL. The hub starts once the worker wrote its file, so poll briefly.
+      # It also proves the image's subject model loads: the worker stops at boot without it.
       - name: The worker keeps the hub
         shell: python3 {0}
         run: |

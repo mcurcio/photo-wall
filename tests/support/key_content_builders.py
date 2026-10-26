@@ -11,14 +11,14 @@ from central.wall_plan.key_content import (
     KeyContent,
     Measured,
     UnitBox,
+    interest_rows,
 )
 from contracts.models import Variant
 
 
 def uniform_grid(columns: int = 16, rows: int = 9) -> InterestGrid:
     """No salient part: every cell holds the same share."""
-    cells = columns * rows
-    return InterestGrid(columns=columns, rows=rows, weights=(1 / cells,) * cells)
+    return InterestGrid.uniform(columns, rows)
 
 
 def _band_share(x0: float, x1: float, y0: float, y1: float, *, left: float, right: float,
@@ -67,5 +67,5 @@ def key_content(width: int, height: int, *, faces: tuple[UnitBox, ...] = (),
                 grid: InterestGrid | None = None, spread: float = 1.0) -> KeyContent:
     """Key content at ANALYSIS_VERSION for a `width` x `height` photo (uniform grid by default)."""
     if grid is None:
-        grid = uniform_grid(INTEREST_COLUMNS, max(1, min(64, round(INTEREST_COLUMNS * height / width))))
+        grid = uniform_grid(INTEREST_COLUMNS, interest_rows(width, height))
     return KeyContent(analysis_version=ANALYSIS_VERSION, faces=faces, interest=grid, spread=spread)

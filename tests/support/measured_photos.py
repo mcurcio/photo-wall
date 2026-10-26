@@ -15,19 +15,23 @@ from central.wall_plan.key_content import (
     InterestGrid,
     KeyContent,
     UnitBox,
+    interest_rows,
 )
 from support.key_content_builders import uniform_grid
 
 
 def measure(registry, photo: LibraryAsset, *, faces: tuple[UnitBox, ...] = (),
             grid: InterestGrid | None = None) -> None:
-    """`photo` measured at the current analysis version (an even interest grid unless named).
-    The photo must already have its asset row (seed its pool first)."""
-    rows = max(1, min(64, round(INTEREST_COLUMNS * photo.height / photo.width)))
-    PgKeyContent(registry.db, times=ProcessTransactionClock(registry.clock)).record_measured(
-        photo.asset_id, KeyContent(analysis_version=ANALYSIS_VERSION, faces=faces,
-                                   interest=grid or uniform_grid(INTEREST_COLUMNS, rows),
-                                   spread=1.0))
+    """`photo` measured at the current analysis version (an even interest grid unless named),
+    final: recorded twice, as a faceless first measurement is once retaken, so it is never due
+    again whichever clock a test's Planner reads it by (the manual one it is written with, or
+    Central's database time). The photo must already have its asset row (seed its pool first)."""
+    store = PgKeyContent(registry.db, times=ProcessTransactionClock(registry.clock))
+    key = KeyContent(analysis_version=ANALYSIS_VERSION, faces=faces,
+                     interest=grid or uniform_grid(INTEREST_COLUMNS,
+                                                       interest_rows(photo.width, photo.height)), spread=1.0)
+    for _ in range(2):
+        store.record_measured(photo.asset_id, key)
 
 
 def measure_all(registry, photos: Iterable[LibraryAsset]) -> None:

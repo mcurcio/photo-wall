@@ -37,6 +37,8 @@ export interface FitTuning {
   min_face_share: number;
   max_lost_interest_density: number;
   min_salience_spread: number;
+  /** How far a photo with faces leans toward what stands out (0..1; subject detection). */
+  interest_skew: number;
   large_frame_inches: number;
   large_frame_video_short_side: number;
   window_steps: number;

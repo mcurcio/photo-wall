@@ -16,7 +16,7 @@ each row's Reset brings the new default.
 
 `crop_limit` is the house crop limit: a Scene whose own crop limit is unset follows it
 (`central.wall_plan.selection.SceneSelection.crop_limit`), so the value lives in one place.
-`face_padding`, `min_face_share` and `min_salience_spread` are applied when a photo is judged
+`face_padding`, `min_face_share`, `min_salience_spread` and `interest_skew` are applied when a photo is judged
 (central/wall_plan/fit.py), never when it is measured, so a change takes effect at the next
 planning pass with nothing measured again.
 """
@@ -37,6 +37,7 @@ FIT_SETTING_RANGES: Final[Mapping[str, tuple[float, float]]] = {
     "min_face_share": (0.0, 0.05),
     "max_lost_interest_density": (1.0, 3.0),
     "min_salience_spread": (0.0, 0.5),
+    "interest_skew": (0.0, 1.0),
     "large_frame_inches": (1.0, 200.0),
     "large_frame_video_short_side": (1, 4320),
     "window_steps": (8, 256),
@@ -63,16 +64,25 @@ class FitSettings(Model):
     min_face_share: float = Field(default=0.002, ge=_R["min_face_share"][0],
                                   le=_R["min_face_share"][1], allow_inf_nan=False)
     # Rule 4: how much denser in interest than the photo's average the removed part may be. At
-    # 1.75 the texture spectral-residual saliency finds at a photo's edges (grass, sky, foliage)
+    # 1.75 the texture spectral-residual saliency found at a photo's edges (grass, sky, foliage)
     # no longer refuses a crop, while a subject on both cut sides (a 4:3 photo on 16:9 with 90 %
     # of its interest in its top and bottom quarters, 1.9 times its share) still does.
     max_lost_interest_density: float = Field(default=1.75,
                                              ge=_R["max_lost_interest_density"][0],
                                              le=_R["max_lost_interest_density"][1],
                                              allow_inf_nan=False)
-    # A saliency map spanning less than this has no part that stands out: judged as even.
+    # A map of what stands out spanning less than this has no part that does: judged as even.
     min_salience_spread: float = Field(default=0.05, ge=_R["min_salience_spread"][0],
                                        le=_R["min_salience_spread"][1], allow_inf_nan=False)
+    # How far a photo with faces leans toward what stands out (central/wall_plan/fit.py `place`):
+    # the share of the gap between the faces' centre and the interest's that the window moves,
+    # and of the room each face keeps, so every face keeps at least 1 - this of the room the
+    # faces-only window gave it. 0: the faces alone place the window. Owner, 2026-10-25: "It
+    # could bias towards face centering but also allow a skew to include extra content"; the
+    # default is the design's recommendation (subject detection, 2026-10-26), a revisable choice.
+    # A row saved before this field reads it at its default (`Model` fills a missing field).
+    interest_skew: float = Field(default=0.33, ge=_R["interest_skew"][0],
+                                 le=_R["interest_skew"][1], allow_inf_nan=False)
     # requirements :186: on a Frame this large or larger a video needs this many rows.
     large_frame_inches: float = Field(default=40.0, ge=_R["large_frame_inches"][0],
                                       le=_R["large_frame_inches"][1], allow_inf_nan=False)

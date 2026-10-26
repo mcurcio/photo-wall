@@ -29,6 +29,11 @@ augmenting paths; Kuhn-Munkres for the placement):
    yet, measured at no current analysis, or its measurement failed) that passes the size-only
    part of the fit rule (`shape_fit`), is usable and is free, with the centred crop; inside the
    preparation window an unprepared one is asked to be prepared instead. Otherwise unfilled.
+Measurement requests (`WallPlan.measure`, at most `limits.max_measurements`): the photos the walk
+found unmeasured, in the order it met them, then the photos it judged whose key is `due` a new
+measurement (`Measured.due`, the key-content store's rule: an older analysis version, or a
+provisional measurement past its retry), those it placed first. A due photo is judged and placed
+with its key meanwhile, so a new analysis version re-measures the wall without emptying it.
 Rule 1 never relaxes: a photo whose extent on another Frame overlaps the slot's is never offered,
 including a hand-placed one. A kept still's extent stays open until a later FILLED slot on its
 Frame replaces what the Frame keeps (`contracts.on_screen.replaces_kept_at`).
@@ -158,7 +163,8 @@ class PrepareNeed(Model):
 class WallPlan(Model):
     placed: tuple[Placed, ...] = ()
     unfilled: tuple[Unfilled, ...] = ()
-    measure: tuple[Identifier, ...] = ()        # in rank order, at most limits.max_measurements
+    # The unmeasured in rank order, then the due (module docstring); at most max_measurements.
+    measure: tuple[Identifier, ...] = ()
     prepare: tuple[PrepareNeed, ...] = ()       # at most limits.max_preparations
 
 
@@ -470,6 +476,8 @@ class _Walk:
         self.placed: dict[str, Placed] = {}
         self.unfilled: dict[str, Unfilled] = {}
         self.measure: dict[str, None] = {}
+        # Judged photos whose key is due a new measurement, in the order the walk judged them.
+        self.due: dict[str, None] = {}
         self.prepare: dict[str, tuple[list[str], float]] = {}
         self.reserved: frozenset[str] = frozenset()
         # Caches within this call. A slot's class is what its standings depend on (its pool,
@@ -503,11 +511,18 @@ class _Walk:
                          if slot.slot_id in self.placed),
             unfilled=tuple(self.unfilled[slot.slot_id] for slot in ordered
                            if slot.slot_id in self.unfilled),
-            measure=tuple(self.measure),
+            measure=self._measurements(),
             prepare=tuple(PrepareNeed(asset_id=asset_id, slot_ids=tuple(slot_ids),
                                       earliest_start=earliest)
                           for asset_id, (slot_ids, earliest) in self.prepare.items()),
         )
+
+    def _measurements(self) -> tuple[str, ...]:
+        """`WallPlan.measure`: the unmeasured requested, then the due, placed ones first."""
+        placed = [placed.asset_id for placed in self.placed.values()
+                  if placed.asset_id in self.due]
+        wanted = dict.fromkeys([*self.measure, *placed, *self.due])
+        return tuple(wanted)[:self.limits.max_measurements]
 
     def _hand_placed(self, slot: Slot) -> None:
         """Step 1: the first authored photo that fits and is free."""
@@ -637,6 +652,8 @@ class _Walk:
             standing = self._standings[key] = _standing(
                 candidate, slot.target, slot.crop_limit, self.settings,
                 inside=slot.start < self.window.preparation_end)
+            if isinstance(candidate.analysis, Measured) and candidate.analysis.due:
+                self.due[candidate.asset_id] = None
         return standing
 
     def _line_offerable(self, slot: Slot) -> tuple[_Offer, ...]:
