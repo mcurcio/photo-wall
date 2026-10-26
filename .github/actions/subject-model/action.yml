@@ -1,0 +1,20 @@
+name: Subject model
+description: >-
+  The pinned subject model (media/subject_model.env, fetched and verified by
+  scripts/subject_model.py) for the jobs whose tests run the key-content measurement or boot a real
+  `python -m media.worker`, which does not start without it; exported as PHOTO_WALL_SUBJECT_MODEL.
+  Cached by the pin, so only a new pin downloads. The worker image fetches its own (the
+  Dockerfile's subject-model stage).
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+      with:
+        path: ${{ runner.temp }}/subject-model
+        key: subject-model-${{ hashFiles('media/subject_model.env') }}
+    - name: Fetch the pinned subject model
+      shell: bash
+      run: |
+        model=$(python3 scripts/subject_model.py fetch --dest "$RUNNER_TEMP/subject-model")
+        echo "PHOTO_WALL_SUBJECT_MODEL=$model" >> "$GITHUB_ENV"

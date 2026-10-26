@@ -13,14 +13,15 @@ so changing them needs no new measurement.
 Rules this module owns (one home each):
 - **Faces** (`faces_of`): each Immich box divided by the size it was measured on (fractions of
   the upright, edited image), clamped to the image, unpadded; a degenerate box is left out.
-- **Interest** (`interest_of`): OpenCV's static saliency, spectral residual (Hou and Zhang, 2007;
-  `cv2.saliency.StaticSaliencySpectralResidual_create`, opencv-contrib-python-headless), on the
-  decoded thumbnail; the saliency map summed into INTEREST_COLUMNS columns and as many rows as
-  keep cells near square (round(columns x height / width), 1 to 64). Only salience above the
-  map's mean counts (Hou and Zhang mark an object where the map passes a multiple of its mean;
-  the map's floor is high everywhere, so summing it raw spreads interest over the whole photo),
-  normalised to sum 1; a map with nothing above its mean gives the uniform grid. The map's
-  spread (max minus min, OpenCV's map runs 0..1) is measured beside it.
+- **Interest** (`interest_of`): where the photo's subjects stand out (subject detection,
+  2026-10-26; owner's gate pick "stands-out", a revisable choice): the decoded thumbnail's
+  `SubjectMap` (media/subject_map.py: U-2-Netp through OpenCV's `cv2.dnn`, a probability 0..1 per
+  pixel at the thumbnail's own size), summed into INTEREST_COLUMNS columns and as many rows as
+  keep cells near square (round(columns x height / width), 1 to 64; `INTER_AREA`, each cell the
+  map's mean over its area), normalised to sum 1; a map with no mass gives the uniform grid. The
+  map's spread (max minus min) is measured beside it, so `min_salience_spread` keeps its
+  meaning: a flat frame spreads near 0 and is judged even. Spectral-residual saliency
+  (analysis version "2") scored texture such as tile floors, leaves and sky.
 - **One measurement** (`measure`): both, at ANALYSIS_VERSION.
 
 Rules it does NOT own: whether a crop keeps enough (central/wall_plan/fit.py); where key content
@@ -43,6 +44,7 @@ from central.wall_plan.key_content import (
     UnitBox,
 )
 from media.library_client import FaceBox
+from media.subject_map import SubjectMap
 
 _MAX_ROWS: Final = 64           # InterestGrid's bound
 
@@ -68,24 +70,26 @@ def faces_of(boxes: Sequence[FaceBox]) -> tuple[UnitBox, ...]:
     return tuple(faces)
 
 
-def interest_of(thumbnail: bytes) -> tuple[InterestGrid, float]:
-    """The interest grid of an encoded image (JPEG, PNG or WebP) and its saliency map's spread
-    (max minus min, 0..1). MeasureError("decode") when it does not decode. CPU only; no I/O."""
+def interest_of(thumbnail: bytes, subjects: SubjectMap) -> tuple[InterestGrid, float]:
+    """The interest grid of an encoded image (JPEG, PNG or WebP) and its subject map's spread
+    (max minus min, 0..1). MeasureError("decode") when it does not decode or the map cannot be
+    made for it. CPU only; no I/O."""
     try:
-        image = cv2.imdecode(np.frombuffer(thumbnail, np.uint8), cv2.IMREAD_GRAYSCALE)
+        image = cv2.imdecode(np.frombuffer(thumbnail, np.uint8), cv2.IMREAD_COLOR)
     except cv2.error:
         image = None
     if image is None or image.size == 0:
         raise MeasureError("decode")
     height, width = image.shape[:2]
     rows = min(_MAX_ROWS, max(1, round(INTEREST_COLUMNS * height / width)))
-    found, salience = cv2.saliency.StaticSaliencySpectralResidual_create().computeSaliency(image)
-    if not found:
-        raise MeasureError("decode")
-    salience = np.nan_to_num(np.asarray(salience, np.float64), nan=0.0, posinf=0.0, neginf=0.0)
-    spread = min(1.0, max(0.0, float(salience.max() - salience.min())))
-    above = np.clip(salience - salience.mean(), 0.0, None)
-    cells = cv2.resize(above, (INTEREST_COLUMNS, rows), interpolation=cv2.INTER_AREA)
+    try:
+        stands_out = subjects.of(image)
+    except cv2.error:
+        raise MeasureError("decode") from None
+    stands_out = np.clip(np.nan_to_num(np.asarray(stands_out, np.float64), nan=0.0, posinf=0.0,
+                                       neginf=0.0), 0.0, 1.0)
+    spread = float(stands_out.max() - stands_out.min())
+    cells = cv2.resize(stands_out, (INTEREST_COLUMNS, rows), interpolation=cv2.INTER_AREA)
     cells = np.clip(cells, 0.0, None)
     total = float(cells.sum())
     if not np.isfinite(total) or total <= 0:
@@ -94,10 +98,10 @@ def interest_of(thumbnail: bytes) -> tuple[InterestGrid, float]:
                         weights=tuple(float(w) for w in (cells / total).ravel())), spread
 
 
-def measure(boxes: Sequence[FaceBox], thumbnail: bytes) -> KeyContent:
+def measure(boxes: Sequence[FaceBox], thumbnail: bytes, subjects: SubjectMap) -> KeyContent:
     """KeyContent(analysis_version=ANALYSIS_VERSION, faces=faces_of(boxes), and the grid and
-    spread of interest_of(thumbnail))."""
-    grid, spread = interest_of(thumbnail)
+    spread of interest_of(thumbnail, subjects))."""
+    grid, spread = interest_of(thumbnail, subjects)
     return KeyContent(analysis_version=ANALYSIS_VERSION, faces=faces_of(boxes),
                       interest=grid, spread=spread)
 

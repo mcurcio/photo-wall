@@ -17,11 +17,12 @@ from support.frame_media import a_frame
 from support.frame_outputs import frame_output_of
 from support.library_store_fake import FakeLibraryStore, RevisionRecord
 from support.photo_pools import photo, seed_pool
+from support.subject_model import FakeSubjects, even_subjects
 
 from central.assets.layout import CacheLayout
 from central.assets.store import CacheStore
 from central.db import Database, ProcessTransactionClock
-from central.infra.key_content_store import PgKeyContent
+from central.infra.key_content_store import MEASURE_RETRY_SECONDS, PgKeyContent
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import MediaReady
 from central.kernel.handling import TerminalFailure, TransientFailure
@@ -29,6 +30,7 @@ from central.kernel.job_types import PrepareMedia
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository, StoreLimits
 from central.photo_library.model import LibraryAsset, MeasuredCopy, Unreachable
+from central.wall_plan.key_content import ANALYSIS_VERSION, InterestGrid, KeyContent, UnitBox
 from contracts.time import Clock
 from media.library_client import FaceBox, FetchedRendition, LibraryUnavailable
 from media.models import MediaError
@@ -143,9 +145,9 @@ def library_store(clock):
     return library
 
 
-def worker(storage, source, preparer=None, **kwargs):
+def worker(storage, source, preparer=None, subjects=None, **kwargs):
     return MediaWorker(storage.repository, library_store(storage.clock),
-                       preparer=preparer or FakePreparer(),
+                       subjects=subjects or even_subjects(), preparer=preparer or FakePreparer(),
                        client_factory=lambda _: source, **kwargs)
 
 
@@ -250,6 +252,27 @@ def test_command_startup_error_contains_no_environment_or_raw_exception(monkeypa
     assert not output.out
 
 
+@pytest.mark.parametrize("model", [None, "missing.onnx", "not-a-model.onnx"])
+def test_a_worker_without_a_loadable_subject_model_stops_at_boot_before_any_job(
+        monkeypatch, capsys, tmp_path, model):
+    """Subject detection: the model is a required dependency; without it the worker reports
+    worker_config before it reaches the database (here one that does not exist), so it claims no
+    job. Mutation probe: load the model after the database work -> another error."""
+    import media.worker as module
+    monkeypatch.setattr(module.sys, "argv", ["media.worker"])
+    monkeypatch.setenv("PHOTO_WALL_DATABASE_URL", "postgresql://nobody@127.0.0.1:1/none")
+    monkeypatch.setenv("PHOTO_WALL_CACHE_ROOT", str(tmp_path / "cache"))
+    if model is None:
+        monkeypatch.delenv("PHOTO_WALL_SUBJECT_MODEL", raising=False)
+    else:
+        (tmp_path / "not-a-model.onnx").write_bytes(b"not an onnx model")
+        monkeypatch.setenv("PHOTO_WALL_SUBJECT_MODEL", str(tmp_path / model))
+    assert module.main() == 1
+    output = capsys.readouterr()
+    assert json.loads(output.err) == {"error": "worker_config"}
+    assert not (tmp_path / "cache").exists()
+
+
 @pytest.mark.parametrize(("error", "code"), [
     (RuntimeError("worker_exited"), "worker_exited"),
     (RuntimeError("completion_not_recorded"), "completion_not_recorded"),
@@ -319,7 +342,8 @@ def test_the_queue_runs_a_deferred_pool_check_step_through_the_library_checks(wo
 def test_a_new_key_or_address_gets_a_new_client(worker_storage):
     made = []
     instance = MediaWorker(worker_storage.repository,
-                           library_store(worker_storage.clock), preparer=FakePreparer(),
+                           library_store(worker_storage.clock), subjects=even_subjects(),
+                           preparer=FakePreparer(),
                            client_factory=lambda secret: made.append(secret) or FakeLibrary(
                                worker_storage.clock))
     asyncio.run(instance._client("fixture"))
@@ -468,6 +492,64 @@ def test_the_last_attempt_records_the_failure_so_lower_ranked_photos_are_measure
     asyncio.run(instance.measure(pooled.asset_id, final_attempt=True))
     assert _analysis(worker_storage, store, pooled.asset_id).model_dump() == {
         "status": "failed", "reason": "timeout"}
+
+
+def test_a_photo_the_subject_model_cannot_read_fails_as_decode_and_is_retried_in_an_hour(
+        worker_storage):
+    """A forward that raises on one photo records that photo `failed`/`decode`, due again after
+    MEASURE_RETRY_SECONDS; the worker goes on. Mutation probe: let the model's error escape
+    measure_key_content -> the task errors."""
+    import cv2
+
+    def broken(height, width):
+        raise cv2.error("the network refused this photo")
+
+    pooled, store, instance = _measuring(worker_storage, FakeFaces(_grey_jpeg()))
+    instance.subjects = FakeSubjects(broken)
+    asyncio.run(instance.measure(pooled.asset_id))
+    assert _analysis(worker_storage, store, pooled.asset_id).model_dump() == {
+        "status": "failed", "reason": "decode"}
+    worker_storage.clock.advance(MEASURE_RETRY_SECONDS)
+    assert _analysis(worker_storage, store, pooled.asset_id) is None      # due: measured again
+
+
+def test_an_older_or_provisional_key_is_requested_and_replaced_by_a_new_version(worker_storage):
+    """Re-measuring after the analysis version bump: a photo measured at version "2", and one
+    whose first faceless measurement is past its retry, are still read (placeable), requested,
+    and the worker's measurement replaces each with a current, final key.
+    Mutation probes: request only the unmeasured -> neither queued; keep ANALYSIS_VERSION "2"
+    -> the replaced row reads "2"."""
+    older, faceless = photo("older", taken_at=900), photo("faceless", taken_at=901)
+    seed_pool(worker_storage, "family:1", (older, faceless))
+    queued = []
+
+    class Queue:
+        def enqueue_measure_in(self, conn, asset_id):
+            queued.append(asset_id)
+            return type("Receipt", (), {"coalesced": False})()
+
+    store = PgKeyContent(worker_storage.db, times=ProcessTransactionClock(worker_storage.clock),
+                         queue=Queue())
+    old = KeyContent(analysis_version="2", interest=InterestGrid(columns=1, rows=1,
+                                                                 weights=(1.0,)), spread=.5,
+                     faces=(UnitBox(left=.4, top=.4, right=.5, bottom=.5),))
+    store.record_measured(older.asset_id, old)                 # final, due by its version alone
+    store.record_measured(faceless.asset_id, old.model_copy(
+        update={"analysis_version": ANALYSIS_VERSION, "faces": ()}))     # provisional
+    worker_storage.clock.advance(7 * 3600)
+    for asset in (older, faceless):
+        assert _analysis(worker_storage, store, asset.asset_id).due
+    with worker_storage.db.transaction() as conn:
+        assert store.request_in(conn, [older.asset_id, faceless.asset_id],
+                                now=worker_storage.clock.utc()) == 2
+    assert queued == [older.asset_id, faceless.asset_id]
+    instance = worker(worker_storage, FakeFaces(_grey_jpeg()), key_content=store)
+    for asset in (older, faceless):
+        asyncio.run(instance.measure(asset.asset_id))
+        analysis = _analysis(worker_storage, store, asset.asset_id)
+        assert (analysis.key.analysis_version, analysis.due) == ("3", False)
+    worker_storage.clock.advance(10 * 3600)
+    assert not _analysis(worker_storage, store, faceless.asset_id).due     # final now
 
 
 def test_measure_without_a_key_content_store_is_a_configuration_error(worker_storage):

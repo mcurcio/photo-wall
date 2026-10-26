@@ -90,11 +90,23 @@ COPY --link central /app/central
 COPY --link nodeapi /app/nodeapi
 COPY --link --from=console-builder /console/dist /app/central/console/dist
 
+# The subject model the worker measures interest with (media/subject_map.py): fetched from its one
+# pin, media/subject_model.env, by scripts/subject_model.py, which refuses a file whose size or
+# SHA-256 is not the pin's, so a wrong download fails the build. Only the worker gets it.
+FROM python-system AS subject-model
+COPY --link media/subject_model.env /pin/media/subject_model.env
+COPY --link scripts/subject_model.py /pin/scripts/subject_model.py
+RUN model=$(python3 /pin/scripts/subject_model.py fetch --dest /fetch) \
+    && install -D -m 0644 "$model" /models/u2netp.onnx
+
 # GHA passes an immutable retained native image; Compose can use the local target.
 FROM ${MEDIA_BASE_IMAGE} AS media-worker
 # Both service targets share the same Python base and absolute environment path.
 COPY --link --from=deps /app /app
 COPY --link --from=source /app /app
+# The worker does not start without it (PHOTO_WALL_SUBJECT_MODEL; image-smoke boots the worker).
+COPY --link --from=subject-model /models/u2netp.onnx /usr/share/photo-wall/u2netp.onnx
+ENV PHOTO_WALL_SUBJECT_MODEL=/usr/share/photo-wall/u2netp.onnx
 # The project itself: an editable install, i.e. a .pth naming /app. Its build backend also
 # leaves bytecode for the standard-library modules it imports, which the pyc-free Python base
 # lacks and a read-only container cannot write; interpreter start-up depends on it, so keep it.

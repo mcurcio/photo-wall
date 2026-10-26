@@ -1386,11 +1386,13 @@ DEMO_SCREEN_INCHES = 24
 def test_every_demo_upload_fills_every_demo_frame(project):
     """Roadmap 5a's fit rule refuses a photo whose Frame-shaped window, inside the Scene's crop
     limit, has fewer pixels than the Frame, or cuts its key content. Every demo image, measured
-    as the worker measures it (no faces: the fixture's machine learning is off), and the video
-    fill every demo Frame at the demo Scene's crop limit, so the wall's baseline shows both. The
-    video is judged on a Frame below the large-Frame size (a Frame whose Display states no size
-    counts as large: .claude/errata.md, fb-8)."""
+    as the worker measures it (no faces: the fixture's machine learning is off; the real subject
+    model, so what stands out in each upload is what the rule judges), and the video fill every
+    demo Frame at the demo Scene's crop limit, so the wall's baseline shows both. The video is
+    judged on a Frame below the large-Frame size (a Frame whose Display states no size counts as
+    large: .claude/errata.md, fb-8)."""
     from support.frame_outputs import target_of
+    from support.subject_model import real_subjects
 
     from central.wall_plan.fit import Fits, judge, shape_fit
     from central.wall_plan.fit_settings import FitSettings
@@ -1406,7 +1408,8 @@ def test_every_demo_upload_fills_every_demo_frame(project):
     # The demo Frame's output (its Position's opening), on a Display stating a 24 in picture.
     target, house = target_of(DEMO_OPENING_PX, DEMO_OPENING_PX, inches=DEMO_SCREEN_INCHES), FitSettings()
     for label, (size, _) in DEMO_IMAGES.items():
-        key = measure((), synthetic_image(f"{project}-{label}", size, "2026-01-01T00:00:00Z"))
+        key = measure((), synthetic_image(f"{project}-{label}", size, "2026-01-01T00:00:00Z"),
+                      real_subjects())
         verdict = judge("image", *size, key, target, DEMO_CROP_LIMIT, house)
         assert isinstance(verdict, Fits), (label, verdict)
     assert shape_fit("video", *DEMO_VIDEO_SIZE, target, DEMO_CROP_LIMIT, house,

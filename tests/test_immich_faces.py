@@ -11,6 +11,7 @@ from pydantic import SecretStr
 from support.immich_library import run
 from support.library_store_fake import FakeLibraryStore
 from support.photo_pools import FIXTURE_CONNECTION, seed_pool
+from support.subject_model import even_subjects
 
 from central.db import ProcessTransactionClock
 from central.infra.key_content_store import PgKeyContent
@@ -52,7 +53,7 @@ def test_measuring_the_real_thumbnail_records_one_face_at_the_top_left(
     library = FakeLibraryStore(registry.clock)
     library.add_connection(FIXTURE_CONNECTION, immich_library.base_url, immich_library.api_key)
     store = PgKeyContent(registry.db, times=times)
-    worker = MediaWorker(repository, library,
+    worker = MediaWorker(repository, library, subjects=even_subjects(),
                          client_factory=ImmichClient.for_connection, key_content=store)
     try:
         run(worker.measure(asset.asset_id))

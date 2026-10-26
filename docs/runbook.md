@@ -739,10 +739,13 @@ Install the free `uv` Python package manager, then:
 
 ```sh
 uv sync --frozen
+export PHOTO_WALL_SUBJECT_MODEL="$(python3 scripts/subject_model.py fetch --dest <dir>)"
 .venv/bin/python -m pytest -q
 .venv/bin/python -m ruff check .
 python3 scripts/check_docs.py
 ```
+
+The subject model (`media/subject_model.env`, [key content](module-media-worker.md#key-content)) is a required dependency: the key-content tests and every test that boots a real `python -m media.worker` fail, never skip, without `PHOTO_WALL_SUBJECT_MODEL`. The fetch downloads the pinned 4.6 MB file once into `<dir>` (put it on a roomy volume), refuses it unless its SHA-256 is the pin's, and prints its path; CI's `unit`, `db` and `photo-sources` legs fetch it the same way (`.github/actions/subject-model`, cached by the pin).
 
 The portable command reports PostgreSQL integration tests as **skipped** unless `PHOTO_WALL_TEST_DATABASE_URL` is set. To run all tests, start the disposable test database and run the suite through the wrapper:
 
@@ -760,7 +763,7 @@ The [test database](../tests/integration/compose.test-database.yml) runs the dep
 
 A test that observes a lock wait counts only its own database's waiters through `support.database.waiting_backends`; `pg_locks` is cluster-wide, so an unscoped count also sees other workers' tests. `tests/test_lock_observation_scope.py` refuses unscoped queries of `pg_locks` or `pg_stat_activity`.
 
-CI runs the [checks](../.github/workflows/checks.yml) as parallel jobs: `static` (ruff, import contracts, documentation links), `unit` and `db` (four xdist workers each), `browser` (below), `image-smoke` (builds the central and media worker images, starts Compose and checks central HTTP health, the served console, and that the worker reached the hub and created WALL), `node-bus` and `bus-fence` ([the Node bus](#the-node-bus-and-centrals-hub)), and `linux-media`, which runs all preparation tests inside the pinned Linux worker image, so missing host FFmpeg cannot silently remove that gate. Each tier job's timeout is about twice its expected time and it prints its 25 slowest test phases. The named photo-source tests against one real Immich (the `photo-sources` job, [Immich fixture](module-immich-fixture.md#the-photo-source-content-set)) and the two fault segments of the two-Player/three-Output wall scenario run as three parallel jobs of the [software e2e](../.github/workflows/software-e2e.yml) (see the [wall demo](module-wall-demo.md)); the `db` job leaves the `immich` tests to it. Passing CI does not establish physical Pi/PXE, rendering or visible timing.
+CI runs the [checks](../.github/workflows/checks.yml) as parallel jobs: `static` (ruff, import contracts, documentation links), `unit` and `db` (four xdist workers each), `browser` (below), `image-smoke` (builds the central and media worker images, starts Compose and checks central HTTP health, the served console, and that the worker reached the hub and created WALL, which also proves the image's subject model loads: the worker stops at boot without it), `node-bus` and `bus-fence` ([the Node bus](#the-node-bus-and-centrals-hub)), and `linux-media`, which runs all preparation tests inside the pinned Linux worker image, so missing host FFmpeg cannot silently remove that gate. Each tier job's timeout is about twice its expected time and it prints its 25 slowest test phases. The named photo-source tests against one real Immich (the `photo-sources` job, [Immich fixture](module-immich-fixture.md#the-photo-source-content-set)) and the two fault segments of the two-Player/three-Output wall scenario run as three parallel jobs of the [software e2e](../.github/workflows/software-e2e.yml) (see the [wall demo](module-wall-demo.md)); the `db` job leaves the `immich` tests to it. Passing CI does not establish physical Pi/PXE, rendering or visible timing.
 
 Every pull request runs its suites. The push to `main` that merges it does not run them again when the pull request's newest run tested exactly the merged tree: the `plan` job's summary then reads "Reused from <run>: …", and only the release builds (`node-components`, `base-image`) and the publishing jobs run. When `main` moved before the merge, the merge runs every suite as before ([the reuse rule](module-appliance-ci.md#shared-service-and-test-dependencies)). Re-running a failed leg on the pull request is therefore also the merge's verdict.
 

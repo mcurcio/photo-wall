@@ -10,6 +10,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from central.infra.runtime import STALLED_WORKER_SECONDS
+from media.subject_map import MODEL_VARIABLE
+from support.subject_model import subject_model_path
 
 JOB_LOOPS = 3  # the runtime's loops per process: fetch, upkeep and transcode
 MEDIA_LOOP = 1  # the library checks' and measurements' loop: one per process (no writer lock)
@@ -35,12 +37,15 @@ def worker_env(root: Path, dsn: str, **extra: str) -> dict[str, str]:
     """The environment a worker (and Central) process boots with, rooted at `root`.
 
     Creates `root/cache` (the one shared cache root) and the media-tool stand-ins in `root/bin`,
-    first on PATH. Immich connections live in Central's database (roadmap 4), so no file is
-    written. `extra` overrides or adds variables.
+    first on PATH; names the pinned subject model, without which a worker does not start
+    (support/subject_model.py: the test fails when PHOTO_WALL_SUBJECT_MODEL is unset). Immich
+    connections live in Central's database (roadmap 4), so no file is written. `extra` overrides
+    or adds variables.
     """
     (root / "cache").mkdir()
     return {**os.environ, "PHOTO_WALL_DATABASE_URL": dsn,
             "PHOTO_WALL_CACHE_ROOT": str(root / "cache"),
+            MODEL_VARIABLE: str(subject_model_path()),
             "PATH": f"{fake_media_tools(root / 'bin')}{os.pathsep}{os.environ.get('PATH', '')}",
             **extra}
 
