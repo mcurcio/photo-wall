@@ -23,8 +23,8 @@ from contracts.lut import LUT_BYTES, LUT_GRID, lut_offset
 from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
 from contracts.room_light import (
-    FixedColour,
     FixedEntry,
+    KelvinColour,
     RoomLightsDocument,
 )
 from player.geometry import (
@@ -45,7 +45,7 @@ HEIGHT_MM = 27 * 25.4 / math.hypot(16 / 9, 1)
 SCREEN = (WIDTH_MM, HEIGHT_MM)      # a 27" 16:9 picture's physical size (contracts/models.py frame_size_mm)
 PORTRAIT = (HEIGHT_MM, WIDTH_MM)    # the same picture, its screen hung turned: tall
 DISPLAY = DisplayLight(1000.0, 0.0003)
-ROOM = RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=FixedColour(kelvin=6500))})
+ROOM = RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=KelvinColour(kelvin=6500))})
 PAPER = Paper(whiteness=.9, ink_density=-math.log10(DISPLAY.black))
 WASH = 100.0                       # the room's even light, lux
 FAR = 300.0                        # the far light's lux

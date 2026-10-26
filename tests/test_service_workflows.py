@@ -130,7 +130,11 @@ def test_the_console_catalog_walk_is_its_own_leg_in_the_browser_image_the_script
     assert 'compose.test-database.yml' not in walk and 'PHOTO_WALL_CATALOG_UPDATE' not in walk
     pinned = re.findall(r'mcr.microsoft.com/playwright/python:\S+', walk + browser)
     assert len(set(pinned)) == 1 and 'catalog_baselines' in workflow
-    assert re.search(r'timeout-minutes: [1-8]\n', walk)
+    assert re.search(r'timeout-minutes: [1-6]\n', walk)
+    # Three shards, each walking its share of the stories (tests/support/shards.py) and keeping
+    # its own evidence.
+    assert 'shard: [1, 2, 3]' in walk and '--env PHOTO_WALL_TEST_SHARD=${{ matrix.shard }}/3' in walk
+    assert 'name: console-catalog-${{ github.sha }}-shard-${{ matrix.shard }}' in walk
 
 
 def test_the_named_immich_tests_run_in_their_own_job_against_one_published_fixture():

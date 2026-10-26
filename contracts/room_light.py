@@ -11,9 +11,12 @@ Three wire shapes:
   every Node keeps a mirror of WALL, so a Pi keeps drawing with the last states while Central is
   away): `change`, which rises with any change below it; `lights`, every room light by id, each an
   entry of its reporter's kind, so a colour and a state that do not belong together cannot be built
-  (a reported colour only on a colour light, a reading only on a measured light). It never rides
-  the Player's control State: a light switching ten times changes this document ten times and the
-  control State's delivery not at all.
+  (an rgb colour only on a reported light, a reading only on a measured light). Each entry carries
+  the light's colour as stated (real kelvin, or a bulb's rgb) and its brightness as last stated:
+  Central chose the source and kept the last stated values (central/room_light/policy.py), the Pi
+  bounds and rounds a kelvin to what it draws (player/geometry.py). It never rides the Player's
+  control State: a light switching ten times changes this document ten times and the control
+  State's delivery not at all.
 - A **light sensor reading** (HostCore -> Central, the host line's state bucket, key
   LIGHT_SENSOR_KEY): what the Pi's one wired light sensor reads, Measured(lux) or Unavailable. A Pi
   with no sensor writes no key.
@@ -22,10 +25,12 @@ Three wire shapes:
   following WALL. Central judges it against the document it wrote.
 
 Rules this module owns (one home each): the room light id (RoomLightId), the lux reading's range
-(Lux, LUX_MAX), a light's word and a reading (LightWord, Reading), the colour, state and entry
-vocabularies with their ranges, the shapes above, their
-caps, keys, codecs and the document's digest. A state is total: absent, `NotReported` and
-`Unavailable` all add no light, so arrival order needs no invariant.
+(Lux, LUX_MAX), a reading (Reading: a Sensor's lux or that it cannot tell), the colour, state and
+entry vocabularies with their ranges (a stated kelvin's is contracts/kelvin.py's), the shapes above,
+their caps, keys, codecs and the document's digest. A document state is total: absent and
+`NotReported` add no light, so arrival order needs no invariant. `Unavailable` is a reporter's word
+only: the document carries the last stated value instead (Central keeps it), or NotReported when
+none was ever stated.
 
 Rules it does NOT own: which room lights and Sensors exist and who reports each, and how an
 integration's message becomes a state (central/); how a state becomes light on a Frame
@@ -43,7 +48,7 @@ from typing import Annotated, Final, Literal
 
 from pydantic import Field, model_validator
 
-from contracts.kelvin import KELVIN_TABLE_MAX, KELVIN_TABLE_MIN, KELVIN_TABLE_STEP
+from contracts.kelvin import KELVIN_STATED_MAX, KELVIN_STATED_MIN
 from contracts.wire_codec import encode
 from contracts.wire_model import Model, decoded
 
@@ -67,43 +72,46 @@ Rgb = tuple[Share, Share, Share]
 DocumentDigest = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$", title="DocumentDigest")]
 
 
-# ---- Colour: one writer each, configured (a fixed kelvin) or reported by the light itself ----
+# ---- Colour: as stated, in real units; the Pi bounds a kelvin to what it draws ----
 
-class FixedColour(Model):
-    """A white light of one colour temperature (a white bulb, daylight): contracts/kelvin.py's row."""
-    kind: Literal["fixed"] = "fixed"
-    kelvin: int = Field(ge=KELVIN_TABLE_MIN, le=KELVIN_TABLE_MAX, multiple_of=KELVIN_TABLE_STEP)
+StatedKelvin = Annotated[float, Field(ge=KELVIN_STATED_MIN, le=KELVIN_STATED_MAX, allow_inf_nan=False,
+                                      title="StatedKelvin")]
 
 
-class ReportedColour(Model):
-    """A light that reports its colour: each screen channel's share of its white lux, read once."""
-    kind: Literal["reported"] = "reported"
-    channel_shares: Rgb
+class KelvinColour(Model):
+    """A white light's colour temperature, in kelvin as its source stated it (a typed kelvin, a
+    colour-temperature sensor, a bulb in its white mode). Never bounded to the table here: the Pi
+    draws it at player/geometry.py `drawn_kelvin`."""
+    kind: Literal["kelvin"] = "kelvin"
+    kelvin: StatedKelvin
+
+
+class RgbColour(Model):
+    """A colour bulb's colour as it stated it in a colour mode: each channel's level as a share of
+    the brightest (sRGB-encoded, 0..1; Home Assistant's rgb_color / 255), its brightness apart."""
+    kind: Literal["rgb"] = "rgb"
+    rgb: Rgb
 
     @model_validator(mode="after")
-    def lit(self) -> ReportedColour:
-        """ValueError unless the shares sum above 0."""
-        if sum(self.channel_shares) <= 0:
-            raise ValueError("a reported colour's shares sum above 0")
+    def lit(self) -> RgbColour:
+        """ValueError unless the channels sum above 0."""
+        if sum(self.rgb) <= 0:
+            raise ValueError("an rgb colour's channels sum above 0")
         return self
 
 
-# ---- States: the last thing a room light's reporter said; full state, never a delta ----
+LightColour = Annotated[KelvinColour | RgbColour, Field(discriminator="kind", title="LightColour")]
+
+
+# ---- States: what a reporter stated about brightness; full state, never a delta ----
 
 class Dimmer(Model):
-    """A white dimmable light: on or off and its brightness, the share of its full light output
-    (linear light; an integration's own scale is its adapter's to convert)."""
+    """A dimmable light: on or off and its brightness, the share of its full light output (linear
+    light; an integration's own scale is its adapter's to convert). Off is a stated value: it adds no
+    light."""
     kind: Literal["dimmer"] = "dimmer"
     on: bool
     brightness: Share
-
-
-class ColourDimmer(Model):
-    """A colour light: on or off, its brightness, and its drive per channel (each 0..1, linear)."""
-    kind: Literal["colour-dimmer"] = "colour-dimmer"
-    on: bool
-    brightness: Share
-    rgb: Rgb
 
 
 class Measured(Model):
@@ -113,51 +121,45 @@ class Measured(Model):
 
 
 class Unavailable(Model):
-    """Its reporter said it cannot tell (an integration's unavailable, a failing sensor). Adds no light."""
+    """Its reporter said it cannot tell (an integration's unavailable, a failing sensor). A word only:
+    the last stated value stands (central/room_light/policy.py); never in the document."""
     kind: Literal["unavailable"] = "unavailable"
 
 
 class NotReported(Model):
-    """Nothing heard from its reporter yet. Adds no light."""
+    """Its reporter never stated a value. Adds no light."""
     kind: Literal["not-reported"] = "not-reported"
 
 
-# What a reporter last said, by kind: a light's word (a white or colour light's state, or that it cannot
-# tell) and a reading (a sensor's lux, or that it cannot tell).
-LightWord = Annotated[Dimmer | ColourDimmer | Unavailable, Field(discriminator="kind", title="LightWord")]
+# What a Sensor last said: its lux, or that it cannot tell (the Pi's light sensor's wire, and Central's word).
 Reading = Annotated[Measured | Unavailable, Field(discriminator="kind", title="Reading")]
 
 
 # ---- Entries: one per reporter kind, so mismatched colour and state pairs cannot be built ----
 
 class FixedEntry(Model):
-    """A light nobody reports: always on, at full."""
+    """A light nobody reports: always on, at full, at its colour (typed, or its colour sensor's)."""
     kind: Literal["fixed"] = "fixed"
-    colour: FixedColour
+    colour: KelvinColour
 
 
-class WhiteEntry(Model):
-    """A white light an integration reports as a dimmer."""
-    kind: Literal["white"] = "white"
-    colour: FixedColour
-    state: Annotated[Dimmer | Unavailable | NotReported, Field(discriminator="kind")]
-
-
-class ColourEntry(Model):
-    """A colour light an integration reports with its drive; its colour is the light's own."""
-    kind: Literal["colour"] = "colour"
-    colour: ReportedColour
-    state: Annotated[ColourDimmer | Unavailable | NotReported, Field(discriminator="kind")]
+class ReportedEntry(Model):
+    """A light an integration reports: its last stated brightness and its colour (typed, or its bulb's
+    own as last stated: kelvin or rgb)."""
+    kind: Literal["reported"] = "reported"
+    colour: LightColour
+    state: Annotated[Dimmer | NotReported, Field(discriminator="kind")]
 
 
 class MeasuredEntry(Model):
-    """A light one Sensor reports: its state is that Sensor's reading."""
+    """A light one Sensor reports: its state is that Sensor's last stated reading; its colour typed,
+    or its colour sensor's."""
     kind: Literal["measured"] = "measured"
-    colour: FixedColour
-    state: Annotated[Measured | Unavailable | NotReported, Field(discriminator="kind")]
+    colour: KelvinColour
+    state: Annotated[Measured | NotReported, Field(discriminator="kind")]
 
 
-RoomLightEntry = Annotated[FixedEntry | WhiteEntry | ColourEntry | MeasuredEntry, Field(discriminator="kind")]
+RoomLightEntry = Annotated[FixedEntry | ReportedEntry | MeasuredEntry, Field(discriminator="kind")]
 
 
 class RoomLightsDocument(Model):
@@ -215,9 +217,9 @@ def decode_light_sensor(raw: bytes) -> LightSensorReading:
 __all__ = [
     "LIGHT_SENSOR_BYTES", "LIGHT_SENSOR_KEY", "LUX_MAX", "ROOM_LIGHTS_BYTES", "ROOM_LIGHTS_DRAWN_BYTES",
     "ROOM_LIGHTS_DRAWN_LEASE_SECONDS", "ROOM_LIGHTS_DRAWN_REPEAT_SECONDS",
-    "ROOM_LIGHTS_DRAWN_PATH", "ROOM_LIGHTS_KEY", "ROOM_LIGHTS_MAX", "ROOM_LIGHT_ID_PATTERN", "ColourDimmer",
-    "ColourEntry", "Dimmer", "DocumentDigest", "FixedColour", "FixedEntry", "LightSensorReading", "LightWord", "Lux",
-    "Measured", "MeasuredEntry", "NotReported", "Reading", "ReportedColour", "Rgb", "RoomLightEntry", "RoomLightId",
-    "RoomLightsDocument", "RoomLightsDrawn", "Share", "Unavailable", "WhiteEntry", "decode_light_sensor",
+    "ROOM_LIGHTS_DRAWN_PATH", "ROOM_LIGHTS_KEY", "ROOM_LIGHTS_MAX", "ROOM_LIGHT_ID_PATTERN", "Dimmer",
+    "DocumentDigest", "FixedEntry", "KelvinColour", "LightColour", "LightSensorReading", "Lux", "Measured",
+    "MeasuredEntry", "NotReported", "Reading", "ReportedEntry", "Rgb", "RgbColour", "RoomLightEntry", "RoomLightId",
+    "RoomLightsDocument", "RoomLightsDrawn", "Share", "StatedKelvin", "Unavailable", "decode_light_sensor",
     "decode_room_lights", "encode_light_sensor", "encode_room_lights", "room_lights_digest",
 ]

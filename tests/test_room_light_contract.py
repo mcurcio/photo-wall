@@ -23,20 +23,18 @@ from contracts.node_picture import UPGRADE_DISPLAY_LIGHT, DisplayLight
 from contracts.room_light import (
     ROOM_LIGHTS_BYTES,
     ROOM_LIGHTS_MAX,
-    ColourDimmer,
-    ColourEntry,
     Dimmer,
-    FixedColour,
     FixedEntry,
+    KelvinColour,
     LightSensorReading,
     Measured,
     MeasuredEntry,
     NotReported,
-    ReportedColour,
+    ReportedEntry,
+    RgbColour,
     RoomLightsDocument,
     RoomLightsDrawn,
     Unavailable,
-    WhiteEntry,
     decode_light_sensor,
     decode_room_lights,
     encode_light_sensor,
@@ -45,13 +43,12 @@ from contracts.room_light import (
 )
 
 DOCUMENT = RoomLightsDocument(change=7, lights={
-    "room": FixedEntry(colour=FixedColour(kelvin=6500)),
-    "bookshelf-spot": ColourEntry(colour=ReportedColour(channel_shares=(0.3, 0.4, 0.3)),
-                                  state=ColourDimmer(on=True, brightness=0.5, rgb=(1.0, 0.5, 0.25))),
-    "daylight": MeasuredEntry(colour=FixedColour(kelvin=5500), state=Measured(lux=320.5)),
-    "overheads": WhiteEntry(colour=FixedColour(kelvin=2700), state=Unavailable()),
-    "hall": WhiteEntry(colour=FixedColour(kelvin=3000), state=Dimmer(on=False, brightness=0.0)),
-    "lamp": WhiteEntry(colour=FixedColour(kelvin=2700), state=NotReported()),
+    "room": FixedEntry(colour=KelvinColour(kelvin=6500)),
+    "bookshelf-spot": ReportedEntry(colour=RgbColour(rgb=(1.0, 0.5, 0.25)), state=Dimmer(on=True, brightness=0.5)),
+    "daylight": MeasuredEntry(colour=KelvinColour(kelvin=34567.5), state=Measured(lux=320.5)),
+    "overheads": ReportedEntry(colour=KelvinColour(kelvin=1000), state=Dimmer(on=True, brightness=0.25)),
+    "hall": ReportedEntry(colour=KelvinColour(kelvin=3000), state=Dimmer(on=False, brightness=0.0)),
+    "lamp": ReportedEntry(colour=KelvinColour(kelvin=2700), state=NotReported()),
 })
 
 
@@ -59,16 +56,15 @@ def test_the_room_lights_document_round_trips_every_state_and_colour():
     raw = encode_room_lights(DOCUMENT)
     assert decode_room_lights(raw) == DOCUMENT
     assert json.loads(raw)["lights"]["bookshelf-spot"] == {
-        "colour": {"channel_shares": [0.3, 0.4, 0.3], "kind": "reported"},
-        "kind": "colour",
-        "state": {"brightness": 0.5, "kind": "colour-dimmer", "on": True, "rgb": [1.0, 0.5, 0.25]}}
+        "colour": {"kind": "rgb", "rgb": [1.0, 0.5, 0.25]},
+        "kind": "reported",
+        "state": {"brightness": 0.5, "kind": "dimmer", "on": True}}
     assert room_lights_digest(decode_room_lights(raw)) == room_lights_digest(DOCUMENT)
 
 
 def test_the_largest_document_fits_its_cap():
     """Mutation probe: ROOM_LIGHTS_BYTES 8192 -> the largest valid document is refused."""
-    entry = ColourEntry(colour=ReportedColour(channel_shares=(1 / 3, 1 / 3, 1 / 3)),
-                        state=ColourDimmer(on=True, brightness=1 / 3, rgb=(1 / 3, 1 / 3, 1 / 3)))
+    entry = ReportedEntry(colour=RgbColour(rgb=(1 / 3, 1 / 3, 1 / 3)), state=Dimmer(on=True, brightness=1 / 3))
     largest = RoomLightsDocument(change=2**63 - 1, lights={f"{'x' * 29}{i:03d}": entry for i in range(ROOM_LIGHTS_MAX)})
     assert len(encode_room_lights(largest)) <= ROOM_LIGHTS_BYTES
 
@@ -77,21 +73,22 @@ def test_the_largest_document_fits_its_cap():
     lambda value: value["lights"]["hall"]["state"].update(kind="dimmed"),
     lambda value: value["lights"]["hall"]["state"].update(brightness=1.5),
     lambda value: value["lights"]["hall"]["state"].update(on=1),
-    lambda value: value["lights"]["room"]["colour"].update(kelvin=6550),
+    lambda value: value["lights"]["room"]["colour"].update(kelvin=40001),
     lambda value: value["lights"]["daylight"]["state"].update(lux=-1),
     lambda value: value["lights"]["daylight"]["state"].update(lux="320"),
-    lambda value: value["lights"]["bookshelf-spot"]["state"].update(rgb=[1, 1]),
+    lambda value: value["lights"]["bookshelf-spot"]["colour"].update(rgb=[1, 1]),
     lambda value: value["lights"].update({"Bad Id": value["lights"]["room"]}),
     lambda value: value.update(change=0),
     lambda value: value["lights"]["room"].update(extra=1),
     # A colour and a state that do not belong together cannot be built.
     lambda value: value["lights"]["hall"]["state"].update(rgb=[1, 1, 1]),
-    lambda value: value["lights"]["overheads"].update(colour=value["lights"]["bookshelf-spot"]["colour"]),
+    lambda value: value["lights"]["daylight"].update(colour=value["lights"]["bookshelf-spot"]["colour"]),
     lambda value: value["lights"]["daylight"].update(state=value["lights"]["hall"]["state"]),
     lambda value: value["lights"]["room"].update(state=value["lights"]["hall"]["state"]),
-], ids=["state-kind", "brightness", "bool-as-int", "kelvin-step", "lux-negative", "lux-string", "rgb-two",
-        "bad-id", "change-0", "extra-field", "white-with-rgb", "white-with-reported-colour",
-        "measured-with-dimmer", "fixed-with-state"])
+    lambda value: value["lights"]["hall"].update(state={"kind": "unavailable"}),
+], ids=["state-kind", "brightness", "bool-as-int", "kelvin-range", "lux-negative", "lux-string", "rgb-two",
+        "bad-id", "change-0", "extra-field", "dimmer-with-rgb", "measured-with-rgb-colour",
+        "measured-with-dimmer", "fixed-with-state", "unavailable-in-document"])
 def test_the_document_is_strict(change):
     value = json.loads(encode_room_lights(DOCUMENT))
     change(value)

@@ -24,7 +24,6 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from importlib.metadata import version as distribution_version
 from pathlib import Path
 from typing import Final, Protocol
 
@@ -53,6 +52,7 @@ from central.infra.node_links import NodeLinks
 from central.infra.player_versions import PgPlayerVersions
 from central.infra.room_light_store import ROOM_LIGHTS_CHANNEL, PgRoomLights
 from central.room_light.ports import RoomLightsDocuments
+from central.version import central_version
 from contracts.node_link import Pipe
 from contracts.room_light import ROOM_LIGHTS_BYTES, ROOM_LIGHTS_KEY, encode_room_lights
 from contracts.time import SystemClock
@@ -69,7 +69,6 @@ WALL_TABLE: Final = KeyTable({"timing": 4096, ROOM_LIGHTS_KEY: ROOM_LIGHTS_BYTES
 WALL_RECHECK_SECONDS: Final = 5.0     # how often the writer looks again for a wall it could not put to yet
 _LISTEN_RETRY_SECONDS: Final = 1.0
 _HUB_SESSION_RETRY_SECONDS: Final = 2.0   # the hub session's first connect, tried again until it answers
-CENTRAL_DISTRIBUTION: Final = "photo-wall"   # Central's version on its hub: this distribution's
 _LISTEN_APPLICATION: Final = "photo-wall-room-lights"
 
 
@@ -202,11 +201,6 @@ async def serve_hub(url: str, stop: asyncio.Event, **session: object) -> None:
                 await asyncio.wait_for(stop.wait(), _HUB_SESSION_RETRY_SECONDS)
 
 
-def central_version() -> str:
-    """Central's version as its hub states it (CentralBirth): its installed distribution's."""
-    return distribution_version(CENTRAL_DISTRIBUTION)
-
-
 def build_node_bus(dsn: str, env: Mapping[str, str]) -> NodeBus | None:
     """The worker's NodeBus over its own database pool, or None without HUB_URL_ENV (no hub
     deployed). Both pipes' links take their documents from `DisplayDocuments` (the fleet pipe's
@@ -241,6 +235,6 @@ def build_node_bus(dsn: str, env: Mapping[str, str]) -> NodeBus | None:
 
     def hub_session(stop: asyncio.Event) -> Awaitable[None]:
         return serve_hub(hub_url, stop, version=central_version(), state=central_state(reads, state_wakes),
-                         listened=HomeAssistantListener(room_lights, room_lights), methods=hub_methods(versions))
+                         listened=HomeAssistantListener(room_lights, room_lights, room_lights), methods=hub_methods(versions))
 
     return NodeBus(db, fleet, links, wakes, wall, hub_session=hub_session, state_wakes=state_wakes)

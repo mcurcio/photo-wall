@@ -1,5 +1,5 @@
 """A Frame's Lighting tab: its mat depth, its lights (each one Frame's view of a room light, in lux
-with its reference) and its paper, live through the Frame's session, which the Position tab shares:
+with its reference, and its room light's colour line as House › Lights says it) and its paper, live through the Frame's session, which the Position tab shares:
 every edit carries the whole lighting with the position, Done saves both and Revert returns both.
 
 The room lights are the real ones: the test sets them up through House › Lights' routes on the
@@ -48,8 +48,8 @@ pytestmark = pytest.mark.skipif(
 CONSOLE = {"X-Photo-Wall-Console": "1"}
 PI = "pi"
 SPOT = {"kind": "reported", "name": "Bookshelf spot",
-        "reporter": {"source": "home-assistant", "address": "light.bookshelf"}, "colour": {"kind": "fixed", "kelvin": 2700}}
-DAYLIGHT = {"kind": "measured", "name": "Daylight", "sensor": "window-meter", "colour": {"kind": "fixed", "kelvin": 6500}}
+        "reporter": {"source": "home-assistant", "address": "light.bookshelf"}, "colour": {"kind": "its-bulb", "typed_kelvin": 2700}}
+DAYLIGHT = {"kind": "measured", "name": "Daylight", "sensor": "window-meter", "colour": {"kind": "typed", "kelvin": 6500}}
 READING = 320.0
 
 
@@ -206,6 +206,8 @@ def test_a_close_lights_lux_rides_the_session_done_keeps_it_and_revert_puts_it_b
         open_frame(page, FRAME, "lighting")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         light = add_close_light(page)
+        # Its room light's colour line, as House › Lights says it: the bulb has not stated a colour yet.
+        expect(light).to_contain_text("Its colour: Typed 2,700 K until its bulb says")
         number = lighting_group(page).get_by_role("group", name=re.compile(r"^Light \d$")).count()
         light.get_by_role("spinbutton", name="Lux at the Frame", exact=True).fill("800")
         sent = wait_for_lighting(page, sessions, lambda lighting: any(
@@ -252,6 +254,7 @@ def test_a_light_a_sensor_measures_is_read_at_the_sensors_reading(page, registry
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         light = add_close_light(page, "Daylight")
         expect(light.get_by_role("button", name="Use its reading now (320 lx)", exact=True)).to_be_visible()
+        expect(light).to_contain_text("Its colour: Typed 6,500 K")
         wait_for_lighting(page, sessions, lambda lighting: any(
             each["light"] == "daylight" and each["reference"] == {"kind": "at-reading", "lux": READING}
             for each in lighting["lights"]))

@@ -4,37 +4,83 @@ from __future__ import annotations
 
 from typing import Literal
 
-from central.room_light.model import ReportRefusal, RoomLight, Sensor, SensorId, Source
+from central.room_light.model import (
+    ColourSensor,
+    ColourSensorId,
+    ReportRefusal,
+    RoomLight,
+    Sensor,
+    SensorId,
+    Source,
+)
 from contracts.models import Identifier, Instant, Model
-from contracts.room_light import Reading, RoomLightEntry, RoomLightId
+from contracts.room_light import KelvinColour, LightColour, Measured, RoomLightEntry, RoomLightId
 
 DrawnState = Literal["drawn", "behind", "not-following", "not-reported"]
+# Where a light's colour comes from now: the typed kelvin by choice; its source's last stated colour;
+# the typed kelvin standing in because its source never stated one.
+ColourFrom = Literal["typed", "following", "never-stated"]
+
+
+class ColourLineView(Model):
+    """A room light's colour line (House › Lights and a Frame's Lighting tab): the colour its entry
+    carries (as stated, real kelvin or rgb; the console says "outside what the screen draws" against
+    contracts/kelvin.py's table), where it comes from (`source`: the light's colour source's kind;
+    `sensor`: the colour sensor it follows, None for any other source), why (`colour_from`), when its
+    source stated it (None: typed, or never stated) and since when its source can't tell (None: it
+    tells, or the colour is typed)."""
+    colour: LightColour
+    source: Literal["typed", "its-bulb", "colour-sensor"]
+    sensor: ColourSensorId | None
+    colour_from: ColourFrom
+    stated_at: Instant | None
+    cant_tell_since: Instant | None
 
 
 class RoomLightView(Model):
     """One room light: its setup, its entry in the document now, when Central last heard its
-    reporter (None: never, or nobody reports it), and the Frames whose lighting names it."""
+    reporter (None: never, or nobody reports it), since when its reporter can't tell (None: it tells
+    now, or nobody reports it; the entry keeps the last stated brightness), its colour line, and the
+    Frames whose lighting names it."""
     id: RoomLightId
     light: RoomLight
     entry: RoomLightEntry
     heard_at: Instant | None
+    cant_tell_since: Instant | None
+    colour: ColourLineView
     named_by: tuple[Identifier, ...]
 
 
 class SensorView(Model):
-    """One Sensor: its setup, its reference's last reading (None: never heard), when Central heard it,
-    and the room light it measures (None: none)."""
+    """One Sensor: its setup, its reference's last stated reading (None: never stated), when Central
+    last heard it, since when it can't tell (None: it tells now), and the room light it measures
+    (None: none)."""
     id: SensorId
     sensor: Sensor
-    reading: Reading | None
+    reading: Measured | None
     heard_at: Instant | None
+    cant_tell_since: Instant | None
     reports: RoomLightId | None
 
 
+class ColourSensorView(Model):
+    """One colour sensor: its setup, its reference's last stated colour (None: never stated), when
+    Central last heard it, since when it can't tell (None: it tells now), and the room lights that
+    follow it."""
+    id: ColourSensorId
+    sensor: ColourSensor
+    colour: KelvinColour | None
+    heard_at: Instant | None
+    cant_tell_since: Instant | None
+    followed_by: tuple[RoomLightId, ...]
+
+
 class RoomLightsView(Model):
-    """GET /v1/operator/house/lights: every room light, in the house's order, and every Sensor."""
+    """GET /v1/operator/house/lights: every room light, in the house's order, every Sensor and every
+    colour sensor."""
     lights: tuple[RoomLightView, ...]
     sensors: tuple[SensorView, ...]
+    colour_sensors: tuple[ColourSensorView, ...]
 
 
 class PlayerDrawnView(Model):
@@ -62,5 +108,5 @@ class RefusedReportsView(Model):
     refused: tuple[RefusedReportView, ...]
 
 
-__all__ = ["DrawnState", "DrawnView", "PlayerDrawnView", "RefusedReportView", "RefusedReportsView", "RoomLightView",
-           "RoomLightsView", "SensorView"]
+__all__ = ["ColourFrom", "ColourLineView", "ColourSensorView", "DrawnState", "DrawnView", "PlayerDrawnView",
+           "RefusedReportView", "RefusedReportsView", "RoomLightView", "RoomLightsView", "SensorView"]

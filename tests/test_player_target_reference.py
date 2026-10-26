@@ -19,8 +19,8 @@ from contracts.models import PositionBox, frame_size_mm
 from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
 from contracts.room_light import (
-    FixedColour,
     FixedEntry,
+    KelvinColour,
     RoomLightsDocument,
 )
 from contracts.tuning import TestPattern
@@ -44,7 +44,7 @@ LIT = picture_lights(
         WashLight(light="room", lux=40, reference=AT_FULL),
         FarLight(light="room", lux=200, reference=AT_FULL, from_degrees=0, steep_degrees=30,
                  softness_degrees=20))),
-    RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=FixedColour(kelvin=3000))}),
+    RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=KelvinColour(kelvin=3000))}),
     frame_size_mm(PositionBox(), QN43, 0), DISPLAY)
 GLOWING_TABLE = bytes([200]) * LUT_BYTES
 DRAW = picture_board(PLACEMENT, target_modules(TargetCode("p-" + "ab" * 16, "HDMI-A-1", 9)))

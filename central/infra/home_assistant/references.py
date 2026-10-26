@@ -2,7 +2,7 @@
 Assistant reports it, and the entity id as its address (contracts/home_assistant.py owns the entity
 id's form).
 
-A room light or Sensor Home Assistant reports is referenced as (SOURCE, entity id): the room-light
+A room light, Sensor or colour sensor Home Assistant reports is referenced as (SOURCE, entity id): the room-light
 domain compares the reference whole and never reads the entity id.
 """
 from __future__ import annotations
@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from typing import Final
 
-from central.room_light.model import ReporterRef, SensorRef
+from central.room_light.model import ColourSensorRef, ReporterRef, SensorRef
 from contracts.home_assistant import ENTITY_ID_MAX, ENTITY_ID_PATTERN
 
 SOURCE: Final = "home-assistant"   # the references' source
@@ -34,4 +34,9 @@ def illuminance_sensor(entity: str) -> SensorRef:
     return SensorRef(source=SOURCE, address=entity)
 
 
-__all__ = ["SOURCE", "illuminance_sensor", "is_entity", "light_reporter"]
+def colour_temperature_sensor(entity: str) -> ColourSensorRef:
+    """ColourSensorRef(SOURCE, entity). Pure."""
+    return ColourSensorRef(source=SOURCE, address=entity)
+
+
+__all__ = ["SOURCE", "colour_temperature_sensor", "illuminance_sensor", "is_entity", "light_reporter"]

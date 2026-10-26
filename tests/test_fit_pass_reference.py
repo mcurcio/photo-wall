@@ -14,7 +14,7 @@ from contracts.frame_lighting import AT_FULL, CloseLight, FarLight, FrameLightin
 from contracts.models import PhotoCrop, PositionBox, frame_size_mm
 from contracts.node_picture import DisplayLight
 from contracts.photo_crop import CENTRED, crop_window
-from contracts.room_light import FixedColour, FixedEntry, RoomLightsDocument
+from contracts.room_light import FixedEntry, KelvinColour, RoomLightsDocument
 from player.fit_pass import target_size
 from player.geometry import buffer_to_picture, fit_source_uv, picture_lights
 
@@ -87,8 +87,8 @@ LIGHTING = FrameLighting(mat_depth_mm=8, paper=PAPER, lights=(
     CloseLight(light="spot", lux=1500, reference=AT_FULL, across_mm=40, up_mm=350, out_mm=250,
                inner_beam_degrees=20, outer_beam_degrees=40)))
 ROOM = RoomLightsDocument(change=1, lights={
-    "room": FixedEntry(colour=FixedColour(kelvin=6500)), "lamp": FixedEntry(colour=FixedColour(kelvin=3000)),
-    "spot": FixedEntry(colour=FixedColour(kelvin=4000))})
+    "room": FixedEntry(colour=KelvinColour(kelvin=6500)), "lamp": FixedEntry(colour=KelvinColour(kelvin=3000)),
+    "spot": FixedEntry(colour=KelvinColour(kelvin=4000))})
 DISPLAY = DisplayLight(matched_lux=250, black=0.01)
 
 

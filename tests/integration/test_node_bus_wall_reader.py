@@ -49,11 +49,11 @@ from contracts.room_light import (
     ROOM_LIGHTS_DRAWN_REPEAT_SECONDS,
     ROOM_LIGHTS_KEY,
     Dimmer,
-    FixedColour,
     FixedEntry,
+    KelvinColour,
+    ReportedEntry,
     RoomLightsDocument,
     RoomLightsDrawn,
-    WhiteEntry,
     decode_room_lights,
     encode_room_lights,
     room_lights_digest,
@@ -63,7 +63,7 @@ from nodeapi.node import WallReader
 from player.room_lights import start_room_lights
 
 SERIAL = "serial-w"
-DOCUMENT = RoomLightsDocument(change=3, lights={"room": FixedEntry(colour=FixedColour(kelvin=6500))})
+DOCUMENT = RoomLightsDocument(change=3, lights={"room": FixedEntry(colour=KelvinColour(kelvin=6500))})
 
 
 async def _holds(reader: WallReader, what: str) -> None:
@@ -219,7 +219,7 @@ WASHED = FrameLighting(mat_depth_mm=0, lights=(WashLight(light=LIGHT, lux=150, r
 
 def _wash(change: int, on: bool) -> RoomLightsDocument:
     return RoomLightsDocument(change=change, lights={
-        LIGHT: WhiteEntry(colour=FixedColour(kelvin=2700), state=Dimmer(on=on, brightness=1.0))})
+        LIGHT: ReportedEntry(colour=KelvinColour(kelvin=2700), state=Dimmer(on=on, brightness=1.0))})
 
 
 async def _line(node) -> dict:

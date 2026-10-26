@@ -60,6 +60,7 @@ ROOTS: Final[tuple[tuple[str, Any], ...]] = (
     ("InstallPlayer", central_api.InstallPlayer),
     ("InstallAnswerValue", central_api._Answer),
     ("HomeAssistantStateValue", home_assistant._StateValue),
+    ("GalleriaBirth", home_assistant.GalleriaBirth),
     ("Birth", node_state.Birth),
     ("HostBase", node_state.HostBase),
     ("FrameReports", node_state.FrameReports),
@@ -96,8 +97,8 @@ def constants() -> dict[str, object]:
         "ENTITY_ID_PATTERN": home_assistant.ENTITY_ID_PATTERN,
         "ENTITY_NAME_MAX": home_assistant.NAME_MAX,
         "LEVEL_MAX": home_assistant.LEVEL_MAX,
-        "KELVIN_MIN": home_assistant.KELVIN_MIN,
-        "KELVIN_MAX": home_assistant.KELVIN_MAX,
+        "GALLERIA_BIRTH_KEY": home_assistant.GALLERIA_BIRTH_KEY,
+        "GALLERIA_BIRTH_BYTES": home_assistant.GALLERIA_BIRTH_BYTES,
         # A Pi's read-only door and the lines read there (contracts/node_link.py, node_state.py)
         "NODE_DOOR_PORT": node_link.NODE_DOOR_PORT,
         "NODE_DOOR_API_PREFIX": node_link.NODE_DOOR_API_PREFIX,
@@ -387,6 +388,12 @@ def encode_home_assistant_state(state: HomeAssistantState) -> bytes:
 def decode_home_assistant_state(raw: bytes) -> HomeAssistantState:
     """ValueError("home_assistant_state") for anything but a state."""
     return _decoded("HomeAssistantStateValue", raw, HOME_ASSISTANT_STATE_BYTES, "home_assistant_state")["state"]
+
+
+def encode_galleria_birth(birth: GalleriaBirth) -> bytes:
+    """Canonical JSON; ValueError("galleria_birth") for an invalid birth,
+    ValueError("galleria_birth_too_large") past GALLERIA_BIRTH_BYTES."""
+    return _encoded("GalleriaBirth", birth, GALLERIA_BIRTH_BYTES, "galleria_birth", "galleria_birth_too_large")
 
 
 def encode_install_player(request: InstallPlayer) -> bytes:

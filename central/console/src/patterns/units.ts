@@ -1,6 +1,6 @@
 /*
  * The units the console writes a measured value in, and the one way each is written: a number
- * with its unit after a space ("1,000 lx", "2700 K", "12.5 mm", "45°", "60 %"). Pure.
+ * with its unit after a space ("1,000 lx", "2,700 K", "12.5 mm", "45°", "60 %"). Pure.
  */
 
 export type Unit = "lx" | "K" | "mm" | "°" | "%";
@@ -26,7 +26,7 @@ function shortest(value: number, decimals: number): string {
 
 /**
  * `value` in `unit`, as the console writes it: lux whole with thousands separated ("1,000 lx"),
- * one decimal below 10 lx ("2.5 lx"); kelvin whole ("2700 K"); millimetres to one decimal at most
+ * one decimal below 10 lx ("2.5 lx"); kelvin whole with thousands separated ("2,700 K"); millimetres to one decimal at most
  * ("12.5 mm"); percent to three decimals at most, for a share as small as a panel's black
  * ("60 %", "0.03 %"); degrees to one decimal at most, with no space ("45°").
  */
@@ -35,7 +35,7 @@ export function unitWords(value: number, unit: Unit): string {
     case "lx":
       return `${Math.abs(value) < LUX_DECIMALS_BELOW ? shortest(value, 1) : grouped(value)} lx`;
     case "K":
-      return `${Math.round(value)} K`;
+      return `${grouped(value)} K`;
     case "°":
       return `${shortest(value, 1)}°`;
     case "%":

@@ -15,8 +15,8 @@ from contracts.lut import LUT_BYTES
 from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
 from contracts.room_light import (
-    FixedColour,
     FixedEntry,
+    KelvinColour,
     RoomLightsDocument,
 )
 from contracts.tuning import TestPattern
@@ -36,7 +36,7 @@ from player.pattern_pass import PATTERN_CODES, _fragment
 
 SIZE_MM = (598.0, 336.0)                         # a 27" 16:9 picture's physical size
 GLOWING_TABLE = bytes([200]) * LUT_BYTES        # every colour to a bright grey: a LUT nobody misses
-ROOM = RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=FixedColour(kelvin=3000))})
+ROOM = RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=KelvinColour(kelvin=3000))})
 # A dim warm room with a deep mat and a dark paper: what a photo gets, and a pattern never does.
 DIM_ROOM = FrameLighting(mat_depth_mm=8, paper=Paper(whiteness=.6, ink_density=1.2), lights=(
     WashLight(light="room", lux=40, reference=AT_FULL),

@@ -43,10 +43,11 @@ def test_087_names_a_secured_locks_variant_and_keeps_serving_its_bytes(empty_dat
         # and writes; the Position's stored form (104, over no rows yet), so the Position today's
         # code saves is the one it reads back; the Display's size (103), which the inventory reads;
         # Shows videos (105), which a new Frame writes; and the Position history and the Frame
-        # without their profile or wall size (107, 108), which today's code no longer writes.
+        # without their profile or wall size (107, 108), which today's code no longer writes; and
+        # each room light's colour source (109), which the Frame's lighting check reads.
         migrate_before(db, "087", also=("089_", "090_", "091_", "092_", "093_", "094_", "096_",
                                         "097_", "099_", "101_", "102_", "103_", "104_", "105_", "107_",
-                                        "108_"))
+                                        "108_", "109_"))
         registry = Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
         frame(registry, "portrait")
         picture = photo("photo-1", taken_at=900)

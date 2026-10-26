@@ -13,11 +13,17 @@ lights), drawing on a recording renderer.
 
 E1. A state published before the worker starts (while Central is away) reaches the callback.
 E2. Ten switches reach the callback, and the Player's control State delivery does not move. Home
-    Assistant's own "unavailable" reads Unavailable; a key that is not an entity id and a value that
+    Assistant's own "unavailable" keeps the last stated brightness and Central marks that it can't tell; a key that is not an entity id and a value that
     is not a state are refused (UNKNOWN_ADDRESS, UNREADABLE); the Home Assistant page shows when
     Central last heard the entity, by its name.
 E3. A reading the Pi sent before its Sensor existed is that Sensor's light once the Sensor and the
     light it reports are set up, with no new reading.
+E5. A colour sensor's state (the Sun's sky colour temperature) reaches the Player as the colour of
+    the light that follows it, as stated (no bound, no rounding); through Home Assistant's own
+    "unavailable" the light keeps that colour and Central marks the colour sensor can't tell. A
+    bulb's colour as Galleria states it by its mode (kelvin in its white mode, rgb in a colour mode)
+    reaches the Player; off keeps its last stated colour. Galleria's birth on the hub reaches the Home
+    Assistant page.
 E4. A change made while the hub is away (a House > Lights edit) reaches the callback once the hub is
     back; and after a hub restart with no change, a Player starting on a Node whose bus restarted
     empty gets the document (WALL holds what Central holds, whatever was put before).
@@ -40,23 +46,43 @@ from test_registry import ADMIN, enroll, frame, hello
 from appliance.host.host_runner import start_host_bus
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
-from central.infra.home_assistant.references import light_reporter
+from central.infra.home_assistant.references import colour_temperature_sensor, light_reporter
 from central.infra.light_sensor_judge import PI_SOURCE
 from central.node_bus_wiring import HUB_CONFIG_ENV, HUB_URL_ENV, WALL_RECHECK_SECONDS
-from central.room_light.model import MeasuredLight, ReportedLight, Sensor, SensorRef
+from central.room_light.model import (
+    BulbColour,
+    ColourSensor,
+    FixedLight,
+    MeasuredLight,
+    ReportedLight,
+    SensedColour,
+    Sensor,
+    SensorRef,
+    TypedColour,
+)
 from central.room_light.views import RoomLightsView
-from central.room_light_routes import HOUSE_LIGHTS, HOUSE_SENSORS
+from central.room_light_routes import HOUSE_COLOUR_SENSORS, HOUSE_LIGHTS, HOUSE_SENSORS
 from contracts.central_api import STATES_EPOCH_KEY
-from contracts.home_assistant import HomeAssistantLight, HomeAssistantUnavailable
+from contracts.home_assistant import (
+    GALLERIA_BIRTH_KEY,
+    GalleriaBirth,
+    HomeAssistantColourTemperature,
+    HomeAssistantKelvin,
+    HomeAssistantLight,
+    HomeAssistantRgb,
+    HomeAssistantUnavailable,
+    encode_galleria_birth,
+)
 from contracts.room_light import (
     LIGHT_SENSOR_KEY,
     Dimmer,
-    FixedColour,
+    FixedEntry,
+    KelvinColour,
     Measured,
     MeasuredEntry,
+    ReportedEntry,
+    RgbColour,
     RoomLightsDocument,
-    Unavailable,
-    WhiteEntry,
 )
 from contracts.wire_model import Model
 from nodeapi.buffers import state_prefix, state_stream
@@ -64,10 +90,12 @@ from nodeapi.buffers import state_prefix, state_stream
 SERIAL = "serial-room-light"
 ENTITY = "light.bookshelf_spot"
 NAME = "Bookshelf spot"
-ON = HomeAssistantLight(name=NAME, on=True, brightness=255, kelvin=None, rgb=None)
-OFF = HomeAssistantLight(name=NAME, on=False, brightness=None, kelvin=None, rgb=None)
+ON = HomeAssistantLight(name=NAME, on=True, brightness=255, colour=None)
+OFF = HomeAssistantLight(name=NAME, on=False, brightness=None, colour=None)
 FULL = Dimmer(on=True, brightness=1.0)
 LUX = 240.0
+SKY = "sensor.sun_sky_color_temperature"
+LAMP = "light.fam_lamp"
 ADMIN_HEADERS = {"Authorization": "Bearer " + ADMIN}
 FIRST_SECONDS = 30   # the worker reaches the hub, the Node links and its WALL mirror first syncs
 SECONDS = WALL_RECHECK_SECONDS / 2   # every later step: a wake, never the WALL writer's own recheck
@@ -75,7 +103,7 @@ SECONDS = WALL_RECHECK_SECONDS / 2   # every later step: a wake, never the WALL 
 
 def _spot(document: RoomLightsDocument) -> Dimmer | None:
     entry = document.lights.get("bookshelf-spot")
-    return entry.state if isinstance(entry, WhiteEntry) and isinstance(entry.state, Dimmer) else None
+    return entry.state if isinstance(entry, ReportedEntry) and isinstance(entry.state, Dimmer) else None
 
 
 def test_room_light_reaches_the_player_through_the_real_composition(registry, tmp_path, monkeypatch):
@@ -123,7 +151,7 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
         async def run() -> None:
             # House > Lights: the spot Home Assistant reports.
             await asyncio.to_thread(call, "PUT", f"{HOUSE_LIGHTS}/bookshelf-spot", json=ReportedLight(
-                name=NAME, reporter=light_reporter(ENTITY), colour=FixedColour(kelvin=4000)))
+                name=NAME, reporter=light_reporter(ENTITY), colour=TypedColour(kelvin=4000)))
             await asyncio.to_thread(hub.start)
             await asyncio.to_thread(node.start)
             await house.__aenter__()
@@ -161,13 +189,19 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
             assert _spot(followed.latest()) == FULL
             assert await asyncio.to_thread(control_state) == before
 
-            # Home Assistant's own unavailable; a key that is no entity id and a value that is no state.
+            # Home Assistant's own unavailable: the spot keeps its last stated brightness and Central
+            # marks that it can't tell; a key that is no entity id and a value that is no state.
             await house.publish(ENTITY, HomeAssistantUnavailable(entity_kind="light", name=NAME))
 
-            def unavailable(document):
-                entry = document.lights.get("bookshelf-spot")
-                return isinstance(entry, WhiteEntry) and isinstance(entry.state, Unavailable)
-            await until(latest(unavailable, followed), SECONDS, "the Player sees the spot unavailable")
+            async def cant_tell():
+                view = RoomLightsView.model_validate(await asyncio.to_thread(call, "GET", HOUSE_LIGHTS))
+                [spot] = [light for light in view.lights if light.id == "bookshelf-spot"]
+                return spot.cant_tell_since is not None
+            await until(cant_tell, SECONDS, "Central marks that the spot can't tell")
+            kept = RoomLightsView.model_validate(await asyncio.to_thread(call, "GET", HOUSE_LIGHTS))
+            assert [light.entry for light in kept.lights if light.id == "bookshelf-spot"] == [
+                ReportedEntry(colour=KelvinColour(kelvin=4000), state=FULL)]   # the last stated brightness stands
+            assert _spot(followed.latest()) == FULL
             await house.publish("Not_An_Entity", ON)
             await house.publish("light.garbage", b"not a state")
 
@@ -197,24 +231,67 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
             await asyncio.to_thread(call, "PUT", f"{HOUSE_SENSORS}/hall-meter", json=Sensor(
                 name="Hall meter", at=SensorRef(source=PI_SOURCE, address=player["player_id"])))
             await asyncio.to_thread(call, "PUT", f"{HOUSE_LIGHTS}/window", json=MeasuredLight(
-                name="Window", sensor="hall-meter", colour=FixedColour(kelvin=6500)))
-            window = MeasuredEntry(colour=FixedColour(kelvin=6500), state=Measured(lux=LUX))
+                name="Window", sensor="hall-meter", colour=TypedColour(kelvin=6500)))
+            window = MeasuredEntry(colour=KelvinColour(kelvin=6500), state=Measured(lux=LUX))
             await until(latest(lambda d: d.lights.get("window") == window, followed), SECONDS,
                         "the Player sees the window at the Pi's reading")
+
+            # E5: a colour sensor's state is the colour of the light that follows it, as stated.
+            await asyncio.to_thread(call, "PUT", f"{HOUSE_COLOUR_SENSORS}/sky", json=ColourSensor(
+                name="Sun sky", at=colour_temperature_sensor(SKY)))
+            await asyncio.to_thread(call, "PUT", f"{HOUSE_LIGHTS}/daylight", json=FixedLight(
+                name="Daylight (windows)", colour=SensedColour(sensor="sky", typed_kelvin=5500)))
+            await until(latest(lambda d: d.lights.get("daylight") == FixedEntry(colour=KelvinColour(kelvin=5500)),
+                               followed), SECONDS, "the Player draws the daylight at its typed kelvin")
+            await house.publish(SKY, HomeAssistantColourTemperature(name="Sun sky", kelvin=3456.7))
+            sky = FixedEntry(colour=KelvinColour(kelvin=3456.7))
+            await until(latest(lambda d: d.lights.get("daylight") == sky, followed), SECONDS,
+                        "the Player draws the daylight at the sky's colour temperature")
+            await house.publish(SKY, HomeAssistantUnavailable(entity_kind="colour-temperature", name="Sun sky"))
+
+            async def sky_cant_tell():
+                view = RoomLightsView.model_validate(await asyncio.to_thread(call, "GET", HOUSE_LIGHTS))
+                [daylight] = [light for light in view.lights if light.id == "daylight"]
+                return daylight.colour.cant_tell_since is not None and daylight.entry == sky
+            await until(sky_cant_tell, SECONDS, "Central keeps the sky's colour and marks it can't tell")
+            assert followed.latest().lights["daylight"] == sky
+
+            # E5: a bulb's colour as stated by its mode; off keeps the last stated colour.
+            await asyncio.to_thread(call, "PUT", f"{HOUSE_LIGHTS}/lamp", json=ReportedLight(
+                name="Lamp", reporter=light_reporter(LAMP), colour=BulbColour(typed_kelvin=2700)))
+            for state, entry in (
+                    (HomeAssistantLight(name="Lamp", on=True, brightness=255, colour=HomeAssistantKelvin(kelvin=2200)),
+                     ReportedEntry(colour=KelvinColour(kelvin=2200), state=FULL)),
+                    (HomeAssistantLight(name="Lamp", on=True, brightness=255, colour=HomeAssistantRgb(rgb=(255, 0, 0))),
+                     ReportedEntry(colour=RgbColour(rgb=(1.0, 0.0, 0.0)), state=FULL)),
+                    (HomeAssistantLight(name="Lamp", on=False, brightness=None, colour=None),
+                     ReportedEntry(colour=RgbColour(rgb=(1.0, 0.0, 0.0)), state=Dimmer(on=False, brightness=0.0)))):
+                await house.publish(LAMP, state)
+                await until(latest(lambda d, entry=entry: d.lights.get("lamp") == entry, followed), SECONDS,
+                            f"the Player draws the lamp as {entry}")
+
+            # E5: Galleria's birth on the hub reaches the Home Assistant page.
+            await house.publish(GALLERIA_BIRTH_KEY, encode_galleria_birth(GalleriaBirth(
+                version="9.9.9", kinds=("light", "illuminance", "colour-temperature"))))
+
+            async def galleria_heard():
+                page = await asyncio.to_thread(call, "GET", "/v1/operator/integrations/home-assistant")
+                return page["galleria"]["version"] == "9.9.9" and page["galleria"]["update"] is False
+            await until(galleria_heard, SECONDS, "the Home Assistant page shows Galleria's version")
 
             # E4a: a change while the hub is away (its WALL put fails) reaches the Player once it is back.
             await asyncio.to_thread(hub.stop)
             await asyncio.to_thread(call, "PUT", f"{HOUSE_LIGHTS}/bookshelf-spot", json=ReportedLight(
-                name=NAME, reporter=light_reporter(ENTITY), colour=FixedColour(kelvin=3000)))
+                name=NAME, reporter=light_reporter(ENTITY), colour=TypedColour(kelvin=3000)))
 
             def warmer(document):
                 entry = document.lights.get("bookshelf-spot")
-                return isinstance(entry, WhiteEntry) and entry.colour == FixedColour(kelvin=3000)
+                return isinstance(entry, ReportedEntry) and entry.colour == KelvinColour(kelvin=3000)
 
             async def recorded_warmer():
                 view = RoomLightsView.model_validate(await asyncio.to_thread(call, "GET", HOUSE_LIGHTS))
                 [spot] = [light.light for light in view.lights if light.id == "bookshelf-spot"]
-                return spot.colour == FixedColour(kelvin=3000)
+                return spot.colour == TypedColour(kelvin=3000)
             await until(recorded_warmer, SECONDS, "Central records the edit while the hub is away")
             await asyncio.to_thread(hub.start)
             await until(latest(warmer, followed), RESTART_SECONDS,

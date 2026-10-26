@@ -21,19 +21,16 @@ from contracts.models import PositionBox, frame_size_mm
 from contracts.node_frame import neutral_operations
 from contracts.node_picture import DisplayLight
 from contracts.room_light import (
-    ColourDimmer,
-    ColourEntry,
     Dimmer,
-    FixedColour,
     FixedEntry,
+    KelvinColour,
     Measured,
     MeasuredEntry,
     NotReported,
-    ReportedColour,
+    ReportedEntry,
+    RgbColour,
     RoomLightEntry,
     RoomLightsDocument,
-    Unavailable,
-    WhiteEntry,
 )
 from player.geometry import (
     HIGHLIGHT_KNEE,
@@ -57,7 +54,7 @@ OPERATIONS = neutral_operations("headless", 1, DisplayLight(MATCHED, BLACK))
 WIDTH_MM, HEIGHT_MM = 43 * 25.4 * 16 / math.hypot(16, 9), 43 * 25.4 * 9 / math.hypot(16, 9)
 SIZE = (WIDTH_MM, HEIGHT_MM)
 UPGRADE_PAPER = Paper(whiteness=0.9, ink_density=-math.log10(BLACK))
-WHITE_ROOM = FixedEntry(colour=FixedColour(kelvin=6500))
+WHITE_ROOM = FixedEntry(colour=KelvinColour(kelvin=6500))
 SPOT = CloseLight(light="bookshelf-spot", lux=400, reference=AT_FULL, across_mm=0, up_mm=350, out_mm=250,
                   inner_beam_degrees=20, outer_beam_degrees=40)
 WASH = WashLight(light="room", lux=50, reference=AT_FULL)
@@ -88,12 +85,11 @@ def test_the_upgrade_wash_and_paper_draw_todays_picture(photo):
 
 @pytest.mark.parametrize("entry", [
     None,
-    WhiteEntry(colour=FixedColour(kelvin=3000), state=NotReported()),
-    WhiteEntry(colour=FixedColour(kelvin=3000), state=Unavailable()),
-    WhiteEntry(colour=FixedColour(kelvin=3000), state=Dimmer(on=False, brightness=1.0)),
-    ColourEntry(colour=ReportedColour(channel_shares=(0.3, 0.5, 0.2)), state=ColourDimmer(on=False, brightness=0.7, rgb=(1.0, 0.2, 0.2))),
-    MeasuredEntry(colour=FixedColour(kelvin=3000), state=Measured(lux=120.0)),  # AtFull against a Sensor
-], ids=["absent", "not-reported", "unavailable", "off", "off-coloured", "measured-against-dimmer"])
+    ReportedEntry(colour=KelvinColour(kelvin=3000), state=NotReported()),
+    ReportedEntry(colour=KelvinColour(kelvin=3000), state=Dimmer(on=False, brightness=1.0)),
+    ReportedEntry(colour=RgbColour(rgb=(1.0, 0.2, 0.2)), state=Dimmer(on=False, brightness=0.7)),
+    MeasuredEntry(colour=KelvinColour(kelvin=3000), state=Measured(lux=120.0)),  # AtFull against a Sensor
+], ids=["absent", "not-reported", "off", "off-coloured", "measured-against-dimmer"])
 def test_a_light_its_room_light_cannot_vouch_for_adds_nothing(entry):
     """Acceptance 3 (design rule 2): each adds exactly (0, 0, 0)."""
     assert light_on_frame(WASH, entry) == (0.0, 0.0, 0.0)
@@ -102,19 +98,17 @@ def test_a_light_its_room_light_cannot_vouch_for_adds_nothing(entry):
 
 def test_a_lux_reference_fits_only_a_sensor():
     measured = WashLight(light="room", lux=200, reference={"kind": "at-reading", "lux": 400.0})
-    assert light_on_frame(measured, FixedEntry(colour=FixedColour(kelvin=6500))) == (0.0, 0.0, 0.0)
-    assert light_on_frame(measured, MeasuredEntry(colour=FixedColour(kelvin=6500), state=Measured(lux=100.0))) == pytest.approx((50.0,) * 3)
+    assert light_on_frame(measured, FixedEntry(colour=KelvinColour(kelvin=6500))) == (0.0, 0.0, 0.0)
+    assert light_on_frame(measured, MeasuredEntry(colour=KelvinColour(kelvin=6500), state=Measured(lux=100.0))) == pytest.approx((50.0,) * 3)
 
 
 def test_a_dimmer_scales_by_brightness_and_colours_at_luminance_one():
-    warm = light_on_frame(WASH, WhiteEntry(colour=FixedColour(kelvin=2700), state=Dimmer(on=True, brightness=0.5)))
+    warm = light_on_frame(WASH, ReportedEntry(colour=KelvinColour(kelvin=2700), state=Dimmer(on=True, brightness=0.5)))
     assert 0.2126 * warm[0] + 0.7152 * warm[1] + 0.0722 * warm[2] == pytest.approx(25.0)
     assert warm[0] > warm[1] > warm[2]
-    shares = (0.3, 0.6, 0.1)
-    rgb = light_on_frame(WASH, ColourEntry(colour=ReportedColour(channel_shares=shares), state=ColourDimmer(on=True, brightness=0.5, rgb=(1.0, 0.5, 0.0))))
-    assert sum(weight * value for weight, value in zip((0.2126, 0.7152, 0.0722), rgb, strict=True)) == pytest.approx(
-        50 * 0.5 * (1.0 * 0.3 + 0.5 * 0.6))
-    assert rgb[2] == 0.0
+    rgb = light_on_frame(WASH, ReportedEntry(colour=RgbColour(rgb=(1.0, 0.5, 0.0)), state=Dimmer(on=True, brightness=0.5)))
+    assert sum(weight * value for weight, value in zip((0.2126, 0.7152, 0.0722), rgb, strict=True)) == pytest.approx(25.0)
+    assert rgb[0] > rgb[1] > rgb[2] == 0.0
 
 
 def spot_lighting() -> FrameLighting:
@@ -125,7 +119,7 @@ def test_the_spot_is_a_cone_that_feathers_and_switching_it_off_leaves_the_wash()
     """The tracer's Pi half, in the reference: the cone is brightest inside, falls through the
     feather and is gone outside; the spot off, the Frame equals the wash alone."""
     on = picture_lights(spot_lighting(), document(bookshelf_spot=WHITE_ROOM, room=WHITE_ROOM), SIZE, DISPLAY)
-    off = picture_lights(spot_lighting(), document(bookshelf_spot=WhiteEntry(colour=FixedColour(kelvin=6500), state=Dimmer(
+    off = picture_lights(spot_lighting(), document(bookshelf_spot=ReportedEntry(colour=KelvinColour(kelvin=6500), state=Dimmer(
         on=False, brightness=1.0)), room=WHITE_ROOM), SIZE, DISPLAY)
     wash = picture_lights(lighting(WashLight(light="room", lux=MATCHED / 10, reference=AT_FULL)),
                         document(room=WHITE_ROOM), SIZE, DISPLAY)
@@ -152,7 +146,7 @@ def test_a_warm_light_keeps_one_colour_from_the_shadows_to_paper_white():
     enough to pass the TV's white keeps the same green/red and blue/red ratios after the rolloff.
     Mutation probe: roll each channel apart -> the ratios climb toward white (0.17 -> 0.51)."""
     warm = picture_lights(lighting(WashLight(light="lamp", lux=MATCHED, reference=AT_FULL)),
-                        document(lamp=FixedEntry(colour=FixedColour(kelvin=2700))), SIZE, DISPLAY)
+                        document(lamp=FixedEntry(colour=KelvinColour(kelvin=2700))), SIZE, DISPLAY)
     assert warm.peak > 1
     ratios = []
     for grey in (0.05, 0.18, 0.4, 0.7, 1.0):

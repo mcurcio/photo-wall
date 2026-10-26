@@ -28,6 +28,9 @@ NODE_CONTROL = NodeControlConfig("node-test")
 # How long a stopping server waits for open connections before it closes them (uvicorn's
 # timeout_graceful_shutdown); the thread join below allows it and the lifespan's shutdown.
 GRACE_SECONDS = 2
+# Central's version the harness states: the browser leg runs from source without the photo-wall
+# distribution installed (checks.yml `--no-install-project`), so there is none to read.
+CENTRAL_VERSION = "0.40.0"
 
 # Readiness sequences only ever rise, as a live Player's do (player/executor.py).
 _SEQUENCE = itertools.count(1)
@@ -50,7 +53,8 @@ def operator_server(db, clock, *, cache_root=None, media_queue=None, admin_token
 
     `node_control` is the node control configuration (node-test by default)."""
     app = create_app(db, clock, admin_token, run_scheduler=False,
-                     cache_root=cache_root, media_queue=media_queue, node_control=node_control)
+                     cache_root=cache_root, media_queue=media_queue, node_control=node_control,
+                     central_version=CENTRAL_VERSION)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen()

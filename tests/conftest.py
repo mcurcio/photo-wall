@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from support.database import TestDatabases, server_dsn
-from support.shards import select_shard, shard
+from support.shards import EACH_CASE, select_shard, shard
 
 from central.db import Database
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
@@ -54,6 +54,8 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "db: needs PostgreSQL (derived from its fixtures)")
     config.addinivalue_line("markers", "browser: drives the console in a browser (tests/browser)")
     config.addinivalue_line("markers", "node_pid1: the node under real systemd (node-pid1.yml)")
+    config.addinivalue_line("markers", f"{EACH_CASE}: shard each parametrised case on its own "
+                            "(support/shards.py)")
     config.addinivalue_line("markers", "immich: needs the published Immich fixture (derived from "
                             "its fixtures; software-e2e.yml photo-sources)")
 

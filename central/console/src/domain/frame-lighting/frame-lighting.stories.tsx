@@ -1,13 +1,20 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
+import { colourLineSaid, colourSensorNames } from "../room-lights/model";
 import { LIVING_ROOM, PROFILES, ROOMS, UPGRADED } from "../room-lights/room-lights.fixtures";
 import { FrameLighting } from "./frame-lighting";
 import { referenceFor, referenceWords } from "./model";
 
+/** Each room light's colour line as the Frame page composes it from House › Lights' words. */
+const colourOf = (id: string) => {
+  const line = ROOMS.lights.find((each) => each.id === id)?.colour;
+  return line === undefined ? null : colourLineSaid(line, colourSensorNames(ROOMS), () => "Tue 14:20");
+};
+
 const meta = {
   title: "Domain/FrameLighting",
   component: FrameLighting,
-  args: { lighting: UPGRADED, onChange: () => {}, rooms: ROOMS, profiles: PROFILES, disabled: false },
+  args: { lighting: UPGRADED, onChange: () => {}, rooms: ROOMS, profiles: PROFILES, colourOf, disabled: false },
 } satisfies Meta<typeof FrameLighting>;
 
 export default meta;

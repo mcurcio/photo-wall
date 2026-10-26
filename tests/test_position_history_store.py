@@ -428,12 +428,11 @@ def test_restore_refuses_an_entry_whose_lighting_names_a_room_light_gone_since(r
     from central.frame_lighting.model import FrameLightingRefused
     from central.infra.frame_lighting_store import PgHouseLock
     from central.infra.room_light_store import PgRoomLights
-    from central.room_light.model import FixedLight
+    from central.room_light.model import FixedLight, TypedColour
     from contracts.frame_lighting import AT_FULL, WashLight
-    from contracts.room_light import FixedColour
 
     lights = PgRoomLights(registry.db, PgHouseLock())
-    lights.save_room_light("spot", FixedLight(name="Spot", colour=FixedColour(kelvin=2700)))
+    lights.save_room_light("spot", FixedLight(name="Spot", colour=TypedColour(kelvin=2700)))
     spotlit = LIGHTING.model_copy(update={"lights": (WashLight(light="spot", lux=500.0, reference=AT_FULL),)})
     node = Node(registry)
     trial = node.edit(node.begin(), SKEWED, spotlit)

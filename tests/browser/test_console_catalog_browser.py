@@ -124,6 +124,9 @@ def differing_share(actual, expected):
     return changed / (actual.width * actual.height)
 
 
+# Every story is one case of this test, the leg's whole length: its cases split across the leg's
+# shards (support/shards.py).
+@pytest.mark.shard_each_case
 @pytest.mark.parametrize("scheme", SCHEMES)
 @pytest.mark.parametrize("story", stories())
 def test_story_renders_clean_passes_axe_and_matches_its_baseline(

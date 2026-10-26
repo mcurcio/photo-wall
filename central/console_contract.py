@@ -38,8 +38,10 @@ from central.infra.home_assistant.views import HomeAssistantStatesView
 from central.infra.light_sensor_judge import PI_SOURCE
 from central.registry import FrameTurnChange, FrameVideoChange
 from central.room_light.model import (
+    COLOUR_SENSORS_MAX,
     ROOM_LIGHT_NAME_MAX,
     SENSORS_MAX,
+    ColourSensor,
     DrawnReportRefusal,
     ReportRefusal,
     RoomLight,
@@ -61,7 +63,13 @@ from contracts.frame_lighting import (
     WHITENESS_MIN,
     FrameLighting,
 )
-from contracts.kelvin import KELVIN_TABLE_MAX, KELVIN_TABLE_MIN, KELVIN_TABLE_STEP
+from contracts.kelvin import (
+    KELVIN_STATED_MAX,
+    KELVIN_STATED_MIN,
+    KELVIN_TABLE_MAX,
+    KELVIN_TABLE_MIN,
+    KELVIN_TABLE_STEP,
+)
 from contracts.node_picture import (
     MATCHED_LUX_MAX,
     MATCHED_LUX_MIN,
@@ -72,26 +80,27 @@ from contracts.room_light import (
     LUX_MAX,
     ROOM_LIGHT_ID_PATTERN,
     ROOM_LIGHTS_MAX,
-    LightWord,
+    LightColour,
     Lux,
     Reading,
 )
 
 CONSOLE_BODIES: Final[tuple[type[BaseModel], ...]] = (   # bodies the console sends (and RoomLight, a union)
-    Sensor, TrialBegin, TrialEdit, TrialStep, FrameLighting, PositionRestore, VersionChoice, FrameTurnChange,
+    Sensor, ColourSensor, TrialBegin, TrialEdit, TrialStep, FrameLighting, PositionRestore, VersionChoice, FrameTurnChange,
     FrameVideoChange)
 CONSOLE_VIEWS: Final[tuple[type[BaseModel], ...]] = (    # answers the console reads
     RoomLightsView, DrawnView, RefusedReportsView, PaperProfileView, PaperProfilesView,
     PositionHistoryView, PictureHistoryView, LightView, HomeAssistantStatesView, ReleasesView, InstallStarted)
 CONSOLE_ALIASES: Final[Mapping[str, object]] = {     # named types a view's fields take, by their name
-    "Lux": Lux, "LightWord": LightWord, "Reading": Reading}
+    "Lux": Lux, "LightColour": LightColour, "Reading": Reading}
 CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
     "FRAME_LIGHTS_MAX": FRAME_LIGHTS_MAX, "MAT_DEPTH_MM_MAX": MAT_DEPTH_MM_MAX, "CLOSE_REACH_MM": CLOSE_REACH_MM,
     "BEAM_DEGREES_MAX": BEAM_DEGREES_MAX, "WHITENESS_MIN": WHITENESS_MIN, "INK_DENSITY_MIN": INK_DENSITY_MIN,
     "INK_DENSITY_MAX": INK_DENSITY_MAX, "GLOSS_INK": GLOSS_INK, "MATTE_INK": MATTE_INK,
     "SHEET_WHITENESS": SHEET_WHITENESS, "LUX_MAX": LUX_MAX, "KELVIN_TABLE_MIN": KELVIN_TABLE_MIN,
     "KELVIN_TABLE_MAX": KELVIN_TABLE_MAX, "KELVIN_TABLE_STEP": KELVIN_TABLE_STEP, "ROOM_LIGHTS_MAX": ROOM_LIGHTS_MAX,
-    "SENSORS_MAX": SENSORS_MAX, "ROOM_LIGHT_NAME_MAX": ROOM_LIGHT_NAME_MAX,
+    "SENSORS_MAX": SENSORS_MAX, "COLOUR_SENSORS_MAX": COLOUR_SENSORS_MAX,
+    "KELVIN_STATED_MIN": KELVIN_STATED_MIN, "KELVIN_STATED_MAX": KELVIN_STATED_MAX, "ROOM_LIGHT_NAME_MAX": ROOM_LIGHT_NAME_MAX,
     "ROOM_LIGHT_ID_PATTERN": ROOM_LIGHT_ID_PATTERN, "HOME_ASSISTANT_SOURCE": references.SOURCE, "PI_SOURCE": PI_SOURCE,
     "MATCHED_LUX_MIN": MATCHED_LUX_MIN, "MATCHED_LUX_MAX": MATCHED_LUX_MAX, "PANEL_BLACK_MIN": PANEL_BLACK_MIN,
     "PANEL_BLACK_MAX": PANEL_BLACK_MAX,
