@@ -5,6 +5,7 @@ import {
   type Unavailable,
 } from "../../generated/contract";
 import type { TruthKind } from "../../design/tokens";
+import type { ColourLine } from "../../patterns/colour-swatch";
 import { unitWords } from "../../patterns/units";
 
 /*
@@ -127,14 +128,6 @@ export function colourLineWords(line: ColourLineView, names: Readonly<Record<str
 function colourLineTone(line: ColourLineView): TruthKind {
   if (line.source !== "typed" && line.cant_tell_since !== null) return "unknown";
   return line.source !== "typed" && line.colour_from === "following" ? "reported" : "set";
-}
-
-/** A room light's colour line in words, its truth kind and its swatch: one shape, House › Lights' and
- * the Lighting tab's. */
-export interface ColourLine {
-  words: string;
-  tone: TruthKind;
-  swatch: string | null;
 }
 
 /** A CSS rgb() channel's top: a share of 1 is this. */

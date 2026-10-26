@@ -1,7 +1,7 @@
 import {
   CONSTANTS, type FrameLighting as Lighting, LIMITS, type RoomLightId, type RoomLightsView,
 } from "../../generated/contract";
-import { ColourSwatch } from "../../patterns/colour-swatch";
+import { type ColourLine, ColourSwatch } from "../../patterns/colour-swatch";
 import { FactGroup, FactRow, Note } from "../../patterns/fact-row";
 import { OwnerLinks } from "../../patterns/link-to-owner";
 import { TypedNumber } from "../../patterns/typed-number";
@@ -13,7 +13,6 @@ import { SegmentedControl } from "../../ui/segmented-control";
 import { Select } from "../../ui/select";
 import { Slider } from "../../ui/slider";
 import { Inline, Stack } from "../../ui/stack";
-import type { ColourLine } from "../room-lights/model";
 import {
   asKind, type FrameLight, fromWords, inkWords, KIND_NAMES, type Paper, type PaperProfileChoice, referenceWords,
   sensorFor, viewing, withLight,

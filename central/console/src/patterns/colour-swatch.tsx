@@ -1,4 +1,14 @@
 import type { ReactNode } from "react";
+import type { TruthKind } from "../design/tokens";
+
+/** A colour line as the console shows it: its words, its truth kind and its swatch (a CSS colour, or
+ * null for words alone). One shape, worked out by a domain's model (room lights' `colourLineSaid`)
+ * and drawn by any context that shows it (House › Lights, a Frame's Lighting tab). */
+export interface ColourLine {
+  words: string;
+  tone: TruthKind;
+  swatch: string | null;
+}
 
 // The swatch's size, about the text's x-height, and its corner.
 const SWATCH = { width: 20, height: 12, corner: 3 } as const;
