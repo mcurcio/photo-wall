@@ -5,6 +5,7 @@ import math
 
 import pytest
 
+from contracts.frame_fit import FreeAxis, free_axis
 from contracts.models import PhotoCrop
 from contracts.photo_crop import CENTRED, crop_window
 
@@ -38,6 +39,19 @@ def test_equal_aspects_have_no_free_axis(offset) -> None:
     assert crop_window(PhotoCrop(offset=offset), 300, 200, 1.5) == (0, 0, 1, 1)
 
 
+@pytest.mark.parametrize(("width", "height", "aspect", "axis"), [
+    (200, 100, 1, FreeAxis("x", .5)),
+    (100, 200, 1, FreeAxis("y", .5)),
+    (300, 200, 1.5, FreeAxis("y", 1.0)),
+])
+def test_the_free_axis_is_the_one_the_window_slides_along(width, height, aspect, axis) -> None:
+    """The axis follows from the two ratios; the window's first edge on it at an offset."""
+    assert free_axis(width, height, aspect) == axis
+    left, top, right, bottom = crop_window(PhotoCrop(offset=.3), width, height, aspect)
+    start, end = (left, right) if axis.along == "x" else (top, bottom)
+    _close((start, end), (axis.start(.3), axis.start(.3) + axis.length))
+
+
 @pytest.mark.parametrize(("width", "height", "aspect"), [
     (200, 100, 0), (200, 100, -1), (200, 100, math.nan), (200, 100, math.inf),
     (0, 100, 1), (200, 0, 1), (-1, 100, 1),
@@ -45,3 +59,5 @@ def test_equal_aspects_have_no_free_axis(offset) -> None:
 def test_a_bad_aspect_or_size_is_refused(width, height, aspect) -> None:
     with pytest.raises(ValueError):
         crop_window(CENTRED, width, height, aspect)
+    with pytest.raises(ValueError):
+        free_axis(width, height, aspect)

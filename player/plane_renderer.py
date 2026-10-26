@@ -52,7 +52,8 @@ Rules this module owns (one home each):
   again; a failed layer's draw is given up at once (a still's retired, a video's target and frame
   given back). While a fence is pending and nothing else is owed, `due` is FENCE_POLL away, never
   now: a turn never spins at FRAME priority over the planning tick. A present whose screen's last
-  commit is unanswered returns its last answer at once, before any sweep, grant or setting work,
+  commit is unanswered answers at once, before any sweep, grant or setting work (the last answer
+  if it was made for this request, else "pending": Outcomes),
   and `due` reads each such screen's word before judging it overdue, so a turn polling a fence
   costs a read, not a present (Pi diagnosis, milestone 3: the main thread at 87 % while a video's
   fence was pending).
@@ -88,7 +89,10 @@ Rules this module owns (one home each):
   ("decode"); over the controller budget with every other Output's last commit: "failed"
   ("capacity"), nothing committed; a seen layer's picture (or the pattern) not finished yet:
   "pending", the screen keeps its last commit; else "presented" (that commit), its composition the
-  looked one.
+  looked one. A "presented" answers only the request asked (player/rendering.py
+  `OutputComposition.request`; the frame loop and the planning tick share the one commit in flight):
+  while the screen's last commit is unanswered, the last answer if it was made for this request,
+  else "pending"; a present that shows what the last commit shows answers with this request's look.
 """
 from __future__ import annotations
 
@@ -237,6 +241,12 @@ VideoFactory = Callable[[Path, Callable[[], None]], Video]
 
 _PENDING: Final = PresentationResult("pending")
 _FAILED: Final = PresentationResult("failed", "decode")
+
+
+def _answers(result: PresentationResult, composition: OutputComposition) -> bool:
+    """Whether `result` is an answer about `composition`: one made for its request
+    (player/rendering.py `OutputComposition.request`; module rule, Outcomes)."""
+    return result.composition is not None and result.composition.request == composition.request
 
 
 def _expiry(trial: AppliedTrial, now: float) -> float:
@@ -575,8 +585,9 @@ class PlaneRenderer:
         one commit over the screen's ground (or its pattern ground), by its drawn Position, within
         the controller budget with every other Output's last commit (module rules, Outcomes). While
         the screen's last commit has no word from the compositor (player/pacing.py) nothing is
-        committed and the answer is the last commit's; a present that shows what the last commit
-        shows commits nothing either. `composition` is held (module rule) for `frame`."""
+        committed; a present that shows what the last commit shows commits nothing either (the
+        answer in each case: module rule, Outcomes). `composition` is held (module rule) for
+        `frame`."""
         self._held[composition.binding.output_id] = composition
         return self._present(composition)
 
@@ -588,8 +599,8 @@ class PlaneRenderer:
         word = self._screens.presentation(output_id, now)
         if word is not None:
             state.pacer.answered(word)
-        if not state.pacer.free(now):
-            return state.last                       # nothing can be committed: no other work (module rule)
+        if not state.pacer.free(now):               # nothing can be committed: no other work (module rule)
+            return state.last if _answers(state.last, composition) else _PENDING
         self._sweep()
         grant = self._screens.grant(composition)
         if grant is None:
@@ -644,7 +655,8 @@ class PlaneRenderer:
         shows = (composed.screen, tuple(self._shown(plane, pictures) for plane in composed.planes), tag,
                  setting.tagged, grant.grant_id, None if ground is None else ground.handle, overlay, drawn.applied)
         if state.committed == shows and state.last.status == "presented":
-            return state.last
+            state.last = replace(state.last, composition=looked)
+            return state.last                       # what the screen shows is this request's look
         sequence = self._screens.present(composed, pictures, grant, tag, setting.tagged, ground, overlay)
         if not isinstance(sequence, int):
             return _FAILED

@@ -9,6 +9,7 @@ import math
 import pytest
 from support.frame_outputs import target_of
 from support.key_content_builders import banded_grid, face, key_content, measured
+from support.real_crops import EASTER, EASTER_SIZE, FIREPLACE_PX, MICKEY, MICKEY_SIZE
 
 from central.catalog import Candidate
 from central.installation_models import FrameOutput
@@ -19,14 +20,20 @@ from central.wall_plan.fit import (
     FitVerdict,
     band,
     crop_share,
+    faces_judged,
     fit_target,
+    interest_judged,
     interest_kept,
     judge,
     large_frame,
+    place,
     shape_fit,
 )
 from central.wall_plan.fit_settings import FitSettings
-from contracts.models import Calibration, PositionBox, frame_output, frame_size_mm
+from central.wall_plan.key_content import KeyContent, UnitBox
+from contracts.frame_fit import FreeAxis, free_axis
+from contracts.models import Calibration, PhotoCrop, PositionBox, frame_output, frame_size_mm
+from contracts.photo_crop import crop_window
 
 UHD = target_of(3840, 2160, inches=55)
 UHD_40 = target_of(3840, 2160, inches=40)
@@ -338,3 +345,188 @@ def test_a_frame_with_no_known_screen_has_no_target() -> None:
     frame = _frame(WHOLE, screen=None)
     assert frame.output_px is None
     assert fit_target(frame) is None
+
+
+# --- Where the window sits: the faces at their place in the photo (`place`) ----------------------
+# Owner, 2026-10-25: "The last two photos on the frame were oddly cropped. The one with Mickey and
+# the one with Easter bunny"; then: "A lone face should sit “in the same relative position within
+# the image as the original (if possible), and cropped only as much as needed to fit the scaled
+# image into the frame." On a photo with faces the window keeps the faces' area-weighted centre at
+# its place in the photo; a photo without faces keeps the most interest.
+
+FIREPLACE = FitTarget(output_px=FIREPLACE_PX, video=True, size_mm=None)
+TWO_BY_THREE = target_of(720, 1080, inches=20)
+STEP = 1 / HOUSE.window_steps
+
+
+def _head(centre: float, tall: float, *, x: float = .5) -> UnitBox:
+    """A face `tall` of the photo's height and three quarters of that wide, centred at
+    (`x`, `centre`)."""
+    wide = tall * .75
+    return face(x - wide / 2, centre - tall / 2, x + wide / 2, centre + tall / 2)
+
+
+def _placed(width: int, height: int, key: KeyContent, target: FitTarget) -> tuple[float, float]:
+    """The chosen offset and the judged faces' area-weighted centre along the free axis (a share
+    of the photo); the photo must fit with every face whole."""
+    verdict = judge("image", width, height, key, target, .6, HOUSE)
+    assert isinstance(verdict, Fits), verdict
+    window = crop_window(verdict.crop, width, height, target.aspect)
+    axis = free_axis(width, height, target.aspect)
+    faces = faces_judged(key, HOUSE)
+    assert faces and all(_inside(one, window) for one in faces)
+    spans = [(one.left, one.right) if axis.along == "x" else (one.top, one.bottom)
+             for one in faces]
+    areas = [(one.right - one.left) * (one.bottom - one.top) for one in faces]
+    centre = sum(area * (start + end) / 2 for area, (start, end) in zip(areas, spans)) / sum(areas)
+    return verdict.crop.offset, centre
+
+
+def _where(centre: float, offset: float, axis: FreeAxis) -> float:
+    """Where `centre` (a share of the photo along `axis`) sits in the window at `offset`, as a
+    share of the window's length."""
+    return (centre - axis.start(offset)) / axis.length
+
+
+def _inside(box: UnitBox, window) -> bool:
+    left, top, right, bottom = window
+    return (box.left >= left - 1e-9 and box.right <= right + 1e-9
+            and box.top >= top - 1e-9 and box.bottom <= bottom + 1e-9)
+
+
+@pytest.mark.parametrize(("size", "key", "offset"), [
+    (MICKEY_SIZE, MICKEY, 22 / 64),     # the most-interest rule: 0.453, a face at the top edge
+    (EASTER_SIZE, EASTER, 21 / 64),     # the most-interest rule: 0, the children cut at the chin
+])
+def test_the_two_photos_cropped_badly_on_the_fireplace_frame_keep_their_faces_in_place(
+        size, key, offset) -> None:
+    """Their stored key content on the fireplace Frame: the faces' centre (Mickey 0.347, Easter
+    0.327 of the photo's height) sits at the same share of the window, within half a step, and
+    the verdict's interest kept is that window's.
+    Mutation probes: choose the window keeping the most interest -> Mickey 0.453, Easter 0;
+    aim the window's centre at the faces' -> Mickey 0.172, Easter 0.125; the faces' window with
+    its room shared by their size (PR 138's first aim) -> Mickey 0.172, Easter 0.141; weight the
+    faces equally -> Mickey 0.359; report the most interest any passing window keeps -> another
+    window's share."""
+    placed, centre = _placed(*size, key, FIREPLACE)
+    axis = free_axis(*size, FIREPLACE.aspect)
+    assert placed == offset
+    assert abs(_where(centre, placed, axis) - centre) <= STEP * (1 - axis.length) / axis.length / 2
+    verdict = judge("image", *size, key, FIREPLACE, .6, HOUSE)
+    window = crop_window(verdict.crop, *size, FIREPLACE.aspect)
+    assert verdict.interest_kept == interest_kept(interest_judged(key, HOUSE), window)
+
+
+@pytest.mark.parametrize(("size", "key", "offset"), [
+    (MICKEY_SIZE, MICKEY, 1), (EASTER_SIZE, EASTER, 0),
+])
+def test_without_faces_the_window_keeping_the_most_interest_wins(size, key, offset) -> None:
+    """The same photos with no faces found keep today's rule: Mickey's floor and the bunny's tree
+    hold the most interest, and the window goes to them.
+    Mutation probe: centre a photo without faces -> 0.5."""
+    verdict = judge("image", *size, key.model_copy(update={"faces": ()}), FIREPLACE, .6, HOUSE)
+    assert isinstance(verdict, Fits) and verdict.crop.offset == offset
+
+
+def test_a_lone_face_keeps_its_place_in_the_photo() -> None:
+    """One face at 30 % of a 3 : 4 photo's height sits at 30 % of the window's, within half a
+    step, on even interest and with half the interest in the bottom quarter (which a window
+    without the face would take, at offset 1).
+    Mutation probes: choose the window keeping the most interest -> 0.5; aim the window's centre
+    at the face -> 0.078125 (the face centred)."""
+    width, height = 4500, 6000
+    axis = free_axis(width, height, FIREPLACE.aspect)
+    for grid in (None, banded_grid(rows=12, bottom=.25, weight=.5)):
+        offset, centre = _placed(width, height, key_content(width, height,
+                                                            faces=(_head(.3, .06),), grid=grid),
+                                 FIREPLACE)
+        assert centre == pytest.approx(.3)
+        assert offset == 19 / 64
+        assert abs(_where(.3, offset, axis) - .3) <= STEP * (1 - axis.length) / axis.length / 2
+
+
+def test_a_stranger_in_the_background_does_not_move_the_window() -> None:
+    """The lone face at 30 % of the photo's height with a stranger's face (0.12 % of the photo,
+    under `min_face_share`) at 85 %: the window is the lone face's, 19/64.
+    Mutation probe: aim from every face found, not the judged ones -> their centre 0.469, 30/64."""
+    width, height = 4500, 6000
+    offset, _ = _placed(width, height, key_content(width, height, faces=(
+        _head(.3, .06), _head(.85, .04, x=.7))), FIREPLACE)
+    assert offset == 19 / 64
+
+
+@pytest.mark.parametrize(("centre", "offset", "toward"), [(.05, 1 / 64, 1), (.95, 63 / 64, -1)])
+def test_a_face_near_an_edge_moves_only_as_far_as_keeping_it_whole_needs(centre, offset,
+                                                                         toward) -> None:
+    """A face so near the photo's edge that the window at its place would cut it: the window
+    moves off that place only to the nearest window holding it whole, not to the photo's edge.
+    Mutation probes: let windows cut faces -> the face cut; aim the window's centre at the face
+    -> 0 and 1, the photo's edges."""
+    width, height = 4500, 6000
+    key = key_content(width, height, faces=(_head(centre, .06),))
+    placed, _ = _placed(width, height, key, FIREPLACE)
+    assert placed == offset
+    nearer = crop_window(PhotoCrop(offset=offset + toward * STEP), width, height, FIREPLACE.aspect)
+    assert not all(_inside(one, nearer) for one in faces_judged(key, HOUSE))
+
+
+def test_a_bigger_face_pulls_harder() -> None:
+    """A big face above a small one: their centre, weighted by area, lies near the big face
+    (0.393 of the photo, not the midpoint 0.4925), and the window keeps it there.
+    Mutation probes: weight the faces equally -> 0.5; aim the window's centre at their centre
+    -> 0.28125."""
+    width, height = 4500, 6000
+    offset, centre = _placed(width, height, key_content(width, height, faces=(
+        _head(.36, .16, x=.4), _head(.625, .06, x=.6))), FIREPLACE)
+    assert centre == pytest.approx(.3927, abs=1e-4)
+    assert offset == 25 / 64
+
+
+def test_four_faces_of_a_group_keep_their_place() -> None:
+    """A real group photo's four faces (6,000 x 4,000) on a 2 : 3 Frame: their weighted centre,
+    0.476 of the photo's width, sits at the same share of the window.
+    Mutation probes: weight the faces equally -> 0.5; aim the window's centre at their centre
+    -> 0.453125, the right face near the window's edge."""
+    group = (face(.3472222222222222, .10625, .4023148148148148, .23125),
+             face(.44305555555555554, .44027777777777777, .49166666666666664, .53125),
+             face(.4583333333333333, .2611111111111111, .5074074074074074, .3611111111111111),
+             face(.6449074074074074, .27847222222222223, .6893518518518519, .36180555555555555))
+    offset, centre = _placed(6000, 4000, key_content(6000, 4000, faces=group), TWO_BY_THREE)
+    assert centre == pytest.approx(.4763, abs=1e-4)
+    assert offset == 30 / 64
+
+
+def test_the_nearest_of_the_windows_that_pass_wins() -> None:
+    """Interest in the top and bottom tenths of a 4 : 3 photo on a 16 : 9 Frame passes only the
+    windows near either end (two runs of passing offsets); a face just above the middle takes the
+    passing window nearest its place, at the top run's end.
+    Mutation probe: choose the window keeping the most interest -> 0."""
+    width, height = 4000, 3000
+    grid = banded_grid(rows=30, top=.1, bottom=.1, weight=.5)
+    centred = crop_window(PhotoCrop(offset=.5), width, height, UHD.aspect)
+    assert 1 - interest_kept(grid, centred) > HOUSE.max_lost_interest_density * .25
+    offset, _ = _placed(width, height, key_content(width, height,
+                                                   faces=(face(.45, .44, .55, .54),),
+                                                   grid=grid), UHD)
+    assert offset == 6 / 64
+
+
+def test_place_needs_a_window_and_centres_an_equal_shape() -> None:
+    """`place` refuses no windows; a photo of the Frame's own shape has one window, offset 0.5."""
+    with pytest.raises(ValueError):
+        place((), free_axis(4000, 3000, 1), ())
+    assert place(((0.0, 1.0), (.5, 1.0), (1.0, 1.0)), free_axis(1600, 900, 16 / 9),
+                 (face(0, 0, .1, .1),)) == .5
+
+
+@pytest.mark.parametrize(("passing", "centre", "offset"), [
+    (((.0, 1.0), (.5, .2)), .25, .5),       # offsets 0 and .5: the one nearer 0.5
+    (((.75, 1.0), (.25, .2)), .5, .25),     # offsets .75 and .25: the lower offset
+])
+def test_a_face_midway_between_two_windows_takes_the_central_then_the_lower(passing, centre,
+                                                                            offset) -> None:
+    """A lone face midway between two passing windows' places, the interest favouring the other:
+    the window whose offset is nearer 0.5 wins, then the lower offset.
+    Mutation probes: drop the nearest-0.5 tie -> 0; drop the lower-offset tie -> 0.75."""
+    lone = face(.45, centre - .05, .55, centre + .05)
+    assert place(passing, FreeAxis("y", .5), (lone,)) == offset

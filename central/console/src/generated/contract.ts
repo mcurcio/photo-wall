@@ -47,6 +47,11 @@ export interface Dimmer {
   on: boolean;
 }
 
+export interface DisplayRefView {
+  id: string;
+  name: string;
+}
+
 export interface DrawnView {
   players: PlayerDrawnView[];
 }
@@ -189,6 +194,34 @@ export interface PaperProfileView {
 
 export interface PaperProfilesView {
   paper_profiles: PaperProfileView[];
+}
+
+export type PictureEntryKind = "kept-done" | "kept-copied" | "kept-unrecorded" | "sent-draft" | "sent-back" | "sent-kept";
+
+export interface PictureEntryView {
+  at: string;
+  display: DisplayRefView;
+  entry_id: string;
+  frame: FrameRefView | null;
+  kind: PictureEntryKind;
+  number: number;
+  picture: PictureValuesView;
+  restored_from: string | null;
+  session_id: string | null;
+  test_pattern: TestPattern | null;
+}
+
+export interface PictureHistoryView {
+  display: DisplayRefView;
+  entries: PictureEntryView[];
+  unrecorded_change: boolean;
+}
+
+export interface PictureValuesView {
+  hardware: Record<string, number>;
+  light: LightView | null;
+  signal_range: SignalRange;
+  software: SoftwarePictureView;
 }
 
 export interface PlayerDrawnView {
@@ -336,6 +369,16 @@ export interface SensorView {
   reports: RoomLightId | null;
   sensor: Sensor;
 }
+
+export type SignalRange = "auto" | "full" | "limited";
+
+export interface SoftwarePictureView {
+  colour_temperature_kelvin: number;
+  contrast_percent: number;
+  gamma_tenths: number;
+}
+
+export type TestPattern = "white" | "grey-ramp" | "black-level" | "target-pre-software" | "target-post-software";
 
 export interface TrialBegin {
   calibration?: Calibration | null;
@@ -571,6 +614,12 @@ export const LIMITS = {
       pattern: "^[a-f0-9]{64}$",
     },
   },
+  PictureEntryView: {
+    number: {
+      integer: true,
+      minimum: 1,
+    },
+  },
   PlayerDrawnView: {
     player_id: {
       pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
@@ -690,6 +739,23 @@ export const LIMITS = {
   SensorView: {
     id: {
       pattern: "^[a-z0-9][a-z0-9-]{0,31}$",
+    },
+  },
+  SoftwarePictureView: {
+    colour_temperature_kelvin: {
+      integer: true,
+      maximum: 9300,
+      minimum: 3000,
+    },
+    contrast_percent: {
+      integer: true,
+      maximum: 150,
+      minimum: 0,
+    },
+    gamma_tenths: {
+      integer: true,
+      maximum: 26,
+      minimum: 18,
     },
   },
   TrialEdit: {

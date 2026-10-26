@@ -41,6 +41,15 @@ class OutputComposition:
         with, so a layer prepared ahead on the same binding is fitted as its frames draw it."""
         return self.binding.calibration
 
+    @property
+    def request(self) -> tuple:
+        """What the composition asks to be shown, apart from how it looks at a time (each layer's
+        position and alpha, the timebase): its binding (the calibration with it), whether it is a
+        fallback, and each layer as planned (its timing, fades, priority and crop too) with its
+        file, bottom to top. The one home of "the same composition" (`Renderer.present`; the
+        executor waits for a draw by it, player/executor.py)."""
+        return self.binding, self.fallback, tuple((local.layer, local.path) for local in self.layers)
+
 
 @dataclass(frozen=True)
 class PrepareResult:
@@ -80,6 +89,8 @@ class Renderer(Protocol):
 
     def capacity(self, compositions: tuple[OutputComposition, ...]) -> CapacityResult: ...
 
+    # "presented" answers `composition`'s request alone (`OutputComposition.request`), never what
+    # was shown for another; one that cannot show it yet answers "pending".
     def present(self, composition: OutputComposition) -> PresentationResult: ...
 
     def release(self, assignment_id: str) -> None: ...
