@@ -1,9 +1,11 @@
 """What room lights' edges depend on: one plain method per question, never a generic apply.
 central/infra/room_light_store.py `PgRoomLights` implements them over PostgreSQL.
 
-Every report is kept by its reference whether or not a room light or Sensor names it yet, and is
-resolved when the document is built, so a light or Sensor set up after its source last spoke shows
-that word at once. Every write that changes the room-lights document raises its `change` in the same
+Every report is kept by its reference whether or not a room light, Sensor or colour sensor names it
+yet, and is resolved when the document is built, so one set up after its source last spoke shows
+that word at once. What a report keeps is policy.py's (`light_facts_after`, `reading_facts_after`,
+`colour_facts_after`: a stated value replaces the last, "can't tell" leaves it standing and marks
+since when). A named reference's facts are never trimmed. Every write that changes the room-lights document raises its `change` in the same
 transaction and wakes the worker's WALL writer, so a House › Lights edit in the API process reaches
 every Pi without waiting.
 """
@@ -13,6 +15,11 @@ from typing import Protocol
 
 from central.kernel.transactions import Transaction
 from central.room_light.model import (
+    ColourReading,
+    ColourSensor,
+    ColourSensorId,
+    ColourSensorRef,
+    LightReport,
     Recorded,
     ReporterRef,
     ReportRefusal,
@@ -25,6 +32,7 @@ from central.room_light.model import (
     Source,
 )
 from central.room_light.views import (
+    ColourSensorView,
     DrawnView,
     RefusedReportsView,
     RoomLightsView,
@@ -32,7 +40,6 @@ from central.room_light.views import (
     SensorView,
 )
 from contracts.room_light import (
-    LightWord,
     Reading,
     RoomLightsDocument,
     RoomLightsDrawn,
@@ -44,16 +51,23 @@ class RoomLightReports(Protocol):
     (central/infra/home_assistant/) and the Pi light sensor's judge of the host line. No source's
     names, scales or shapes cross it."""
 
-    def record_light_state(self, reporter: ReporterRef, state: LightWord) -> Recorded:
-        """Keep `state` as `reporter`'s last word, and Central's time as when it was heard, whether or
-        not a room light names `reporter` yet. "recorded" when the document changed (its change
-        rises and the WALL writer wakes at commit), else "unchanged" (a repeat, or no light names it)."""
+    def record_light_state(self, reporter: ReporterRef, report: LightReport) -> Recorded:
+        """Keep what `report` states as `reporter`'s facts (policy.light_facts_after), heard now
+        (Central's clock), whether or not a room light names `reporter` yet. "recorded" when the
+        document changed (its change rises and the WALL writer wakes at commit), else "unchanged" (a
+        repeat, "can't tell" over a kept value, or no light names it)."""
         ...
 
     def record_reading(self, sensor: SensorRef, reading: Reading) -> Recorded:
-        """Keep `reading` as `sensor`'s last word, heard now, whether or not a Sensor is there yet;
-        the room light that Sensor measures takes it when the document is built. "recorded" when the
-        document changed, else "unchanged"."""
+        """Keep what `reading` states as `sensor`'s facts (policy.reading_facts_after), heard now,
+        whether or not a Sensor is there yet; the room light that Sensor measures takes it when the
+        document is built. "recorded" when the document changed, else "unchanged"."""
+        ...
+
+    def record_colour_reading(self, sensor: ColourSensorRef, reading: ColourReading) -> Recorded:
+        """Keep what `reading` states as `sensor`'s facts (policy.colour_facts_after), heard now,
+        whether or not a colour sensor is there yet; every room light following that colour sensor
+        takes it when the document is built. "recorded" when the document changed, else "unchanged"."""
         ...
 
     def record_reading_within(self, tx: Transaction, sensor: SensorRef, reading: Reading) -> Recorded:
@@ -73,10 +87,10 @@ class RoomLightReports(Protocol):
 
 
 class RoomLightSetup(Protocol):
-    """Injected into the House › Lights routes. The four writers raise RoomLightRefused."""
+    """Injected into the House › Lights routes. The six writers raise RoomLightRefused."""
 
     def lights(self) -> RoomLightsView:
-        """Every room light and Sensor with its reference's last word."""
+        """Every room light, Sensor and colour sensor with its reference's kept facts and colour line."""
         ...
 
     def save_room_light(self, light_id: RoomLightId, light: RoomLight) -> RoomLightView:
@@ -95,6 +109,15 @@ class RoomLightSetup(Protocol):
         """Remove it (policy.check_sensor_removal)."""
         ...
 
+    def save_colour_sensor(self, sensor_id: ColourSensorId, sensor: ColourSensor) -> ColourSensorView:
+        """Create or replace colour sensor `sensor_id` (policy.check_colour_sensor; its reference's
+        source and form: ReportSources.colour_address_refusal, checked by the route)."""
+        ...
+
+    def remove_colour_sensor(self, sensor_id: ColourSensorId) -> None:
+        """Remove it (policy.check_colour_sensor_removal: refused while a room light follows it)."""
+        ...
+
     def drawn(self) -> DrawnView:
         """What each Player last said it drew with, judged against the document now (policy.drawn_state)."""
         ...
@@ -110,6 +133,11 @@ class ReportSources(Protocol):
 
     def address_refusal(self, source: Source, address: str) -> RoomLightRefusal | None:
         """UNKNOWN_ADDRESS unless `source` is one Central runs and `address` has that source's form."""
+        ...
+
+    def colour_address_refusal(self, source: Source, address: str) -> RoomLightRefusal | None:
+        """UNKNOWN_ADDRESS unless `source` is one Central runs that reports colour temperatures (Home
+        Assistant; never a Pi's light meter) and `address` has that source's form."""
         ...
 
 

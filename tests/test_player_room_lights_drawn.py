@@ -22,10 +22,10 @@ from contracts.room_light import (
     ROOM_LIGHTS_DRAWN_PATH,
     ROOM_LIGHTS_DRAWN_REPEAT_SECONDS,
     Dimmer,
-    FixedColour,
+    KelvinColour,
+    ReportedEntry,
     RoomLightsDocument,
     RoomLightsDrawn,
-    WhiteEntry,
     room_lights_digest,
 )
 from contracts.time import ManualClock
@@ -41,7 +41,7 @@ WASHED = FrameLighting(mat_depth_mm=0, lights=(WashLight(light=LIGHT, lux=150, r
 
 def document(change: int, on: bool) -> RoomLightsDocument:
     return RoomLightsDocument(change=change, lights={
-        LIGHT: WhiteEntry(colour=FixedColour(kelvin=2700), state=Dimmer(on=on, brightness=1.0))})
+        LIGHT: ReportedEntry(colour=KelvinColour(kelvin=2700), state=Dimmer(on=on, brightness=1.0))})
 
 
 class RecordedLine:

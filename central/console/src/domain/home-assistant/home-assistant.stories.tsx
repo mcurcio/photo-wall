@@ -14,10 +14,28 @@ type Story = StoryObj<typeof meta>;
 // Taller than the catalogue's 800 x 600 view: screenshot whole (tests/browser/test_console_catalog_browser.py).
 const WHOLE = ["full-page"];
 
-/** Heard: three entities linked, the kitchen light not linked yet (listed first). */
+/** Heard: four entities linked (the sky's colour among them), the kitchen light and the porch meter
+ * not linked yet (listed first); Galleria's version beside Central's. */
 export const Heard: Story = { tags: WHOLE };
-/** Nothing heard yet: the Galleria integration has not published. */
-export const NotHeardYet: Story = { args: { view: { heard_at: null, entities: [], refused: [] } } };
+/** Galleria too old to send colour sensors: its version beside Central's, and the line to update it. */
+export const UpdateGalleria: Story = {
+  tags: WHOLE,
+  args: {
+    view: {
+      ...HOME_ASSISTANT_STATES,
+      galleria: { ...HOME_ASSISTANT_STATES.galleria, version: "0.39.0", kinds: ["light", "illuminance"], update: true },
+    },
+  },
+};
+/** At phone width. */
+export const Phone: Story = { tags: WHOLE, parameters: { phone: true } };
+/** Nothing heard yet: the Galleria integration has not published, nor said its version. */
+export const NotHeardYet: Story = {
+  args: {
+    view: { galleria: { version: null, kinds: [], heard_at: null, central_version: "0.40.0", update: true },
+      heard_at: null, entities: [], refused: [] },
+  },
+};
 /** States Central could not record, kept with the reason. */
 export const StatesNotRecorded: Story = {
   tags: WHOLE,

@@ -16,7 +16,13 @@ from central.frame_lighting.policy import (
     stamped,
     upgrade_lighting,
 )
-from central.room_light.model import FixedLight, MeasuredLight, ReportedLight, ReporterRef
+from central.room_light.model import (
+    FixedLight,
+    MeasuredLight,
+    ReportedLight,
+    ReporterRef,
+    TypedColour,
+)
 from contracts.frame_lighting import (
     AT_FULL,
     SHEET_WHITENESS,
@@ -27,9 +33,8 @@ from contracts.frame_lighting import (
 )
 from contracts.lut import LutRef
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
-from contracts.room_light import FixedColour
 
-WHITE = FixedColour(kelvin=4000)
+WHITE = TypedColour(kelvin=4000)
 PROFILE = "c" * 64
 HOUSE = LightingHouse(lights={
     "spot": ReportedLight(name="Spot", reporter=ReporterRef(source="home-assistant", address="light.spot"), colour=WHITE),

@@ -15,7 +15,7 @@ from contracts.frame_fit import Placement
 from contracts.frame_lighting import AT_FULL, FarLight, FrameLighting, Paper, WashLight
 from contracts.node_frame import PictureOperations
 from contracts.node_picture import DisplayLight
-from contracts.room_light import FixedColour, FixedEntry, RoomLightsDocument
+from contracts.room_light import FixedEntry, KelvinColour, RoomLightsDocument
 from contracts.tuning import SIGNAL_LEVELS, TestPattern
 from player.calibration_target import target_modules
 from player.fit_pass import target_size
@@ -46,7 +46,7 @@ LIGHTING = FrameLighting(mat_depth_mm=8, paper=Paper(whiteness=.9, ink_density=1
     WashLight(light="room", lux=200, reference=AT_FULL),
     FarLight(light="lamp", lux=600, reference=AT_FULL, from_degrees=20, steep_degrees=30, softness_degrees=20)))
 ROOM = RoomLightsDocument(change=1, lights={
-    "room": FixedEntry(colour=FixedColour(kelvin=6500)), "lamp": FixedEntry(colour=FixedColour(kelvin=3000))})
+    "room": FixedEntry(colour=KelvinColour(kelvin=6500)), "lamp": FixedEntry(colour=KelvinColour(kelvin=3000))})
 DISPLAY = DisplayLight(250.0, .01)
 LIGHTS = picture_lights(LIGHTING, ROOM, (598.0, 336.0), DISPLAY)   # a 27" 16:9 picture, mm
 

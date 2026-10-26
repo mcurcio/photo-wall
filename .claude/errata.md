@@ -7009,3 +7009,133 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
   the aim to the photo") no longer apply: the aim F always lies inside the photo, so there is
   nothing to clamp. Its `interest_kept` deferral still holds (named in contracts/frame_fit.py's
   docstring).
+
+## Light colour follows Home Assistant, interfaces milestone (feat/light-colour-follows, 2026-10-25)
+
+- **The brief names no channel for "Galleria's version"** (Settings › Home Assistant). Added
+  `GalleriaBirth` (contracts/home_assistant.py) at the states bucket's one non-entity key
+  `GALLERIA_BIRTH_KEY = "galleria"`: version plus the entity kinds Galleria publishes. A Galleria older
+  than this release sends none, so Central says "update Galleria" (`settings.galleria_view`). The
+  bucket's newest-1024 trim could drop the key in a house past 1024 entities; Galleria puts it again
+  with every publish of all states.
+- **"Passes HA's value as is (contract range only)" was read as:** the HA contract carries a kelvin
+  as any finite number above 0 (as it carries lux), and Central's adapter refuses one outside
+  contracts/kelvin.py KELVIN_STATED_MIN..MAX (OUT_OF_RANGE, the one refusal log). A light's colour
+  refused that way is refused alone: its on/off and brightness are still recorded.
+- **Audit fields (global rule, 2026-10-24) are absent from the room-light schema** (099 has none) and
+  this delivery's new tables (colour_sensors, colour_words, galleria_birth) follow 099. "By whom" has
+  no actor to name (no accounts, 2026-10-23). Left for the owner with the schema consolidation (#117).
+- **Upgrade data (109):** every reported light becomes "its bulb" with its old kelvin typed (6500 for
+  an old reported-colour light: its channel shares have no kelvin), per Q2. Production `room`
+  (Insteon, brightness only) never states a colour, so it keeps drawing at 5000 K. A light word that
+  was "unavailable" keeps no state and can't tell since it was heard. The document's change rises.
+- **Listening grows by the colour sensors:** LISTENED_MAX 64 -> 96 and the Listening key's largest
+  value 24 -> 32 KiB (96 entity ids of up to 255 bytes).
+- **central/app.py now imports central.node_bus_wiring** for `central_version()` (the settings page
+  shows Central's version beside Galleria's). Kept by import-linter; moving `central_version` to a
+  lighter module is the CENTRAL lane's call.
+- **The milestone carries minimal bodies** (the two holds in policy.py, the store's facts columns,
+  Galleria's colour by mode, the Pi's `drawn_kelvin` and rgb light) so the build and the existing
+  tests stay green on the new wire shape; each lane owns its tests, probes and the rest.
+
+## Light colour follows Home Assistant, DOCS lane (feat/light-colour-follows, 2026-10-25)
+
+- **`drawn_kelvin` rounds halves to even, the brief says halves up.** player/geometry.py at b2f67f4c
+  uses Python's `round(bounded / 100)`, banker's rounding: 2,450 K draws at 2,400 K, 2,550 K at
+  2,600 K. 0028's amendment states the brief's rule (nearest 100 K, a half up); the PLAYER lane owns
+  the fix (`math.floor(x / 100 + 0.5)`), and the console's "drawn at" label must use the same rule.
+- **The runbook names the colour sensor refusals' statuses by analogy:** 409 `colour_sensor_followed`,
+  404 `unknown_colour_sensor` (as `sensor_reports_a_light` and `unknown_sensor`). `REFUSAL_STATUS`
+  (central/room_light_routes.py) at b2f67f4c maps neither, and the routes table there lists no colour
+  sensor route: the CENTRAL lane maps them so, or the runbook changes.
+- **The runbook's refusal table said 422 `unknown_sensor`** for a measured light naming no Sensor; the
+  routes answer 404 (`REFUSAL_STATUS`). Fixed in the runbook.
+- **"Kept facts are never trimmed while named"** (0028 amendment row j, from the gate page's costs and
+  the brief's DB test) is a claim on central/infra/room_light_store.py `_kept_in`, which at b2f67f4c
+  trims the newest WORDS_KEPT_PER_SOURCE per source with no exception for a named reference (read,
+  not run); the CENTRAL lane's DB test proves or fixes it.
+- **scripts/check_docs.py checks file links only, never anchors** (it drops `#…` before checking): a
+  renamed heading leaves every `#room-lights-and-home-assistant` link silently broken. The mutation
+  probe used a broken relative file link instead.
+- **Resolved:** the half-up rounding above landed in 893eeffb (PLAYER lane) before this lane's push.
+
+## Light colour follows Home Assistant, CENTRAL lane (feat/light-colour-follows, 2026-10-25)
+
+- **The interfaces commit left Galleria unimportable:** `custom_components/galleria/states.py` imported
+  `HomeAssistantColour` from its generated `contract.py`, which never carries it (scripts/galleria_contract.py
+  names a titled union only when it is a field's type directly; under `| None` it is inlined). Fixed in
+  states.py by naming the two TypedDicts (`HomeAssistantKelvin | HomeAssistantRgb`); the generator is unchanged.
+- **The listener's third port reaches one file outside the lane's list:** `HomeAssistantListener(reports,
+  heard, births)`; tests/integration/test_central_leaf_bridge.py constructs it, so it changed too, with two lines
+  the interfaces commit left stale there (a light state still in the old `kelvin`/`rgb` shape, and
+  `PgHomeAssistantSettings` without Central's version): that test failed at b2f67f4c.
+- **Galleria's birth goes through a new door method** (`CentralDoor.publish_birth`, the same states-bucket
+  publish under GALLERIA_BIRTH_KEY), so the birth never passes through the entity-state encoder.
+- **Resolved (the DOCS lane's notes above):** `REFUSAL_STATUS` maps `unknown_colour_sensor` 404 and
+  `colour_sensor_followed` 409, as the runbook says; `_kept_in` now trims only references no room
+  light, Sensor or colour sensor names (tests/test_room_light_store.py
+  `test_a_named_reference_is_never_trimmed` fails without it).
+
+## Light colour follows Home Assistant, FIX lane after review (feat/light-colour-follows, 2026-10-25)
+
+- **Resolved: create_app read the photo-wall distribution while building the app** (every browser
+  leg failed in setup, PackageNotFoundError: the leg's venv is `--no-install-project`). Central's
+  version has one home, `central/version.py`, imported by both composition roots (app.py no longer
+  imports the worker's `node_bus_wiring`); `create_app(central_version=...)` takes it, None reading
+  the installed distribution as uvicorn's factory call does. The browser harness passes its own.
+  This closes the interfaces-milestone entry above ("moving central_version ... the CENTRAL lane's call").
+- **A browser test on the branch was never run:** test_house_lights_browser's picker test recorded a
+  bare `Dimmer` through `record_light_state`, which now takes a LightReport; it read as Unavailable.
+  Fixed to `LightStated`. The full browser suite (482) and the catalog (732) pass locally.
+- **Spec wrong: the release order (DESIGN.md:42 "Pis, then Central").** A Player on the new release
+  refuses the old document shape and a restarted (installed) Player holds none, so Pis first darkens
+  every installed Pi's room light until Central changes; "a Pi not installed keeps its last document"
+  only holds for Central first. The runbook and 0028 now say Central, Galleria straight after, then
+  the Pis, with both windows' costs (an old Pi that restarts draws no room light; between Central and
+  Galleria every Home Assistant light keeps its last value, its states refused `unreadable`, and the
+  old Galleria's own room-light sensors go unavailable). The owner may still pick the other order.
+- **Upgrade data (109) no longer carries an old colour dimmer's rgb as the bulb's colour:** main's
+  Galleria sent Home Assistant's rgb in every mode, a colour worked out from color_temp included
+  (design row e). Every bulb's colour is "typed until its bulb says" until it states one.
+- **Audit fields:** the new tables (colour_sensors, colour_words, galleria_birth) now carry created
+  and changed at and by, written by the store, the actor as "whom" (operator, the source, galleria).
+  099's tables still lack them (#117). The entry above is resolved for this delivery's tables only.
+- **Central's version is "0.1.0" in production** (pyproject's decorative version; the entry above on
+  Central's own version still stands), so Settings › Home Assistant reads "Galleria 0.40.0 · Central
+  0.1.0". The two need not match (runbook), but the line says little until the release flow stamps
+  a version into the image (an owner workflow change).
+- **A repeated value keeps when it was first stated** (policy.py `_kept`): a hub re-read no longer
+  moves ColourLineView.stated_at. A same value restated after "can't tell" keeps its first time too.
+- **Owner or architect questions, not built here:**
+  - A bulb that is on in a non-colour mode (Home Assistant's `white`, `brightness`, `onoff`) states no
+    colour, and the hold then keeps its last colour: a bulb switched from red (hs) to its white channel
+    keeps drawing red. Should an on bulb in a non-colour mode fall back to its typed kelvin, the hold
+    applying only to off and unavailable? Galleria's `white` mode as "no colour" has no design line.
+  - A typed kelvin is validated against the Pi's drawing table (`TypedKelvin`, 2,000..10,000 K in 100 K
+    steps), a screen fact in Central's setup (C4/R4). Keep as a deliberate exception, or take a typed
+    kelvin as a stated real kelvin with the step as the console field's choice.
+  - Galleria's birth and Home Assistant's heard entities live in `PgRoomLights`; the room-light store
+    re-derives Home Assistant's entity kind from the reference's class (a second copy of
+    references.py's mapping). The review asks for a Home Assistant store in its adapter package.
+  - The three held-fact folds (light, reading, colour) and three (source, address) reference classes
+    are one shape three times; one generic held fact over `Kept[T]` would replace them.
+    (`_kept` now holds the repeat rule once.)
+  - `GalleriaBirth` is a third birth shape (capability by `kinds`), beside `node_state.Birth`'s
+    `schema_majors`; 0028 does not argue the choice.
+  - Which sources can report colour temperatures is data in app.py (`REPORT_SOURCES`), not each
+    adapter's declaration.
+  - EntityList draws a table at every width: at phone width the Colour sensors table and Settings ›
+    Home Assistant's lists clip their last columns (main's room lights clipped "Last heard" already).
+    The class fix is EntityList's cards below md (design language T2), across every list.
+  - The room-light store's SQL is hand-written psycopg (the repo's pattern): for #117.
+- **Interface drift, recorded:** DESIGN.md's `colour-sensor {from: ColourSensorId, ...}` is
+  `SensedColour.sensor` in code (`from` is a Python keyword), and its one "Reference" is three classes
+  (ReporterRef, SensorRef, ColourSensorRef), so each kind's reference is typed apart.
+
+## Overlay-always merge of main, 2026-10-26: the region documents migration is 110, not 109
+
+- Main took 109 for `109_light_colour.sql` (room-light colour follows Home Assistant, PR #140) while
+  this PR was open. This PR's `109_region_documents.sql` was applied nowhere, so it is renumbered
+  `110_region_documents.sql`. Every "migration 109" in the overlay-always entries above (the S3
+  spec slips and S3 re-cut 2: "migration 109 also needs 103's UPDATE", "Migration 109 keeps 103's
+  stored-report UPDATE") means 110; the entries stay as written (append-only).

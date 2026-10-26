@@ -1,9 +1,9 @@
 import { CONSTANTS, type FrameLighting, type HomeAssistantStatesView, type RoomLightsView } from "../../generated/contract";
 
 /*
- * One house's lights for the stories: daylight a window Sensor measures, the colour overheads that
- * report themselves, the bookshelf spotlight not heard yet, and a lamp nobody reports. Instants are
- * fixed, so the screenshots never move.
+ * One house's lights for the stories: daylight a window Sensor measures, its colour following the
+ * sky's colour sensor, the colour overheads that report themselves, the bookshelf spotlight not
+ * heard yet, and a lamp nobody reports. Instants are fixed, so the screenshots never move.
  */
 
 export const HEARD = 1_791_000_000;
@@ -14,57 +14,77 @@ export const ROOMS: RoomLightsView = {
   lights: [
     {
       id: "daylight",
-      light: { kind: "measured", name: "Daylight", sensor: "window-meter", colour: { kind: "fixed", kelvin: 6500 } },
-      entry: { kind: "measured", colour: { kind: "fixed", kelvin: 6500 }, state: { kind: "measured", lux: 320 } },
-      heard_at: HEARD, named_by: ["lobby"],
+      light: {
+        kind: "measured", name: "Daylight", sensor: "window-meter",
+        colour: { kind: "colour-sensor", sensor: "sky", typed_kelvin: 5500 },
+      },
+      entry: { kind: "measured", colour: { kind: "kelvin", kelvin: 3400 }, state: { kind: "measured", lux: 320 } },
+      heard_at: HEARD, cant_tell_since: null, named_by: ["lobby"],
+      colour: { colour: { kind: "kelvin", kelvin: 3400 }, source: "colour-sensor", sensor: "sky", colour_from: "following",
+        stated_at: HEARD, cant_tell_since: null },
     },
     {
       id: "overheads",
       light: {
         kind: "reported", name: "Overheads", reporter: { source: CONSTANTS.HOME_ASSISTANT_SOURCE, address: "light.living_room" },
-        colour: { kind: "reported", channel_shares: [0.42, 0.36, 0.22] },
+        colour: { kind: "its-bulb", typed_kelvin: 2700 },
       },
       entry: {
-        kind: "colour", colour: { kind: "reported", channel_shares: [0.42, 0.36, 0.22] },
-        state: { kind: "colour-dimmer", on: true, brightness: 0.6, rgb: [1, 0.8, 0.6] },
+        kind: "reported", colour: { kind: "rgb", rgb: [1, 0.8, 0.6] },
+        state: { kind: "dimmer", on: true, brightness: 0.6 },
       },
-      heard_at: HEARD - MINUTE, named_by: ["lobby"],
+      heard_at: HEARD - MINUTE, cant_tell_since: null, named_by: ["lobby"],
+      colour: { colour: { kind: "rgb", rgb: [1, 0.8, 0.6] }, source: "its-bulb", sensor: null, colour_from: "following",
+        stated_at: HEARD - MINUTE, cant_tell_since: null },
     },
     {
       id: "bookshelf-spot",
       light: {
         kind: "reported", name: "Bookshelf spot", reporter: { source: CONSTANTS.HOME_ASSISTANT_SOURCE, address: "light.bookshelf" },
-        colour: { kind: "fixed", kelvin: 2700 },
+        colour: { kind: "its-bulb", typed_kelvin: 2700 },
       },
-      entry: { kind: "white", colour: { kind: "fixed", kelvin: 2700 }, state: { kind: "not-reported" } },
-      heard_at: null, named_by: [],
+      entry: { kind: "reported", colour: { kind: "kelvin", kelvin: 2700 }, state: { kind: "not-reported" } },
+      heard_at: null, cant_tell_since: null, named_by: [],
+      colour: { colour: { kind: "kelvin", kelvin: 2700 }, source: "its-bulb", sensor: null, colour_from: "never-stated",
+        stated_at: null, cant_tell_since: null },
     },
     {
       id: "lamp",
-      light: { kind: "fixed", name: "Reading lamp", colour: { kind: "fixed", kelvin: 3000 } },
-      entry: { kind: "fixed", colour: { kind: "fixed", kelvin: 3000 } },
-      heard_at: null, named_by: [],
+      light: { kind: "fixed", name: "Reading lamp", colour: { kind: "typed", kelvin: 3000 } },
+      entry: { kind: "fixed", colour: { kind: "kelvin", kelvin: 3000 } },
+      heard_at: null, cant_tell_since: null, named_by: [],
+      colour: { colour: { kind: "kelvin", kelvin: 3000 }, source: "typed", sensor: null, colour_from: "typed", stated_at: null,
+        cant_tell_since: null },
     },
   ],
   sensors: [
     {
       id: "window-meter",
       sensor: { name: "Window meter", at: { source: CONSTANTS.HOME_ASSISTANT_SOURCE, address: "sensor.window_illuminance" } },
-      reading: { kind: "measured", lux: 320 }, heard_at: HEARD, reports: "daylight",
+      reading: { kind: "measured", lux: 320 }, heard_at: HEARD, cant_tell_since: null, reports: "daylight",
     },
     {
       id: "hall-pi",
       sensor: { name: "Hall Pi meter", at: { source: CONSTANTS.PI_SOURCE, address: "player-1" } },
-      reading: null, heard_at: null, reports: null,
+      reading: null, heard_at: null, cant_tell_since: null, reports: null,
+    },
+  ],
+  colour_sensors: [
+    {
+      id: "sky",
+      sensor: { name: "Sky colour", at: { source: CONSTANTS.HOME_ASSISTANT_SOURCE, address: "sensor.sun_sky_color_temperature" } },
+      colour: { kind: "kelvin", kelvin: 3400 }, heard_at: HEARD, cant_tell_since: null, followed_by: ["daylight"],
     },
   ],
 };
 
 export const PI_NAMES: Readonly<Record<string, string>> = { "player-1": "Player …1a2b3c" };
 
-/** Home Assistant's states as Central last heard them: the two lights and the window meter the house
- * names, the kitchen light nothing names yet, and the porch meter. */
+/** Home Assistant's states as Central last heard them: the two lights, the window meter and the sky's
+ * colour the house names, the kitchen light nothing names yet, and the porch meter. */
 export const HOME_ASSISTANT_STATES: HomeAssistantStatesView = {
+  galleria: { version: "0.40.0", kinds: ["light", "illuminance", "colour-temperature"], heard_at: HEARD,
+    central_version: "0.40.0", update: false },
   heard_at: HEARD,
   entities: [
     { entity: "light.living_room", kind: "light", name: "Living room", reports: "overheads", heard_at: HEARD - MINUTE },
@@ -72,6 +92,8 @@ export const HOME_ASSISTANT_STATES: HomeAssistantStatesView = {
     { entity: "sensor.window_illuminance", kind: "illuminance", name: "Window illuminance", reports: "window-meter", heard_at: HEARD },
     { entity: "light.kitchen", kind: "light", name: "Kitchen", reports: null, heard_at: HEARD - 2 * MINUTE },
     { entity: "sensor.porch_illuminance", kind: "illuminance", name: "Porch illuminance", reports: null, heard_at: HEARD },
+    { entity: "sensor.sun_sky_color_temperature", kind: "colour-temperature", name: "Sun Sky colour temperature",
+      reports: "sky", heard_at: HEARD },
   ],
   refused: [],
 };

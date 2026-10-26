@@ -1,6 +1,6 @@
 import { callApi } from "../../apiWrite.js";
 import type {
-  DrawnView, RefusedReportsView, RoomLight, RoomLightsView, RoomLightView, Sensor, SensorView,
+  ColourSensor, ColourSensorView, DrawnView, RefusedReportsView, RoomLight, RoomLightsView, RoomLightView, Sensor, SensorView,
 } from "../../generated/contract";
 import type { Answer } from "../answer";
 
@@ -9,6 +9,7 @@ import type { Answer } from "../answer";
 
 const LIGHTS = "/v1/operator/house/lights";
 const SENSORS = "/v1/operator/house/sensors";
+const COLOUR_SENSORS = "/v1/operator/house/colour-sensors";
 const DRAWN = `${LIGHTS}/drawn`;
 const REFUSED = "/v1/operator/house/refused-reports";
 
@@ -38,6 +39,18 @@ export function saveSensor(id: string, sensor: Sensor): Promise<Answer<"sensor",
 /** Remove a Sensor (DELETE …/house/sensors/{id}); refused while it measures a room light. */
 export function removeSensor(id: string): Promise<Answer<"removed", null>> {
   return callApi("removed", `${SENSORS}/${encodeURIComponent(id)}`, { method: "DELETE" }) as
+    Promise<Answer<"removed", null>>;
+}
+
+/** Create or replace a colour sensor (PUT …/house/colour-sensors/{id}). */
+export function saveColourSensor(id: string, sensor: ColourSensor): Promise<Answer<"colourSensor", ColourSensorView>> {
+  return callApi("colourSensor", `${COLOUR_SENSORS}/${encodeURIComponent(id)}`, { method: "PUT", body: sensor }) as
+    Promise<Answer<"colourSensor", ColourSensorView>>;
+}
+
+/** Remove a colour sensor (DELETE …/house/colour-sensors/{id}); refused while a room light follows it. */
+export function removeColourSensor(id: string): Promise<Answer<"removed", null>> {
+  return callApi("removed", `${COLOUR_SENSORS}/${encodeURIComponent(id)}`, { method: "DELETE" }) as
     Promise<Answer<"removed", null>>;
 }
 

@@ -27,6 +27,11 @@ def test_unit():
 def test_cases(case):
     pass
 
+@pytest.mark.shard_each_case
+@pytest.mark.parametrize("case", range(12))
+def test_each_case(case):
+    pass
+
 def test_named_0():
     pass
 
@@ -103,12 +108,17 @@ def collected(run) -> set[str]:
 
 def test_the_shards_run_every_test_once_and_keep_a_tests_cases_together(tmp_path):
     """support/shards.py: the two shards are disjoint and together the whole run; a test's
-    parametrised cases share a shard. Mutation probe: hash the node id -> the cases split."""
+    parametrised cases share a shard unless it is marked `shard_each_case`. Mutation probe: hash
+    the node id -> the cases split."""
     whole = collected(run_probe(tmp_path, "--collect-only", ci=False))
     first = collected(run_probe(tmp_path, "--collect-only", ci=False, shard="1/2"))
     second = collected(run_probe(tmp_path, "--collect-only", ci=False, shard="2/2"))
     assert first and second and not first & second and first | second == whole
     cases = {test for test in whole if "test_cases[" in test}
     assert len(cases) == 3 and (cases <= first or cases <= second)
+    # A `shard_each_case` test's cases spread over both shards. Mutation probe: ignore the marker
+    # -> its twelve cases land in one shard.
+    each = {test for test in whole if "test_each_case[" in test}
+    assert len(each) == 12 and each & first and each & second
     malformed = run_probe(tmp_path, "--collect-only", ci=False, shard="3/2")
     assert malformed.returncode != 0 and "PHOTO_WALL_TEST_SHARD must be index/count" in malformed.stderr

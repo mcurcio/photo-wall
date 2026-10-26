@@ -258,7 +258,7 @@ def test_home_assistants_door_through_centrals_origin(registry, tmp_path, monkey
         stop = asyncio.Event()
         serving = asyncio.create_task(run_hub_session(
             hub.client_url, version="0.1.0", state=central_state(reads, PgStateWakes()),
-            listened=HomeAssistantListener(lights, lights), methods=hub_methods(versions), stop=stop))
+            listened=HomeAssistantListener(lights, lights, lights), methods=hub_methods(versions), stop=stop))
         try:
             async with HomeAssistant(door) as house:
                 async def installation():
@@ -276,11 +276,11 @@ def test_home_assistants_door_through_centrals_origin(registry, tmp_path, monkey
                 assert set(listing) == {"v2.1.0", "v2.0.0"}
                 assert (listing["v2.0.0"].stable, listing["v2.0.0"].readiness) == (True, "ready")
                 await house.publish("light.door", HomeAssistantLight(name="Door", on=True, brightness=255,
-                                                                     kelvin=None, rgb=None))   # acknowledged
+                                                                     colour=None))   # acknowledged
 
                 async def heard():
                     return "light.door" in {each.entity for each in
-                                            (await asyncio.to_thread(PgHomeAssistantSettings(registry.db).view)).entities}
+                                            (await asyncio.to_thread(PgHomeAssistantSettings(registry.db, "0.1.0").view)).entities}
                 await until(heard, SECONDS, "Central hears the state published at the door")
 
                 # installPlayer answers as the route does.

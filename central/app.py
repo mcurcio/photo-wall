@@ -91,6 +91,7 @@ from central.runtime import RuntimeConflict, Scene, SceneInUse, SceneOnWall, Sce
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceInUse, SourceNameService
 from central.tuning_history_routes import mount_tuning_history_routes
+from central.version import central_version as installed_central_version
 from central.wall_plan.fit import fit_target
 from central.wall_plan.fit_analysis import analyse
 from central.wall_plan.fit_settings import FIT_SETTING_RANGES
@@ -169,18 +170,23 @@ class AuthoredSceneRequest(AuthoredCandidatesRequest):
 
 class ReportSourceForms:
     """room_light.ports.ReportSources over each source Central runs and its adapter's own check of an
-    address's form."""
+    address's form; `colour` names the sources that report colour temperatures."""
 
-    def __init__(self, forms: Mapping[str, Callable[[str], bool]]) -> None:
+    def __init__(self, forms: Mapping[str, Callable[[str], bool]], *, colour: frozenset[str]) -> None:
         self._forms = dict(forms)
+        self._colour = colour
 
     def address_refusal(self, source: str, address: str) -> RoomLightRefusal | None:
         form = self._forms.get(source)
         return None if form is not None and form(address) else RoomLightRefusal.UNKNOWN_ADDRESS
 
+    def colour_address_refusal(self, source: str, address: str) -> RoomLightRefusal | None:
+        return self.address_refusal(source, address) if source in self._colour else RoomLightRefusal.UNKNOWN_ADDRESS
+
 
 REPORT_SOURCES: Final = ReportSourceForms({home_assistant_references.SOURCE: home_assistant_references.is_entity,
-                                           PI_SOURCE: is_player})
+                                           PI_SOURCE: is_player},
+                                          colour=frozenset({home_assistant_references.SOURCE}))
 
 
 def create_app(
@@ -195,7 +201,10 @@ def create_app(
     node_control: NodeControlConfig = NodeControlConfig(),
     media_times: TransactionClock | None = None,
     hub_leaf_url: str | None = None,
+    central_version: str | None = None,
 ) -> FastAPI:
+    """`central_version`: Central's own version (central/version.py); None reads the installed
+    distribution's, as uvicorn's factory call does. A harness running from source passes its own."""
     run_scheduler = clock is None if run_scheduler is None else run_scheduler
     clock_injected = clock
     owns_db = db is None
@@ -856,7 +865,8 @@ def create_app(
     mount_house_routes(app, admin=admin, queries=house, commands=house)
     room_lights = PgRoomLights(db, house_lock)
     mount_room_light_routes(app, admin=admin, lights=room_lights, sources=REPORT_SOURCES)
-    mount_home_assistant_routes(app, admin=admin, settings=PgHomeAssistantSettings(db))
+    mount_home_assistant_routes(app, admin=admin, settings=PgHomeAssistantSettings(
+        db, installed_central_version() if central_version is None else central_version))
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
     mount_tuning_history_routes(app, admin=admin, queries=PgTuningHistory(db))

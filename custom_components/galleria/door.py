@@ -20,14 +20,17 @@ from .contract import (
     CENTRAL_STATE_PREFIX,
     CENTRAL_STATE_STREAM,
     DOOR_PATH,
+    GALLERIA_BIRTH_KEY,
     HOME_ASSISTANT_STATES_PREFIX,
     HOME_ASSISTANT_USER,
     INSTALL_PLAYER_SUBJECT,
     KV_OPERATION_HEADER,
+    GalleriaBirth,
     HomeAssistantState,
     InstallRefused,
     InstallStarted,
     decode_install_answer,
+    encode_galleria_birth,
     encode_home_assistant_state,
     encode_install_player,
 )
@@ -115,6 +118,15 @@ class CentralDoor:
             await self._jetstream.publish(HOME_ASSISTANT_STATES_PREFIX + entity_id, payload)
         except _FAILURES as error:
             raise DoorUnavailable(f"publish {entity_id}: {error!r}") from error
+
+    async def publish_birth(self, birth: GalleriaBirth) -> None:
+        """Put `birth` under GALLERIA_BIRTH_KEY in Home Assistant's states (acknowledged);
+        DoorUnavailable when the hub does not take it; ValueError for a birth the contract refuses."""
+        payload = encode_galleria_birth(birth)
+        try:
+            await self._jetstream.publish(HOME_ASSISTANT_STATES_PREFIX + GALLERIA_BIRTH_KEY, payload)
+        except _FAILURES as error:
+            raise DoorUnavailable(f"publish {GALLERIA_BIRTH_KEY}: {error!r}") from error
 
     async def install_player(self, serial: str, version: str) -> InstallStarted | InstallRefused:
         """Central's installPlayer(serial, version), answered once within INSTALL_TIMEOUT."""

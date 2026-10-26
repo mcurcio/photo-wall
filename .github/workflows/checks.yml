@@ -231,10 +231,16 @@ jobs:
   # axe and matches its baseline screenshot (tests/browser/test_console_catalog_browser.py). Own
   # leg, so the operator browser leg above does not wait on it; no database. Baselines are valid
   # only in this image: `python3 scripts/catalog_baselines.py` rewrites them there and reads the
-  # image reference from this file.
+  # image reference from this file. Three shards (PHOTO_WALL_TEST_SHARD; each story and scheme is
+  # its own case to shard, `shard_each_case` in tests/support/shards.py), so each leg stays near
+  # the ~4 min budget; `checks` succeeds only when every shard does.
   console-catalog:
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    timeout-minutes: 6
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - id: python-uv
@@ -251,6 +257,7 @@ jobs:
             --volume "$GITHUB_WORKSPACE:/work:ro" \
             --volume "$RUNNER_TEMP/console-catalog:/evidence" --workdir /work \
             --env PHOTO_WALL_BROWSER_TESTS=1 --env PYTHONDONTWRITEBYTECODE=1 \
+            --env PHOTO_WALL_TEST_SHARD=${{ matrix.shard }}/3 \
             --env CI --env PHOTO_WALL_CATALOG_ACTUAL=/evidence \
             --env UV_PROJECT_ENVIRONMENT=/tmp/photo-wall-browser-venv \
             --env UV_PYTHON_DOWNLOADS=never --env UV_VERSION \
@@ -273,7 +280,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: console-catalog-${{ github.sha }}
+          name: console-catalog-${{ github.sha }}-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/console-catalog
           if-no-files-found: ignore
           retention-days: 7

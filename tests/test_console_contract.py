@@ -49,7 +49,7 @@ def test_the_generated_contract_names_the_trials_refusals_and_the_room_light_ali
     assert contract["refusals"]["PositionRestoreRefusal"] == [code.value for code in PositionRestoreRefusal]
     text = contract_text(contract)
     assert 'export type TrialRefusal = (typeof REFUSALS)["TrialRefusal"][number];' in text
-    for declared in ("export type Lux = number;", "export type LightWord = Dimmer | ColourDimmer | Unavailable;",
-                     "export type Reading = Measured | Unavailable;", "  lux: Lux;", "  reading: Reading | null;",
-                     "export type HeardEntityView = HeardLightView | HeardSensorView;", "  paper_profiles: PaperProfileView[];"):
+    for declared in ("export type Lux = number;", "export type LightColour = KelvinColour | RgbColour;",
+                     "export type Reading = Measured | Unavailable;", "  lux: Lux;", "  reading: Measured | null;",
+                     "export type HeardEntityView = HeardLightView | HeardSensorView | HeardColourSensorView;", "  paper_profiles: PaperProfileView[];"):
         assert declared in text, declared

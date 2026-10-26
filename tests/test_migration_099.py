@@ -19,10 +19,10 @@ from central.frame_lighting.policy import (
     upgrade_lighting,
 )
 from central.infra.room_light_store import document_in
-from central.room_light.model import FixedLight, RoomLight
+from central.room_light.model import FixedLight, RoomLight, TypedColour
 from contracts.frame_lighting import FrameLighting
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
-from contracts.room_light import FixedColour, FixedEntry
+from contracts.room_light import FixedEntry, KelvinColour
 
 MIGRATIONS = Path(__file__).parents[1] / "central/migrations"
 PROFILE = {"width_px": 1920, "height_px": 1080, "diagonal_inches": 27}
@@ -107,8 +107,8 @@ def test_099_upgrades_every_frame_to_the_python_upgrade_rule(database_provisione
                 document = document_in(conn)
                 room = conn.execute("SELECT id, light FROM room_lights").fetchall()
                 assert [(row["id"], TypeAdapter(RoomLight).validate_python(row["light"])) for row in room] == [
-                    (UPGRADE_ROOM_LIGHT_ID, FixedLight(name=UPGRADE_ROOM_LIGHT_NAME, colour=FixedColour(kelvin=6500)))]
-                assert document.change == 1
-                assert document.lights == {UPGRADE_ROOM_LIGHT_ID: FixedEntry(colour=FixedColour(kelvin=6500))}
+                    (UPGRADE_ROOM_LIGHT_ID, FixedLight(name=UPGRADE_ROOM_LIGHT_NAME, colour=TypedColour(kelvin=6500)))]
+                assert document.change == 2   # 099 seeds 1; 109 raises it for the new document shape
+                assert document.lights == {UPGRADE_ROOM_LIGHT_ID: FixedEntry(colour=KelvinColour(kelvin=6500))}
         finally:
             db.close()

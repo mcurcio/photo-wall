@@ -94,8 +94,7 @@ class RoomLight(CentralEntity, SensorEntity):
             return "not_reported", None, {}
         if state["kind"] == "measured":
             return ("on" if state["lux"] > 0 else "off"), None, {"lux": state["lux"]}
-        extra = {"rgb": state["rgb"]} if state["kind"] == "colour-dimmer" else {}
-        return ("on" if state["on"] else "off"), (state["brightness"] if state["on"] else 0.0), extra
+        return ("on" if state["on"] else "off"), (state["brightness"] if state["on"] else 0.0), {}
 
     @property
     def native_value(self) -> str | None:
@@ -107,7 +106,7 @@ class RoomLight(CentralEntity, SensorEntity):
             return None
         _, level, extra = self._drawn()
         colour = self._listing()["entry"]["colour"]
-        return {"level": level, "kelvin": colour.get("kelvin"), **extra}
+        return {"level": level, "kelvin": colour.get("kelvin"), "rgb": colour.get("rgb"), **extra}
 
 
 class LightMeter(PiEntity, SensorEntity):

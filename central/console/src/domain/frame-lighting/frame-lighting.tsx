@@ -1,5 +1,8 @@
-import { CONSTANTS, type FrameLighting as Lighting, LIMITS, type RoomLightsView } from "../../generated/contract";
-import { FactGroup, Note } from "../../patterns/fact-row";
+import {
+  CONSTANTS, type FrameLighting as Lighting, LIMITS, type RoomLightId, type RoomLightsView,
+} from "../../generated/contract";
+import { type ColourLine, ColourSwatch } from "../../patterns/colour-swatch";
+import { FactGroup, FactRow, Note } from "../../patterns/fact-row";
 import { OwnerLinks } from "../../patterns/link-to-owner";
 import { TypedNumber } from "../../patterns/typed-number";
 import { unitWords } from "../../patterns/units";
@@ -33,12 +36,13 @@ const KIND_HELP: Record<FrameLight["kind"], string> = {
   close: "From a point near the Frame, aimed at its centre, bright inside its beam and fading to its edge: a spotlight.",
 };
 
-function LightRows({ light, number, rooms, disabled, onChange, onRemove }: {
-  light: FrameLight; number: number; rooms: RoomLightsView; disabled: boolean;
+function LightRows({ light, number, rooms, colourOf, disabled, onChange, onRemove }: {
+  light: FrameLight; number: number; rooms: RoomLightsView; colourOf: (roomLightId: RoomLightId) => ColourLine | null; disabled: boolean;
   onChange(light: FrameLight): void; onRemove(): void;
 }) {
   const room = rooms.lights.find((each) => each.id === light.light);
   const sensor = sensorFor(light.light, rooms);
+  const colour = room === undefined ? null : colourOf(room.id);
   const now = sensor?.reading?.kind === "measured" && sensor.reading.lux > 0 ? sensor.reading.lux : null;
   const set = (patch: Partial<FrameLight>) => onChange({ ...light, ...patch } as FrameLight);
   const options = rooms.lights.map((each) => ({ value: each.id, label: each.light.name }));
@@ -55,6 +59,9 @@ function LightRows({ light, number, rooms, disabled, onChange, onRemove }: {
           <Select value={light.light} options={options} disabled={disabled} width="fit"
             onChange={(id) => onChange(viewing(light, id, rooms))} />
         </Field>
+        {colour !== null && (
+          <FactRow label="Its colour" tone={colour.tone}><ColourSwatch colour={colour.swatch}>{colour.words}</ColourSwatch></FactRow>
+        )}
         <TypedNumber label="Lux at the Frame" help="What a phone light meter reads at the Frame's centre, facing out"
           value={light.lux} min={LUX.exclusiveMinimum} max={LUX.maximum} step={STEP.lux} unit="lx" exclusiveMin
           disabled={disabled} onChange={(lux) => set({ lux })} />
@@ -172,17 +179,20 @@ export interface FrameLightingProps {
   rooms: RoomLightsView | null;
   /** The paper profiles on the list (null: not read yet). */
   profiles: readonly PaperProfileChoice[] | null;
+  /** A room light's colour line (its colour and where it comes from), as the page composes it from
+   * House › Lights' words; null: none to show. */
+  colourOf: (roomLightId: RoomLightId) => ColourLine | null;
   disabled: boolean;
 }
 
 /**
  * The Frame's lighting: the mat's depth, up to the Frame's most lights, each a kind (Even wash, Far
  * light, Close light) of one room light with the lux a phone light meter reads at the Frame and the
- * reference it was read at, and the paper (whiteness, ink density with the Gloss and Matte presets,
+ * reference it was read at, with its room light's colour line, and the paper (whiteness, ink density with the Gloss and Matte presets,
  * a paper profile). It rides the Frame's live session: every change shows on the wall, Done keeps
  * it and Revert puts it back.
  */
-export function FrameLighting({ lighting, onChange, rooms, profiles, disabled }: FrameLightingProps) {
+export function FrameLighting({ lighting, onChange, rooms, profiles, colourOf, disabled }: FrameLightingProps) {
   const full = lighting.lights.length >= LIGHTS_MAX;
   const none = rooms !== null && rooms.lights.length === 0;
   const setLight = (index: number) => (light: FrameLight) =>
@@ -203,7 +213,7 @@ export function FrameLighting({ lighting, onChange, rooms, profiles, disabled }:
       {lighting.lights.length === 0 && <Note>{NO_LIGHTS}</Note>}
       {rooms !== null && lighting.lights.map((light, index) => (
         // A light has no identity of its own: its place in the list is it.
-        <LightRows key={index} light={light} number={index + 1} rooms={rooms} disabled={disabled}
+        <LightRows key={index} light={light} number={index + 1} rooms={rooms} colourOf={colourOf} disabled={disabled}
           onChange={setLight(index)} onRemove={removeLight(index)} />
       ))}
       {rooms === null && lighting.lights.length > 0 && <Note>Reading the house&apos;s lights…</Note>}

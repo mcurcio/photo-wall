@@ -39,7 +39,7 @@ const checks: [string, string][] = [
   [unitWords(1000, "lx"), "1,000 lx"],
   [unitWords(200000, "lx"), "200,000 lx"],
   [unitWords(2.46, "lx"), "2.5 lx"],
-  [unitWords(2700, "K"), "2700 K"],
+  [unitWords(2700, "K"), "2,700 K"],
   [unitWords(12.5, "mm"), "12.5 mm"],
   [unitWords(45, "°"), "45°"],
   [unitWords(60, "%"), "60 %"],

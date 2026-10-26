@@ -15,6 +15,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.loader import async_get_integration
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.galleria import contract
@@ -89,14 +90,15 @@ async def test_a_pi_central_lists_later_gets_its_devices(hass: HomeAssistant, en
 
 async def test_a_light_turned_on_is_published_under_its_entity_id(hass: HomeAssistant, entry: MockConfigEntry,
                                                                    door: FakeDoor) -> None:
-    hass.states.async_set("light.test", STATE_ON, {"brightness": 128, "color_temp_kelvin": 2700,
-                                                   "rgb_color": (255, 180, 100), "friendly_name": "Test"})
+    hass.states.async_set("light.test", STATE_ON, {"brightness": 128, "color_mode": "color_temp",
+                                                   "color_temp_kelvin": 2700, "rgb_color": (255, 180, 100),
+                                                   "friendly_name": "Test"})
     hass.states.async_set("sensor.lux", "12.5", {"device_class": "illuminance", "friendly_name": "Lux"})
     hass.states.async_set("sensor.temperature", "21", {"device_class": "temperature"})
     hass.states.async_set("switch.fan", STATE_ON)
     await settle(hass)
-    assert ("light.test", {"kind": "light", "name": "Test", "on": True, "brightness": 128, "kelvin": 2700,
-                           "rgb": [255, 180, 100]}) in door.published
+    assert ("light.test", {"kind": "light", "name": "Test", "on": True, "brightness": 128,
+                           "colour": {"kind": "kelvin", "kelvin": 2700.0}}) in door.published
     assert ("sensor.lux", {"kind": "illuminance", "name": "Lux", "lux": 12.5}) in door.published
     published = {entity for entity, _ in door.published}
     assert "sensor.temperature" not in published and "switch.fan" not in published
@@ -106,9 +108,116 @@ async def test_a_light_turned_on_is_published_under_its_entity_id(hass: HomeAssi
     hass.states.async_set("sensor.lux", STATE_UNAVAILABLE, {"device_class": "illuminance", "friendly_name": "Lux"})
     await settle(hass)
     assert door.published == [
-        ("light.test", {"kind": "light", "name": "Test", "on": False, "brightness": None, "kelvin": None,
-                        "rgb": None}),
+        ("light.test", {"kind": "light", "name": "Test", "on": False, "brightness": None, "colour": None}),
         ("sensor.lux", {"kind": "unavailable", "entity_kind": "illuminance", "name": "Lux"})]
+
+
+async def test_the_sun_s_sky_colour_temperature_is_published_as_a_colour_temperature(
+        hass: HomeAssistant, entry: MockConfigEntry, door: FakeDoor) -> None:
+    """Home Assistant's real shape: a template sensor in K with no device class and a measurement
+    state class. Its kelvin goes as stated (never bounded or rounded); a temperature in K is not one."""
+    sky = {"unit_of_measurement": "K", "state_class": "measurement", "friendly_name": "Sun Sky color temperature"}
+    hass.states.async_set("sensor.sun_sky_color_temperature", "4321.5", sky)
+    hass.states.async_set("sensor.hot", "45000", {"unit_of_measurement": "K", "friendly_name": "Hot"})
+    hass.states.async_set("sensor.kiln", "1500", {"unit_of_measurement": "K", "device_class": "temperature"})
+    await settle(hass)
+    assert ("sensor.sun_sky_color_temperature", {"kind": "colour-temperature", "name": "Sun Sky color temperature",
+                                                 "kelvin": 4321.5}) in door.published
+    assert ("sensor.hot", {"kind": "colour-temperature", "name": "Hot", "kelvin": 45000.0}) in door.published
+    assert "sensor.kiln" not in {entity for entity, _ in door.published}
+    door.published.clear()
+    hass.states.async_set("sensor.sun_sky_color_temperature", "not a number", sky)
+    hass.states.async_set("sensor.hot", "-3", {"unit_of_measurement": "K", "friendly_name": "Hot"})
+    await settle(hass)
+    hass.states.async_set("sensor.sun_sky_color_temperature", STATE_UNAVAILABLE, sky)
+    await settle(hass)
+    assert door.published == [
+        ("sensor.sun_sky_color_temperature", {"kind": "colour-temperature", "name": "Sun Sky color temperature",
+                                              "kelvin": None}),
+        ("sensor.hot", {"kind": "colour-temperature", "name": "Hot", "kelvin": None}),
+        ("sensor.sun_sky_color_temperature", {"kind": "unavailable", "entity_kind": "colour-temperature",
+                                              "name": "Sun Sky color temperature"})]
+
+
+LIFX = {"supported_color_modes": ["color_temp", "hs"], "min_color_temp_kelvin": 1500,
+        "max_color_temp_kelvin": 9000, "friendly_name": "Window lamp"}
+
+
+async def test_a_bulb_states_its_colour_by_its_colour_mode(hass: HomeAssistant, entry: MockConfigEntry,
+                                                           door: FakeDoor) -> None:
+    """A LIFX bulb fills every colour attribute; Galleria states only its mode's: kelvin in color_temp
+    (the rgb Home Assistant works out is left), rgb in hs, none when off."""
+    hass.states.async_set("light.fam_window", STATE_ON, {
+        **LIFX, "color_mode": "color_temp", "brightness": 255, "color_temp_kelvin": 3500,
+        "hs_color": (27.0, 47.0), "rgb_color": (255, 196, 135), "xy_color": (0.43, 0.38)})
+    await settle(hass)
+    hass.states.async_set("light.fam_window", STATE_ON, {
+        **LIFX, "color_mode": "hs", "brightness": 255, "color_temp_kelvin": None,
+        "hs_color": (240.0, 100.0), "rgb_color": (0, 0, 255), "xy_color": (0.136, 0.04)})
+    await settle(hass)
+    hass.states.async_set("light.fam_window", STATE_OFF, {
+        **LIFX, "color_mode": None, "brightness": None, "color_temp_kelvin": None, "hs_color": None,
+        "rgb_color": None, "xy_color": None})
+    await settle(hass)
+    assert [state for entity, state in door.published if entity == "light.fam_window"] == [
+        {"kind": "light", "name": "Window lamp", "on": True, "brightness": 255,
+         "colour": {"kind": "kelvin", "kelvin": 3500.0}},
+        {"kind": "light", "name": "Window lamp", "on": True, "brightness": 255, "colour": {"kind": "rgb", "rgb": [0, 0, 255]}},
+        {"kind": "light", "name": "Window lamp", "on": False, "brightness": None, "colour": None}]
+
+
+async def test_a_bulb_not_in_a_colour_mode_or_off_states_no_colour(hass: HomeAssistant, entry: MockConfigEntry,
+                                                                   door: FakeDoor) -> None:
+    """Only color_temp states a kelvin and only a colour mode an rgb, whatever else Home Assistant
+    fills: brightness and onoff modes state none, and so does an off bulb that still names a mode.
+    A colour mode's rgb goes as Home Assistant states it, all zeros too: Central judges its range."""
+    filled = {"color_temp_kelvin": 3500, "hs_color": (27.0, 47.0), "rgb_color": (255, 196, 135),
+              "xy_color": (0.43, 0.38)}
+    for brightness, mode in ((100, "brightness"), (120, "onoff")):
+        hass.states.async_set("light.fam_window", STATE_ON, {**LIFX, "color_mode": mode, "brightness": brightness,
+                                                            **filled})
+        await settle(hass)
+    hass.states.async_set("light.fam_window", STATE_OFF, {**LIFX, "color_mode": "color_temp", "brightness": None,
+                                                         **filled})
+    await settle(hass)
+    hass.states.async_set("light.fam_window", STATE_ON, {**LIFX, "color_mode": "rgb", "brightness": 50,
+                                                        **filled, "rgb_color": (0, 0, 0)})
+    await settle(hass)
+    assert [state for entity, state in door.published if entity == "light.fam_window"] == [
+        {"kind": "light", "name": "Window lamp", "on": True, "brightness": 100, "colour": None},
+        {"kind": "light", "name": "Window lamp", "on": True, "brightness": 120, "colour": None},
+        {"kind": "light", "name": "Window lamp", "on": False, "brightness": None, "colour": None},
+        {"kind": "light", "name": "Window lamp", "on": True, "brightness": 50, "colour": {"kind": "rgb", "rgb": [0, 0, 0]}}]
+
+
+async def test_a_birth_the_hub_did_not_take_publishes_nothing_until_the_next_read(
+        hass: HomeAssistant, entry: MockConfigEntry, door: FakeDoor) -> None:
+    """Galleria's birth goes first; when the hub does not take it, no state goes into that epoch and
+    none is kept as published, so the next read publishes the birth and every state again."""
+    hass.states.async_set("light.test", STATE_ON, {"brightness": 10, "friendly_name": "Test"})
+    await settle(hass)
+    door.published.clear()
+    door.births.clear()
+    door.state[contract.STATES_EPOCH_KEY] = wire(contract.STATES_EPOCH_KEY, {"epoch": "f" * 32})
+    door.births_refused = 1
+    await read_all(hass, entry)
+    assert (door.published, door.births) == ([], [])
+    assert entry.runtime_data.publisher.published_epoch is None
+    await read_all(hass, entry)
+    assert len(door.births) == 1 and [entity for entity, _ in door.published] == ["light.test"]
+    assert entry.runtime_data.publisher.published_epoch == "f" * 32
+
+
+async def test_galleria_s_birth_goes_with_every_publish_of_all_states(hass: HomeAssistant, entry: MockConfigEntry,
+                                                                      door: FakeDoor) -> None:
+    """On start and with every publish of all states: its manifest's version and every kind it publishes."""
+    manifest = (await async_get_integration(hass, DOMAIN)).version
+    expected = {"component": "galleria", "version": str(manifest),
+                "kinds": ["light", "illuminance", "colour-temperature"]}
+    assert door.births == [expected]
+    door.state[contract.STATES_EPOCH_KEY] = wire(contract.STATES_EPOCH_KEY, {"epoch": "e" * 32})
+    await read_all(hass, entry)
+    assert door.births == [expected, expected]
 
 
 async def test_galleria_s_own_entities_are_never_published(hass: HomeAssistant, entry: MockConfigEntry,
@@ -152,8 +261,8 @@ async def test_a_publish_the_hub_did_not_take_publishes_every_state_at_the_next_
     door.down = False
     door.published.clear()
     await read_all(hass, entry)
-    assert ("light.test", {"kind": "light", "name": "Test", "on": True, "brightness": 200, "kelvin": None,
-                           "rgb": None}) in door.published
+    assert ("light.test", {"kind": "light", "name": "Test", "on": True, "brightness": 200,
+                           "colour": None}) in door.published
     assert entry.runtime_data.publisher.published_epoch == EPOCH
 
 

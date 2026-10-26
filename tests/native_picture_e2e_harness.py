@@ -119,12 +119,12 @@ def placement():
 
 def room():
     from contracts.room_light import (
-        FixedColour,
         FixedEntry,
+        KelvinColour,
         RoomLightsDocument,
     )
 
-    return RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=FixedColour(kelvin=6500))})
+    return RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=KelvinColour(kelvin=6500))})
 
 
 def grey_png(path: pathlib.Path) -> bytes:

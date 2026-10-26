@@ -17,10 +17,9 @@ from central.infra.frame_lighting_store import PgFrameLighting, PgHouseLock
 from central.infra.paper_profile_store import PgPaperProfiles
 from central.infra.room_light_store import PgRoomLights
 from central.infra.transactions import PgTransaction
-from central.room_light.model import FixedLight, RoomLightRefused
+from central.room_light.model import FixedLight, RoomLightRefused, TypedColour
 from contracts.frame_lighting import AT_FULL, FrameLighting, Paper, WashLight
 from contracts.lut import LutRef
-from contracts.room_light import FixedColour
 
 PROFILE = "e" * 64
 WAIT_SECONDS = 10.0
@@ -69,7 +68,7 @@ def test_a_room_light_removal_waits_for_the_check_then_is_refused(registry):
     remove_room_light without `changing_within` -> it does not wait either."""
     frame(registry, "hall")
     lights = PgRoomLights(registry.db, PgHouseLock())
-    lights.save_room_light("lamp", FixedLight(name="Lamp", colour=FixedColour(kelvin=3000)))
+    lights.save_room_light("lamp", FixedLight(name="Lamp", colour=TypedColour(kelvin=3000)))
     refused = _removal_waits_then_sees(registry, _lit("lamp"), lambda: lights.remove_room_light("lamp"))
     assert isinstance(refused, RoomLightRefused) and refused.code.value == "named_by_a_frame"
     assert "lamp" in lights.current().lights

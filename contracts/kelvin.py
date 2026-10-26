@@ -1,14 +1,21 @@
 """A colour temperature as linear-light white: the one kelvin-to-white conversion. Stdlib and
 contracts only: the Pi runs it.
 
-Two consumers, one table:
+Two consumers, one table, and the range a stated colour temperature may take on any wire:
 - the Display's Photo Wall (software) colour temperature, KELVIN_MIN..KELVIN_MAX of
   contracts/node_picture.py, which the Pi's picture controller turns into the Player's white
   balance (appliance/display_host/picture.py `operations_for`);
-- a room light's fixed colour, KELVIN_TABLE_MIN..KELVIN_TABLE_MAX (contracts/room_light.py
-  `FixedColour`), which the Player turns into the light's colour at luminance 1
-  (player/geometry.py `light_colour`, the physics' own normalisation: the white balance's largest
-  channel is 1, a light's luminance is 1, so the two vary apart).
+- a room light's colour as the room-lights document states it (contracts/room_light.py
+  `KelvinColour`, real kelvin, KELVIN_STATED_MIN..KELVIN_STATED_MAX), which the Player bounds to the
+  table and rounds to its step (player/geometry.py `drawn_kelvin`, the Pi's rule alone, 2026-10-25:
+  "make sure that changes like bounding color temperature are being handled within the correct
+  layers") and turns into the light's colour at luminance 1 (player/geometry.py `light_colour`, the
+  physics' own normalisation: the white balance's largest channel is 1, a light's luminance is 1, so
+  the two vary apart). A typed kelvin (central/room_light/model.py) is a table row.
+
+KELVIN_STATED_MIN..KELVIN_STATED_MAX is the one range a stated colour temperature takes: Home
+Assistant's states as Central reads them (central/infra/home_assistant/messages.py refuses others)
+and the room-lights document. Central never bounds a stated colour to the table; the Pi does.
 """
 from __future__ import annotations
 
@@ -21,6 +28,8 @@ from contracts.colour import srgb_to_linear
 KELVIN_TABLE_MIN: Final = 2000                  # the table's rows, in KELVIN_TABLE_STEP
 KELVIN_TABLE_MAX: Final = 10000
 KELVIN_TABLE_STEP: Final = 100
+KELVIN_STATED_MIN: Final = 1000               # a stated colour temperature (any wire): real kelvin, unbounded
+KELVIN_STATED_MAX: Final = 40000              # to the table until the Pi draws it
 KELVIN_WHITE: Final = 6500                      # the Display's white: kelvin_white(6500) is exactly (1, 1, 1)
 
 # Mitchell Charity's blackbody colours (http://www.vendian.org/mncharity/dir3/blackbody/,
@@ -73,4 +82,5 @@ def kelvin_white(kelvin: int) -> tuple[float, float, float]:
     return red / largest, green / largest, blue / largest
 
 
-__all__ = ["KELVIN_TABLE_MAX", "KELVIN_TABLE_MIN", "KELVIN_TABLE_STEP", "KELVIN_WHITE", "kelvin_white"]
+__all__ = ["KELVIN_STATED_MAX", "KELVIN_STATED_MIN", "KELVIN_TABLE_MAX", "KELVIN_TABLE_MIN", "KELVIN_TABLE_STEP",
+           "KELVIN_WHITE", "kelvin_white"]

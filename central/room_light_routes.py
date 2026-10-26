@@ -3,10 +3,12 @@
 | Method | Path | Body | Answer | Refusals |
 |---|---|---|---|---|
 | GET | /v1/operator/house/lights | | RoomLightsView | |
-| PUT | /v1/operator/house/lights/{light_id} | RoomLight | RoomLightView | 404 unknown_sensor; 422 unknown_address; 409 reference_taken, sensor_reports_a_light, named_by_a_frame, too_many |
+| PUT | /v1/operator/house/lights/{light_id} | RoomLight | RoomLightView | 404 unknown_sensor, unknown_colour_sensor; 422 unknown_address; 409 reference_taken, sensor_reports_a_light, named_by_a_frame, too_many |
 | DELETE | /v1/operator/house/lights/{light_id} | | 204 | 404 unknown_room_light; 409 named_by_a_frame |
 | PUT | /v1/operator/house/sensors/{sensor_id} | Sensor | SensorView | 422 unknown_address; 409 reference_taken, too_many |
 | DELETE | /v1/operator/house/sensors/{sensor_id} | | 204 | 404 unknown_sensor; 409 sensor_reports_a_light |
+| PUT | /v1/operator/house/colour-sensors/{sensor_id} | ColourSensor | ColourSensorView | 422 unknown_address; 409 reference_taken, too_many |
+| DELETE | /v1/operator/house/colour-sensors/{sensor_id} | | 204 | 404 unknown_colour_sensor; 409 colour_sensor_followed |
 | GET | /v1/operator/house/lights/drawn | | DrawnView | |
 | GET | /v1/operator/house/refused-reports | | RefusedReportsView | |
 
@@ -24,6 +26,7 @@ from fastapi.responses import JSONResponse, Response
 
 from central.operator_auth import OPERATOR_PREFIX
 from central.room_light.model import (
+    ColourSensor,
     ReportedLight,
     RoomLight,
     RoomLightRefusal,
@@ -32,6 +35,7 @@ from central.room_light.model import (
 )
 from central.room_light.ports import ReportSources, RoomLightSetup
 from central.room_light.views import (
+    ColourSensorView,
     DrawnView,
     RefusedReportsView,
     RoomLightsView,
@@ -42,15 +46,18 @@ from contracts.room_light import ROOM_LIGHT_ID_PATTERN
 
 HOUSE_LIGHTS: Final = OPERATOR_PREFIX + "house/lights"
 HOUSE_SENSORS: Final = OPERATOR_PREFIX + "house/sensors"
+HOUSE_COLOUR_SENSORS: Final = OPERATOR_PREFIX + "house/colour-sensors"
 HOUSE_REFUSED: Final = OPERATOR_PREFIX + "house/refused-reports"
 _ID: Final = rf"^{ROOM_LIGHT_ID_PATTERN}$"
 LightId = Annotated[str, Path(pattern=_ID)]
 REFUSAL_STATUS: Final[dict[RoomLightRefusal, int]] = {
     RoomLightRefusal.UNKNOWN_ROOM_LIGHT: 404,
     RoomLightRefusal.UNKNOWN_SENSOR: 404,
+    RoomLightRefusal.UNKNOWN_COLOUR_SENSOR: 404,
     RoomLightRefusal.UNKNOWN_ADDRESS: 422,
     RoomLightRefusal.REFERENCE_TAKEN: 409,
     RoomLightRefusal.SENSOR_REPORTS_A_LIGHT: 409,
+    RoomLightRefusal.COLOUR_SENSOR_FOLLOWED: 409,
     RoomLightRefusal.NAMED_BY_A_FRAME: 409,
     RoomLightRefusal.TOO_MANY: 409,
 }
@@ -104,9 +111,22 @@ def mount_room_light_routes(app: FastAPI, *, admin: Any, lights: RoomLightSetup,
         lights.remove_sensor(sensor_id)
         return Response(status_code=204)
 
+    @app.put(HOUSE_COLOUR_SENSORS + "/{sensor_id}", dependencies=[Depends(admin)], response_model=ColourSensorView)
+    def save_colour_sensor(sensor_id: SensorIdPath, sensor: ColourSensor) -> ColourSensorView:
+        refusal = sources.colour_address_refusal(sensor.at.source, sensor.at.address)
+        if refusal is not None:
+            raise RoomLightRefused(refusal)
+        return lights.save_colour_sensor(sensor_id, sensor)
+
+    @app.delete(HOUSE_COLOUR_SENSORS + "/{sensor_id}", dependencies=[Depends(admin)], status_code=204,
+                response_class=Response)
+    def remove_colour_sensor(sensor_id: SensorIdPath) -> Response:
+        lights.remove_colour_sensor(sensor_id)
+        return Response(status_code=204)
+
 
 def _refusal(code: RoomLightRefusal) -> JSONResponse:
     return JSONResponse({"error": code.value}, status_code=REFUSAL_STATUS[code])
 
 
-__all__ = ["HOUSE_LIGHTS", "HOUSE_REFUSED", "HOUSE_SENSORS", "REFUSAL_STATUS", "mount_room_light_routes"]
+__all__ = ["HOUSE_COLOUR_SENSORS", "HOUSE_LIGHTS", "HOUSE_REFUSED", "HOUSE_SENSORS", "REFUSAL_STATUS", "mount_room_light_routes"]

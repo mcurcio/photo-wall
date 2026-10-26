@@ -55,10 +55,10 @@ def central_state(epoch: str = EPOCH) -> dict[str, bytes]:
                         {"serial": "p2", "name": "Stairs Pi", "address": "10.0.0.2"}]}),
         contract.ROOM_LIGHTS_KEY: wire(contract.ROOM_LIGHTS_KEY, {"change": 2, "lights": [
             {"id": "overheads", "name": "Overheads", "entry": {
-                "kind": "white", "colour": {"kind": "fixed", "kelvin": 2700},
+                "kind": "reported", "colour": {"kind": "kelvin", "kelvin": 2700},
                 "state": {"kind": "dimmer", "on": True, "brightness": 0.5}}},
             {"id": "lamp", "name": "Lamp", "entry": {
-                "kind": "white", "colour": {"kind": "fixed", "kelvin": 3000}, "state": {"kind": "not-reported"}}}]}),
+                "kind": "reported", "colour": {"kind": "kelvin", "kelvin": 3000}, "state": {"kind": "not-reported"}}}]}),
         contract.RELEASES_KEY: wire(contract.RELEASES_KEY, {"releases": [
             {"version": "v0.36.0-rc.1", "stable": False, "readiness": "ready"},
             {"version": "v0.36.0", "stable": True, "readiness": "downloading"},
@@ -77,10 +77,12 @@ class FakeDoor:
     def __init__(self) -> None:
         self.state = central_state()
         self.published: list[tuple[str, dict[str, Any]]] = []
+        self.births: list[dict[str, Any]] = []
         self.installs: list[tuple[str, str]] = []
         self.answer: dict[str, Any] = {"kind": "started", "serial": "p1", "version": LATEST, "install": "downloading"}
         self.connected = True
         self.down = False
+        self.births_refused = 0   # how many births to come the hub does not take
 
     async def read(self, key: str) -> bytes | None:
         if self.down:
@@ -92,6 +94,15 @@ class FakeDoor:
             raise DoorUnavailable("down")
         contract.encode_home_assistant_state(state)   # the contract's own check of what goes on the wire
         self.published.append((entity_id, state))
+
+    async def publish_birth(self, birth: dict[str, Any]) -> None:
+        if self.down:
+            raise DoorUnavailable("down")
+        if self.births_refused:
+            self.births_refused -= 1
+            raise DoorUnavailable("birth not taken")
+        contract.encode_galleria_birth(birth)   # the contract's own check
+        self.births.append(birth)
 
     async def install_player(self, serial: str, version: str) -> dict[str, Any]:
         self.installs.append((serial, version))
