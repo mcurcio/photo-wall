@@ -27,8 +27,11 @@ some window with the Frame's aspect (its Frame output's shape, the Position's bo
    content is on the left and the right is benign, then it would be reasonable to crop the
    picture so that the left edge is preserved"); one holding key content may not ("if it has key
    content on the sides then it can't be cropped to fit"). An even spread of interest passes.
-Among the windows passing 3 and 4, the one keeping the most interest wins; ties go to the window
-nearest the centre, then the lower offset. Windows are tried at offsets k / `window_steps` for
+Among the windows passing 3 and 4, `place` picks one: on a photo with faces, the window nearest
+the one that keeps the faces' centre at its place in the photo (owner, 2026-10-25: "A lone face
+should sit “in the same relative position within the image as the original (if possible), and
+cropped only as much as needed to fit the scaled image into the frame."); on a photo without
+faces, the one keeping the most interest. Windows are tried at offsets k / `window_steps` for
 k = 0..`window_steps`, plus 0.5.
 
 Every tuning value is a `FitSettings` field (central/wall_plan/fit_settings.py; owner,
@@ -54,7 +57,7 @@ from central.installation_models import FrameOutput, Pixels, PositiveMm
 from central.photo_library.rendition import FrameNeed, copy_edge
 from central.wall_plan.fit_settings import FIT_SETTING_RANGES, FitSettings
 from central.wall_plan.key_content import InterestGrid, KeyContent, UnitBox
-from contracts.frame_fit import window_holds
+from contracts.frame_fit import FreeAxis, free_axis, window_holds
 from contracts.models import Fraction, Model, PhotoCrop
 from contracts.photo_crop import CENTRED, Window, crop_window
 
@@ -139,12 +142,10 @@ FitVerdict = Fits | DoesNotFit
 
 def crop_share(width: int, height: int, aspect: float) -> float:
     """The share of the photo's area the largest window of the Frame's `aspect` (width / height)
-    removes: 1 - (the smaller of the two aspects / the larger). 0 for equal aspects. Pure;
-    ValueError for a non-positive size."""
-    if width <= 0 or height <= 0:
-        raise ValueError("positive photo dimensions required")
-    photo = width / height
-    return 1 - min(photo, aspect) / max(photo, aspect)
+    removes: 1 - the window's length on its free axis (contracts/frame_fit.py `free_axis`), which
+    is the smaller of the two aspects / the larger. 0 for equal aspects. Pure; ValueError for a
+    non-positive size or aspect."""
+    return 1 - free_axis(width, height, aspect).length
 
 
 def shape_fit(kind: MediaKind, width: int, height: int, target: FitTarget, crop_limit: float,
@@ -276,13 +277,46 @@ def judge(kind: MediaKind, width: int, height: int, key: KeyContent | None, targ
         return DoesNotFit(reason="face_cut")
     grid = interest_judged(key, settings)
     allowed = settings.max_lost_interest_density * share + _SLACK
-    passing = [(kept, offset) for offset, window in whole
-               if 1 - (kept := interest_kept(grid, window)) <= allowed]
+    passing = {offset: kept for offset, window in whole
+               if 1 - (kept := interest_kept(grid, window)) <= allowed}
     if not passing:
         return DoesNotFit(reason="interest_cut")
-    kept, offset = max(passing, key=lambda pair: (round(pair[0], 9), -abs(pair[1] - 0.5),
-                                                  -pair[1]))
-    return Fits(crop=PhotoCrop(offset=offset), crop_share=share, interest_kept=kept)
+    offset = place(tuple(passing.items()), free_axis(width, height, aspect), faces)
+    return Fits(crop=PhotoCrop(offset=offset), crop_share=share, interest_kept=passing[offset])
+
+
+def place(passing: Sequence[tuple[float, float]], axis: FreeAxis,
+          faces: tuple[UnitBox, ...]) -> float:
+    """The offset of the window a photo takes among `passing`, its windows past rules 3 and 4 as
+    (offset, interest kept), on its `axis`, with its judged `faces` (`faces_judged`: padded and
+    clamped). The one home of placement:
+    - no faces: the window keeping the most interest (rounded to 9 digits); ties go to the
+      offset nearest 0.5, then the lower;
+    - faces: the window keeping the faces' centre at its place in the photo. F is the mean of
+      the faces' centres along the axis weighted by their area (a share of the photo, so a bigger
+      face pulls harder), and the window at offset F holds F at the same share of its own length
+      (its first edge is F x (1 - length)). The passing offset nearest F wins, measured as the
+      distance between the two windows' first edges and rounded to 9 digits; ties go to the
+      offset nearest 0.5, then the lower. So a face too near the photo's edge for that window
+      moves only as far as keeping it whole needs, and equal shapes (`axis.length` 1, every
+      window the same) take the centred offset 0.5. The window stays the largest (owner,
+      2026-10-25, his pick "Nothing: least crop": no zoom). The interest does not move it (the
+      owner's pick of 2026-10-25, "faces only", a revisable design choice: saliency scores
+      texture such as a floor or foliage, which pulled windows off the faces).
+    Pure; ValueError when `passing` is empty."""
+    if not passing:
+        raise ValueError("no passing window to place")
+    if not faces:
+        return max(passing, key=lambda pair: (round(pair[1], 9), -abs(pair[0] - 0.5),
+                                              -pair[0]))[0]
+    spans = [(face.left, face.right) if axis.along == "x" else (face.top, face.bottom)
+             for face in faces]
+    areas = [(face.right - face.left) * (face.bottom - face.top) for face in faces]
+    aim = math.fsum(area * (start + end) / 2
+                    for area, (start, end) in zip(areas, spans, strict=True)) / math.fsum(areas)
+    return min((offset for offset, _ in passing),
+               key=lambda offset: (round(abs(axis.start(offset) - axis.start(aim)), 9),
+                                   abs(offset - 0.5), offset))
 
 
 @lru_cache(maxsize=4096)

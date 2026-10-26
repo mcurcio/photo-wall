@@ -11,13 +11,14 @@ Rules this module owns:
 - **Centred** (`CENTRED`): offset 0.5, the window a video uses and today's centred cover.
 
 Rules it does NOT own: which offset a photo gets, and whether a photo fits a Frame at all (the
-photo fit rule); the Frame fit (contracts/frame_fit.py); the masks and the final pass (player).
+photo fit rule); the Frame fit and the free axis the window slides along
+(contracts/frame_fit.py `free_axis`); the masks and the final pass (player).
 """
 from __future__ import annotations
 
-import math
 from typing import Final
 
+from contracts.frame_fit import free_axis
 from contracts.models import PhotoCrop
 
 Window = tuple[float, float, float, float]   # left, top, right, bottom; fractions of the photo
@@ -28,7 +29,8 @@ CENTRED: Final = PhotoCrop(offset=0.5)
 def crop_window(crop: PhotoCrop, source_width: int, source_height: int,
                 frame_aspect: float) -> Window:
     """The window `crop` names on a `source_width` x `source_height` photo for a Frame whose
-    profile aspect is `frame_aspect` (width_px / height_px).
+    profile aspect is `frame_aspect` (width_px / height_px): the photo's whole extent across its
+    `free_axis` and the axis's `length` along it, its first edge at `FreeAxis.start(crop.offset)`.
 
     A photo wider than the Frame: the window is the photo's full height and
     frame_aspect / photo_aspect of its width, and its left edge is offset x (1 - that width).
@@ -36,17 +38,8 @@ def crop_window(crop: PhotoCrop, source_width: int, source_height: int,
     edge at offset x (1 - that height). Equal aspects: (0, 0, 1, 1) whatever the offset.
     `crop_window(CENTRED, w, h, a)` equals the centred cover player/geometry.py drew before 5a.
     Pure; ValueError for a non-positive or non-finite aspect or a non-positive size."""
-    if not math.isfinite(frame_aspect) or frame_aspect <= 0:
-        raise ValueError("positive finite Frame aspect required")
-    if source_width <= 0 or source_height <= 0:
-        raise ValueError("positive source dimensions required")
-    photo_aspect = source_width / source_height
-    if photo_aspect > frame_aspect:
-        width = frame_aspect / photo_aspect
-        left = crop.offset * (1 - width)
-        return (left, 0.0, left + width, 1.0)
-    if photo_aspect < frame_aspect:
-        height = photo_aspect / frame_aspect
-        top = crop.offset * (1 - height)
-        return (0.0, top, 1.0, top + height)
-    return (0.0, 0.0, 1.0, 1.0)
+    axis = free_axis(source_width, source_height, frame_aspect)
+    start = axis.start(crop.offset)
+    if axis.along == "x":
+        return (start, 0.0, start + axis.length, 1.0)
+    return (0.0, start, 1.0, start + axis.length)
