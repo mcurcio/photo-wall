@@ -31,7 +31,7 @@ from test_frame_picture_browser import _off_thread
 
 from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.room_light_store import PgRoomLights
-from central.room_light.model import ColourSensorRef, ReporterRef
+from central.room_light.model import ColourSensorRef, LightStated, ReporterRef
 from contracts.room_light import Dimmer, KelvinColour
 
 pytestmark = pytest.mark.skipif(
@@ -48,7 +48,7 @@ SPOT = {"kind": "reported", "name": "Bookshelf spot", "reporter": {"source": HOM
 INTEGRATION_WORDS = re.compile(r"home assistant|mqtt|topic|light\.bookshelf|sensor\.window_illuminance|sensor\.sky_colour",
                                re.I)
 HEARD_AT = 1_791_000_000
-GALLERIA = {"version": "v0.40.0", "kinds": ["light", "illuminance", "colour-temperature"], "heard_at": HEARD_AT,
+GALLERIA = {"version": "0.40.0", "kinds": ["light", "illuminance", "colour-temperature"], "heard_at": HEARD_AT,
             "central_version": "0.40.0", "update": False}
 # Home Assistant's states as Central last heard them (HomeAssistantStatesView).
 STATES = {
@@ -173,7 +173,7 @@ def test_home_assistant_says_when_its_states_were_last_heard_and_what_each_entit
         expect(_row(page, "From Home Assistant", "Kitchen ceiling")).to_contain_text("Nothing yet")
         expect(_row(page, "Newest first", "light.porch")).to_contain_text(
             "No room light, Sensor or colour sensor is linked to this entity yet. Pick it on House › Lights.")
-        expect(shown).to_contain_text("Versions: Galleria v0.40.0 · Central 0.40.0")
+        expect(shown).to_contain_text(re.compile(r"Versions: Galleria 0\.40\.0, heard \S.* · Central 0\.40\.0"))
         expect(shown).not_to_contain_text("Update Galleria")
         expect(shown.get_by_role("link", name="Room lights and Sensors", exact=True)).to_have_attribute("href", "#/lights")
         assert not re.search(r"mqtt|broker|topic", shown.inner_text(), re.I), shown.inner_text()
@@ -186,16 +186,16 @@ def test_home_assistant_not_heard_yet(page, registry):
         signed_in(page, origin)
         go(page, "home-assistant")
         expect(visible_page(page)).to_contain_text("States last heard: Not heard yet")
-        expect(visible_page(page)).to_contain_text("Galleria has not said its version: update it in HACS")
+        expect(visible_page(page)).to_contain_text("Galleria has not been heard from: install it in HACS")
 
 
 def test_home_assistant_says_to_update_galleria_that_cannot_send_colour_sensors(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
-        _states(page, {**STATES, "galleria": {**GALLERIA, "version": "v0.39.0", "update": True}})
+        _states(page, {**STATES, "galleria": {**GALLERIA, "version": "0.39.0", "update": True}})
         signed_in(page, origin)
         go(page, "home-assistant")
         shown = visible_page(page)
-        expect(shown).to_contain_text("Versions: Galleria v0.39.0 · Central 0.40.0")
+        expect(shown).to_contain_text(re.compile(r"Versions: Galleria 0\.39\.0, heard \S.* · Central 0\.40\.0"))
         expect(shown).to_contain_text("Update Galleria in HACS: this version cannot send colour sensors yet")
 
 
@@ -209,7 +209,7 @@ def test_the_picker_offers_light_entities_for_a_light_and_illuminance_entities_f
     and Sensor name the entity picked, and the light reports itself on House › Lights."""
     lights = PgRoomLights(registry.db, PgHouseLock())
     _off_thread(lambda: lights.record_light_state(ReporterRef(source=HOME_ASSISTANT, address="light.kitchen"),
-                                                  Dimmer(on=True, brightness=0.5)))
+                                                  LightStated(state=Dimmer(on=True, brightness=0.5), colour=None)))
     with operator_server(registry.db, registry.clock) as origin:
         _states(page)
         signed_in(page, origin)

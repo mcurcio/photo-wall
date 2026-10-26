@@ -4,6 +4,7 @@ import {
   type ColourSensor, type ColourSensorView, type HeardEntityView, LIMITS, type RoomLight, type RoomLightsView,
   type RoomLightView, type Sensor, type SensorView,
 } from "../../generated/contract";
+import { ColourSwatch } from "../../patterns/colour-swatch";
 import { EntityList } from "../../patterns/entity-list";
 import { Note } from "../../patterns/fact-row";
 import { OwnerLinks } from "../../patterns/link-to-owner";
@@ -16,7 +17,7 @@ import { SegmentedControl } from "../../ui/segmented-control";
 import { Select } from "../../ui/select";
 import { Inline, Stack } from "../../ui/stack";
 import {
-  brightnessWords, colourLineWords, colourReadingWords, colourSensorNames, entitiesFor, entityLabel, followedWords, heardWords,
+  brightnessWords, colourLineWords, colourReadingWords, colourSwatch, colourSensorNames, entitiesFor, entityLabel, followedWords, heardWords,
   lightNames, NEW_KELVIN, newId, reportedThrough, reporterOf, reporterWords, sensorReadingWords, smartColourSensor,
   smartSensor, whereWords,
 } from "./model";
@@ -59,8 +60,11 @@ const KIND_HELP: Record<Kind, string> = {
 };
 
 type ColourSource = RoomLight["colour"]["kind"];
-/** The colour sources each kind of light takes, its default first. */
-const COLOUR_SOURCES: Record<Kind, readonly { value: ColourSource; label: string }[]> = {
+/** The colour sources a kind of light takes, from that kind's own generated union. */
+type SourceOf<K extends Kind> = Extract<RoomLight, { kind: K }>["colour"]["kind"];
+/** The colour sources each kind of light takes, its default first; each kind's list holds only the
+ * sources its generated type allows. */
+const COLOUR_SOURCES: { [K in Kind]: readonly { value: SourceOf<K>; label: string }[] } = {
   reported: [{ value: "its-bulb", label: "Its bulb's own" }, { value: "typed", label: "Typed" }],
   measured: [{ value: "typed", label: "Typed" }, { value: "colour-sensor", label: "A colour sensor" }],
   fixed: [{ value: "typed", label: "Typed" }, { value: "colour-sensor", label: "A colour sensor" }],
@@ -325,7 +329,10 @@ export function RoomLights({
           columns={[
             { id: "name", header: "Name", rowHeader: true, cell: (row) => row.light.name },
             { id: "reporter", header: "How it is known", cell: (row) => reporterWords(row.light, view.sensors) },
-            { id: "colour", header: "Colour", cell: (row) => colourLineWords(row.colour, colourNames, since) },
+            { id: "colour", header: "Colour",
+              cell: (row) => (
+                <ColourSwatch colour={colourSwatch(row.colour)}>{colourLineWords(row.colour, colourNames, since)}</ColourSwatch>
+              ) },
             { id: "state", header: "Now", cell: (row) => brightnessWords(row, since) },
             { id: "heard", header: "Last heard", cell: (row) => heardWords(row, since) },
             {

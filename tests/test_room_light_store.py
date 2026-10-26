@@ -299,3 +299,28 @@ def test_galleria_s_birth_reaches_the_settings_page(registry):
     lights.record_galleria_birth(GalleriaBirth(version="0.41.0", kinds=("light", "illuminance", "colour-temperature")))
     new = settings.view().galleria
     assert (new.version, new.kinds, new.update) == ("0.41.0", ("light", "illuminance", "colour-temperature"), False)
+
+
+def test_the_new_tables_carry_their_audit_fields(registry):
+    """A colour sensor, a colour sensor's facts and Galleria's birth each keep when and by whom they
+    were created and last changed: a second write moves only when it changed and by whom."""
+    lights = PgRoomLights(registry.db, PgHouseLock())
+
+    def audit(table: str) -> dict:
+        with registry.db.transaction() as conn:
+            return conn.execute(f"SELECT created_at, created_by, changed_at, changed_by FROM {table}").fetchone()  # noqa: S608
+
+    writes = {
+        "colour_sensors": lambda name: lights.save_colour_sensor("sky", ColourSensor(name=name, at=SKY_AT)),
+        "colour_words": lambda name: lights.record_colour_reading(SKY_AT, KelvinColour(kelvin=len(name) * 1000.0)),
+        "galleria_birth": lambda name: lights.record_galleria_birth(GalleriaBirth(version=name, kinds=("light",))),
+    }
+    by = {"colour_sensors": "operator", "colour_words": "home-assistant", "galleria_birth": "galleria"}
+    for table, write in writes.items():
+        write("Sky")
+        first = audit(table)
+        assert first["created_at"] == first["changed_at"] and first["created_by"] == first["changed_by"] == by[table]
+        write("Daylight")
+        second = audit(table)
+        assert second["created_at"] == first["created_at"] and second["changed_at"] > first["changed_at"], table
+        assert (second["created_by"], second["changed_by"]) == (by[table], by[table])

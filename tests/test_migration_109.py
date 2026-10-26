@@ -1,8 +1,9 @@
 """109 over rows seeded at 108 (099's shapes): each light's colour becomes a colour source (a
 reported light follows its bulb with its old kelvin typed, 6500 for an old reported colour; a
 measured or fixed light's kelvin becomes typed), each light word and reading word becomes its
-reference's facts (a stated state and when, a colour dimmer's rgb as its stated colour, "unavailable"
-keeping nothing and can't tell since it was heard), and the document the store builds from them is
+reference's facts (a stated state and when, no colour carried over: an old colour dimmer's rgb may be
+one Home Assistant worked out from color_temp, so the bulb's colour stays typed until it states one;
+"unavailable" keeping nothing and can't tell since it was heard), and the document the store builds from them is
 the one the new rules give.
 """
 from __future__ import annotations
@@ -33,7 +34,6 @@ from contracts.room_light import (
     MeasuredEntry,
     NotReported,
     ReportedEntry,
-    RgbColour,
 )
 
 MIGRATIONS = Path(__file__).parents[1] / "central/migrations"
@@ -105,9 +105,10 @@ def test_109_upgrades_lights_and_words_to_colour_sources_and_facts(database_prov
                     "EXTRACT(EPOCH FROM heard_at) AS heard_at FROM light_words").fetchall()}
                 assert (words["light.white"]["state"], words["light.white"]["colour"], words["light.white"]["state_at"]) == (
                     {"kind": "dimmer", "on": True, "brightness": 0.5}, None, 100)
-                assert (words["light.colour"]["colour"], words["light.colour"]["colour_at"]) == (
-                    {"kind": "rgb", "rgb": [1.0, 0.5, 0.0]}, 200)
-                assert words["light.dark"]["colour"] is None      # all channels 0: no colour stated
+                # An old colour dimmer's rgb is never carried as the bulb's own colour.
+                assert (words["light.colour"]["colour"], words["light.colour"]["colour_at"]) == (None, None)
+                assert words["light.colour"]["state"] == {"kind": "dimmer", "on": True, "brightness": 0.25}
+                assert words["light.dark"]["colour"] is None
                 assert (words["light.away"]["state"], words["light.away"]["cant_tell"],
                         words["light.away"]["heard_at"]) == (None, 300, 300)
                 readings = {row["address"]: row for row in conn.execute(
@@ -119,13 +120,13 @@ def test_109_upgrades_lights_and_words_to_colour_sources_and_facts(database_prov
             assert document.change == change + 1
             assert document.lights["white"] == ReportedEntry(colour=KelvinColour(kelvin=5000),
                                                              state=Dimmer(on=True, brightness=0.5))
-            assert document.lights["colour"] == ReportedEntry(colour=RgbColour(rgb=(1.0, 0.5, 0.0)),
+            assert document.lights["colour"] == ReportedEntry(colour=KelvinColour(kelvin=6500),
                                                               state=Dimmer(on=True, brightness=0.25))
             assert document.lights["away"] == ReportedEntry(colour=KelvinColour(kelvin=2700), state=NotReported())
             assert document.lights["window"] == MeasuredEntry(colour=KelvinColour(kelvin=5500), state=Measured(lux=80.0))
             assert document.lights["room"] == FixedEntry(colour=KelvinColour(kelvin=6500))
             view = {each.id: each for each in PgRoomLights(db, PgHouseLock()).lights().lights}
             assert view["away"].cant_tell_since == 300 and view["white"].cant_tell_since is None
-            assert view["colour"].colour.colour_from == "following" and view["white"].colour.colour_from == "never-stated"
+            assert view["colour"].colour.colour_from == "never-stated" and view["white"].colour.colour_from == "never-stated"
         finally:
             db.close()

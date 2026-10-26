@@ -83,7 +83,7 @@ export const PI_NAMES: Readonly<Record<string, string>> = { "player-1": "Player 
 /** Home Assistant's states as Central last heard them: the two lights, the window meter and the sky's
  * colour the house names, the kitchen light nothing names yet, and the porch meter. */
 export const HOME_ASSISTANT_STATES: HomeAssistantStatesView = {
-  galleria: { version: "v0.40.0", kinds: ["light", "illuminance", "colour-temperature"], heard_at: HEARD,
+  galleria: { version: "0.40.0", kinds: ["light", "illuminance", "colour-temperature"], heard_at: HEARD,
     central_version: "0.40.0", update: false },
   heard_at: HEARD,
   entities: [

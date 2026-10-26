@@ -12,7 +12,7 @@ name with its entity id as the detail, and the light or Sensor it saves names th
 
 Mutation probes: "Off" for a not-reported state -> the state case fails; the id keeps
 upper case or a trailing hyphen -> the contract rejects it; `entitiesFor` keeps illuminance entities
-for a light -> the picker case fails; `drawnKelvin` bounded by KELVIN_STATED_MAX instead of
+for a light -> the picker case fails; `tableEndKelvin` bounded by KELVIN_STATED_MAX instead of
 KELVIN_TABLE_MAX -> the 34,000 K line loses "outside what the screen draws (drawn at 10,000 K)" and
 the colour line case fails.
 """
@@ -57,11 +57,15 @@ LINES = [
     (_line(5500), "Typed 5,500 K"),
     (_line(3400, **BULB, colour_from="following"), "Following its bulb 3,400 K"),
     (_line(3400, **SENSOR, colour_from="following"), "Following Sky colour 3,400 K"),
-    (_line(rgb=[1, 0.8, 0.6], **BULB, colour_from="following"), "Following its bulb (colour)"),
+    (_line(rgb=[1, 0.8, 0.6], **BULB, colour_from="following"), "Following its bulb's colour"),
     (_line(5500, **BULB, colour_from="never-stated"), "Typed 5,500 K until its bulb says"),
     (_line(5500, **SENSOR, colour_from="never-stated"), "Typed 5,500 K until Sky colour says"),
     (_line(3400, **SENSOR, colour_from="following", cant_tell_since=CANT_TELL), "Can't tell since 18:42 (keeping 3,400 K)"),
     (_line(3400, **BULB, colour_from="following", cant_tell_since=CANT_TELL), "Can't tell since 18:42 (keeping 3,400 K)"),
+    # Production `room` (a brightness-only bulb, 5,000 K typed) while Home Assistant says unavailable:
+    # its typed colour is never said to be kept.
+    (_line(5000, **BULB, colour_from="never-stated", cant_tell_since=CANT_TELL),
+     "Typed 5,000 K until its bulb says · can't tell since 18:42"),
     (_line(34000, **BULB, colour_from="following"),
      "Following its bulb 34,000 K · outside what the screen draws (drawn at 10,000 K)"),
     (_line(1500, **SENSOR, colour_from="following"),
@@ -95,6 +99,7 @@ process.stdout.write(JSON.stringify({
     words.reporterWords({ kind: "fixed", name: "Lamp", colour: input.fixed }, sensors),
   ],
   lines: input.lines.map((line) => words.colourLineWords(line, input.sky, clock)),
+  swatches: input.lines.map((line) => words.colourSwatch(line)),
   brightness: [
     words.brightnessWords(light(null, { kind: "dimmer", on: true, brightness: 0.6 }), clock),
     words.brightnessWords(light(input.cantTell, { kind: "dimmer", on: true, brightness: 0.6 }), clock),
@@ -154,6 +159,13 @@ def test_a_colour_line_says_its_colour_and_where_it_comes_from(said):
     """Every ColourLineView kind in words, with "outside what the screen draws" only past the screen's
     colour table (2,000..10,000 K), the drawn kelvin the table's bound."""
     assert said["lines"] == [words for _, words in LINES]
+
+
+def test_a_bulb_s_rgb_is_drawn_as_its_swatch_and_a_kelvin_is_not(said):
+    """A colour mode's rgb (shares of 1) is the swatch's CSS colour; a kelvin's words say it in full."""
+    swatches = dict(zip((words for _, words in LINES), said["swatches"], strict=True))
+    assert swatches["Following its bulb's colour"] == "rgb(255 204 153)"
+    assert {swatch for words, swatch in swatches.items() if words != "Following its bulb's colour"} == {None}
 
 
 def test_what_a_source_cant_tell_is_kept_and_said(said):

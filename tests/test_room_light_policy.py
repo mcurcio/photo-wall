@@ -176,8 +176,22 @@ def test_a_light_keeps_its_brightness_and_colour_through_cant_tell():
     still = light_facts_after(away, Unavailable(), 30.0)
     assert still.cant_tell_since == 20.0 and still.heard_at == 30.0 and still.state == Kept(HALF, 10.0)
     back = light_facts_after(still, LightStated(state=HALF, colour=None), 40.0)
-    assert back == LightFacts(state=Kept(HALF, 40.0), colour=Kept(WARM, 10.0), cant_tell_since=None, heard_at=40.0)
+    assert back == LightFacts(state=Kept(HALF, 10.0), colour=Kept(WARM, 10.0), cant_tell_since=None, heard_at=40.0)
     assert entry_of(SPOT, Facts(lights={SPOT_REF: away}, readings={}, colours={}), SENSORS, {}).state == HALF
+
+
+def test_a_repeated_value_keeps_when_it_was_first_stated():
+    """A re-read (Central restarting, Galleria publishing all again) states the same values again:
+    when each was stated stays; heard_at moves, and a new value is stamped when it comes."""
+    light = light_facts_after(None, LightStated(state=HALF, colour=WARM), 1.0)
+    again = light_facts_after(light, LightStated(state=HALF, colour=WARM), 5.0)
+    assert again == LightFacts(state=Kept(HALF, 1.0), colour=Kept(WARM, 1.0), cant_tell_since=None, heard_at=5.0)
+    assert light_facts_after(again, LightStated(state=OFF, colour=RED), 6.0) == LightFacts(
+        state=Kept(OFF, 6.0), colour=Kept(RED, 6.0), cant_tell_since=None, heard_at=6.0)
+    read = reading_facts_after(reading_facts_after(None, Measured(lux=80.0), 1.0), Measured(lux=80.0), 5.0)
+    assert (read.reading, read.heard_at) == (Kept(Measured(lux=80.0), 1.0), 5.0)
+    sky = colour_facts_after(colour_facts_after(None, KelvinColour(kelvin=4100.5), 1.0), KelvinColour(kelvin=4100.5), 5.0)
+    assert (sky.colour, sky.heard_at) == (Kept(KelvinColour(kelvin=4100.5), 1.0), 5.0)
 
 
 def test_off_is_stated_and_a_report_without_colour_leaves_the_colour():

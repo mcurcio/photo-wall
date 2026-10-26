@@ -82,6 +82,7 @@ class FakeDoor:
         self.answer: dict[str, Any] = {"kind": "started", "serial": "p1", "version": LATEST, "install": "downloading"}
         self.connected = True
         self.down = False
+        self.births_refused = 0   # how many births to come the hub does not take
 
     async def read(self, key: str) -> bytes | None:
         if self.down:
@@ -97,6 +98,9 @@ class FakeDoor:
     async def publish_birth(self, birth: dict[str, Any]) -> None:
         if self.down:
             raise DoorUnavailable("down")
+        if self.births_refused:
+            self.births_refused -= 1
+            raise DoorUnavailable("birth not taken")
         contract.encode_galleria_birth(birth)   # the contract's own check
         self.births.append(birth)
 

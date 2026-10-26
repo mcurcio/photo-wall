@@ -98,6 +98,10 @@ from contracts.room_light import (
 ROOM_LIGHTS_CHANNEL: Final = "room_lights"     # NOTIFY payload: empty; the WALL writer re-reads the document
 REFUSALS_KEPT: Final = 20                      # the newest refused reports kept per source
 WORDS_KEPT_PER_SOURCE: Final = 256             # the newest references' words kept per source
+# Who writes a row, for its audit fields (created_by, changed_by; there are no accounts): the console's
+# operator for setup, Galleria for its birth, and a reference's own source for its facts.
+OPERATOR: Final = "operator"
+GALLERIA: Final = "galleria"
 
 _COLOUR: Final = TypeAdapter(LightColour)
 
@@ -242,12 +246,15 @@ def _colour_in(conn: Any, house: HouseLock, sensor: ColourSensorRef, reading: Co
                            (sensor.source, sensor.address)).fetchone()
         facts = colour_facts_after(None if row is None else _colour_facts(row), reading, now)
         conn.execute(
-            "INSERT INTO colour_words(source, address, colour, colour_at, cant_tell_since, heard_at) "
-            "VALUES (%s, %s, %s, to_timestamp(%s), to_timestamp(%s), to_timestamp(%s)) "
+            "INSERT INTO colour_words(source, address, colour, colour_at, cant_tell_since, heard_at, "
+            "created_at, created_by, changed_at, changed_by) "
+            "VALUES (%(source)s, %(address)s, %(colour)s, to_timestamp(%(colour_at)s), to_timestamp(%(cant_tell)s), "
+            "to_timestamp(%(now)s), to_timestamp(%(now)s), %(source)s, to_timestamp(%(now)s), %(source)s) "
             "ON CONFLICT (source, address) DO UPDATE SET colour=EXCLUDED.colour, colour_at=EXCLUDED.colour_at, "
-            "cant_tell_since=EXCLUDED.cant_tell_since, heard_at=EXCLUDED.heard_at",
-            (sensor.source, sensor.address, _json(facts.colour and facts.colour.value),
-             facts.colour and facts.colour.at, facts.cant_tell_since, facts.heard_at))
+            "cant_tell_since=EXCLUDED.cant_tell_since, heard_at=EXCLUDED.heard_at, "
+            "changed_at=EXCLUDED.changed_at, changed_by=EXCLUDED.changed_by",
+            {"source": sensor.source, "address": sensor.address, "colour": _json(facts.colour and facts.colour.value),
+             "colour_at": facts.colour and facts.colour.at, "cant_tell": facts.cant_tell_since, "now": facts.heard_at})
     return _kept_in(conn, house, "colour_words", sensor.source, sensor.address, write)
 
 
@@ -340,9 +347,12 @@ class PgRoomLights:
 
     def record_galleria_birth(self, birth: GalleriaBirth) -> None:
         with self._db.transaction() as conn:
-            conn.execute("INSERT INTO galleria_birth(one, birth, heard_at) VALUES (true, %s, clock_timestamp()) "
-                         "ON CONFLICT (one) DO UPDATE SET birth=EXCLUDED.birth, heard_at=EXCLUDED.heard_at",
-                         (Jsonb(birth.model_dump(mode="json")),))
+            conn.execute("INSERT INTO galleria_birth(one, birth, heard_at, created_at, created_by, changed_at, "
+                         "changed_by) VALUES (true, %(birth)s, clock_timestamp(), clock_timestamp(), %(by)s, "
+                         "clock_timestamp(), %(by)s) "
+                         "ON CONFLICT (one) DO UPDATE SET birth=EXCLUDED.birth, heard_at=EXCLUDED.heard_at, "
+                         "changed_at=EXCLUDED.changed_at, changed_by=EXCLUDED.changed_by",
+                         {"birth": Jsonb(birth.model_dump(mode="json")), "by": GALLERIA})
 
     # ---- RoomLightSetup ----
 
@@ -423,9 +433,11 @@ class PgRoomLights:
             if refused is not None:
                 raise refused
             before = document_in(conn)
-            conn.execute("INSERT INTO colour_sensors(id, sensor) VALUES (%s, %s) "
-                         "ON CONFLICT (id) DO UPDATE SET sensor=EXCLUDED.sensor",
-                         (sensor_id, Jsonb(sensor.model_dump(mode="json"))))
+            conn.execute("INSERT INTO colour_sensors(id, sensor, created_at, created_by, changed_at, changed_by) "
+                         "VALUES (%(id)s, %(sensor)s, clock_timestamp(), %(by)s, clock_timestamp(), %(by)s) "
+                         "ON CONFLICT (id) DO UPDATE SET sensor=EXCLUDED.sensor, changed_at=EXCLUDED.changed_at, "
+                         "changed_by=EXCLUDED.changed_by",
+                         {"id": sensor_id, "sensor": Jsonb(sensor.model_dump(mode="json")), "by": OPERATOR})
             _changed_in(conn, before)
             return next(view for view in _view_in(conn, self._house).colour_sensors if view.id == sensor_id)
 

@@ -27,6 +27,13 @@ const lined = (light: RoomLightView, name: string, colour: Partial<ColourLineVie
   ...light, id: idFromName(name), light: { ...light.light, name } as RoomLightView["light"], colour: { ...light.colour, ...colour },
 });
 
+/** A bulb that reports itself, heard on at 60 % and following its own kelvin: its entry and its
+ * colour line from the same facts, as Central gives them. */
+const following = (name: string, kelvin: number): RoomLightView => lined({
+  ...SPOT, entry: { kind: "reported", colour: { kind: "kelvin", kelvin }, state: { kind: "dimmer", on: true, brightness: 0.6 } },
+  heard_at: HEARD,
+}, name, { colour: { kind: "kelvin", kelvin }, colour_from: "following", stated_at: HEARD });
+
 /** The owner's house: daylight a window Sensor measures, its colour following the sky's colour
  * sensor; the colour overheads at 60 %, following their bulb; the spotlight not heard yet, typed
  * until its bulb says; a lamp always on, typed; two Sensors, one never heard; one colour sensor. */
@@ -37,7 +44,8 @@ export const Empty: Story = { args: { view: { lights: [], sensors: [], colour_se
 export const RemoveRefused: Story = { tags: WHOLE, args: { note: refusalWords("Not removed", "sensor_reports_a_light") } };
 /** Removing a colour sensor a light follows, refused in words. */
 export const ColourSensorFollowed: Story = { tags: WHOLE, args: { note: refusalWords("Not removed", "colour_sensor_followed") } };
-/** An off light, and one that can't tell (its last brightness kept). */
+/** An off light, and one that can't tell (its last brightness kept; its bulb never stated a colour,
+ * so its typed colour stands and is never said to be kept). */
 export const OffAndUnavailable: Story = {
   tags: WHOLE,
   args: {
@@ -47,7 +55,8 @@ export const OffAndUnavailable: Story = {
         { ...OVERHEADS, entry: { kind: "reported", colour: { kind: "rgb", rgb: [1, 0.8, 0.6] },
           state: { kind: "dimmer", on: false, brightness: 0 } } },
         { ...SPOT, entry: { kind: "reported", colour: { kind: "kelvin", kelvin: 2700 },
-          state: { kind: "dimmer", on: true, brightness: 0.4 } }, heard_at: HEARD, cant_tell_since: HEARD },
+          state: { kind: "dimmer", on: true, brightness: 0.4 } }, heard_at: HEARD, cant_tell_since: HEARD,
+          colour: { ...SPOT.colour, cant_tell_since: HEARD } },
       ],
     },
   },
@@ -62,13 +71,13 @@ export const ColourLines: Story = {
       ...ROOMS,
       lights: [
         LAMP,
-        lined(SPOT, "Hall bulb", { colour: { kind: "kelvin", kelvin: 3400 }, colour_from: "following", stated_at: HEARD }),
+        following("Hall bulb", 3400),
         OVERHEADS,
         DAYLIGHT,
         SPOT,
         lined(DAYLIGHT, "Porch light", { colour: { kind: "kelvin", kelvin: 5500 }, colour_from: "never-stated", stated_at: null }),
         lined(DAYLIGHT, "Window light", { cant_tell_since: HEARD - 3600 }),
-        lined(SPOT, "Cold bulb", { colour: { kind: "kelvin", kelvin: 34000 }, colour_from: "following", stated_at: HEARD }),
+        following("Cold bulb", 34000),
       ],
       colour_sensors: [{ ...SKY, followed_by: ["daylight", "porch-light", "window-light"] }],
     },
@@ -104,7 +113,8 @@ const checks: [string, string][] = [
   [idFromName("Café lamp"), "cafe-lamp"],
   [idFromName("Spot-"), "spot"],
   [colourLineWords(DAYLIGHT.colour, names, clock), "Following Sky colour 3,400 K"],
-  [colourLineWords(OVERHEADS.colour, names, clock), "Following its bulb (colour)"],
+  [colourLineWords(OVERHEADS.colour, names, clock), "Following its bulb's colour"],
+  [colourLineWords({ ...SPOT.colour, cant_tell_since: HEARD }, names, clock), "Typed 2,700 K until its bulb says · can't tell since 18:42"],
   [colourLineWords(SPOT.colour, names, clock), "Typed 2,700 K until its bulb says"],
   [colourLineWords({ ...DAYLIGHT.colour, cant_tell_since: HEARD }, names, clock), "Can't tell since 18:42 (keeping 3,400 K)"],
   [brightnessWords({ ...SPOT, entry: { kind: "reported", colour: { kind: "kelvin", kelvin: 2700 },

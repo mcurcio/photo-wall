@@ -1,15 +1,8 @@
-import type { TruthKind } from "../../design/tokens";
 import {
   CONSTANTS, type FrameLighting as Lighting, LIMITS, type RoomLightId, type RoomLightsView,
 } from "../../generated/contract";
-import { FactRow } from "../../patterns/fact-row";
-import { FactGroup, Note } from "../../patterns/fact-row";
-
-/** A room light's colour line in words and its truth kind, as House › Lights says it. */
-export interface ColourLine {
-  words: string;
-  tone: TruthKind;
-}
+import { ColourSwatch } from "../../patterns/colour-swatch";
+import { FactGroup, FactRow, Note } from "../../patterns/fact-row";
 import { OwnerLinks } from "../../patterns/link-to-owner";
 import { TypedNumber } from "../../patterns/typed-number";
 import { unitWords } from "../../patterns/units";
@@ -20,6 +13,7 @@ import { SegmentedControl } from "../../ui/segmented-control";
 import { Select } from "../../ui/select";
 import { Slider } from "../../ui/slider";
 import { Inline, Stack } from "../../ui/stack";
+import type { ColourLine } from "../room-lights/model";
 import {
   asKind, type FrameLight, fromWords, inkWords, KIND_NAMES, type Paper, type PaperProfileChoice, referenceWords,
   sensorFor, viewing, withLight,
@@ -66,7 +60,9 @@ function LightRows({ light, number, rooms, colourOf, disabled, onChange, onRemov
           <Select value={light.light} options={options} disabled={disabled} width="fit"
             onChange={(id) => onChange(viewing(light, id, rooms))} />
         </Field>
-        {colour !== null && <FactRow label="Its colour" tone={colour.tone}>{colour.words}</FactRow>}
+        {colour !== null && (
+          <FactRow label="Its colour" tone={colour.tone}><ColourSwatch colour={colour.swatch}>{colour.words}</ColourSwatch></FactRow>
+        )}
         <TypedNumber label="Lux at the Frame" help="What a phone light meter reads at the Frame's centre, facing out"
           value={light.lux} min={LUX.exclusiveMinimum} max={LUX.maximum} step={STEP.lux} unit="lx" exclusiveMin
           disabled={disabled} onChange={(lux) => set({ lux })} />

@@ -60,13 +60,15 @@ from contracts.room_light import (
 
 def light_facts_after(before: LightFacts | None, report: LightReport, at: float) -> LightFacts:
     """A light reference's facts after `report`, heard at `at`: a stated state replaces the last and
-    clears "can't tell"; a stated colour replaces the last, a report stating none leaves it;
+    clears "can't tell"; a stated colour replaces the last, a report stating none leaves it (a repeat
+    of a kept value keeps when it was first stated, `_kept`);
     Unavailable leaves both and marks "can't tell" since `at` (or since it already could not). Pure."""
     if isinstance(report, LightStated):
         colour = None if before is None else before.colour
         if report.colour is not None:
-            colour = Kept(report.colour, at)
-        return LightFacts(state=Kept(report.state, at), colour=colour, cant_tell_since=None, heard_at=at)
+            colour = _kept(colour, report.colour, at)
+        return LightFacts(state=_kept(None if before is None else before.state, report.state, at), colour=colour,
+                          cant_tell_since=None, heard_at=at)
     return LightFacts(state=None if before is None else before.state, colour=None if before is None else before.colour,
                       cant_tell_since=_since(before, at), heard_at=at)
 
@@ -75,7 +77,8 @@ def reading_facts_after(before: ReadingFacts | None, reading: Reading, at: float
     """A Sensor reference's facts after `reading`, heard at `at`: a Measured replaces the last and
     clears "can't tell"; Unavailable leaves it and marks "can't tell". Pure."""
     if isinstance(reading, Measured):
-        return ReadingFacts(reading=Kept(reading, at), cant_tell_since=None, heard_at=at)
+        return ReadingFacts(reading=_kept(None if before is None else before.reading, reading, at), cant_tell_since=None,
+                            heard_at=at)
     return ReadingFacts(reading=None if before is None else before.reading, cant_tell_since=_since(before, at),
                         heard_at=at)
 
@@ -84,9 +87,16 @@ def colour_facts_after(before: ColourFacts | None, reading: ColourReading, at: f
     """A colour sensor reference's facts after `reading`, heard at `at`: a KelvinColour replaces the
     last and clears "can't tell"; Unavailable leaves it and marks "can't tell". Pure."""
     if isinstance(reading, KelvinColour):
-        return ColourFacts(colour=Kept(reading, at), cant_tell_since=None, heard_at=at)
+        return ColourFacts(colour=_kept(None if before is None else before.colour, reading, at), cant_tell_since=None,
+                           heard_at=at)
     return ColourFacts(colour=None if before is None else before.colour, cant_tell_since=_since(before, at),
                        heard_at=at)
+
+
+def _kept[T](before: Kept[T] | None, value: T, at: float) -> Kept[T]:
+    """`value` as stated at `at`; a repeat of the kept value keeps when it was first stated, so a
+    re-read (a hub restart, Galleria publishing all again) never moves "when it was stated"."""
+    return before if before is not None and before.value == value else Kept(value, at)
 
 
 def _since(before: LightFacts | ReadingFacts | ColourFacts | None, at: float) -> float:

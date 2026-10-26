@@ -4,6 +4,9 @@ references whose address form the source's adapter judges, and the Player's repo
 line, tests/test_drawn_report_judge.py) judged against the document now."""
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError
+
+import pytest
 from fastapi.testclient import TestClient
 from test_registry import ADMIN, enroll
 
@@ -107,6 +110,22 @@ def test_refused_reports_and_the_home_assistant_page(registry):
             "light.x": "light", "light.heard": "light", "sensor.lux": "illuminance"}   # what each reports, said
         assert [(each["source"], each["address"], each["reason"]) for each in page["refused"]] == [
             ("home-assistant", "Cellar.Light", "unknown_address")]   # one view shape, its source only
+
+
+def test_the_app_builds_without_the_distribution_and_states_the_version_it_was_given(registry, monkeypatch):
+    """A caller running from source (the browser leg: no photo-wall distribution installed) passes
+    Central's version; building the app then reads no distribution metadata, and the Home
+    Assistant page states the version given. With none given, the installed one is read."""
+    def no_distribution(name: str) -> str:
+        raise PackageNotFoundError(name)
+
+    monkeypatch.setattr("central.version.distribution_version", no_distribution)
+    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
+                               node_control=NodeControlConfig("node-test"), central_version="9.8.7")) as client:
+        page = client.get("/v1/operator/integrations/home-assistant", headers=AUTH).json()
+    assert page["galleria"]["central_version"] == "9.8.7"
+    with pytest.raises(PackageNotFoundError):
+        create_app(registry.db, registry.clock, ADMIN, run_scheduler=False, node_control=NodeControlConfig("node-test"))
 
 
 def test_a_players_drawn_report_is_judged_against_the_document_now(registry):

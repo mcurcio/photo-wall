@@ -133,6 +133,8 @@ def test_each_state_is_recorded_under_its_kinds_reference_or_refused():
     listener = HomeAssistantListener(reports, reports, reports)   # type: ignore[arg-type]
     asyncio.run(listener.heard("e" * 32, (
         Heard("light.spot", encode_home_assistant_state(_light(brightness=255))),
+        # A kelvin past what Central reads: on and brightness still recorded, the colour refused.
+        Heard("light.hot", encode_home_assistant_state(_light(brightness=255, colour=HomeAssistantKelvin(kelvin=45000)))),
         Heard("sensor.lux", encode_home_assistant_state(HomeAssistantIlluminance(name="Lux", lux=12))),
         Heard("light.gone", encode_home_assistant_state(HomeAssistantUnavailable(entity_kind="light", name="Gone"))),
         Heard("sensor.lux", encode_home_assistant_state(_light())),   # a light state for a sensor
@@ -143,6 +145,9 @@ def test_each_state_is_recorded_under_its_kinds_reference_or_refused():
     assert reports.told == [
         ("light", ReporterRef(source=source, address="light.spot"), _stated(True, 1.0)),
         ("heard", "light.spot", "light", "Spot"),
+        ("light", ReporterRef(source=source, address="light.hot"), _stated(True, 1.0)),
+        ("refused", source, "light.hot", ReportRefusal.OUT_OF_RANGE),
+        ("heard", "light.hot", "light", "Spot"),
         ("reading", SensorRef(source=source, address="sensor.lux"), Measured(lux=12.0)),
         ("heard", "sensor.lux", "illuminance", "Lux"),
         ("light", ReporterRef(source=source, address="light.gone"), Unavailable()),

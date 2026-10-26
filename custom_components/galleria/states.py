@@ -107,7 +107,7 @@ def _colour(state: State) -> HomeAssistantKelvin | HomeAssistantRgb | None:
         return None if kelvin is None else {"kind": "kelvin", "kelvin": kelvin}
     if mode in _RGB_MODES:
         rgb = _rgb(state.attributes.get("rgb_color"))
-        return None if rgb is None or not any(rgb) else {"kind": "rgb", "rgb": rgb}
+        return None if rgb is None else {"kind": "rgb", "rgb": rgb}   # as stated: Central judges its range
     return None
 
 

@@ -64,7 +64,6 @@ from central.library_routes import mount_library_routes
 from central.media_ports import MediaApplication
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
-from central.node_bus_wiring import central_version
 from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from central.operator_auth import OperatorAuth
 from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
@@ -91,6 +90,7 @@ from central.runtime import RuntimeConflict, Scene, SceneInUse, SceneOnWall, Sce
 from central.runtime_store import RuntimeStore
 from central.source_names import SourceInUse, SourceNameService
 from central.tuning_history_routes import mount_tuning_history_routes
+from central.version import central_version as installed_central_version
 from central.wall_plan.fit import fit_target
 from central.wall_plan.fit_analysis import analyse
 from central.wall_plan.fit_settings import FIT_SETTING_RANGES
@@ -200,7 +200,10 @@ def create_app(
     node_control: NodeControlConfig = NodeControlConfig(),
     media_times: TransactionClock | None = None,
     hub_leaf_url: str | None = None,
+    central_version: str | None = None,
 ) -> FastAPI:
+    """`central_version`: Central's own version (central/version.py); None reads the installed
+    distribution's, as uvicorn's factory call does. A harness running from source passes its own."""
     run_scheduler = clock is None if run_scheduler is None else run_scheduler
     clock_injected = clock
     owns_db = db is None
@@ -859,7 +862,8 @@ def create_app(
     mount_house_routes(app, admin=admin, queries=house, commands=house)
     room_lights = PgRoomLights(db, house_lock)
     mount_room_light_routes(app, admin=admin, lights=room_lights, sources=REPORT_SOURCES)
-    mount_home_assistant_routes(app, admin=admin, settings=PgHomeAssistantSettings(db, central_version()))
+    mount_home_assistant_routes(app, admin=admin, settings=PgHomeAssistantSettings(
+        db, installed_central_version() if central_version is None else central_version))
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
     mount_tuning_history_routes(app, admin=admin, queries=PgTuningHistory(db))

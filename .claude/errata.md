@@ -6937,3 +6937,59 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
   `colour_sensor_followed` 409, as the runbook says; `_kept_in` now trims only references no room
   light, Sensor or colour sensor names (tests/test_room_light_store.py
   `test_a_named_reference_is_never_trimmed` fails without it).
+
+## Light colour follows Home Assistant, FIX lane after review (feat/light-colour-follows, 2026-10-25)
+
+- **Resolved: create_app read the photo-wall distribution while building the app** (every browser
+  leg failed in setup, PackageNotFoundError: the leg's venv is `--no-install-project`). Central's
+  version has one home, `central/version.py`, imported by both composition roots (app.py no longer
+  imports the worker's `node_bus_wiring`); `create_app(central_version=...)` takes it, None reading
+  the installed distribution as uvicorn's factory call does. The browser harness passes its own.
+  This closes the interfaces-milestone entry above ("moving central_version ... the CENTRAL lane's call").
+- **A browser test on the branch was never run:** test_house_lights_browser's picker test recorded a
+  bare `Dimmer` through `record_light_state`, which now takes a LightReport; it read as Unavailable.
+  Fixed to `LightStated`. The full browser suite (482) and the catalog (732) pass locally.
+- **Spec wrong: the release order (DESIGN.md:42 "Pis, then Central").** A Player on the new release
+  refuses the old document shape and a restarted (installed) Player holds none, so Pis first darkens
+  every installed Pi's room light until Central changes; "a Pi not installed keeps its last document"
+  only holds for Central first. The runbook and 0028 now say Central, Galleria straight after, then
+  the Pis, with both windows' costs (an old Pi that restarts draws no room light; between Central and
+  Galleria every Home Assistant light keeps its last value, its states refused `unreadable`, and the
+  old Galleria's own room-light sensors go unavailable). The owner may still pick the other order.
+- **Upgrade data (109) no longer carries an old colour dimmer's rgb as the bulb's colour:** main's
+  Galleria sent Home Assistant's rgb in every mode, a colour worked out from color_temp included
+  (design row e). Every bulb's colour is "typed until its bulb says" until it states one.
+- **Audit fields:** the new tables (colour_sensors, colour_words, galleria_birth) now carry created
+  and changed at and by, written by the store, the actor as "whom" (operator, the source, galleria).
+  099's tables still lack them (#117). The entry above is resolved for this delivery's tables only.
+- **Central's version is "0.1.0" in production** (pyproject's decorative version; the entry above on
+  Central's own version still stands), so Settings › Home Assistant reads "Galleria 0.40.0 · Central
+  0.1.0". The two need not match (runbook), but the line says little until the release flow stamps
+  a version into the image (an owner workflow change).
+- **A repeated value keeps when it was first stated** (policy.py `_kept`): a hub re-read no longer
+  moves ColourLineView.stated_at. A same value restated after "can't tell" keeps its first time too.
+- **Owner or architect questions, not built here:**
+  - A bulb that is on in a non-colour mode (Home Assistant's `white`, `brightness`, `onoff`) states no
+    colour, and the hold then keeps its last colour: a bulb switched from red (hs) to its white channel
+    keeps drawing red. Should an on bulb in a non-colour mode fall back to its typed kelvin, the hold
+    applying only to off and unavailable? Galleria's `white` mode as "no colour" has no design line.
+  - A typed kelvin is validated against the Pi's drawing table (`TypedKelvin`, 2,000..10,000 K in 100 K
+    steps), a screen fact in Central's setup (C4/R4). Keep as a deliberate exception, or take a typed
+    kelvin as a stated real kelvin with the step as the console field's choice.
+  - Galleria's birth and Home Assistant's heard entities live in `PgRoomLights`; the room-light store
+    re-derives Home Assistant's entity kind from the reference's class (a second copy of
+    references.py's mapping). The review asks for a Home Assistant store in its adapter package.
+  - The three held-fact folds (light, reading, colour) and three (source, address) reference classes
+    are one shape three times; one generic held fact over `Kept[T]` would replace them.
+    (`_kept` now holds the repeat rule once.)
+  - `GalleriaBirth` is a third birth shape (capability by `kinds`), beside `node_state.Birth`'s
+    `schema_majors`; 0028 does not argue the choice.
+  - Which sources can report colour temperatures is data in app.py (`REPORT_SOURCES`), not each
+    adapter's declaration.
+  - EntityList draws a table at every width: at phone width the Colour sensors table and Settings ›
+    Home Assistant's lists clip their last columns (main's room lights clipped "Last heard" already).
+    The class fix is EntityList's cards below md (design language T2), across every list.
+  - The room-light store's SQL is hand-written psycopg (the repo's pattern): for #117.
+- **Interface drift, recorded:** DESIGN.md's `colour-sensor {from: ColourSensorId, ...}` is
+  `SensedColour.sensor` in code (`from` is a Python keyword), and its one "Reference" is three classes
+  (ReporterRef, SensorRef, ColourSensorRef), so each kind's reference is typed apart.

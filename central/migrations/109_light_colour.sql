@@ -9,7 +9,13 @@
 -- Upgrade data: a reported light's colour becomes "its bulb", its typed kelvin the old fixed kelvin
 -- (6500 for an old reported colour, whose channel shares have no kelvin); a measured or fixed light's
 -- fixed kelvin becomes typed. A light word that said "unavailable" keeps no state and can't tell
--- since it was heard; a colour dimmer's drive becomes its stated rgb colour. A reading word likewise.
+-- since it was heard. No old word carries a colour over: main's Galleria sent Home Assistant's rgb
+-- in every mode (a colour worked out from color_temp too), so a bulb's colour stays "typed until its
+-- bulb says" until Galleria states one in the new shape. A reading word likewise.
+--
+-- The new tables carry their audit fields (created and last changed: when and by whom), written by
+-- central/infra/room_light_store.py: by the operator (a colour sensor), by the reference's source (a
+-- colour sensor's facts) or by Galleria (its birth). There are no accounts, so "whom" is the actor.
 
 -- Each light's colour source (central/room_light/model.py ReportedColourSource, SensedColourSource).
 UPDATE room_lights SET light = jsonb_set(light, '{colour}', CASE
@@ -22,7 +28,11 @@ UPDATE room_lights SET light = jsonb_set(light, '{colour}', CASE
 -- Colour sensors by id (central/room_light/model.py ColourSensor, as JSON).
 CREATE TABLE colour_sensors (
     id TEXT PRIMARY KEY,
-    sensor JSONB NOT NULL CHECK (jsonb_typeof(sensor) = 'object'));
+    sensor JSONB NOT NULL CHECK (jsonb_typeof(sensor) = 'object'),
+    created_at TIMESTAMPTZ NOT NULL,
+    created_by TEXT NOT NULL,
+    changed_at TIMESTAMPTZ NOT NULL,
+    changed_by TEXT NOT NULL);
 
 -- A light reference's facts: its last stated Dimmer and when (NULL: never stated), its last stated
 -- colour and when (NULL: never), since when it can't tell (NULL: it tells), when it was last heard.
@@ -36,12 +46,7 @@ UPDATE light_words SET
     state = CASE WHEN word->>'kind' IN ('dimmer', 'colour-dimmer')
                  THEN jsonb_build_object('kind', 'dimmer', 'on', word->'on', 'brightness', word->'brightness') END,
     state_at = CASE WHEN word->>'kind' IN ('dimmer', 'colour-dimmer') THEN heard_at END,
-    colour = CASE WHEN word->>'kind' = 'colour-dimmer'
-                       AND (word->'rgb'->>0)::double precision + (word->'rgb'->>1)::double precision
-                           + (word->'rgb'->>2)::double precision > 0
-                  THEN jsonb_build_object('kind', 'rgb', 'rgb', word->'rgb') END,
     cant_tell_since = CASE WHEN word->>'kind' = 'unavailable' THEN heard_at END;
-UPDATE light_words SET colour_at = heard_at WHERE colour IS NOT NULL;
 ALTER TABLE light_words DROP COLUMN word;
 
 -- A Sensor reference's facts: its last stated reading (contracts/room_light.py Measured) and when.
@@ -63,6 +68,10 @@ CREATE TABLE colour_words (
     colour_at TIMESTAMPTZ NULL,
     cant_tell_since TIMESTAMPTZ NULL,
     heard_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    created_by TEXT NOT NULL,
+    changed_at TIMESTAMPTZ NOT NULL,
+    changed_by TEXT NOT NULL,
     PRIMARY KEY (source, address));
 
 -- Galleria's birth on Central's hub (contracts/home_assistant.py GalleriaBirth) and when Central
@@ -70,7 +79,11 @@ CREATE TABLE colour_words (
 CREATE TABLE galleria_birth (
     one BOOLEAN PRIMARY KEY DEFAULT true CHECK (one),
     birth JSONB NOT NULL CHECK (jsonb_typeof(birth) = 'object'),
-    heard_at TIMESTAMPTZ NOT NULL);
+    heard_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL,
+    created_by TEXT NOT NULL,
+    changed_at TIMESTAMPTZ NOT NULL,
+    changed_by TEXT NOT NULL);
 
 -- Every Pi draws the new document shape once Central puts it (the change rises).
 UPDATE room_lights_change SET change = change + 1 WHERE one;

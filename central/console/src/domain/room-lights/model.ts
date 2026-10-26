@@ -76,9 +76,10 @@ function sourceWords(line: ColourLineView, names: Readonly<Record<string, string
   return null;
 }
 
-/** The kelvin the screen draws a stated kelvin at, as the line names it: bounded to the screen's
- * colour table (the Pi also rounds it to the table's step: player/geometry.py `drawn_kelvin`). */
-export function drawnKelvin(kelvin: number): number {
+/** The screen colour table's end a kelvin past it is drawn at, for the line's words: bounded to the
+ * generated table constants only. Not the Pi's rule (player/geometry.py `drawn_kelvin` also rounds to
+ * the table's step); the line names only the ends, which are on the step. Inside the table: as is. */
+function tableEndKelvin(kelvin: number): number {
   return Math.min(CONSTANTS.KELVIN_TABLE_MAX, Math.max(CONSTANTS.KELVIN_TABLE_MIN, kelvin));
 }
 
@@ -86,7 +87,7 @@ export function drawnKelvin(kelvin: number): number {
  * table, else "". */
 function outsideWords(colour: LightColour): string {
   if (colour.kind !== "kelvin") return "";
-  const drawn = drawnKelvin(colour.kelvin);
+  const drawn = tableEndKelvin(colour.kelvin);
   return drawn === colour.kelvin ? "" : ` · outside what the screen draws (drawn at ${unitWords(drawn, "K")})`;
 }
 
@@ -99,9 +100,10 @@ export function keptWords(cantTellSince: number, kept: string | null, clock: (ep
 
 /**
  * A light's colour line, from Central's ColourLineView: "Typed 5,500 K"; "Following its bulb 3,400 K",
- * "Following Sky colour 3,400 K" (a colour sensor, named by `names`), "Following its bulb (colour)" (a
- * bulb in a colour mode); "Typed 5,500 K until its bulb says" (its source never stated one); while
- * its source can't tell, "Can't tell since 18:42 (keeping 3,400 K)". A kelvin outside the screen's
+ * "Following Sky colour 3,400 K" (a colour sensor, named by `names`), "Following its bulb's colour" (a
+ * bulb in a colour mode, drawn beside its swatch, `colourSwatch`); "Typed 5,500 K until its bulb says" (its source never stated one); while
+ * its source can't tell, "Can't tell since 18:42 (keeping 3,400 K)", or when it never stated one,
+ * "Typed 5,500 K until its bulb says · can't tell since 18:42" (a typed value is never "kept"). A kelvin outside the screen's
  * colour table adds " · outside what the screen draws (drawn at 10,000 K)". `clock` says a time.
  */
 export function colourLineWords(line: ColourLineView, names: Readonly<Record<string, string>>,
@@ -110,9 +112,12 @@ export function colourLineWords(line: ColourLineView, names: Readonly<Record<str
   const kelvin = line.colour.kind === "kelvin" ? unitWords(line.colour.kelvin, "K") : null;
   let said: string;
   if (source === null) said = `Typed ${kelvin ?? "(colour)"}`;
-  else if (line.cant_tell_since !== null) said = keptWords(line.cant_tell_since, kelvin ?? "its colour", clock);
-  else if (line.colour_from === "following") said = `Following ${source} ${kelvin ?? "(colour)"}`;
-  else if (line.colour_from === "never-stated") said = `Typed ${kelvin ?? "(colour)"} until ${source} says`;
+  else if (line.colour_from === "never-stated") {
+    // Nothing stated, so nothing is kept: the typed colour stands, and can't tell is said beside it.
+    said = `Typed ${kelvin ?? "(colour)"} until ${source} says`;
+    if (line.cant_tell_since !== null) said += ` · can't tell since ${clock(line.cant_tell_since)}`;
+  } else if (line.cant_tell_since !== null) said = keptWords(line.cant_tell_since, kelvin ?? "its colour", clock);
+  else if (line.colour_from === "following") said = kelvin === null ? `Following ${source}'s colour` : `Following ${source} ${kelvin}`;
   else said = `Typed ${kelvin ?? "(colour)"}`;
   return said + outsideWords(line.colour);
 }
@@ -124,10 +129,29 @@ function colourLineTone(line: ColourLineView): TruthKind {
   return line.source !== "typed" && line.colour_from === "following" ? "reported" : "set";
 }
 
+/** A room light's colour line in words, its truth kind and its swatch: one shape, House › Lights' and
+ * the Lighting tab's. */
+export interface ColourLine {
+  words: string;
+  tone: TruthKind;
+  swatch: string | null;
+}
+
+/** A CSS rgb() channel's top: a share of 1 is this. */
+const CSS_CHANNEL_MAX = 255;
+
+/** A line's rgb colour as a CSS colour for its swatch ("rgb(255 128 0)"); null for a kelvin, which
+ * its words say in full. */
+export function colourSwatch(line: ColourLineView): string | null {
+  if (line.colour.kind !== "rgb") return null;
+  const [r, g, b] = line.colour.rgb.map((share) => Math.round(share * CSS_CHANNEL_MAX));
+  return `rgb(${r} ${g} ${b})`;
+}
+
 /** A light's colour line, said where a Frame's Lighting tab shows it: its words and truth kind. */
 export function colourLineSaid(line: ColourLineView, names: Readonly<Record<string, string>>,
-  clock: (epochSeconds: number) => string): { words: string; tone: TruthKind } {
-  return { words: colourLineWords(line, names, clock), tone: colourLineTone(line) };
+  clock: (epochSeconds: number) => string): ColourLine {
+  return { words: colourLineWords(line, names, clock), tone: colourLineTone(line), swatch: colourSwatch(line) };
 }
 
 /** A light's state now: its entry's words ("On, 60 %"), or while its reporter can't tell, the kept

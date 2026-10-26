@@ -23,7 +23,7 @@ export const UpdateGalleria: Story = {
   args: {
     view: {
       ...HOME_ASSISTANT_STATES,
-      galleria: { ...HOME_ASSISTANT_STATES.galleria, version: "v0.39.0", kinds: ["light", "illuminance"], update: true },
+      galleria: { ...HOME_ASSISTANT_STATES.galleria, version: "0.39.0", kinds: ["light", "illuminance"], update: true },
     },
   },
 };

@@ -166,6 +166,48 @@ async def test_a_bulb_states_its_colour_by_its_colour_mode(hass: HomeAssistant, 
         {"kind": "light", "name": "Window lamp", "on": False, "brightness": None, "colour": None}]
 
 
+async def test_a_bulb_not_in_a_colour_mode_or_off_states_no_colour(hass: HomeAssistant, entry: MockConfigEntry,
+                                                                   door: FakeDoor) -> None:
+    """Only color_temp states a kelvin and only a colour mode an rgb, whatever else Home Assistant
+    fills: brightness and onoff modes state none, and so does an off bulb that still names a mode.
+    A colour mode's rgb goes as Home Assistant states it, all zeros too: Central judges its range."""
+    filled = {"color_temp_kelvin": 3500, "hs_color": (27.0, 47.0), "rgb_color": (255, 196, 135),
+              "xy_color": (0.43, 0.38)}
+    for brightness, mode in ((100, "brightness"), (120, "onoff")):
+        hass.states.async_set("light.fam_window", STATE_ON, {**LIFX, "color_mode": mode, "brightness": brightness,
+                                                            **filled})
+        await settle(hass)
+    hass.states.async_set("light.fam_window", STATE_OFF, {**LIFX, "color_mode": "color_temp", "brightness": None,
+                                                         **filled})
+    await settle(hass)
+    hass.states.async_set("light.fam_window", STATE_ON, {**LIFX, "color_mode": "rgb", "brightness": 50,
+                                                        **filled, "rgb_color": (0, 0, 0)})
+    await settle(hass)
+    assert [state for entity, state in door.published if entity == "light.fam_window"] == [
+        {"kind": "light", "name": "Window lamp", "on": True, "brightness": 100, "colour": None},
+        {"kind": "light", "name": "Window lamp", "on": True, "brightness": 120, "colour": None},
+        {"kind": "light", "name": "Window lamp", "on": False, "brightness": None, "colour": None},
+        {"kind": "light", "name": "Window lamp", "on": True, "brightness": 50, "colour": {"kind": "rgb", "rgb": [0, 0, 0]}}]
+
+
+async def test_a_birth_the_hub_did_not_take_publishes_nothing_until_the_next_read(
+        hass: HomeAssistant, entry: MockConfigEntry, door: FakeDoor) -> None:
+    """Galleria's birth goes first; when the hub does not take it, no state goes into that epoch and
+    none is kept as published, so the next read publishes the birth and every state again."""
+    hass.states.async_set("light.test", STATE_ON, {"brightness": 10, "friendly_name": "Test"})
+    await settle(hass)
+    door.published.clear()
+    door.births.clear()
+    door.state[contract.STATES_EPOCH_KEY] = wire(contract.STATES_EPOCH_KEY, {"epoch": "f" * 32})
+    door.births_refused = 1
+    await read_all(hass, entry)
+    assert (door.published, door.births) == ([], [])
+    assert entry.runtime_data.publisher.published_epoch is None
+    await read_all(hass, entry)
+    assert len(door.births) == 1 and [entity for entity, _ in door.published] == ["light.test"]
+    assert entry.runtime_data.publisher.published_epoch == "f" * 32
+
+
 async def test_galleria_s_birth_goes_with_every_publish_of_all_states(hass: HomeAssistant, entry: MockConfigEntry,
                                                                       door: FakeDoor) -> None:
     """On start and with every publish of all states: its manifest's version and every kind it publishes."""

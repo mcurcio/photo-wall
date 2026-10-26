@@ -28,12 +28,12 @@ type RefusedRow = RefusedReportView & { key: string; severity: null };
 export function HomeAssistant({ view, house, since }: HomeAssistantProps) {
   const entities: EntityRow[] = entitiesInOrder(view).map((entity) => ({ ...entity, key: `${entity.kind}:${entity.entity}`, severity: null }));
   const refused: RefusedRow[] = view.refused.map((message, index) => ({ ...message, key: `${index}`, severity: null }));
-  const update = updateWords(view.galleria);
+  const update = updateWords(view);
   return (
     <Stack>
       <FactRow label="States last heard" tone="reported">{heardWords(view, since)}</FactRow>
-      <FactRow label="Versions" tone="reported">{versionWords(view.galleria)}</FactRow>
-      {update !== null && <FactRow tone="unknown" band="notice">{update}</FactRow>}
+      <FactRow label="Versions" tone="reported">{versionWords(view.galleria, since)}</FactRow>
+      {update !== null && <FactRow tone="derived" band="notice">{update}</FactRow>}
       <Note>
         The Galleria integration for Home Assistant tells Photo Wall each light&apos;s, light sensor&apos;s and colour
         sensor&apos;s state. Pick which one reports each room light, Sensor or colour sensor on House › Lights.

@@ -36,17 +36,24 @@ export function reportsWords(entity: HeardEntityView, house: RoomLightsView): st
   }
 }
 
-/** Galleria's version beside Central's: "Galleria v0.40.0 · Central 0.40.0" ("Central 0.40.0" alone
- * while Galleria has not said its version). */
-export function versionWords(galleria: GalleriaView): string {
+/** Galleria's version and when Central heard it, beside Central's: "Galleria 0.40.0, heard Tue 14:20 ·
+ * Central 0.40.0" ("Central 0.40.0" alone while Galleria has not said its version). */
+export function versionWords(galleria: GalleriaView, since: (epochSeconds: number) => string): string {
   const central = `Central ${galleria.central_version}`;
-  return galleria.version === null ? central : `Galleria ${galleria.version} · ${central}`;
+  if (galleria.version === null || galleria.heard_at === null) return central;
+  return `Galleria ${galleria.version}, heard ${since(galleria.heard_at)} · ${central}`;
 }
 
-/** What to do about Galleria, or null when nothing: Central judges `update`, the words are the console's. */
-export function updateWords(galleria: GalleriaView): string | null {
-  if (galleria.version === null) return "Galleria has not said its version: update it in HACS";
-  return galleria.update ? "Update Galleria in HACS: this version cannot send colour sensors yet" : null;
+/** What to do about Galleria, or null when nothing: Central judges `update`, the words are the
+ * console's. Nothing heard from Home Assistant at all: install and connect it; states heard but no
+ * version: an older Galleria, update it; a version that cannot send colour sensors: update it. */
+export function updateWords(view: HomeAssistantStatesView): string | null {
+  if (!view.galleria.update) return null;
+  if (view.galleria.version !== null) return "Update Galleria in HACS: this version cannot send colour sensors yet";
+  if (view.heard_at === null) {
+    return "Galleria has not been heard from: install it in HACS and add it in Home Assistant (runbook: Connect Home Assistant)";
+  }
+  return "Galleria has not said its version, so it is older than this release: update it in HACS";
 }
 
 /** An entity's name as the page lists it: its friendly name, else its entity id. */
