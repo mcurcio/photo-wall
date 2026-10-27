@@ -35,7 +35,7 @@ from central.room_light.model import (
     SensorRef,
     TypedColour,
 )
-from contracts.home_assistant import GalleriaBirth
+from contracts.home_assistant import GalleriaBirth, GalleriaConnection
 from contracts.node_link import Pipe
 from contracts.room_light import (
     LIGHT_SENSOR_KEY,
@@ -58,6 +58,7 @@ X = ReporterRef(source="home-assistant", address="light.x")
 Y = ReporterRef(source="home-assistant", address="light.y")
 WHITE = TypedColour(kelvin=4000)
 KELVIN = KelvinColour(kelvin=4000)
+_CONNECTION = GalleriaConnection(server="NHUB", client=1)
 
 
 def _said(on: bool, brightness: float) -> LightStated:
@@ -78,7 +79,7 @@ def test_a_word_heard_before_its_light_exists_shows_at_once(registry):
     assert lights.record_light_state(X, _said(True, 0.5)) == "unchanged"     # no light names it yet
     assert lights.current().change == change
     view = lights.save_room_light("x", ReportedLight(name="X", reporter=X, colour=WHITE))
-    assert view.entry == ReportedEntry(colour=KELVIN, state=Dimmer(on=True, brightness=0.5)) and view.heard_at is not None
+    assert view.entry == ReportedEntry(colour=KELVIN, state=Dimmer(on=True, brightness=0.5), doubt=None) and view.heard_at is not None
     assert lights.current().lights["x"] == view.entry and lights.current().change == change + 1
     assert lights.record_light_state(X, _said(True, 0.5)) == "unchanged"     # a repeat
     assert lights.record_light_state(X, _said(False, 0.0)) == "recorded"
@@ -95,7 +96,7 @@ def test_a_pi_reading_heard_before_its_sensor_exists_shows_at_once(registry):
                                                                                 address=player["player_id"])))
     assert sensor.reading == Measured(lux=180.0) and sensor.heard_at is not None and sensor.reports is None
     window = lights.save_room_light("window", MeasuredLight(name="Window", sensor="pi-meter", colour=WHITE))
-    assert window.entry == MeasuredEntry(colour=KELVIN, state=Measured(lux=180.0))
+    assert window.entry == MeasuredEntry(colour=KELVIN, state=Measured(lux=180.0), doubt=None)
     assert next(each for each in lights.lights().sensors if each.id == "pi-meter").reports == "window"
 
 
@@ -249,21 +250,24 @@ def test_kept_brightness_and_colour_survive_cant_tell_and_a_restart(registry):
     red = RgbColour(rgb=(1.0, 0.0, 0.0))
     assert lights.record_light_state(X, LightStated(state=Dimmer(on=True, brightness=0.4), colour=red)) == "recorded"
     assert lights.record_colour_reading(SKY_AT, KelvinColour(kelvin=3456.5)) == "recorded"
-    assert lights.record_light_state(X, Unavailable()) == "unchanged"
+    assert lights.record_light_state(X, Unavailable()) == "recorded"   # its doubt travels
     assert lights.record_colour_reading(SKY_AT, Unavailable()) == "unchanged"
     restarted = PgRoomLights(registry.db, PgHouseLock())
     document = restarted.current()
-    assert document.lights["x"] == ReportedEntry(colour=red, state=Dimmer(on=True, brightness=0.4))
+    entry = document.lights["x"]
+    assert isinstance(entry, ReportedEntry) and (entry.colour, entry.state) == (red, Dimmer(on=True, brightness=0.4))
+    assert entry.doubt is not None and entry.doubt.line1.startswith("X: its light can't tell · since")
     assert document.lights["sun"].colour == KelvinColour(kelvin=3456.5)
     view = {each.id: each for each in restarted.lights().lights}
-    assert view["x"].cant_tell_since is not None and view["x"].colour.cant_tell_since is not None
+    assert view["x"].doubt is not None and view["x"].doubt.reason == "cant-tell"
+    assert view["x"].colour.doubt is not None
     assert (view["x"].colour.colour_from, view["sun"].colour.colour_from) == ("following", "following")
-    assert restarted.lights().colour_sensors[0].cant_tell_since is not None
+    assert restarted.lights().colour_sensors[0].doubt is not None
     # off is stated (adds no light) and keeps the colour; a stated value clears "can't tell"
     assert restarted.record_light_state(X, _said(False, 0.0)) == "recorded"
     after = {each.id: each for each in restarted.lights().lights}["x"]
-    assert after.entry == ReportedEntry(colour=red, state=Dimmer(on=False, brightness=0.0))
-    assert after.cant_tell_since is None
+    assert after.entry == ReportedEntry(colour=red, state=Dimmer(on=False, brightness=0.0), doubt=None)
+    assert after.doubt is None
 
 
 def test_colour_sensors_are_saved_and_kept_while_followed(registry):
@@ -293,10 +297,11 @@ def test_galleria_s_birth_reaches_the_settings_page(registry):
     settings = PgHomeAssistantSettings(registry.db, "0.40.0")
     before = settings.view().galleria
     assert (before.version, before.update, before.central_version) == (None, True, "0.40.0")
-    lights.record_galleria_birth(GalleriaBirth(version="0.39.0", kinds=("light", "illuminance")))
+    lights.record_galleria_birth(GalleriaBirth(version="0.39.0", kinds=("light", "illuminance"), connection=_CONNECTION))
     old = settings.view().galleria
     assert (old.version, old.update) == ("0.39.0", True) and old.heard_at is not None
-    lights.record_galleria_birth(GalleriaBirth(version="0.41.0", kinds=("light", "illuminance", "colour-temperature")))
+    lights.record_galleria_birth(GalleriaBirth(version="0.41.0", kinds=("light", "illuminance", "colour-temperature"),
+                                               connection=_CONNECTION))
     new = settings.view().galleria
     assert (new.version, new.kinds, new.update) == ("0.41.0", ("light", "illuminance", "colour-temperature"), False)
 
@@ -313,7 +318,8 @@ def test_the_new_tables_carry_their_audit_fields(registry):
     writes = {
         "colour_sensors": lambda name: lights.save_colour_sensor("sky", ColourSensor(name=name, at=SKY_AT)),
         "colour_words": lambda name: lights.record_colour_reading(SKY_AT, KelvinColour(kelvin=len(name) * 1000.0)),
-        "galleria_birth": lambda name: lights.record_galleria_birth(GalleriaBirth(version=name, kinds=("light",))),
+        "galleria_birth": lambda name: lights.record_galleria_birth(GalleriaBirth(version=name, kinds=("light",),
+                                                                                     connection=_CONNECTION)),
     }
     by = {"colour_sensors": "operator", "colour_words": "home-assistant", "galleria_birth": "galleria"}
     for table, write in writes.items():

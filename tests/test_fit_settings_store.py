@@ -66,6 +66,23 @@ def test_a_row_that_no_longer_validates_reads_as_the_defaults(registry):
     assert _store(registry).fit_settings() == FitSettings()
 
 
+def test_a_row_saved_before_the_skew_existed_keeps_its_values_and_takes_the_skews_default(
+        registry):
+    """Subject detection: `interest_skew` is a new field with a default and no migration, so a
+    row saved before it still reads as saved (here its crop limit), the skew at 0.33, and the
+    console's read shows both.
+    Mutation probe: make the field required -> the whole row reads as the defaults."""
+    saved = FitSettings().model_dump(mode="json") | {"crop_limit": 0.5}
+    del saved["interest_skew"]
+    with registry.db.transaction() as conn:
+        conn.execute("INSERT INTO photo_fit_settings VALUES(TRUE,%s,0)", (Jsonb(saved),))
+    read = _store(registry).fit_settings()
+    assert (read.crop_limit, read.interest_skew) == (0.5, 0.33)
+    body = _client(registry).get(SETTINGS_PATH, headers=AUTH).json()
+    assert (body["settings"]["crop_limit"], body["settings"]["interest_skew"]) == (0.5, 0.33)
+    assert body["ranges"]["interest_skew"] == [0.0, 1.0]
+
+
 def _one_wide_frame(registry) -> None:
     player, _, _ = enroll(registry)
     registry.create_frame(frame_create("frame-wide"))

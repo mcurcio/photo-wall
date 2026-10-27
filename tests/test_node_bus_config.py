@@ -85,6 +85,7 @@ from nodeapi.buffers import (
     wall_mirror_config,
 )
 from nodeapi.epoch import EPOCH_KEY
+from nodeapi.hub import DOOR_CLOSES_SUBJECT
 from nodeapi.pull import PULL_MAX_BYTES, PULL_ONE_BYTES
 
 REPO = Path(__file__).resolve().parents[1]
@@ -259,7 +260,9 @@ def test_node_accounts_import_only_the_wall_set_and_export_nothing():
         {"service": "$JS.API.CONSUMER.DELETE.WALL.*"}, {"stream": "DELIVER.WALL.>"},
         {"service": "$JS.FC.WALL.>"}, {"service": "$JS.FC.*.*.WALL.>"}]
     assert accounts["SYS"] == {"users": [{"user": FLEET_SYSTEM_USER, "password": FLEET_SYSTEM_USER,
-                                          "allowed_connection_types": [STANDARD_CONNECTION]}]}
+                                          "allowed_connection_types": [STANDARD_CONNECTION]}],
+                               # only the door's disconnect events, which Central's account imports
+                               "exports": [{"stream": DOOR_CLOSES_SUBJECT}]}
     assert config["system_account"] == "SYS"
     # The hub's JetStream is the memory store, with no store directory: it starts empty and Central
     # rebuilds WALL (E3b design §9.6, §12).

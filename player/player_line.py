@@ -1,11 +1,13 @@
 """The Player's own line on its Node's bus (0017 E7/E8 pulled into #106, owner Q3 "yes",
 2026-10-16; 0017 C4 amended: the Player declares its own line). The Player is a component on its
 bus: it declares the `player` store line (contracts.node_link.STORE_LINES, declarer "player") with
-the slice its release ships (`player_slice()`), writes `birth`, and holds two state keys anyone reads
-(contracts/node_state.py): `frames` (FrameReports: per Frame, the binding generation it draws, its
-Output, whether it is showing, the light on the Frame at its centre as last drawn) and
+the slice its release ships (`player_slice()`), writes `birth`, and holds three state keys anyone reads:
+`frames` (contracts/node_state.py FrameReports: per Frame, the binding generation it draws, its
+Output, whether it is showing, the light on the Frame at its centre as last drawn),
 `room-lights-drawn` (RoomLightsDrawn, moved here from the HTTP control link; re-put at least every
-ROOM_LIGHTS_DRAWN_REPEAT_SECONDS so Central judges it by age).
+ROOM_LIGHTS_DRAWN_REPEAT_SECONDS so Central judges it by age) and `impeded` (contracts/node_impeded.py
+ImpededFrames: the Frames Central's doubt blacks now, judged by player/impediment.py; read by Display
+Host's controller for Central's card and by Central for the Frame page's "Central's error").
 
 The session never blocks the Player: it connects forever on its own thread; a put is held and
 published when attached, and every attach re-puts what is held (a bus restart starts empty). Central
@@ -15,6 +17,7 @@ from __future__ import annotations
 
 from typing import Final
 
+from contracts.node_impeded import IMPEDED_BYTES, IMPEDED_KEY, ImpededFrames, encode_impeded
 from contracts.node_link import NODE_BUS_URL, STORE_LINES
 from contracts.node_state import (
     FRAME_REPORTS_BYTES,
@@ -32,13 +35,13 @@ from nodeapi.buffers import KeyTable, Slice, event_buffer, state_bucket
 from nodeapi.node import NodeSession, Release
 
 PLAYER_VERSION: Final = "1.0.0"   # the Player component's API version (its birth's `version`)
-PLAYER_STATE: Final = KeyTable({FRAMES_KEY: FRAME_REPORTS_BYTES, ROOM_LIGHTS_DRAWN_KEY: ROOM_LIGHTS_DRAWN_BYTES})
+PLAYER_STATE: Final = KeyTable({FRAMES_KEY: FRAME_REPORTS_BYTES, ROOM_LIGHTS_DRAWN_KEY: ROOM_LIGHTS_DRAWN_BYTES,
+                                IMPEDED_KEY: IMPEDED_BYTES})
 
 
 def player_slice() -> Slice:
     """The Player line's slice: a circular record buffer (method calls' records) and the state bucket
-    of KeyTable({FRAMES_KEY: FRAME_REPORTS_BYTES, ROOM_LIGHTS_DRAWN_KEY: ROOM_LIGHTS_DRAWN_BYTES}), the
-    record buffer taking every byte of the line the bucket leaves."""
+    of PLAYER_STATE, the record buffer taking every byte of the line the bucket leaves."""
     state = state_bucket(PLAYER_LINE, PLAYER_STATE)
     records = event_buffer(PLAYER_LINE, "record", STORE_LINES[PLAYER_LINE].max_bytes - state.max_bytes)
     return Slice(PLAYER_LINE, (records, state))
@@ -70,6 +73,11 @@ class PlayerLine:
         (the repeat Central judges by age); never blocks."""
         self._session.state.put(ROOM_LIGHTS_DRAWN_KEY, encode(drawn.model_dump(mode="json"), ROOM_LIGHTS_DRAWN_BYTES,
                                                               "room_lights_drawn_too_large"))
+
+    def put_impeded(self, frames: ImpededFrames) -> None:
+        """Hold `frames` as `impeded` (whole: a Frame absent is not impeded) and publish it when
+        attached; never blocks."""
+        self._session.state.put(IMPEDED_KEY, encode_impeded(frames))
 
 
 __all__ = ["PLAYER_STATE", "PLAYER_VERSION", "PlayerLine", "player_slice"]

@@ -8,8 +8,8 @@ references whole and never reads an address; each source's adapter owns its addr
 
 A reference's facts stand until the reference states another (owner, 2026-10-25, Q1 and Q3: keep
 the last stated colour and brightness through "unavailable"): per reference, its last stated
-brightness (or lux reading, or colour), when it was stated, and separately whether it can't tell now
-and since when. Colour is its own fact: a report that states no colour leaves the last stated one,
+brightness (or lux reading, or colour), when it was stated, and separately whether Central can't
+stand behind it now (its Doubt: why, and since when). Colour is its own fact: a report that states no colour leaves the last stated one,
 and no colour ever costs a light its on/off or brightness.
 
 Colours, states and entries are the wire's (contracts/room_light.py): House › Lights, the store and
@@ -157,6 +157,23 @@ LightReport = Annotated[LightStated | Unavailable, Field(discriminator="kind", t
 ColourReading = Annotated[KelvinColour | Unavailable, Field(discriminator="kind", title="ColourReading")]
 
 
+class DoubtReason(StrEnum):
+    """Why Central can't stand behind a reference's last word now. The newest event's reason wins;
+    a repeat of the same reason keeps its `since` (DESIGN-r8 §3, BUILD.md Q3 B)."""
+    CANT_READ = "cant-read"         # its source spoke; Central refused the report as unreadable (Central's error)
+    CANT_TELL = "cant-tell"         # its source said it cannot tell (Home Assistant's unavailable, a Pi meter's Unavailable)
+    LINK_CLOSED = "link-closed"     # its source's connection to Central's hub closed (Galleria's, by its birth's connection)
+
+
+@dataclass(frozen=True)
+class Doubt:
+    """Central can't stand behind a reference's last word now: why, and since when (Central's clock,
+    epoch seconds; only ever shown as dated text, never compared across systems). Set and cleared
+    only by an event about its own reference: a stated report clears it."""
+    reason: DoubtReason
+    since: float
+
+
 @dataclass(frozen=True)
 class Kept[T]:
     """A value a reference stated, and when Central heard it stated (Central's clock, epoch seconds)."""
@@ -166,27 +183,27 @@ class Kept[T]:
 
 @dataclass(frozen=True)
 class LightFacts:
-    """A light reference's facts: its last stated brightness and colour (None: never stated), since
-    when it can't tell (None: it tells now) and when Central last heard it at all."""
+    """A light reference's facts: its last stated brightness and colour (None: never stated), its
+    doubt (None: Central stands behind its last word) and when Central last heard it at all."""
     state: Kept[Dimmer] | None
     colour: Kept[LightColour] | None
-    cant_tell_since: float | None
+    doubt: Doubt | None
     heard_at: float
 
 
 @dataclass(frozen=True)
 class ReadingFacts:
-    """A Sensor reference's facts: its last stated reading, since when it can't tell, last heard."""
+    """A Sensor reference's facts: its last stated reading, its doubt, when last heard."""
     reading: Kept[Measured] | None
-    cant_tell_since: float | None
+    doubt: Doubt | None
     heard_at: float
 
 
 @dataclass(frozen=True)
 class ColourFacts:
-    """A colour sensor reference's facts: its last stated colour, since when it can't tell, last heard."""
+    """A colour sensor reference's facts: its last stated colour, its doubt, when last heard."""
     colour: Kept[KelvinColour] | None
-    cant_tell_since: float | None
+    doubt: Doubt | None
     heard_at: float
 
 
@@ -239,7 +256,7 @@ class RoomLightRefused(Exception):
 
 __all__ = [
     "ADDRESS_MAX", "COLOUR_SENSORS_MAX", "ROOM_LIGHT_NAME_MAX", "SENSORS_MAX", "SOURCE_PATTERN", "Address",
-    "BulbColour", "ColourFacts", "ColourReading", "ColourSensor", "ColourSensorId", "ColourSensorRef",
+    "BulbColour", "ColourFacts", "Doubt", "DoubtReason", "ColourReading", "ColourSensor", "ColourSensorId", "ColourSensorRef",
     "DrawnReportRefusal", "Facts", "FixedLight", "Kept", "LightFacts", "LightReport", "LightStated", "MeasuredLight",
     "Name", "Reading", "ReadingFacts", "Recorded", "ReportRefusal", "ReportedColourSource", "ReportedLight",
     "ReporterRef", "RoomLight", "RoomLightId", "RoomLightRefusal", "RoomLightRefused", "SensedColour",

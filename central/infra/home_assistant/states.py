@@ -9,8 +9,10 @@ A light entity records its LightReport against `ReporterRef(SOURCE, entity)`, an
 Reading against `SensorRef(SOURCE, entity)`, a colour-temperature one its ColourReading against
 `ColourSensorRef(SOURCE, entity)`; Unavailable for Home Assistant's own unavailable (the last stated
 value stands: policy.py). A key that is not an entity id, or a value the contract's decoder refuses,
-goes to the one refusal log (UNKNOWN_ADDRESS, UNREADABLE); GALLERIA_BIRTH_KEY is Galleria's birth,
-kept for the settings page. A state of a light kind for an entity outside the `light` domain, or a
+goes to the one refusal log (UNKNOWN_ADDRESS, UNREADABLE; an unreadable one also doubts its
+reference "can't read"); GALLERIA_BIRTH_KEY is Galleria's birth, kept for the settings page and for
+judging which connection's close is Galleria's link closing (`closed`), and whether a close was missed while
+Central was away from the hub (`hub_is`: the birth names another hub server). A state of a light kind for an entity outside the `light` domain, or a
 sensor kind for a `light.` entity, is UNREADABLE too, so a light never records under a sensor's
 reference nor a reading under a ReporterRef. A light's colour outside the stated range is refused
 on its own (OUT_OF_RANGE) and its brightness still recorded. A key
@@ -45,6 +47,7 @@ from contracts.home_assistant import (
     EntityKind,
     EntityName,
     GalleriaBirth,
+    GalleriaConnection,
     HomeAssistantColourTemperature,
     HomeAssistantIlluminance,
     HomeAssistantLight,
@@ -73,6 +76,10 @@ class GalleriaBirths(Protocol):
         """Keep `birth` as Galleria's, heard now (Central's clock), replacing the last."""
         ...
 
+    def galleria_birth(self) -> GalleriaBirth | None:
+        """Galleria's last birth as kept (None: none heard)."""
+        ...
+
 
 class HomeAssistantListener:
     """nodeapi.hub ListenedStates over room lights' reports, the heard entities and Galleria's births."""
@@ -85,6 +92,33 @@ class HomeAssistantListener:
     async def heard(self, epoch: str, items: Sequence[Heard]) -> None:
         """Record each item, in order, in a thread (the stores block); see the module's rules."""
         await asyncio.to_thread(self._record_all, items)
+
+    async def closed(self, connection: GalleriaConnection) -> None:
+        """A door connection closed (nodeapi.hub ListenedStates): when it is the connection Galleria's
+        latest birth names, every reference Home Assistant reports takes the "link closed" doubt
+        (RoomLightReports.record_link_closed(SOURCE)); a close of any other connection (an older
+        one, closed late) changes nothing. Cleared when Galleria reconnects and restates. A store
+        failure is raised."""
+        await asyncio.to_thread(self._closed, connection)
+
+    async def hub_is(self, server: str) -> None:
+        """Central's client is attached to hub server `server` (nodeapi.hub ListenedStates): when
+        Galleria's latest birth names a connection to another server, that link closed while Central
+        was away (a worker restart starts the hub under a new server id), so every reference Home
+        Assistant reports takes the "link closed" doubt, as `closed` would have. When Galleria has
+        reconnected meanwhile, its new birth and its restated states, read next, clear it. A store
+        failure is raised."""
+        await asyncio.to_thread(self._hub_is, server)
+
+    def _hub_is(self, server: str) -> None:
+        birth = self._births.galleria_birth()
+        if birth is not None and birth.connection.server != server:
+            self._reports.record_link_closed(SOURCE)
+
+    def _closed(self, connection: GalleriaConnection) -> None:
+        birth = self._births.galleria_birth()
+        if birth is not None and birth.connection == connection:
+            self._reports.record_link_closed(SOURCE)
 
     def _record_all(self, items: Sequence[Heard]) -> None:
         for item in items:

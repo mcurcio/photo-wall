@@ -24,6 +24,7 @@ import pytest
 from media_queue import RecordingMediaQueue
 from support.frames import frame_create
 from support.position import save_position
+from support.subject_model import even_subjects
 from test_registry import enroll
 
 from central.assets.layout import CacheLayout
@@ -114,7 +115,7 @@ class Wall:
         self.store = CacheStore(CacheLayout(tmp_path))
         self.preparer = Preparer(ffmpeg=_tool("ffmpeg"), ffprobe=_tool("ffprobe"),
                                  clock=wall_clock)
-        self.worker = MediaWorker(self.repository, self.library,
+        self.worker = MediaWorker(self.repository, self.library, subjects=even_subjects(),
                                   preparer=self.preparer,
                                   key_content=PgKeyContent(registry.db,
                                                            times=DatabaseTransactionClock()))

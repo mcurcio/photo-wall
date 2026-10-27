@@ -2,7 +2,8 @@
 
 `render_slate` is the base page the private client shows under a released Output (and, translucent,
 over a starting candidate: `testing`); `render_trial` is the live-calibration overlay; `render_health`
-is a tint-on health page (the health layer, above everything, app included). `paint.paint`
+is a tint-on health page (the health layer, above everything, app included); `render_central` is
+Central's card, drawn on the same layer when no health card shows. `paint.paint`
 executes a draw-list with cairo; tests read the draw-list directly. Text, colours and geometry are
 the retired C client's (native/diagnostic-client.c), so the slate on a whole Output is
 pixel-identical.
@@ -50,6 +51,14 @@ REASON_DEFAULT = "Player output unavailable"
 MAX_PRIMITIVES = 512          # the trial event's primitives text, as the shell bounds it
 HEALTH_TINT_RGBA: RGBA = (0.0, 0.0, 0.0, 0.45)
 CARD_RGBA: RGBA = (*SLATE_RGB, 1.0)
+# Central's card (the Frame shows Central's error): its own look, never the Pi card's tint, slate
+# or the shell's amber. A light card, the words dark, labelled "Central" in Central's blue.
+CENTRAL_LABEL = "Central"
+CENTRAL_CARD_RGBA: RGBA = (0.93, 0.94, 0.96, 0.96)
+CENTRAL_TEXT_RGBA: RGBA = (0.09, 0.10, 0.13, 1.0)
+CENTRAL_LABEL_RGBA: RGBA = (0.16, 0.36, 0.72, 1.0)
+CENTRAL_SHARE = 0.2                           # of the explain area's height: three rows
+CENTRAL_LEAST = 64
 OUTSIDE_RGBA: RGBA = (0.0, 0.0, 0.0, 1.0)     # the Output outside the explain area
 TEXT_FACE = "sans"
 # How far right of its origin `text` inks at `size` in `face` (pixels): the layout's one question
@@ -169,14 +178,16 @@ def card_pad(area_width: int) -> int:
     return max(8, round(0.024 * area_width))
 
 
-def card_rect(rect: tuple[int, int, int, int], content: float = 0.0) -> tuple[int, int, int, int]:
-    """The health card's (x, y, w, h) inside `rect` (x, y, w, h: the explain area): as wide as its
+def card_rect(rect: tuple[int, int, int, int], content: float = 0.0, *, share: float = 0.15,
+              least: int = 48) -> tuple[int, int, int, int]:
+    """A card's (x, y, w, h) inside `rect` (x, y, w, h: the explain area): as wide as its
     `content` (its widest line's ink) plus its margins, at least 60 % of the area's width and never
-    wider than the area, centred; its bottom 5 % of the area's height above its bottom edge, at
-    least 48 px tall."""
+    wider than the area, centred; its bottom 5 % of the area's height above its bottom edge, `share`
+    of the area's height tall and at least `least` px (the health card's two lines: 15 %, 48 px;
+    Central's three rows: CENTRAL_SHARE, CENTRAL_LEAST)."""
     left, top, width, height = rect
     w = min(width, max(round(0.6 * width), math.ceil(content) + 2 * card_pad(width)))
-    h = max(48, round(0.15 * height))
+    h = max(least, round(share * height))
     return left + (width - w) // 2, top + height - h - round(0.05 * height), w, h
 
 
@@ -215,6 +226,33 @@ def render_health(width: int, height: int, page: HealthPage, *, area: ExplainAre
         Rect(x, y, w, h, CARD_RGBA),
         Text(x + pad, y + round(0.45 * h), first_size, first, TEXT_RGBA, TEXT_FACE),
         Text(x + pad, y + round(0.8 * h), second_size, second, TEXT_RGBA, TEXT_FACE),
+    )
+
+
+def render_central(width: int, height: int, lines: tuple[str, str], *, area: ExplainArea,
+                   measure: TextMeasure) -> DrawList:
+    """Central's card (the Frame shows Central's error when it blacks the Frame) on a width x height
+    Output with the explain area `area`: nothing outside the card (no tint, no black: the Frame's own
+    picture shows around it), then Central's card inside the area in Central's look, three rows: the
+    label "Central", then Central's two lines verbatim, each shrunk until its ink fits the area's
+    width less the margins, the card as wide as the widest (card_rect, CENTRAL_SHARE tall)."""
+    rect = area_rect(area, (width, height))
+    pad = card_pad(rect[2])
+    room = max(1, rect[2] - 2 * pad)
+    h = card_rect(rect, share=CENTRAL_SHARE, least=CENTRAL_LEAST)[3]
+    first, second = lines
+    label_size = fit_size(CENTRAL_LABEL, max(10, round(0.14 * h)), room, measure)
+    first_size = fit_size(first, max(12, round(0.22 * h)), room, measure)
+    second_size = fit_size(second, max(10, round(0.16 * h)), room, measure)
+    content = max(measure(CENTRAL_LABEL, label_size, TEXT_FACE), measure(first, first_size, TEXT_FACE),
+                  measure(second, second_size, TEXT_FACE))
+    x, y, w, h = card_rect(rect, content, share=CENTRAL_SHARE, least=CENTRAL_LEAST)
+    return (
+        Paint((0.0, 0.0, 0.0, 0.0), source=True),
+        Rect(x, y, w, h, CENTRAL_CARD_RGBA),
+        Text(x + pad, y + round(0.27 * h), label_size, CENTRAL_LABEL, CENTRAL_LABEL_RGBA, TEXT_FACE),
+        Text(x + pad, y + round(0.59 * h), first_size, first, CENTRAL_TEXT_RGBA, TEXT_FACE),
+        Text(x + pad, y + round(0.85 * h), second_size, second, CENTRAL_TEXT_RGBA, TEXT_FACE),
     )
 
 

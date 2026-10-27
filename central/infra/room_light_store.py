@@ -1,12 +1,12 @@
-"""Room lights over PostgreSQL (migrations 099, 109): `PgRoomLights` implements central/room_light/ports.py's
+"""Room lights over PostgreSQL (migrations 099, 109, 111): `PgRoomLights` implements central/room_light/ports.py's
 RoomLightReports (every reporting source's adapter), RoomLightSetup (House › Lights),
 RoomLightsDocuments (the worker's WALL writer) and DrawnReports (each Player's drawn report), and
 the Home Assistant adapter's HeardEntities (central/infra/home_assistant/states.py: each entity Home
 Assistant published, its kind, name and when Central last heard it, home_assistant_entities).
 
 Every reference's facts are kept by its reference (light_words, reading_words, colour_words: the
-last stated value and when, since when it can't tell, when last heard; policy.py's `*_facts_after`
-decide them) whether or not a room light, Sensor or colour sensor names it, and are resolved only when
+last stated value and when, its doubt (why and since when), when last heard; policy.py's
+`*_facts_after` and `doubted` decide them) whether or not a room light, Sensor or colour sensor names it, and are resolved only when
 the document is built (policy.room_lights_document). Each source keeps its newest
 WORDS_KEPT_PER_SOURCE references and REFUSALS_KEPT refusals.
 
@@ -16,17 +16,28 @@ the store is handed, central/infra/frame_lighting_store.py), and sends `NOTIFY R
 and puts the document again. Every instant is PostgreSQL's `clock_timestamp()` (Central's one clock).
 No trigger, no stored procedure, no range in SQL: the rules are central/room_light/policy.py's and
 the ranges pydantic's.
+
+A doubt with no report behind it is written here too, under the same lock and wake: an unreadable
+refusal doubts every reference at its (source, address) "can't read" (one a setup item names, or
+one with facts), and a closed link doubts every reference of its source with facts "link closed".
+The words that travel for a doubt are dated on the house's clock (its zone and 12- or 24-hour clock,
+central/infra/house_store.py), so a Settings › House save that changes them raises the change too
+(`house_clock_changing_within`, which PgHouse calls).
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Final
+from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Jsonb
 from pydantic import TypeAdapter
 
 from central.db import Database
 from central.frame_lighting.ports import HouseLock
+from central.house_time.model import HouseClock
+from central.infra.house_store import house_settings_in
 from central.infra.light_sensor_judge import PI_SOURCE, missed_readings_in
 from central.infra.room_light_rows import ROOM_LIGHT, lights_in
 from central.infra.transactions import PgTransaction, pg_connection
@@ -38,6 +49,8 @@ from central.room_light.model import (
     ColourSensor,
     ColourSensorId,
     ColourSensorRef,
+    Doubt,
+    DoubtReason,
     Facts,
     FixedLight,
     Kept,
@@ -65,6 +78,8 @@ from central.room_light.policy import (
     check_sensor_removal,
     colour_facts_after,
     colour_line,
+    doubt_view,
+    doubted,
     drawn_state,
     entry_of,
     followed_by,
@@ -99,25 +114,27 @@ ROOM_LIGHTS_CHANNEL: Final = "room_lights"     # NOTIFY payload: empty; the WALL
 REFUSALS_KEPT: Final = 20                      # the newest refused reports kept per source
 WORDS_KEPT_PER_SOURCE: Final = 256             # the newest references' words kept per source
 # Who writes a row, for its audit fields (created_by, changed_by; there are no accounts): the console's
-# operator for setup, Galleria for its birth, and a reference's own source for its facts.
+# operator for setup, Galleria for its birth, a reference's own source for what it stated, and
+# Central for a doubt it set itself (a refused report, a closed link).
 OPERATOR: Final = "operator"
 GALLERIA: Final = "galleria"
+CENTRAL: Final = "central"
 
 _COLOUR: Final = TypeAdapter(LightColour)
 
 
-def _sensors_in(conn: Any) -> dict[SensorId, Sensor]:
+def sensors_in(conn: Any) -> dict[SensorId, Sensor]:
     rows = conn.execute("SELECT id, sensor FROM sensors ORDER BY id").fetchall()
     return {row["id"]: Sensor.model_validate(row["sensor"]) for row in rows}
 
 
-def _colour_sensors_in(conn: Any) -> dict[ColourSensorId, ColourSensor]:
+def colour_sensors_in(conn: Any) -> dict[ColourSensorId, ColourSensor]:
     rows = conn.execute("SELECT id, sensor FROM colour_sensors ORDER BY id").fetchall()
     return {row["id"]: ColourSensor.model_validate(row["sensor"]) for row in rows}
 
 
-def _at(value: Any) -> float | None:
-    return None if value is None else float(value)
+def _doubt(row: Any) -> Doubt | None:
+    return None if row["doubt_reason"] is None else Doubt(DoubtReason(row["doubt_reason"]), float(row["doubt_since"]))
 
 
 def _kept[T](value: T | None, at: Any) -> Kept[T] | None:
@@ -132,30 +149,30 @@ def _light_facts(row: Any) -> LightFacts:
     return LightFacts(
         state=_kept(None if row["state"] is None else Dimmer.model_validate(row["state"]), row["state_at"]),
         colour=_kept(None if row["colour"] is None else _COLOUR.validate_python(row["colour"]), row["colour_at"]),
-        cant_tell_since=_at(row["cant_tell_since"]), heard_at=float(row["heard_at"]))
+        doubt=_doubt(row), heard_at=float(row["heard_at"]))
 
 
 def _reading_facts(row: Any) -> ReadingFacts:
     return ReadingFacts(
         reading=_kept(None if row["reading"] is None else Measured.model_validate(row["reading"]), row["reading_at"]),
-        cant_tell_since=_at(row["cant_tell_since"]), heard_at=float(row["heard_at"]))
+        doubt=_doubt(row), heard_at=float(row["heard_at"]))
 
 
 def _colour_facts(row: Any) -> ColourFacts:
     return ColourFacts(
         colour=_kept(None if row["colour"] is None else KelvinColour.model_validate(row["colour"]), row["colour_at"]),
-        cant_tell_since=_at(row["cant_tell_since"]), heard_at=float(row["heard_at"]))
+        doubt=_doubt(row), heard_at=float(row["heard_at"]))
 
 
-_LIGHT_SELECT: Final = (f"SELECT source, address, state, colour, "
-                        f"{_epochs('state_at', 'colour_at', 'cant_tell_since', 'heard_at')} FROM light_words")
-_READING_SELECT: Final = (f"SELECT source, address, reading, "
-                          f"{_epochs('reading_at', 'cant_tell_since', 'heard_at')} FROM reading_words")
-_COLOUR_SELECT: Final = (f"SELECT source, address, colour, "
-                         f"{_epochs('colour_at', 'cant_tell_since', 'heard_at')} FROM colour_words")
+_LIGHT_SELECT: Final = (f"SELECT source, address, state, colour, doubt_reason, "
+                        f"{_epochs('state_at', 'colour_at', 'doubt_since', 'heard_at')} FROM light_words")
+_READING_SELECT: Final = (f"SELECT source, address, reading, doubt_reason, "
+                          f"{_epochs('reading_at', 'doubt_since', 'heard_at')} FROM reading_words")
+_COLOUR_SELECT: Final = (f"SELECT source, address, colour, doubt_reason, "
+                         f"{_epochs('colour_at', 'doubt_since', 'heard_at')} FROM colour_words")
 
 
-def _facts_in(conn: Any) -> Facts:
+def facts_in(conn: Any) -> Facts:
     """Every reference's kept facts."""
     return Facts(
         lights={ReporterRef(source=row["source"], address=row["address"]): _light_facts(row)
@@ -166,10 +183,17 @@ def _facts_in(conn: Any) -> Facts:
                  for row in conn.execute(_COLOUR_SELECT).fetchall()})
 
 
+def _clock_in(conn: Any) -> HouseClock:
+    """The house's clock (its zone and 12- or 24-hour clock), the one a doubt's words are dated on."""
+    settings = house_settings_in(conn)
+    return HouseClock(ZoneInfo(settings.time.zone), settings.clock)
+
+
 def document_in(conn: Any) -> RoomLightsDocument:
     """The room-lights document now (policy.room_lights_document over the stored rows)."""
     change = int(conn.execute("SELECT change FROM room_lights_change WHERE one").fetchone()["change"])
-    return room_lights_document(lights_in(conn), _sensors_in(conn), _colour_sensors_in(conn), _facts_in(conn), change)
+    return room_lights_document(lights_in(conn), sensors_in(conn), colour_sensors_in(conn), facts_in(conn), change,
+                                _clock_in(conn))
 
 
 def _changed_in(conn: Any, before: RoomLightsDocument) -> bool:
@@ -208,20 +232,57 @@ def _kept_in(conn: Any, house: HouseLock, table: str, source: str, address: str,
     return "recorded" if _changed_in(conn, before) else "unchanged"
 
 
+def _put_words(conn: Any, table: str, source: str, address: str, values: dict[str, Any], instants: frozenset[str],
+               now: float, by: str) -> None:
+    """Upsert (source, address)'s row of `table` with `values` (column -> value; the `instants`
+    columns as epoch seconds) and its audit fields: created at `now` by `by` when new, changed at
+    `now` by `by` always."""
+    columns = list(values)
+    placeholders = ", ".join(f"to_timestamp(%({column})s)" if column in instants else f"%({column})s"
+                             for column in columns)
+    updates = ", ".join(f"{column}=EXCLUDED.{column}" for column in (*columns, "changed_at", "changed_by"))
+    conn.execute(
+        f"INSERT INTO {table}(source, address, {', '.join(columns)}, created_at, created_by, changed_at, "  # noqa: S608
+        f"changed_by) VALUES (%(source)s, %(address)s, {placeholders}, to_timestamp(%(now)s), %(by)s, "
+        f"to_timestamp(%(now)s), %(by)s) ON CONFLICT (source, address) DO UPDATE SET {updates}",
+        {**values, "source": source, "address": address, "now": now, "by": by})
+
+
+def _put_light(conn: Any, reporter: ReporterRef, facts: LightFacts, now: float, by: str) -> None:
+    reason, since = _doubt_columns(facts.doubt)
+    _put_words(conn, "light_words", reporter.source, reporter.address, {
+        "state": _json(facts.state and facts.state.value), "state_at": facts.state and facts.state.at,
+        "colour": _json(facts.colour and facts.colour.value), "colour_at": facts.colour and facts.colour.at,
+        "doubt_reason": reason, "doubt_since": since, "heard_at": facts.heard_at},
+        frozenset({"state_at", "colour_at", "doubt_since", "heard_at"}), now, by)
+
+
+def _put_reading(conn: Any, sensor: SensorRef, facts: ReadingFacts, now: float, by: str) -> None:
+    reason, since = _doubt_columns(facts.doubt)
+    _put_words(conn, "reading_words", sensor.source, sensor.address, {
+        "reading": _json(facts.reading and facts.reading.value), "reading_at": facts.reading and facts.reading.at,
+        "doubt_reason": reason, "doubt_since": since, "heard_at": facts.heard_at},
+        frozenset({"reading_at", "doubt_since", "heard_at"}), now, by)
+
+
+def _put_colour(conn: Any, sensor: ColourSensorRef, facts: ColourFacts, now: float, by: str) -> None:
+    reason, since = _doubt_columns(facts.doubt)
+    _put_words(conn, "colour_words", sensor.source, sensor.address, {
+        "colour": _json(facts.colour and facts.colour.value), "colour_at": facts.colour and facts.colour.at,
+        "doubt_reason": reason, "doubt_since": since, "heard_at": facts.heard_at},
+        frozenset({"colour_at", "doubt_since", "heard_at"}), now, by)
+
+
+def _doubt_columns(doubt: Doubt | None) -> tuple[str | None, float | None]:
+    return (None, None) if doubt is None else (doubt.reason.value, doubt.since)
+
+
 def _light_in(conn: Any, house: HouseLock, reporter: ReporterRef, report: LightReport) -> Recorded:
     def write(now: float) -> None:
         row = conn.execute(f"{_LIGHT_SELECT} WHERE source=%s AND address=%s",  # noqa: S608
                            (reporter.source, reporter.address)).fetchone()
-        facts = light_facts_after(None if row is None else _light_facts(row), report, now)
-        conn.execute(
-            "INSERT INTO light_words(source, address, state, state_at, colour, colour_at, cant_tell_since, heard_at) "
-            "VALUES (%s, %s, %s, to_timestamp(%s), %s, to_timestamp(%s), to_timestamp(%s), to_timestamp(%s)) "
-            "ON CONFLICT (source, address) DO UPDATE SET state=EXCLUDED.state, state_at=EXCLUDED.state_at, "
-            "colour=EXCLUDED.colour, colour_at=EXCLUDED.colour_at, cant_tell_since=EXCLUDED.cant_tell_since, "
-            "heard_at=EXCLUDED.heard_at",
-            (reporter.source, reporter.address, _json(facts.state and facts.state.value),
-             facts.state and facts.state.at, _json(facts.colour and facts.colour.value),
-             facts.colour and facts.colour.at, facts.cant_tell_since, facts.heard_at))
+        _put_light(conn, reporter, light_facts_after(None if row is None else _light_facts(row), report, now), now,
+                   reporter.source)
     return _kept_in(conn, house, "light_words", reporter.source, reporter.address, write)
 
 
@@ -229,14 +290,8 @@ def _reading_in(conn: Any, house: HouseLock, sensor: SensorRef, reading: Reading
     def write(now: float) -> None:
         row = conn.execute(f"{_READING_SELECT} WHERE source=%s AND address=%s",  # noqa: S608
                            (sensor.source, sensor.address)).fetchone()
-        facts = reading_facts_after(None if row is None else _reading_facts(row), reading, now)
-        conn.execute(
-            "INSERT INTO reading_words(source, address, reading, reading_at, cant_tell_since, heard_at) "
-            "VALUES (%s, %s, %s, to_timestamp(%s), to_timestamp(%s), to_timestamp(%s)) "
-            "ON CONFLICT (source, address) DO UPDATE SET reading=EXCLUDED.reading, reading_at=EXCLUDED.reading_at, "
-            "cant_tell_since=EXCLUDED.cant_tell_since, heard_at=EXCLUDED.heard_at",
-            (sensor.source, sensor.address, _json(facts.reading and facts.reading.value),
-             facts.reading and facts.reading.at, facts.cant_tell_since, facts.heard_at))
+        _put_reading(conn, sensor, reading_facts_after(None if row is None else _reading_facts(row), reading, now), now,
+                     sensor.source)
     return _kept_in(conn, house, "reading_words", sensor.source, sensor.address, write)
 
 
@@ -244,18 +299,38 @@ def _colour_in(conn: Any, house: HouseLock, sensor: ColourSensorRef, reading: Co
     def write(now: float) -> None:
         row = conn.execute(f"{_COLOUR_SELECT} WHERE source=%s AND address=%s",  # noqa: S608
                            (sensor.source, sensor.address)).fetchone()
-        facts = colour_facts_after(None if row is None else _colour_facts(row), reading, now)
-        conn.execute(
-            "INSERT INTO colour_words(source, address, colour, colour_at, cant_tell_since, heard_at, "
-            "created_at, created_by, changed_at, changed_by) "
-            "VALUES (%(source)s, %(address)s, %(colour)s, to_timestamp(%(colour_at)s), to_timestamp(%(cant_tell)s), "
-            "to_timestamp(%(now)s), to_timestamp(%(now)s), %(source)s, to_timestamp(%(now)s), %(source)s) "
-            "ON CONFLICT (source, address) DO UPDATE SET colour=EXCLUDED.colour, colour_at=EXCLUDED.colour_at, "
-            "cant_tell_since=EXCLUDED.cant_tell_since, heard_at=EXCLUDED.heard_at, "
-            "changed_at=EXCLUDED.changed_at, changed_by=EXCLUDED.changed_by",
-            {"source": sensor.source, "address": sensor.address, "colour": _json(facts.colour and facts.colour.value),
-             "colour_at": facts.colour and facts.colour.at, "cant_tell": facts.cant_tell_since, "now": facts.heard_at})
+        _put_colour(conn, sensor, colour_facts_after(None if row is None else _colour_facts(row), reading, now), now,
+                    sensor.source)
     return _kept_in(conn, house, "colour_words", sensor.source, sensor.address, write)
+
+
+def _doubts_in(conn: Any, house: HouseLock, source: Source, address: str | None, reason: DoubtReason) -> Recorded:
+    """Under the house's lock: every reference of `source` (at `address` only, when given) that has
+    facts takes `reason`'s doubt (policy.doubted), its last word standing; for "can't read" (the
+    source spoke), so does every such reference a setup item names that has none yet. "recorded"
+    when the document changed."""
+    house.changing_within(PgTransaction(conn))
+    before = document_in(conn)
+    now = _now_in(conn)
+    facts = facts_in(conn)
+    named = named_in(conn, source) if reason == DoubtReason.CANT_READ else {}
+
+    def mine[R: (ReporterRef, SensorRef, ColourSensorRef)](kept: Any, kind: type[R]) -> list[R]:
+        found = {reference for reference in kept if reference.source == source}
+        found |= {reference for reference in named if isinstance(reference, kind)}
+        return sorted((reference for reference in found if address is None or reference.address == address),
+                      key=lambda reference: reference.address)
+
+    for reporter in mine(facts.lights, ReporterRef):
+        _put_light(conn, reporter, doubted(facts.lights.get(reporter), reason, now,
+                                           LightFacts(state=None, colour=None, doubt=None, heard_at=now)), now, CENTRAL)
+    for sensor in mine(facts.readings, SensorRef):
+        _put_reading(conn, sensor, doubted(facts.readings.get(sensor), reason, now,
+                                           ReadingFacts(reading=None, doubt=None, heard_at=now)), now, CENTRAL)
+    for colour_sensor in mine(facts.colours, ColourSensorRef):
+        _put_colour(conn, colour_sensor, doubted(facts.colours.get(colour_sensor), reason, now,
+                                                 ColourFacts(colour=None, doubt=None, heard_at=now)), now, CENTRAL)
+    return "recorded" if _changed_in(conn, before) else "unchanged"
 
 
 def _refusal_in(conn: Any, source: Source, address: str, reason: ReportRefusal) -> None:
@@ -266,6 +341,13 @@ def _refusal_in(conn: Any, source: Source, address: str, reason: ReportRefusal) 
     conn.execute("DELETE FROM report_refusals WHERE source=%(source)s AND id NOT IN (SELECT id FROM "
                  "report_refusals WHERE source=%(source)s ORDER BY id DESC LIMIT %(keep)s)",
                  {"source": source, "keep": REFUSALS_KEPT})
+
+
+def _refused_in(conn: Any, house: HouseLock, source: Source, address: str, reason: ReportRefusal) -> None:
+    """The refusal in the one log; an unreadable one also doubts its references "can't read"."""
+    _refusal_in(conn, source, address, reason)
+    if reason == ReportRefusal.UNREADABLE:
+        _doubts_in(conn, house, source, address[:ADDRESS_MAX], DoubtReason.CANT_READ)
 
 
 class PgRoomLights:
@@ -298,12 +380,25 @@ class PgRoomLights:
 
     def record_refused(self, source: Source, address: str, reason: ReportRefusal) -> None:
         with self._db.transaction() as conn:
-            _refusal_in(conn, source, address, reason)
+            _refused_in(conn, self._house, source, address, reason)
 
     def record_refused_within(self, tx: Transaction, source: Source, address: str, reason: ReportRefusal) -> None:
         conn = pg_connection(tx)
         with conn.transaction():
-            _refusal_in(conn, source, address, reason)
+            _refused_in(conn, self._house, source, address, reason)
+
+    def record_link_closed(self, source: Source) -> Recorded:
+        with self._db.transaction() as conn:
+            return _doubts_in(conn, self._house, source, None, DoubtReason.LINK_CLOSED)
+
+    # ---- HouseClockChanges (Settings › House) ----
+
+    def house_clock_changing_within(self, tx: Transaction, write: Callable[[], None]) -> Recorded:
+        conn = pg_connection(tx)
+        self._house.changing_within(tx)
+        before = document_in(conn)
+        write()
+        return "recorded" if _changed_in(conn, before) else "unchanged"
 
     # ---- RoomLightsDocuments ----
 
@@ -354,6 +449,11 @@ class PgRoomLights:
                          "changed_at=EXCLUDED.changed_at, changed_by=EXCLUDED.changed_by",
                          {"birth": Jsonb(birth.model_dump(mode="json")), "by": GALLERIA})
 
+    def galleria_birth(self) -> GalleriaBirth | None:
+        with self._db.transaction() as conn:
+            kept = galleria_birth_in(conn)
+        return None if kept is None else kept[0]
+
     # ---- RoomLightSetup ----
 
     def lights(self) -> RoomLightsView:
@@ -380,7 +480,7 @@ class PgRoomLights:
             tx = PgTransaction(conn)
             self._house.changing_within(tx)
             lights = lights_in(conn)
-            refused = check_room_light(light_id, light, lights, _sensors_in(conn), _colour_sensors_in(conn),
+            refused = check_room_light(light_id, light, lights, sensors_in(conn), colour_sensors_in(conn),
                                        self._house.naming_within(tx).lights.get(light_id, ()))
             if refused is not None:
                 raise refused
@@ -407,7 +507,7 @@ class PgRoomLights:
     def save_sensor(self, sensor_id: SensorId, sensor: Sensor) -> SensorView:
         with self._db.transaction() as conn:
             self._house.changing_within(PgTransaction(conn))
-            refused = check_sensor(sensor_id, sensor, _sensors_in(conn), lights_in(conn), _colour_sensors_in(conn))
+            refused = check_sensor(sensor_id, sensor, sensors_in(conn), lights_in(conn), colour_sensors_in(conn))
             if refused is not None:
                 raise refused
             before = document_in(conn)
@@ -420,7 +520,7 @@ class PgRoomLights:
     def remove_sensor(self, sensor_id: SensorId) -> None:
         with self._db.transaction() as conn:
             self._house.changing_within(PgTransaction(conn))
-            refused = check_sensor_removal(sensor_id, _sensors_in(conn), lights_in(conn))
+            refused = check_sensor_removal(sensor_id, sensors_in(conn), lights_in(conn))
             if refused is not None:
                 raise refused
             conn.execute("DELETE FROM sensors WHERE id=%s", (sensor_id,))
@@ -428,8 +528,8 @@ class PgRoomLights:
     def save_colour_sensor(self, sensor_id: ColourSensorId, sensor: ColourSensor) -> ColourSensorView:
         with self._db.transaction() as conn:
             self._house.changing_within(PgTransaction(conn))
-            refused = check_colour_sensor(sensor_id, sensor, _colour_sensors_in(conn), lights_in(conn),
-                                          _sensors_in(conn))
+            refused = check_colour_sensor(sensor_id, sensor, colour_sensors_in(conn), lights_in(conn),
+                                          sensors_in(conn))
             if refused is not None:
                 raise refused
             before = document_in(conn)
@@ -444,14 +544,15 @@ class PgRoomLights:
     def remove_colour_sensor(self, sensor_id: ColourSensorId) -> None:
         with self._db.transaction() as conn:
             self._house.changing_within(PgTransaction(conn))
-            refused = check_colour_sensor_removal(sensor_id, _colour_sensors_in(conn), lights_in(conn))
+            refused = check_colour_sensor_removal(sensor_id, colour_sensors_in(conn), lights_in(conn))
             if refused is not None:
                 raise refused
             conn.execute("DELETE FROM colour_sensors WHERE id=%s", (sensor_id,))
 
 
 def _view_in(conn: Any, house: HouseLock) -> RoomLightsView:
-    lights, sensors, colour_sensors, facts = lights_in(conn), _sensors_in(conn), _colour_sensors_in(conn), _facts_in(conn)
+    lights, sensors, colour_sensors, facts = lights_in(conn), sensors_in(conn), colour_sensors_in(conn), facts_in(conn)
+    clock = _clock_in(conn)
     named = house.naming_within(PgTransaction(conn)).lights
 
     def reporter_facts(light: RoomLight) -> LightFacts | ReadingFacts | None:
@@ -464,9 +565,9 @@ def _view_in(conn: Any, house: HouseLock) -> RoomLightsView:
 
     def light_view(light_id: RoomLightId, light: RoomLight) -> RoomLightView:
         kept = reporter_facts(light)
-        return RoomLightView(id=light_id, light=light, entry=entry_of(light, facts, sensors, colour_sensors),
+        return RoomLightView(id=light_id, light=light, entry=entry_of(light, facts, sensors, colour_sensors, clock),
                              heard_at=None if kept is None else kept.heard_at,
-                             cant_tell_since=None if kept is None else kept.cant_tell_since,
+                             doubt=None if kept is None else doubt_view(kept.doubt),
                              colour=colour_line(light, facts, colour_sensors), named_by=named.get(light_id, ()))
 
     def sensor_view(sensor_id: SensorId, sensor: Sensor) -> SensorView:
@@ -474,7 +575,7 @@ def _view_in(conn: Any, house: HouseLock) -> RoomLightsView:
         return SensorView(id=sensor_id, sensor=sensor,
                           reading=None if kept is None or kept.reading is None else kept.reading.value,
                           heard_at=None if kept is None else kept.heard_at,
-                          cant_tell_since=None if kept is None else kept.cant_tell_since,
+                          doubt=None if kept is None else doubt_view(kept.doubt),
                           reports=measured_by(lights, sensor_id))
 
     def colour_sensor_view(sensor_id: ColourSensorId, sensor: ColourSensor) -> ColourSensorView:
@@ -482,7 +583,7 @@ def _view_in(conn: Any, house: HouseLock) -> RoomLightsView:
         return ColourSensorView(id=sensor_id, sensor=sensor,
                                 colour=None if kept is None or kept.colour is None else kept.colour.value,
                                 heard_at=None if kept is None else kept.heard_at,
-                                cant_tell_since=None if kept is None else kept.cant_tell_since,
+                                doubt=None if kept is None else doubt_view(kept.doubt),
                                 followed_by=followed_by(lights, sensor_id))
 
     return RoomLightsView(
@@ -508,10 +609,10 @@ def named_in(conn: Any, source: Source) -> dict[ReporterRef | SensorRef | Colour
     for light_id, light in lights_in(conn).items():
         if isinstance(light, ReportedLight) and light.reporter.source == source:
             named[light.reporter] = light_id
-    for sensor_id, sensor in _sensors_in(conn).items():
+    for sensor_id, sensor in sensors_in(conn).items():
         if sensor.at.source == source:
             named[sensor.at] = sensor_id
-    for sensor_id, colour_sensor in _colour_sensors_in(conn).items():
+    for sensor_id, colour_sensor in colour_sensors_in(conn).items():
         if colour_sensor.at.source == source:
             named[colour_sensor.at] = sensor_id
     return named
@@ -562,4 +663,5 @@ def last_heard_in(conn: Any) -> float | None:
 
 
 __all__ = ["REFUSALS_KEPT", "ROOM_LIGHTS_CHANNEL", "WORDS_KEPT_PER_SOURCE", "HeardEntity", "PgRoomLights",
-           "document_in", "galleria_birth_in", "heard_entities_in", "last_heard_in", "named_in", "refused_in"]
+           "colour_sensors_in", "document_in", "facts_in", "galleria_birth_in", "heard_entities_in", "last_heard_in",
+           "named_in", "refused_in", "sensors_in"]

@@ -85,10 +85,10 @@ def test_the_upgrade_wash_and_paper_draw_todays_picture(photo):
 
 @pytest.mark.parametrize("entry", [
     None,
-    ReportedEntry(colour=KelvinColour(kelvin=3000), state=NotReported()),
-    ReportedEntry(colour=KelvinColour(kelvin=3000), state=Dimmer(on=False, brightness=1.0)),
-    ReportedEntry(colour=RgbColour(rgb=(1.0, 0.2, 0.2)), state=Dimmer(on=False, brightness=0.7)),
-    MeasuredEntry(colour=KelvinColour(kelvin=3000), state=Measured(lux=120.0)),  # AtFull against a Sensor
+    ReportedEntry(colour=KelvinColour(kelvin=3000), state=NotReported(), doubt=None),
+    ReportedEntry(colour=KelvinColour(kelvin=3000), state=Dimmer(on=False, brightness=1.0), doubt=None),
+    ReportedEntry(colour=RgbColour(rgb=(1.0, 0.2, 0.2)), state=Dimmer(on=False, brightness=0.7), doubt=None),
+    MeasuredEntry(colour=KelvinColour(kelvin=3000), state=Measured(lux=120.0), doubt=None),  # AtFull against a Sensor
 ], ids=["absent", "not-reported", "off", "off-coloured", "measured-against-dimmer"])
 def test_a_light_its_room_light_cannot_vouch_for_adds_nothing(entry):
     """Acceptance 3 (design rule 2): each adds exactly (0, 0, 0)."""
@@ -99,14 +99,14 @@ def test_a_light_its_room_light_cannot_vouch_for_adds_nothing(entry):
 def test_a_lux_reference_fits_only_a_sensor():
     measured = WashLight(light="room", lux=200, reference={"kind": "at-reading", "lux": 400.0})
     assert light_on_frame(measured, FixedEntry(colour=KelvinColour(kelvin=6500))) == (0.0, 0.0, 0.0)
-    assert light_on_frame(measured, MeasuredEntry(colour=KelvinColour(kelvin=6500), state=Measured(lux=100.0))) == pytest.approx((50.0,) * 3)
+    assert light_on_frame(measured, MeasuredEntry(colour=KelvinColour(kelvin=6500), state=Measured(lux=100.0), doubt=None)) == pytest.approx((50.0,) * 3)
 
 
 def test_a_dimmer_scales_by_brightness_and_colours_at_luminance_one():
-    warm = light_on_frame(WASH, ReportedEntry(colour=KelvinColour(kelvin=2700), state=Dimmer(on=True, brightness=0.5)))
+    warm = light_on_frame(WASH, ReportedEntry(colour=KelvinColour(kelvin=2700), state=Dimmer(on=True, brightness=0.5), doubt=None))
     assert 0.2126 * warm[0] + 0.7152 * warm[1] + 0.0722 * warm[2] == pytest.approx(25.0)
     assert warm[0] > warm[1] > warm[2]
-    rgb = light_on_frame(WASH, ReportedEntry(colour=RgbColour(rgb=(1.0, 0.5, 0.0)), state=Dimmer(on=True, brightness=0.5)))
+    rgb = light_on_frame(WASH, ReportedEntry(colour=RgbColour(rgb=(1.0, 0.5, 0.0)), state=Dimmer(on=True, brightness=0.5), doubt=None))
     assert sum(weight * value for weight, value in zip((0.2126, 0.7152, 0.0722), rgb, strict=True)) == pytest.approx(25.0)
     assert rgb[0] > rgb[1] > rgb[2] == 0.0
 
@@ -120,7 +120,7 @@ def test_the_spot_is_a_cone_that_feathers_and_switching_it_off_leaves_the_wash()
     feather and is gone outside; the spot off, the Frame equals the wash alone."""
     on = picture_lights(spot_lighting(), document(bookshelf_spot=WHITE_ROOM, room=WHITE_ROOM), SIZE, DISPLAY)
     off = picture_lights(spot_lighting(), document(bookshelf_spot=ReportedEntry(colour=KelvinColour(kelvin=6500), state=Dimmer(
-        on=False, brightness=1.0)), room=WHITE_ROOM), SIZE, DISPLAY)
+        on=False, brightness=1.0), doubt=None), room=WHITE_ROOM), SIZE, DISPLAY)
     wash = picture_lights(lighting(WashLight(light="room", lux=MATCHED / 10, reference=AT_FULL)),
                         document(room=WHITE_ROOM), SIZE, DISPLAY)
     grey = (0.5, 0.5, 0.5)

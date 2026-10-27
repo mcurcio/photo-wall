@@ -19,8 +19,10 @@ dependencies = [
   "procrastinate==3.9.0",
   "semver>=3,<4",
   "nats-py==2.16.0",  # the Node API library's client: the worker's hub side (E3d S5)
-  # Roadmap 5a: the key content analyser's interest grid (OpenCV static saliency, spectral
-  # residual; the saliency module ships only in the contrib build). Media worker only.
+  # Roadmap 5a: the key content analyser (media/key_content.py): its interest grid is what stands
+  # out, the U-2-Netp model run by OpenCV's dnn module (media/subject_map.py, subject detection
+  # 2026-10-26). The contrib build was chosen for spectral-residual saliency, which nothing uses
+  # now. Media worker only.
   "opencv-contrib-python-headless==5.0.0.93",
   # Power and the week (roadmap 2a + 2b): house time's sun times and the zone database zoneinfo
   # reads (the slim image has none). Central only; the Pi never imports them.
@@ -228,6 +230,16 @@ forbidden_modules = ["media", "httpx", "nodeapi", "central.infra", "central.db",
                      "central.displays", "central.fleet", "central.frame_lighting"]
 
 [[tool.importlinter.contracts]]
+# Central's errors compose what room lights and each Player said; they judge nothing and do no I/O
+# (the Frame shows Central's error when it blacks the Frame).
+name = "Central's errors are pure"
+type = "forbidden"
+source_modules = ["central.central_errors"]
+forbidden_modules = ["media", "httpx", "nodeapi", "central.infra", "central.db",
+                     "central.registry", "central.app", "central.coordination", "central.planner",
+                     "central.displays", "central.fleet", "central.frame_lighting"]
+
+[[tool.importlinter.contracts]]
 # A Frame's lighting rules are pure; the house is read through its port, under the room-lights lock.
 # They read room lights' vocabulary; room lights never import them ("Room lights are pure").
 name = "Frame lighting is pure"
@@ -332,6 +344,15 @@ name = "Health reaches only Display among contexts"
 type = "forbidden"
 source_modules = ["appliance.health"]
 forbidden_modules = ["appliance.host"]
+
+[[tool.importlinter.contracts]]
+# Central's error never goes on the health line, and a Player crash never reaches the health judge
+# through it: the health judge never imports the Player's `impeded` report or the controller's rule
+# for Central's card (the Frame shows Central's error when it blacks the Frame; DESIGN-r8 §5).
+name = "Health never reads the Player's impeded report"
+type = "forbidden"
+source_modules = ["appliance.health"]
+forbidden_modules = ["contracts.node_impeded", "appliance.display_host.central_card"]
 
 [[tool.importlinter.contracts]]
 # The host-core launcher ships alone. Like the apps fence, this has no ignore lines, so a path

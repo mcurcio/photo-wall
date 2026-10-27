@@ -37,6 +37,8 @@ const SHOWN: readonly Row[] = [
     help: "Room kept beside each face, as a share of the face's own width, so a crop never grazes a face." },
   { key: "min_face_share", label: "Smallest face that counts", control: "number", scale: 100, unit: "% of the photo", step: 0.01,
     help: "A face smaller than this (someone far away) does not stop a crop." },
+  { key: "interest_skew", label: "Skew toward what stands out", control: "slider", scale: 100, unit: "%", step: 1,
+    help: "On a photo with faces, how far the crop leans from the faces' own place toward the people and things that stand out, as a share of the way there. Every face keeps at least the rest of its room. At 0 the faces alone place the crop." },
 ];
 /** Under Advanced. */
 const ADVANCED: readonly Row[] = [
@@ -122,7 +124,7 @@ function SettingsRow({ row, draft, view, onChange, onDrag }: {
  * "Agreed that these should be configurable, and not hardcoded."): every tuning value of the
  * photo fit rule, house-wide, each a SettingRow with Central's range, its default and Reset.
  * Shown: the crop limit (the one Scenes without their own follow), the space kept around a
- * face and the smallest face that counts; under Advanced the rest, the crop positions tried
+ * face, the smallest face that counts and the skew toward what stands out; under Advanced the rest, the crop positions tried
  * under its Details. Beside them the Fit board of every Source a Scene uses, judged with the
  * values as typed (a dragged slider by shape), so a change shows its effect before Save. Save
  * sends every value; each Frame uses it from its next photo, and the photos showing now finish their

@@ -20,7 +20,7 @@ from player.room_lights import RoomLights
 
 def document(change: int, on: bool) -> RoomLightsDocument:
     return RoomLightsDocument(change=change, lights={
-        "bookshelf-spot": ReportedEntry(colour=KelvinColour(kelvin=2700), state=Dimmer(on=on, brightness=1.0))})
+        "bookshelf-spot": ReportedEntry(colour=KelvinColour(kelvin=2700), state=Dimmer(on=on, brightness=1.0), doubt=None)})
 
 
 def test_ten_switches_redraw_ten_times_and_leave_the_delivery_alone(tmp_path):

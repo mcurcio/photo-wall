@@ -22,7 +22,7 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Final, Protocol
+from typing import Final, Generic, Protocol, TypeVar
 from uuid import UUID
 
 from appliance.feed import Feed, answer_feed_read
@@ -36,8 +36,10 @@ from appliance.kernel.display_paths import (
 from appliance.kernel.unix_credentials import receive_credential_packet
 from contracts.node_output import (
     OUTPUT_IDS,
+    CentralCard,
     FrameRegion,
     OutputReport,
+    Power,
     PowerAttempt,
     decode_output_document,
     decode_region_document,
@@ -48,7 +50,8 @@ from contracts.node_picture import decode_picture_document, picture_document_key
 from contracts.node_protocol import OutputKey
 from nodeapi.documents import Document
 
-from .bus import DISPLAY_SLICE, BusPictureSink, BusReportSink, display_session
+from .bus import DISPLAY_SLICE, BusImpededReports, BusPictureSink, BusReportSink, display_session
+from .central_card import CentralCards
 from .ddc import DdcChannel
 from .domain import OutputState
 from .edid import EdidReading, parse_edid, read_edid
@@ -58,6 +61,7 @@ from .picture import (
     FileAppliedPictures,
     PictureController,
     PictureReports,
+    PictureShell,
     RestartSignal,
 )
 from .picture_list import FileOfferedCache, PictureListAsker
@@ -225,39 +229,41 @@ class PowerObservations:
         raise TypeError("the OutputReporter makes no power attempt")
 
 
-REGION_SECONDS: Final = 2.0    # one `region` op's answer from the shell
+SHELL_OP_SECONDS: Final = 2.0  # one forwarded op's answer from the shell (`region`, `central_card`)
+REGION_SECONDS: Final = SHELL_OP_SECONDS
+
+_Wanted = TypeVar("_Wanted")
 
 
-class RegionShell(Protocol):
-    """The shell's `region` op, as WestonBackend carries it."""
-
-    def region(self, output_id: str, region: FrameRegion | None, *, timeout: float) -> bool: ...
-
-
-class ShellRegions:
-    """Carries each Output's Frame region (issue #124) to the shell's `region` op on its own worker
-    thread, so neither the bus's document callback nor the dispatch loop waits on the shell.
+class ShellForwarder(Generic[_Wanted]):
+    """Carries each Output's newest value of one kept shell op to the shell on its own worker
+    thread, so neither the bus's callbacks, the controllers' workers nor the dispatch loop wait on
+    the shell. The shell keeps the value per Output and forwards it verbatim to the overlay client.
 
     Newest wins per Output. The shell (re)creating an Output (a Weston restart or hot-plug;
-    WestonBackend.output_listeners) sends that Output's region again, as the picture is. A send the
+    WestonBackend.output_listeners) sends that Output's value again, as the picture is. A send the
     shell refuses is not retried: the shell refuses one only for an Output it does not have yet or
     under an Output key since replaced, and every new key arrives with the shell's `output` event,
-    which sends it again. An Output whose region never reaches the shell keeps the debug overlay on
-    the whole Display, the safe side of the rule."""
+    which sends it again. Subclasses name the op (`_send`)."""
 
-    def __init__(self, shell: RegionShell, *, timeout: float = REGION_SECONDS) -> None:
-        self._shell, self._timeout = shell, timeout
+    _name = "shell-op"
+
+    def __init__(self, *, timeout: float = SHELL_OP_SECONDS) -> None:
+        self._timeout = timeout
         self._changed = threading.Condition()
-        self._wanted: dict[str, FrameRegion | None] = {}
-        self._due: dict[str, None] = {}              # Outputs whose region is to be sent, in order
+        self._wanted: dict[str, _Wanted | None] = {}
+        self._due: dict[str, None] = {}              # Outputs whose value is to be sent, in order
         self._stopping = False
         self._thread: threading.Thread | None = None
+
+    def _send(self, output_id: str, value: _Wanted | None, timeout: float) -> bool:
+        raise NotImplementedError
 
     def start(self) -> None:
         with self._changed:
             if self._thread is not None:
                 return
-            self._thread = threading.Thread(target=self._run, name="shell-regions", daemon=True)
+            self._thread = threading.Thread(target=self._run, name=f"shell-{self._name}", daemon=True)
         self._thread.start()
 
     def stop(self, timeout: float = 5.0) -> None:
@@ -267,17 +273,17 @@ class ShellRegions:
         if self._thread is not None:
             self._thread.join(timeout)
 
-    def document(self, output_id: str, region: FrameRegion | None) -> None:
-        """`output_id`'s newest region (None: none, or its document was refused). Never blocks."""
+    def document(self, output_id: str, value: _Wanted | None) -> None:
+        """`output_id`'s newest value (None: none). Never blocks."""
         with self._changed:
-            if output_id in self._wanted and self._wanted[output_id] == region:
+            if output_id in self._wanted and self._wanted[output_id] == value:
                 return
-            self._wanted[output_id] = region
+            self._wanted[output_id] = value
             self._due[output_id] = None
             self._changed.notify_all()
 
     def shell_output(self, output_id: str) -> None:
-        """The shell (re)created `output_id`: its region, if any came, is sent again. Never blocks."""
+        """The shell (re)created `output_id`: its value, if any came, is sent again. Never blocks."""
         with self._changed:
             if output_id in self._wanted:
                 self._due[output_id] = None
@@ -292,10 +298,151 @@ class ShellRegions:
                     return
                 output_id = next(iter(self._due))
                 del self._due[output_id]
-                region = self._wanted[output_id]
-            if not self._shell.region(output_id, region, timeout=self._timeout):
-                log.info("region for %s not taken by the shell; sent again when it announces the Output",
-                         output_id)
+                value = self._wanted[output_id]
+            if not self._send(output_id, value, self._timeout):
+                log.info("%s for %s not taken by the shell; sent again when it announces the Output",
+                         self._name, output_id)
+
+
+class RegionShell(Protocol):
+    """The shell's `region` op, as WestonBackend carries it."""
+
+    def region(self, output_id: str, region: FrameRegion | None, *, timeout: float) -> bool: ...
+
+
+class ShellRegions(ShellForwarder[FrameRegion]):
+    """Each Output's Frame region (issue #124) to the shell's `region` op. An Output whose region
+    never reaches the shell keeps the debug overlay on the whole Display, the safe side of the
+    rule."""
+
+    _name = "region"
+
+    def __init__(self, shell: RegionShell, *, timeout: float = REGION_SECONDS) -> None:
+        super().__init__(timeout=timeout)
+        self._shell = shell
+
+    def _send(self, output_id: str, value: FrameRegion | None, timeout: float) -> bool:
+        return self._shell.region(output_id, value, timeout=timeout)
+
+
+class CardShell(Protocol):
+    """The shell's `central_card` op, as WestonBackend carries it."""
+
+    def central_card(self, output_id: str, card: CentralCard | None, *, timeout: float) -> bool: ...
+
+
+class ShellCards(ShellForwarder[CentralCard]):
+    """Each Output's Central card (central_card.CentralCards composes it) to the shell's
+    `central_card` op. The shell drops an Output's card itself when it invalidates the Output's
+    grant (a Player crash, hang or mode change), so a card never outlives its run there even
+    before the controller has heard of the end."""
+
+    _name = "central_card"
+
+    def __init__(self, shell: CardShell, *, timeout: float = SHELL_OP_SECONDS) -> None:
+        super().__init__(timeout=timeout)
+        self._shell = shell
+
+    def _send(self, output_id: str, value: CentralCard | None, timeout: float) -> bool:
+        return self._shell.central_card(output_id, value, timeout=timeout)
+
+
+class PowerToCards:
+    """`ReportSink` around the power controller's sink that also tells Central's cards whether the
+    power in force leaves the display on (an Output turned off by Night off or Resting shows no
+    card). Never blocks."""
+
+    def __init__(self, sink: ReportSink, cards: CentralCards) -> None:
+        self._sink, self._cards = sink, cards
+
+    def put_report(self, report: OutputReport) -> None:
+        self._sink.put_report(report)
+        in_force = report.in_force
+        self._cards.power(report.output_id, in_force is None or in_force.power is not Power.OFF)
+
+    def emit_attempt(self, attempt: PowerAttempt) -> None:
+        self._sink.emit_attempt(attempt)
+
+
+class DrawingToCards:
+    """`picture.PictureShell` around the shell that also tells Central's cards whether Display draws
+    a test pattern or calibration target on the Output (the op's `drawing`, once the shell took it)."""
+
+    def __init__(self, shell: PictureShell, cards: CentralCards) -> None:
+        self._shell, self._cards = shell, cards
+
+    def picture(self, output_id: str, operations: str, brightness: str, *, drawing: bool,
+                timeout: float) -> bool:
+        taken = self._shell.picture(output_id, operations, brightness, drawing=drawing, timeout=timeout)
+        if taken:
+            self._cards.drawing(output_id, drawing)
+        return taken
+
+
+def admitted_run(backend: WestonBackend, state: OutputState) -> tuple[str | None, str | None]:
+    """The admitted Player run on the Output as Central's card rule reads it: (its shell grant id,
+    its Frame id), or (None, None) while none shows its picture: nothing admitted, its handoff not
+    complete, or the holding slate up (no hold evidence)."""
+    admitted = state.admitted
+    granted = backend.grants.get(state.key.output_id)
+    if (admitted is None or granted is None or granted[0].surface != admitted
+            or state.diagnostic != "released" or not state.holding):
+        return None, None
+    return str(granted[1]), admitted.frame_id
+
+
+def tell_cards(cards: CentralCards, backend: WestonBackend) -> None:
+    """The main loop's facts for Central's cards, after each change it handled (a shell event, an
+    ingress op, a trial): each Output's admitted run and whether a live trial is drawn on it."""
+    host = backend.host
+    if host is None:
+        return
+    for state in host.states():
+        grant, frame = admitted_run(backend, state)
+        cards.admitted(state.key.output_id, grant, frame, trial=state.key.output_id in backend.trials)
+
+
+class CentralCardWiring:
+    """Central's card on this Pi, composed once (the Frame shows Central's error when it blacks the
+    Frame): the Player's `impeded` read on the bus by Display's own reader, composed with each
+    owner's fact (`CentralCards`), to the shell's `central_card` op (`ShellCards`, sent again when
+    the shell announces an Output). Never through the health judge. The power controller's sink and
+    the picture controller's shell are wrapped here (`power_sink`, `picture_shell`), and the main
+    loop's pass ends in `settle`."""
+
+    def __init__(self, backend: WestonBackend, impeded: BusImpededReports | None = None) -> None:
+        self.impeded = BusImpededReports() if impeded is None else impeded
+        self.shell = ShellCards(backend)   # the shell's `central_card` op (WestonBackend.central_card)
+        self.cards = CentralCards(self.impeded, self.shell.document)
+        self.impeded.on_change(self.cards.reported)
+        backend.output_listeners.append(self.shell.shell_output)
+
+    def power_sink(self, sink: ReportSink) -> ReportSink:
+        """The power controller's sink, also telling the cards whether the display is on."""
+        return PowerToCards(sink, self.cards)
+
+    def picture_shell(self, shell: PictureShell) -> PictureShell:
+        """The picture controller's shell, also telling the cards what Display draws itself."""
+        return DrawingToCards(shell, self.cards)
+
+    def start(self) -> None:
+        self.shell.start()
+        self.impeded.start()
+
+    def stop(self) -> None:
+        self.shell.stop()
+        self.impeded.stop()
+
+
+def settle(controller: Controller, backend: WestonBackend, wiring: CentralCardWiring) -> None:
+    """The main loop's pass before it waits: every pending shell event observed, the retiring
+    service ticked, then Central's cards told what this pass changed (`tell_cards`; no change:
+    nothing sent)."""
+    while backend.pending:
+        controller.observe()
+    if controller.service is not None:
+        controller.service.tick()
+    tell_cards(wiring.cards, backend)
 
 
 def document_feed(power: OutputPowerController, picture: PictureController,
@@ -375,16 +522,17 @@ def power_controller(backend: WestonBackend, sink: ReportSink,
 
 
 def picture_controller(backend: WestonBackend, sink: PictureReports, ddc: DdcChannel,
-                       applied: Path = CONTROLLER_STATE) -> PictureController:
+                       applied: Path = CONTROLLER_STATE, *, shell: PictureShell | None = None) -> PictureController:
     """The picture controller on the port's DDC/CI channel (the one the power controller uses, at
     picture's turn), asking each display's list there (PictureListAsker), and the shell,
     remembering each display's list (FileOfferedCache) and applied picture change in `applied` (the
     controller's preserved runtime directory); the signal range read from the connector, asked for
     in the same directory (display_paths.SIGNAL_RANGE_REQUEST) behind every port's turn on the same
-    channel; it hears the shell's `presented` and `output` events through the backend."""
+    channel; it hears the shell's `presented` and `output` events through the backend. `shell`: the
+    picture op's carrier when not the backend itself (DrawingToCards around it)."""
     signal = RestartSignal(DrmConnectorRanges(), FileRangeRequests(applied / SIGNAL_RANGE_REQUEST.name), ddc)
-    picture = PictureController(DdcPictureAdapter(ddc), PictureListAsker(ddc), FileOfferedCache(applied), backend,
-                                sink, FileAppliedPictures(applied), time.monotonic, signal)
+    picture = PictureController(DdcPictureAdapter(ddc), PictureListAsker(ddc), FileOfferedCache(applied),
+                                backend if shell is None else shell, sink, FileAppliedPictures(applied), time.monotonic, signal)
     backend.picture_events = picture
     return picture
 
@@ -463,12 +611,13 @@ class Controller:
 
 
 class _stopping:
-    """Stops the controllers', the screen turns' and the regions' workers and gives back the CEC
-    addresses on the way out."""
+    """Stops the controllers', the screen turns', the regions' and the cards' workers and the report
+    reader, and gives back the CEC addresses on the way out."""
 
     def __init__(self, power: OutputPowerController, picture: PictureController, turns: ScreenTurns,
-                 regions: ShellRegions, cec: HdmiCecAdapter) -> None:
+                 regions: ShellRegions, cards: CentralCardWiring, cec: HdmiCecAdapter) -> None:
         self._power, self._picture, self._turns, self._regions, self._cec = power, picture, turns, regions, cec
+        self._cards = cards
 
     def __enter__(self) -> None:
         return None
@@ -478,6 +627,7 @@ class _stopping:
         self._picture.stop()
         self._turns.stop()
         self._regions.stop()
+        self._cards.stop()
         self._cec.close()
 
 
@@ -516,8 +666,9 @@ def main() -> None:
         # One DDC/CI channel per Pi (one command at a time per port, power first), shared by power
         # and picture; each controller writes its own report key.
         ddc = DdcChannel(run_tool)
-        power, cec = power_controller(backend, BusReportSink(session), ddc)
-        picture = picture_controller(backend, BusPictureSink(session), ddc)
+        cards = CentralCardWiring(backend)   # Central's card, never through the health judge
+        power, cec = power_controller(backend, cards.power_sink(BusReportSink(session)), ddc)
+        picture = picture_controller(backend, BusPictureSink(session), ddc, shell=cards.picture_shell(backend))
         turns = ScreenTurns(backend)        # the shell's `turn` op (WestonBackend.turn)
         regions = ShellRegions(backend)     # the shell's `region` op (WestonBackend.region)
         backend.output_listeners.append(regions.shell_output)
@@ -525,6 +676,7 @@ def main() -> None:
         picture.start()
         turns.start()
         regions.start()
+        cards.start()
         feed = document_feed(power, picture, turns, regions)
         session.desired.on_change(feed)
         for output_id in OUTPUT_IDS:     # what arrived before the callback, once more (idempotent)
@@ -546,7 +698,7 @@ def main() -> None:
                 runtime=args.runtime,
             )
         with (
-            _stopping(power, picture, turns, regions, cec),
+            _stopping(power, picture, turns, regions, cards, cec),
             feed_listener(controller) as feeds,
             socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as ingress,
         ):
@@ -561,10 +713,7 @@ def main() -> None:
                 selector.register(ingress, selectors.EVENT_READ, "ingress")
                 selector.register(feeds.listener, selectors.EVENT_READ, "feed")
                 while True:
-                    while backend.pending:
-                        controller.observe()
-                    if controller.service is not None:
-                        controller.service.tick()
+                    settle(controller, backend, cards)
                     for key, _mask in selector.select(timeout=0.1):
                         if key.data == "backend":
                             controller.observe()

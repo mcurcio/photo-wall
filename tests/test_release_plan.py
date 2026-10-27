@@ -1342,6 +1342,11 @@ def _code(text: str) -> str:
 # image tag that is not `:sha-*`, or a GitHub CLI / API call.
 VERSION_WRITES = ("needs.plan.outputs.tag", "needs.plan.outputs.since", "env.TAG", "$TAG",
                   "imagetools", "gh release", "gh api", "claim")
+# The one read of the plan's tag outside the seal: the images job builds each image with it as
+# PHOTO_WALL_RELEASE (an environment value inside the image, never a tag) and checks the image
+# states it (central/version.py).
+RELEASE_BUILD_ARG = "PHOTO_WALL_RELEASE=${{ needs.plan.outputs.tag }}"
+RELEASE_CHECK_ENV = "PHOTO_WALL_RELEASE: ${{ needs.plan.outputs.tag }}"
 
 
 def test_only_the_seal_writes_a_version():
@@ -1357,8 +1362,10 @@ def test_only_the_seal_writes_a_version():
     assert _writes(_permissions(jobs["seal"], "    ")) == {"contents", "packages"}
     for name, body in jobs.items():
         if name != "seal":
-            assert not [word for word in VERSION_WRITES if word in _code(body)], name
+            code = _code(body).replace(RELEASE_BUILD_ARG, "").replace(RELEASE_CHECK_ENV, "")
+            assert not [word for word in VERSION_WRITES if word in code], name
     images = _code(jobs["images"])
+    assert images.count(RELEASE_BUILD_ARG) == len(IMAGES) and images.count(RELEASE_CHECK_ENV) == 1
     tags = re.findall(r"^\s+tags: (.+)$", images, flags=re.MULTILINE)
     assert tags == [f"ghcr.io/${{{{ github.repository }}}}/{name}:sha-"
                     "${{ needs.plan.outputs.revision }}" for name in IMAGES]

@@ -16,6 +16,7 @@ from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 from pydantic import Field, StrictBool
 
+from central.central_errors.ports import BoundOutput
 from central.db import Database
 from central.fleet.acceptance_evidence import applied_is_latest
 from central.fleet.device_fence import fence_in, retire_in
@@ -43,7 +44,7 @@ from central.infra.health_report_store import health_reports_in
 from central.infra.output_wakes import notify_nodes_in
 from central.infra.position_history_store import record_created_in, write_position_in, write_turn_in
 from central.infra.power_store import forget_frame_in
-from central.infra.transactions import PgTransaction
+from central.infra.transactions import PgTransaction, pg_connection
 from central.installation_models import (
     FrameInventory,
     InstallationInventory,
@@ -55,6 +56,7 @@ from central.installation_models import (
 )
 from central.installation_ports import InstallationSessions
 from central.installation_repository import PostgresInstallationRepository
+from central.kernel.transactions import Transaction
 from central.transaction_locks import acquire_runtime_locks, holds_runtime_locks_in
 from contracts.display_turn import DisplayTurn
 from contracts.enrollment import Enrollment as Enrollment
@@ -759,6 +761,17 @@ class Registry:
             (frame_id,),
         ).fetchone()
         return "native_trial" if row["native"] else "not_admitted"
+
+    @staticmethod
+    def bound_output_within(tx: Transaction, frame_id: str) -> BoundOutput | None:
+        """central_errors.ports FrameOutputs: the Frame's bound, not retired Player's device and
+        Output; None when unbound or the Player has no device."""
+        row = pg_connection(tx).execute(
+            "SELECT b.output_id, p.device_id FROM bindings b JOIN players p ON p.id = b.player_id "
+            "AND p.retired_at IS NULL WHERE b.frame_id=%s", (frame_id,)).fetchone()
+        if row is None or row["device_id"] is None:
+            return None
+        return BoundOutput(device_id=row["device_id"], output_id=row["output_id"])
 
     def calibration_capability(self, frame_id: str) -> dict:
         with self.db.transaction() as conn:

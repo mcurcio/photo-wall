@@ -39,11 +39,13 @@ from contracts.models import (
     Layer,
     Model,
     Observation,
+    OutputBinding,
     Plan,
     PlayerConfiguration,
     PlayerTime,
     Revocation,
 )
+from contracts.node_impeded import ImpededFrames
 from contracts.node_link import NODE_BUS_URL
 from contracts.node_state import FrameReport, FrameReports
 from contracts.player_control import (
@@ -67,6 +69,7 @@ from player.central_link import CentralLink, Session, read_refusal
 from player.executor import AcquisitionStopped, AuthorityError, Executor
 from player.geometry import light_lux_on_frame
 from player.identity import Identity, load_identity
+from player.impediment import impeded
 from player.luts import LutWants, PlayerLuts
 from player.mainloop import DispatchRefused, LatePosts, LoopLate, MainLoopDispatcher, Tick
 from player.node_app_link import NodeAppLinkClient
@@ -124,6 +127,14 @@ DISPATCH_DEADLINE = 2 * REPORT_INTERVAL
 # commit in flight plus one of them (player/executor.py `DRAW_GRACE`).
 PLANNING_TICK_MS = 33
 LOG = logging.getLogger("photo_wall.player")
+
+
+def _drawn_lux(binding: OutputBinding, document: RoomLightsDocument | None) -> float | None:
+    """The light on `binding`'s Frame at its centre as drawn with `document`, capped at LUX_MAX (None
+    before the first document): the one value the Frame's report carries and its impediment is
+    judged by."""
+    lux = light_lux_on_frame(binding.lighting, document)
+    return None if lux is None else min(lux, LUX_MAX)
 
 
 class ServiceError(ValueError):
@@ -373,6 +384,7 @@ class PlayerService:
         self._line_started = False
         # What the line was last given, and when the drawn report is due again (`_report_on_line`).
         self._frames_reported: tuple | None = None
+        self._impeded_reported: ImpededFrames | None = None
         self._drawn_reported: RoomLightsDrawn | None = None
         self._drawn_due = -math.inf
         self.clock = clock or SystemClock()
@@ -482,28 +494,60 @@ class PlayerService:
         LUX_MAX). On the GLib thread."""
         self._main()
         with self._lock:
-            configuration, document, executor = self._configuration, self._room_lights_document, self.executor
+            executor = self.executor
         reports = []
-        for binding in configuration.bindings if configuration is not None else ():
-            lux = light_lux_on_frame(binding.lighting, document)
+        for binding, document in self._drawn_bindings():
+            lux = _drawn_lux(binding, document)
             try:
                 reports.append(FrameReport(
                     frame_id=binding.frame_id, generation=binding.generation, output_id=binding.output_id,
-                    showing=executor is not None and executor.showing(binding),
-                    light_lux=None if lux is None else min(lux, LUX_MAX)))
+                    showing=executor is not None and executor.showing(binding), light_lux=lux))
             except ValidationError:   # an id the report's contract refuses: left out, never a fault
                 LOG.debug("player: no Frame report for %s", binding.frame_id)
         return FrameReports(frames=tuple(reports))
 
+    def impeded_frames(self) -> ImpededFrames:
+        """Every Frame Central's doubt blacks now (player/impediment.py `impeded`, owner 2026-10-27:
+        "when the issue induces blackness on the frame"): judged against the room-lights document last
+        drawn and the light drawn at its centre (`frame_reports`' `light_lux`), naming the grant its
+        Output's last presented commit was drawn under. A Frame with no presented commit, or with no
+        document drawn yet, is not impeded. Changes no drawing. On the GLib thread."""
+        self._main()
+        frames = []
+        for binding, document in self._drawn_bindings():
+            lux, grant = _drawn_lux(binding, document), self.renderer.drawn_grant(binding.output_id)
+            if lux is None or grant is None:
+                continue
+            try:
+                found = impeded(binding.frame_id, binding.output_id, grant, binding.lighting, document, lux)
+            except ValidationError:   # an id the report's contract refuses: left out, never a fault
+                LOG.debug("player: no impeded report for %s", binding.frame_id)
+                continue
+            if found is not None:
+                frames.append(found)
+        return ImpededFrames(frames=tuple(frames))
+
+    def _drawn_bindings(self) -> list[tuple[OutputBinding, RoomLightsDocument | None]]:
+        """Each Frame the Player draws now (its control State's bindings), with the room-lights
+        document last drawn."""
+        with self._lock:
+            configuration, document = self._configuration, self._room_lights_document
+        return [(binding, document) for binding in (configuration.bindings if configuration is not None else ())]
+
     def _report_on_line(self) -> None:
         """On the GLib thread, every main-loop turn: the Player's line gets `frames` whenever a Frame's
-        report changes, and `room-lights-drawn` whenever it changes and at least every
+        report changes, `impeded` whenever which Frames are impeded changes (put whole, empty too, so
+        "not impeded" is said, never left unsaid), and `room-lights-drawn` whenever it changes and at least every
         ROOM_LIGHTS_DRAWN_REPEAT_SECONDS, unchanged too (Central judges it by age). The line holds
         each and publishes it when attached; nothing here waits on the bus."""
         frames = self.frame_reports()
         if frames.frames != self._frames_reported:
             self.line.put_frames(frames)
             self._frames_reported = frames.frames
+        stopped = self.impeded_frames()
+        if stopped != self._impeded_reported:
+            self.line.put_impeded(stopped)
+            self._impeded_reported = stopped
         drawn, now = self.room_lights_drawn(), self.clock.monotonic()
         if drawn != self._drawn_reported or now >= self._drawn_due:
             self.line.put_drawn(drawn)

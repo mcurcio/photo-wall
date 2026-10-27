@@ -187,6 +187,9 @@ jobs:
       - name: Start the disposable test database
         run: docker compose -f tests/integration/compose.test-database.yml up -d --wait
 
+      # The real `python -m media.worker` the Immich tests boot needs the model.
+      - uses: ./.github/actions/subject-model
+
       - name: Start and publish a disposable real Immich fixture
         env:
           WORKER_IMAGE: ${{ steps.setup.outputs.worker-image }}

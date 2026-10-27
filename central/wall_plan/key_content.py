@@ -19,12 +19,22 @@ from pydantic import Field, model_validator
 
 from contracts.models import Fraction, Model
 
-# A new value re-measures every photo (the store keeps one row per asset; hydration reads a row
-# only at this version). Bump it when the measurement's method or constants change. "2"
-# (follow-ups B1): raw face boxes and the saliency spread, padding and thresholds at judge time.
-ANALYSIS_VERSION: Final = "2"
-# The interest grid's columns; its rows follow the thumbnail's aspect (at least 1).
+# A new value re-measures every photo (the store keeps one row per asset; a row at an older
+# version is still read, marked `due`, and the Planner requests it again). Bump it when the
+# measurement's method or constants change. "2" (follow-ups B1): raw face boxes and the saliency
+# spread, padding and thresholds at judge time. "3" (subject detection, 2026-10-26): the interest
+# grid is U-2-Netp's "what stands out" map, no longer spectral-residual saliency.
+ANALYSIS_VERSION: Final = "3"
+# The interest grid's columns; its rows follow the thumbnail's aspect (`interest_rows`).
 INTEREST_COLUMNS: Final = 16
+# The most rows a grid has (InterestGrid's bound): a very tall photo's rows stop here.
+INTEREST_MAX_ROWS: Final = 64
+
+
+def interest_rows(width: int, height: int) -> int:
+    """The rows of a `width` x `height` image's interest grid: INTEREST_COLUMNS scaled by its
+    aspect, rounded, 1 to INTEREST_MAX_ROWS (the one home of the rows rule). Pure."""
+    return max(1, min(INTEREST_MAX_ROWS, round(INTEREST_COLUMNS * height / width)))
 
 
 class UnitBox(Model):
@@ -49,8 +59,14 @@ class InterestGrid(Model):
     `len(weights) == columns * rows`). An image with no salient part is the uniform grid."""
 
     columns: int = Field(ge=1, le=64)
-    rows: int = Field(ge=1, le=64)
+    rows: int = Field(ge=1, le=INTEREST_MAX_ROWS)
     weights: tuple[float, ...]
+
+    @classmethod
+    def uniform(cls, columns: int, rows: int) -> InterestGrid:
+        """The even grid of `columns` x `rows`: no part stands out, every cell the same share."""
+        cells = columns * rows
+        return cls(columns=columns, rows=rows, weights=(1.0 / cells,) * cells)
 
     @model_validator(mode="after")
     def distribution(self) -> Self:
@@ -66,8 +82,8 @@ class InterestGrid(Model):
 class KeyContent(Model):
     """One photo's key content at `analysis_version`, as measured, with no tuning value applied
     (follow-ups 2026-10-11, slice B1): `faces` are Immich's boxes as fractions, clamped and
-    unpadded, every non-degenerate box kept; `interest` is the grid of the salience above the
-    map's mean; `spread` is the saliency map's max minus its min. The fit rule pads faces, drops
+    unpadded, every non-degenerate box kept; `interest` is the grid of where the photo's subjects
+    stand out (media/key_content.py); `spread` is that map's max minus its min. The fit rule pads faces, drops
     small ones and treats a flat map as even when it judges (central/wall_plan/fit.py
     `faces_judged`, `interest_judged`), so a settings change needs no new measurement."""
 
@@ -78,8 +94,13 @@ class KeyContent(Model):
 
 
 class Measured(Model):
+    """A measured key, and whether it is `due` a new measurement (the key-content store's due
+    rule, its one home: an older analysis version, or a provisional measurement past its retry).
+    A due key is still judged and placed until a new one replaces it; the Planner requests it."""
+
     status: Literal["measured"] = "measured"
     key: KeyContent
+    due: bool = False
 
 
 MeasureFailure = Literal["decode", "timeout"]

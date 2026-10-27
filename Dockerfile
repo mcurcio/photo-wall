@@ -90,11 +90,23 @@ COPY --link central /app/central
 COPY --link nodeapi /app/nodeapi
 COPY --link --from=console-builder /console/dist /app/central/console/dist
 
+# The subject model the worker measures interest with (media/subject_map.py): fetched from its one
+# pin, media/subject_model.env, by scripts/subject_model.py, which refuses a file whose size or
+# SHA-256 is not the pin's, so a wrong download fails the build. Only the worker gets it.
+FROM python-system AS subject-model
+COPY --link media/subject_model.env /pin/media/subject_model.env
+COPY --link scripts/pinned_fetch.py scripts/subject_model.py /pin/scripts/
+RUN model=$(python3 /pin/scripts/subject_model.py fetch --dest /fetch) \
+    && install -D -m 0644 "$model" /models/u2netp.onnx
+
 # GHA passes an immutable retained native image; Compose can use the local target.
 FROM ${MEDIA_BASE_IMAGE} AS media-worker
 # Both service targets share the same Python base and absolute environment path.
 COPY --link --from=deps /app /app
 COPY --link --from=source /app /app
+# The worker does not start without it (PHOTO_WALL_SUBJECT_MODEL; image-smoke boots the worker).
+COPY --link --from=subject-model /models/u2netp.onnx /usr/share/photo-wall/u2netp.onnx
+ENV PHOTO_WALL_SUBJECT_MODEL=/usr/share/photo-wall/u2netp.onnx
 # The project itself: an editable install, i.e. a .pth naming /app. Its build backend also
 # leaves bytecode for the standard-library modules it imports, which the pyc-free Python base
 # lacks and a read-only container cannot write; interpreter start-up depends on it, so keep it.
@@ -124,6 +136,11 @@ RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0700 \
 RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0755 /var/lib/photo-wall/hub
 VOLUME ${PHOTO_WALL_CACHE_ROOT}
 USER wall
+# The release this image is built as (central/version.py RELEASE_ENV, "v0.45.0"): pipeline.yml's
+# images job passes the plan's tag, which the seal then claims; every other build (checks.yml,
+# Compose, a bare `docker build`) passes none and runs as source. Last, so it changes no other layer.
+ARG PHOTO_WALL_RELEASE=""
+ENV PHOTO_WALL_RELEASE=${PHOTO_WALL_RELEASE}
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["python", "-m", "media.worker"]
 
@@ -156,6 +173,11 @@ RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0700 \
 VOLUME ${PHOTO_WALL_CACHE_ROOT}
 USER wall
 EXPOSE 8000
+# The release this image is built as (central/version.py RELEASE_ENV, "v0.45.0"): pipeline.yml's
+# images job passes the plan's tag, which the seal then claims; every other build (checks.yml,
+# Compose, a bare `docker build`) passes none and runs as source. Last, so it changes no other layer.
+ARG PHOTO_WALL_RELEASE=""
+ENV PHOTO_WALL_RELEASE=${PHOTO_WALL_RELEASE}
 # --ws-max-size bounds one WebSocket frame. A Node's leaf rides Central's origin
 # (/photo-wall/bus/leafnode), and nats-server writes everything it has pending for a connection as
 # one frame, so it is at least node-bus.conf's max_pending plus one message
