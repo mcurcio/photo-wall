@@ -104,7 +104,8 @@ def still_region(layer: Layer, at: Placement) -> StillRegion:
     home of it): of the variant's width W x height H, the box of its crop window
     (contracts/photo_crop.py `crop_window` of the layer's crop, CENTRED when none, at the
     placement's aspect), each edge times W or H rounded half up (floor(v + 0.5)), as (left, top,
-    width, height) with each side at least 1, scaled to `finish_size(layer, at)`. Pure;
+    width, height) with each side at least 1 and the box within the copy (a window under a pixel at
+    its far edge is that edge's last pixel), scaled to `finish_size(layer, at)`. Pure;
     ValueError("still_region") for a black layer or one with no variant."""
     if layer.presentation != "media" or layer.variant is None:
         raise ValueError("still_region")
@@ -112,8 +113,9 @@ def still_region(layer: Layer, at: Placement) -> StillRegion:
     left, top, right, bottom = (math.floor(edge * side + 0.5) for edge, side in zip(
         crop_window(layer.crop or CENTRED, width, height, at.width / at.height), (width, height, width, height),
         strict=True))
-    return StillRegion((width, height), (left, top, max(1, right - left), max(1, bottom - top)),
-                       finish_size(layer, at))
+    box_width, box_height = max(1, right - left), max(1, bottom - top)
+    return StillRegion((width, height), (min(left, width - box_width), min(top, height - box_height), box_width,
+                                         box_height), finish_size(layer, at))
 
 
 @dataclass(frozen=True)

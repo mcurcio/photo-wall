@@ -245,6 +245,19 @@ def test_a_still_hands_the_gpu_its_window_at_its_finish_size():
     assert larger.size == (3004, 2140)
 
 
+@pytest.mark.parametrize(("offset", "box"), [(0, (0, 0, 1, 1)), (1, (9999, 0, 1, 1))])
+def test_a_window_under_a_pixel_still_lies_within_the_copy(offset, box):
+    """A window narrower than a pixel is one pixel wide, at the copy's edge when the crop reaches
+    it, never past the copy (a box past it would decode another window: videocrop only warns of a
+    negative edge). Mutation probe (no clamp to the copy): the right edge's box starts at 10,000."""
+    local = LocalLayer(layer("strip", crop=PhotoCrop(offset=offset), variant=media(b"strip").model_copy(update={
+        "media_type": "image/jpeg", "width": 10000, "height": 1})), None, 0.0, 1.0)
+    region = still_region(local.layer, Placement(0, 0, 1, 1000))
+    assert region.box == box
+    left, top, width, height = region.box
+    assert left + width <= 10000 and top + height <= 1
+
+
 def test_a_black_layer_has_no_still_region():
     with pytest.raises(ValueError, match="^still_region$"):
         still_region(black("dark", 1.0).layer, FIREPLACE)

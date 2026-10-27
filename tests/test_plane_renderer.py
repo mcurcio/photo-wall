@@ -292,13 +292,17 @@ class Rig:
         self.stills: list[Path] = []
         self.regions: list[StillRegion] = []
         self.decodes: list[FakeStill] = []
+        self.holding: set[str] = set()          # the stills whose decode is held until let go
+        self.refusing: set[str] = set()         # the stills whose decode cannot be started
         self.renderer = PlaneRenderer(self.screens, self.device, self.fitter, self.patterns, NoLuts(),
                                       stills=self._still, videos=self._video, clock=self.clock)
 
     def _still(self, path, region):
         self.stills.append(path)
         self.regions.append(region)
-        self.decodes.append(FakeStill(region.size))
+        if path.stem in self.refusing:
+            raise RuntimeError("decode_refused")
+        self.decodes.append(FakeStill(region.size, held=path.stem in self.holding))
         return self.decodes[-1]
 
     def _video(self, path, on_frame):
@@ -1354,6 +1358,82 @@ def test_one_still_decode_is_in_flight_at_a_time():
         rig.renderer.finish()
         rig.clock.tick()
     assert len(holding) == 2
+
+
+def _decodes_started(rig: Rig, *layers: LocalLayer, frame=None, refreshes: int = 10) -> list[str]:
+    """Prepare and finish `layers` for `refreshes` refreshes: the stills whose decode started."""
+    for _ in range(refreshes):
+        for local in layers:
+            rig.renderer.prepare(local, frame or framed())
+        rig.renderer.finish()
+        rig.clock.tick()
+    return [path.stem for path in rig.stills]
+
+
+def test_a_still_released_while_it_decodes_never_holds_up_another():
+    """The first still's layer goes while its decode is held: the second still decodes. Mutation
+    probe (release keeps the decode in flight): the second never starts."""
+    rig = Rig()
+    rig.holding = {"first"}
+    first, second = photo("first", start=0), photo("second", start=1)
+    assert _decodes_started(rig, first) == ["first"]
+    rig.renderer.release("first")
+    assert _decodes_started(rig, second) == ["first", "second"]
+    assert rig.renderer.prepare(second, framed()).status == "prepared"
+
+
+def test_a_decode_its_layer_no_longer_needs_never_holds_up_another():
+    """A still's box changes shape, so its window decodes again; it changes back before that decode
+    answers, so the picture it has is right again and nothing is owed: that decode is given up and
+    another still decodes (and the still decodes again if its box changes once more). Mutation
+    probe (no give-up in `_settle_decoding`): the other still never starts."""
+    rig = Rig()
+    still, other = sized("still", 1280, 720, start=0), photo("other", start=1)
+    rig.settle(still)
+    rig.holding = {"still"}
+    half = framed(PositionBox(width=0.5))
+    assert _decodes_started(rig, still, frame=half, refreshes=3) == ["still", "still"]
+    assert rig.renderer.prepare(still, framed()).status == "prepared"
+    assert _decodes_started(rig, other) == ["still", "still", "other"]
+    assert rig.decodes[1].closed
+    assert _decodes_started(rig, still, frame=half, refreshes=3)[-1] == "still"
+
+
+def test_a_decode_answering_while_its_layer_waits_for_a_fade_frees_the_next():
+    """A still started decoding before a fade it is not needed during; its decode answers during the
+    fade: a still needed within the fade decodes then, and the first is prepared after it. Mutation
+    probe (a deferred layer's answer not taken in `_settle_decoding`): the one within the fade
+    never decodes during it."""
+    rig = Rig()
+    outgoing, incoming = photo("out", start=0, end=200), photo("in", start=100, fade_in=3.0)
+    rig.ready(outgoing, incoming)
+    later, within_fade = photo("later", start=104), photo("within", start=102)
+    rig.holding = {"later"}
+    assert _decodes_started(rig, later, refreshes=3)[-1] == "later"
+    timebase = 100.1 - rig.clock.now
+    rig.present(outgoing, incoming, timebase=timebase)
+    rig.decodes[-1].held = False                        # it answers during the fade
+    for _ in range(30):
+        rig.present(outgoing, incoming, timebase=timebase)
+        rig.renderer.prepare(within_fade, framed())
+        rig.renderer.finish()
+        rig.clock.tick()
+    assert rig.renderer.prepare(within_fade, framed()).status == "prepared"
+    rig.clock.now += 3.0                                # the fade is over
+    rig.present(outgoing, incoming, timebase=timebase)
+    rig.ready(later)
+    assert [path.stem for path in rig.stills].count("later") == 1
+
+
+def test_a_still_whose_decode_cannot_start_fails_and_frees_the_next():
+    """The decode refused at its start fails the layer, and the next still decodes (the refusal
+    frees the decode, and `_settle_decoding` gives up a failed layer's: either alone suffices)."""
+    rig = Rig()
+    rig.refusing = {"first"}
+    first, second = photo("first", start=0), photo("second", start=1)
+    assert _decodes_started(rig, first, second) == ["first", "second"]
+    assert rig.renderer.prepare(first, framed()).status == "failed"
+    assert rig.renderer.prepare(second, framed()).status == "prepared"
 
 
 def test_a_turned_screen_finishes_the_picture_at_its_size_laid_out_turned():

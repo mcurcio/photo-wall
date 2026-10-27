@@ -190,7 +190,10 @@ transparency (a PNG) pre-multiplied. Within one level of 256 of the reference.
   pipeline is GStreamer's own way; uploading a region with `GL_UNPACK_SKIP_*` would still fail once
   the window itself is over 4,096 (a portrait copy on a full 4K Frame), and `jpegdec` has no scaled
   decode. At most one still decode is in flight over every Output; `finish` starts the next once it
-  answers. A new crop window or finish size (a new crop, a box of another shape, or a size below
+  answers, its layer is released, its start is refused, or its layer no longer needs it (its
+  picture is right again for what it is asked, or it failed; the decode is given up), and a decode
+  that answers while its layer waits for a fade is taken then, so no decode nobody polls holds up
+  the others. A new crop window or finish size (a new crop, a box of another shape, or a size below
   the source) decodes the still again and deletes its old texture. Costs: a Position trial that
   changes the box's shape decodes the still again (its lag is measured on the render bench), and
   the CPU scales the window (Lanczos) instead of the GPU.
@@ -222,7 +225,9 @@ transparency (a PNG) pre-multiplied. Within one level of 256 of the reference.
   (`StillDecode.result`) and dropped once uploaded; the still keeps its source texture, at most
   its finish size (so a key change other than a new window finishes it again without a new
   decode), and its target. One still decode is in flight at a time, so the decode's own memory is
-  one picture's. There is no separate memory budget: what is held is bounded by the layers
+  one picture's: the whole copy before the cut, 3 bytes a pixel for a 4:4:4 JPEG (about 91 MB for
+  a 4,506 x 6,759 copy, about 192 MB at preparation's 64-megapixel ceiling). There is no separate
+  memory budget: what is held is bounded by the layers
   alive, which the executor's prepare lead and the controller budget bound (the old renderer's
   texture and decoder limits went with it).
 - **Patterns are the ground** (`player/pattern_pass.py`): while the Display's picture operations

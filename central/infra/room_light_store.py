@@ -186,6 +186,11 @@ def _json(value: Any) -> Jsonb | None:
     return None if value is None else Jsonb(value.model_dump(mode="json"))
 
 
+# One read of Central's clock for a whole statement: a row created now is created and changed at the
+# same instant (two clock_timestamp() calls in one statement may read a microsecond apart).
+_ONE_CLOCK_READ = "(SELECT clock_timestamp() AS at) AS now"
+
+
 def _now_in(conn: Any) -> float:
     """Central's clock now (epoch seconds), the instant every fact this write keeps is stamped with."""
     return float(conn.execute("SELECT EXTRACT(EPOCH FROM clock_timestamp()) AS now").fetchone()["now"])
@@ -348,8 +353,8 @@ class PgRoomLights:
     def record_galleria_birth(self, birth: GalleriaBirth) -> None:
         with self._db.transaction() as conn:
             conn.execute("INSERT INTO galleria_birth(one, birth, heard_at, created_at, created_by, changed_at, "
-                         "changed_by) VALUES (true, %(birth)s, clock_timestamp(), clock_timestamp(), %(by)s, "
-                         "clock_timestamp(), %(by)s) "
+                         "changed_by) SELECT true, %(birth)s, now.at, now.at, %(by)s, now.at, %(by)s "
+                         f"FROM {_ONE_CLOCK_READ} "
                          "ON CONFLICT (one) DO UPDATE SET birth=EXCLUDED.birth, heard_at=EXCLUDED.heard_at, "
                          "changed_at=EXCLUDED.changed_at, changed_by=EXCLUDED.changed_by",
                          {"birth": Jsonb(birth.model_dump(mode="json")), "by": GALLERIA})
@@ -434,7 +439,7 @@ class PgRoomLights:
                 raise refused
             before = document_in(conn)
             conn.execute("INSERT INTO colour_sensors(id, sensor, created_at, created_by, changed_at, changed_by) "
-                         "VALUES (%(id)s, %(sensor)s, clock_timestamp(), %(by)s, clock_timestamp(), %(by)s) "
+                         f"SELECT %(id)s, %(sensor)s, now.at, %(by)s, now.at, %(by)s FROM {_ONE_CLOCK_READ} "
                          "ON CONFLICT (id) DO UPDATE SET sensor=EXCLUDED.sensor, changed_at=EXCLUDED.changed_at, "
                          "changed_by=EXCLUDED.changed_by",
                          {"id": sensor_id, "sensor": Jsonb(sensor.model_dump(mode="json")), "by": OPERATOR})

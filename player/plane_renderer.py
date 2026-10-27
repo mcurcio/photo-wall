@@ -28,7 +28,9 @@ Rules this module owns (one home each):
   once `set_player` gave an id. The composition reported and tagged stays the looked one: a
   pattern is a tuning overlay, not a change of what plays.
 - **When a still is decoded**: in `finish`, never in `prepare` or `present`, and at most one still
-  decode in flight over every Output (the next starts once it answers). A still's decode hands
+  decode in flight over every Output (the next starts once it answers, its layer is released, its
+  start is refused, or its layer no longer needs it; one answering while its layer waits for a
+  fade is taken then: `_settle_decoding`). A still's decode hands
   the GPU only its crop window at its finish size (player/planes.py `still_region`), so its
   texture is at most the finish size, never the whole copy. A new crop window or a new finish
   size (a new crop, a Position whose box changes shape, or size below the source) decodes it
