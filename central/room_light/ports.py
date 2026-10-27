@@ -11,6 +11,7 @@ every Pi without waiting.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol
 
 from central.kernel.transactions import Transaction
@@ -171,4 +172,17 @@ class RoomLightsDocuments(Protocol):
         ...
 
 
-__all__ = ["DrawnReports", "ReportSources", "RoomLightReports", "RoomLightSetup", "RoomLightsDocuments"]
+class HouseClockChanges(Protocol):
+    """Injected into Settings › House's store (central/infra/house_store.py PgHouse): a doubt's words
+    are dated on the house's clock, so a save that changes the zone or the 12- or 24-hour clock
+    changes the document too."""
+
+    def house_clock_changing_within(self, tx: Transaction, write: Callable[[], None]) -> Recorded:
+        """Under the house's lock in `tx`: run `write` (the Settings › House save); when the
+        document's words moved, raise its change and wake the WALL writer at commit. "recorded" when
+        they did."""
+        ...
+
+
+__all__ = ["DrawnReports", "HouseClockChanges", "ReportSources", "RoomLightReports", "RoomLightSetup",
+           "RoomLightsDocuments"]

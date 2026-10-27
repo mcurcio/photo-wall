@@ -136,6 +136,11 @@ RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0700 \
 RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0755 /var/lib/photo-wall/hub
 VOLUME ${PHOTO_WALL_CACHE_ROOT}
 USER wall
+# The release this image is built as (central/version.py RELEASE_ENV, "v0.45.0"): pipeline.yml's
+# images job passes the plan's tag, which the seal then claims; every other build (checks.yml,
+# Compose, a bare `docker build`) passes none and runs as source. Last, so it changes no other layer.
+ARG PHOTO_WALL_RELEASE=""
+ENV PHOTO_WALL_RELEASE=${PHOTO_WALL_RELEASE}
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["python", "-m", "media.worker"]
 
@@ -168,6 +173,11 @@ RUN install -d -o "$PHOTO_WALL_PUID" -g "$PHOTO_WALL_PGID" -m 0700 \
 VOLUME ${PHOTO_WALL_CACHE_ROOT}
 USER wall
 EXPOSE 8000
+# The release this image is built as (central/version.py RELEASE_ENV, "v0.45.0"): pipeline.yml's
+# images job passes the plan's tag, which the seal then claims; every other build (checks.yml,
+# Compose, a bare `docker build`) passes none and runs as source. Last, so it changes no other layer.
+ARG PHOTO_WALL_RELEASE=""
+ENV PHOTO_WALL_RELEASE=${PHOTO_WALL_RELEASE}
 # --ws-max-size bounds one WebSocket frame. A Node's leaf rides Central's origin
 # (/photo-wall/bus/leafnode), and nats-server writes everything it has pending for a connection as
 # one frame, so it is at least node-bus.conf's max_pending plus one message

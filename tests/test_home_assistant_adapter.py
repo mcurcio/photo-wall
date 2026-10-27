@@ -228,3 +228,19 @@ def test_only_the_close_of_the_connection_galleria_s_latest_birth_names_closes_i
     assert reports.told == []
     asyncio.run(listener.closed(new))
     assert reports.told == [("link-closed", references.SOURCE)]
+
+
+def test_a_birth_naming_another_hub_server_is_a_link_closed_while_central_was_away():
+    """A worker restart restarts the hub under a new server id and no close event is seen. Mutation
+    probe: `hub_is` doing nothing -> the Frame stays black with no card."""
+    reports = Reports()
+    listener = HomeAssistantListener(reports, reports, reports)   # type: ignore[arg-type]
+    asyncio.run(listener.hub_is("NHUB"))   # no birth heard yet: no link Central knows of
+    assert reports.told == []
+    asyncio.run(listener.heard("e" * 32, (Heard(GALLERIA_BIRTH_KEY, encode_galleria_birth(GalleriaBirth(
+        version="1.2.3", kinds=("light",), connection=GalleriaConnection(server="NHUB", client=7)))),)))
+    reports.told.clear()
+    asyncio.run(listener.hub_is("NHUB"))   # the same hub: its link is judged by its close
+    assert reports.told == []
+    asyncio.run(listener.hub_is("NEWHUB"))
+    assert reports.told == [("link-closed", references.SOURCE)]

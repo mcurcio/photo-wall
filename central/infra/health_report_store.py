@@ -12,8 +12,9 @@ import logging
 from collections.abc import Mapping
 from typing import Any, Final
 
+from central.infra.node_link_latest import latest_values_in
 from contracts.node_health import HEALTH_LINE, HEALTH_REPORT_KEY, HealthReport, decode_health_report
-from nodeapi.buffers import KV_OPERATION_HEADER, state_prefix, state_stream
+from nodeapi.buffers import state_prefix, state_stream
 
 log = logging.getLogger(__name__)
 
@@ -23,23 +24,14 @@ HEALTH_REPORT_SUBJECT: Final = state_prefix(HEALTH_LINE) + HEALTH_REPORT_KEY
 
 def health_reports_in(conn: Any) -> Mapping[str, HealthReport]:
     """player id -> its Pi's newest decoded HealthReport, for every enrolled (not retired) Player
-    whose device has one, in the caller's transaction (one query: DISTINCT ON device over
-    node_link_records WHERE stream = HEALTH_STATE_STREAM AND subject = HEALTH_REPORT_SUBJECT,
-    joined to players). Safe in read-only snapshots."""
-    rows = conn.execute(
-        "SELECT DISTINCT ON (r.device_id) p.id AS player_id, r.seq, r.data, r.headers"
-        " FROM node_link_records r JOIN players p ON p.device_id = r.device_id AND p.retired_at IS NULL"
-        " WHERE r.stream=%s AND r.subject=%s ORDER BY r.device_id, r.recorded_at DESC, r.seq DESC",
-        (HEALTH_STATE_STREAM, HEALTH_REPORT_SUBJECT)).fetchall()
+    whose device has one, in the caller's transaction (node_link_latest.py). Safe in read-only
+    snapshots."""
     reports: dict[str, HealthReport] = {}
-    for row in rows:
-        if (row["headers"] or {}).get(KV_OPERATION_HEADER):
-            log.info("health verdict removed: player=%s seq=%s", row["player_id"], row["seq"])
-            continue
-        try:
-            reports[row["player_id"]] = decode_health_report(bytes(row["data"]))
-        except ValueError:
-            log.warning("health verdict not decoded: player=%s seq=%s", row["player_id"], row["seq"])
+    for latest in latest_values_in(conn, HEALTH_LINE, HEALTH_REPORT_KEY):
+        if latest.removed:
+            log.info("health verdict removed: player=%s seq=%s", latest.player_id, latest.seq)
+        elif (report := latest.decoded(decode_health_report, "health verdict")) is not None:
+            reports[latest.player_id] = report
     return reports
 
 

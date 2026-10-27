@@ -402,6 +402,49 @@ def tell_cards(cards: CentralCards, backend: WestonBackend) -> None:
         cards.admitted(state.key.output_id, grant, frame, trial=state.key.output_id in backend.trials)
 
 
+class CentralCardWiring:
+    """Central's card on this Pi, composed once (the Frame shows Central's error when it blacks the
+    Frame): the Player's `impeded` read on the bus by Display's own reader, composed with each
+    owner's fact (`CentralCards`), to the shell's `central_card` op (`ShellCards`, sent again when
+    the shell announces an Output). Never through the health judge. The power controller's sink and
+    the picture controller's shell are wrapped here (`power_sink`, `picture_shell`), and the main
+    loop's pass ends in `settle`."""
+
+    def __init__(self, backend: WestonBackend, impeded: BusImpededReports | None = None) -> None:
+        self.impeded = BusImpededReports() if impeded is None else impeded
+        self.shell = ShellCards(backend)   # the shell's `central_card` op (WestonBackend.central_card)
+        self.cards = CentralCards(self.impeded, self.shell.document)
+        self.impeded.on_change(self.cards.reported)
+        backend.output_listeners.append(self.shell.shell_output)
+
+    def power_sink(self, sink: ReportSink) -> ReportSink:
+        """The power controller's sink, also telling the cards whether the display is on."""
+        return PowerToCards(sink, self.cards)
+
+    def picture_shell(self, shell: PictureShell) -> PictureShell:
+        """The picture controller's shell, also telling the cards what Display draws itself."""
+        return DrawingToCards(shell, self.cards)
+
+    def start(self) -> None:
+        self.shell.start()
+        self.impeded.start()
+
+    def stop(self) -> None:
+        self.shell.stop()
+        self.impeded.stop()
+
+
+def settle(controller: Controller, backend: WestonBackend, wiring: CentralCardWiring) -> None:
+    """The main loop's pass before it waits: every pending shell event observed, the retiring
+    service ticked, then Central's cards told what this pass changed (`tell_cards`; no change:
+    nothing sent)."""
+    while backend.pending:
+        controller.observe()
+    if controller.service is not None:
+        controller.service.tick()
+    tell_cards(wiring.cards, backend)
+
+
 def document_feed(power: OutputPowerController, picture: PictureController,
                   turns: ScreenTurns, regions: ShellRegions) -> Callable[[str, Document], None]:
     """The desired view's callback, routed by key: an Output document (`output-…`), decoded, to the
@@ -572,10 +615,9 @@ class _stopping:
     reader, and gives back the CEC addresses on the way out."""
 
     def __init__(self, power: OutputPowerController, picture: PictureController, turns: ScreenTurns,
-                 regions: ShellRegions, cards: ShellCards, impeded: BusImpededReports,
-                 cec: HdmiCecAdapter) -> None:
+                 regions: ShellRegions, cards: CentralCardWiring, cec: HdmiCecAdapter) -> None:
         self._power, self._picture, self._turns, self._regions, self._cec = power, picture, turns, regions, cec
-        self._cards, self._impeded = cards, impeded
+        self._cards = cards
 
     def __enter__(self) -> None:
         return None
@@ -586,7 +628,6 @@ class _stopping:
         self._turns.stop()
         self._regions.stop()
         self._cards.stop()
-        self._impeded.stop()
         self._cec.close()
 
 
@@ -625,16 +666,9 @@ def main() -> None:
         # One DDC/CI channel per Pi (one command at a time per port, power first), shared by power
         # and picture; each controller writes its own report key.
         ddc = DdcChannel(run_tool)
-        # Central's card (the Frame shows Central's error when it blacks the Frame): the Player's
-        # `impeded` read on the bus by Display's own reader, composed with the controller's facts,
-        # to the shell's `central_card` op. Never through the health judge.
-        impeded = BusImpededReports()
-        shell_cards = ShellCards(backend)   # the shell's `central_card` op (WestonBackend.central_card)
-        cards = CentralCards(impeded, shell_cards.document)
-        impeded.on_change(cards.reported)
-        backend.output_listeners.append(shell_cards.shell_output)
-        power, cec = power_controller(backend, PowerToCards(BusReportSink(session), cards), ddc)
-        picture = picture_controller(backend, BusPictureSink(session), ddc, shell=DrawingToCards(backend, cards))
+        cards = CentralCardWiring(backend)   # Central's card, never through the health judge
+        power, cec = power_controller(backend, cards.power_sink(BusReportSink(session)), ddc)
+        picture = picture_controller(backend, BusPictureSink(session), ddc, shell=cards.picture_shell(backend))
         turns = ScreenTurns(backend)        # the shell's `turn` op (WestonBackend.turn)
         regions = ShellRegions(backend)     # the shell's `region` op (WestonBackend.region)
         backend.output_listeners.append(regions.shell_output)
@@ -642,8 +676,7 @@ def main() -> None:
         picture.start()
         turns.start()
         regions.start()
-        shell_cards.start()
-        impeded.start()
+        cards.start()
         feed = document_feed(power, picture, turns, regions)
         session.desired.on_change(feed)
         for output_id in OUTPUT_IDS:     # what arrived before the callback, once more (idempotent)
@@ -665,7 +698,7 @@ def main() -> None:
                 runtime=args.runtime,
             )
         with (
-            _stopping(power, picture, turns, regions, shell_cards, impeded, cec),
+            _stopping(power, picture, turns, regions, cards, cec),
             feed_listener(controller) as feeds,
             socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as ingress,
         ):
@@ -680,11 +713,7 @@ def main() -> None:
                 selector.register(ingress, selectors.EVENT_READ, "ingress")
                 selector.register(feeds.listener, selectors.EVENT_READ, "feed")
                 while True:
-                    while backend.pending:
-                        controller.observe()
-                    if controller.service is not None:
-                        controller.service.tick()
-                    tell_cards(cards, backend)   # what this pass changed (no change: nothing sent)
+                    settle(controller, backend, cards)
                     for key, _mask in selector.select(timeout=0.1):
                         if key.data == "backend":
                             controller.observe()

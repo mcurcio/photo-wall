@@ -142,7 +142,7 @@ Never: Galleria bounds, rounds or keeps a value, or sends its own entities; Cent
 
 - **A Galleria that stays connected but goes silent** (Q3's option C, not built): its lights keep their last word with no doubt.
 - **A link closed under an older Galleria:** its birth names no connection, so Central cannot tell its close from another's. Its unreadable states still raise "can't read".
-- **A link closed while Central's hub client is away** (the worker down): disconnect events are not stored, so no "link closed" is set; Galleria's states restate when it reconnects.
+- **A link closed while Central's hub client is away on the same hub server** (a network blip between Central's worker and its hub): disconnect events are not stored, so no "link closed" is set; Galleria's states restate when it reconnects. A worker or hub restart is not this case: the hub starts under a new server id, and when Central's client attaches to it (`ListenedStates.hub_is`, at its connect and every reconnect) a Galleria birth that names another server's connection is itself proof the link closed, so Central marks "link closed" then.
 - **A dark room with every light trusted.** A choice (the black test needs a doubt). The owner's 2026-10-20 words pull the other way: "its entire purpose is to show up when a problem occurs so i never have to ask the question 'why is the screen black when i expected it to be on?'"
 - **A dim but not black Frame** lit by a doubted light, **a fraction of a lux** (black to the eye, not 0), or **light only off-centre** (the planned bookshelf cone): Needs attention and House › Lights only.
 - **A misconfiguration with trusted values:** the wrong light named, the wrong entity.
@@ -151,11 +151,11 @@ Never: Galleria bounds, rounds or keeps a value, or sends its own entities; Cent
 
 **Costs.**
 
-- **A new document shape again:** Central first, then every Pi (an older Pi shows "Behind" and no card), then Galleria. The order and why are the [runbook's](../runbook.md#releasing-centrals-error-on-the-frame).
+- **A new document shape again:** Central first, then every Pi (an older Pi shows "Behind" and no card), then Galleria. The order and why are the [runbook's](../runbook.md#releasing-centrals-error-on-the-frame). Every reported and measured entry now carries `doubt`, and the contract refuses unknown fields both ways, so from Central's deploy until a Pi is installed its Player refuses each new document and keeps the one it holds (light changes and daylight stop reaching it), and one that restarts in that window holds none and draws no room light: install every Pi straight after Central, and not at dusk (no compatibility seam, per the owner's no-backwards-compatibility rule).
 - **Every Central release that changes what it reads from Galleria freezes those lights under the card** until Galleria is updated (no backwards compatibility); the card is how that shows.
 - **A card at every Home Assistant restart** for any Frame black under a Home Assistant light, until Galleria reconnects and restates.
-- **Central's release number** must reach Central for "which side to update" to be right: `central/version.py` reads the release tag from `PHOTO_WALL_RELEASE`; until the image build passes it in, Central states its source version (0.1.0), any Galleria that states its version reads as newer, and a can't-read row says "Update Photo Wall (Central)".
-- **A house zone change** does not re-date words already sent: a Pi keeps the old dates until the next room-lights change.
+- **Central's release number** reaches Central through its image: pipeline.yml's images job builds both service images with the plan's tag as `PHOTO_WALL_RELEASE` (`central/version.py`) and checks each image states it; the plan's tag is then read outside the seal, as a build argument only (the seal still alone claims and publishes it). A Central run from source (Compose, CI's image checks) states its distribution version (0.1.0), so there any Galleria reads as newer and a can't-read row says "Update Photo Wall (Central)".
+- **The words are dated on the house's clock** (its zone and 12- or 24-hour clock), so a Settings › House save that changes either is a room-lights change too: the house's store calls `HouseClockChanges` in its transaction, under the house's lock, and the Pis redraw the card with the new dates.
 
 **Not run in the delivery that built this:** Central's card on a real HDMI Output (the CI harness's Output is headless), and the live proof after dark on the fireplace Frame (the card, then Galleria updated and the card gone).
 

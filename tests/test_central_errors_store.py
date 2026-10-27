@@ -97,6 +97,68 @@ def test_an_unreadable_report_doubts_its_reference_and_a_stated_one_clears_it(re
     assert lights.current().lights["family"].doubt is None
 
 
+def test_an_out_of_range_or_unknown_address_refusal_is_log_only(registry):
+    """Mutation probe: every refusal doubting its reference (not only an unreadable one) -> a light
+    whose colour is out of range, its brightness recorded, reads "can't read"."""
+    lights = _house(registry)
+    lights.record_light_state(FAMILY, OFF)
+    before = lights.current()
+    for reason in (ReportRefusal.OUT_OF_RANGE, ReportRefusal.UNKNOWN_ADDRESS):
+        lights.record_refused(HA, FAMILY.address, reason)
+    assert lights.current() == before
+    assert {each.id: each for each in lights.lights().lights}["family"].doubt is None
+    assert [each.reason for each in lights.refused().refused][:2] == ["unknown_address", "out_of_range"]
+
+
+def test_each_word_row_says_who_created_and_last_changed_it_and_when(registry):
+    """Audit fields: a reference's source for what it stated, Central for a doubt it set itself."""
+    lights = _house(registry)
+    lights.record_light_state(FAMILY, OFF)
+    lights.record_reading(SensorRef(source=HA, address="sensor.window"), Measured(lux=3.0))
+
+    def audit(table: str, address: str) -> tuple:
+        with registry.db.transaction() as conn:
+            row = conn.execute(f"SELECT created_by, changed_by, created_at, changed_at FROM {table} "  # noqa: S608
+                               "WHERE address=%s", (address,)).fetchone()
+        return row["created_by"], row["changed_by"], row["created_at"], row["changed_at"]
+
+    created_by, changed_by, created_at, changed_at = audit("light_words", FAMILY.address)
+    assert (created_by, changed_by, created_at) == (HA, HA, changed_at)
+    lights.record_refused(HA, FAMILY.address, ReportRefusal.UNREADABLE)
+    lights.record_link_closed(HA)
+    assert audit("light_words", FAMILY.address)[:3] == (HA, "central", created_at)
+    assert audit("light_words", FAMILY.address)[3] > changed_at
+    assert audit("reading_words", "sensor.window")[:2] == (HA, "central")
+    lights.record_light_state(FAMILY, OFF)                # restated: its source changed it last
+    assert audit("light_words", FAMILY.address)[:2] == (HA, HA)
+
+
+def test_a_settings_house_save_that_moves_the_words_raises_the_document_s_change(registry):
+    """The words are dated on the house's clock, so a save of its zone or clock format is an event
+    for the document too. Mutation probe: PgHouse not calling house_clock_changing_within -> the
+    same change number carries other words, and the WALL copy keeps the old ones."""
+    lights = _house(registry)
+    lights.record_light_state(FAMILY, OFF)
+    lights.record_refused(HA, FAMILY.address, ReportRefusal.UNREADABLE)
+    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
+        headers = {"Authorization": "Bearer " + ADMIN}
+
+        def save(zone: str, clock: str) -> None:
+            response = client.put("/v1/operator/house", headers=headers, json={
+                "time": {"zone": zone, "place": None}, "units": "cm", "clock": clock})
+            assert response.status_code == 200, response.text
+
+        save("Europe/London", "24h")
+        before = lights.current()
+        save("Europe/London", "24h")                         # nothing moved: no change
+        assert lights.current() == before
+        save("Asia/Tokyo", "12h")
+        after = lights.current()
+    assert after.change == before.change + 1
+    assert after.lights["family"].doubt != before.lights["family"].doubt
+    assert after.lights["family"].doubt.line1.endswith(("am", "pm"))
+
+
 def test_an_unreadable_report_of_a_named_reference_never_heard_and_of_one_nothing_names(registry):
     lights = _house(registry)
     lights.record_refused(HA, LAMP.address, ReportRefusal.UNREADABLE)   # named, never stated
@@ -128,18 +190,18 @@ def test_a_closed_link_doubts_every_reference_of_its_source_with_facts(registry)
     assert lights.current().lights["family"].doubt is None
 
 
-def _pi(registry) -> dict:
-    device = device_id_for_serial(SERIAL)
+def _pi(registry, serial: str = SERIAL) -> dict:
+    device = device_id_for_serial(serial)
     with registry.db.transaction() as conn:
         conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (device, SERIAL))
+                     (device, serial))
     return enroll(registry, device_id=device)[0]
 
 
-def _record(registry, stream: str, subject: str, value: bytes, seq: int, judges=None) -> None:
+def _record(registry, stream: str, subject: str, value: bytes, seq: int, judges=None, serial: str = SERIAL) -> None:
     stores = PgLinkStores(registry.db, judges or {})
     read = Read(Token("epoch", seq), subject, {}, value)
-    asyncio.run(stores.store(SERIAL, Pipe.FLEET).commit(stream, Batch((read,), Token("epoch", seq), False)))
+    asyncio.run(stores.store(serial, Pipe.FLEET).commit(stream, Batch((read,), Token("epoch", seq), False)))
 
 
 def test_a_pi_s_unreadable_reading_doubts_its_sensor_without_rolling_back_the_host_line(registry):
@@ -167,7 +229,7 @@ def test_needs_attention_and_the_frame_page_read_what_central_keeps(registry):
     lights.record_refused(HA, FAMILY.address, ReportRefusal.UNREADABLE)
     lights.record_link_closed(HA)                                # the sky's colour too (its facts exist)
     errors = PgCentralErrors(registry.db, PgHouseLock(), {
-        HA: HomeAssistantAdvice(lights.galleria_birth, "0.45.0"), PI_SOURCE: PiMeterAdvice()})
+        HA: HomeAssistantAdvice(lights.galleria_birth, "0.45.0"), PI_SOURCE: PiMeterAdvice()}, registry)
     rows = {row.address: row for row in errors.in_doubt().in_doubt}
     assert set(rows) == {FAMILY.address, SKY.address}
     assert (rows[FAMILY.address].doubt.reason, rows[FAMILY.address].lights, rows[FAMILY.address].frames) == (
@@ -191,4 +253,11 @@ def test_needs_attention_and_the_frame_page_read_what_central_keeps(registry):
         assert page.impediment == FrameImpeded(by=entry)
         assert client.get(CENTRAL_ERRORS).status_code in (401, 403)
     _record(registry, PLAYER_STATE_STREAM, IMPEDED_SUBJECT, encode_impeded(ImpededFrames(frames=())), 2)
+    assert errors.impeded("hall").impediment.kind == "clear"
+    # Another Pi's report (its device sorts first) is never the bound Pi's.
+    other = "10000000c0ffee12"
+    assert device_id_for_serial(other) < device_id_for_serial(SERIAL)
+    _pi(registry, other)
+    _record(registry, PLAYER_STATE_STREAM, IMPEDED_SUBJECT, encode_impeded(ImpededFrames(frames=(entry,))), 3,
+            serial=other)
     assert errors.impeded("hall").impediment.kind == "clear"

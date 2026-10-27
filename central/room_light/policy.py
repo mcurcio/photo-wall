@@ -15,9 +15,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
+from central.house_time.model import HouseClock
 from central.room_light.model import (
     COLOUR_SENSORS_MAX,
     SENSORS_MAX,
@@ -133,32 +132,28 @@ def doubted[F: (LightFacts, ReadingFacts, ColourFacts)](before: F | None, reason
     return replace(facts, doubt=doubt_after(facts.doubt, reason, at), heard_at=heard_at)
 
 
-def doubt_words(name: str, doubt: Doubt, last: Kept[Dimmer] | Kept[Measured] | None, zone: ZoneInfo) -> CentralWords:
+def doubt_words(name: str, doubt: Doubt, last: Kept[Dimmer] | Kept[Measured] | None,
+                clock: HouseClock) -> CentralWords:
     """Central's two lines for a light whose brightness reference is in `doubt` (DESIGN-r8 §7):
     line 1 what is wrong and since when ("Photo Wall can't read Family Room Lights · since 29 Oct
     18:05"; "Family Room Lights: its light can't tell · since …"; "Photo Wall lost the link to
     Family Room Lights · since …"), line 2 the last word the Frame is drawn with and where to look
     ("Its last word: off (26 Oct 15:35) · see Needs attention in Photo Wall"). A light whose last
-    word is a reading says "its sensor". Dates in the house's `zone`; a name too long for its line
+    word is a reading says "its sensor". Dates on the house's `clock` (its zone, 12 or 24 hours); a name too long for its line
     is shortened, so "since" always shows. Names the light, never an integration. Pure."""
-    return _words(name, doubt, last, zone, sensor=last is not None and isinstance(last.value, Measured))
+    return _words(name, doubt, last, clock, sensor=last is not None and isinstance(last.value, Measured))
 
 
-def _words(name: str, doubt: Doubt, last: Kept[Dimmer] | Kept[Measured] | None, zone: ZoneInfo, *,
+def _words(name: str, doubt: Doubt, last: Kept[Dimmer] | Kept[Measured] | None, clock: HouseClock, *,
            sensor: bool) -> CentralWords:
-    since = f" · since {_when(doubt.since, zone)}"
+    since = f" · since {clock.instant_words(doubt.since)}"
     before, after = {DoubtReason.CANT_READ: ("Photo Wall can't read ", ""),
                      DoubtReason.CANT_TELL: ("", f": its {'sensor' if sensor else 'light'} can't tell"),
                      DoubtReason.LINK_CLOSED: ("Photo Wall lost the link to ", "")}[doubt.reason]
     room = CENTRAL_LINE_MAX - len(before) - len(after) - len(since)
-    said = "none yet" if last is None else f"{_said(last.value)} ({_when(last.at, zone)})"
+    said = "none yet" if last is None else f"{_said(last.value)} ({clock.instant_words(last.at)})"
     return CentralWords(line1=f"{before}{_fit(name, room)}{after}{since}",
                         line2=f"Its last word: {said} · see Needs attention in Photo Wall")
-
-
-def _when(at: float, zone: ZoneInfo) -> str:
-    moment = datetime.fromtimestamp(at, zone)
-    return f"{moment.day} {moment:%b %H:%M}"
 
 
 def _said(value: Dimmer | Measured) -> str:
@@ -219,12 +214,12 @@ def colour_of(light: RoomLight, facts: Facts, colour_sensors: Mapping[ColourSens
 # ---- What each light reads as now ----
 
 def entry_of(light: RoomLight, facts: Facts, sensors: Mapping[SensorId, Sensor],
-             colour_sensors: Mapping[ColourSensorId, ColourSensor], zone: ZoneInfo) -> RoomLightEntry:
+             colour_sensors: Mapping[ColourSensorId, ColourSensor], clock: HouseClock) -> RoomLightEntry:
     """`light` as the document's entry of its kind, with its references' kept facts: a FixedLight is
     always on, at full; a ReportedLight takes its reporter's last stated Dimmer; a MeasuredLight its
     Sensor's last stated reading; each at `colour_of`. Never stated (or no such Sensor): NotReported.
     The doubt travels only from the reference its brightness comes from (the reporter, the Sensor),
-    worded in the house's `zone` (`doubt_words`); a colour doubt never does. A colour never decides
+    worded on the house's `clock` (`doubt_words`); a colour doubt never does. A colour never decides
     a state. Pure."""
     colour = colour_of(light, facts, colour_sensors)
     if isinstance(light, FixedLight):
@@ -237,21 +232,21 @@ def entry_of(light: RoomLight, facts: Facts, sensors: Mapping[SensorId, Sensor],
         reading = None if kept is None else kept.reading
         return MeasuredEntry(colour=colour, state=NotReported() if reading is None else reading.value,
                              doubt=None if kept is None or kept.doubt is None
-                             else _words(light.name, kept.doubt, reading, zone, sensor=True))
+                             else _words(light.name, kept.doubt, reading, clock, sensor=True))
     kept_light = facts.lights.get(light.reporter)
     state = None if kept_light is None else kept_light.state
     return ReportedEntry(colour=colour, state=NotReported() if state is None else state.value,
                          doubt=None if kept_light is None or kept_light.doubt is None
-                         else doubt_words(light.name, kept_light.doubt, state, zone))
+                         else doubt_words(light.name, kept_light.doubt, state, clock))
 
 
 def room_lights_document(lights: Mapping[RoomLightId, RoomLight], sensors: Mapping[SensorId, Sensor],
                          colour_sensors: Mapping[ColourSensorId, ColourSensor], facts: Facts,
-                         change: int, zone: ZoneInfo) -> RoomLightsDocument:
-    """The document every Pi draws with: every room light's entry (`entry_of`, worded in the house's
-    `zone`). The same for every Pi."""
+                         change: int, clock: HouseClock) -> RoomLightsDocument:
+    """The document every Pi draws with: every room light's entry (`entry_of`, worded on the house's
+    `clock`). The same for every Pi."""
     return RoomLightsDocument(change=change, lights={
-        light_id: entry_of(light, facts, sensors, colour_sensors, zone) for light_id, light in sorted(lights.items())})
+        light_id: entry_of(light, facts, sensors, colour_sensors, clock) for light_id, light in sorted(lights.items())})
 
 
 def measured_by(lights: Mapping[RoomLightId, RoomLight], sensor_id: SensorId) -> RoomLightId | None:

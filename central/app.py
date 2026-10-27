@@ -864,15 +864,15 @@ def create_app(
     mount_power_routes(app, admin=admin, queries=power, commands=power)
     mount_program_routes(app, admin=admin, runtime=runtime_store)
     mount_why_routes(app, admin=admin, queries=PgWhy(db, times=media_times))
-    house = PgHouse(db, times=media_times)
-    mount_house_routes(app, admin=admin, queries=house, commands=house)
     room_lights = PgRoomLights(db, house_lock)
+    house = PgHouse(db, times=media_times, room_lights=room_lights)
+    mount_house_routes(app, admin=admin, queries=house, commands=house)
     mount_room_light_routes(app, admin=admin, lights=room_lights, sources=REPORT_SOURCES)
     version = installed_central_version() if central_version is None else central_version
     mount_home_assistant_routes(app, admin=admin, settings=PgHomeAssistantSettings(db, version))
     mount_central_error_routes(app, admin=admin, errors=PgCentralErrors(db, house_lock, {
         home_assistant_references.SOURCE: HomeAssistantAdvice(room_lights.galleria_birth, version),
-        PI_SOURCE: PiMeterAdvice()}))
+        PI_SOURCE: PiMeterAdvice()}, registry))
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
     mount_tuning_history_routes(app, admin=admin, queries=PgTuningHistory(db))

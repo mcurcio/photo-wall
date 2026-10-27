@@ -244,9 +244,12 @@ jobs:
       architecture: amd64
 
   # The service images, pushed BY DIGEST: each under `:sha-<revision>` only, a tag that claims
-  # no version, so nothing here can make a version visible. The job reads the plan's revision,
-  # never its tag, and outputs each image as `<repository>@<digest>` -- the exact manifest the
-  # seal promotes. Every attempt leaves one `:sha-<revision>` per image (see 0011 for its cost).
+  # no version, so nothing here can make a version visible. The job builds the plan's revision and
+  # reads the plan's tag only as the PHOTO_WALL_RELEASE build argument, so Central states the
+  # release it is built as (central/version.py); only the seal claims and publishes it, and a seal
+  # that refuses leaves an image no version tag ever names. Each image is output as
+  # `<repository>@<digest>` -- the exact manifest the seal promotes. Every attempt leaves one
+  # `:sha-<revision>` per image (see 0011 for its cost).
   images:
     needs: [plan, service-base]
     if: >-
@@ -288,6 +291,7 @@ jobs:
         with:
           target: central
           architecture: amd64
+          build-args: PHOTO_WALL_RELEASE=${{ needs.plan.outputs.tag }}
           push: true
           tags: ghcr.io/${{ github.repository }}/central:sha-${{ needs.plan.outputs.revision }}
       - name: Push the media worker service image by digest
@@ -296,9 +300,23 @@ jobs:
         with:
           target: media-worker
           architecture: amd64
-          build-args: MEDIA_BASE_IMAGE=${{ needs.service-base.outputs.image }}
+          build-args: |
+            MEDIA_BASE_IMAGE=${{ needs.service-base.outputs.image }}
+            PHOTO_WALL_RELEASE=${{ needs.plan.outputs.tag }}
           push: true
           tags: ghcr.io/${{ github.repository }}/media-worker:sha-${{ needs.plan.outputs.revision }}
+      # Both images state the release they were built as, never the source fallback (0.1.0).
+      - name: Check the images state the plan's release
+        env:
+          CENTRAL: ghcr.io/${{ github.repository }}/central@${{ steps.central.outputs.digest }}
+          WORKER: ghcr.io/${{ github.repository }}/media-worker@${{ steps.media-worker.outputs.digest }}
+          PHOTO_WALL_RELEASE: ${{ needs.plan.outputs.tag }}
+        run: |
+          for image in "$CENTRAL" "$WORKER"; do
+            stated=$(docker run --rm --entrypoint python "$image" -c \
+              'from central.version import central_version; print(central_version())')
+            test "$stated" = "${PHOTO_WALL_RELEASE#v}" || { echo "$image states $stated"; exit 1; }
+          done
 
       - uses: ./.github/actions/python-uv
       - name: Install locked test tooling for the exact-image matrix

@@ -242,3 +242,52 @@ def test_cards_reach_the_shell_newest_once_and_again_when_the_shell_announces_th
     finally:
         forwarder.stop()
     assert shell.sent == [("HDMI-A-1", CARD), ("HDMI-A-1", CARD), ("HDMI-A-1", None)]
+
+
+# -- the runner's composition (main's wiring and its loop pass) ---------------------------------------
+
+def test_the_runner_s_wiring_takes_a_bus_report_to_the_shell_through_each_owner_s_fact():
+    """main() composes Central's card by CentralCardWiring and ends each loop pass in `settle`: the
+    Player's report read off the bus, the admitted run the pass saw, the power in force and what
+    Display draws itself all reach the shell's op, and a hot-plugged Output is sent its card again.
+    Mutation probes: `settle` not calling tell_cards, the wiring not registering `cards.reported`, or
+    not adding the shell's Output listener -> no card, or none again after the hot-plug."""
+    from appliance.display_host.bus import BusImpededReports
+    from appliance.display_host.runner import CentralCardWiring, settle
+    from contracts.node_impeded import IMPEDED_KEY
+    shell = CardShell()
+    surface = SimpleNamespace(frame_id="frame-1")
+    state = _state(admitted=surface)
+    backend = SimpleNamespace(
+        central_card=shell.central_card, output_listeners=[], trials={}, pending=False,
+        grants={"HDMI-A-1": (SimpleNamespace(surface=surface), UUID(GRANT))},
+        host=SimpleNamespace(states=lambda: (state,)))
+    controller = SimpleNamespace(observe=lambda: None, service=None)
+    reports = BusImpededReports(url="nats://127.0.0.1:1")                    # never started: no connection
+    wiring = CentralCardWiring(backend, reports)   # type: ignore[arg-type]
+    sink = wiring.power_sink(SimpleNamespace(put_report=lambda _report: None, emit_attempt=lambda _attempt: None))
+    drawing = wiring.picture_shell(SimpleNamespace(
+        picture=lambda output_id, operations, brightness, *, drawing, timeout: True))
+    wiring.shell.start()
+    try:
+        settle(controller, backend, wiring)                                   # admitted, nothing reported
+        reports._reader.state._changed({IMPEDED_KEY: encode_impeded(report())})   # the Player says: black
+        wait_sent(shell, 1)
+        sink.put_report(output_report(Power.OFF))                             # Night off
+        wait_sent(shell, 2)
+        sink.put_report(output_report(Power.ON))
+        wait_sent(shell, 3)
+        for listener in backend.output_listeners:                            # the shell announces HDMI-A-1
+            listener("HDMI-A-1")
+        wait_sent(shell, 4)
+        drawing.picture("HDMI-A-1", "{}", "", drawing=True, timeout=1)       # a test pattern
+        wait_sent(shell, 5)
+        drawing.picture("HDMI-A-1", "{}", "", drawing=False, timeout=1)
+        wait_sent(shell, 6)
+        state.admitted = None                                                 # the slate: the run ended
+        settle(controller, backend, wiring)
+        wait_sent(shell, 7)
+    finally:
+        wiring.shell.stop()
+    assert shell.sent == [("HDMI-A-1", CARD), ("HDMI-A-1", None), ("HDMI-A-1", CARD), ("HDMI-A-1", CARD),
+                          ("HDMI-A-1", None), ("HDMI-A-1", CARD), ("HDMI-A-1", None)]

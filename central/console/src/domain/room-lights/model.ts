@@ -382,6 +382,6 @@ export function impedimentWords(impediment: FrameImpediment): string {
     case "clear":
       return "Its Pi reports no error of Central's blacks this Frame.";
     default:
-      return "Its Pi has not said whether an error of Central's blacks this Frame: it may run an older release, or not be connected yet.";
+      return "Its Pi has not said whether an error of Central's blacks this Frame: it may run older software, or not be connected yet.";
   }
 }

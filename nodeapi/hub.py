@@ -49,7 +49,7 @@ import hashlib
 import json
 import logging
 import time
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Protocol
@@ -661,6 +661,12 @@ class ListenedStates(Protocol):
         # is the one Galleria's latest birth names (BUILD.md Q3 B); raising hands the same close
         # again after a backoff
 
+    async def hub_is(self, server: str) -> None: ...
+        # Central's client is attached to the hub whose INFO server_id is `server` (once connected
+        # and after every reconnect): a close missed while it was away (a worker or hub restart
+        # starts the hub under a new server id) is judged here by identity, never by time; raising
+        # hands it again after a backoff
+
 
 # The hub's disconnect event of every connection in Home Assistant's door account: a system-account
 # event, which the hub configuration (central/fleet/node_bus_accounts.py) exports from the system
@@ -686,11 +692,18 @@ async def run_hub_session(url: str, *, version: str, state: CentralState, listen
     epoch: all of them again) and followed, each batch handed to `listened.heard` before the reader's
     position moves past it. A value past its table size is refused before sending and logged. Each
     close of a door connection the hub announces (DOOR_CLOSES_SUBJECT) while this client is
-    connected is handed to `listened.closed`, in order (one missed while Central's client is away is
-    not seen)."""
-    client = await _connect(url, CENTRAL_USER)
+    connected is handed to `listened.closed`, in order; and once connected and after every
+    reconnect the hub's own server id (its INFO server_id; nats-py has no public accessor of it) is
+    handed to `listened.hub_is`, so a close missed while Central's client was away on another hub
+    server is still judged (one missed on the same server is not seen)."""
+    reconnected = asyncio.Event()
+
+    async def on_reconnect() -> None:
+        reconnected.set()
+
+    client = await _connect(url, CENTRAL_USER, reconnected_cb=on_reconnect)
     try:
-        await _HubSession(client, version, state, listened, methods).run(stop)
+        await _HubSession(client, version, state, listened, methods, reconnected).run(stop)
     finally:
         await _close(client)
 
@@ -708,8 +721,9 @@ class _HubSession:
     """One connected client's life as Central on its hub (`run_hub_session`)."""
 
     def __init__(self, client: Client, version: str, state: CentralState, listened: ListenedStates,
-                 methods: Mapping[str, MethodHandler]) -> None:
+                 methods: Mapping[str, MethodHandler], reconnected: asyncio.Event) -> None:
         self._client = client
+        self._reconnected = reconnected   # set by the client at each reconnect
         self._jetstream = client.jetstream()
         self._birth = encode_central_state(CENTRAL_BIRTH_KEY, CentralBirth(version=version))
         self._state = state
@@ -722,6 +736,7 @@ class _HubSession:
     async def run(self, stop: asyncio.Event) -> None:
         service = await self._serve() if self._methods else None
         await self._client.subscribe(DOOR_CLOSES_SUBJECT, cb=self._door_closed)
+        attached = asyncio.create_task(self._hub_attached())
         delay = _BACKOFF[0]
         try:
             while not stop.is_set():
@@ -736,9 +751,19 @@ class _HubSession:
                     await _pause(stop, delay)
                     delay = min(delay * 2, _BACKOFF[1])
         finally:
+            attached.cancel()
+            await asyncio.gather(attached, return_exceptions=True)
             if service is not None:
                 with contextlib.suppress(Exception):
                     await asyncio.wait_for(service.stop(), _REQUEST_SECONDS)
+
+    async def _hub_attached(self) -> None:
+        """The hub server this client is attached to (its INFO server_id), to `listened.hub_is` once
+        connected and again after every reconnect (the event the client raises, never a timer)."""
+        while True:
+            self._reconnected.clear()
+            await self._told(self._listened.hub_is, str(self._client._server_info.get("server_id", "")))
+            await self._reconnected.wait()
 
     async def _serve(self) -> object:
         """The method service, registered once per client (nats-py restores its subscriptions at
@@ -760,13 +785,19 @@ class _HubSession:
         except (ValueError, TypeError, KeyError) as error:
             log.warning("central on its hub: a door close not read: %r", error)
             return
+        await self._told(self._listened.closed, connection)
+
+    @staticmethod
+    async def _told[T](tell: Callable[[T], Awaitable[None]], what: T) -> None:
+        """`tell(what)` until it takes it: a failure (a database away) is logged and the same is
+        told again after a backoff, so none is lost."""
         delay = _BACKOFF[0]
         while True:
             try:
-                await self._listened.closed(connection)
+                await tell(what)
                 return
             except Exception as error:
-                log.warning("central on its hub: a door close not taken: %r", error)
+                log.warning("central on its hub: %r not taken: %r", what, error)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, _BACKOFF[1])
 

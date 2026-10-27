@@ -1,9 +1,11 @@
 """What Central's errors depend on and offer: one plain method per question."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol
 
 from central.central_errors.views import CentralErrorsView, FrameImpedimentView
+from central.kernel.transactions import Transaction
 from central.room_light.model import ColourSensorRef, DoubtReason, ReporterRef, SensorRef
 from contracts.identifiers import TargetIdentifier
 
@@ -25,6 +27,22 @@ class SourceAdvice(Protocol):
         ...
 
 
+@dataclass(frozen=True, slots=True)
+class BoundOutput:
+    """Where a Frame is shown now: its bound Player's device and the Output it is bound to."""
+    device_id: str
+    output_id: str
+
+
+class FrameOutputs(Protocol):
+    """A Frame's current binding, asked of the Registry (central/registry.py), which owns bindings."""
+
+    def bound_output_within(self, tx: Transaction, frame_id: TargetIdentifier) -> BoundOutput | None:
+        """`frame_id`'s bound, not retired Player's device and Output in `tx`; None when the Frame
+        is unbound or its Player never booted from a node offer (no device)."""
+        ...
+
+
 class CentralErrors(Protocol):
     """Injected into Needs attention's and the Frame page's routes."""
 
@@ -39,4 +57,4 @@ class CentralErrors(Protocol):
         ...
 
 
-__all__ = ["CentralErrors", "Reference", "SourceAdvice"]
+__all__ = ["BoundOutput", "CentralErrors", "FrameOutputs", "Reference", "SourceAdvice"]

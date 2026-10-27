@@ -352,6 +352,10 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
             await asyncio.to_thread(hub.start)
             await until(latest(warmer, followed), RESTART_SECONDS,
                         "the Player sees the change made while the hub was away")
+            # ... and the restarted hub has a new server id, while Galleria's birth names the old one:
+            # no close event was seen, yet Central judges the link closed when it reconnects.
+            await until(latest(lambda d: _doubt(d, "Photo Wall lost the link to Bookshelf spot · since"), followed),
+                        RESTART_SECONDS, "the Player's document says Photo Wall lost the link (missed close)")
             current = followed.latest()
 
             # E4b: a hub restart with no change, then the Node's bus restarted empty: a Player starting

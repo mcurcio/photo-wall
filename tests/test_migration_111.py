@@ -59,5 +59,11 @@ def test_111_turns_can_t_tell_into_a_doubt_and_drops_an_old_galleria_birth(datab
                 assert _doubts(conn, "reading_words") == {"sensor.gone": Doubt(DoubtReason.CANT_TELL, 450.0)}
                 assert _doubts(conn, "colour_words") == {"sensor.sky": Doubt(DoubtReason.CANT_TELL, 550.0)}
                 assert galleria_birth_in(conn) is None
+                for table, address, heard in (("light_words", "light.away", 300.0), ("reading_words", "sensor.gone", 500.0)):
+                    row = conn.execute(f"SELECT created_by, changed_by, EXTRACT(EPOCH FROM created_at) AS created, "  # noqa: S608
+                                       f"EXTRACT(EPOCH FROM changed_at) AS changed FROM {table} WHERE address=%s",
+                                       (address,)).fetchone()
+                    assert (row["created_by"], row["changed_by"], float(row["created"]), float(row["changed"])) == (
+                        HA, HA, heard, heard)   # audit fields backfilled: its source, when last heard
         finally:
             db.close()

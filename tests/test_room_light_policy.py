@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from central.house_time.model import HouseClock
 from central.room_light.model import (
     COLOUR_SENSORS_MAX,
     BulbColour,
@@ -81,7 +82,7 @@ LIGHTS = {"spot": SPOT, "bulb": BULB, "room": ROOM, "window": WINDOW}
 SENSORS = {"meter": METER}
 NONE = Facts(lights={}, readings={}, colours={})
 KELVIN = KelvinColour(kelvin=4000)
-ZONE = ZoneInfo("Europe/London")
+ZONE = HouseClock(ZoneInfo("Europe/London"), "24h")   # the house's clock the words are dated on
 
 
 def _cant(since: float) -> Doubt:
@@ -295,7 +296,7 @@ def test_colour_sensors_saved_and_removed():
 # ---- Doubt and its words ----
 
 def _at(day: int, hour: int, minute: int) -> float:
-    return datetime(2026, 10, day, hour, minute, tzinfo=ZONE).timestamp()
+    return datetime(2026, 10, day, hour, minute, tzinfo=ZONE.zone).timestamp()
 
 
 def test_the_newest_reason_wins_and_a_repeat_keeps_since():
@@ -336,6 +337,16 @@ def test_doubt_words_name_the_light_its_last_word_and_since_when_in_the_house_s_
     assert closed.line1 == "Photo Wall lost the link to Lamp · since 27 Oct 07:01"
     assert closed.line2.startswith("Its last word: on at 50% (26 Oct 09:00)")
     assert doubt_words("Lamp", Doubt(DoubtReason.CANT_TELL, 1.0), None, ZONE).line2.startswith("Its last word: none yet")
+
+
+def test_doubt_words_are_dated_on_the_house_s_12_hour_clock_when_it_has_one():
+    """Mutation probe: the words ignoring the house's clock format -> "18:05" on a 12-hour house."""
+    twelve = HouseClock(ZoneInfo("Europe/London"), "12h")
+    off = Kept(Dimmer(on=False, brightness=0.0), _at(26, 0, 35))
+    words = doubt_words("Family Room Lights", Doubt(DoubtReason.CANT_READ, _at(29, 18, 5)), off, twelve)
+    assert words.line1 == "Photo Wall can't read Family Room Lights · since 29 Oct 6:05 pm"
+    assert words.line2.startswith("Its last word: off (26 Oct 12:35 am)")
+    assert twelve.instant_words(_at(26, 12, 0)) == "26 Oct 12:00 pm"
 
 
 def test_a_long_name_is_shortened_so_since_always_shows():
