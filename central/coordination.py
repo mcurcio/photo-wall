@@ -33,7 +33,6 @@ from central.planner import (
     PLAN_SECONDS,
     PlannerLimits,
     Projection,
-    assignment_id,
     eligible,
     project,
     same_execution,
@@ -72,7 +71,6 @@ LOG = logging.getLogger(__name__)
 class CoordinationLimits(Model):
     horizon_seconds: float = Field(default=300, gt=0, le=3600)
     renewal_seconds: float = Field(default=30, gt=0, le=60)
-    prepare_seconds: float = Field(default=PREPARE_SECONDS, gt=0, le=30)
     readiness_seconds: float = Field(default=2, gt=0, le=10)
     max_uncertainty: float = Field(default=0.1, gt=0, le=1)
     max_offers: int = Field(default=64, ge=1, le=256)
@@ -127,6 +125,23 @@ def _stored_configuration(player_id: str, stored) -> PlayerConfiguration | None:
         LOG.warning("player_configurations: stored configuration for player %s no longer validates "
                     "(%s); regenerating it", player_id, ", ".join(fields) or "document")
         return None
+
+
+def _refusal_code(exc: Exception) -> str:
+    """The code an `offer_unavailable` event names for one Player left out: a registry refusal's
+    own code, else the failure's type and where (`scheduler_failure`), never its message."""
+    return exc.code if isinstance(exc, RegistryError) else scheduler_failure(exc)
+
+
+def _withdraws(latest: Plan, proposal, projection: Projection, now: float) -> bool:
+    """Whether a cut plan (`Projection.cut`) would withdraw a layer the latest offer still
+    holds past the cut: a budget shortens what is planned anew, never what was offered, so the
+    latest offer stands until the plan reaches that far again or the offer expires."""
+    if projection.cut is None:
+        return False
+    proposed = {layer.assignment_id for layer in proposal.layers}
+    return any(layer.end > now and layer.start >= projection.cut
+               and layer.assignment_id not in proposed for layer in latest.layers)
 
 
 def offer_owner(plan: Plan) -> str:
@@ -248,7 +263,7 @@ class Coordinator:
             or has_source_refs
         ):
             raise RegistryError("invalid_authored_scene", 422)
-        with self._transaction() as conn, self.runtime.edit(conn, by=by) as runtime:
+        with self._transaction() as conn, self.runtime.edit(conn, by=by, command=command) as runtime:
             # Keep the existing Runtime -> Frame -> Media order.
             targets = self._authored_scene_targets(conn, scene)
             authored = self.media.author_candidates_in(conn, source_ref, requested)
@@ -256,7 +271,6 @@ class Coordinator:
             # One Runtime command, at the post-lock cut on Central's clock (as
             # RuntimeStore.command_current).
             on_wall = getattr(runtime, command)(scene, self.clock.utc())
-            self.runtime.record_change_in(conn, command, (scene,), by=by)
             return {**on_wall.model_dump(mode="json"), **authored}
 
     @contextmanager
@@ -277,20 +291,20 @@ class Coordinator:
         return self.installation.active_sessions_in(conn)
 
     def _configurations(self, conn, *, report: bool) -> dict[str, PlayerConfiguration]:
-        """Each active Player's configuration. One whose authority went stale since its session
-        was read is left out of this pass alone (an `offer_unavailable` event with the code
-        stale_authority when `report`), never the whole wall."""
+        """Each active Player's configuration. The Player is the unit of isolation: one whose
+        configuration fails (its authority went stale since its session was read, or anything
+        else) is left out of this pass alone, its writes rolled back to its own savepoint (an
+        `offer_unavailable` event naming the code when `report`), never the whole wall."""
         configurations = {}
         for player in self._players(conn):
             try:
-                configurations[player["id"]] = self._configuration(
-                    conn, player["id"], player["authority_epoch"])
-            except CoordinationError as exc:
-                if exc.code != "stale_authority":
-                    raise
+                with conn.transaction():
+                    configurations[player["id"]] = self._configuration(
+                        conn, player["id"], player["authority_epoch"])
+            except Exception as exc:   # noqa: BLE001 - the per-Player bulkhead
                 if report:
                     self._event(conn, "offer_unavailable", player["id"],
-                                detail={"code": exc.code})
+                                detail={"code": _refusal_code(exc)})
         return configurations
 
     def _configuration(self, conn, player_id: str, epoch: int) -> PlayerConfiguration:
@@ -342,7 +356,13 @@ class Coordinator:
             "SELECT manifest FROM plan_offers WHERE valid_until>%s ORDER BY revision",
             (self.clock.utc(),),
         ).fetchall():
-            plan = Plan.model_validate(row["manifest"])
+            try:
+                plan = Plan.model_validate(row["manifest"])
+            except ValidationError:
+                # One stored offer that no longer reads (a shape an earlier release wrote) is
+                # left out alone; its Player is offered a fresh revision. Never the content.
+                LOG.warning("plan_offers: a stored offer no longer validates; leaving it out")
+                continue
             config = configurations.get(plan.player_id)
             # A restarted Player loses execution authority, not the exact
             # content identity of an unexpired, possibly secured assignment.
@@ -350,8 +370,12 @@ class Coordinator:
                 result[plan.player_id].append(plan)
         return result
 
-    def _locks(self, conn, configs, offers) -> dict[str, Layer]:
-        result = {}
+    def _locks(self, conn, configs, offers) -> tuple[dict[str, Layer], dict[str, str]]:
+        """The content locks of this pass, and the Players left out of it with their code. The
+        Player is the unit of isolation: a Player with a stored lock that no longer reads, or
+        whose lock disagrees with another on the same assignment, is left out alone (its offers
+        stand), never the whole wall."""
+        refused: dict[str, str] = {}
         layers = [
             (p, layer) for p, plans in offers.items() for plan in plans for layer in plan.layers
         ]
@@ -359,20 +383,31 @@ class Coordinator:
             "SELECT player_id,authority_epoch,layer FROM assignment_locks WHERE valid_until>%s",
             (self.clock.utc(),),
         ).fetchall():
-            config = configs.get(row["player_id"])
-            if config:
+            if row["player_id"] not in configs:
+                continue
+            try:
                 layers.append((row["player_id"], Layer.model_validate(row["layer"])))
+            except ValidationError:
+                refused[row["player_id"]] = "invalid_content_lock"
+        claims: dict[str, list[tuple[str, Layer]]] = {}
         for player, layer in layers:
             if layer.end <= self.clock.utc() or not self._authorized(layer, configs[player]):
                 continue
-            old = result.get(layer.assignment_id)
-            if old and not same_execution(old, layer):
-                raise CoordinationError("inconsistent_content_lock")
-            result[layer.assignment_id] = layer
-        return result
+            claims.setdefault(layer.assignment_id, []).append((player, layer))
+        for claim in claims.values():
+            first = claim[0][1]
+            if any(not same_execution(first, layer) for _, layer in claim[1:]):
+                for player, _ in claim:
+                    refused[player] = "inconsistent_content_lock"
+        result = {}
+        for assignment, claim in claims.items():
+            kept = [layer for player, layer in claim if player not in refused]
+            if kept:
+                result[assignment] = kept[-1]
+        return result, refused
 
-    def _groups(self, conn, runtime, now, horizon_end, configurations, *,
-                max_events: int) -> dict[str, str]:
+    def _groups(self, conn, projection: Projection, now, horizon_end,
+                configurations) -> dict[str, str]:
         owners = {
             f"frame:{b.frame_id}": (p, c.authority_epoch, b.output_id, b.generation)
             for p, c in configurations.items()
@@ -381,20 +416,15 @@ class Coordinator:
         }
         cues: dict[tuple, dict] = {}
         # A cue starts when its layers do: as each photo starts to show (`Intent.shows_from`, a
-        # cross-fade's lead before its turn), so the timeline reaches the longest lead past the
-        # horizon for the turns that start to show inside it. It reads the timeline with the
-        # Planner's budget, so a cut timeline holds every cue of the layers the Planner placed.
-        for view in runtime.timeline(now, horizon_end + runtime.longest_lead(),
-                                     max_events=max_events).views:
-            for intent in view.contributions:
-                if (intent.kind == "actuator" or intent.interval_end <= now
-                        or intent.shows_from >= horizon_end):
-                    continue
-                key = (intent.root_id, intent.shows_from)
-                cue = cues.setdefault(key, {"members": {}, "ends": {}, "end": intent.interval_end})
-                cue["end"] = max(cue["end"], intent.interval_end)
-                cue["members"][assignment_id(intent)] = owners.get(intent.target)
-                cue["ends"][assignment_id(intent)] = intent.interval_end
+        # cross-fade's lead before its turn). Its members are the showings the Planner placed
+        # inside the preparation horizon (`Projection.cues`): the Planner's one timeline walk,
+        # its window and its cut, so no cue waits on a layer the Planner did not place.
+        for member in projection.cues:
+            key = (member.root_id, member.shows_from)
+            cue = cues.setdefault(key, {"members": {}, "ends": {}, "end": member.interval_end})
+            cue["end"] = max(cue["end"], member.interval_end)
+            cue["members"][member.assignment_id] = owners.get(member.target)
+            cue["ends"][member.assignment_id] = member.interval_end
         assignments = {}
         cue_keys = {identity("cue-", list(key)) for key in cues}
         # A future cue is a forecast until it starts; one the timeline no longer holds is
@@ -449,7 +479,7 @@ class Coordinator:
             # fetches the new plan only after the start may already be playing the old commit,
             # and must be able to commit the new cohort rather than be revoked at the start.
             if starts <= now or superseding:
-                deadline = max(starts, now) + self.limits.prepare_seconds
+                deadline = max(starts, now) + PREPARE_SECONDS
             else:
                 deadline = starts
             conn.execute(
@@ -564,7 +594,8 @@ class Coordinator:
     def _advance_runtime(self) -> None:
         """The Runtime's current state moves to now (Program windows open and close, Runs end),
         saved alone, so no later step can hold it back."""
-        with self._transaction() as conn, self.runtime.edit(conn, by="scheduler") as runtime:
+        with self._transaction() as conn, self.runtime.edit(
+                conn, by="scheduler", command="advance") as runtime:
             # A scheduler waiting on either lock must advance at the committed
             # serialization cut, not at the time it first requested the cut.
             runtime.advance(self.clock.utc())
@@ -581,7 +612,11 @@ class Coordinator:
             self.media.reconcile_source_activity_in(conn, runtime.planning_source_refs())
             lines = self.media.scene_lines_in(conn)
             authored = self.media.authored_in(conn)
-            locks = self._locks(conn, configurations, offers)
+            locks, refused = self._locks(conn, configurations, offers)
+            for player, code in sorted(refused.items()):
+                self._event(conn, "offer_unavailable", player, detail={"code": code})
+                del configurations[player]
+                del offers[player]
             # Renewable extent changes only at a renewal boundary, avoiding heartbeat churn.
             quantum = self.limits.renewal_seconds
             horizon_end = (math.floor(now / quantum) + 1) * quantum + self.limits.horizon_seconds
@@ -591,10 +626,6 @@ class Coordinator:
                 window_seconds=86400 * max(
                     (selection.no_repeat_days for selection in selections.values()), default=0),
             )
-            # Roadmap 5a: the Runtime's transition budget was sized for the preparation horizon;
-            # the wall plan reads its timeline that many times further ahead.
-            max_events = PlannerLimits().max_events * math.ceil(
-                self.limits.plan_seconds / (self.limits.horizon_seconds + quantum))
             projection = project(
                 runtime,
                 now,
@@ -611,10 +642,10 @@ class Coordinator:
                 horizon_seconds=horizon_end - now,
                 plan_seconds=self.limits.plan_seconds,
                 max_clock_uncertainty=self.limits.max_uncertainty,
-                limits=PlannerLimits(max_events=max_events),
+                limits=PlannerLimits.over(self.limits.plan_seconds,
+                                          self.limits.horizon_seconds + quantum),
             )
-            groups = self._groups(conn, runtime, now, horizon_end, configurations,
-                                  max_events=max_events)
+            groups = self._groups(conn, projection, now, horizon_end, configurations)
             for proposal in projection.players:
                 self._propose(conn, proposal, configurations[proposal.player_id],
                               offers[proposal.player_id], groups, projection, now)
@@ -625,11 +656,28 @@ class Coordinator:
 
     def _propose(self, conn, proposal, config: PlayerConfiguration, offered: list[Plan],
                  groups: dict[str, str], projection: Projection, now: float) -> None:
-        """Offer one Player its proposal as a new plan revision, unless it equals the latest."""
+        """Offer one Player its proposal. The Player is the unit of isolation: anything that
+        fails while offering it rolls back to its own savepoint and is an `offer_unavailable`
+        event naming the code (its latest offer stands), never the whole wall."""
+        try:
+            with conn.transaction():
+                self._propose_one(conn, proposal, config, offered, groups, projection, now)
+        except Exception as exc:   # noqa: BLE001 - the per-Player bulkhead
+            self._event(conn, "offer_unavailable", proposal.player_id,
+                        detail={"code": _refusal_code(exc)})
+
+    def _propose_one(self, conn, proposal, config: PlayerConfiguration, offered: list[Plan],
+                     groups: dict[str, str], projection: Projection, now: float) -> None:
+        """A new plan revision for one Player, unless it equals the latest, or a cut plan would
+        withdraw a layer the latest offered (`_withdraws`)."""
         # Historical offers feed content locks only. Reconciliation,
         # revision reuse and backpressure belong to the fresh epoch.
         previous = [plan for plan in offered if plan.authority_epoch == config.authority_epoch]
         latest = previous[-1] if previous else None
+        if latest and _withdraws(latest, proposal, projection, now):
+            self._event(conn, "offer_unavailable", proposal.player_id,
+                        detail={"code": "plan_shortened"})
+            return
         bindings = config.bindings
         membership = {layer.assignment_id: groups[layer.assignment_id] for layer in proposal.layers}
         if (
@@ -658,14 +706,8 @@ class Coordinator:
             bindings=bindings,
             layers=proposal.layers,
         )
-        try:
-            self._offer(conn, plan, groups)
-        except RegistryError as exc:
-            # This Player's offer alone (its media unavailable, or any other registry
-            # refusal); every other Player is still offered its plan.
-            self._event(conn, "offer_unavailable", proposal.player_id, detail={"code": exc.code})
-        else:
-            self._record_selected(conn, plan, projection)
+        self._offer(conn, plan, groups)
+        self._record_selected(conn, plan, projection)
 
     def _settle(self) -> None:
         """Commit the cues that are due, release expired pins, clean up expired offers."""
@@ -1188,7 +1230,7 @@ class Coordinator:
         for group in conn.execute(
             "SELECT * FROM coordination_groups WHERE status!='skipped' "
             "AND valid_until>%s AND starts_at<=%s ORDER BY starts_at,id",
-            (now, now + self.limits.prepare_seconds),
+            (now, now + PREPARE_SECONDS),
         ).fetchall():
             if group["status"] == "pending" and now > group["deadline"]:
                 self._skip_group(conn, group["id"], "not_ready")

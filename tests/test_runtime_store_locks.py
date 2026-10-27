@@ -34,9 +34,9 @@ def test_advance_samples_clock_after_both_serialization_locks(registry, monkeypa
         original = coordinator.runtime.edit
 
         @contextmanager
-        def notified_edit(conn=None, *, by):
+        def notified_edit(conn=None, *, by, command):
             entering.set()
-            with original(conn, by=by) as runtime:
+            with original(conn, by=by, command=command) as runtime:
                 yield runtime
 
         monkeypatch.setattr(coordinator.runtime, "edit", notified_edit)
@@ -65,7 +65,7 @@ def test_runtime_read_waits_for_writer_then_returns_committed_state(registry):
         return store.read()
 
     with ThreadPoolExecutor(max_workers=1) as workers:
-        with store.edit(by="console") as runtime:
+        with store.edit(by="console", command="set_scene") as runtime:
             runtime.set_scene(Scene(scene_id="written-under-lock", loop=True))
             pending = workers.submit(read_after_signal)
             assert entering.wait(4)
@@ -111,9 +111,9 @@ def test_operator_activation_uses_post_lock_time(registry, monkeypatch):
     original = RuntimeStore.edit
 
     @contextmanager
-    def notified_edit(self, conn=None, *, by):
+    def notified_edit(self, conn=None, *, by, command):
         entering.set()
-        with original(self, conn, by=by) as runtime:
+        with original(self, conn, by=by, command=command) as runtime:
             yield runtime
 
     monkeypatch.setattr(RuntimeStore, "edit", notified_edit)
@@ -152,9 +152,9 @@ def test_program_save_applies_at_the_clock_after_lock_wait(registry, monkeypatch
     original = store.edit
 
     @contextmanager
-    def notified_edit(conn=None, *, by):
+    def notified_edit(conn=None, *, by, command):
         entering.set()
-        with original(conn, by=by) as runtime:
+        with original(conn, by=by, command=command) as runtime:
             yield runtime
 
     monkeypatch.setattr(store, "edit", notified_edit)

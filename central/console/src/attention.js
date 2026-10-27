@@ -23,10 +23,29 @@ function sceneHref(sceneId) {
 }
 
 /**
- * The planning rows: one "Planning is failing since Mon 14:03" row (timeWords.js `sinceTime`,
- * design language §7) while the scheduler's
- * planning (or Runtime) step fails, whatever the Frames report; and one row per Scene the last
- * planning pass refused (`snapshot.planning`, code "intent_refused"), linking to the Scene.
+ * What each scheduler step's failure means to the operator, in the order the rows list them
+ * (central/scheduler.py: one facet per step). Planning and the Runtime share one row.
+ */
+const STEP_WORDS = [
+  [["planning", "runtime"], "planning", "Planning is failing"],
+  [["settle"], "settle", "Plans are not being committed"],
+  [["reconcile"], "reconcile", "Players are not being brought up to date"],
+  [["measurement"], "measurement", "Photos are not being measured"],
+];
+
+/** Why the last planning pass cut the plan short (`plan_shortened`'s reason), in plain words. */
+const SHORTENED_WORDS = {
+  runtime_events: "too many schedule changes in the hour ahead",
+  assignments: "too many showings in the next minutes",
+  slots: "too many photo turns in the hour ahead",
+};
+
+/**
+ * The Central rows: one row per failing scheduler step ("Planning is failing since Mon 14:03",
+ * timeWords.js `sinceTime`, design language §7), whatever the Frames report; one row per Scene
+ * the last planning pass refused (`snapshot.planning`, code "intent_refused"), linking to the
+ * Scene; one when the pass cut the plan short (`plan_shortened`: Frames may go dark past the
+ * cut); and one when it counted issues it could not keep.
  *
  * @param {object} snapshot
  * @param {{steps?: Record<string, {status: string, since: number|null}>}|null} central
@@ -34,28 +53,41 @@ function sceneHref(sceneId) {
  */
 export function planningRows(snapshot, central) {
   const steps = central?.steps ?? {};
-  const failing = ["planning", "runtime"].map((name) => steps[name])
-    .filter((step) => step?.status === "failing");
-  const since = Math.min(...failing.map((step) => step.since ?? Infinity));
+  const failingRows = STEP_WORDS.flatMap(([names, key, words]) => {
+    const failing = names.map((name) => steps[name]).filter((step) => step?.status === "failing");
+    if (failing.length === 0) return [];
+    const since = Math.min(...failing.map((step) => step.since ?? Infinity));
+    return [{
+      key,
+      text: Number.isFinite(since) ? `${words} since ${sinceTime(since, snapshot?.readAt)}` : words,
+    }];
+  });
+  const planning = snapshot?.planning ?? {};
   const refused = new Map();
-  for (const issue of snapshot?.planning?.issues ?? []) {
+  const shortened = new Set();
+  for (const issue of planning.issues ?? []) {
     if (issue.code === "intent_refused" && issue.scene_id && !refused.has(issue.scene_id)) {
       refused.set(issue.scene_id, issue);
+    } else if (issue.code === "plan_shortened") {
+      shortened.add(SHORTENED_WORDS[issue.reason] ?? "a planning limit");
     }
   }
   return [
-    ...(failing.length > 0
-      ? [{
-          key: "planning",
-          text: Number.isFinite(since) ? `Planning is failing since ${sinceTime(since, snapshot?.readAt)}`
-            : "Planning is failing",
-        }]
-      : []),
+    ...failingRows,
     ...[...refused.values()].map((issue) => ({
       key: `scene:${issue.scene_id}`,
       href: sceneHref(issue.scene_id),
       text: `Scene ${issue.scene_id} could not be planned: ${issue.reason ?? "refused"}`,
     })),
+    ...(shortened.size > 0
+      ? [{
+          key: "plan_shortened",
+          text: `Plans are cut short (${[...shortened].join("; ")}); Frames may go dark past the cut`,
+        }]
+      : []),
+    ...(planning.dropped > 0
+      ? [{ key: "planning_dropped", text: `${planning.dropped} more planning issues were not kept` }]
+      : []),
   ];
 }
 

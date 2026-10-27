@@ -28,7 +28,7 @@ WITH_PREVIEW = """jsonb_set({column}, '{{bindings}}', (
 
 def test_stored_bindings_from_before_1c_read_back_and_the_scheduler_advances(registry):
     """Mutation probe: drop the plan_offers statement from 087 -> the offered plan still fails to
-    validate and `advance`'s planning step fails."""
+    validate."""
     player = setup_players(registry, count=1)[0]
     coordinator = Coordinator(registry.db, registry.clock)
     schedule(coordinator, ["frame-0"])
@@ -37,8 +37,9 @@ def test_stored_bindings_from_before_1c_read_back_and_the_scheduler_advances(reg
                      + WITH_PREVIEW.format(column="configuration"), (Jsonb(PRE_1C),))
         conn.execute("UPDATE plan_offers SET manifest=" + WITH_PREVIEW.format(column="manifest"),
                      (Jsonb(PRE_1C),))
-    # The outage: the stale offer stops planning and settling (the Runtime still moves on).
-    assert [failure.step for failure in coordinator.advance().failures] == ["planning", "settle"]
+    # Once the outage: the stale offer stopped planning and settling. Now it is left out alone
+    # (each stored offer is read on its own) and the tick runs through.
+    assert coordinator.advance().failures == ()
 
     with registry.db.transaction() as conn:
         conn.execute(MIGRATION.read_text())

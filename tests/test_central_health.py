@@ -260,3 +260,43 @@ def test_a_failing_step_never_skips_a_later_one():
         "measurement": "ok"}
     assert "private" not in health.steps["reconcile"].reason
     assert health.last_tick_monotonic is not None
+
+
+def test_a_coordinator_that_raises_fails_its_three_steps_and_skips_measurement():
+    """`Coordinator.advance` handles its own steps; one that raises past them (it should not)
+    fails runtime, planning and settle together, and measurement, which needs the plan, is
+    skipped, never left reading ok. Mutation probe: let `_coordinate` re-raise (the tick
+    stops) or drop the `_skipped` branch (measurement keeps its last ok)."""
+    class Broken:
+        def advance(self):
+            raise RuntimeError("private coordinator failure")
+
+    clock = ManualClock(1000)
+    scheduler = Scheduler(NoReconciliation(), FakeCoordinator(), lambda _requests: 0, clock)
+    scheduler.tick()
+    scheduler.coordinator = Broken()
+    clock.advance(5)
+    scheduler.tick()
+    health = scheduler.health()
+    assert {name: step.status for name, step in health.steps.items()} == {
+        "reconcile": "ok", "runtime": "failing", "planning": "failing", "settle": "failing",
+        "measurement": "skipped"}
+    assert all("private" not in health.steps[name].reason
+               for name in ("runtime", "planning", "settle"))
+    assert health.steps["measurement"].last_success == 1000
+    assert health.last_tick_monotonic is not None
+
+
+def test_a_step_failing_tick_after_tick_keeps_its_first_since():
+    """A facet's `since` is when its run of failures began, not its latest failure. Mutation
+    probe: stamp `since` with the clock on every failure (the second tick moves it)."""
+    coordinator = FakeCoordinator()
+    coordinator.fail_planning = True
+    clock = ManualClock(1000)
+    scheduler = Scheduler(NoReconciliation(), coordinator, lambda _requests: 0, clock)
+    scheduler.tick()
+    clock.advance(30)
+    scheduler.tick()
+    planning = scheduler.health().steps["planning"]
+    assert (planning.status, planning.since) == ("failing", 1000)
+    assert scheduler.health().steps["measurement"].since == 1000

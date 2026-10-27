@@ -127,8 +127,8 @@ def test_refresh_membership_change_serializes_before_atomic_scene(registry, monk
     original_edit = coordinator.runtime.edit
 
     @contextmanager
-    def observed_edit(conn, *, by):
-        with original_edit(conn, by=by) as runtime:
+    def observed_edit(conn, *, by, command):
+        with original_edit(conn, by=by, command=command) as runtime:
             entered.set()
             yield runtime
 

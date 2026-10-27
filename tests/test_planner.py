@@ -12,7 +12,16 @@ import central.planner as planner_module
 from central.catalog import Candidate, SourcePool
 from central.house_time.model import HouseTime
 from central.planner import PlannerLimits, PlanningError, _ProjectionBuilder, eligible, project
-from central.runtime import Child, Contribution, RecordingActuator, Runtime, Scene, Transition
+from central.runtime import (
+    Child,
+    Contribution,
+    RecordingActuator,
+    Runtime,
+    RuntimeBudgetExceeded,
+    Scene,
+    TimelineCut,
+    Transition,
+)
 from central.wall_plan.assignment import WallLimits
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import PoolLines, WallHistory
@@ -361,10 +370,13 @@ def test_each_planning_budget_shortens_the_plan_without_mutation(monkeypatch):
     instance = runtime()                     # 10 s cycles over a 25 s horizon: 0, 10, 20
     before = instance.export_state()
     events = propose(instance, limits=PlannerLimits(max_events=1))
-    assert [layer.start for layer in layers(events)] == [0, 10]   # the timeline stops at 10
+    # The timeline stops at 10: what starts to show before it is planned, valid to the cut.
+    assert [layer.start for layer in layers(events)] == [0]
+    assert (events.cut, events.valid_until) == (10, 10)
     assert _shortened(events) == {"runtime_events"}
     assignments = propose(instance, limits=PlannerLimits(max_assignments=1))
     assert [layer.start for layer in layers(assignments)] == [0]
+    assert (assignments.cut, assignments.valid_until) == (10, 10)
     assert _shortened(assignments) == {"assignments"}
     diagnostics = propose(instance, pools={}, limits=PlannerLimits(max_diagnostics=1))
     assert len(diagnostics.diagnostics) == 1 and diagnostics.diagnostics_dropped > 0
@@ -372,8 +384,111 @@ def test_each_planning_budget_shortens_the_plan_without_mutation(monkeypatch):
                         lambda **limits: WallLimits(max_slots=1, **limits))
     slots = propose(instance)
     assert [layer.start for layer in layers(slots)] == [0]
+    assert (slots.cut, slots.valid_until) == (10, 10)
     assert _shortened(slots) == {"slots"}
     assert instance.export_state() == before
+
+
+def test_a_cut_keeps_offered_locks_and_one_rule_for_every_budget(monkeypatch):
+    """One cut rule (`cut_at`): the assignments and slots budgets both leave out what starts to
+    show at or after the cut, except a lock, which is offered content a budget never
+    withdraws. Mutation probe: drop the lock exemption in `past_cut` (the lock at 10 goes)."""
+    instance = runtime()
+    whole = propose(instance)
+    lock = next(layer for layer in layers(whole) if layer.start == 10)
+    locks = {lock.assignment_id: lock}
+    assignments = propose(instance, locks=locks, limits=PlannerLimits(max_assignments=1))
+    assert [layer.start for layer in layers(assignments)] == [0, 10]
+    assert layers(assignments)[1] == lock
+    monkeypatch.setattr(planner_module, "WallLimits",
+                        lambda **limits: WallLimits(max_slots=1, **limits))
+    slots = propose(instance, locks=locks)
+    assert [layer.start for layer in layers(slots)] == [0, 10]
+    assert {cue.assignment_id for cue in slots.cues} == {
+        layer.assignment_id for layer in layers(slots)}
+
+
+def test_a_runtime_that_cannot_settle_now_fails_the_pass_rather_than_offer_nothing(monkeypatch):
+    """An empty timeline (not even now fits the transition budget) would offer every Player an
+    empty plan, withdrawing what it holds; the pass fails instead, so the offers stand.
+    Mutation probe: drop the `if not timeline.views` raise (an empty Projection returns)."""
+    instance = runtime()
+    monkeypatch.setattr(Runtime, "timeline", lambda self, start, end, **_: TimelineCut(
+        views=(), until=start))
+    with pytest.raises(RuntimeBudgetExceeded):
+        propose(instance)
+
+
+def _two_frames():
+    """Two Players, each with its Frame, and a Contribution for each from its own Source (so
+    one Frame's photos never depend on the other's)."""
+    two = {"player-one": (binding(),), "player-two": (binding("right", "hdmi-1"),)}
+    left = Contribution(target="frame:left", source_refs=("holiday:1",))
+    right = Contribution(target="frame:right", source_refs=("garden:1",))
+    return two, left, right
+
+
+TWO_POOLS = {"holiday:1": pool("holiday:1", candidate("a")),
+             "garden:1": pool("garden:1", candidate("b"))}
+
+
+def test_one_frames_media_layer_that_fails_leaves_the_other_frame_planned(monkeypatch):
+    """The bulkhead reaches the media layers built after the wall assignment: one Frame's layer
+    that does not build is refused alone (`intent_refused`, in plain words), the other Frame's
+    plan equals its baseline, and no cue waits on the refused one. Mutation probe: drop the
+    try/except around `_settle_slot` in `plan` (the pass raises)."""
+    two, left, right = _two_frames()
+    baseline = propose(runtime(contributions=(left,)), bindings=two, pools=TWO_POOLS)
+    real = planner_module.Layer
+
+    def failing(**fields):
+        if fields.get("presentation") == "media" and fields.get("frame_id") == "right":
+            raise ValueError("a media layer that does not validate")
+        return real(**fields)
+
+    monkeypatch.setattr(planner_module, "Layer", failing)
+    refused = propose(runtime(contributions=(left, right)), bindings=two, pools=TWO_POOLS)
+    assert layers(baseline)
+    assert refused.for_player("player-one") == baseline.for_player("player-one")
+    assert refused.for_player("player-two").layers == ()
+    issue = next(d for d in refused.diagnostics if d.code == "intent_refused")
+    assert (issue.target, issue.reason) == (
+        "frame:right", "Central could not build its showing (ValueError)")
+    assert {cue.target for cue in refused.cues} == {"frame:left"}
+
+
+def test_one_scene_whose_line_cannot_be_read_leaves_the_other_scene_planned():
+    """The Scene is the unit of isolation in the line reads too: one Scene whose read raises is
+    refused alone (each of its showings `intent_refused`), the other Scene's Frame equals its
+    baseline. Mutation probe: drop the try/except around `_read_line` (the pass raises)."""
+    two, left, right = _two_frames()
+    instance = Runtime(house=UTC_HOUSE)
+    for scene_id, contribution in (("a", left), ("b", right)):
+        instance.set_scene(Scene(scene_id=scene_id, cycle_seconds=10, loop=True,
+                                 contributions=(contribution,)))
+        instance.activate(scene_id, scene_id, 0)
+    alone = Runtime(house=UTC_HOUSE)
+    alone.set_scene(Scene(scene_id="a", cycle_seconds=10, loop=True, contributions=(left,)))
+    alone.activate("a", "a", 0)
+    baseline = propose(alone, bindings=two, pools=TWO_POOLS)
+    assert layers(baseline)
+
+    class FailingLines(PoolLines):
+        def line(self, query):
+            if query.scene_id == "b":
+                raise RuntimeError("the read failed")
+            return super().line(query)
+
+    refused = project(instance, 0, bindings_by_player=two, settings=FitSettings(),
+                      frame_outputs=full_screen(two),
+                      lines=FailingLines(TWO_POOLS),
+                      authored_candidates={}, locked_assignments={}, history=WallHistory(),
+                      horizon_seconds=25, plan_seconds=25)
+    assert refused.for_player("player-one") == baseline.for_player("player-one")
+    assert refused.for_player("player-two").layers == ()
+    assert {(d.scene_id, d.reason) for d in refused.diagnostics if d.code == "intent_refused"} == {
+        ("b", "Central could not build its showing (RuntimeError)")}
+    assert not any(photo.frame_id == "right" for photo in refused.plan)
 
 
 def test_one_refused_intent_leaves_every_other_frame_planned(monkeypatch):
@@ -534,3 +649,21 @@ def test_a_bound_frame_with_no_known_screen_gets_no_photo_and_asks_for_none():
     assert ("no_eligible_candidates", "frame:left") in {(d.code, d.target) for d in result.diagnostics}
     right = {entry.assignment_id for entry in result.plan if entry.frame_id == "right"}
     assert all(set(request.assignment_ids) <= right for request in result.acquisitions)
+
+
+def test_a_cut_plan_never_replaces_an_offer_holding_layers_past_the_cut():
+    """A budget shortens what is planned anew, never what was offered: coordination keeps the
+    latest offer when a cut proposal would drop one of its layers that starts at or after the
+    cut and has not ended (`coordination._withdraws`); a whole plan, or one keeping every such
+    layer, replaces it. Mutation probe: return False from `_withdraws` (the cut plan replaces)."""
+    from central.coordination import _withdraws
+
+    instance = runtime()
+    whole = propose(instance)
+    latest = Plan(plan_id="plan-1", revision=1, player_id="player-one", authority_epoch=1,
+                  issued_at=0, valid_from=0, valid_until=whole.valid_until, bindings=(binding(),),
+                  layers=layers(whole))
+    cut = propose(instance, limits=PlannerLimits(max_events=1))
+    assert _withdraws(latest, cut.for_player("player-one"), cut, now=0)
+    assert not _withdraws(latest, whole.for_player("player-one"), whole, now=0)
+    assert not _withdraws(latest, cut.for_player("player-one"), cut, now=30)

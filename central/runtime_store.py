@@ -1,8 +1,10 @@
 """Transactional current Runtime ownership; never persist a future projection.
 
-Every write names its actor (`central/actor.py`): `edit` stamps runtime_state's audit fields, and
-each operator command (`command`, `command_current`) appends one runtime_changes row in the same
-transaction (migration 111)."""
+Every write names its actor (`central/actor.py`) and its command, and `edit`, the one writer of
+runtime_state, audits it (migration 111): it stamps runtime_state's audit fields, and appends one
+runtime_changes row for each Scene, Program, Run and Default Scene the command changed, found by
+comparing the state before and after it (`_changes`). No caller writes the audit, so none can
+skip it."""
 
 from contextlib import contextmanager
 
@@ -11,7 +13,7 @@ from psycopg.types.json import Jsonb
 from central.actor import Actor
 from central.db import Database
 from central.infra.house_store import house_time_in
-from central.runtime import Program, ProgramDraft, Runtime, Scene
+from central.runtime import Runtime
 from central.transaction_locks import RUNTIME_LOCK as RUNTIME_LOCK
 from central.transaction_locks import acquire_runtime_locks
 from contracts.time import Clock
@@ -24,29 +26,37 @@ _TIMED_COMMANDS = frozenset({
     "save_scene", "save_scene_and_apply_now", "create_program", "save_program", "save_program_and_apply_now", "remove_program",
     "set_default_scene", "activate", "finish", "cancel", "advance",
 })
-# Which id a command's leading string argument is.
-_NAMED_BY_STRING = {
-    "delete_scene": "scene_id", "set_default_scene": "scene_id", "activate": "scene_id",
-    "remove_program": "program_id", "finish": "run_id", "cancel": "run_id",
-}
+_NO_IDS = {"scene_id": None, "run_id": None, "program_id": None, "scene_revision": None}
 
 
-def _change(method: str, args: tuple, result: object) -> dict:
-    """The Scene, Run and Program a command names, from its arguments (and the Run it admitted)."""
-    named: dict = {"scene_id": None, "run_id": None, "program_id": None, "scene_revision": None}
-    for arg in args:
-        if isinstance(arg, Scene):
-            named.update(scene_id=arg.scene_id, scene_revision=arg.revision)
-        elif isinstance(arg, Program):
-            named.update(program_id=arg.program_id, scene_id=arg.scene_id)
-        elif isinstance(arg, ProgramDraft):
-            named["scene_id"] = arg.scene_id
-    if args and isinstance(args[0], str) and method in _NAMED_BY_STRING:
-        named[_NAMED_BY_STRING[method]] = args[0]
-    run_id = getattr(result, "run_id", None)
-    if isinstance(run_id, str) and named["run_id"] is None:
-        named["run_id"] = run_id
-    return named
+def _changes(before: dict, after: dict) -> list[dict]:
+    """What one write changed, as runtime_changes rows: each Scene, Program and Default Scene
+    whose stored form differs, and each Run admitted, moved to another phase or removed (a Run's
+    turns moving on is not a change). A command that changed only admissions or the queue is one
+    row naming none of them."""
+    rows: list[dict] = []
+    for scene_id in sorted(before["scenes"].keys() | after["scenes"].keys()):
+        old, new = before["scenes"].get(scene_id), after["scenes"].get(scene_id)
+        if old != new:
+            rows.append({**_NO_IDS, "scene_id": scene_id,
+                         "scene_revision": (new or old)["revision"]})
+    for program_id in sorted(before["programs"].keys() | after["programs"].keys()):
+        old, new = before["programs"].get(program_id), after["programs"].get(program_id)
+        if old != new:
+            rows.append({**_NO_IDS, "program_id": program_id,
+                         "scene_id": (new or old)["scene_id"]})
+    if before.get("default_scene") != after.get("default_scene"):
+        chosen = after.get("default_scene") or before.get("default_scene")
+        rows.append({**_NO_IDS, "scene_id": chosen["scene_id"]})
+    for run_id in sorted(before["runs"].keys() | after["runs"].keys()):
+        old, new = before["runs"].get(run_id), after["runs"].get(run_id)
+        if old is None or new is None or old["phase"] != new["phase"]:
+            scene = (new or old)["scene"]
+            rows.append({**_NO_IDS, "run_id": run_id, "scene_id": scene["scene_id"],
+                         "scene_revision": scene["revision"]})
+    if not rows and any(before.get(key) != after.get(key) for key in ("admissions", "queue")):
+        rows.append(dict(_NO_IDS))
+    return rows
 
 
 class RuntimeStore:
@@ -54,32 +64,35 @@ class RuntimeStore:
         self.db, self.clock = db, clock
 
     @contextmanager
-    def edit(self, conn=None, *, by: Actor):
+    def edit(self, conn=None, *, by: Actor, command: str):
+        """The one writer of runtime_state: the Runtime as stored, saved on exit with its audit
+        fields, and one runtime_changes row per thing `command` changed (`_changes`), all in the
+        caller's transaction."""
         if conn is None:
-            with self.db.transaction() as transaction, self.edit(transaction, by=by) as runtime:
+            with self.db.transaction() as transaction, self.edit(
+                    transaction, by=by, command=command) as runtime:
                 yield runtime
             return
         acquire_runtime_locks(conn)
         runtime = self.read_in(conn)
+        before = runtime.export_state()
         yield runtime
+        after = runtime.export_state()
+        at = self.clock.utc()
         conn.execute(
             "INSERT INTO runtime_state(singleton,revision,snapshot,created_at,created_by,"
             "changed_at,changed_by) VALUES(TRUE,1,%(snapshot)s,%(at)s,%(by)s,%(at)s,%(by)s) "
             "ON CONFLICT(singleton) DO UPDATE SET revision=runtime_state.revision+1,"
             "snapshot=EXCLUDED.snapshot,changed_at=EXCLUDED.changed_at,"
             "changed_by=EXCLUDED.changed_by",
-            {"snapshot": Jsonb(runtime.export_state()), "at": self.clock.utc(), "by": by},
+            {"snapshot": Jsonb(after), "at": at, "by": by},
         )
-
-    def record_change_in(self, conn, method: str, args: tuple, *, by: Actor,
-                         result: object = None) -> None:
-        """Append one operator Runtime command to runtime_changes, in the caller's transaction."""
-        conn.execute(
-            "INSERT INTO runtime_changes(at,by,command,scene_id,run_id,program_id,scene_revision) "
-            "VALUES(to_timestamp(%(at)s),%(by)s,%(command)s,%(scene_id)s,%(run_id)s,"
-            "%(program_id)s,%(scene_revision)s)",
-            {"at": self.clock.utc(), "by": by, "command": method, **_change(method, args, result)},
-        )
+        for change in _changes(before, after):
+            conn.execute(
+                "INSERT INTO runtime_changes(at,by,command,scene_id,run_id,program_id,"
+                "scene_revision) VALUES(to_timestamp(%(at)s),%(by)s,%(command)s,%(scene_id)s,"
+                "%(run_id)s,%(program_id)s,%(scene_revision)s)",
+                {"at": at, "by": by, "command": command, **change})
 
     def read(self) -> Runtime:
         with self.db.transaction() as conn:
@@ -102,10 +115,8 @@ class RuntimeStore:
         # The HTTP adapter cannot call arbitrary object methods through operator input.
         if method not in _RUNTIME_COMMANDS:
             raise ValueError("unknown Runtime command")
-        with self.db.transaction() as conn, self.edit(conn, by=by) as runtime:
-            result = getattr(runtime, method)(*args, **kwargs)
-            self.record_change_in(conn, method, args, by=by, result=result)
-            return result
+        with self.edit(by=by, command=method) as runtime:
+            return getattr(runtime, method)(*args, **kwargs)
 
     def command_current(self, method: str, *args, by: Actor, **kwargs):
         """Apply a wall-clock command at the post-lock serialization cut.
@@ -116,7 +127,5 @@ class RuntimeStore:
         """
         if method not in _TIMED_COMMANDS or "now" in kwargs:
             raise ValueError("unknown current-time Runtime command")
-        with self.db.transaction() as conn, self.edit(conn, by=by) as runtime:
-            result = getattr(runtime, method)(*args, self.clock.utc(), **kwargs)
-            self.record_change_in(conn, method, args, by=by, result=result)
-            return result
+        with self.edit(by=by, command=method) as runtime:
+            return getattr(runtime, method)(*args, self.clock.utc(), **kwargs)

@@ -4,7 +4,9 @@ One tick runs, in order: the Node reconciler ("reconcile"), the coordinator's th
 ("runtime": the Runtime moves to now; "planning": plan and offer; "settle": commits due, pin
 expiry and cleanup, central/coordination.py `Coordinator.advance`) and the measurement requests
 of the plan ("measurement"). A step that fails never skips a later one: the Runtime keeps moving
-when planning fails, and planning still runs when the reconciler fails. Each step's health is its
+when planning fails, and planning still runs when the reconciler fails. Measurement alone needs
+an earlier step's answer (the plan): when planning fails it is "skipped" this tick, so no facet
+claims a step ran that did not. Each step's health is its
 own facet (`StepHealth`), logged when it changes, not every tick; /healthz reads them
 (central/app.py)."""
 
@@ -46,9 +48,10 @@ def scheduler_failure(exc: BaseException) -> str:
 @dataclass(frozen=True)
 class StepHealth:
     """One step's facet: "failing" since its first failure in a row (`since`, Central's clock),
-    with the sanitized reason of its latest one; `last_success` is when it last ran through."""
+    with the sanitized reason of its latest one; "skipped" since the first tick in a row it could
+    not run (`reason`: which step it waits on); `last_success` is when it last ran through."""
 
-    status: Literal["ok", "failing"]
+    status: Literal["ok", "failing", "skipped"]
     since: float | None
     last_success: float | None
     reason: str | None
@@ -77,6 +80,8 @@ class Scheduler:
         if advance is not None and advance.projection is not None:
             projection = advance.projection
             self._run("measurement", lambda: self.measurements(projection.measurements))
+        else:
+            self._skipped("measurement", "planning failed")
         self._last_tick_monotonic = self.clock.monotonic()
 
     def _coordinate(self) -> Advance | None:
@@ -118,6 +123,13 @@ class Scheduler:
             LOG.error("scheduler step %s failing: %s", step, reason)
         self._steps[step] = StepHealth(
             status="failing", since=previous.since if failing else self.clock.utc(),
+            last_success=previous.last_success if previous else None, reason=reason)
+
+    def _skipped(self, step: str, reason: str) -> None:
+        previous = self._steps.get(step)
+        skipped = previous is not None and previous.status == "skipped"
+        self._steps[step] = StepHealth(
+            status="skipped", since=previous.since if skipped else self.clock.utc(),
             last_success=previous.last_success if previous else None, reason=reason)
 
     def _succeeded(self, step: str) -> None:

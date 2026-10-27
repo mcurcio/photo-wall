@@ -28,7 +28,7 @@ from central.catalog import Candidate
 from central.house_time.calculator import house_date
 from central.house_time.model import HouseTime
 from central.installation_models import FrameOutput
-from central.runtime import Intent, Runtime
+from central.runtime import Intent, Runtime, RuntimeBudgetExceeded
 from central.wall_plan.assignment import (
     FixedShowing,
     PlanWindow,
@@ -114,6 +114,13 @@ class PlannerLimits(Model):
     # Follow-up S3: a Scene's line is read `hydrate_factor` members per slot at a time.
     hydrate_factor: int = Field(default=4, ge=1, le=64)
 
+    @classmethod
+    def over(cls, plan_seconds: float, horizon_seconds: float) -> PlannerLimits:
+        """The budgets of a wall plan reading `plan_seconds` ahead, re-planned every
+        `horizon_seconds` (roadmap 5a): the Runtime's transition budget was sized for one
+        preparation horizon, so the plan gets it that many times over."""
+        return cls(max_events=cls().max_events * math.ceil(plan_seconds / horizon_seconds))
+
 
 class AcquisitionRequest(Model):
     asset_id: str
@@ -167,6 +174,19 @@ class Diagnostic(Model):
     reason: str | None = None
 
 
+class CueMember(Model):
+    """One showing inside the preparation horizon that the Planner placed (or left unfilled, or
+    on an unbound Frame), for coordination's cues (`Coordinator._groups`): a cue is the showings
+    of one root starting to show at one instant. A refused or cut showing is never a member, so
+    no cue waits on a layer that will not be offered."""
+
+    assignment_id: str
+    root_id: str
+    target: str
+    shows_from: float
+    interval_end: float
+
+
 class PlayerProposal(Model):
     player_id: str
     layers: tuple[Layer, ...]
@@ -185,6 +205,11 @@ class Projection(Model):
     plan: tuple[PlannedPhoto, ...] = ()
     # Diagnostics past `PlannerLimits.max_diagnostics`, counted, not kept.
     diagnostics_dropped: int = 0
+    # The instant a budget cut the plan at (`plan_shortened`), None when whole: nothing but a
+    # lock starts to show at or after it, and `valid_until` does not reach past it.
+    cut: float | None = None
+    # The showings coordination's cues group (`CueMember`): the one timeline walk is this one.
+    cues: tuple[CueMember, ...] = ()
 
     def for_player(self, player_id: str) -> PlayerProposal | None:
         return next((player for player in self.players if player.player_id == player_id), None)
@@ -312,6 +337,8 @@ class _ProjectionBuilder:
         self.fixed: list[FixedShowing] = []
         self.pending: list[_Pending] = []
         self.pool_refs: dict[str, tuple[str, ...]] = {}
+        self.cut: float | None = None
+        self.cues: dict[str, CueMember] = {}
         self._validate_inputs(bindings_by_player)
 
     def _validate_inputs(self, bindings: Mapping[str, Sequence[OutputBinding]]) -> None:
@@ -351,6 +378,25 @@ class _ProjectionBuilder:
             scene_id=intent.scene_id if intent else None, reason=reason,
         )
 
+    def cut_at(self, instant: float, reason: str) -> None:
+        """The one cut rule: a budget shortens the plan at `instant` (`plan_shortened`, `reason`
+        the budget). Every showing starting to show at or after the earliest cut is left out,
+        except a lock (already offered content, never withdrawn by a budget), and the plan is
+        valid no further than the cut (`result`)."""
+        self.cut = instant if self.cut is None else min(self.cut, instant)
+        self.diagnose("plan_shortened", reason=reason)
+
+    def past_cut(self, start: float, identity: str) -> bool:
+        """Whether a showing starting to show at `start` is left out by the cut (`cut_at`)."""
+        return self.cut is not None and start >= self.cut and identity not in self.locks
+
+    def refuse(self, intent: Intent, error: Exception, identity: str | None = None) -> None:
+        """One showing (or one Scene's showings) the Planner could not plan: `intent_refused`
+        naming its Scene and Run, and no cue waits on it."""
+        if identity is not None:
+            self.cues.pop(identity, None)
+        self.diagnose("intent_refused", intent=intent, reason=_refusal(error))
+
     def _source_diagnostics(self, intent: Intent, identity: str) -> None:
         for source in intent.source_refs if not intent.asset_refs else ():
             line = self.sources.get(source)
@@ -382,14 +428,22 @@ class _ProjectionBuilder:
     def add(self, intent: Intent, window: PlanWindow) -> None:
         """One Intent of the plan horizon: a lock or a black layer is fixed (a layer when it
         starts inside the preparation horizon); a media Intent becomes a wall-plan slot. Each
-        starts when its photo starts to show (`Intent.shows_from`)."""
+        starts when its photo starts to show (`Intent.shows_from`). One placed inside the
+        preparation horizon (or a lock) is a cue member; one that raises adds nothing."""
         if not _in_window(intent, window):
             return
         identity = assignment_id(intent)
         if identity in self.seen:
             return
-        inside = intent.shows_from < window.preparation_end
         self.seen.add(identity)
+        self._place(intent, window, identity)
+        if intent.shows_from < window.preparation_end or identity in self.locks:
+            self.cues[identity] = CueMember(
+                assignment_id=identity, root_id=intent.root_id, target=intent.target,
+                shows_from=intent.shows_from, interval_end=intent.interval_end)
+
+    def _place(self, intent: Intent, window: PlanWindow, identity: str) -> None:
+        inside = intent.shows_from < window.preparation_end
         owner = self.frames.get(intent.target)
         if owner is None:
             if inside:
@@ -419,25 +473,27 @@ class _ProjectionBuilder:
             return
         if intent.kind == "black":
             after_end = _after_end(intent, still=False)
-            self.fixed.append(FixedShowing(
+            showing = FixedShowing(
                 slot_id=identity, frame_id=binding.frame_id, asset_id=None,
                 start=intent.shows_from, end=intent.interval_end,
-                fade_in=intent.fade_in_seconds, after_end=after_end))
-            if inside:
-                self.layers[player].append(Layer(**fields, presentation="black",
-                                                 after_end=after_end))
+                fade_in=intent.fade_in_seconds, after_end=after_end)
+            layer = Layer(**fields, presentation="black", after_end=after_end) if inside else None
+            self.fixed.append(showing)
+            if layer is not None:
+                self.layers[player].append(layer)
             return
         authored = bool(intent.asset_refs)
         pool = "" if authored else json.dumps(list(intent.source_refs), separators=(",", ":"))
-        if not authored:
-            self.pool_refs[pool] = intent.source_refs
-        self.pending.append(_Pending(intent=intent, player_id=player, fields=fields, slot=Slot(
+        pending = _Pending(intent=intent, player_id=player, fields=fields, slot=Slot(
             slot_id=identity, frame_id=binding.frame_id, scene_id=intent.scene_id,
             start=intent.shows_from, end=intent.interval_end,
             fade_in=intent.fade_in_seconds, after_end=intent.after_end,
             target=self._target(binding.frame_id),
             crop_limit=crop_limit_of(intent.selection, self.settings),
-            pool=pool, authored=intent.asset_refs)))
+            pool=pool, authored=intent.asset_refs))
+        if not authored:
+            self.pool_refs[pool] = intent.source_refs
+        self.pending.append(pending)
 
     def _target(self, frame_id: str) -> FitTarget | None:
         """The slot target of a Frame: `fit_target` of its Frame output; None when it has none
@@ -473,55 +529,18 @@ class _ProjectionBuilder:
         candidates: dict[str, Candidate] = {}
         members: dict[str, set[str]] = {pool: set() for pool in self.pool_refs}
         lines: dict[str, SceneLine] = {}
+        refused: set[str] = set()
         for scene_id, items in sorted(by_scene.items()):
-            selection = items[0].intent.selection
-            classes: dict[tuple, Slot] = {}
-            for item in items:
-                classes.setdefault((item.slot.pool, item.slot.target, item.slot.crop_limit),
-                                   item.slot)
-            keys_of = {slot.pool: self._pool_keys(slot.pool) for slot in classes.values()}
-            pool_keys = tuple(sorted(set().union(*keys_of.values())))
-            scene_pass = passes.get(scene_id, ScenePass(scene_id=scene_id))
-            recent = recent_assets(shown_at, selection.no_repeat_days, now=now)
-            shape = shape_bounds(tuple(classes.values()))
-
-            def read(pass_number: int, picked: frozenset[str], limit: int, *, scene_id=scene_id,
-                     selection=selection, pool_keys=pool_keys, recent=recent, shape=shape,
-                     last=scene_pass.last_shown) -> LineAnswer:
-                if not pool_keys:
-                    return LineAnswer()
-                return self.lines.line(LineQuery(
-                    pool_keys=pool_keys, scene_id=scene_id, pass_number=pass_number,
-                    order=selection.order, after=last, now=now, picked=picked, recent=recent,
-                    shape=shape, limit=limit, house=self.house))
-
-            def serves(member: LineMember, test, *, classes=classes, keys_of=keys_of) -> bool:
-                return member.candidate.asset_id not in reserved and any(
-                    member.pools & keys_of[slot.pool] and test(member.candidate, slot,
-                                                               self.settings)
-                    for slot in classes.values())
-
-            limit = len(items) * self.limits.hydrate_factor
-            answer = read(scene_pass.pass_number, scene_pass.picked, limit)
-            # Read deeper while the batch holds fewer useful photos than the line has slots
-            # (and the line goes on): a sparse batch would otherwise fill every slot by
-            # repeating the few it found, where a whole-pool read rotates through the fitting
-            # photos further down the line.
-            while (len(answer.members) == limit
-                   and sum(serves(member, useful_for) for member in answer.members) < len(items)):
-                limit *= 2
-                answer = read(scene_pass.pass_number, scene_pass.picked, limit)
-            whole = len(answer.members) < limit
-            complete = whole or answer.members[-1].candidate.asset_id in scene_pass.picked
-            known = {member.candidate.asset_id: member for member in answer.members}
-            pickable = {asset_id for asset_id, member in known.items()
-                        if serves(member, fits_slot)}
-            if not whole and complete and len(pickable - scene_pass.picked) <= len(items):
-                for member in read(scene_pass.pass_number + 1, frozenset(), limit).members:
-                    if member.candidate.asset_id not in known:
-                        known[member.candidate.asset_id] = member
-                        if serves(member, fits_slot):
-                            pickable.add(member.candidate.asset_id)
+            # The Scene is the unit of isolation: one whose line cannot be read leaves its own
+            # slots out (`intent_refused`), never another Scene's.
+            try:
+                known, keys_of, line = self._read_line(
+                    scene_id, items, reserved, passes, shown_at, now, today)
+            except Exception as error:   # noqa: BLE001 - the bulkhead names it per Scene
+                refused.add(scene_id)
+                for item in items:
+                    self.refuse(item.intent, error, item.slot.slot_id)
+                continue
             for asset_id, member in known.items():
                 candidates.setdefault(asset_id, member.candidate)
                 for pool, keys in keys_of.items():
@@ -529,15 +548,72 @@ class _ProjectionBuilder:
                         members[pool].add(asset_id)
                 for key in member.pools:
                     self.read_by_key.setdefault(key, {})[asset_id] = member.candidate
-            lines[scene_id] = SceneLine(
-                scene_id, selection, tuple(member.candidate for member in known.values()),
-                scene_pass, shown_at, now=now, today=today, pickable=frozenset(pickable),
-                whole=whole, complete=complete, mark=answer.after, house=self.house)
+            lines[scene_id] = line
+        self.pending = [item for item in self.pending
+                        if not (item.slot.pool and item.slot.scene_id in refused)]
         for item in self.pending:
             for ref in item.slot.authored:
                 if ref in self.authored:
                     candidates.setdefault(ref, self.authored[ref])
         return candidates, {pool: frozenset(ids) for pool, ids in members.items()}, lines
+
+    def _read_line(self, scene_id: str, items: list[_Pending], reserved: set[str],
+                   passes: Mapping[str, ScenePass], shown_at, now: float, today,
+                   ) -> tuple[dict[str, LineMember], dict[str, frozenset[str]], SceneLine]:
+        """One Scene's read of its line (`_read_lines`): the members it read, each slot pool's
+        keys, and its `SceneLine`. Nothing of the builder changes here, so a Scene whose read
+        raises leaves no trace but its refusal."""
+        selection = items[0].intent.selection
+        classes: dict[tuple, Slot] = {}
+        for item in items:
+            classes.setdefault((item.slot.pool, item.slot.target, item.slot.crop_limit),
+                               item.slot)
+        keys_of = {slot.pool: self._pool_keys(slot.pool) for slot in classes.values()}
+        pool_keys = tuple(sorted(set().union(*keys_of.values())))
+        scene_pass = passes.get(scene_id, ScenePass(scene_id=scene_id))
+        recent = recent_assets(shown_at, selection.no_repeat_days, now=now)
+        shape = shape_bounds(tuple(classes.values()))
+
+        def read(pass_number: int, picked: frozenset[str], limit: int) -> LineAnswer:
+            if not pool_keys:
+                return LineAnswer()
+            return self.lines.line(LineQuery(
+                pool_keys=pool_keys, scene_id=scene_id, pass_number=pass_number,
+                order=selection.order, after=scene_pass.last_shown, now=now, picked=picked, recent=recent,
+                shape=shape, limit=limit, house=self.house))
+
+        def serves(member: LineMember, test) -> bool:
+            return member.candidate.asset_id not in reserved and any(
+                member.pools & keys_of[slot.pool] and test(member.candidate, slot,
+                                                           self.settings)
+                for slot in classes.values())
+
+        limit = len(items) * self.limits.hydrate_factor
+        answer = read(scene_pass.pass_number, scene_pass.picked, limit)
+        # Read deeper while the batch holds fewer useful photos than the line has slots
+        # (and the line goes on): a sparse batch would otherwise fill every slot by
+        # repeating the few it found, where a whole-pool read rotates through the fitting
+        # photos further down the line.
+        while (len(answer.members) == limit
+               and sum(serves(member, useful_for) for member in answer.members) < len(items)):
+            limit *= 2
+            answer = read(scene_pass.pass_number, scene_pass.picked, limit)
+        whole = len(answer.members) < limit
+        complete = whole or answer.members[-1].candidate.asset_id in scene_pass.picked
+        known = {member.candidate.asset_id: member for member in answer.members}
+        pickable = {asset_id for asset_id, member in known.items()
+                    if serves(member, fits_slot)}
+        if not whole and complete and len(pickable - scene_pass.picked) <= len(items):
+            for member in read(scene_pass.pass_number + 1, frozenset(), limit).members:
+                if member.candidate.asset_id not in known:
+                    known[member.candidate.asset_id] = member
+                    if serves(member, fits_slot):
+                        pickable.add(member.candidate.asset_id)
+        line = SceneLine(
+            scene_id, selection, tuple(member.candidate for member in known.values()),
+            scene_pass, shown_at, now=now, today=today, pickable=frozenset(pickable),
+            whole=whole, complete=complete, mark=answer.after, house=self.house)
+        return known, keys_of, line
 
     def _failure_diagnostics(self) -> None:
         """`asset_preparation_failed` for a Source whose photos read this pass include one
@@ -554,12 +630,20 @@ class _ProjectionBuilder:
         wall whose hour of slots exceeds the wall plan's slot budget is planned over a shorter
         span, never refused. The slots are cut at the start of the first slot past the budget,
         inside the preparation horizon or after it, so every Frame's plan ends at one instant,
-        and the diagnostic `plan_shortened` (reason "slots") says so."""
+        and the diagnostic `plan_shortened` (reason "slots") says so (`cut_at`: the black
+        showings past the cut go too, a lock stays)."""
         if len(self.pending) <= budget:
             return
-        cutoff = _cut_instant([item.slot.start for item in self.pending], budget)
-        self.pending = [item for item in self.pending if item.slot.start < cutoff]
-        self.diagnose("plan_shortened", reason="slots")
+        self.cut_at(_cut_instant([item.slot.start for item in self.pending], budget), "slots")
+        self.pending = [item for item in self.pending
+                        if not self.past_cut(item.slot.start, item.slot.slot_id)]
+        self.fixed = [showing for showing in self.fixed
+                      if not self.past_cut(showing.start, showing.slot_id)]
+        self.layers = {player: [layer for layer in layers
+                                if not self.past_cut(layer.start, layer.assignment_id)]
+                       for player, layers in self.layers.items()}
+        self.cues = {identity: cue for identity, cue in self.cues.items()
+                     if not self.past_cut(cue.shows_from, identity)}
 
     def _lock_photos(self, history: WallHistory) -> dict[str, str]:
         """Which photo each lock shows: its selection in the history, else (a lock offered
@@ -599,29 +683,17 @@ class _ProjectionBuilder:
         unfilled = {gap.slot_id: gap.reason for gap in wall.unfilled}
         planned: list[PlannedPhoto] = []
         for item in self.pending:
-            slot, intent = item.slot, item.intent
-            inside = slot.start < window.preparation_end
-            entry = dict(assignment_id=slot.slot_id, frame_id=slot.frame_id,
-                         start=slot.start, end=slot.end)
-            placement = placed.get(slot.slot_id)
-            if placement is None:
-                reason = unfilled[slot.slot_id]
-                if inside:
-                    self.diagnose(_UNFILLED_CODES[reason], intent=intent, assignment=slot.slot_id)
-                planned.append(PlannedPhoto(**entry, state="unfilled", reason=reason))
+            # Each slot is its own unit: one whose layer cannot be built is refused alone.
+            try:
+                photo, layer, selection = self._settle_slot(
+                    item, window, placed, unfilled, candidates, current_pass)
+            except Exception as error:   # noqa: BLE001 - the bulkhead names it per slot
+                self.refuse(item.intent, error, item.slot.slot_id)
                 continue
-            candidate = candidates[placement.asset_id]
-            planned.append(PlannedPhoto(
-                **entry, state="offered" if inside else "tentative",
-                asset_id=placement.asset_id, crop=placement.crop))
-            if not inside:
-                continue
-            self.layers[item.player_id].append(Layer(
-                **item.fields, presentation="media", variant=candidate.variant,
-                crop=placement.crop, after_end=_after_end(intent, still=candidate.kind == "image")))
-            self.selections.append(AssignmentSelection(
-                assignment_id=slot.slot_id, asset_id=placement.asset_id, scene_id=slot.scene_id,
-                pass_number=placement.pass_number or current_pass.get(slot.scene_id, 1)))
+            planned.append(photo)
+            if layer is not None:
+                self.layers[item.player_id].append(layer)
+                self.selections.append(selection)
         for identity, layer in self.used_locks.items():
             if layer.presentation == "media":
                 planned.append(PlannedPhoto(
@@ -635,6 +707,34 @@ class _ProjectionBuilder:
                         for need in sorted(wall.prepare, key=lambda need: need.asset_id)]
         measurements = [MeasureRequest(asset_id=asset_id) for asset_id in wall.measure]
         return planned, acquisitions, measurements
+
+    def _settle_slot(self, item: _Pending, window: PlanWindow, placed: Mapping, unfilled: Mapping,
+                     candidates: Mapping[str, Candidate], current_pass: Mapping[str, int],
+                     ) -> tuple[PlannedPhoto, Layer | None, AssignmentSelection | None]:
+        """One slot after the wall assignment: its planned photo, and its layer and selection
+        when it was placed inside the preparation horizon."""
+        slot, intent = item.slot, item.intent
+        inside = slot.start < window.preparation_end
+        entry = dict(assignment_id=slot.slot_id, frame_id=slot.frame_id,
+                     start=slot.start, end=slot.end)
+        placement = placed.get(slot.slot_id)
+        if placement is None:
+            reason = unfilled[slot.slot_id]
+            if inside:
+                self.diagnose(_UNFILLED_CODES[reason], intent=intent, assignment=slot.slot_id)
+            return PlannedPhoto(**entry, state="unfilled", reason=reason), None, None
+        candidate = candidates[placement.asset_id]
+        photo = PlannedPhoto(**entry, state="offered" if inside else "tentative",
+                             asset_id=placement.asset_id, crop=placement.crop)
+        if not inside:
+            return photo, None, None
+        layer = Layer(
+            **item.fields, presentation="media", variant=candidate.variant,
+            crop=placement.crop, after_end=_after_end(intent, still=candidate.kind == "image"))
+        selection = AssignmentSelection(
+            assignment_id=slot.slot_id, asset_id=placement.asset_id, scene_id=slot.scene_id,
+            pass_number=placement.pass_number or current_pass.get(slot.scene_id, 1))
+        return photo, layer, selection
 
     def result(self, window: PlanWindow, history: WallHistory,
                max_clock_uncertainty: float) -> Projection:
@@ -653,8 +753,10 @@ class _ProjectionBuilder:
             layers=tuple(sorted(layers, key=lambda layer: (
                 *stack_order(layer), layer.output_id, layer.assignment_id))),
         ) for player, layers in sorted(self.layers.items()))
-        # A layer is offered whole, so the plan stays valid to the end of its longest layer.
-        extent = max([horizon_end, *(layer.end for p in players for layer in p.layers)])
+        # A layer is offered whole, so the plan stays valid to the end of its longest layer; a
+        # cut plan holds nothing new past its cut, so it is valid no further than the cut.
+        reach = horizon_end if self.cut is None else min(horizon_end, self.cut)
+        extent = max([reach, *(layer.end for p in players for layer in p.layers)])
         return Projection(
             now=now, horizon_end=horizon_end, valid_until=extent, players=players,
             acquisitions=tuple(acquisitions),
@@ -663,6 +765,8 @@ class _ProjectionBuilder:
             measurements=tuple(measurements),
             plan=tuple(planned),
             diagnostics_dropped=self.diagnostics_dropped,
+            cut=self.cut,
+            cues=tuple(sorted(self.cues.values(), key=lambda cue: cue.assignment_id)),
         )
 
 
@@ -696,11 +800,14 @@ def project(
     Source revisions and the top of each Scene's line (`_ProjectionBuilder._read_lines`); nothing
     reads a whole pool.
 
-    A pass never refuses the wall. Each Intent is planned alone: one `add` raises (a
-    `PlanningError` or an invalid layer) and only that Intent is left out, with the diagnostic
-    `intent_refused` naming its Scene and Run. A budget shortens the plan at one instant
-    (`plan_shortened`, its `reason` the budget: "runtime_events", "assignments" or "slots").
-    Only inconsistent caller input (`_validate_inputs`, a non-finite time) raises."""
+    A pass never refuses the wall for one Scene: each Intent's `add`, each Scene's line read
+    (`_read_line`) and each placed slot's layer (`_settle_slot`) is its own unit, and one that
+    raises is left out alone, with the diagnostic `intent_refused` naming its Scene and Run. A
+    budget shortens the plan at one instant (`cut_at`; `plan_shortened`, its `reason` the
+    budget: "runtime_events", "assignments" or "slots"), never cutting a lock. Only inconsistent
+    caller input (`_validate_inputs`, a non-finite time) raises, and a Runtime that cannot settle
+    even `now` within its budget (`RuntimeBudgetExceeded`: an empty plan would withdraw every
+    offered layer)."""
     now = _finite(now, "now")
     horizon_seconds = _finite(horizon_seconds, "horizon_seconds")
     if horizon_seconds <= 0:
@@ -721,31 +828,37 @@ def project(
         settings=settings, frame_outputs=frame_outputs, house=runtime.house,
     )
     # A turn starting up to the longest cross-fade lead past the plan's end may start to show
-    # inside it. Past the transition budget the timeline stops at its last whole boundary, and
-    # the plan holds only the Intents of the views up to it.
+    # inside it. Past the transition budget the timeline stops at its last whole boundary: the
+    # plan is cut there (`cut_at`), holding only what starts to show before it.
     end = window.plan_end + runtime.longest_lead()
-    cut = runtime.timeline(now, end, max_events=limits.max_events)
-    if cut.until < end:
-        builder.diagnose("plan_shortened", reason="runtime_events")
-    intents = [intent for view in cut.views for intent in view.contributions]
+    timeline = runtime.timeline(now, end, max_events=limits.max_events)
+    if not timeline.views:
+        # Not even now fits the budget: an empty plan would withdraw every Frame's offered
+        # layers, so this pass fails and the offers stand.
+        raise RuntimeBudgetExceeded("the Runtime cannot settle now within its transition budget")
+    if timeline.until < end:
+        builder.cut_at(timeline.until, "runtime_events")
+    intents = [intent for view in timeline.views for intent in view.contributions]
     # Layers inside the preparation horizon past `max_assignments`: cut at one instant.
     inside = {assignment_id(intent): intent.shows_from for intent in intents
               if _in_window(intent, window) and intent.shows_from < window.preparation_end}
     cutoff = _cut_instant(list(inside.values()), limits.max_assignments)
     if cutoff is not None:
-        builder.diagnose("plan_shortened", reason="assignments")
+        builder.cut_at(cutoff, "assignments")
     for intent in intents:
-        if cutoff is not None and intent.shows_from >= cutoff:
+        if builder.past_cut(intent.shows_from, assignment_id(intent)):
             continue
         try:
             builder.add(intent, window)
-        except ValueError as error:   # a PlanningError, or a layer that does not validate
-            builder.diagnose("intent_refused", intent=intent, reason=_refusal(error))
+        except Exception as error:   # noqa: BLE001 - the per-Intent bulkhead
+            builder.refuse(intent, error, assignment_id(intent))
     return builder.result(window, history, max_clock_uncertainty)
 
 
-def _refusal(error: ValueError) -> str:
-    """Why one Intent was refused, for its `intent_refused` diagnostic: a PlanningError's own
-    message (the Planner writes it), else only the error's type (a validation error's text can
-    carry the values it judged)."""
-    return str(error) if isinstance(error, PlanningError) else type(error).__name__
+def _refusal(error: Exception) -> str:
+    """Why one Intent was refused, in the operator's words, for its `intent_refused` diagnostic:
+    a PlanningError's own message (the Planner writes it), else a plain sentence naming only the
+    error's type (another error's text can carry the values it judged)."""
+    if isinstance(error, PlanningError):
+        return str(error)
+    return f"Central could not build its showing ({type(error).__name__})"

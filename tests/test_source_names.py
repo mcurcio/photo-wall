@@ -36,7 +36,7 @@ class Names:
         return self.service.save_draft(self.library.create_draft(query, editing), name, by="console")
 
     def reconcile(self) -> None:
-        with self.registry.db.transaction() as conn, self.runtime.edit(conn, by="console") as current:
+        with self.registry.db.transaction() as conn, self.runtime.edit(conn, by="console", command="reconcile") as current:
             self.repository.reconcile_source_activity_in(conn, current.planning_source_refs())
 
     def active(self, source_ref: str) -> bool:
@@ -180,3 +180,22 @@ def test_migration_preserves_legacy_collisions_and_large_numeric_suffix(registry
         assert len(versions) == len(refs)
         assert {row["name"] for row in versions} == {"foo", "foo:bar", refs[-1]}
         assert len({(row["name"], row["revision"]) for row in versions}) == len(refs)
+
+
+def test_a_source_save_that_rewrites_scenes_is_audited_per_scene(names, registry):
+    """A Photo source save moves every Scene using its name to the new revision; each Scene it
+    rewrote is one runtime_changes row by its actor ("save_source"), as any other Runtime write
+    (`RuntimeStore.edit` audits every write, no caller can skip it). Mutation probe: drop the
+    runtime_changes insert from `edit` (no row)."""
+    runtime = names.runtime
+    names.save("old")
+    for scene_id in ("one", "two"):
+        runtime.command("set_scene", Scene(scene_id=scene_id, loop=True, contributions=(
+            Contribution(target="frame:main", source_refs=("old:1",)),)), by="console")
+    names.save("old", editing="old:1", favourites=True)
+    with registry.db.transaction() as conn:
+        rows = conn.execute("SELECT by, command, scene_id, scene_revision FROM runtime_changes "
+                            "WHERE command='save_source' ORDER BY id").fetchall()
+    assert [dict(row) for row in rows] == [
+        {"by": "console", "command": "save_source", "scene_id": "one", "scene_revision": 2},
+        {"by": "console", "command": "save_source", "scene_id": "two", "scene_revision": 2}]

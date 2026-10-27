@@ -557,6 +557,12 @@ const out = {
   refused: rows({ ...noFrames, ...refused }, { scheduler: null, steps: {} }),
   summary: attention.attentionSummary(attention.attentionView(noFrames,
     { scheduler: null, steps: failing })),
+  steps: rows(noFrames, { scheduler: null, steps: {
+    settle: { status: "failing", since: 14 * 3600 }, reconcile: { status: "failing", since: null },
+    measurement: { status: "skipped", since: 14 * 3600 } } }),
+  shortened: rows({ ...noFrames, planning: { dropped: 3, issues: [
+    { code: "plan_shortened", reason: "runtime_events" },
+    { code: "plan_shortened", reason: "slots" } ] } }, { scheduler: null, steps: {} }),
 };
 console.log(JSON.stringify(out));
 """
@@ -578,3 +584,24 @@ def test_planning_failing_and_a_refused_scene_need_attention_without_silent_fram
     assert out["refused"] == [{"key": "scene:s", "text": "Scene s could not be planned: refused",
                                "href": "#/scenes/s/edit/review"}]
     assert out["summary"].startswith("Central needs attention")
+
+
+def test_every_failing_scheduler_step_and_a_shortened_plan_need_attention():
+    """Each scheduler step that fails is its own Central row, in the operator's words (a skipped
+    step is not a failure), and a pass that cut the plan short, or counted issues it could not
+    keep, says so. Mutation probe: list only planning and the Runtime in `STEP_WORDS` (no
+    settle or reconcile row)."""
+    _require_node()
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", PLANNING_SCRIPT, "--",
+         (SRC / "attention.js").as_uri()],
+        capture_output=True, text=True, timeout=30, check=True, env={**os.environ, "TZ": "UTC"})
+    out = json.loads(result.stdout)
+    assert out["steps"] == [
+        {"key": "settle", "text": "Plans are not being committed since Thu 14:00", "href": None},
+        {"key": "reconcile", "text": "Players are not being brought up to date", "href": None}]
+    assert out["shortened"] == [
+        {"key": "plan_shortened", "href": None,
+         "text": "Plans are cut short (too many schedule changes in the hour ahead; too many "
+                 "photo turns in the hour ahead); Frames may go dark past the cut"},
+        {"key": "planning_dropped", "text": "3 more planning issues were not kept", "href": None}]
