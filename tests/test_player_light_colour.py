@@ -102,8 +102,8 @@ def test_a_warmer_stated_kelvin_draws_warmer_and_out_of_range_draws_the_end_rows
 
 
 @pytest.mark.parametrize("entry", [
-    ReportedEntry(colour=KelvinColour(kelvin=1200.0), state=Dimmer(on=True, brightness=0.5)),
-    MeasuredEntry(colour=KelvinColour(kelvin=38000.0), state=Measured(lux=100.0)),
+    ReportedEntry(colour=KelvinColour(kelvin=1200.0), state=Dimmer(on=True, brightness=0.5), doubt=None),
+    MeasuredEntry(colour=KelvinColour(kelvin=38000.0), state=Measured(lux=100.0), doubt=None),
 ])
 def test_every_entry_kind_draws_an_out_of_range_kelvin(entry):
     """A reported and a measured light draw a stated kelvin past the table too, at the end row."""
@@ -120,13 +120,13 @@ def test_every_entry_kind_draws_an_out_of_range_kelvin(entry):
 def test_a_colour_bulb_draws_its_rgb_warm_at_lux_times_brightness():
     """A bulb in a colour mode (Home Assistant's hs, rgb (1, 0.5, 0)): drawn warm, red over green
     and no blue, its luminance lux x brightness; the same bulb off adds nothing."""
-    on = ReportedEntry(colour=RgbColour(rgb=(1.0, 0.5, 0.0)), state=Dimmer(on=True, brightness=0.4))
+    on = ReportedEntry(colour=RgbColour(rgb=(1.0, 0.5, 0.0)), state=Dimmer(on=True, brightness=0.4), doubt=None)
     rgb = drawn(on)
     assert rgb[0] > rgb[1] > rgb[2] == 0.0
     assert luminance(rgb) == pytest.approx(LUX * 0.4)
     assert reported_lux(on) == pytest.approx(LUX * 0.4)
     assert rgb[1] / rgb[0] == pytest.approx(((0.5 + 0.055) / 1.055) ** 2.4)    # the share taken to linear light
-    off = ReportedEntry(colour=RgbColour(rgb=(1.0, 0.5, 0.0)), state=Dimmer(on=False, brightness=0.4))
+    off = ReportedEntry(colour=RgbColour(rgb=(1.0, 0.5, 0.0)), state=Dimmer(on=False, brightness=0.4), doubt=None)
     assert drawn(off) == (0.0, 0.0, 0.0)
     assert reported_lux(off) == 0.0
 
@@ -134,6 +134,6 @@ def test_a_colour_bulb_draws_its_rgb_warm_at_lux_times_brightness():
 def test_a_white_bulb_and_a_grey_rgb_draw_the_same_luminance():
     """Colour never changes how bright a light is: a grey rgb share and a kelvin at the same
     brightness both put lux x brightness on the Frame."""
-    grey = drawn(ReportedEntry(colour=RgbColour(rgb=(0.2, 0.2, 0.2)), state=Dimmer(on=True, brightness=1.0)))
+    grey = drawn(ReportedEntry(colour=RgbColour(rgb=(0.2, 0.2, 0.2)), state=Dimmer(on=True, brightness=1.0), doubt=None))
     assert grey == pytest.approx((LUX, LUX, LUX))
     assert not any(math.isnan(channel) for channel in grey)

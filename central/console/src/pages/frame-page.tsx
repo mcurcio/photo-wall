@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { BindingFacet } from "../BindingFacet.jsx";
+import { FrameCentralError, useFrameImpediment } from "../domain/room-lights/frame-central-error";
 import { FrameDisplay } from "../domain/frame-display";
 import { frameChip, type FrameHealth } from "../domain/frame-health-chip";
 import { FrameOverview } from "../domain/frame-overview";
@@ -122,7 +123,9 @@ function useHouseLights(open: boolean): { rooms: RoomLightsView | null; drawn: D
 /**
  * One Frame's page (`#/wall/frames/<id>/<tab>`): every setting of one place on the wall, one
  * tab each. The header names the Frame, its way back to the Wall and its health (health.js,
- * the plan tile's words). Overview is what Central puts on it and why, and its Photos: one Fit board
+ * the plan tile's words). Overview is Central's error (whether its Pi reports the Frame black because
+ * Central can't stand behind a room light it uses: Central's own, apart from Hardware, which holds the
+ * Pi's faults), what Central puts on it and why, and its Photos: one Fit board
  * row per Scene that shows photos here (follow-ups C1); Position is where the
  * picture sits on its screen as it hangs (one box: move, width and height, nudges), with the Frame's Position
  * History; Lighting is the room lights that fall on it, its mat and its paper, and whether its Pi
@@ -145,8 +148,11 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
   const frame = frames.find((candidate) => candidate.id === frameId);
   const session = SESSION_TABS.includes(tab);
   const adjustment = useFrameAdjustment({ frameId, frame, open: session });
-  // The Frame's lighting chooses among the house's room lights and paper profiles; its history names them.
-  const { rooms, drawn, profiles } = useHouseLights(session && frame !== undefined);
+  // The Frame's lighting chooses among the house's room lights and paper profiles; its history names
+  // them, and Overview's Central's error names the lights in doubt.
+  const { rooms, drawn, profiles } = useHouseLights((session || tab === "overview") && frame !== undefined);
+  // What the Frame's Pi last said about Central's error on it, read while Overview is shown.
+  const impediment = useFrameImpediment(frameId, tab === "overview" && frame !== undefined);
   // The Frame's Why, read once for the page: the header's Resting, Overview's sentence, Power's line.
   const { read: why, refresh: rereadWhy } = useFrameWhy(frameId);
   // A tab shown reads Why again: what it says is as of now, not the last poll's.
@@ -211,6 +217,8 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
       <Tabs label="Frame settings" tabs={TABS} value={tab} onValueChange={(next) => choose(next as Tab)}>
         {tab === "overview" && (
           <>
+            <FrameCentralError read={impediment} names={lightNames(rooms)}
+              attentionHref={formatRoute({ section: "attention" })} lightsHref={formatRoute({ section: "lights" })} />
             <FrameOverview snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} frameName={frame.name ?? frameId}
               hosts={hosts} why={why} />
             <FramePhotos key={`${frameId}:photos`} snapshot={snapshot} frameId={frameId} />

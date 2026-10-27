@@ -22,6 +22,8 @@ from central.house_time.calculator import known_zone, when_problems
 from central.house_time.model import HouseSettings, HouseSettingsDraft, HouseTime
 from central.house_time.ports import HouseRefused
 from central.infra.output_wakes import wake_every_node_in
+from central.infra.transactions import PgTransaction
+from central.room_light.ports import HouseClockChanges
 
 _LOG = logging.getLogger(__name__)
 _LOCALTIME = Path("/etc/localtime")
@@ -84,9 +86,11 @@ def seed_house(db: Database, times: TransactionClock) -> None:
 class PgHouse:
     """central.house_time.ports HouseQueries and HouseCommands over PostgreSQL."""
 
-    def __init__(self, db: Database, *, times: TransactionClock) -> None:
-        """`times` stamps `updated_at` (the database's clock in production, G11)."""
-        self._db, self._times = db, times
+    def __init__(self, db: Database, *, times: TransactionClock, room_lights: HouseClockChanges) -> None:
+        """`times` stamps `updated_at` (the database's clock in production, G11); `room_lights` raises
+        the room-lights document's change when a save moves its words (they are dated on the house's
+        clock)."""
+        self._db, self._times, self._room_lights = db, times, room_lights
 
     def house_settings(self) -> HouseSettings:
         with self._db.transaction() as conn:
@@ -105,13 +109,13 @@ class PgHouse:
                 if any("needs-place" in when_problems(when, draft.time) for when in whens):
                     raise HouseRefused("place-in-use", 409)
             saved = HouseSettings(**draft.model_dump(), updated_at=self._times.now_in(conn), zone_confirmed=True)
-            conn.execute(
+            self._room_lights.house_clock_changing_within(PgTransaction(conn), lambda: conn.execute(
                 "INSERT INTO house_settings (singleton, zone, latitude, longitude, units, clock_format, updated_at,"
                 " zone_confirmed) VALUES (TRUE, %s, %s, %s, %s, %s, %s, TRUE) ON CONFLICT (singleton) DO UPDATE SET"
                 " zone=EXCLUDED.zone, latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude, units=EXCLUDED.units,"
                 " clock_format=EXCLUDED.clock_format, updated_at=EXCLUDED.updated_at, zone_confirmed=TRUE",
                 (saved.time.zone, None if place is None else place.latitude,
-                 None if place is None else place.longitude, saved.units, saved.clock, saved.updated_at))
+                 None if place is None else place.longitude, saved.units, saved.clock, saved.updated_at)))
             # Every Node's set times follow the zone and the place.
             wake_every_node_in(conn)
         return saved

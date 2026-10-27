@@ -83,7 +83,7 @@
       <arg name="picture_change" type="string"/>
     </request>
   </interface>
-  <interface name="pw_diagnostic_manager_v1" version="5">
+  <interface name="pw_diagnostic_manager_v1" version="6">
     <description summary="Base-private diagnostic surfaces">
       Only the compositor-created private diagnostic client may bind this global.
       Output events name physical Output pixels. Serial is acknowledged before
@@ -141,6 +141,19 @@
       </description>
       <arg name="output_id" type="string"/>
       <arg name="region" type="string"/>
+    </event>
+    <event name="central_card" since="6">
+      <description summary="Central's card for one Output (the Frame shows Central's error)">
+        Canonical JSON of contracts.node_output.CentralCard, at most 1024 bytes,
+        or empty: none. Composed by the base controller from the admitted Player
+        run's impeded report and forwarded verbatim; the shell never interprets it
+        and it carries no verdict or code. Re-sent when the diagnostic client
+        binds and right after every output event. The client draws the health
+        card when one shows, else Central's card inside the Frame region, else
+        nothing.
+      </description>
+      <arg name="output_id" type="string"/>
+      <arg name="card" type="string"/>
     </event>
   </interface>
   <interface name="pw_health_layer_v1" version="1">

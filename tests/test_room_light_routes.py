@@ -52,7 +52,8 @@ def test_house_lights_refuse_with_one_vocabulary_at_its_status(registry):
     with _client(registry) as client:
         saved = client.put(f"{LIGHTS}/x", headers=AUTH, json=_reported("light.x"))
         assert saved.status_code == 200, saved.text
-        assert saved.json()["entry"] == {"kind": "reported", "colour": {"kind": "kelvin", "kelvin": 4000.0}, "state": {"kind": "not-reported"}}
+        assert saved.json()["entry"] == {"kind": "reported", "colour": {"kind": "kelvin", "kelvin": 4000.0}, "state": {"kind": "not-reported"},
+                                         "doubt": None}
         assert saved.json()["light"]["reporter"] == {"source": "home-assistant", "address": "light.x"}
         for path, body, status, code in (
                 (f"{LIGHTS}/y", _reported("light.x"), 409, "reference_taken"),

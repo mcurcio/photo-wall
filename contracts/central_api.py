@@ -108,7 +108,7 @@ CENTRAL_STATE_TABLE: Final = MappingProxyType({
     BIRTH_KEY: 256,
     INSTALLATION_KEY: 64 * 1024,
     LISTENING_KEY: 32 * 1024,
-    ROOM_LIGHTS_KEY: 24 * 1024,
+    ROOM_LIGHTS_KEY: 64 * 1024,          # ROOM_LIGHTS_MAX lights at their longest, Central's words included (about 49 KiB)
     RELEASES_KEY: 8 * 1024,
     VERSIONS_KEY: 32 * 1024,
     STATES_EPOCH_KEY: 128,

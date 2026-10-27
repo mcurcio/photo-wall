@@ -17,7 +17,8 @@ def test_every_hosted_media_build_supplies_the_retained_base():
         for step in re.split(r'^      - ', text, flags=re.MULTILINE):
             if re.search(r'target: media-(worker|test)\n', step):
                 consumers.append(workflow.name)
-                assert 'build-args: MEDIA_BASE_IMAGE=${{ needs.service-base.outputs.image }}' in step
+                assert re.search(r'build-args: \|?\s*MEDIA_BASE_IMAGE=\$\{\{ needs\.service-base\.outputs\.image \}\}\n',
+                                 step), step
                 assert 'uses: ./.github/workflows/service-base.yml' in text
             if E2E_SETUP in step:  # builds the media worker from the base handed to it
                 consumers.append(workflow.name)

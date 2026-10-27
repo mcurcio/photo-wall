@@ -27,6 +27,16 @@ never acks (ack binds the slate/trial configure). A tint-on commit's presentatio
 reported to the judge as a `PresentedReport`; a tint-off commit presents nothing, so it is reported
 when the compositor has processed it: when a `wl_display.sync` sent after it is done.
 
+Central's card (manager v6, the Frame shows Central's error when it blacks the Frame): a
+`central_card` event (sent after every `output` configure, and whenever the display controller's
+card changes) carries the card the controller composed, or none. The health layer draws it when no
+health card shows (the judge's page is tint off, or none came yet): one whole-Output ARGB buffer,
+transparent but for Central's card inside the explain area (render_central: no tint, no black, never
+the amber). The health card always wins: a tint-on page replaces Central's card at once, and Central's
+card returns when the page goes tint off. A Central card that cannot be drawn unmaps the layer (no
+fallback tint: it is not the Pi's fault). The commit of a tint-off page that draws Central's card is
+reported to the judge as that page's presentation, as an unmap would be.
+
 pywayland and the generated bindings (`overlay/protocol`, built by meson) are imported in `main`,
 so the pure parts import anywhere. Per-Output state lives here once; a composing client adds a
 surface per Output through `OutputHook` and binds a newer manager through `manager_version`.
@@ -47,7 +57,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from contracts.node_output import FrameRegion, decode_frame_region
+from contracts.node_output import CentralCard, FrameRegion, decode_central_card, decode_frame_region
 
 from .area import ExplainArea, explain_area
 from .health import (
@@ -71,6 +81,7 @@ from .render import (
     Point,
     TextMeasure,
     parse_trial_points,
+    render_central,
     render_health,
     render_slate,
     render_trial,
@@ -82,7 +93,8 @@ MAX_PIXELS = 4096 * 2160
 MAX_MEMORY = 128 * 1024 * 1024
 MAX_BUFFERS = 2                     # per Output: one on screen, one being drawn
 MAX_NAME = 96
-MANAGER_VERSION = 5                 # v3: the health layer (get_health_layer); v4: `brightness`; v5: `region`
+MANAGER_VERSION = 6                 # v3: the health layer (get_health_layer); v4: `brightness`; v5: `region`;
+                                    # v6: `central_card` (drawn when no health card shows)
 MAX_BRIGHTNESS = 128                # the shell's bound on a `brightness` line
 OOM_SCORE_ADJ = 900                 # the first thing the kernel kills, never Weston (-500)
 WL_SHM_FORMAT_ARGB8888 = 0
@@ -128,6 +140,7 @@ class OutputState:
     testing: bool = False
     brightness: str = ""            # the base page's brightness line (manager v4); "" draws none
     region: FrameRegion | None = None   # the Frame region the shell last sent (manager v5); None: none
+    central: CentralCard | None = None  # Central's card the shell last sent (manager v6); None: none
     overlay: bool = False
     points: tuple[Point, Point, Point, Point] = ((0.0, 0.0),) * 4
     dirty: bool = False
@@ -173,6 +186,7 @@ class OverlayClient:
         manager.dispatcher["overlay"] = self._overlay_configure
         manager.dispatcher["brightness"] = self._brightness
         manager.dispatcher["region"] = self._region
+        manager.dispatcher["central_card"] = self._central_card
 
     def _output_configure(self, manager, name: str, width: int, height: int, serial: int,
                           reason: str, testing: int) -> None:
@@ -232,6 +246,24 @@ class OverlayClient:
         if not output.overlay:
             output.dirty = True
             self.draw(output)
+        for hook in self.hooks:
+            hook.output_configured(self, output)
+
+    def _central_card(self, manager, name: str, text: str) -> None:
+        """The Output's Central card (canonical JSON of a CentralCard, or empty: none), kept; a
+        malformed one, or one naming another Output, reads as none. A change tells the hooks (the
+        health layer draws it); the slate never shows it."""
+        try:
+            card = decode_central_card(text.encode()) if text else None
+            if card is not None and card.output_id != name:
+                raise ValueError("central_card")
+        except ValueError:
+            log.warning("malformed Central card for %s; showing none", name)
+            card = None
+        output = self.outputs.get(name)
+        if output is None or output.central == card:
+            return
+        output.central = card
         for hook in self.hooks:
             hook.output_configured(self, output)
 
@@ -446,6 +478,7 @@ class HealthSurface:
     shown: HealthPage | None = None
     size: tuple[int, int] = (0, 0)      # the Output size `shown` was drawn for
     area: ExplainArea | None = None     # and the explain area
+    central: CentralCard | None = None  # Central's card as drawn on the layer now; None: not drawn
     commits: dict[int, int] = field(default_factory=dict)   # commit id -> committed at (ms)
     held: set = field(default_factory=set)
 
@@ -484,9 +517,10 @@ class HealthLayer:
             state = self.surfaces[output.name] = HealthSurface(
                 output, self.board.configure(output.name, now), surface, viewport)
             state.held.update((surface, layer, viewport))
-        elif (state.shown is not None and state.shown.tint
-              and (state.size, state.area) != ((output.width, output.height), output.area())):
-            state.health.repaint()
+        elif (state.size, state.area) != ((output.width, output.height), output.area()):
+            if state.shown is not None and state.shown.tint:
+                state.health.repaint()
+            state.central = None                 # drawn for another size or area: drawn again
         self.draw(state, now)
 
     def attach(self, selector: selectors.BaseSelector) -> None:
@@ -510,9 +544,25 @@ class HealthLayer:
     # -- drawing -----------------------------------------------------------------------------
 
     def draw(self, state: HealthSurface, now_ms: int) -> None:
-        """Draw the page `overlay.health` says is due, if any (nothing before the first)."""
+        """Draw what is due: the health card when the judge's page is tint on (it always wins),
+        else Central's card when the controller sent one, else nothing (the layer unmapped). A page
+        `overlay.health` says is due is drawn and marked drawn; Central's card is drawn again only
+        when it, or the reason it shows, changed."""
         page = state.health.page(now_ms)
-        if page is not None and self._commit(state, page):
+        current = state.health.current(now_ms)
+        if current is not None and current.tint:
+            if page is not None and self._commit(state, page):
+                state.health.drawn(page)
+                state.central = None
+            return
+        card = state.output.central
+        if page is None and card == state.central:
+            return
+        if card is None:
+            self._unmap(state, page)
+        elif not self._commit_central(state, card, page):
+            return                               # held back by the caps: still due
+        if page is not None:
             state.health.drawn(page)
 
     def _commit(self, state: HealthSurface, page: HealthPage) -> bool:
@@ -528,29 +578,69 @@ class HealthLayer:
         if not size_admissible(width, height):
             self._fail_visible(state, page, f"{width} x {height} is over the size caps")
             return True
-        if not buffer_admissible(width, height, state.buffers, client.memory):
-            return False
         area = output.area()
-        buffer, pixels, size = client.allocate(width, height, "photo-wall-health")
-        if not self._paint(page, pixels, width, height, area):
-            buffer.destroy()
-            pixels.close()
+        drawn = self._commit_buffer(
+            state, page.serial,
+            lambda: render_health(width, height, page, area=area, measure=self.measure))
+        if drawn is None:
             self._fail_visible(state, page, "paint failed")
             return True
+        if drawn:
+            state.shown, state.size, state.area = page, (width, height), area
+        return drawn
+
+    def _commit_central(self, state: HealthSurface, card: CentralCard, page: HealthPage | None) -> bool:
+        """Commit Central's card over the whole Output (transparent but for the card), reported as
+        `page`'s presentation when one is due. False when the caps hold it back (it stays due). One
+        that cannot be drawn (over the size caps, a failed paint) unmaps the layer instead: never
+        the amber, which is the Pi's."""
+        output = state.output
+        width, height = output.width, output.height
+        area = output.area()
+        drawn: bool | None = None
+        if size_admissible(width, height):
+            drawn = self._commit_buffer(
+                state, None if page is None else page.serial,
+                lambda: render_central(width, height, (card.line1, card.line2), area=area,
+                                       measure=self.measure))
+        if drawn is False:
+            return False
+        if drawn is None:
+            log.error("Central's card for %s not drawn; the layer is unmapped", output.name)
+            self._unmap(state, page)
+        elif page is not None:
+            state.shown = page
+        state.central, state.size, state.area = card, (width, height), area
+        return True
+
+    def _commit_buffer(self, state: HealthSurface, serial: int | None,
+                       ops: Callable[[], DrawList]) -> bool | None:
+        """Paint `ops()` into a fresh whole-Output ARGB buffer and commit it, its presentation
+        reported for `serial`. False when the buffer count or memory cap holds it back; None when
+        the paint failed (nothing committed)."""
+        client, output = self.client, state.output
+        assert client is not None
+        width, height = output.width, output.height
+        if not buffer_admissible(width, height, state.buffers, client.memory):
+            return False
+        buffer, pixels, size = client.allocate(width, height, "photo-wall-health")
+        if not self._paint(ops, pixels, width, height):
+            buffer.destroy()
+            pixels.close()
+            return None
         commit_id = next(self._commit_ids)
         feedback = client.presentation.feedback(state.surface)
         state.held.add(feedback)
         feedback.dispatcher["presented"] = (
-            lambda proxy, *_: self._feedback(state, proxy, commit_id, page.serial, presented=True))
+            lambda proxy, *_: self._feedback(state, proxy, commit_id, serial, presented=True))
         feedback.dispatcher["discarded"] = (
-            lambda proxy: self._feedback(state, proxy, commit_id, page.serial, presented=False))
+            lambda proxy: self._feedback(state, proxy, commit_id, serial, presented=False))
         self._attach(state, buffer)
         state.commits[commit_id] = self.clock()
         state.buffers += 1
         client.memory += size
         state.held.add(buffer)
         buffer.dispatcher["release"] = lambda proxy: self._release(state, proxy, pixels, size)
-        state.shown, state.size, state.area = page, (width, height), area
         return True
 
     def _attach(self, state: HealthSurface, buffer) -> None:
@@ -562,22 +652,24 @@ class HealthLayer:
         state.surface.damage(0, 0, width, height)
         state.surface.commit()
 
-    def _unmap(self, state: HealthSurface, page: HealthPage) -> None:
-        """Tint off: commit a NULL buffer (the layer unmapped), then a `wl_display.sync`; the
-        page is reported presented when that sync is done (the compositor has processed the
-        commit), at that time."""
+    def _unmap(self, state: HealthSurface, page: HealthPage | None) -> None:
+        """Tint off (or Central's card gone): commit a NULL buffer (the layer unmapped), then a
+        `wl_display.sync`; the page, if one is due, is reported presented when that sync is done
+        (the compositor has processed the commit), at that time."""
         client = self.client
         assert client is not None and client.display is not None
+        serial = None if page is None else page.serial
         state.surface.attach(None, 0, 0)
         state.surface.commit()
         commit_id = next(self._commit_ids)
         callback = client.display.sync()
         state.held.add(callback)
         callback.dispatcher["done"] = (
-            lambda proxy, _data: self._feedback(state, proxy, commit_id, page.serial,
-                                                presented=True))
+            lambda proxy, _data: self._feedback(state, proxy, commit_id, serial, presented=True))
         state.commits[commit_id] = self.clock()
-        state.shown, state.size = page, (state.output.width, state.output.height)
+        if page is not None:
+            state.shown = page
+        state.central, state.size = None, (state.output.width, state.output.height)
 
     def _fail_visible(self, state: HealthSurface, page: HealthPage, why: str) -> None:
         """A tint-on page that cannot be drawn: the shell's amber over the whole Output (a
@@ -592,13 +684,11 @@ class HealthLayer:
         self._attach(state, self.amber)
         state.shown, state.size = page, (state.output.width, state.output.height)
 
-    def _paint(self, page: HealthPage, pixels: mmap.mmap, width: int, height: int,
-               area: ExplainArea) -> bool:
+    def _paint(self, ops: Callable[[], DrawList], pixels: mmap.mmap, width: int, height: int) -> bool:
         try:
             surface = surface_for(pixels, width, height)
             try:
-                self.painter(render_health(width, height, page, area=area, measure=self.measure),
-                             surface)
+                self.painter(ops(), surface)
             finally:
                 surface.finish()
                 del surface            # drops cairo's export of `pixels`, so release can close it

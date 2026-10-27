@@ -14,7 +14,9 @@ A key's subject is nodeapi.buffers `state_prefix(line) + key`, in the line's sta
   `frames`, `FrameReports`: per Frame it draws, the binding generation it draws, its Output,
   whether it is showing and the light on the Frame at its centre as last drawn;
   `room-lights-drawn`, contracts/room_light.py `RoomLightsDrawn`: what the Player last drew its
-  Frames with, repeated at least every ROOM_LIGHTS_DRAWN_REPEAT_SECONDS so Central judges it by age.
+  Frames with, repeated at least every ROOM_LIGHTS_DRAWN_REPEAT_SECONDS so Central judges it by age;
+  `impeded`, contracts/node_impeded.py `ImpededFrames`: which of its Frames Central's doubt blacks now
+  (its own module, so the Pi's health judge can never import it; a new key under major 1).
 
 A Frame report counts for a Frame only while its `generation` equals Central's binding generation
 for that Frame (contracts/central_api.py `DrivenBy.generation`); a reader holding another

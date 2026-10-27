@@ -383,7 +383,8 @@ class _Layer:
 class _Output:
     """One screen's commits: its pacer, the last answer, the pictures and the layers its last
     commit shows, and what that commit showed (module rule, Nothing changed); when its last commit
-    was made, and when the trial drawn by the last present runs out (on the renderer's clock)."""
+    was made, when the trial drawn by the last present runs out (on the renderer's clock), and the
+    grant its last presented commit was drawn under."""
     pacer: FramePacer = field(default_factory=FramePacer)
     last: PresentationResult = _PENDING
     shown: frozenset[int] = frozenset()
@@ -391,6 +392,7 @@ class _Output:
     committed: tuple | None = None
     submitted: float = -float("inf")
     expires: float | None = None
+    grant: str | None = None                # the admitted grant of its last presented commit
 
 
 class PlaneRenderer:
@@ -695,11 +697,18 @@ class PlaneRenderer:
                                  *(() if ground is None else (ground.handle,))])
         state.seen = frozenset(pictures)
         state.committed = shows
+        state.grant = str(grant.grant_id)
         state.last = PresentationResult("presented", composition=looked, presented_at=now,
                                         applied_calibration=drawn.applied)
         self._newest[output_id] = composed
         self._sweep()
         return state.last
+
+    def drawn_grant(self, output_id: str) -> str | None:
+        """The grant `output_id`'s last presented commit was drawn under (an admitted grant whose
+        binding the composition matches); None before one, and after a candidate's ground."""
+        state = self._outputs.get(output_id)
+        return None if state is None else state.grant
 
     def release(self, assignment_id: str) -> None:
         """Drop the layer's decode, targets and compositor buffers once no commit shows them, and
@@ -872,7 +881,7 @@ class PlaneRenderer:
         state.pacer.submitted(sequence, now)
         state.submitted = now
         state.shown = frozenset(() if ground is None else (ground.handle,))
-        state.seen, state.committed = frozenset(), None
+        state.seen, state.committed, state.grant = frozenset(), None, None
         self._sweep()
         state.last = _PENDING
         return _PENDING

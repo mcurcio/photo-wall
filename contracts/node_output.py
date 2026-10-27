@@ -552,6 +552,47 @@ def decode_frame_region(raw: bytes) -> FrameRegion:
     return decode(raw, REGION_DOCUMENT_BYTES, FrameRegion, _frame_region, "frame_region")
 
 
+# --- Central's card (the Frame shows Central's error when it blacks the Frame; BUILD.md) ------------
+#
+# Composed by Display Host's controller per Output from the admitted Player run's `impeded` report
+# (contracts/node_impeded.py; the rule: appliance/display_host/central_card.py), carried to the
+# overlay client by the shell's `central_card` event (frame protocol, pw_diagnostic_manager_v1
+# version 6), forwarded verbatim. The overlay client draws the health judge's card, else Central's,
+# else nothing; Central's card is drawn in Central's look, labelled "Central", never the Pi card's
+# tint or amber. Its lines are Central's words (contracts/room_light.py CentralWords) verbatim.
+# Stdlib only, like every shape the shell and the overlay client read.
+
+CENTRAL_CARD_BYTES: Final = 1024                # a card's largest encoding (two lines of 96 four-byte characters fit)
+CENTRAL_CARD_LINE_MAX: Final = 96               # characters per line: contracts/room_light.py CENTRAL_LINE_MAX
+
+
+@dataclass(frozen=True)
+class CentralCard:
+    """Central's card for one Output: Central's two lines, verbatim."""
+    output_id: str
+    line1: str
+    line2: str
+
+    def __post_init__(self) -> None:
+        """ValueError("central_card") unless output_id is in OUTPUT_IDS and each line is 1..
+        CENTRAL_CARD_LINE_MAX printable characters."""
+        require(self.output_id in OUTPUT_IDS and printable(self.line1, 1, CENTRAL_CARD_LINE_MAX)
+                 and printable(self.line2, 1, CENTRAL_CARD_LINE_MAX), "central_card")
+
+
+def encode_central_card(card: CentralCard) -> bytes:
+    """Canonical JSON of at most CENTRAL_CARD_BYTES: the text the controller hands the shell's
+    `central_card` op and the shell forwards verbatim (empty text: no card)."""
+    return encode(card, CENTRAL_CARD_BYTES, "central_card_too_large")
+
+
+def decode_central_card(raw: bytes) -> CentralCard:
+    """The card `raw` encodes (strict, exactly the dataclass's field names, at most
+    CENTRAL_CARD_BYTES); ValueError("central_card") for anything else. The overlay client's one
+    parser of what the shell forwarded."""
+    return decode(raw, CENTRAL_CARD_BYTES, CentralCard, lambda value: CentralCard(**value), "central_card")
+
+
 # The checks and the codec above share these: one home for the wire's rules.
 
 _MAKER: Final = re.compile(r"[A-Z]{3}")
@@ -606,6 +647,7 @@ def _in_force(value: object) -> InForce:
 
 
 __all__ = [
+    "CENTRAL_CARD_BYTES", "CENTRAL_CARD_LINE_MAX", "CentralCard", "decode_central_card", "encode_central_card",
     "BEST_DETECTED", "DISPLAY_MM_MAX", "MAX_DISPLAY_MODES", "MAX_REQUEST_SECONDS", "METHOD_PRECEDENCE",
     "OUTPUT_DOCUMENT_BYTES", "OUTPUT_IDS", "OUTPUT_REPORT_BYTES", "POWER_ATTEMPT_BYTES",
     "MAX_POWER_CHANGES", "SCHEMA_MAJOR", "SET_TIME_PATTERN", "Darkness", "DisplayIdentity", "DisplayMode",

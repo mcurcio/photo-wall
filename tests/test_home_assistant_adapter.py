@@ -20,6 +20,7 @@ from central.room_light.model import (
 from contracts.home_assistant import (
     GALLERIA_BIRTH_KEY,
     GalleriaBirth,
+    GalleriaConnection,
     HomeAssistantColourTemperature,
     HomeAssistantIlluminance,
     HomeAssistantKelvin,
@@ -104,6 +105,7 @@ class Reports:
 
     def __init__(self) -> None:
         self.told: list[tuple] = []
+        self.births: list[GalleriaBirth] = []
 
     def record_light_state(self, reporter, state):
         self.told.append(("light", reporter, state))
@@ -119,6 +121,14 @@ class Reports:
 
     def record_galleria_birth(self, birth):
         self.told.append(("birth", birth))
+        self.births.append(birth)
+
+    def galleria_birth(self):
+        return self.births[-1] if self.births else None
+
+    def record_link_closed(self, source):
+        self.told.append(("link-closed", source))
+        return "recorded"
 
     def record_refused(self, source, address, reason):
         self.told.append(("refused", source, address, reason))
@@ -162,7 +172,8 @@ def test_colour_temperature_states_and_galleria_s_birth():
     never an entity; an unreadable birth is refused; a removed birth records nothing."""
     reports = Reports()
     listener = HomeAssistantListener(reports, reports, reports)   # type: ignore[arg-type]
-    birth = GalleriaBirth(version="1.2.3", kinds=("light", "illuminance", "colour-temperature"))
+    birth = GalleriaBirth(version="1.2.3", kinds=("light", "illuminance", "colour-temperature"),
+                          connection=GalleriaConnection(server="NHUB", client=7))
     sky = HomeAssistantColourTemperature(name="Sky", kelvin=4321.5)
     asyncio.run(listener.heard("e" * 32, (
         Heard("sensor.sky", encode_home_assistant_state(sky)),
@@ -185,3 +196,51 @@ def test_colour_temperature_states_and_galleria_s_birth():
         ("refused", source, "light.sky", ReportRefusal.UNREADABLE),
         ("birth", birth),
         ("refused", source, GALLERIA_BIRTH_KEY, ReportRefusal.UNREADABLE)]
+
+
+# v0.40.1's light state as it went on the hub (kelvin and rgb fields, no `colour`): the shape Central
+# reads changed in v0.43.0, so each of them is refused as unreadable.
+V0_40_1_LIGHT = b'{"brightness":255,"kelvin":null,"kind":"light","name":"Family Room Lights","on":false,"rgb":null}'
+
+
+def test_v0_40_1_s_light_state_is_refused_as_unreadable():
+    reports = Reports()
+    listener = HomeAssistantListener(reports, reports, reports)   # type: ignore[arg-type]
+    asyncio.run(listener.heard("e" * 32, (Heard("light.family_room", V0_40_1_LIGHT),)))
+    assert reports.told == [("refused", references.SOURCE, "light.family_room", ReportRefusal.UNREADABLE)]
+
+
+def test_only_the_close_of_the_connection_galleria_s_latest_birth_names_closes_its_link():
+    """Mutation probe: `closed` marking every close -> a late close of an older connection marks the
+    newer one's lights."""
+    reports = Reports()
+    listener = HomeAssistantListener(reports, reports, reports)   # type: ignore[arg-type]
+    old, new = GalleriaConnection(server="NHUB", client=7), GalleriaConnection(server="NHUB", client=8)
+    asyncio.run(listener.closed(old))   # no birth heard yet: no link Central knows of
+    assert reports.told == []
+    for connection in (old, new):
+        asyncio.run(listener.heard("e" * 32, (Heard(GALLERIA_BIRTH_KEY, encode_galleria_birth(GalleriaBirth(
+            version="1.2.3", kinds=("light",), connection=connection))),)))
+    reports.told.clear()
+    asyncio.run(listener.closed(old))   # the older connection, closed late
+    assert reports.told == []
+    asyncio.run(listener.closed(GalleriaConnection(server="OTHER", client=8)))   # another server's client 8
+    assert reports.told == []
+    asyncio.run(listener.closed(new))
+    assert reports.told == [("link-closed", references.SOURCE)]
+
+
+def test_a_birth_naming_another_hub_server_is_a_link_closed_while_central_was_away():
+    """A worker restart restarts the hub under a new server id and no close event is seen. Mutation
+    probe: `hub_is` doing nothing -> the Frame stays black with no card."""
+    reports = Reports()
+    listener = HomeAssistantListener(reports, reports, reports)   # type: ignore[arg-type]
+    asyncio.run(listener.hub_is("NHUB"))   # no birth heard yet: no link Central knows of
+    assert reports.told == []
+    asyncio.run(listener.heard("e" * 32, (Heard(GALLERIA_BIRTH_KEY, encode_galleria_birth(GalleriaBirth(
+        version="1.2.3", kinds=("light",), connection=GalleriaConnection(server="NHUB", client=7)))),)))
+    reports.told.clear()
+    asyncio.run(listener.hub_is("NHUB"))   # the same hub: its link is judged by its close
+    assert reports.told == []
+    asyncio.run(listener.hub_is("NEWHUB"))
+    assert reports.told == [("link-closed", references.SOURCE)]
