@@ -1,5 +1,6 @@
 import { fact, factText, LAYER_NAMES, receiptText } from "./facts.js";
 import { boundOutput, frameForOutput, isBound, liveRunsFor } from "./join.js";
+import { clockTime } from "./timeWords.js";
 
 // The one definition lives with the bound-output join; consumers read it through here.
 export { isBound };
@@ -32,10 +33,10 @@ export { isBound };
 
 /**
  * @typedef {"ok"|"todo"|"alarm"} Severity
- * @typedef {"unbound"|"awaiting-report"|"player-silent"|"output-interrupted"|
+ * @typedef {"unbound"|"dark"|"awaiting-report"|"player-silent"|"output-interrupted"|
  *           "no-panel-at-enrollment"|"display-changed"|"needs-calibration"|"ok"} FrameState
  * @typedef {import("./routes.js").Tab} Tab
- * @typedef {"liveness"|"binding"|"output"|"panel"|"display"|"calibration"} Cause
+ * @typedef {"liveness"|"binding"|"dark"|"output"|"panel"|"display"|"calibration"} Cause
  * @typedef {{state: FrameState, severity: Severity, cause: Cause|null,
  *            label: string, tileLabel: string, settling: boolean,
  *            tab: Tab|null}} FrameHealth
@@ -44,7 +45,8 @@ export { isBound };
  *
  * `cause` groups states by what must change: "liveness" (awaiting-report and
  * player-silent — the Player's reports are not reaching Central), "binding"
- * (unbound), "output" (output-interrupted — a node layer reported the bound Output
+ * (unbound), "dark" (dark — the Pi's health judge tinted the bound Output's debug overlay, issue
+ * #126), "output" (output-interrupted — a node layer reported the bound Output
  * lost while its Run continues), "panel" (no-panel-at-enrollment), "display"
  * (display-changed: another display is on the Frame's port, resolved on the Hardware tab),
  * "calibration" (needs-calibration); null when ok. `label` is the full fact with its age;
@@ -167,7 +169,8 @@ export function ageAt(readAt, timestamp) {
 
 /**
  * The health of one frame: the first matching state, in design §4 order.
- * Rows 1–3 make the facts below them stale; an Output interruption Central has
+ * A dark Frame (its Pi's health judge, issue #126) follows unbound and precedes the liveness
+ * rows. Rows 1–3 make the facts below them stale; an Output interruption Central has
  * linked to the current Binding (console DDD §15) follows them; a physical cause (no Panel
  * listed at enrollment) precedes a configuration to-do (calibration). Only alarms are alarms.
  *
@@ -182,6 +185,11 @@ export function frameHealth(snapshot, frameId) {
   }
   if (!isBound(frame)) {
     return healthOf("unbound", "todo", "binding", "Needs a Player", "Needs a Player", "hardware");
+  }
+  // The Pi's own health judge says the bound Output is dark: it holds whatever the Player app's
+  // reports say (a frozen Player may still answer, a dead one says nothing), so it precedes them.
+  if (frame.dark != null) {
+    return healthOf("dark", "alarm", "dark", darkLabel(frame.dark), "Dark", "hardware");
   }
   const liveness = playerLiveness(snapshot, frame.player_id);
   if (liveness === null || liveness.state === "awaiting-report") {
@@ -236,6 +244,21 @@ export function frameHealth(snapshot, frameId) {
     );
   }
   return healthOf("ok", "ok", null, liveness.label, "Heard recently", null);
+}
+
+/**
+ * A dark Frame in words (issue #126): "Dark since 08:10 · out of open files". The time is when
+ * the card's evidence began on the Pi's own clock (`dark.since`, a UTC set time), shown to the
+ * minute on the house's clock and never compared with Central's; the cause is the catalogue's
+ * household line Central served (central/fleet/frame_dark.py).
+ *
+ * @param {{code: string, line: string, since: string}} dark the inventory Frame's `dark`
+ * @returns {string}
+ */
+export function darkLabel(dark) {
+  const seconds = Date.parse(dark.since) / 1000;
+  const since = Number.isFinite(seconds) ? clockTime(Math.floor(seconds / 60) * 60) : dark.since;
+  return `Dark since ${since} · ${dark.line}`;
 }
 
 /**

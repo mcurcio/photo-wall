@@ -2,22 +2,18 @@
 
 The broker is the single writer of the local intent journal. Once roots are
 verified it checks the old process, journals intent, arms the host recovery
-obligation, owns the stop, then starts the target and falls back if needed. Each
-transition is an effect event queued for Central; reporting never gates progress.
+obligation, owns the stop, then starts the target once ("release_switch",
+`appliance.apps.broker.StartCause`). A target that fails to start or exits before it
+proves control is `target_failed`, then `effect_unknown`: never a fallback to the old
+release and never a second start (issue #125; a person recovers). Each transition is
+an effect event queued for Central; reporting never gates progress.
 """
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from uuid import uuid4
 
-from appliance.apps.broker import (
-    RelaunchPacingStore,
-    RunningApp,
-    display_took_app,
-    relaunch_absent,
-)
-from appliance.apps.probe import RECOVERY_ACKNOWLEDGED, RECOVERY_ARMED
+from appliance.apps.broker import RunningApp, start_for_display
 from appliance.apps.stop_operation import (
     StopGuaranteeUnavailable,
     StopRequest,
@@ -41,16 +37,14 @@ from contracts.node_protocol import NodeCommandResponseV2, encode_node_message
 # A newer desired stage replaces the current record only before its stop intent
 # or after the switch completed. A stop or start in flight always finishes first;
 # an ambiguous outcome (effect_unknown) belongs to the host recovery obligation.
-_REPLACEABLE = ("preparing", "running", "fallback_running")
+_REPLACEABLE = ("preparing", "running")
 LOG = logging.getLogger(__name__)
 
 
 class OnlineEffectBroker:
-    def __init__(self, store, driver, session, recovery, *, pacing: RelaunchPacingStore,
-                 now_ms: Callable[[], int]):
+    def __init__(self, store, driver, session, recovery):
         self.store, self.driver, self.session = store, driver, session
         self.recovery = recovery
-        self.pacing, self.now_ms = pacing, now_ms
 
     @property
     def record(self):
@@ -89,14 +83,13 @@ class OnlineEffectBroker:
                     "response_pending": True, "pending": prior["pending"] if prior else [], "sequence": 0})
 
     def execute(self) -> None:
-        """Switch once roots are verified: _old → intent_stop → owned stop → target → fallback."""
+        """Switch once the target root is verified: _old → intent_stop → owned stop → target."""
         record = self.record
         if record is None or record["phase"] != "preparing":
             raise ValueError("online_switch_not_preparing")
         command = parse_stage_command(record["command"].encode())
-        for reference in (command.target, command.fallback):
-            if self.driver.verify(reference) is not True:
-                raise ValueError("online_root_unverified")
+        if self.driver.verify(command.target) is not True:
+            raise ValueError("online_root_unverified")
         _, available = memory_values()
         if available <= EMERGENCY_HEADROOM:
             raise ValueError("online_runtime_capacity")
@@ -154,12 +147,6 @@ class OnlineEffectBroker:
     def _arm_recovery(self, obligation):
         if self.recovery.arm(obligation) != obligation.receipt:
             raise ValueError("online_recovery_receipt")
-        # The last obligation the host accepted, kept apart from the online record (which a
-        # newer stage replaces before control is acknowledged): the probe kill rule stays
-        # fenced until this operation is acknowledged (recovery_may_be_armed, probe.py).
-        armed = {"operation_id": str(obligation.operation_id)}
-        if self.store.read(RECOVERY_ARMED) != armed:
-            self.store.write(RECOVERY_ARMED, armed)
 
     def _stop_fault(self, error):
         record = self.record
@@ -177,7 +164,7 @@ class OnlineEffectBroker:
         if stop_request_document(completed.request) != self.record["stop_request"]:
             raise StopGuaranteeUnavailable("stop_completion_mismatch")
         self._event("stopped", running=completed.request.old)
-        self._start(command, command.target, fallback=False)
+        self._start(command)
 
     def service(self):
         self.driver.service(now_ms=boottime_ms(), budget_ms=100)
@@ -187,100 +174,81 @@ class OnlineEffectBroker:
             return
         obligation = RecoveryObligation.parse(record["recovery"])
         proof = self.store.read("local-app-control")
-        if record["phase"] in ("running", "fallback_running") and proof is not None:
+        if record["phase"] == "running" and proof is not None:
             if proof["operation_id"] == str(obligation.operation_id):
                 self.recovery.advance(obligation, proof["progress"])
-                # The host accepted control: the obligation no longer guards the app, so the
-                # probe kill rule may act (recovery_may_be_armed, appliance/apps/probe.py).
-                acknowledged = {"operation_id": str(obligation.operation_id)}
-                if self.store.read(RECOVERY_ACKNOWLEDGED) != acknowledged:
-                    self.store.write(RECOVERY_ACKNOWLEDGED, acknowledged)
         elif record.get("stop_consumed"):
             self.recovery.advance(obligation, {"kind": "stopped"})
 
-    def _start(self, command, reference, *, fallback: bool):
+    def _start(self, command: StageCommandV2) -> None:
+        """Start the target once ("release_switch"). A start that fails with the unit absent is
+        the target's failure (`_target_failed`); one whose outcome is unknown is reported."""
         record = self.record
         if record.get("recovery"):
             self._arm_recovery(RecoveryObligation.parse(record["recovery"]))
-        # The intent is durable before selection/spawn, including fallback budget.
-        self._save({**record, "phase": "fallback_intent" if fallback else "target_intent"})
+        # The intent is durable before selection/spawn.
+        self._save({**record, "phase": "target_intent"})
         try:
             if not self.driver.absent_and_quiescent():
                 raise ValueError("online_start_not_quiescent")
-            self.driver.select(reference)
-            running = self.driver.start(reference, command.operation_id)
-            if running.environment != reference or running.operation_id != command.operation_id:
+            self.driver.select(command.target)
+            running = self.driver.start(command.target, command.operation_id)
+            if running.environment != command.target or running.operation_id != command.operation_id:
                 raise ValueError("online_started_identity_mismatch")
         except Exception:
-            if not fallback and self.driver.absent_and_quiescent():
-                self._event("target_failed", fault="target_start_failed")
-                self._start(command, command.fallback, fallback=True)
+            if self.driver.absent_and_quiescent():
+                self._target_failed("target_start_failed")
             else:
-                self._event("effect_unknown", fault="fallback_failed" if fallback else "start_outcome_unknown")
+                self._event("effect_unknown", fault="start_outcome_unknown")
             return
-        self._event("fallback_starting" if fallback else "starting_new", running=running)
-        self._event("fallback_running" if fallback else "running", running=running)
+        self._event("starting_new", running=running)
+        self._event("running", running=running)
+
+    def _target_failed(self, cause: str) -> None:
+        """The target failed (`cause`): `target_failed`, then `effect_unknown` with fault
+        `target_failed`. Nothing starts: neither the old release nor the target again."""
+        self._event("target_failed", fault=cause)
+        self._event("effect_unknown", fault="target_failed")
 
     def _controlled(self, command: StageCommandV2) -> bool:
         """The started app proved control for this operation (the proof `service` hands the host)."""
         proof = self.store.read("local-app-control")
         return proof is not None and proof.get("operation_id") == str(command.operation_id)
 
-    def _settle(self, record, command: StageCommandV2) -> None:
-        """A switch completes when its app proves control, not when its unit was first seen
-        active. Until then the app's exit is the switch's own failure: a target that dies
-        falls back, and a fallback that dies is reported (the host's deadline then recovers).
-        Never a silent wait for the recovery deadline's reboot."""
-        if self._controlled(command) or not self.driver.absent_and_quiescent():
-            return
-        if record["phase"] == "running":
-            self._event("target_failed", fault="target_exited_before_control")
-            self._start(command, command.fallback, fallback=True)
+    def _follow_display(self, record, command: StageCommandV2) -> None:
+        """After control, the switch's launch found absent: `exited_under` is recorded once, then
+        `start_for_display` starts the target again only if Display's own Weston restart took
+        it. A start that raises is reported, never retried; the switch's record otherwise stays
+        `running` (Central's phase), and the judge shows the absent run."""
+        if "exited_under" in record:
+            exited_under = record["exited_under"]
         else:
-            self._event("effect_unknown", fault="fallback_exited_before_control")
-
-    def _relaunch(self, command: StageCommandV2, phase: str):
-        """The paced relaunch of the launch `phase` (running or fallback_running) names; a failed
-        start is reported and kept as `relaunch_of` for the next turn's retry."""
-        launched = command.target if phase == "running" else command.fallback
+            exited_under = self.driver.display_incarnation()
+            self._save({**record, "exited_under": exited_under})
         try:
-            return relaunch_absent(self.driver, self.pacing, launched, command.operation_id,
-                                   now_ms=self.now_ms)
+            running = start_for_display(self.driver, command.target, command.operation_id,
+                                        exited_under=exited_under)
         except Exception:
-            self._event("effect_unknown", fault="relaunch_outcome_unknown")
-            self._save({**self.record, "relaunch_of": phase})
-            return None
+            self._event("effect_unknown", fault="start_outcome_unknown")
+            return
+        if running is not None:
+            self._save({key: value for key, value in self.record.items() if key != "exited_under"})
 
     def reconcile(self) -> None:
         record = self.record
         if record is None or record["phase"] == "preparing":
             return
         command = parse_stage_command(record["command"].encode())
-        # A relaunch whose start failed (E-1B-18 on the switch path) is asked again on the cold
-        # start's pacing, never left for good: the phase it relaunched is kept beside the fault.
-        retry = record.get("relaunch_of") if record["phase"] == "effect_unknown" else None
-        if retry is not None:
-            running = self.driver.current()
-            if running is None:
-                running = self._relaunch(command, retry)
-            if running is not None:
-                self._event(retry, running=running)
-                self._save({key: value for key, value in self.record.items() if key != "relaunch_of"})
-            return
-        if record["phase"] in ("running", "fallback_running"):
+        if record["phase"] == "running":
             if self.driver.current() is not None:
-                self._settle(record, command)
+                if "exited_under" in record:
+                    self._save({key: value for key, value in record.items() if key != "exited_under"})
                 return
-            # The app is absent. Before control is proven its exit is the switch's own failure
-            # (E-1B-17), unless its Weston took it. Otherwise the cold start's relaunch rule
-            # holds for the switch's current launch: the same root again, paced. The switch's
-            # own record is untouched; it still completes only at the control proof.
-            if (not self._controlled(command)
-                    and not display_took_app(self.driver.launched(),
-                                             self.driver.display_incarnation())):
-                self._settle(record, command)
-                return
-            self._relaunch(command, record["phase"])
+            if self._controlled(command):
+                self._follow_display(record, command)
+            elif self.driver.absent_and_quiescent():
+                # Before control proves the switch, the target's exit is its own failure (E-1B-17).
+                self._target_failed("target_exited_before_control")
             return
         if record.get("intent_stop_written") and not record.get("stop_consumed") and record.get("stop_request"):
             request = stop_request_from(record["stop_request"])
@@ -291,20 +259,16 @@ class OnlineEffectBroker:
                 self._stop_fault(error)
             return
         running = self.driver.current()
-        if running is not None and running.operation_id == command.operation_id:
-            if running.environment == command.target:
-                self._event("running", running=running)
-                return
-            if running.environment == command.fallback:
-                self._event("fallback_running", running=running)
-                return
+        if (running is not None and running.operation_id == command.operation_id
+                and running.environment == command.target):
+            self._event("running", running=running)
+            return
         if running is None and self.driver.absent_and_quiescent():
             if record["phase"] == "stopped":
-                self._start(command, command.target, fallback=False)
+                self._start(command)
                 return
             if record["phase"] == "target_intent":
-                self._event("target_failed", fault="target_absent_after_restart")
-                self._start(command, command.fallback, fallback=True)
+                self._target_failed("target_absent_after_restart")
                 return
         # Ambiguous stop or spawn is never blindly retried after a broker restart.
         if record["phase"] != "effect_unknown":

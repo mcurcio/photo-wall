@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
-import signal
+import stat
 import subprocess
 import time
 from collections.abc import Sequence
@@ -11,7 +11,13 @@ from dataclasses import replace
 from pathlib import Path
 from uuid import UUID
 
-from appliance.apps.broker import AppUnitSettling, ForeignAppUnit, Launch, RunningApp
+from appliance.apps.broker import (
+    AppUnitSettling,
+    ForeignAppUnit,
+    Launch,
+    PurposefulRestart,
+    RunningApp,
+)
 from appliance.apps.device_grants import DeviceGrant, player_device_grants
 from appliance.apps.environment import mounted_root
 from appliance.apps.lifecycle_storage import primitive, running_from
@@ -19,7 +25,12 @@ from appliance.apps.stop_linux import STOP_TIMEOUT_SECONDS, StopObserver
 from appliance.kernel.boot_store import BootStore
 from appliance.kernel.capacity import ROOT_IMAGES, line
 from appliance.kernel.clock import boottime_ms
-from appliance.kernel.display_paths import DISPLAY_UNIT, WAYLAND_DIRECTORY, WAYLAND_SOCKET
+from appliance.kernel.display_paths import (
+    DISPLAY_UNIT,
+    PURPOSEFUL_RESTART,
+    WAYLAND_DIRECTORY,
+    WAYLAND_SOCKET,
+)
 from appliance.kernel.image_mount import ImageMounter, SystemdImageMounter
 from appliance.process_identity import read_proc_start_ticks
 from contracts.app_environment import AppEnvironmentRefV2
@@ -86,9 +97,10 @@ def app_unit_properties(root: Path, devices: Sequence[DeviceGrant]) -> tuple[str
     pending Weston start's READY=1 (`After=`). `BindsTo=`, `Requires=`, `Requisite=` and `PartOf=`
     are never used: systemd turns a restart of the display unit into a try-restart along each of
     them, which started a Player the broker never launched (incident 2026-10-13, a signal range
-    change). `Restart=no`: the broker alone starts the Player, and only while Weston is up, again
-    at once for a new Weston incarnation and on its relaunch pacing after any other exit
-    (`appliance.apps.broker.relaunch_absent`). `PYTHONFAULTHANDLER=1` puts
+    change). `Restart=no`: the broker alone starts the Player, once at cold start, again only for
+    a Weston Display restarted on purpose, and for a release a person applies; any other exit
+    stays down until a person reboots (`appliance.apps.broker.start_for_display`, issue #125).
+    `PYTHONFAULTHANDLER=1` puts
     the Python stack of a crash in its journal. It reaches Weston through
     WAYLAND_DIRECTORY, bound in whole at the same path (the directory outlives every Weston, so
     the bind never holds a stale socket), with WAYLAND_DISPLAY the socket's absolute path; its
@@ -125,8 +137,10 @@ class SystemdAppProcessDriver:
     def __init__(self, roots: Path, store: BootStore, *, base_abi: str,
                  graphics_abi: str, plugin_abi: str, proc: Path = Path("/proc"),
                  cgroups: Path = Path("/sys/fs/cgroup"), images: Path = ROOT_IMAGES,
-                 mounter: ImageMounter | None = None, sysfs: Path = Path("/sys")):
+                 mounter: ImageMounter | None = None, sysfs: Path = Path("/sys"),
+                 purposeful: Path = PURPOSEFUL_RESTART):
         self.roots, self.store, self.proc, self.sysfs = roots, store, proc, sysfs
+        self.purposeful = purposeful
         self.cgroups, self.images = cgroups, images
         self.mounter = mounter if mounter is not None else SystemdImageMounter()
         self.stops = StopObserver(self)
@@ -143,9 +157,8 @@ class SystemdAppProcessDriver:
     def display_incarnation(self) -> str | None:
         """The running Weston's InvocationID; None unless the display unit is active with no job
         pending. A Weston with a restart or stop queued is on its way out (a signal range change
-        stops the Player, then the controller, then Weston): no relaunch is judged or spawned
-        against it, so the broker's next Player is the new Weston's, at once and never counted as
-        the Player's own exit (`relaunch_absent`)."""
+        stops the Player, then the controller, then Weston): a Player found absent then was not
+        seen to exit under its own Weston (`appliance.apps.broker.restarted_on_purpose`)."""
         rows = systemctl_show(DISPLAY_UNIT, DISPLAY_PROPERTIES)
         if rows["ActiveState"] != "active" or rows["Job"] not in ("", "0"):
             return None
@@ -158,6 +171,26 @@ class SystemdAppProcessDriver:
         if launch is None:
             return None
         return Launch(launch["epoch"], launch.get("display"), launch["started_ms"])
+
+    def purposeful_restart(self) -> PurposefulRestart | None:
+        """Display's mark (PURPOSEFUL_RESTART, written by photo-wall-display-signal.service
+        before it restarts Weston): a regular file, never a symlink, at most 64 bytes, its text
+        stripped. Anything else, absent included, is None; never raises."""
+        try:
+            descriptor = os.open(self.purposeful, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError:
+            return None
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                return None
+            raw = os.read(descriptor, 65)
+            if len(raw) > 64:
+                return None
+            return PurposefulRestart(raw.decode("ascii").strip())
+        except (OSError, ValueError):  # UnicodeDecodeError is a ValueError
+            return None
+        finally:
+            os.close(descriptor)
 
     def unit_collected(self) -> bool:
         """PID1 unloaded the fixed unit name (after --collect) and no app or job remains."""
@@ -216,7 +249,7 @@ class SystemdAppProcessDriver:
     def _adopt(self, launch: dict, observed: RunningApp) -> RunningApp:
         """A run the broker did not spawn, of its launch's root, cgroup and environment (`_observe`
         proved them): the broker's own app, so it becomes the current launch, a new epoch with its
-        identity, the running Weston and now as its start, and its exit is paced like any other.
+        identity, the running Weston and now as its start, and its exit judged like any other.
         UX over strictness: the wall keeps its picture. Nothing in the base starts the unit
         (`app_unit_properties`); this keeps a stray start, a manual one included, harmless."""
         adopted = replace(observed, app_epoch=launch["epoch"] + 1)
@@ -228,41 +261,10 @@ class SystemdAppProcessDriver:
 
     def stop_foreign(self) -> None:
         """Ask PID1 to stop whatever runs under the app's unit name (a ForeignAppUnit), without
-        waiting; later turns observe the stop and the broker relaunches its own app on its
-        pacing."""
+        waiting; later turns observe the stop, and nothing starts in its place."""
         subprocess.run(["/usr/bin/systemctl", "--no-block", "stop", UNIT], check=True, timeout=5,
                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                        env={"PATH": "/usr/bin", "LANG": "C"})
-
-    def kill(self, expected: RunningApp) -> bool:
-        """SIGKILL exactly `expected`'s main process; False (no signal) on any mismatch.
-
-        The pidfd pins one process before its identity is checked, so a pid reused after the
-        check cannot receive the signal: kernel birth (start ticks) and systemd's MainPID and
-        InvocationID must all match. KillMode=control-group takes the rest of the unit;
-        Restart=no leaves its restart to the broker, which relaunches on its pacing
-        (`appliance.apps.broker.relaunch_absent`). An unavailable observation raises (nothing
-        was sent).
-        """
-        pid = expected.process.pid
-        try:
-            descriptor = os.pidfd_open(pid)
-        except ProcessLookupError:
-            return False
-        try:
-            if read_proc_start_ticks(self.proc, pid) != expected.process.start_ticks:
-                return False
-            rows = systemctl_show(UNIT)
-            if (rows["MainPID"] != str(pid)
-                    or rows["InvocationID"] != str(expected.process.invocation_id)):
-                return False
-            try:
-                signal.pidfd_send_signal(descriptor, signal.SIGKILL)
-            except ProcessLookupError:
-                return False
-            return True
-        finally:
-            os.close(descriptor)
 
     def absent_and_quiescent(self) -> bool:
         if self.current() is not None:
@@ -381,8 +383,8 @@ class SystemdAppProcessDriver:
         previous = self.store.read("launch")
         self._await_unit_unloaded(previous)
         epoch = previous["epoch"] + 1 if previous else 1
-        # Read before the spawn: a Weston that restarts in between costs one spare relaunch,
-        # never a missed one.
+        # Read before the spawn: a Weston Display restarts on purpose in between costs one spare
+        # start (its mark names the Weston recorded here), never a missed one.
         launch = {"environment": primitive(environment), "operation_id": str(operation_id),
                   "epoch": epoch, "running": None, "display": self.display_incarnation(),
                   "started_ms": boottime_ms()}

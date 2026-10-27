@@ -34,8 +34,8 @@ def broker_loop(tmp_path, monkeypatch, *, granted: bool):
     state = {"running": None, "ms": 0}
     session = Session(producer, granted=granted)
     feed = Feed(512)
-    probes = SimpleNamespace(check=lambda: None, publish_run=lambda run, recovery_may_be_armed: None,
-                             owe_relink=lambda run: None, feed=feed, take_kill_due=lambda: None)
+    probes = SimpleNamespace(check=lambda: None, publish_run=lambda run: None,
+                             owe_relink=lambda run: None, feed=feed)
     online = SimpleNamespace(broker=SimpleNamespace(record=None, service=lambda: None),
                              tick=lambda: None)
     loop = BrokerLoop(broker=SimpleNamespace(reconcile=lambda: None), online=online, store=store,

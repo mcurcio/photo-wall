@@ -29,13 +29,21 @@ Rules this module owns (one home each):
   opacity below 1 cannot be swapped and fades in on top, as does a layer over one not opaque.
 - **Removed, never transparent**: a plane under MIN_STRENGTH is left out of the composition (bench
   T3: an opaque picture at alpha 0 is not black; the plane is removed instead).
+- **A Frame is never shown as nothing** (`compose`, issue #123: "Dark on purpose (Night off, Resting)
+  is drawn as a black plane by the Player so it is never mistaken for 'nothing to show'"): a Frame
+  none of whose layers has a plane (an empty fallback: nothing kept, nothing playing; a moment of a
+  dip too dark for any plane) gets its **dark plane**, a black picture over its whole placement at
+  full strength. Over the screen's black ground it changes no pixel, but it is a picture plane the
+  compositor sees, which is what Display Host's shell keeps the Output with (`shell.c`
+  `hold_evidence`); the ground never is. It is the Player's own drawing, never a layer: the
+  composition reported stays the looked one, so no assignment is invented or reported presented.
 - **The finish size** (`finish_size`, `Plane.size`): a picture (a still photo or a video's frame) is
   finished (fit, crop, look, LUT) at the smaller of its source's cropped size and its Frame's
   placement, scaled down evenly so the Frame's aspect is kept, and the display controller enlarges
   it to the placement (owner, 2026-10-18: "the look-and-feel should be applied at the minimum of the
   asset size and the frame size"). So the controller only ever enlarges or shows a picture 1:1,
   never shrinks it (bench T2: shrinking large sources glitches), and no picture is shown from a
-  buffer larger than it appears. A black layer's picture is the placement's size.
+  buffer larger than it appears. A black layer's picture, and a dark plane's, is the placement's size.
 - **What a still's decode hands the GPU** (`still_region`): the crop window of the copy, in whole
   pixels, scaled to the finish size; never the whole copy (player/decode.py, The still pipeline).
 
@@ -61,6 +69,9 @@ from player.visibility import opaque, visible_now
 
 MIN_STRENGTH: Final = 1 / 255
 """The weakest plane shown: the controller's 8-bit plane alpha rounds anything below to 0."""
+DARK_KEY: Final = "#dark:"
+"""A dark plane's picture key is this and its Frame's id (`Plane.key`): '#' starts no assignment id
+(contracts/identifiers.py IDENTIFIER_PATTERN), so a dark plane never shares a layer's key."""
 
 
 @dataclass(frozen=True)
@@ -121,17 +132,31 @@ def still_region(layer: Layer, at: Placement) -> StillRegion:
 @dataclass(frozen=True)
 class Plane:
     """One picture the controller places: the layer it shows (a media layer's finished picture, or a
-    black layer's black picture), at its Frame's placement `at` (the plane's destination), at
+    black layer's black picture; None: the Frame's dark plane, its black picture, module rule A
+    Frame is never shown as nothing), at its Frame's placement `at` (the plane's destination), at
     `strength` (its plane alpha), MIN_STRENGTH <= strength <= 1. Its picture is `size` as it hangs
     (the plane's source), which the controller enlarges to `at` when smaller (`enlarged`)."""
     frame_id: str
-    layer: LocalLayer
+    layer: LocalLayer | None
     at: Placement
     strength: float
 
     @property
+    def dark(self) -> bool:
+        """Whether this is its Frame's dark plane (module rule), not a layer's."""
+        return self.layer is None
+
+    @property
+    def key(self) -> str:
+        """Which picture the plane shows: its layer's assignment id, or DARK_KEY and its Frame's id."""
+        return DARK_KEY + self.frame_id if self.layer is None else self.layer.layer.assignment_id
+
+    @property
     def size(self) -> tuple[int, int]:
-        """The plane's picture as it hangs: `finish_size(layer, at)` (module rule)."""
+        """The plane's picture as it hangs: `finish_size(layer, at)` (module rule); a dark plane's,
+        the placement's."""
+        if self.layer is None:
+            return self.at.width, self.at.height
         return finish_size(self.layer.layer, self.at)
 
     @property
@@ -162,7 +187,9 @@ def compose(screen: Screen, frames: Sequence[FrameLayers]) -> Composition:
     """`screen`'s composition: for each Frame in order, its seen layers (`visible_now`) bottom to
     top, each a Plane at the Frame's placement at `plane_strength(alpha, over_picture)` (module
     rule), a layer fading in over an opaque one beneath it at full and that one above at the rest
-    (module rule, A shown picture keeps its plane), a plane under MIN_STRENGTH left out. Pure.
+    (module rule, A shown picture keeps its plane), a plane under MIN_STRENGTH left out; a Frame
+    left with no plane gets its dark plane at full (module rule, A Frame is never shown as nothing).
+    Pure.
 
     ValueError("compose_frames") for two FrameLayers with one frame_id; ValueError("compose_outside")
     unless every placement lies inside `screen.size` (0 <= x, x + width <= W, 0 <= y,
@@ -178,8 +205,9 @@ def compose(screen: Screen, frames: Sequence[FrameLayers]) -> Composition:
             raise ValueError("compose_outside")
         if any(local.layer.output_id != screen.output_id for local in frame.layers):
             raise ValueError("compose_output")
-        planes.extend(Plane(frame.frame_id, local, at, strength)
-                      for local, strength in _stacked(visible_now(frame.layers)) if strength >= MIN_STRENGTH)
+        shown = [Plane(frame.frame_id, local, at, strength)
+                 for local, strength in _stacked(visible_now(frame.layers)) if strength >= MIN_STRENGTH]
+        planes.extend(shown or [Plane(frame.frame_id, None, at, 1.0)])
     return Composition(screen, tuple(planes))
 
 
@@ -198,5 +226,5 @@ def _stacked(seen: Sequence[LocalLayer]) -> list[tuple[LocalLayer, float]]:
     return stacked
 
 
-__all__ = ["MIN_STRENGTH", "Composition", "FrameLayers", "Plane", "Screen", "compose", "finish_size", "plane_strength",
-           "still_region"]
+__all__ = ["DARK_KEY", "MIN_STRENGTH", "Composition", "FrameLayers", "Plane", "Screen", "compose", "finish_size",
+           "plane_strength", "still_region"]

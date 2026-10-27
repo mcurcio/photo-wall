@@ -14,6 +14,8 @@ Output. Each must end this client with a protocol error (logged by libwayland to
 Two modes leave the layer unmapped, writing MARKER_FILE once done: `bare` takes the layer and
 commits it without a buffer (marker `bare`); `unmap` maps the tint, then on that commit's
 presentation feedback commits a NULL buffer (marker: the feedback, `presented` or `discarded`).
+Every configure's slate reason is appended to REASONS_FILE ("<output> <reason>" per line), so
+the smoke can read what the slate says (the shell's reason, native/shell.c `diagnostic_configure`).
 `production` runs the production client unchanged (`main()` with its own health hooks and judge
 link), so the smoke can drive the real health drawing against its fake judge.
 Same `sys.path` rule as the production launcher (`-I` implies `-P`).
@@ -23,11 +25,13 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+sys.path.insert(1, "/usr/lib/photo-wall/common")   # contracts (photo-wall-common): the Frame region
 
 from overlay.client import main  # noqa: E402
 
 MODE_FILE = "/tmp/pw-health-client-mode"
 MARKER_FILE = "/tmp/pw-health-client-marker"
+REASONS_FILE = "/tmp/pw-slate-reasons"
 TINT = bytes((0x80, 0x00, 0x80, 0x80))  # ARGB8888 little-endian, premultiplied: magenta at 0.5
 CLEAR = bytes(4)
 
@@ -57,6 +61,8 @@ class HealthTint:
         self.held: list[object] = []      # pywayland destroys a collected proxy
 
     def output_configured(self, client, output) -> None:
+        with open(REASONS_FILE, "a") as handle:
+            handle.write(f"{output.name} {output.reason}\n")
         if output.name in self.done or not output.width or not output.height:
             return
         self.done.add(output.name)

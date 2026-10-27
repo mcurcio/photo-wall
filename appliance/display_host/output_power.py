@@ -232,6 +232,7 @@ class _Port:
     identity: DisplayIdentity | None = None
     modes: tuple[DisplayMode, ...] = ()
     size_mm: tuple[int, int] | None = None
+    current_mode: tuple[int, int] | None = None
     document: OutputDocument | None = None
     started: dict[str, float] = field(default_factory=dict)   # the test's id -> first apply
     acted: tuple[object, ...] | None = None   # `_carried` of the last look's in-force
@@ -297,14 +298,18 @@ class OutputPowerController:
                 self._put(output_id, port)
 
     def output(self, output_id: str, *, connected: bool, identity: DisplayIdentity | None,
-               modes: tuple[DisplayMode, ...], size_mm: tuple[int, int] | None = None) -> None:
+               modes: tuple[DisplayMode, ...], size_mm: tuple[int, int] | None = None,
+               current_mode: tuple[int, int] | None = None) -> None:
         """What the compositor and the EDID say about `output_id` now (`size_mm`: the EDID's picture
-        size, None when it states none); a disconnected-then-connected Output is APPEARED. Re-puts the Output's report. Thread-safe, never blocks."""
+        size, None when it states none; `current_mode`: the mode Weston runs, as built, None when not
+        known); a disconnected-then-connected Output is APPEARED. Re-puts the Output's report.
+        Thread-safe, never blocks."""
         with self._wake:
             first = output_id not in self._ports
             port = self._ports.setdefault(output_id, _Port())
             appeared = connected and not port.connected
             port.connected, port.identity, port.modes, port.size_mm = connected, identity, modes, size_mm
+            port.current_mode = current_mode
             if first:
                 self._queue(output_id, Trigger.START)
             elif appeared:
@@ -326,7 +331,8 @@ class OutputPowerController:
     def _put(self, output_id: str, port: _Port) -> None:
         """Under the lock: the Output's report, put only when it differs from the last."""
         report = OutputReport(output_id, port.connected, port.identity, port.modes, port.answers,
-                              port.method, port.for_change, port.result, port.in_force, port.size_mm)
+                              port.method, port.for_change, port.result, port.in_force, port.size_mm,
+                              port.current_mode)
         if self._reports.get(output_id) != report:
             self._reports[output_id] = report
             self._sink.put_report(report)

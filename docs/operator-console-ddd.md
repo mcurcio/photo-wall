@@ -341,7 +341,6 @@ Before R0, Central recorded any new command id without checking for an outstandi
 | staged, rejected | "Rejected by App Effect Broker" (the reason is not served) | `reported` (response receipt) |
 | switching | "App Effect Broker reported switching (<latest phase>)" | `reported` (`latest_effect.received_at`) |
 | target_running | "App Effect Broker reported the staged app running" | `reported` |
-| fallback_running | "App Effect Broker reported the fallback app running" | `reported` |
 | effect_unknown | "App Effect Broker reported the outcome as unknown" | `reported` |
 | superseded | "Replaced by a later stage" | `set`; plus a second Evidence fact for what the broker had reported before (served `command_response` or `latest_effect`), so a rejection is not hidden (R0) |
 | interrupted_by_reboot | "Interrupted (Central's inference: a later boot of this Player was admitted)" | `derived`; plus the same second Evidence fact (R0) |
@@ -872,7 +871,7 @@ stateDiagram-v2
 | Choose | the release row names its deployment, not selected | "Try it on one Frame (optional)" with a picker of bound Players and their Frames, the release's readiness fact, the named plan with Skip, and **Put vX on the wall…**. Try is withdrawn, with the reason, when the target's base differs from the release the selection carries ("This release changes the base, so it cannot be tried live; putting it on the wall reboots each Player onto it"). That pre-check is a hint only; Central judges at send | `set` |
 | Qualifying | tried Player chosen and this page is sampling | the requirement ("one steady photo or looping video on every Output of this Player for 30 s"), a link to Show now for its Frames, and the sampler's progress and stop words (§27) | `derived` (Central's sample answers) |
 | Staging | the tried Player's latest operation is not a stage of the target, or it is Staged or Switching | Stage inline with the target fixed (the Player page's dialog lists deployments for choice), with the dialog words including the bound rule (§25); then the operation state | `set`, `reported` (App Effect Broker) |
-| Looking | the tried Player's latest stage is the target's and is `target_running`, `fallback_running` or `effect_unknown`. The app-attempts read serves no deployment per operation, so a stage is "the target's" when this page holds it (operation id), or when it reads `target_running` while the linked app (G4) is the target's. After a reload, a target stage that is staged, switching, `fallback_running` or `effect_unknown` therefore shows as Staging, offering a newer stage with its "replaces" words (stated cost, §31) | per bound Frame: its Runs and Output state from the snapshot; the operation state. On `fallback_running`: "The new app did not start; the Player fell back on its own. Back out is recommended." Keep stays offered | `reported` (readiness, broker) |
+| Looking | the tried Player's latest stage is the target's and is `target_running` or `effect_unknown`. The app-attempts read serves no deployment per operation, so a stage is "the target's" when this page holds it (operation id), or when it reads `target_running` while the linked app (G4) is the target's. After a reload, a target stage that is staged, switching or `effect_unknown` therefore shows as Staging, offering a newer stage with its "replaces" words (stated cost, §31) | per bound Frame: its Runs and Output state from the snapshot; the operation state. Keep stays offered | `reported` (readiness, broker) |
 | Keeping | the selection is the target (G1) | the selection fact, the fleet-wide sentence (below), and one row per planned Player (next table) | `set` + per row |
 | Backing out | the tried Player is chosen, the selection is not the target, and Back out was pressed | the reboot's command state (§10), then the Player's new boot | `set`, `claimed` |
 | Done | Keeping with nothing pending (never before the snapshot the plan comes from is read: until then the step is reading), or Backing out completed | a summary of the rows; **Undo** selects the selection's `previous_deployment_id` directly, by id (Select alone, its own confirmation), then opens that release's own Update the wall, whose Resume offers the reboots; a previous deployment with no release (published before the upgrade under another id) is selected and stays on this page | `derived` |
@@ -987,7 +986,6 @@ stateDiagram-v2
   state "Staged (no response, or the broker's response)" as Staged
   Staged --> Switching: broker effect intent_stop … starting_new
   Switching --> TargetRunning: running
-  Switching --> FallbackRunning: fallback_running
   Switching --> EffectUnknown: effect_unknown
   Staged --> Interrupted: later boot admitted
   Switching --> Interrupted: later boot admitted

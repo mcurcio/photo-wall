@@ -922,6 +922,19 @@ def labelled(*labels):
     return lambda item: item["label"] in labels
 
 
+def position_demo_frame(registry, frame: str, device_id: str, output: dict) -> None:
+    """Give the bound demo Frame `frame` its screen and its Position. A demo Player has no Node,
+    so no display line reports its Output: the demo records the report that line would send, the
+    mode Weston would run being the size the Player enrolled with (`current_mode`, the first source
+    of a Frame's screen size, issue #124; without it no Frame has a screen and none is given
+    photos), then saves `demo_position` on it."""
+    from support.output_report import report_modes
+    from support.position import save_position
+    observation = output["observation"]
+    report_modes(registry, device_id, (output["output_id"],), (observation["width_px"], observation["height_px"]))
+    save_position(registry, frame, demo_position(observation))
+
+
 def demo_position(observation: dict):
     """The demo Frame's Position: a box DEMO_OPENING_PX output pixels square at the top left of
     the Output its Pi reported (the demo's Frames hang at turn 0), so its Frame output
@@ -933,11 +946,12 @@ def demo_position(observation: dict):
 
 
 def operator_action(action: str):
-    """Control through real operator HTTP; SQL is limited to evidence reads, and to Position Save
+    """Control through real operator HTTP; SQL is limited to evidence reads, to each Output's
+    report on its display line (`support.output_report.report_modes`, through Central's real
+    OutputReportJudge: the one source of a Frame's screen size, issue #124), and to Position Save
     (`support.position.save_position`, the tests' helper through Registry's Save CAS), which has
     no operator route without a Position trial: the demo's Players have no Node."""
     import httpx
-    from support.position import save_position
 
     from central.db import Database
     from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
@@ -998,13 +1012,14 @@ def operator_action(action: str):
         frames = []
         database = Database(os.environ["PHOTO_WALL_DATABASE_URL"])
         registry = Registry(database, SystemClock(), lighting=PgFrameLighting(LUT_RECIPE_ID))
+        devices = {player["id"]: player["device_id"] for player in inventory["players"]}
         try:
             for index, output in enumerate(outputs):
                 frame = "demo-frame-" + str(index + 1)
                 request("POST", "/v1/operator/frames", {"id": frame, "video": True})
                 request("PUT", "/v1/operator/frames/" + frame + "/binding", {
                     "player_id": output["player_id"], "output_id": output["output_id"], "expected_generation": 0})
-                save_position(registry, frame, demo_position(output["observation"]))
+                position_demo_frame(registry, frame, devices[output["player_id"]], output)
                 frames.append(frame)
         finally:
             database.close()

@@ -338,9 +338,8 @@ def test_no_grant_holds_the_slot(monkeypatch, node):
 
 def loop_turn(node, running, session, *, granted):
     owed = []
-    probes = SimpleNamespace(check=lambda: None, publish_run=lambda run, recovery_may_be_armed: None,
-                             feed=Feed(64), owe_relink=owed.append, owed=owed,
-                             take_kill_due=lambda: None)
+    probes = SimpleNamespace(check=lambda: None, publish_run=lambda run: None,
+                             feed=Feed(64), owe_relink=owed.append, owed=owed)
     session.ensure = lambda: session.grant if granted else None
     online = SimpleNamespace(broker=SimpleNamespace(record={"phase": "running"}, service=lambda: None),
                              tick=lambda: None)

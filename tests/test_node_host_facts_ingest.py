@@ -178,7 +178,7 @@ def test_g12_serves_only_the_current_boots_facts_and_its_base_tag(registry):
     received = registry.clock.utc()
     _send(first, _facts(first.grant.producer, 1))
     served = _device(observations.fleet_hosts())
-    assert served["facts"] == {"first_received_at": received, **VALUES, "boot": None}
+    assert served["facts"] == {"first_received_at": received, **VALUES, "reset_cause": None, "boot": None}
     assert served["boot"] == {"base_tag": BASE_TAG}
     # A reboot: the new admission has a session but no facts. The old boot's facts are the
     # newest facts Central holds for this box, yet they are never served.
@@ -195,7 +195,7 @@ def test_g12_serves_only_the_current_boots_facts_and_its_base_tag(registry):
     _send(second, _facts(second.grant.producer, 1, kernel_release=None, address=None))
     served = _device(observations.fleet_hosts())
     assert served["facts"] == {**VALUES, "first_received_at": registry.clock.utc(),
-                               "kernel_release": None, "address": None, "boot": None}
+                               "kernel_release": None, "address": None, "reset_cause": None, "boot": None}
 
 
 def test_g12_boot_is_null_without_an_admission_and_the_node_offers_base_tag_with_one(registry):

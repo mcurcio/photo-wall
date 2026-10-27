@@ -17,7 +17,7 @@ from central.fleet.node_app_links import (
 )
 from central.fleet.node_sessions import NodeControlError, NodeSessions, claim_intake_in
 from central.installation_repository import PostgresInstallationRepository
-from central.transaction_locks import acquire_runtime_locks
+from central.transaction_locks import acquire_node_lock, acquire_runtime_locks
 from contracts.node_commands import parse_session_grant
 from contracts.node_display import (
     DisplayDecision,
@@ -136,7 +136,19 @@ class NodeDisplay:
         request = parse_display_exchange(raw)
         canonical = encode_display_exchange(request)
         with self.sessions.db.transaction() as conn:
-            acquire_runtime_locks(conn)
+            # Issue #127: only this Node's own lock, never the fleet-wide Coordination lock. One
+            # session names one device, so its device id is read without a lock first.
+            located = conn.execute("SELECT device_id FROM node_sessions WHERE session_id=%s",
+                                   (session_id,)).fetchone()
+            if located is None:
+                raise NodeControlError("node_session_unavailable", 401)
+            device_id = located["device_id"]
+            if request.completed_decision_id is not None:
+                # A completion reports a decision's effect once: a handoff's resolves the Output's
+                # loss, Runtime state the Coordinator reads (`reconcile_node_output_in`), so it
+                # alone takes Coordination and Runtime, before the Node lock, in the one order.
+                acquire_runtime_locks(conn)
+            acquire_node_lock(conn, device_id)
             principal = self.sessions.authenticate_in(conn, session_id, credential)
             if request.producer != principal.grant.producer:
                 raise NodeControlError("display_producer_mismatch", 403)
@@ -197,7 +209,7 @@ class NodeDisplay:
             operation, reason, fence, receipt = "retain", "no_current_binding", None, None
             decision_surface = surface
             if link is not None and request.connected:
-                self._complete_in(conn, principal, request, surface, link, now)
+                self._complete_in(conn, principal, request, surface, link, now, device_id)
                 previous = request.admitted or request.candidate
                 if previous is not None and (surface is None or previous.frame_id != surface.frame_id
                         or previous.process != surface.process or previous.app_epoch != surface.app_epoch
@@ -205,7 +217,8 @@ class NodeDisplay:
                     if not ((latest and previous in (old.admitted, old.candidate))
                             or self._authorized_previous_in(conn, principal, request, previous)):
                         raise NodeControlError("display_withdrawal_previous_unknown", 409)
-                    admission = self.runtime.display_withdrawal_in(conn, player_id=link.player_id,
+                    admission = self.runtime.display_withdrawal_in(conn, device_id=device_id,
+                        player_id=link.player_id,
                         authority_epoch=link.authority_epoch, previous_surface=previous,
                         expected_surface=surface)
                     if admission.allowed:
@@ -217,7 +230,8 @@ class NodeDisplay:
                     operation, reason = self._operation(request, surface)
                     if operation != "retain":
                         admission = self.runtime.display_admission_in(
-                            conn, player_id=link.player_id, authority_epoch=link.authority_epoch,
+                            conn, device_id=device_id, player_id=link.player_id,
+                            authority_epoch=link.authority_epoch,
                             output_id=binding.output_id, frame_id=binding.frame_id,
                             binding_generation=binding.generation,
                             config_revision=binding.configuration_revision,
@@ -316,7 +330,10 @@ class NodeDisplay:
                 and 0 <= request.sampled_boottime_ms - receipt.sampled_boottime_ms < self.receipt_ms)
 
     def current_frame_in(self, conn, frame_id: str):
-        """Operator-side read under Runtime locks, then the device fence and session order."""
+        """Operator-side read under Runtime locks, then the Node's own lock (the display
+        admission's, so this trial orders against the Node's exchanges), the device fence and
+        session order. Lock order: Coordination, Runtime, Node; an exchange takes the Node lock
+        alone, so no cycle."""
         row = conn.execute(
             "SELECT b.player_id,b.output_id,p.authority_epoch,p.device_id "
             "FROM bindings b JOIN players p ON p.id=b.player_id WHERE b.frame_id=%s "
@@ -325,6 +342,7 @@ class NodeDisplay:
         ).fetchone()
         if row is None:
             raise TrialRefused(TrialRefusal.FRAME_UNBOUND)
+        acquire_node_lock(conn, row["device_id"])
         generation = fence_in(conn, row["device_id"], "act").generation()
         now = self.sessions.clock.utc()
         session = conn.execute(
@@ -381,6 +399,7 @@ class NodeDisplay:
             raise TrialRefused(TrialRefusal.ADMITTED_SURFACE_REQUIRED)
         admission = self.runtime.display_admission_in(
             conn,
+            device_id=row["device_id"],
             player_id=link.player_id,
             authority_epoch=link.authority_epoch,
             output_id=binding.output_id,
@@ -419,7 +438,7 @@ class NodeDisplay:
             return "candidate", "candidate_requires_runtime"
         return "retain", "candidate_identity_changed"
 
-    def _complete_in(self, conn, principal, request, surface, link, now) -> None:
+    def _complete_in(self, conn, principal, request, surface, link, now, device_id: str) -> None:
         if request.completed_decision_id is None:
             return
         row = conn.execute(
@@ -455,6 +474,7 @@ class NodeDisplay:
             raise NodeControlError("display_handoff_receipt_mismatch", 409)
         admission = self.runtime.display_admission_in(
             conn,
+            device_id=device_id,
             player_id=link.player_id,
             authority_epoch=link.authority_epoch,
             output_id=surface.output.output_id,

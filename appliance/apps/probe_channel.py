@@ -2,18 +2,14 @@
 waits on the main loop (which blocks on systemctl and HTTP).
 
 The main loop hands over admitted channels (`adopt`), publishes the current app run each
-turn (`publish_run`), restates the relink it owes (`owe_relink`) and collects kill decisions
-(`take_kill_due`); it alone actuates. This thread only measures: it sends a nonce every T on
+turn (`publish_run`) and restates the relink it owes (`owe_relink`). This thread only measures: it sends a nonce every T on
 the current run's channel, matches answers, and appends probe facts (audience node) to the
 broker feed, with the renderer the Player reports on its channel (`app_renderer`). It never calls systemctl, HTTP, the store or the driver. A channel is judged
 against every publication after its adoption: one whose run is not the published run is
 closed. An owed relink is a level, not a packet: each channel instance for the owed run gets
 it once per owed episode (each Central refusal is a new episode), so a relink owed while no
-channel is open reaches the next one and a later refusal reaches a long-lived channel again. Kill-due is a level
-too: the latch is re-asserted on every turn while the run stays unanswered for at least K
-(the `probe_kill_due` fact stays once per episode) and dropped by an answer, so a kill the main
-loop withheld (an armed recovery) is offered again until it is taken and carried out or the
-run answers.
+channel is open reaches the next one and a later refusal reaches a long-lived channel again.
+Nothing acts on an unanswered run (issue #125): the judge shows it, a person recovers it.
 """
 from __future__ import annotations
 
@@ -28,7 +24,6 @@ from dataclasses import dataclass
 from appliance.apps.probe import (
     SHIPPED_TIMING,
     AppRunKey,
-    KillDue,
     OwedRelink,
     ProbeClock,
     ProbeTiming,
@@ -60,11 +55,9 @@ class ProbeThread:
         self.feed, self._now, self.timing = feed, clock, timing
         self._lock = threading.Lock()
         # Main loop -> thread (under the lock).
-        self._publication: tuple[int, AppRunKey | None, bool] = (0, None, False)
+        self._publication: tuple[int, AppRunKey | None] = (0, None)
         self._adoptions: list[_Channel] = []
         self._owed: OwedRelink | None = None
-        # Thread -> main loop (under the lock).
-        self._kill_due: KillDue | None = None
         # Thread-owned.
         self._applied = 0
         self._probes: ProbeClock | None = None
@@ -114,24 +107,13 @@ class ProbeThread:
             self._adoptions.append(_Channel(connection, run, self._publication[0]))
         self._wake()
 
-    def publish_run(self, run: AppRunKey | None, recovery_may_be_armed: bool) -> None:
-        """The main loop's current app run and its kill guard, every turn."""
+    def publish_run(self, run: AppRunKey | None) -> None:
+        """The main loop's current app run, every turn."""
         with self._lock:
-            sequence, previous, _ = self._publication
-            self._publication = (sequence + 1, run, bool(recovery_may_be_armed))
+            sequence, previous = self._publication
+            self._publication = (sequence + 1, run)
         if run != previous:
             self._wake()
-
-    @property
-    def recovery_may_be_armed(self) -> bool:
-        with self._lock:
-            return self._publication[2]
-
-    def take_kill_due(self) -> KillDue | None:
-        """Take the kill-due latch; the thread re-asserts it next turn while still overdue."""
-        with self._lock:
-            due, self._kill_due = self._kill_due, None
-            return due
 
     def owe_relink(self, owed: OwedRelink | None) -> None:
         """The relink the outbox owes a run's Player (Central refused its link), every turn.
@@ -186,7 +168,7 @@ class ProbeThread:
 
     def _apply(self, now: int) -> None:
         with self._lock:
-            sequence, run, _ = self._publication
+            sequence, run = self._publication
             adoptions, self._adoptions = self._adoptions, []
         if sequence != self._applied:
             self._applied = sequence
@@ -194,8 +176,6 @@ class ProbeThread:
             if run != current:
                 self._probes = ProbeClock(run, now, timing=self.timing) if run is not None else None
                 with self._lock:
-                    if self._kill_due is not None and self._kill_due.run != run:
-                        self._kill_due = None
                     if self._owed is not None and self._owed.run != run:
                         self._owed = None
         for channel in adoptions:
@@ -231,9 +211,6 @@ class ProbeThread:
             return
         for fact in probes.turn(now, late=late):
             self.feed.append(fact.kind, fact.value)
-        if probes.overdue:  # level: re-asserted every turn until an answer or a run change
-            with self._lock:
-                self._kill_due = KillDue(probes.run, probes.unanswered_ms)
         if self._channel is not None and self._channel.run == probes.run:
             nonce = secrets.token_hex(32)
             if self._send(encode_node_probe(nonce)):
@@ -263,9 +240,6 @@ class ProbeThread:
         nonce = reply.nonce
         probes = self._probes
         if probes is not None and probes.run == channel.run and probes.answered(nonce, now):
-            with self._lock:  # the run answered: a latch set before the answer is stale
-                if self._kill_due is not None and self._kill_due.run == channel.run:
-                    self._kill_due = None
             self.feed.append("probe_answered", {"run": channel.run.document(),
                                                 "rtt_ms": probes.last_rtt_ms})
 

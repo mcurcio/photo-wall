@@ -6872,6 +6872,112 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
   "a 40-inch Frame"). The design review asks for a width; R2 says the diagonal is "a weird
   concept". Left for the owner: which measure the threshold uses is his call.
 
+## Overlay-always S3 (issue #124, Central half), 2026-10-23: stopped
+
+- **The frozen page's "the Player's enrolment report (outputs.observation width_px) is no longer
+  read" breaks 88 DB-tier tests in 22 files outside S3's owned paths.** Every test that enrolls a
+  Pi through `tests/test_registry.py` `enroll(size=...)` (82 importers) or
+  `tests/test_display_identity.py` `enroll_pi` got its Frame's screen size from that enrolment
+  report; with the rule as frozen (and as r2-final.md:103 states) such a Frame has no screen until
+  an Output report states `current_mode` or a Display with a preferred mode is seen, so it gets no
+  Frame output and no photos. A/B: with only SCREEN_COLUMNS put back on `outputs.observation`, all
+  88 pass. Red files: test_after_end_migration, test_authored_compatibility, test_authored_scene,
+  test_coordination, test_exposed_settings_roundtrip, test_fit_analysis_budget,
+  test_fit_analysis_store, test_fit_settings_store, test_frame_fit_settings, test_frame_output,
+  test_frame_output_wiring, test_frame_video, test_node_acceptance, test_photo_library_routes,
+  test_player_service, test_registry, test_restart_content_locks, test_scene_apply_now,
+  test_scene_transition_migration, test_shown_history, test_wall_copy_sizing, test_wall_plan_tracer.
+  Re-cut needed: give S3 `tests/test_registry.py` (its `enroll` should also record each Output's
+  report with `current_mode=size` through the real judge, `OutputReportJudge`) plus whichever of
+  the above still seed a size another way, or keep the enrolment as screen_px's last fallback
+  (an owner/design call: r2-final says it is no longer read).
+- **Smaller spec slips found on the way:** `frame_placement` returns a `Placement` dataclass, not a
+  tuple, so `OutputRect(*frame_placement(...))` does not run (WIP uses its four attributes); a saved
+  Position (`registry.commit_calibration_trial_in`) wakes no Node's document source, so the region
+  document reaches the Pi only at the next wake (a report, a deadline, house midnight) unless the
+  Position write calls `notify_nodes_in` (registry.py, not S3's); stored Output reports lack
+  `current_mode`, so migration 109 also needs 103's `UPDATE output_displays SET report = report ||
+  '{"current_mode": null}'` (WIP has it; the page says "no other schema change"); r2-final's
+  "migration 104's SQL copy of the rule follows" cannot apply (104 is applied, forward-only).
+
+## Overlay-always S3 re-cut (issue #124, Central half), 2026-10-23: stopped again, one test
+
+- **`tests/test_display_picture_settings.py::test_a_1b_report_and_document_still_answer_after_075_and_092`
+  turns red and is outside S3's owned paths (not in the 22-file list, no slice owns it).** The
+  test replays migrations 075, 092, 094 and 096 on a current database (`_migrate`), and 075
+  rewrites every `frames.calibration` to the 1c shape (`fit: {mode: "cover", corners, rotation}`)
+  that migration 104 later turned into the box; 104 is not replayed. Its last line,
+  `_picture(registry)`, runs the worker's `output_documents`, which now reads the bound Frame's
+  Position for the region (`Calibration.model_validate(f.calibration).fit`) and raises
+  `ValidationError` on that shape. A real database always runs 104 after 075, so the state is
+  one only the replay can build; the product read is right (`frame_outputs_in` parses the same
+  column the same way). Fix (one test line, not mine to make; tried and reverted: the test then
+  passes): in that test, after `_migrate(registry)`, put the Frame's Position back on the current
+  shape:
+  `_sql(registry, "UPDATE frames SET calibration = jsonb_build_object('revision', 3, 'fit', '{}'::jsonb)")`.
+  Re-cut: add that file to S3's owned paths.
+- **Decision 1's `enroll_pi` half is not done, on purpose.** Recording a report for each Output in
+  `test_display_identity.enroll_pi` adds an `output_displays` row per Output and breaks tests that
+  expect one row (`test_migration_092`, `test_migration_094`, `test_display_picture_settings`,
+  `test_display_identity`'s undecodable-report test), none owned. Every `enroll_pi` caller but
+  `test_frame_output` (owned via the 22 list, now seeded explicitly) then reports a Display with a
+  preferred mode, so nothing else needs it; `enroll` (test_registry) does record the reports.
+
+## Overlay-always S3 re-cut 2 (issue #124, Central half), 2026-10-23: resolved, landed
+
+- Both S3 stops above are resolved by the main loop's re-cuts, not by a page change: `enroll`
+  (tests/test_registry.py) records each Output's report with `current_mode=size` through
+  `OutputReportJudge`; `tests/test_display_picture_settings.py`'s 075/092 replay test puts the
+  Frame's Position back on the current shape after `_migrate` (a real database runs 104 after 075);
+  `enroll_pi` stays unchanged (accepted). Migration 109 keeps 103's stored-report UPDATE
+  (`current_mode: null`); `commit_calibration_trial_in` calls `notify_nodes_in`.
+## Overlay-always S5 (issues #126, #125), 2026-10-23: the Pi 5's watchdog cannot tell a watchdog reset
+- **The page's reset source does not exist on the Pi 5.** S5's `reset_cause` reads
+  `/sys/class/watchdog/watchdog0/bootstatus` for WDIOF_CARDRESET (0x20). On the test Pi 75628d0c
+  (kernel 6.18.50+rpt-rpi-2712, read 2026-10-23) the watchdog is `bcm2835-wdt` ("Broadcom BCM2835
+  Watchdog timer"): `options` = 0x8180 (SETTIMEOUT | MAGICCLOSE | KEEPALIVEPING, no CARDRESET) and
+  `bootstatus` = 0. The driver source (raspberrypi/linux rpi-6.12.y drivers/watchdog/bcm2835_wdt.c)
+  never sets `bootstatus` and never reads PM_RSTS for a reset reason. So, as the page allows,
+  `reset_cause` ships and reads None on a Pi 5: `appliance/host/host_linux.py` returns None whenever
+  the driver's `options` does not offer WDIOF_CARDRESET (the watchdog API reports only bits `options`
+  names), never "other". The Hardware page's "Last start: after a hardware watchdog reset" line is
+  therefore never shown on today's Pis.
+- **A possible source, unverified:** the Pi 5 bootloader exposes PM_RSTS at boot as
+  `/proc/device-tree/chosen/bootloader/rsts` (4 bytes; 0 on the test Pi after this boot). Whether a
+  watchdog reset sets a bit there distinctly from a software reboot (which on the Pi also goes through
+  the watchdog's reset) needs a forced watchdog reset on the test Pi (a kernel hang with
+  `kernel.panic=0`) and a read after it. Not done: the test Pi was shared with sibling slices' bench
+  runs. Re-cut if wanted: a reader for that source in `host_linux.reset_cause`.
+
+## Overlay-always fix pass (PR #135 CI and review), 2026-10-23: three reds outside the slices' paths
+- **S3 left three test files that still seed a Frame's screen through `outputs.observation`** (none owned):
+  `tests/browser/test_operator_showrunner_browser.py` `_seed`, `tests/browser/test_frame_photo_fit_browser.py`
+  `_wide_frame` and `tests/browser/test_frame_fit_browser.py`'s no-known-size test. Since `screen_px` reads the
+  Output report's `current_mode` and `enroll` records it, they now pass `enroll(..., size=)` and clear with
+  `report_modes(..., None)`. 15 browser tests were red on 358624e9 and are green with this.
+- **`tests/integration/test_central_display_picture.py` pinned `SCHEMA_MAJOR == 10`** (room light's major); S3
+  moved the display line to 11. It now asserts `>= 10`: the test is about the sliders being gone since 10.
+- **`tests/debs/test_node_package.py` read a unit's `/bin/sh -ec '...'` script as one path** (S2's mark write in
+  `photo-wall-display-signal.service`). The rule now splits a shell script's words and holds each `/usr/` binary
+  it runs to "installed", so the rule covers more than before rather than exempting the line. The `-` prefix
+  (a failed mark never holds the restart back) is kept as S2 chose and tested it.
+- **S6: a completion still takes Coordination and Runtime.** The page says the exchange takes the
+  Node lock "in place of acquire_runtime_locks"; but a handoff's completion resolves the Output's
+  loss through `Coordinator.reconcile_node_output_in`, which the inbox also writes under
+  Coordination and Runtime (and which requires them), and the page did not move that port to the
+  Node lock. So an exchange carrying `completed_decision_id` takes Coordination, Runtime, then the
+  Node lock (`acquire_node_lock`'s order); every other exchange takes the Node lock alone. While
+  Coordination is held a completion waits out `lock_timeout` and is refused 503 `lock_busy`
+  (`tests/test_node_display_lock.py` `test_a_completion_alone_waits_on_coordination_...`). Moving
+  completions off Coordination needs the inbox's loss writes under the Node lock too: a re-cut.
+- **S6 `lock_holders_in` widened.** The page named only holders some backend still waits for; the
+  request that timed out has already rolled back, so a lone timeout logged "none still held". It now
+  also names every holder of Coordination, Runtime and any Node lock in this database. A row lock's
+  holder is still not named (PostgreSQL lists one only while someone waits); `log_lock_waits` stays
+  the deploy's choice (the iac repository), not made here.
+- **S5: "Last start: after a hardware watchdog reset" has one home, `hostHealth.js`** (the Hardware
+  page), not also `bootFacts.js` as the page said. One home is the better shape; and on the Pi 5 it
+  never shows (the S5 erratum above).
 ## PR 138 fix round (odd crop, faces only, 2026-10-25)
 
 - **design-w2-final.md §Reconcile: `interest_kept` reading the axis from `FreeAxis`** is not done.
@@ -7025,3 +7131,11 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
 - **Interface drift, recorded:** DESIGN.md's `colour-sensor {from: ColourSensorId, ...}` is
   `SensedColour.sensor` in code (`from` is a Python keyword), and its one "Reference" is three classes
   (ReporterRef, SensorRef, ColourSensorRef), so each kind's reference is typed apart.
+
+## Overlay-always merge of main, 2026-10-26: the region documents migration is 110, not 109
+
+- Main took 109 for `109_light_colour.sql` (room-light colour follows Home Assistant, PR #140) while
+  this PR was open. This PR's `109_region_documents.sql` was applied nowhere, so it is renumbered
+  `110_region_documents.sql`. Every "migration 109" in the overlay-always entries above (the S3
+  spec slips and S3 re-cut 2: "migration 109 also needs 103's UPDATE", "Migration 109 keeps 103's
+  stored-report UPDATE") means 110; the entries stay as written (append-only).

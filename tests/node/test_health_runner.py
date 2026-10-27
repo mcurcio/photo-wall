@@ -1,5 +1,6 @@
 """Health judge unit: draining the broker and display feeds by cursor, the root-only `status`
 op, the pw-display-only `overlay` op, packaging."""
+import datetime
 import json
 import os
 import socket
@@ -70,7 +71,8 @@ def local_reader(feed, *, name="broker"):
 def snapshot_output(name="Virtual-1", run=RUN, *, connected=True):
     admitted = None if run is None else {**run, "frame_id": "frame-1"}
     return {"output_id": name, "connected": connected, "admitted": admitted,
-            "diagnostic": "released", "fault": "app_absent"}
+            "diagnostic": "released", "fault": "app_absent", "holding": run is not None,
+            "power": "on"}
 
 
 def local_display_reader(feed, outputs):
@@ -336,7 +338,8 @@ def test_the_judge_closure_is_small_and_the_base_ships_its_unit():
     unit = (REPO / "appliance/systemd/photo-wall-health.service").read_text().splitlines()
     for line in ("User=pw-health", "Group=pw-health", "SupplementaryGroups=pw-node-feeds",
                  "RuntimeDirectory=photo-wall-health", "RuntimeDirectoryMode=0755",
-                 "RestrictAddressFamilies=AF_UNIX", "ProtectSystem=strict", "PrivateDevices=yes",
+                 "RestrictAddressFamilies=AF_UNIX AF_INET", "IPAddressDeny=any",
+                 "IPAddressAllow=localhost", "ProtectSystem=strict", "PrivateDevices=yes",
                  "NoNewPrivileges=yes", "CapabilityBoundingSet=", "MemoryMax=64M",
                  "Restart=always", "RestartSec=2", "Slice=photowallbase.slice",
                  "After=photo-wall-app-broker.service",
@@ -368,12 +371,12 @@ def test_a_judge_started_after_the_display_ring_lapped_still_projects_every_outp
         health = HealthRunner(runner.shipped_judge(), (display,), clock=Clock())
         health.turn()
         assert display.gaps == 1 and display.failures == 0
-        assert [(i.output, i.tint) for i in health.judge.instructions(0)] == [
+        assert [(i.output, i.tint) for i in health.judge.instructions(0, wall_ms=0)] == [
             ("HDMI-A-2", False), ("Virtual-1", False)]
         status = health.answer("status")
         assert status["verdict"]["outputs"] == [
-            {"output": "HDMI-A-2", "underlay": "slate", "codes": []},
-            {"output": "Virtual-1", "underlay": "live", "codes": []}]
+            {"output": "HDMI-A-2", "underlay": "slate", "codes": [], "card": None, "card_age_ms": None},
+            {"output": "Virtual-1", "underlay": "live", "codes": [], "card": None, "card_age_ms": None}]
         assert [(i["output"], i["tint"]) for i in status["overlay"]["instructions"]] == [
             ("HDMI-A-2", False), ("Virtual-1", False)]
 
@@ -426,7 +429,7 @@ def test_the_reader_drains_the_display_controllers_real_feed_socket(tmp_path):
     key = OutputKey(host.boot_id, host.incarnation_id, "Virtual-1", 2, 3)
     process = NodeProcessIdentity(4242, 777, uuid4())
     backend.states = (OutputState(key, admitted=Surface(key, process, 5, 1, 2, "frame-1"),
-                                  diagnostic="released", fault="app_absent"),)
+                                  holding=True, diagnostic="released", fault="app_absent"),)
     for index in range(20):
         controller.feed.append("Observed", {"index": index})
     directory = tmp_path / "display-feed"
@@ -454,6 +457,8 @@ def test_the_reader_drains_the_display_controllers_real_feed_socket(tmp_path):
     assert reader.cursor.after == 20 and reader.failures == 0
     run = AppRunKey(process.invocation_id, 4242, 777, 5).document()
     assert health.judge._outputs["Virtual-1"].admitted == run
+    assert (health.judge._outputs["Virtual-1"].holding, health.judge._outputs["Virtual-1"].power) == (
+        True, None)   # no power controller: no power in force
     assert [(o.output, o.underlay) for o in health.judge.verdict(0).outputs] == [
         ("Virtual-1", "live")]
 
@@ -464,9 +469,14 @@ def judged(outputs=None, *, clock=None):
     clock = clock or Clock()
     display = local_display_reader(Feed(8), outputs or [snapshot_output()])
     broker = local_reader(Feed(64))
-    health = HealthRunner(runner.shipped_judge(), (broker, display), clock=clock)
+    # The Pi's wall clock reads the boot clock plus 07:17 UTC on 2026-10-20 (the card's time).
+    card = runner.CardClock(wall=lambda: WALL_AT_0 + clock.now, zone=lambda: datetime.UTC)
+    health = HealthRunner(runner.shipped_judge(), (broker, display), clock=clock, card=card)
     health.turn()
     return health, broker, display, clock
+
+
+WALL_AT_0 = int(datetime.datetime(2026, 10, 20, 7, 17, tzinfo=datetime.UTC).timestamp() * 1000)
 
 
 def received(connection):
@@ -518,7 +528,8 @@ def test_changes_are_pushed_each_turn_and_everything_every_v_over_3(pairs):
     health.turn()
     [tinted] = received(theirs)
     assert tinted.tint and tinted.serial > first.serial
-    assert tinted.lines[0] == FAULTS[APP_UNRESPONSIVE].household_line
+    # The evidence began at 1000 ms on the boot clock: 07:17:01 on the Pi's own clock.
+    assert tinted.lines[0] == FAULTS[APP_UNRESPONSIVE].household_line + " · since 07:17"
     clock.now = 2000 + RAISE  # a change between refreshes is pushed on its own turn
     broker.feed.append("app_link_accepted", {"run": RUN, "player_id": "player-1"})
     health.turn()

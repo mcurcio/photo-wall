@@ -13,7 +13,10 @@ not list is never sent and is logged as `document_refused`. (6) Picture on its o
 the runner's document feed, and the picture report the controller puts appears on Central's
 `picture-HDMI-A-1`. (7) The Display's light ships together (picture operations v8, decision 0028): a
 picture document with a new matched lux and panel black reaches the real picture controller, whose
-`picture` op gives the shell v8 operations text that `decode_picture_operations` accepts.
+`picture` op gives the shell v8 operations text that `decode_picture_operations` accepts. (8) The
+Frame region on its own key (issue #124): a region document Central puts on `region-HDMI-A-1`
+reaches the display session's desired view and decodes to the same document; the Output report
+carries the mode Weston runs (`current_mode`, schema 11).
 """
 from __future__ import annotations
 
@@ -50,7 +53,7 @@ from appliance.display_host.picture_list import FileOfferedCache
 from appliance.display_host.runner import document_feed
 from appliance.display_host.signal_range import DrmConnectorRanges, FileRangeRequests
 from appliance.host.bus import HOST_SLICE, host_session
-from contracts.node_frame import decode_picture_operations, encode_picture_operations
+from contracts.node_frame import decode_picture_operations
 from contracts.node_link import CENTRAL_WRITER, NODE_MAX_STREAMS, Pipe, account_id
 from contracts.node_output import (
     BEST_DETECTED,
@@ -58,18 +61,24 @@ from contracts.node_output import (
     Darkness,
     DisplayIdentity,
     DisplayMode,
+    FrameRegion,
+    FrameRegionDocument,
     OutputDocument,
     OutputPower,
+    OutputRect,
     OutputReport,
     Power,
     PowerMethod,
     PowerRequest,
     decode_output_document,
     decode_output_report,
+    decode_region_document,
     encode_output_document,
     encode_output_report,
+    encode_region_document,
     output_document_key,
     output_report_key,
+    region_document_key,
 )
 from contracts.node_picture import (
     UPGRADE_DISPLAY_LIGHT,
@@ -111,7 +120,9 @@ MATCHED = PictureDocument("HDMI-A-1", 9, {"10": 46}, PICTURE_DOCUMENT.software,
                           light=DisplayLight(matched_lux=400.0, black=0.001))
 REPORT = OutputReport("HDMI-A-1", True, DisplayIdentity("XYM", 5475, "MNN", None),
                       (DisplayMode(1920, 1080, 60000, preferred=True),), (PowerMethod.DDC_CI, PowerMethod.SIGNAL_OFF),
-                      PowerMethod.DDC_CI, 2, None, None, (950, 540))
+                      PowerMethod.DDC_CI, 2, None, None, (950, 540), (1920, 1080))
+REGION_KEY = region_document_key("HDMI-A-1")
+REGION = FrameRegionDocument("HDMI-A-1", 3, FrameRegion("kitchen", (1080, 1920), OutputRect(28, 672, 1024, 576)))
 
 
 async def _names(node) -> frozenset[str]:
@@ -129,8 +140,8 @@ class TextShell:
     def __init__(self) -> None:
         self.texts: list[str] = []
 
-    def picture(self, operations, *, timeout, brightness):
-        self.texts.append(encode_picture_operations(operations))
+    def picture(self, output_id, operations, brightness, *, drawing, timeout):
+        self.texts.append(operations)
         return True
 
 
@@ -187,8 +198,8 @@ def test_the_display_line_carries_centrals_output_document(tmp_path):
         controller = SimpleNamespace(document=lambda output_id, document: (pictures.append((output_id, document)),
                                                                           sink.put_picture(PICTURE_REPORT),
                                                                           picture.document(output_id, document)))
-        ignored = SimpleNamespace(document=lambda output_id, document: None)   # power and turns: not here
-        display.desired.on_change(document_feed(ignored, controller, ignored))
+        ignored = SimpleNamespace(document=lambda output_id, document: None)   # power, turns, regions: not here
+        display.desired.on_change(document_feed(ignored, controller, ignored, ignored))
 
         # (1) The display line applies beside the host line, inside the store's stream count.
         names = await _names(node)
@@ -278,6 +289,15 @@ def test_the_display_line_carries_centrals_output_document(tmp_path):
             [operations] = (await until(drawn, 15, "the Display's light at the shell"))[:1]
             assert operations == operations_for("HDMI-A-1", 9, MATCHED.software, MATCHED.light, None)
             assert operations.light == DisplayLight(matched_lux=400.0, black=0.001)
+
+            # (8) The Frame region on its own key reaches the display session's desired view.
+            projection.set(DESIRED, REGION_KEY, encode_region_document(REGION))
+
+            async def region():
+                found = display.desired.get(REGION_KEY)
+                return (found is not None and found.writer == CENTRAL_WRITER
+                        and decode_region_document(found.value) == REGION)
+            await until(region, 15, "the Frame region document in the desired view")
         finally:
             picture.stop()
             stop.set()

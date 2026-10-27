@@ -168,7 +168,7 @@ def test_wall_helper_bundle_is_import_closed_without_host_orchestration(tmp_path
     assert set(files) == {
         "demo_wall.py", "scripts/harness_failure.py", "scripts/immich_actions.py",
         "scripts/provenance_models.py", "scripts/runtime_provenance.py",
-        "support/position.py",
+        "support/output_report.py", "support/position.py",
     }
     assert not (tmp_path / "scripts/immich_fixture.py").exists()
     assert not (tmp_path / "scripts/docker_diagnostics.py").exists()
@@ -1414,6 +1414,31 @@ def test_every_demo_upload_fills_every_demo_frame(project):
         assert isinstance(verdict, Fits), (label, verdict)
     assert shape_fit("video", *DEMO_VIDEO_SIZE, target, DEMO_CROP_LIMIT, house,
                      size_known=True) is None
+
+
+def test_a_demo_frame_has_its_players_screen_and_is_ready(registry):
+    """The demo's Players have no Node, so no display line reports their Outputs, and a Frame's
+    screen size comes only from that report (issue #124), never the enrolment: the demo records
+    the report its line would send, the enrolled size, before it saves the Position. Without it
+    the Frame has no screen, so the Planner gives it no photo and the e2e baseline times out.
+    Mutation probe: drop `report_modes` from `position_demo_frame` -> display_px None -> RED."""
+    from support.frames import frame_create
+    from test_registry import enroll
+
+    from central.displays.model import Readiness
+    from central.infra.display_store import frame_outputs_in
+    from scripts.demo_wall import DEMO_OPENING_PX, position_demo_frame
+    identity, _, request = enroll(registry, count=1, report=False)
+    registry.create_frame(frame_create("demo-frame-1"))
+    registry.bind("demo-frame-1", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    output = next(item for item in registry.inventory().outputs if item.player_id == identity["player_id"])
+    position_demo_frame(registry, "demo-frame-1", request.device_id, output.model_dump(mode="json"))
+    with registry.db.transaction() as conn:
+        shown = next(item for item in frame_outputs_in(conn) if item.frame_id == "demo-frame-1")
+    assert shown.display_px == (1920, 1080)
+    assert shown.output_px == (DEMO_OPENING_PX, DEMO_OPENING_PX)
+    frame = next(item for item in registry.inventory().frames if item.id == "demo-frame-1")
+    assert frame.readiness == Readiness.READY, frame.readiness
 
 
 def test_every_demo_upload_fills_the_demo_frame_output_and_none_fills_the_whole_display():

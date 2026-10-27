@@ -91,7 +91,7 @@ class Rig:
                 for item in self.service.desired(claim.session_id, claim.credential, effects=True)['commands']]
 
     def report(self, command, phase, sequence, *, claim=None, environment_sha256=None):
-        running = phase in ('starting_new', 'running', 'fallback_starting', 'fallback_running')
+        running = phase in ('starting_new', 'running')
         event = AppEffectEventV2(command.producer, command.operation_id, command.command_id,
             command.command_sha256, command.command_session_id, uuid4(), sequence, 2000 + sequence, phase,
             NodeProcessIdentity(456, 30, uuid4()) if running else None,
@@ -382,14 +382,12 @@ def test_a_superseded_boot_that_claims_again_is_current_and_its_operation_reads_
 
 
 @pytest.mark.parametrize('phases, reached', [
-    (('intent_stop', 'stopped', 'starting_new', 'running'), 'target_running'),
-    (('intent_stop', 'stopped', 'target_failed', 'fallback_starting', 'fallback_running'), 'fallback_running')])
+    (('intent_stop', 'stopped', 'starting_new', 'running'), 'target_running')])
 def test_a_finished_stage_reads_ended_by_a_later_boot_and_unchanged_without_one(registry, phases, reached):
     fixture = Rig(registry)
     command = fixture.stage()
     for sequence, phase in enumerate(phases, start=1):
-        fixture.report(command, phase, sequence, environment_sha256=command.fallback.environment_sha256
-                       if phase.startswith('fallback') else None)
+        fixture.report(command, phase, sequence)
     registry.clock.advance(600)
     assert fixture.states() == [reached]  # no later boot: the finished state stands
     _later_boot(fixture)

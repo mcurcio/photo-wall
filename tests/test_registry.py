@@ -13,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 from pydantic import TypeAdapter, ValidationError
 from support.frames import frame_create
+from support.output_report import report_modes
 from support.position import PORTRAIT_ON_WIDE, save_position
 
 from central.app import create_app
@@ -43,7 +44,9 @@ ADMIN = "test-operator-" + "x" * 40
 SKEWED = Calibration(fit=PositionBox(left=0.275, top=0.1, width=0.25, height=0.79))
 
 
-def enroll(registry, key=None, count=2, device_id=None, size=(1920, 1080)):
+def enroll(registry, key=None, count=2, device_id=None, size=(1920, 1080), report=True):
+    """Enroll a Player whose Outputs are `size`; with `report`, each Output's report (`report_modes`)
+    states that mode, as a Node's display line would; without it, as a Player with no Node."""
     key = key or Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes_raw().hex()
     device_id = device_id or "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
@@ -55,7 +58,10 @@ def enroll(registry, key=None, count=2, device_id=None, size=(1920, 1080)):
                          device_id=device_id, boot_id=boot_id,
                          signature=base64.b64encode(key.sign(enrollment_message(
                              nonce, outputs, device_id, boot_id))).decode())
-    return registry.enroll(request), key, request
+    identity = registry.enroll(request)
+    if report and size[0] >= 1 and size[1] >= 1:
+        report_modes(registry, device_id, tuple(output.output_id for output in outputs), size)
+    return identity, key, request
 
 
 def hello(registry, identity, capabilities=()):

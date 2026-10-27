@@ -2000,7 +2000,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
     from support.measured_photos import measure
     from support.photo_pools import photo, seed_pool
     from test_coordination import schedule
-    from test_registry import ADMIN, frame
+    from test_registry import ADMIN, frame, report_modes
 
     from central.app import create_app
     from central.media_repository import MediaRepository
@@ -2052,7 +2052,6 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
         # An http root needs no trust store; the fixture CA keeps the host's out of it.
         trust = Trust.public(tls.write_bundle(tmp_path / "ca.pem", tls.CA))
         transport = HttpTransport(trust=trust)
-        # A sized mode: on a screen of unknown size a Frame has no Frame output (decision 0030).
         service = PlayerService(PlayerConfig(central_origin=origin, cache_dir=str(cache_dir)),
             load_identity(), (OutputReport(output_id="HDMI-A-1", width_px=1920, height_px=1080),),
             RecordingRenderer(), immediate,
@@ -2063,6 +2062,8 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
         try:
             assert (await service.locate_central()).origin == Origin.parse_root(origin)
             await service.enroll()
+            # The screen's size is the mode Weston runs, from the Node's Output report (issue #124).
+            report_modes(registry, device_id, ("HDMI-A-1",), (1920, 1080))
             await service.hello_protocol()
             registered = service.registration
             await service.probe_time()

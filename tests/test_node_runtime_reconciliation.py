@@ -167,19 +167,19 @@ def test_link_replay_exact_but_modified_proof_and_new_control_rejected(registry)
 
 
 def test_display_admission_is_exact_and_never_releases_runtime(registry):
-    from central.transaction_locks import acquire_runtime_locks
+    from central.transaction_locks import acquire_node_lock
     coordinator, player, _, _, _, _, surfaces, _, proof = rig(registry)
     surface = surfaces[0]
-    arguments = dict(player_id=player["player_id"], authority_epoch=1,
+    arguments = dict(device_id=DEVICE_ID, player_id=player["player_id"], authority_epoch=1,
         output_id=surface.output.output_id, frame_id=surface.frame_id, binding_generation=surface.binding_generation,
         config_revision=surface.config_revision, process=surface.process,
         app_epoch=surface.app_epoch, environment_sha256=proof.challenge.environment_sha256,
         phase="candidate")
     before = coordinator.runtime.read().export_state()
     with registry.db.transaction() as conn:
-        with pytest.raises(ValueError, match="runtime_locks_required"):
+        with pytest.raises(ValueError, match="node_lock_required"):
             coordinator.display_admission_in(conn, **arguments)
-        acquire_runtime_locks(conn)
+        acquire_node_lock(conn, DEVICE_ID)
         admitted = coordinator.display_admission_in(conn, **arguments)
         assert admitted.allowed and admitted.fence
         assert not coordinator.display_admission_in(conn, **{**arguments,
@@ -203,7 +203,7 @@ def test_first_compositor_frame_cannot_release_output_loss(registry):
 
 
 def test_equal_counter_frame_rebind_preserves_historical_loss_without_fencing_replacement(registry):
-    from central.transaction_locks import acquire_runtime_locks
+    from central.transaction_locks import acquire_node_lock, acquire_runtime_locks
     from contracts.node_display import Surface
 
     coordinator, player, _, sessions, claims, grants, surfaces, reconciler, _ = rig(registry)
@@ -234,9 +234,11 @@ def test_equal_counter_frame_rebind_preserves_historical_loss_without_fencing_re
     expected = replace(previous, frame_id=binding.frame_id)
     with registry.db.transaction() as conn:
         acquire_runtime_locks(conn)
-        assert coordinator.display_withdrawal_in(conn, player_id=player["player_id"], authority_epoch=1,
-            previous_surface=previous, expected_surface=expected).allowed
-        assert not coordinator.display_withdrawal_in(conn, player_id=player["player_id"], authority_epoch=1,
+        acquire_node_lock(conn, DEVICE_ID)
+        assert coordinator.display_withdrawal_in(conn, device_id=DEVICE_ID, player_id=player["player_id"],
+            authority_epoch=1, previous_surface=previous, expected_surface=expected).allowed
+        assert not coordinator.display_withdrawal_in(conn, device_id=DEVICE_ID, player_id=player["player_id"],
+            authority_epoch=1,
             previous_surface=expected, expected_surface=expected).allowed
         args = dict(player_id=player["player_id"], authority_epoch=1, output_id=old.output.output_id,
             binding_generation=old.binding_generation, configuration_revision=old.config_revision,

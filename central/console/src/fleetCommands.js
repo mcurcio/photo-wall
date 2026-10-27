@@ -359,9 +359,6 @@ function operationState(operation, readAt) {
         fact: effectFact() };
     case "target_running":
       return { state: "target_running", label: "App Effect Broker reported the staged app running", fact: effectFact() };
-    case "fallback_running":
-      return { state: "fallback_running", label: "App Effect Broker reported the fallback app running",
-        fact: effectFact() };
     case "effect_unknown":
       return { state: "effect_unknown", label: "App Effect Broker reported the outcome as unknown", fact: effectFact() };
     case "superseded":

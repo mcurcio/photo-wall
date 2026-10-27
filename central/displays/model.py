@@ -45,21 +45,25 @@ from typing import Final, TypeGuard
 from uuid import UUID
 
 from central.power.timetable import Timetable
-from contracts.display_turn import DisplayTurn
+from contracts.display_turn import DisplayTurn, hanging
 from contracts.frame_fit import OutputSize
+from contracts.models import PositionBox, frame_placement
 from contracts.node_output import (
     BEST_DETECTED,
     DisplayIdentity,
     DisplayMode,
+    FrameRegion,
     InForceKind,
     OutputDocument,
     OutputPower,
+    OutputRect,
     OutputReport,
     Power,
     PowerChange,
     PowerMethod,
     PowerRequest,
     PowerResult,
+    encode_frame_region,
     encode_output_document,
     encode_set_time,
 )
@@ -153,18 +157,40 @@ def readiness(position: FramePosition) -> Readiness:
     return Readiness.READY
 
 
-def screen_px(reported: OutputSize | None, modes: Sequence[DisplayMode]) -> OutputSize | None:
-    """The mode as built of a Frame's screen (frame box run, .claude/runs/frame-box/page.md):
-    `reported` (its Pi's report of the bound Output, outputs.observation width_px x height_px) when
-    both sides are >= 1, else the first preferred mode of `modes` (the Display seen on that Output,
-    displays.modes; Weston, given no mode, runs the preferred one), else None. The one home of a
-    Frame's screen size: central/infra/display_store.py `frame_outputs_in` and the inventory's
-    `FrameInventory.screen_px` ask here (migration 104 states the same rule in SQL over the same
-    columns; 102, applied before, read the Output's own report's modes instead). Pure."""
-    if reported is not None and reported[0] >= 1 and reported[1] >= 1:
-        return reported
+def screen_px(current_mode: OutputSize | None, modes: Sequence[DisplayMode]) -> OutputSize | None:
+    """The mode as built of a Frame's screen (frame box run, .claude/runs/frame-box/page.md; issue
+    #124): `current_mode` (the mode Weston runs, from the bound Output's Output report,
+    output_displays.report's `current_mode`) when both sides are >= 1, else the first preferred mode
+    of `modes` (the Display seen on that Output, displays.modes; Weston, given no mode, runs the
+    preferred one), else None. The Player's enrolment report (outputs.observation) is not read. The
+    one home of a Frame's screen size: central/infra/display_store.py `frame_outputs_in`, the Frame
+    region (`frame_region`) and the inventory's `FrameInventory.screen_px` ask here (migrations 102
+    and 104, applied before, stated older rules in SQL). Pure."""
+    if current_mode is not None and current_mode[0] >= 1 and current_mode[1] >= 1:
+        return current_mode
     preferred = next((mode for mode in modes if mode.preferred), None)
     return None if preferred is None else (preferred.width, preferred.height)
+
+
+def frame_region(frame_id: str | None, fit: PositionBox | None, screen: OutputSize | None,
+                 turn: DisplayTurn) -> FrameRegion | None:
+    """The Frame region Central sends one Output (issue #124; the debug overlay draws inside it):
+    None when no Frame is bound (`frame_id` or `fit` None) or no screen size is known (`screen`
+    None: `screen_px`'s answer, as built); else FrameRegion(frame_id, hanging(screen, turn),
+    OutputRect of contracts/models.py `frame_placement(fit, screen, turn)`). The one place Central
+    turns a Frame's box into the overlay's rectangle: the placement rule itself stays
+    `frame_placement`'s (decision 0030). Pure."""
+    if frame_id is None or fit is None or screen is None:
+        return None
+    placed = frame_placement(fit, screen, turn)
+    return FrameRegion(frame_id, hanging(screen, turn), OutputRect(placed.x, placed.y, placed.width, placed.height))
+
+
+def region_digest(region: FrameRegion | None) -> str:
+    """sha256 hex of `region`'s canonical encoding (contracts.node_output `encode_frame_region`), or
+    of b"null" for None: the region document's change rises exactly when this differs from the
+    digest recorded with the last change (output_documents.region_digest). Pure."""
+    return hashlib.sha256(b"null" if region is None else encode_frame_region(region)).hexdigest()
 
 
 def adopts(position: FramePosition, seen_before: UUID | None, seen_now: UUID) -> bool:

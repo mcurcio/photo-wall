@@ -8,6 +8,16 @@ and the client library's header are read there, to build the test probe against 
 library. This executes a real headless compositor, not a recorded callback simulator. It uses
 fixture controller authority and does not qualify systemd, GTK or HDMI. Output pixels are read
 back through Weston's own weston_capture_v1 (enabled by --debug).
+
+Issue #124: the debug overlay (the slate and the health card) draws inside the Frame region the
+controller sends (the `region` op), black outside it, and on the whole Output when the region's
+screen is not the Output's; with the private client dead the amber covers the whole Output
+(`explain_area_cases`).
+
+Issue #123: the shell keeps a handed-off Output with its app only on hold evidence (a picture plane
+the compositor shows, or Display's own drawing). The probe draws its ground alone, so the steps
+that look at its pixels hold the Output by Display's drawing (the `picture` op's `drawing`, as a
+test pattern does); the hold's own cases are below (`hold_cases`) and in native_screen_harness.py.
 """
 
 import json
@@ -33,12 +43,17 @@ HEALTH_MODE = "/tmp/pw-health-client-mode"  # display_harness_health_client.py M
 # The production client's health drawing (overlay/render.py card_rect), as installed, and its
 # fake judge.
 sys.path.append(DISPLAY)
+sys.path.append("/usr/lib/photo-wall/common")  # contracts, as the installed overlay reads them
 from display_harness_judge_feeder import PATH as JUDGE_SOCKET  # noqa: E402
 from display_harness_judge_feeder import JudgeFeeder  # noqa: E402
 from overlay.instruction import INSTRUCTION_STALE_MS  # noqa: E402
 from overlay.render import card_rect  # noqa: E402
 
+from contracts.node_faults import FAULTS  # noqa: E402
+from contracts.node_output import FrameRegion, OutputRect, encode_frame_region  # noqa: E402
+
 HEALTH_MARKER = "/tmp/pw-health-client-marker"  # display_harness_health_client.py MARKER_FILE
+SLATE_REASONS = "/tmp/pw-slate-reasons"  # display_harness_health_client.py REASONS_FILE
 PROBE_STILL = "/tmp/pw-probe-still"  # native_display_probe.c: while it exists, the probe commits nothing
 PROBE_UNTAGGED = "/tmp/pw-probe-untagged"  # while it exists, the probe's commits carry no tag
 PROBE_ALPHA_RESET = "/tmp/pw-probe-alpha-reset"  # native_display_probe.c ALPHA_RESET
@@ -244,7 +259,7 @@ FALLBACK = over(tuple(int(c * 0.5 * 0xFFFF) >> 8 for c in (0.55, 0.35, 0.0)),
 # The production health page (overlay/render.py render_health): black at 0.45 over the app, and
 # its opaque card, slate-coloured.
 HEALTH_TINT = cairo_over((0.0, 0.0, 0.0), 0.45, PROBE_APP)
-CARD_X, CARD_Y, _, _ = card_rect(640, 480)
+CARD_X, CARD_Y, _, _ = card_rect((0, 0, 640, 480))
 CARD_PIXEL = (CARD_X + 2, CARD_Y + 2)
 CARD_LINES = ("Photos paused - the player stopped responding", "app_unresponsive")
 # DRM fourcc -> wl_shm format: only the two 32-bit formats differ (wl_shm keeps the rest).
@@ -296,6 +311,12 @@ def read_until(predicate, limit=8):
         if predicate(e):
             return e
     raise AssertionError("event_timeout")
+
+
+def slate_reason(name):
+    """The reason of the slate's latest configure for Output `name`, as the private client got it."""
+    lines = pathlib.Path(SLATE_REASONS).read_text().splitlines()
+    return next(line.split(" ", 1)[1] for line in reversed(lines) if line.split(" ", 1)[0] == name)
 
 
 def drain():
@@ -580,9 +601,13 @@ def picture_v4():
     read_until(lambda e: e["event"] == "diagnostic_presented", limit=6)
     time.sleep(0.5)
     before = capture_box(*BRIGHTNESS_BOX)
-    assert request("picture", operations=OPERATIONS, brightness="Brightness: display 46 %")["accepted"]
-    assert not request("picture", operations="x" * 1025, brightness="")["accepted"]
-    assert not request("picture", operations=OPERATIONS, brightness="b" * 129)["accepted"]
+    assert request("picture", operations=OPERATIONS, brightness="Brightness: display 46 %",
+                   drawing=True)["accepted"]
+    assert not request("picture", operations="x" * 1025, brightness="", drawing=True)["accepted"]
+    assert not request("picture", operations=OPERATIONS, brightness="b" * 129, drawing=True)["accepted"]
+    assert not request("picture", operations=OPERATIONS, brightness="")["accepted"]   # no `drawing`
+    assert not request("picture", operations=OPERATIONS, brightness="", drawing="yes")["accepted"]
+    print("PASS picture_op_refuses_a_missing_or_non_boolean_drawing", flush=True)
     end = time.monotonic() + 5
     while capture_box(*BRIGHTNESS_BOX) == before:
         assert time.monotonic() < end, "slate brightness line not drawn"
@@ -601,7 +626,7 @@ def picture_v4():
     tagged = read_until(lambda e: e["event"] == "presented" and e["identity"] == identity)
     assert tagged["frame_tag"] == "picture-probe" and tagged["picture_change"] == "6", tagged
     print("PASS tag_picture_echoes_the_picture_change", flush=True)
-    assert request("picture", operations=NOT_JSON, brightness="")["accepted"]
+    assert request("picture", operations=NOT_JSON, brightness="", drawing=True)["accepted"]
     picture_lines(app, NOT_JSON)
     print("PASS picture_op_reaches_the_v4_app_verbatim", flush=True)
     app.terminate()
@@ -614,6 +639,123 @@ def picture_v4():
     await_pixel(*HEALTH, health_over(SLATE), 6.0 - (time.monotonic() - killed), drained=True)
     time.sleep(0.5)
     drain()     # the respawn's own presentations: later steps wait for new ones
+
+
+# Issue #124: a Frame on the 640 x 480 Output (larger than the slate's smallest page, 448 x 252).
+FRAME_RECT = (100, 90, 480, 300)
+
+
+def region_text(screen, rect=FRAME_RECT):
+    return encode_frame_region(FrameRegion("frame-1", screen, OutputRect(*rect))).decode()
+
+
+def outside_not_black(rect):
+    """The first captured pixel outside `rect` (x, y, w, h) on the 640 x 480 Output that is not
+    black, as (x, y, rgb); None when every one is."""
+    pixels = capture_box(0, 0, 640, 480)
+    x0, y0, w, h = rect
+    for i in range(0, len(pixels), 4):
+        x, y = (i // 4) % 640, (i // 4) // 640
+        if x0 <= x < x0 + w and y0 <= y < y0 + h:
+            continue
+        if pixels[i:i + 3] != bytes(3):
+            return x, y, tuple(reversed(pixels[i:i + 3]))
+    return None
+
+
+def await_black_outside(rect, limit):
+    end = time.monotonic() + limit
+    while (wrong := outside_not_black(rect)) is not None:
+        assert time.monotonic() < end, ("not black outside the Frame", rect, wrong)
+        drain()
+        time.sleep(0.1)
+
+
+def card_ink_stays_in_the_explain_area():
+    """Bench P0 (the test Pi, 2026-10-23, 3840 x 2160): the card's line 2 (a 34-character Player
+    id) inked from x 1079 to 3654, past its card (1005..2805) and the Frame region (right edge
+    3406). The installed overlay's own render, measure and cairo paint, the card's longest real
+    lines (appliance/health/judge.py `_card`), its text alone on a clear surface: every inked pixel
+    lies inside the card, and the card inside the area, in the smallest Frame region the overlay
+    takes (MIN_AREA), the bench's region and the whole-Display fallback. Mutation probe:
+    render.py `fit_size` returning `size` unchanged -> the MIN_AREA case inks past its card."""
+    import cairo
+    from overlay.area import MIN_AREA, FrameArea, OutputArea, area_rect
+    from overlay.health import HealthPage
+    from overlay.paint import paint, text_width
+    from overlay.render import CARD_RGBA, Rect, Text, render_health
+
+    width, height = 3840, 2160
+    lines = (max((f"{fault.household_line} · since 12:09" for fault in FAULTS.values()), key=len),
+             f"{max(FAULTS, key=len)} · Player p-5c85e236873353bec06574c31ee5aae6 · Output HDMI-A-1")
+    for area in (FrameArea(OutputRect(402, 20, *MIN_AREA)), FrameArea(OutputRect(402, 20, 3004, 2140)),
+                 OutputArea("no_region")):
+        ops = render_health(width, height, HealthPage(1, True, lines), area=area, measure=text_width)
+        (card,) = [op for op in ops if isinstance(op, Rect) and op.rgba == CARD_RGBA]
+        left, top, area_width, area_height = area_rect(area, (width, height))
+        assert (left <= card.x and card.x + card.width <= left + area_width and top <= card.y
+                and card.y + card.height <= top + area_height), (area, card)
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
+        paint(tuple(op for op in ops if isinstance(op, Text)), surface)
+        alpha, stride = bytes(surface.get_data())[3::4], surface.get_stride() // 4
+        inked = [(width - len(row.lstrip(b"\0")), len(row.rstrip(b"\0")) - 1, y)
+                 for y in range(height) if (row := alpha[y * stride:y * stride + width]).strip(b"\0")]
+        assert inked, area
+        ink = (min(x for x, _, _ in inked), max(x for _, x, _ in inked),
+               min(y for _, _, y in inked), max(y for _, _, y in inked))
+        assert (card.x <= ink[0] and ink[1] < card.x + card.width and card.y <= ink[2]
+                and ink[3] < card.y + card.height), (area, card, ink)
+        print("PASS card_ink_stays_in_the_explain_area", area, (card.x, card.width), ink, flush=True)
+
+
+def explain_area_cases():
+    """The production private client (manager v5) with the slate up (app absent): the slate, then
+    the health card, inside the Frame region and black outside it; a region placed on another
+    screen puts the card on the whole Output; with the client dead, the amber covers the whole
+    Output. Mutation probe (area.py `area_rect` returning the whole Output): the black-outside
+    captures fail."""
+    name = output["output_id"]
+    pathlib.Path(HEALTH_MODE).write_text("production")
+    opened = judge.opened
+    killed = kill_private_client()
+    read_until(lambda e: e["event"] == "diagnostic_presented", limit=6)
+    assert time.monotonic() - killed < 6
+    assert not request("region", region="r" * 1025)["accepted"]               # past the shell's bound
+    assert not request("region")["accepted"]                                  # no region at all
+    assert request("region", region=region_text((640, 480)))["accepted"]
+    await_black_outside(FRAME_RECT, 3)
+    assert_pixel(FRAME_RECT[0] + 2, FRAME_RECT[1] + 2, SLATE)
+    print("PASS slate_inside_the_frame_region_black_outside", flush=True)
+    judge.await_client(opened + 1, 4, drain)
+    judge.send(name, 1, True, CARD_LINES)
+    judge.await_report(name, 1, 3, drain)
+    card_x, card_y, card_w, card_h = card_rect(FRAME_RECT)
+    x, y, w, h = FRAME_RECT
+    assert x <= card_x and card_x + card_w <= x + w and y <= card_y and card_y + card_h <= y + h
+    await_pixel(card_x + 2, card_y + 2, SLATE, 2)                       # the card, inside the Frame
+    await_black_outside(FRAME_RECT, 2)
+    tinted = assert_pixel(x + 2, y + 2, cairo_over((0.0, 0.0, 0.0), 0.45, SLATE))
+    print("PASS health_card_inside_the_frame_region_black_outside", tinted, flush=True)
+    # Placed on a turned screen (480 x 640) that is not the Output as it hangs: the whole Output.
+    assert request("region", region=region_text((480, 640), (0, 0, 460, 300)))["accepted"]
+    await_pixel(5, 5, cairo_over((0.0, 0.0, 0.0), 0.45, SLATE), 2, drained=True)
+    print("PASS mismatched_screen_puts_the_card_on_the_whole_output",
+          assert_pixel(CARD_X + 2, CARD_Y + 2, SLATE), flush=True)
+    assert request("region", region=region_text((640, 480)))["accepted"]
+    await_black_outside(FRAME_RECT, 3)
+    # The client dead (released or not): the shell's amber over the whole Output, until it binds
+    # again (2 s). The next spawn is the magenta test client again (the mode file is consumed).
+    killed = kill_private_client()
+    amber = await_pixel(320, 240, over(tuple(int(c * 0.5 * 0xFFFF) >> 8 for c in (0.55, 0.35, 0.0)),
+                                       int(0.5 * 0xFFFF) >> 8, SLATE), 1.0 - (time.monotonic() - killed))
+    assert_whole_output(amber)
+    assert time.monotonic() - killed < 1.8, "the respawn came before the whole Output was read"
+    print("PASS amber_covers_the_whole_output_while_the_overlay_client_is_dead", amber, flush=True)
+    assert request("region", region="")["accepted"]                           # none, for the steps that follow
+    read_until(lambda e: e["event"] == "diagnostic_presented", limit=6)
+    await_pixel(*HEALTH, health_over(SLATE), 6.0 - (time.monotonic() - killed), drained=True)
+    time.sleep(0.5)
+    drain()
 
 
 def admit(args, frame_id):
@@ -643,14 +785,22 @@ def window_alpha_and_turn():
     and the Output is its mode turned; transform 4 is refused."""
     global app, output
     pathlib.Path(PROBE_ALPHA_RESET).unlink(missing_ok=True)
+    # Hold (issue #123): with no drawing of Display's, the probe's sub-surface (a picture plane at
+    # alpha 0.5) holds the handed-off Output. Mutation probe: no picture plane evidence in
+    # `hold_evidence` -> the slate covers it and the half white is never captured.
+    assert request("picture", operations=OPERATIONS, brightness="", drawing=False)["accepted"]
     admit(["alpha"], "alpha-frame")
+    held = read_until(lambda e: e["event"] == "hold" and e["output"] == output)
+    assert (held["holding"], held["evidence"]) == (True, "picture_plane"), held
     half = await_pixel(200, 175, (127.5, 127.5, 127.5), 3, tolerance=0.5)   # 127 or 128
     assert_pixel(40, 40, (0, 0, 0), tolerance=0)
     assert_pixel(99, 175, (0, 0, 0), tolerance=0)                           # just left of it
     print("PASS window_alpha_multiplier_halves_the_sub_surface", half, flush=True)
+    print("PASS a_picture_plane_holds_the_handed_off_output", flush=True)
     pathlib.Path(PROBE_ALPHA_RESET).write_text("")
     print("PASS window_alpha_object_destroyed_resets_to_opaque",
           await_pixel(200, 175, (255, 255, 255), 3, tolerance=0), flush=True)
+    assert not any(e["event"] == "hold" and not e["holding"] for e in events[events.index(held):])
     probe_line(app, "TRANSFORM 0")
     sent = len(events)
     assert not request("turn", transform=4)["accepted"]
@@ -741,6 +891,9 @@ try:
                            capture_output=True, text=True, timeout=20)
     assert words.returncode == 0, (words.returncode, words.stderr)
     print("PASS frame_client_word_for_every_new_surface", flush=True)
+    # The probe draws its ground alone: Display's drawing holds the Output for the steps that
+    # look at the probe's pixels (module docstring).
+    assert request("picture", operations=OPERATIONS, brightness="", drawing=True)["accepted"]
     app = subprocess.Popen(["/tmp/probe"], env=env, preexec_fn=user)
     ticks = int(pathlib.Path(f"/proc/{app.pid}/stat").read_text().rpartition(") ")[2].split()[19])
     identity = {"frame_id": "native-frame",
@@ -774,6 +927,8 @@ try:
     assert result["accepted"], result
     release = read_until(lambda e: e["event"] == "handoff_presented")
     assert release["handoff_id"] == handoff
+    held = read_until(lambda e: e["event"] == "hold")
+    assert (held["holding"], held["evidence"]) == (True, "display_drawing"), held
     read_until(lambda e: e["event"] == "presented" and e["frame_tag"] == "authored-probe")
     print("PASS separate_handoff_ack_then_admitted_grant", flush=True)
     print("PASS handed_off_app_pixel_captured", assert_pixel(320, 240, PROBE_APP), flush=True)
@@ -1010,22 +1165,37 @@ try:
     assert not any(e["event"] in ("invalidated", "presented") for e in still_events), \
         still_events[-12:]
     print("PASS still_app_keeps_its_grant_on_ping_answers_with_no_commit", flush=True)
-    # An app whose draws fail commits untagged buffers while it still answers every ping: what it
-    # shows is no frame it can name, so its answers keep no lease and the diagnostic returns within
-    # LEASE_MS, as it did before the ping. Mutation probe: renew on a pong whatever the newest
-    # commit (`untagged` dropped from `pong`): the grant is kept.
-    pathlib.Path(PROBE_UNTAGGED).write_text("")
-    pathlib.Path(PROBE_STILL).unlink()
-    untagged = time.monotonic()
-    lost = read_until(lambda e: e["event"] == "invalidated", limit=8)
-    assert lost["reason"] == "surface_lease_or_process_lost", lost
-    assert time.monotonic() - untagged < 7, time.monotonic() - untagged
-    read_until(lambda e: e["event"] == "diagnostic_presented")
+    # Hold (issue #123), liveness and hold apart. An app whose draws fail commits untagged buffers
+    # while it still answers every ping: it is alive, so it keeps its grant, but its ground holds
+    # nothing, so without Display's drawing the holding slate covers it (`hold` false) within a
+    # tick, and Display's drawing takes it back off. Mutation probe: `hold_evidence` returns
+    # HOLD_PICTURE_PLANE unconditionally -> no `hold` false, read_until times out.
+    pathlib.Path(PROBE_STILL).unlink()      # the replacement candidate draws again: hand it off
+    shown = read_until(lambda e: e["event"] == "presented" and e["identity"] == replacement)
+    handoff = str(uuid.uuid4())
+    assert request("handoff", grant_id=replacement_grant, handoff_id=handoff,
+                   buffer_id=shown["buffer_id"])["accepted"]
+    read_until(lambda e: e["event"] == "handoff_presented" and e["handoff_id"] == handoff)
+    pathlib.Path(PROBE_UNTAGGED).write_text("")   # its commits name nothing from here on
+    hold_from = len(events)
+    assert request("picture", operations=OPERATIONS, brightness="", drawing=False)["accepted"]
+    lost = read_until(lambda e: e["event"] == "hold" and not e["holding"], limit=3)
+    assert lost["evidence"] is None and lost["output"] == output, lost
+    print("PASS a_ground_only_app_loses_the_screen_to_the_slate",
+          await_pixel(40, 40, SLATE, 2, drained=True), flush=True)
+    quiet = time.monotonic() + 6.5          # past LEASE_MS: its ping answers keep the grant
+    while time.monotonic() < quiet:
+        time.sleep(0.25)
+        drain()
+    assert not any(e["event"] == "invalidated" for e in events[hold_from:]), events[-12:]
+    assert_pixel(40, 40, SLATE)
+    print("PASS an_app_answering_pings_keeps_its_grant_under_the_slate", flush=True)
+    assert request("picture", operations=OPERATIONS, brightness="", drawing=True)["accepted"]
+    back = read_until(lambda e: e["event"] == "hold" and e["holding"], limit=3)
+    assert back["evidence"] == "display_drawing", back
+    print("PASS displays_drawing_takes_the_slate_back_off",
+          await_pixel(320, 240, PROBE_APP, 2, drained=True), flush=True)
     pathlib.Path(PROBE_UNTAGGED).unlink()
-    print("PASS untagged_app_loses_its_grant_on_ping_answers_and_the_diagnostic_returns", flush=True)
-    regranted = {**replacement, "frame_id": "regranted-frame"}
-    assert request("candidate", identity=regranted, grant_id=str(uuid.uuid4()), uid=10004)["accepted"]
-    read_until(lambda e: e["event"] == "presented" and e["identity"] == regranted)
     pathlib.Path(PROBE_STILL).write_text("")
     time.sleep(0.3)
     drain()
@@ -1037,15 +1207,32 @@ try:
     assert lost["reason"] == "surface_lease_or_process_lost", lost
     assert time.monotonic() - stopped < 7, time.monotonic() - stopped
     read_until(lambda e: e["event"] == "diagnostic_presented")
+    assert slate_reason(output["output_id"]) == "surface_lease_or_process_lost"
+    print("PASS stopped_app_loses_its_grant_within_the_lease_and_the_diagnostic_returns", flush=True)
+    # Bench P2 (the test Pi, 2026-10-23): Central offers the same stopped run again (no candidate,
+    # none admitted), the shell takes it, and the slate read "Starting Player - waiting for
+    # authorized handoff" for as long as the run stayed frozen. The offer is still taken (a run
+    # that resumes can hand off again), but the slate keeps the lease-lost reason, offer after
+    # offer. Mutation probe: shell.c `candidate` always setting "starting_new" -> the reason reads
+    # starting_new.
+    assert request("candidate", identity=replacement, grant_id=str(uuid.uuid4()), uid=10004)["accepted"]
+    read_until(lambda e: e["event"] == "diagnostic_presented")
+    assert slate_reason(output["output_id"]) == "surface_lease_or_process_lost"
+    again = read_until(lambda e: e["event"] == "invalidated", limit=8)
+    assert again["reason"] == "surface_lease_or_process_lost", again
+    read_until(lambda e: e["event"] == "diagnostic_presented")
+    assert slate_reason(output["output_id"]) == "surface_lease_or_process_lost"
+    print("PASS a_stopped_run_offered_again_keeps_the_lease_lost_reason", flush=True)
     os.kill(app.pid, signal.SIGCONT)
     pathlib.Path(PROBE_STILL).unlink()
     app.terminate()
     app.wait(timeout=3)
     app = None
-    print("PASS stopped_app_loses_its_grant_within_the_lease_and_the_diagnostic_returns", flush=True)
     picture_v4()
     print("PASS health_layer_survives_invalidate", assert_pixel(*HEALTH, health_over(SLATE)),
           flush=True)
+    explain_area_cases()
+    card_ink_stays_in_the_explain_area()
     killed = kill_private_client()
     # While no private client is bound (the shell respawns it 2 s after it is gone), the
     # client-identity check alone refuses a foreign bind: no held resource masks it here.

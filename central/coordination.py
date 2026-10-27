@@ -43,7 +43,7 @@ from central.registry import RegistryError
 from central.runtime import Scene
 from central.runtime import handle_execution_outcome as handle_runtime_outcome
 from central.runtime_store import RuntimeStore
-from central.transaction_locks import COORDINATION_LOCK, holds_runtime_locks_in
+from central.transaction_locks import COORDINATION_LOCK, holds_node_lock_in, holds_runtime_locks_in
 from central.wall_plan.fit import FitTarget, fit_target
 from central.wall_plan.order import PhotoShowing
 from central.wall_plan.ports import FitSettingsStore, ShownHistory
@@ -973,21 +973,24 @@ class Coordinator:
             self._commit_due(conn, configurations, now)
             return True
 
-    def display_admission_in(self, conn, *, player_id: str, authority_epoch: int,
+    def display_admission_in(self, conn, *, device_id: str, player_id: str, authority_epoch: int,
                              output_id: str, frame_id: str, binding_generation: int, config_revision: int,
                              process, app_epoch: int, environment_sha256: str,
                              phase: str) -> DisplayAdmission:
         """Authorize an exact operational surface, never an execution Commit.
 
-        Caller holds Coordination→Runtime before authenticating the node session.
+        Caller holds the Node's own lock (`acquire_node_lock`), never the fleet-wide
+        Coordination lock (issue #127). The player row is read FOR SHARE, so a binding write
+        on this one player orders against it and no other Node waits.
         A live app linkage and Registry tuple are necessary.
         """
         from central.fleet.node_app_links import load_current_node_app_link_for_player_in
 
-        if not holds_runtime_locks_in(conn):
-            raise ValueError("node_display_runtime_locks_required")
+        if not holds_node_lock_in(conn, device_id):
+            raise ValueError("node_display_node_lock_required")
         if phase not in ("candidate", "handoff", "revision"):
             raise ValueError("node_display_phase_invalid")
+        conn.execute("SELECT id FROM players WHERE id=%s FOR SHARE", (player_id,))
         observed = self.installation.configuration_in(conn, player_id, authority_epoch)
         if observed is None or not any(b.output_id == output_id and b.frame_id == frame_id
                 and b.generation == binding_generation
@@ -1003,17 +1006,19 @@ class Coordinator:
             link.app_epoch, link.environment_sha256, phase])
         return DisplayAdmission(True, fence, "current_linked_app")
 
-    def display_withdrawal_in(self, conn, *, player_id: str, authority_epoch: int,
+    def display_withdrawal_in(self, conn, *, device_id: str, player_id: str, authority_epoch: int,
                               previous_surface, expected_surface) -> DisplayAdmission:
         """Revoke exactly an old operational role after Registry authority changes.
 
-        Caller proves this DisplayHost previously admitted the old surface. This
-        decision neither changes Run state nor grants a replacement surface.
+        Caller holds the Node's own lock, as for `display_admission_in`, and proves this
+        DisplayHost previously admitted the old surface. This decision neither changes Run
+        state nor grants a replacement surface.
         """
         from central.fleet.node_app_links import load_current_node_app_link_for_player_in
 
-        if not holds_runtime_locks_in(conn):
-            raise ValueError("node_display_runtime_locks_required")
+        if not holds_node_lock_in(conn, device_id):
+            raise ValueError("node_display_node_lock_required")
+        conn.execute("SELECT id FROM players WHERE id=%s FOR SHARE", (player_id,))
         if previous_surface.frame_id is None:
             return DisplayAdmission(False, "", "historical_surface_identity_incomplete")
         observed = self.installation.configuration_in(conn, player_id, authority_epoch)

@@ -12,6 +12,7 @@ from contracts.models import PhotoCrop
 from contracts.photo_crop import crop_window
 from player.geometry import encode_srgb
 from player.planes import (
+    DARK_KEY,
     MIN_STRENGTH,
     FrameLayers,
     Screen,
@@ -40,7 +41,7 @@ def strengths(*layers: LocalLayer, frame: str = "frame1") -> list[tuple[str, flo
     """Each plane's assignment and strength; full strength over black is encode_srgb(1), which is
     1 within a float's last bit."""
     planes = compose(SCREEN, [FrameLayers(frame, FULL, layers)]).planes
-    return [(plane.layer.layer.assignment_id, pytest.approx(plane.strength, abs=1e-12)) for plane in planes]
+    return [(plane.key, pytest.approx(plane.strength, abs=1e-12)) for plane in planes]
 
 
 def test_a_dissolve_keeps_the_outgoing_on_top_fading_out_over_the_incoming_at_full():
@@ -129,7 +130,28 @@ def test_a_plane_too_weak_to_show_is_removed_never_left_transparent():
     """An outgoing dissolve at 1 - 0.999 is under MIN_STRENGTH; a dip at 0.001 encodes to about 0.0129."""
     assert strengths(photo("out", 1.0, start=100), photo("in", 0.999, start=101)) == [("in", 1.0)]
     assert strengths(photo("dip", 0.001)) == [("dip", pytest.approx(0.0129, abs=1e-4))]
-    assert encode_srgb(0.0001) < MIN_STRENGTH and strengths(photo("dip", 0.0001)) == []
+    assert encode_srgb(0.0001) < MIN_STRENGTH and strengths(photo("dip", 0.0001)) == [(DARK_KEY + "frame1", 1.0)]
+
+
+@pytest.mark.parametrize("layers", [(), (photo("dip", 0.0),), (photo("dip", 0.0001),)],
+                         ids=["empty-fallback", "alpha-0", "too-weak"])
+def test_a_frame_with_no_plane_shows_its_dark_plane_never_nothing(layers):
+    """Issue #123: dark on purpose is a black picture plane the compositor sees (Display Host's hold
+    evidence), never the bare ground, so it is not read as "nothing to show". It is no layer: a
+    reserved key no assignment id can take, the placement's size, at full strength."""
+    at = Placement(400, 20, 3000, 2140)
+    (plane,) = compose(SCREEN, [FrameLayers("frame1", at, layers)]).planes
+    assert plane.dark and plane.layer is None and plane.key == DARK_KEY + "frame1"
+    assert (plane.at, plane.size, plane.strength, plane.enlarged) == (at, (3000, 2140), 1.0, False)
+
+
+def test_a_dark_plane_is_only_for_a_frame_with_no_plane_of_its_own():
+    left, right = Placement(0, 0, 1920, 1080), Placement(1920, 1080, 1920, 1080)
+    composition = compose(SCREEN, [FrameLayers("a", left, (photo("a1", 1.0, frame="a"),)),
+                                   FrameLayers("b", right, ())])
+    assert [(p.frame_id, p.key, p.dark) for p in composition.planes] == [
+        ("a", "a1", False), ("b", DARK_KEY + "b", True)]
+    assert strengths(black("authored", 1.0)) == [("authored", 1.0)]        # authored black is its own plane
 
 
 def test_frames_keep_the_order_given_each_at_its_placement():
