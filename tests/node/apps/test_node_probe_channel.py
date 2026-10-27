@@ -326,6 +326,7 @@ def test_relink_reaches_only_the_owed_runs_channel(probes):
         assert relinks(player) == []
         probes.owe_relink(OWED)
         assert until(lambda: relinks(player))
+        assert until(lambda: facts(probes.feed, "relink_sent"))  # recorded after the send returns
         assert [e.value for e in facts(probes.feed, "relink_sent")] == [{"run": RUN.document()}]
     finally:
         player.stop()
@@ -342,6 +343,7 @@ def test_a_relink_owed_while_no_channel_is_open_goes_to_the_next_channel_first(p
         probes.adopt(ours, RUN)
         assert until(lambda: relinks(player))
         assert type(player.received[0]).__name__ == "NodeRelinkV2"  # before the first probe
+        assert until(lambda: facts(probes.feed, "relink_sent"))  # recorded after the send returns
         assert len(facts(probes.feed, "relink_sent")) == 1
     finally:
         player.stop()
@@ -367,6 +369,7 @@ def test_a_relink_is_sent_once_per_channel_instance(probes):
     try:
         probes.adopt(second_ours, RUN)  # the Player reconnected: a new channel instance
         assert until(lambda: relinks(second))
+        assert until(lambda: len(facts(probes.feed, "relink_sent")) == 2)  # after the send returns
         for _ in range(10):
             probes.owe_relink(OWED)
             time.sleep(0.02)
@@ -391,6 +394,7 @@ def test_each_owed_episode_reaches_a_long_lived_channel_once(probes):
                 probes.owe_relink(OwedRelink(RUN, episode))
                 time.sleep(0.02)
         assert until(lambda: len(relinks(player)) == 3)
+        assert until(lambda: len(facts(probes.feed, "relink_sent")) == 3)  # after the send returns
         time.sleep(0.15)  # restated every turn: still once per episode
         assert len(relinks(player)) == 3
         assert [e.value for e in facts(probes.feed, "relink_sent")] == [{"run": RUN.document()}] * 3
@@ -464,6 +468,7 @@ def test_an_unsent_relink_is_retried_on_a_later_pass(probes):
         probes.owe_relink(OWED)
         probes.adopt(channel, RUN)
         assert until(lambda: relinks(player))
+        assert until(lambda: facts(probes.feed, "relink_sent"))  # recorded after the send returns
         assert channel.refused == 3 and len(relinks(player)) == 1
         assert len(facts(probes.feed, "relink_sent")) == 1
     finally:
