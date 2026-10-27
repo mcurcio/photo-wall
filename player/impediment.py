@@ -8,9 +8,9 @@ the Pi holds: the Frame's lighting, the document it drew with and the light it d
 reachability, never an age. The Player draws exactly what the document says (the last stated value
 stands); the judge changes no drawing.
 
-TODO(player lane): the body of `impeded`, writing IMPEDED_KEY on the Player's line
-(player/player_line.py PLAYER_STATE gains IMPEDED_KEY: IMPEDED_BYTES; restated whole at every
-attach and on every change).
+The Player judges every Frame it draws at every main-loop turn (player/service.py
+`impeded_frames`) and writes the result whole on its line (player/player_line.py `put_impeded`,
+IMPEDED_KEY), restated at every attach and on every change.
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from contracts.frame_lighting import FrameLighting
 from contracts.identifiers import TargetIdentifier
 from contracts.node_impeded import Impeded
 from contracts.node_state import OutputId
-from contracts.room_light import Lux, RoomLightsDocument
+from contracts.room_light import Lux, MeasuredEntry, ReportedEntry, RoomLightsDocument
 
 
 def impeded(frame_id: TargetIdentifier, output_id: OutputId, grant_id: str, lighting: FrameLighting,
@@ -26,7 +26,18 @@ def impeded(frame_id: TargetIdentifier, output_id: OutputId, grant_id: str, ligh
     """The Frame's impediment now, or None. Impeded only when `drawn_lux` == 0 and one or more room
     lights `lighting` names carry a doubt in `drawn_with`: `lights` those lights in id order, `words`
     the first one's CentralWords verbatim, `grant_id` the shell grant the Frame was drawn under."""
-    raise NotImplementedError("player lane")
+    if drawn_lux != 0:
+        return None
+    doubted = {}
+    for light in lighting.lights:
+        entry = drawn_with.lights.get(light.light)
+        if isinstance(entry, ReportedEntry | MeasuredEntry) and entry.doubt is not None:
+            doubted[light.light] = entry.doubt
+    if not doubted:
+        return None
+    lights = tuple(sorted(doubted))
+    return Impeded(frame_id=frame_id, output_id=output_id, grant_id=grant_id, lights=lights,
+                   words=doubted[lights[0]])
 
 
 __all__ = ["impeded"]
