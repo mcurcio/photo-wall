@@ -24,6 +24,7 @@ from central import cache_layout
 from central.assets.frame_media import FrameMediaRefused
 from central.assets.reader import Unavailable
 from central.calibration_target_routes import mount_calibration_target_routes
+from central.central_errors_routes import mount_central_error_routes
 from central.content_routes import (
     error_response,
     mount_content_routes,
@@ -40,6 +41,7 @@ from central.fleet.node_sessions import NodeControlConfig
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.home_assistant_routes import mount_home_assistant_routes
 from central.house_routes import mount_house_routes
+from central.infra.central_errors_store import PgCentralErrors
 from central.infra.display_store import (
     PgDisplayCommands,
     PgDisplayQueries,
@@ -50,9 +52,10 @@ from central.infra.fit_analysis_store import PgFitAnalysisReader
 from central.infra.fit_settings_store import PgFitSettings
 from central.infra.frame_lighting_store import PgFrameLighting, PgHouseLock
 from central.infra.home_assistant import references as home_assistant_references
+from central.infra.home_assistant.advice import HomeAssistantAdvice
 from central.infra.home_assistant.settings import PgHomeAssistantSettings
 from central.infra.house_store import PgHouse, seed_house
-from central.infra.light_sensor_judge import PI_SOURCE, is_player
+from central.infra.light_sensor_judge import PI_SOURCE, PiMeterAdvice, is_player
 from central.infra.paper_profile_store import PgPaperProfiles
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.power_store import PgPower
@@ -865,8 +868,11 @@ def create_app(
     mount_house_routes(app, admin=admin, queries=house, commands=house)
     room_lights = PgRoomLights(db, house_lock)
     mount_room_light_routes(app, admin=admin, lights=room_lights, sources=REPORT_SOURCES)
-    mount_home_assistant_routes(app, admin=admin, settings=PgHomeAssistantSettings(
-        db, installed_central_version() if central_version is None else central_version))
+    version = installed_central_version() if central_version is None else central_version
+    mount_home_assistant_routes(app, admin=admin, settings=PgHomeAssistantSettings(db, version))
+    mount_central_error_routes(app, admin=admin, errors=PgCentralErrors(db, house_lock, {
+        home_assistant_references.SOURCE: HomeAssistantAdvice(room_lights.galleria_birth, version),
+        PI_SOURCE: PiMeterAdvice()}))
     pictures = PgPictureSessions(db)
     mount_picture_routes(app, admin=admin, queries=pictures, commands=pictures)
     mount_tuning_history_routes(app, admin=admin, queries=PgTuningHistory(db))

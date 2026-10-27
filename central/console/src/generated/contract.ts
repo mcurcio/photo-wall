@@ -45,9 +45,9 @@ export interface CloseLight {
 }
 
 export interface ColourLineView {
-  cant_tell_since: number | null;
   colour: LightColour;
   colour_from: "typed" | "following" | "never-stated";
+  doubt: DoubtView | null;
   sensor: ColourSensorId | null;
   source: "typed" | "its-bulb" | "colour-sensor";
   stated_at: number | null;
@@ -66,8 +66,8 @@ export interface ColourSensorRef {
 }
 
 export interface ColourSensorView {
-  cant_tell_since: number | null;
   colour: KelvinColour | null;
+  doubt: DoubtView | null;
   followed_by: RoomLightId[];
   heard_at: number | null;
   id: ColourSensorId;
@@ -437,8 +437,8 @@ export type RoomLight = ReportedLight | MeasuredLight | FixedLight;
 export type RoomLightId = string;
 
 export interface RoomLightView {
-  cant_tell_since: number | null;
   colour: ColourLineView;
+  doubt: DoubtView | null;
   entry: FixedEntry | ReportedEntry | MeasuredEntry;
   heard_at: number | null;
   id: RoomLightId;
@@ -473,7 +473,7 @@ export interface SensorRef {
 }
 
 export interface SensorView {
-  cant_tell_since: number | null;
+  doubt: DoubtView | null;
   heard_at: number | null;
   id: SensorId;
   reading: Measured | null;

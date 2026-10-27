@@ -5,6 +5,6 @@ blacks its Frame (player/impediment.py, its `impeded` report); each reporting so
 what to do about its own references (`SourceAdvice`). Needs attention and the Frame page's "Central's
 error" read it; it is never a Pi's health and never shown under Hardware.
 
-TODO(central edge lane): the implementation (central/infra/), its routes, Needs attention and the
-Frame page.
+The composition is compose.py's; central/infra/central_errors_store.py reads what Central keeps for
+it, and central/central_errors_routes.py serves it.
 """

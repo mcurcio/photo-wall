@@ -25,7 +25,7 @@ ColourFrom = Literal["typed", "following", "never-stated"]
 
 class DoubtView(Model):
     """Why Central can't stand behind a reference's last word now, and since when (Central's clock).
-    Replaces `cant_tell_since` across House › Lights' views (TODO room-lights lane)."""
+    Every House › Lights view carries it (None: Central stands behind the last word)."""
     reason: DoubtReason
     since: Instant
 
@@ -35,51 +35,51 @@ class ColourLineView(Model):
     carries (as stated, real kelvin or rgb; the console says "outside what the screen draws" against
     contracts/kelvin.py's table), where it comes from (`source`: the light's colour source's kind;
     `sensor`: the colour sensor it follows, None for any other source), why (`colour_from`), when its
-    source stated it (None: typed, or never stated) and since when its source can't tell (None: it
-    tells, or the colour is typed)."""
+    source stated it (None: typed, or never stated) and its source's doubt (None: Central
+    stands behind it, or the colour is typed)."""
     colour: LightColour
     source: Literal["typed", "its-bulb", "colour-sensor"]
     sensor: ColourSensorId | None
     colour_from: ColourFrom
     stated_at: Instant | None
-    cant_tell_since: Instant | None
+    doubt: DoubtView | None
 
 
 class RoomLightView(Model):
     """One room light: its setup, its entry in the document now, when Central last heard its
-    reporter (None: never, or nobody reports it), since when its reporter can't tell (None: it tells
-    now, or nobody reports it; the entry keeps the last stated brightness), its colour line, and the
-    Frames whose lighting names it."""
+    reporter (None: never, or nobody reports it), its brightness reference's doubt (None: Central
+    stands behind it, or nobody reports it; the entry keeps the last stated brightness), its colour
+    line, and the Frames whose lighting names it."""
     id: RoomLightId
     light: RoomLight
     entry: RoomLightEntry
     heard_at: Instant | None
-    cant_tell_since: Instant | None
+    doubt: DoubtView | None
     colour: ColourLineView
     named_by: tuple[Identifier, ...]
 
 
 class SensorView(Model):
     """One Sensor: its setup, its reference's last stated reading (None: never stated), when Central
-    last heard it, since when it can't tell (None: it tells now), and the room light it measures
+    last heard it, its doubt (None: Central stands behind it), and the room light it measures
     (None: none)."""
     id: SensorId
     sensor: Sensor
     reading: Measured | None
     heard_at: Instant | None
-    cant_tell_since: Instant | None
+    doubt: DoubtView | None
     reports: RoomLightId | None
 
 
 class ColourSensorView(Model):
     """One colour sensor: its setup, its reference's last stated colour (None: never stated), when
-    Central last heard it, since when it can't tell (None: it tells now), and the room lights that
+    Central last heard it, its doubt (None: Central stands behind it), and the room lights that
     follow it."""
     id: ColourSensorId
     sensor: ColourSensor
     colour: KelvinColour | None
     heard_at: Instant | None
-    cant_tell_since: Instant | None
+    doubt: DoubtView | None
     followed_by: tuple[RoomLightId, ...]
 
 

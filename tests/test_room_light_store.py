@@ -250,21 +250,24 @@ def test_kept_brightness_and_colour_survive_cant_tell_and_a_restart(registry):
     red = RgbColour(rgb=(1.0, 0.0, 0.0))
     assert lights.record_light_state(X, LightStated(state=Dimmer(on=True, brightness=0.4), colour=red)) == "recorded"
     assert lights.record_colour_reading(SKY_AT, KelvinColour(kelvin=3456.5)) == "recorded"
-    assert lights.record_light_state(X, Unavailable()) == "unchanged"
+    assert lights.record_light_state(X, Unavailable()) == "recorded"   # its doubt travels
     assert lights.record_colour_reading(SKY_AT, Unavailable()) == "unchanged"
     restarted = PgRoomLights(registry.db, PgHouseLock())
     document = restarted.current()
-    assert document.lights["x"] == ReportedEntry(colour=red, state=Dimmer(on=True, brightness=0.4), doubt=None)
+    entry = document.lights["x"]
+    assert isinstance(entry, ReportedEntry) and (entry.colour, entry.state) == (red, Dimmer(on=True, brightness=0.4))
+    assert entry.doubt is not None and entry.doubt.line1.startswith("X: its light can't tell · since")
     assert document.lights["sun"].colour == KelvinColour(kelvin=3456.5)
     view = {each.id: each for each in restarted.lights().lights}
-    assert view["x"].cant_tell_since is not None and view["x"].colour.cant_tell_since is not None
+    assert view["x"].doubt is not None and view["x"].doubt.reason == "cant-tell"
+    assert view["x"].colour.doubt is not None
     assert (view["x"].colour.colour_from, view["sun"].colour.colour_from) == ("following", "following")
-    assert restarted.lights().colour_sensors[0].cant_tell_since is not None
+    assert restarted.lights().colour_sensors[0].doubt is not None
     # off is stated (adds no light) and keeps the colour; a stated value clears "can't tell"
     assert restarted.record_light_state(X, _said(False, 0.0)) == "recorded"
     after = {each.id: each for each in restarted.lights().lights}["x"]
     assert after.entry == ReportedEntry(colour=red, state=Dimmer(on=False, brightness=0.0), doubt=None)
-    assert after.cant_tell_since is None
+    assert after.doubt is None
 
 
 def test_colour_sensors_are_saved_and_kept_while_followed(registry):

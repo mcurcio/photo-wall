@@ -24,6 +24,10 @@ E5. A colour sensor's state (the Sun's sky colour temperature) reaches the Playe
     bulb's colour as Galleria states it by its mode (kelvin in its white mode, rgb in a colour mode)
     reaches the Player; off keeps its last stated colour. Galleria's birth on the hub reaches the Home
     Assistant page.
+E6. Galleria v0.40.1's recorded light state is refused as unreadable: the spot keeps its last
+    stated brightness and the Player's document carries Central's words that it can't read it. When
+    the door connection Galleria's birth names closes, the words say Photo Wall lost the link; a new
+    connection, its birth and the restated state clear them.
 E4. A change made while the hub is away (a House > Lights edit) reaches the callback once the hub is
     back; and after a hub restart with no change, a Player starting on a Node whose bus restarted
     empty gets the document (WALL holds what Central holds, whatever was put before).
@@ -100,6 +104,19 @@ LAMP = "light.fam_lamp"
 ADMIN_HEADERS = {"Authorization": "Bearer " + ADMIN}
 FIRST_SECONDS = 30   # the worker reaches the hub, the Node links and its WALL mirror first syncs
 SECONDS = WALL_RECHECK_SECONDS / 2   # every later step: a wake, never the WALL writer's own recheck
+
+
+# Galleria v0.40.1's light state as it went on the hub (kelvin and rgb, no `colour`): the shape Central
+# reads changed in v0.43.0.
+V0_40_1_LIGHT = b'{"brightness":255,"kelvin":null,"kind":"light","name":"Bookshelf spot","on":true,"rgb":null}'
+
+
+def _doubt(document: RoomLightsDocument, line1: str | None) -> bool:
+    """The spot's doubt in `document`: none (`line1` None), or its first line starts with `line1`."""
+    entry = document.lights.get("bookshelf-spot")
+    if not isinstance(entry, ReportedEntry):
+        return False
+    return entry.doubt is None if line1 is None else entry.doubt is not None and entry.doubt.line1.startswith(line1)
 
 
 def _spot(document: RoomLightsDocument) -> Dimmer | None:
@@ -197,11 +214,12 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
             async def cant_tell():
                 view = RoomLightsView.model_validate(await asyncio.to_thread(call, "GET", HOUSE_LIGHTS))
                 [spot] = [light for light in view.lights if light.id == "bookshelf-spot"]
-                return spot.cant_tell_since is not None
+                return spot.doubt is not None and spot.doubt.reason == "cant-tell"
             await until(cant_tell, SECONDS, "Central marks that the spot can't tell")
             kept = RoomLightsView.model_validate(await asyncio.to_thread(call, "GET", HOUSE_LIGHTS))
-            assert [light.entry for light in kept.lights if light.id == "bookshelf-spot"] == [
-                ReportedEntry(colour=KelvinColour(kelvin=4000), state=FULL, doubt=None)]   # the last stated brightness stands
+            [kept_spot] = [light.entry for light in kept.lights if light.id == "bookshelf-spot"]
+            assert isinstance(kept_spot, ReportedEntry) and kept_spot.state == FULL   # the last stated brightness stands
+            assert kept_spot.doubt is not None and kept_spot.doubt.line1.startswith(f"{NAME}: its light can't tell")
             assert _spot(followed.latest()) == FULL
             await house.publish("Not_An_Entity", ON)
             await house.publish("light.garbage", b"not a state")
@@ -253,7 +271,7 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
             async def sky_cant_tell():
                 view = RoomLightsView.model_validate(await asyncio.to_thread(call, "GET", HOUSE_LIGHTS))
                 [daylight] = [light for light in view.lights if light.id == "daylight"]
-                return daylight.colour.cant_tell_since is not None and daylight.entry == sky
+                return daylight.colour.doubt is not None and daylight.entry == sky
             await until(sky_cant_tell, SECONDS, "Central keeps the sky's colour and marks it can't tell")
             assert followed.latest().lights["daylight"] == sky
 
@@ -280,6 +298,42 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
                 page = await asyncio.to_thread(call, "GET", "/v1/operator/integrations/home-assistant")
                 return page["galleria"]["version"] == "9.9.9" and page["galleria"]["update"] is False
             await until(galleria_heard, SECONDS, "the Home Assistant page shows Galleria's version")
+
+            # E6: v0.40.1's recorded light state: refused as unreadable, the last word stands, the
+            # Player's document carries Central's words.
+            await house.publish(ENTITY, V0_40_1_LIGHT)
+            await until(latest(lambda d: _doubt(d, "Photo Wall can't read Bookshelf spot · since"), followed),
+                        SECONDS, "the Player's document says Central can't read the spot")
+            assert _spot(followed.latest()) == FULL
+            await house.publish(ENTITY, ON)
+            await until(latest(lambda d: _spot(d) == FULL and _doubt(d, None), followed), SECONDS,
+                        "a stated spot clears Central's doubt")
+
+            # E6: the door connection Galleria's birth names closes: "link closed"; a new connection,
+            # its birth and the restated state clear it.
+            async def birth_of(door: HomeAssistant, version: str) -> None:
+                assert door.client is not None
+                await door.publish(GALLERIA_BIRTH_KEY, encode_galleria_birth(GalleriaBirth(
+                    version=version, kinds=("light", "illuminance", "colour-temperature"),
+                    connection=GalleriaConnection(server=door.client._server_info["server_id"],
+                                                  client=door.client.client_id))))
+
+                async def heard():
+                    page = await asyncio.to_thread(call, "GET", "/v1/operator/integrations/home-assistant")
+                    return page["galleria"]["version"] == version
+                await until(heard, SECONDS, f"Central keeps Galleria's birth {version}")
+            await birth_of(house, "9.9.10")
+            await house.client.close()
+            await until(latest(lambda d: _doubt(d, "Photo Wall lost the link to Bookshelf spot · since"), followed),
+                        SECONDS, "the Player's document says Photo Wall lost the link")
+            assert _spot(followed.latest()) == FULL
+            again = HomeAssistant(house.url)
+            await again.__aenter__()
+            stoppers.append(again.__aexit__)
+            await birth_of(again, "9.9.11")
+            await again.publish(ENTITY, ON)
+            await until(latest(lambda d: _spot(d) == FULL and _doubt(d, None), followed), SECONDS,
+                        "the restated spot clears the link's doubt")
 
             # E4a: a change while the hub is away (its WALL put fails) reaches the Player once it is back.
             await asyncio.to_thread(hub.stop)

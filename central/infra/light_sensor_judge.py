@@ -96,12 +96,16 @@ def missed_readings_in(conn: Any) -> tuple[tuple[str, Reading], ...]:
             continue
     return tuple(missed)
 
+
 class PiMeterAdvice:
-    """SourceAdvice (central/central_errors/ports.py) for PI_SOURCE references: cant-read ->
-    "Install the current release on Player p-…"; cant-tell -> "Check the light meter on Player p-…"."""
+    """SourceAdvice (central/central_errors/ports.py) for PI_SOURCE references (the address is the
+    Pi's player id): its reading can't be read -> install the current release on it; any other doubt
+    (it can't tell; a Pi's meter has no link of its own to close) -> check its light meter."""
 
     def what_to_do(self, reference: Reference, reason: DoubtReason) -> str:
-        raise NotImplementedError("central edge lane")
+        if reason == DoubtReason.CANT_READ:
+            return f"Install the current release on Player {reference.address}"
+        return f"Check the light meter on Player {reference.address}"
 
 
 __all__ = ["HOST_STATE_STREAM", "PI_SOURCE", "LightSensorJudge", "PiMeterAdvice", "is_player", "missed_readings_in"]

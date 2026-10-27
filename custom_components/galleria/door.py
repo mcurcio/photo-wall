@@ -3,11 +3,13 @@ Central's origin to the hub's WebSocket listener, as HOME_ASSISTANT_USER. The hu
 permissions: publish Home Assistant's states, read Central's state one key at a time, call Central's
 methods, nothing else. No Home Assistant import: this is the transport, the entities are elsewhere.
 
-nats-py keeps the connection and reconnects forever; every failure of a call is DoorUnavailable."""
+nats-py keeps the connection and reconnects forever, each reconnect a new connection on the hub
+(`on_reconnected` hears each); every failure of a call is DoorUnavailable."""
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from urllib.parse import urlsplit
 
 from nats.aio.client import Client
@@ -76,11 +78,22 @@ class CentralDoor:
         self._client = client
         # Central's state read is imported into the door's own account under its own API prefix.
         self._jetstream = client.jetstream(prefix=CENTRAL_DOOR_API_PREFIX, timeout=CENTRAL_TIMEOUT)
+        self._reconnected: Callable[[], Awaitable[None]] | None = None
+
+    def on_reconnected(self, heard: Callable[[], Awaitable[None]] | None) -> None:
+        """`heard` is awaited after every reconnect (a new connection, with a new client id), never
+        after the first connect; None hears none."""
+        self._reconnected = heard
+
+    async def _reconnect(self) -> None:
+        if self._reconnected is not None:
+            await self._reconnected()
 
     @classmethod
     async def connect(cls, origin: str) -> CentralDoor:
         """Connected to `origin`'s door; DoorUnavailable when it does not answer now."""
         client = Client()
+        door = cls(client)
         try:
             # nats-py retries a first connect forever when it may reconnect forever: the first one
             # answers now or not at all, and a client left mid-connect is closed.
@@ -88,11 +101,11 @@ class CentralDoor:
                 await client.connect(
                     door_url(origin), user=HOME_ASSISTANT_USER, password=HOME_ASSISTANT_USER, name="galleria",
                     connect_timeout=CENTRAL_TIMEOUT, allow_reconnect=True, max_reconnect_attempts=-1,
-                    reconnect_time_wait=2, error_cb=_quiet)
+                    reconnect_time_wait=2, error_cb=_quiet, reconnected_cb=door._reconnect)
         except (*_FAILURES, ValueError) as error:
-            await cls(client).close()
+            await door.close()
             raise DoorUnavailable(str(error) or type(error).__name__) from error
-        return cls(client)
+        return door
 
     @property
     def connected(self) -> bool:

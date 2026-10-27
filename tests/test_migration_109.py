@@ -4,7 +4,8 @@ measured or fixed light's kelvin becomes typed), each light word and reading wor
 reference's facts (a stated state and when, no colour carried over: an old colour dimmer's rgb may be
 one Home Assistant worked out from color_temp, so the bulb's colour stays typed until it states one;
 "unavailable" keeping nothing and can't tell since it was heard), and the document the store builds from them is
-the one the new rules give.
+the one the new rules give. Migration 111 runs after it here: "can't tell since" is read as its
+"cant-tell" doubt (tests/test_migration_111.py proves that step alone).
 """
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from central.room_light.model import (
     RoomLight,
     TypedColour,
 )
+from central.room_light.views import DoubtView
 from contracts.room_light import (
     Dimmer,
     FixedEntry,
@@ -101,7 +103,7 @@ def test_109_upgrades_lights_and_words_to_colour_sources_and_facts(database_prov
                 assert isinstance(lights["room"], FixedLight) and lights["room"].colour == TypedColour(kelvin=6500)
                 words = {row["address"]: row for row in conn.execute(
                     "SELECT address, state, colour, EXTRACT(EPOCH FROM state_at) AS state_at, "
-                    "EXTRACT(EPOCH FROM colour_at) AS colour_at, EXTRACT(EPOCH FROM cant_tell_since) AS cant_tell, "
+                    "EXTRACT(EPOCH FROM colour_at) AS colour_at, EXTRACT(EPOCH FROM doubt_since) AS cant_tell, "
                     "EXTRACT(EPOCH FROM heard_at) AS heard_at FROM light_words").fetchall()}
                 assert (words["light.white"]["state"], words["light.white"]["colour"], words["light.white"]["state_at"]) == (
                     {"kind": "dimmer", "on": True, "brightness": 0.5}, None, 100)
@@ -112,7 +114,7 @@ def test_109_upgrades_lights_and_words_to_colour_sources_and_facts(database_prov
                 assert (words["light.away"]["state"], words["light.away"]["cant_tell"],
                         words["light.away"]["heard_at"]) == (None, 300, 300)
                 readings = {row["address"]: row for row in conn.execute(
-                    "SELECT address, reading, EXTRACT(EPOCH FROM cant_tell_since) AS cant_tell FROM reading_words")}
+                    "SELECT address, reading, EXTRACT(EPOCH FROM doubt_since) AS cant_tell FROM reading_words")}
                 assert (readings["sensor.lux"]["reading"], readings["sensor.lux"]["cant_tell"]) == (
                     {"kind": "measured", "lux": 80.0}, None)
                 assert (readings["sensor.gone"]["reading"], readings["sensor.gone"]["cant_tell"]) == (None, 500)
@@ -122,11 +124,13 @@ def test_109_upgrades_lights_and_words_to_colour_sources_and_facts(database_prov
                                                              state=Dimmer(on=True, brightness=0.5), doubt=None)
             assert document.lights["colour"] == ReportedEntry(colour=KelvinColour(kelvin=6500),
                                                               state=Dimmer(on=True, brightness=0.25), doubt=None)
-            assert document.lights["away"] == ReportedEntry(colour=KelvinColour(kelvin=2700), state=NotReported(), doubt=None)
+            away = document.lights["away"]
+            assert isinstance(away, ReportedEntry) and (away.colour, away.state) == (KelvinColour(kelvin=2700), NotReported())
+            assert away.doubt is not None and away.doubt.line1.startswith("light.away: its light can't tell")
             assert document.lights["window"] == MeasuredEntry(colour=KelvinColour(kelvin=5500), state=Measured(lux=80.0), doubt=None)
             assert document.lights["room"] == FixedEntry(colour=KelvinColour(kelvin=6500))
             view = {each.id: each for each in PgRoomLights(db, PgHouseLock()).lights().lights}
-            assert view["away"].cant_tell_since == 300 and view["white"].cant_tell_since is None
+            assert view["away"].doubt == DoubtView(reason="cant-tell", since=300) and view["white"].doubt is None
             assert view["colour"].colour.colour_from == "never-stated" and view["white"].colour.colour_from == "never-stated"
         finally:
             db.close()

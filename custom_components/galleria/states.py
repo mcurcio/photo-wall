@@ -4,11 +4,13 @@ Every light, illuminance and colour-temperature entity, except Galleria's own (n
 from the wall), in Home Assistant's own words: one value per entity id, the latest wins. A sensor is
 an illuminance one by its device class, a colour-temperature one by its unit "K" with any device class
 but temperature; each value goes as Home Assistant states it, never bounded, rounded or kept here
-(Central and the Pi own those). Galleria's birth (its version and the kinds it publishes) goes
-under GALLERIA_BIRTH_KEY with every publish of all states. The publisher puts a state on
-every change, and every state again when it starts and whenever Central's hub names a states epoch
-other than the one it last published all of them into (a hub restart, a lost connection: the
-coordinator compares them at every read). Central's room-light setup picks the ones it listens to.
+(Central and the Pi own those). Galleria's birth (its version, the kinds it publishes and the hub
+connection it goes on) goes under GALLERIA_BIRTH_KEY first with every publish of all states. The
+publisher puts a state on every change, and its birth and every state again when it starts, after
+every reconnect to Central's hub (a new connection: Central marks Home Assistant's lights "link
+closed" when the connection its birth names closes, and each clears as its state is restated) and
+whenever Central's hub names a states epoch other than the one it last published all of them into
+(a hub restart: the coordinator compares them at every read). Central's room-light setup picks the ones it listens to.
 """
 from __future__ import annotations
 
@@ -182,7 +184,13 @@ class StatePublisher:
     async def start(self) -> None:
         self._unsubscribe = self._hass.bus.async_listen(EVENT_STATE_CHANGED, self._changed)
         self._task = self._hass.async_create_background_task(self._run(), "galleria state publisher")
+        self._door.on_reconnected(self._reconnected)
         await self.publish_all()
+
+    async def _reconnected(self) -> None:
+        """A new connection to Central's hub: its birth and every state again, off the client's own
+        reconnect path."""
+        self._hass.async_create_background_task(self.publish_all(), "galleria publish after reconnect")
 
     @callback
     def _changed(self, event: Event[EventStateChangedData]) -> None:
@@ -218,8 +226,8 @@ class StatePublisher:
 
     async def _put_birth(self) -> bool:
         """Galleria's birth: its manifest's version, KINDS and the hub connection it goes on (False:
-        the hub did not take it, or no connection is open). TODO(galleria lane): put it again on every
-        reconnect (a new connection), so Central's hub judges the close of the newest one."""
+        the hub did not take it, or no connection is open). Put first with every publish of all
+        states, so Central judges the close of the newest connection only."""
         integration = await async_get_integration(self._hass, DOMAIN)
         connection = self._door.connection
         if connection is None:
@@ -262,6 +270,7 @@ class StatePublisher:
             self.published_epoch = epoch
 
     async def stop(self) -> None:
+        self._door.on_reconnected(None)
         if self._unsubscribe is not None:
             self._unsubscribe()
             self._unsubscribe = None

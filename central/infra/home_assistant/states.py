@@ -9,8 +9,9 @@ A light entity records its LightReport against `ReporterRef(SOURCE, entity)`, an
 Reading against `SensorRef(SOURCE, entity)`, a colour-temperature one its ColourReading against
 `ColourSensorRef(SOURCE, entity)`; Unavailable for Home Assistant's own unavailable (the last stated
 value stands: policy.py). A key that is not an entity id, or a value the contract's decoder refuses,
-goes to the one refusal log (UNKNOWN_ADDRESS, UNREADABLE); GALLERIA_BIRTH_KEY is Galleria's birth,
-kept for the settings page. A state of a light kind for an entity outside the `light` domain, or a
+goes to the one refusal log (UNKNOWN_ADDRESS, UNREADABLE; an unreadable one also doubts its
+reference "can't read"); GALLERIA_BIRTH_KEY is Galleria's birth, kept for the settings page and for
+judging which connection's close is Galleria's link closing (`closed`). A state of a light kind for an entity outside the `light` domain, or a
 sensor kind for a `light.` entity, is UNREADABLE too, so a light never records under a sensor's
 reference nor a reading under a ReporterRef. A light's colour outside the stated range is refused
 on its own (OUT_OF_RANGE) and its brightness still recorded. A key
@@ -74,6 +75,10 @@ class GalleriaBirths(Protocol):
         """Keep `birth` as Galleria's, heard now (Central's clock), replacing the last."""
         ...
 
+    def galleria_birth(self) -> GalleriaBirth | None:
+        """Galleria's last birth as kept (None: none heard)."""
+        ...
+
 
 class HomeAssistantListener:
     """nodeapi.hub ListenedStates over room lights' reports, the heard entities and Galleria's births."""
@@ -91,8 +96,14 @@ class HomeAssistantListener:
         """A door connection closed (nodeapi.hub ListenedStates): when it is the connection Galleria's
         latest birth names, every reference Home Assistant reports takes the "link closed" doubt
         (RoomLightReports.record_link_closed(SOURCE)); a close of any other connection (an older
-        one, closed late) changes nothing. Cleared when Galleria reconnects and restates."""
-        raise NotImplementedError("central edge lane")
+        one, closed late) changes nothing. Cleared when Galleria reconnects and restates. A store
+        failure is raised."""
+        await asyncio.to_thread(self._closed, connection)
+
+    def _closed(self, connection: GalleriaConnection) -> None:
+        birth = self._births.galleria_birth()
+        if birth is not None and birth.connection == connection:
+            self._reports.record_link_closed(SOURCE)
 
     def _record_all(self, items: Sequence[Heard]) -> None:
         for item in items:

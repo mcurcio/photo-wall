@@ -67,6 +67,7 @@ from contracts.central_api import (
     CENTRAL_STATE_STREAM,
     CENTRAL_STATE_TABLE,
     CENTRAL_USER,
+    HOME_ASSISTANT_ACCOUNT,
     HOME_ASSISTANT_STATES_PREFIX,
     HOME_ASSISTANT_STATES_STREAM,
     STATES_EPOCH_KEY,
@@ -657,8 +658,14 @@ class ListenedStates(Protocol):
     async def closed(self, connection: GalleriaConnection) -> None: ...
         # a connection of the door's user (HOME_ASSISTANT_USER) to the hub closed, as the hub's
         # disconnect event names it (its server's id, its client id); the listener judges whether it
-        # is the one Galleria's latest birth names (BUILD.md Q3 B). TODO(central edge lane): the hub
-        # session follows the door user's disconnect events and hands each here.
+        # is the one Galleria's latest birth names (BUILD.md Q3 B); raising hands the same close
+        # again after a backoff
+
+
+# The hub's disconnect event of every connection in Home Assistant's door account: a system-account
+# event, which the hub configuration (central/fleet/node_bus_accounts.py) exports from the system
+# account and imports into CENTRAL_ACCOUNT under the same subject.
+DOOR_CLOSES_SUBJECT: Final = f"$SYS.ACCOUNT.{HOME_ASSISTANT_ACCOUNT}.DISCONNECT"
 
 
 async def run_hub_session(url: str, *, version: str, state: CentralState, listened: ListenedStates,
@@ -677,7 +684,10 @@ async def run_hub_session(url: str, *, version: str, state: CentralState, listen
     this session last put in this epoch (content-keyed: an equal value is not put again); and Home
     Assistant's states are read from the latest value per entity (at every connect and every new
     epoch: all of them again) and followed, each batch handed to `listened.heard` before the reader's
-    position moves past it. A value past its table size is refused before sending and logged."""
+    position moves past it. A value past its table size is refused before sending and logged. Each
+    close of a door connection the hub announces (DOOR_CLOSES_SUBJECT) while this client is
+    connected is handed to `listened.closed`, in order (one missed while Central's client is away is
+    not seen)."""
     client = await _connect(url, CENTRAL_USER)
     try:
         await _HubSession(client, version, state, listened, methods).run(stop)
@@ -711,6 +721,7 @@ class _HubSession:
 
     async def run(self, stop: asyncio.Event) -> None:
         service = await self._serve() if self._methods else None
+        await self._client.subscribe(DOOR_CLOSES_SUBJECT, cb=self._door_closed)
         delay = _BACKOFF[0]
         try:
             while not stop.is_set():
@@ -738,6 +749,26 @@ class _HubSession:
             await service.add_endpoint(name=name, subject=f"{CENTRAL_COMPONENT}.{METHOD_TOKEN}.{name}",
                                        handler=_endpoint(name, handler))
         return service
+
+    async def _door_closed(self, message) -> None:
+        """One disconnect event of the door's account: its connection, handed to `listened.closed`
+        until it takes it (a failure is logged and the same close handed again after a backoff). An
+        event that names no connection is logged and dropped."""
+        try:
+            event = json.loads(message.data)
+            connection = GalleriaConnection(server=event["server"]["id"], client=event["client"]["id"])
+        except (ValueError, TypeError, KeyError) as error:
+            log.warning("central on its hub: a door close not read: %r", error)
+            return
+        delay = _BACKOFF[0]
+        while True:
+            try:
+                await self._listened.closed(connection)
+                return
+            except Exception as error:
+                log.warning("central on its hub: a door close not taken: %r", error)
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, _BACKOFF[1])
 
     async def _ensure(self) -> str:
         """Declare both buckets (create-if-absent); in a state epoch this session has not put into,
