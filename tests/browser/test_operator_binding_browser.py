@@ -806,8 +806,8 @@ def _two_bound(registry, *, live_run_on=None):
         store.command("set_scene", Scene(
             scene_id="lobby-loop", loop=True, cycle_seconds=30,
             contributions=(Contribution(target="frame:" + live_run_on,
-                                        source_refs=("lobby-photos:1",)),)))
-        store.command("activate", "lobby-loop", "lobby-activation", registry.clock.utc())
+                                        source_refs=("lobby-photos:1",)),)), by="console")
+        store.command("activate", "lobby-loop", "lobby-activation", registry.clock.utc(), by="console")
     return player_id
 
 

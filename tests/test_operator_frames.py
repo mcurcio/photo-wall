@@ -170,8 +170,8 @@ def test_delete_frame_a_live_run_targets_is_refused_409_frame_in_use(registry):
     _frame(registry)
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     now = registry.clock.utc()  # ManualClock(1000)
-    app.state.coordinator.runtime.command("set_scene", _scene_targeting("portrait", "live"))
-    admission = app.state.coordinator.runtime.command("activate", "live", "run-live", now)
+    app.state.coordinator.runtime.command("set_scene", _scene_targeting("portrait", "live"), by="console")
+    admission = app.state.coordinator.runtime.command("activate", "live", "run-live", now, by="console")
     # Sanity: the projected runtime carries a live (body) run listing the frame,
     # read the SAME way the route reads it.
     view = app.state.coordinator.runtime.read().project(now)
@@ -193,8 +193,8 @@ def test_delete_frame_refuses_stored_nested_outro_scene_and_names_program(regist
             scene_id="child", outro_seconds=5,
             outro_contributions=(Contribution(target="frame:portrait", asset_refs=("a",)),),
         )),),
-    ))
-    runtime.command_current("create_program", window_program("evening", "parent", 1140, 1200))
+    ), by="console")
+    runtime.command_current("create_program", window_program("evening", "parent", 1140, 1200), by="console")
     with TestClient(app) as client:
         response = client.delete("/v1/operator/frames/portrait", headers=AUTH)
     assert response.status_code == 409
@@ -210,11 +210,11 @@ def test_delete_frame_refuses_queued_snapshot_after_definition_moves_on(registry
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     runtime = app.state.coordinator.runtime
     now = registry.clock.utc()
-    runtime.command("set_scene", _scene_targeting("elsewhere", "show"))
-    runtime.command("activate", "show", "active", now)
-    runtime.command("set_scene", _scene_targeting("portrait", "show").model_copy(update={"revision": 2}))
-    runtime.command("activate", "show", "queued", now, repeat="queue", expires_at=now + 50)
-    runtime.command("set_scene", _scene_targeting("elsewhere", "show").model_copy(update={"revision": 3}))
+    runtime.command("set_scene", _scene_targeting("elsewhere", "show"), by="console")
+    runtime.command("activate", "show", "active", now, by="console")
+    runtime.command("set_scene", _scene_targeting("portrait", "show").model_copy(update={"revision": 2}), by="console")
+    runtime.command("activate", "show", "queued", now, repeat="queue", expires_at=now + 50, by="console")
+    runtime.command("set_scene", _scene_targeting("elsewhere", "show").model_copy(update={"revision": 3}), by="console")
     with TestClient(app) as client:
         response = client.delete("/v1/operator/frames/portrait", headers=AUTH)
     assert response.status_code == 409
@@ -234,7 +234,7 @@ def test_scene_save_serializes_after_locked_frame_delete(registry):
     with ThreadPoolExecutor(max_workers=1) as pool:
         def save_scene():
             save_started.set()
-            return coordinator.runtime.command("set_scene", scene)
+            return coordinator.runtime.command("set_scene", scene, by="console")
 
         with coordinator.serialized_runtime_read() as (conn, runtime):
             references = runtime.frame_references("portrait", registry.clock.utc())
@@ -258,12 +258,12 @@ def test_delete_of_unbound_frame_a_non_live_run_targets_is_benign(registry):
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     now = registry.clock.utc()
     coordinator = app.state.coordinator
-    coordinator.runtime.command("set_scene", _scene_targeting("portrait", "doomed"))
-    coordinator.runtime.command("activate", "doomed", "run-doomed", now)
+    coordinator.runtime.command("set_scene", _scene_targeting("portrait", "doomed"), by="console")
+    coordinator.runtime.command("activate", "doomed", "run-doomed", now, by="console")
     run_id = next(r.run_id for r in coordinator.runtime.read().project(now).runs
                   if "frame:portrait" in r.participants)
-    coordinator.runtime.command("cancel", run_id, now)
-    coordinator.runtime.command("set_scene", Scene(scene_id="doomed", revision=2))
+    coordinator.runtime.command("cancel", run_id, now, by="console")
+    coordinator.runtime.command("set_scene", Scene(scene_id="doomed", revision=2), by="console")
     cancelled = next(r for r in coordinator.runtime.read().project(now).runs if r.run_id == run_id)
     assert cancelled.phase == "cancelled" and "frame:portrait" in cancelled.participants
     with TestClient(app) as client:

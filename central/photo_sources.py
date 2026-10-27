@@ -7,6 +7,7 @@ revision of a name, and Scenes move to it under Runtime's lock).
 
 from __future__ import annotations
 
+from central.actor import Actor
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.photo_library.model import DraftRef, PoolCursor, SourceQuery, SourceRef
 from central.photo_library.views import SourcePoolView
@@ -25,8 +26,8 @@ class PhotoSources:
     def set_draft_query(self, draft: DraftRef, query: SourceQuery) -> None:
         self.store.set_draft_query(draft, query)
 
-    def save_draft(self, draft: DraftRef, name: str) -> SourceRef:
-        return self.names.save_draft(draft, name)["source_ref"]
+    def save_draft(self, draft: DraftRef, name: str, *, by: Actor) -> SourceRef:
+        return self.names.save_draft(draft, name, by=by)["source_ref"]
 
     def check_source(self, source_ref: SourceRef) -> None:
         self.store.check_source(source_ref)

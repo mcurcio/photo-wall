@@ -97,7 +97,7 @@ def test_saving_an_edit_makes_the_next_revision_and_moves_scenes(client, registr
     _save(test_client, _draft(test_client, SourceQuery(connection_ref=ref)), "family")
     runtime = RuntimeStore(registry.db, registry.clock)
     runtime.command("set_scene", Scene(scene_id="show", contributions=(
-        Contribution(target="frame:main", source_refs=("family:1",)),)))
+        Contribution(target="frame:main", source_refs=("family:1",)),)), by="console")
     edited = SourceQuery(connection_ref=ref, partners=True)
     saved = _save(test_client, _draft(test_client, edited, "family:1"), "family")
     assert saved.json() == {"source_ref": "family:2"}

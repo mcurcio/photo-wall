@@ -7139,3 +7139,29 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
   `110_region_documents.sql`. Every "migration 109" in the overlay-always entries above (the S3
   spec slips and S3 re-cut 2: "migration 109 also needs 103's UPDATE", "Migration 109 keeps 103's
   stored-report UPDATE") means 110; the entries stay as written (append-only).
+
+## fix/planning-without-time-cap (planning never refuses the wall, 2026-10-27)
+
+- **`Coordinator(outcomes=...)` is taken.** The page names the new constructor port `outcomes:
+  PlanningOutcomes`, but `outcomes` is already the `ExecutionOutcomeRouter`. The planning outcome
+  port is `planning: PlanningOutcomes` (attribute `Coordinator.planning`).
+- **runtime_state's `created_at` is DOUBLE PRECISION, not TIMESTAMPTZ.** Migration 111 renames
+  `updated_at` (a DOUBLE on the Runtime's clock) to `changed_at`; a TIMESTAMPTZ `created_at` beside
+  it would put the row's two audit times on two scales. `runtime_changes.at` and
+  `planning_outcome`'s times are TIMESTAMPTZ as the page says.
+- **Files outside the owned list, forced by `by: Actor`:** `central/program_routes.py`,
+  `central/source_names.py`, `central/photo_sources.py`, `central/photo_library/ports.py`,
+  `central/photo_library_routes.py` (every Runtime writer names its actor); `Shell.jsx` (the pill
+  reads "degraded"), `index.css` (the Scene link's colour), `AttentionPage.jsx`, `AttentionStrip.jsx`
+  and `tests/test_console_routes_r4.py` (the pure attention rules moved to `attention.js` so Node can
+  test them without JSX).
+- **"Planning is failing since HH:MM"** renders with the console's one Since format
+  (`timeWords.js` `sinceTime`, design language §7): "since Wed 16:16".
+- **The per-Intent bulkhead catches `ValueError`** (a `PlanningError`, or a pydantic
+  `ValidationError` from a layer), not only `PlanningError`; a validation error's reason is its
+  type alone (its text can carry the judged values).
+- **`Runtime.timeline` also cuts on the cycle-arithmetic overflow** (`RuntimeBudgetExceeded`
+  "cycle index exceeds supported arithmetic range"), which module-planner.md said failed "with the
+  same explicit Runtime budget error"; `advance()` still raises both.
+- **Left as whole-pass failures (follow-up):** `_locks` raising `inconsistent_content_lock`, and a
+  layer whose cue `_groups` did not compute (KeyError); both fail the planning step alone now.

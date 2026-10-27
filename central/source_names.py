@@ -12,6 +12,7 @@ import re
 
 from psycopg.types.json import Jsonb
 
+from central.actor import Actor
 from central.db import MEDIA_LOCK, Database
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.media_repository import MediaRepository
@@ -52,12 +53,12 @@ class SourceNameService:
             (name,)).fetchall())
         return head, refs
 
-    def save_draft(self, draft: DraftRef, name: str) -> dict:
+    def save_draft(self, draft: DraftRef, name: str, *, by: Actor) -> dict:
         """Save a draft at any time: the next revision of its `editing` name (renamed to `name`
         when it differs), or revision 1 (or the next hidden revision) of a new `name`. The new
         revision carries the draft's query and pool; Scenes using the edited name move to it,
         admitted Runs keep theirs; the draft goes."""
-        with self.db.transaction() as conn, self.runtime.edit(conn) as runtime:
+        with self.db.transaction() as conn, self.runtime.edit(conn, by=by) as runtime:
             found = self.library.draft_for_save_in(conn, draft)
             if found is None:
                 raise LibraryRefused("draft_unknown", 404)
@@ -104,8 +105,8 @@ class SourceNameService:
         conn.execute("INSERT INTO media_source_name_versions(source_ref,name,revision) "
                      "VALUES(%s,%s,%s)", (source_ref, name, revision))
 
-    def delete(self, name: str, expected_revision: int) -> dict:
-        with self.db.transaction() as conn, self.runtime.edit(conn) as runtime:
+    def delete(self, name: str, expected_revision: int, *, by: Actor) -> dict:
+        with self.db.transaction() as conn, self.runtime.edit(conn, by=by) as runtime:
             head, refs = self._versions_in(conn, name)
             if head is None:
                 raise RegistryError("source_not_found", 404)

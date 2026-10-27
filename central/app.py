@@ -7,7 +7,6 @@ import json
 import logging
 import mimetypes
 import os
-import traceback
 from collections.abc import Callable, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -21,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import Field, model_validator
 
 from central import cache_layout
+from central.actor import Actor
 from central.assets.frame_media import FrameMediaRefused
 from central.assets.reader import Unavailable
 from central.calibration_target_routes import mount_calibration_target_routes
@@ -89,6 +89,7 @@ from central.room_light.model import RoomLightRefusal
 from central.room_light_routes import mount_room_light_routes
 from central.runtime import RuntimeConflict, Scene, SceneInUse, SceneOnWall, SceneWriteRefused
 from central.runtime_store import RuntimeStore
+from central.scheduler import Scheduler
 from central.source_names import SourceInUse, SourceNameService
 from central.tuning_history_routes import mount_tuning_history_routes
 from central.version import central_version as installed_central_version
@@ -110,22 +111,6 @@ from contracts.time import Clock, SystemClock
 LOG = logging.getLogger("central.app")
 
 SCHEDULER_MAX_AGE = 10.0
-_OWN_PACKAGES = ("central", "media", "contracts", "nodeapi")
-
-
-def scheduler_failure(exc: BaseException) -> str:
-    """A scheduler tick's failure as its exception type and the innermost line of this project's
-    code it passed (else the innermost line at all), e.g. `ValidationError at
-    central/coordination.py:231`. Never the message: a driver's may carry a connection string."""
-    frames = traceback.extract_tb(exc.__traceback__)
-    own = [frame for frame in frames if "site-packages" not in frame.filename
-           and any(f"/{package}/" in frame.filename for package in _OWN_PACKAGES)]
-    if not frames:
-        return type(exc).__name__
-    where = (own or frames)[-1]
-    parts = Path(where.filename).parts
-    start = max((i for i, part in enumerate(parts) if part in _OWN_PACKAGES), default=len(parts) - 1)
-    return f"{type(exc).__name__} at {'/'.join(parts[start:])}:{where.lineno}"
 
 
 class Challenge(Model):
@@ -268,46 +253,21 @@ def create_app(
         else None
     )
     feed = content.feed if content is not None else None
-    scheduler_health = {
-        "enabled": run_scheduler,
-        "running": False,
-        "status": "starting" if run_scheduler else "disabled",
-        "last_tick": None,
-        "last_tick_monotonic": None,
-        "error": None,
-    }
+    # Whether the scheduler loop runs, and when its last tick completed. Each step's own health
+    # is the Scheduler's (central/scheduler.py), built once the reconciler exists (below).
+    scheduler_loop = {"enabled": run_scheduler, "running": False, "stopped": False,
+                      "last_tick": None}
 
-    async def scheduler():
-        scheduler_health["running"] = True
-        scheduler_health["status"] = "starting"
-        logged = None   # the failure last logged, so a failing tick logs once, not every second
+    async def run_scheduler_loop():
+        scheduler_loop.update(running=True, stopped=False)
         try:
             while True:
-                try:
-                    await asyncio.to_thread(app.state.node_reconciler.advance)
-                    projection = await asyncio.to_thread(coordinator.advance)
-                    await asyncio.to_thread(
-                        media_application.request_measurements, projection.measurements
-                    )
-                    scheduler_health.update(
-                        last_tick=clock.utc(),
-                        last_tick_monotonic=clock.monotonic(),
-                        error=None,
-                        status="ok",
-                    )
-                    logged = None
-                except Exception as exc:
-                    # Sanitized health and log: driver exceptions may include connection secrets.
-                    failure = scheduler_failure(exc)
-                    if failure != logged:
-                        LOG.error("scheduler tick failed: %s", failure)
-                        logged = failure
-                    scheduler_health.update(
-                        error="coordination_unavailable", status="coordination_unavailable"
-                    )
+                # Every step runs and reports on its own; a tick itself never fails.
+                await asyncio.to_thread(app.state.scheduler.tick)
+                scheduler_loop["last_tick"] = clock.utc()
                 await asyncio.sleep(1)
         finally:
-            scheduler_health.update(running=False, status="stopped")
+            scheduler_loop.update(running=False, stopped=True)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -325,7 +285,7 @@ def create_app(
                 os.environ, lambda path: Path(path).read_text(encoding="utf-8")))
         if feed is not None:
             await feed.start()
-        task = asyncio.create_task(scheduler()) if run_scheduler else None
+        task = asyncio.create_task(run_scheduler_loop()) if run_scheduler else None
         try:
             yield
         finally:
@@ -433,40 +393,50 @@ def create_app(
 
     @app.get("/healthz")
     def health():
+        """503 only when Central cannot serve: the database is down, or the scheduler loop has
+        not completed a tick yet ("starting"), has not completed one within SCHEDULER_MAX_AGE
+        ("stale") or has stopped. A completed tick with a failing step is 200 "degraded", each
+        step's facet beside it (its reason sanitized: type and where, never a message)."""
         try:
             database = db.healthy()
         except Exception:
             database = False
-        scheduler = dict(scheduler_health)
-        last_tick_monotonic = scheduler["last_tick_monotonic"]
-        scheduler.pop("last_tick_monotonic", None)
-        if scheduler["enabled"]:
-            if scheduler["status"] == "stopped":
-                scheduler["status"] = "stopped"
-            elif scheduler["error"] is not None:
-                scheduler["status"] = scheduler["error"]
-            elif last_tick_monotonic is None:
-                scheduler["status"] = "starting"
-            elif not scheduler["running"]:
-                scheduler["status"] = "stopped"
+        scheduler: dict = {"enabled": scheduler_loop["enabled"],
+                           "running": scheduler_loop["running"],
+                           "last_tick": scheduler_loop["last_tick"]}
+        serving = database
+        degraded = False
+        if scheduler_loop["enabled"]:
+            ticks = app.state.scheduler.health()
+            scheduler["steps"] = {
+                name: {"status": step.status, "since": step.since, "reason": step.reason}
+                for name, step in sorted(ticks.steps.items())}
+            degraded = any(step.status == "failing" for step in ticks.steps.values())
+            if scheduler_loop["stopped"]:
+                status = "stopped"
+            elif ticks.last_tick_monotonic is None:
+                status = "starting"
+            elif not scheduler_loop["running"]:
+                status = "stopped"
             else:
                 try:
-                    age = clock.monotonic() - last_tick_monotonic
+                    age = clock.monotonic() - ticks.last_tick_monotonic
                 except Exception:
                     age = SCHEDULER_MAX_AGE + 1
-                scheduler["status"] = "ok" if 0 <= age <= SCHEDULER_MAX_AGE else "stale"
-            healthy = database and scheduler["status"] == "ok"
+                status = ("stale" if not 0 <= age <= SCHEDULER_MAX_AGE
+                          else "degraded" if degraded else "ok")
+            scheduler["status"] = status
+            serving = database and status in ("ok", "degraded")
         else:
             scheduler["status"] = "disabled"
-            healthy = database
         return JSONResponse(
             {
-                "status": "ok" if healthy else "unavailable",
+                "status": ("degraded" if degraded else "ok") if serving else "unavailable",
                 "database": database,
                 "protocol": 1,
                 "scheduler": scheduler,
             },
-            status_code=200 if healthy else 503,
+            status_code=200 if serving else 503,
         )
 
     @app.get(LOCATE_PATH)
@@ -766,9 +736,10 @@ def create_app(
     def media_state():
         return media_application.media_read()
 
-    @app.delete("/v1/operator/source-names/{name}", dependencies=[Depends(admin)])
-    def delete_source_name(name: str, expected_revision: int = Query(ge=1)):
-        return source_names.delete(name, expected_revision)
+    @app.delete("/v1/operator/source-names/{name}")
+    def delete_source_name(name: str, expected_revision: int = Query(ge=1),
+                           by: Actor = Depends(admin)):
+        return source_names.delete(name, expected_revision, by=by)
 
     @app.get("/v1/operator/sources/{source_ref}/candidates", dependencies=[Depends(admin)])
     def source_candidates(
@@ -797,58 +768,62 @@ def create_app(
     def author_candidates(request: AuthoredCandidatesRequest):
         return media_application.author_authored_candidates(request.source_ref, request.asset_ids)
 
-    @app.put("/v1/operator/scenes/{scene_id}/authored", dependencies=[Depends(admin)])
-    def configure_authored_scene(scene_id: Identifier, request: AuthoredSceneRequest):
+    @app.put("/v1/operator/scenes/{scene_id}/authored")
+    def configure_authored_scene(scene_id: Identifier, request: AuthoredSceneRequest,
+                                 by: Actor = Depends(admin)):
         if request.scene.scene_id != scene_id:
             raise ValueError("Scene identity mismatch")
         return coordinator.configure_authored_scene(
-            request.scene, request.source_ref, request.asset_ids
+            request.scene, request.source_ref, request.asset_ids, by=by
         )
 
     # A Scene's two writes, one Runtime command each, both answering a `SceneOnWall` (what on the
     # wall still plays an earlier version): Save stores it (R4: edits default to the next Run);
     # Save and apply now also replaces at once what plays an earlier version.
-    @app.put("/v1/operator/scenes/{scene_id}", dependencies=[Depends(admin)], response_model=SceneOnWall)
-    def configure_scene(scene_id: Identifier, scene: Scene):
+    @app.put("/v1/operator/scenes/{scene_id}", response_model=SceneOnWall)
+    def configure_scene(scene_id: Identifier, scene: Scene, by: Actor = Depends(admin)):
         if scene.scene_id != scene_id:
             raise ValueError("Scene identity mismatch")
-        return coordinator.runtime.command_current("save_scene", scene)
+        return coordinator.runtime.command_current("save_scene", scene, by=by)
 
-    @app.post("/v1/operator/scenes/{scene_id}/apply-now", dependencies=[Depends(admin)],
-              response_model=SceneOnWall)
-    def apply_scene_now(scene_id: Identifier, scene: Scene):
+    @app.post("/v1/operator/scenes/{scene_id}/apply-now", response_model=SceneOnWall)
+    def apply_scene_now(scene_id: Identifier, scene: Scene, by: Actor = Depends(admin)):
         if scene.scene_id != scene_id:
             raise ValueError("Scene identity mismatch")
-        return coordinator.runtime.command_current("save_scene_and_apply_now", scene)
+        return coordinator.runtime.command_current("save_scene_and_apply_now", scene, by=by)
 
-    @app.post("/v1/operator/scenes/{scene_id}/authored/apply-now", dependencies=[Depends(admin)])
-    def apply_authored_scene_now(scene_id: Identifier, request: AuthoredSceneRequest):
+    @app.post("/v1/operator/scenes/{scene_id}/authored/apply-now")
+    def apply_authored_scene_now(scene_id: Identifier, request: AuthoredSceneRequest,
+                                 by: Actor = Depends(admin)):
         if request.scene.scene_id != scene_id:
             raise ValueError("Scene identity mismatch")
         return coordinator.configure_authored_scene_and_apply_now(
-            request.scene, request.source_ref, request.asset_ids
+            request.scene, request.source_ref, request.asset_ids, by=by
         )
 
-    @app.delete("/v1/operator/scenes/{scene_id}", dependencies=[Depends(admin)])
-    def delete_scene(scene_id: Identifier, expected_revision: int = Query(ge=1)):
-        coordinator.runtime.command("delete_scene", scene_id, expected_revision)
+    @app.delete("/v1/operator/scenes/{scene_id}")
+    def delete_scene(scene_id: Identifier, expected_revision: int = Query(ge=1),
+                     by: Actor = Depends(admin)):
+        coordinator.runtime.command("delete_scene", scene_id, expected_revision, by=by)
         return {"status": "deleted"}
 
-    @app.post("/v1/operator/activations", dependencies=[Depends(admin)])
-    def activate(request: ActivationRequest):
+    @app.post("/v1/operator/activations")
+    def activate(request: ActivationRequest, by: Actor = Depends(admin)):
         return coordinator.runtime.command_current(
             "activate",
             request.scene_id,
             request.activation_id,
+            by=by,
             priority=request.priority,
             repeat=request.repeat,
             force=request.force,
             expires_at=request.expires_at,
         )
 
-    @app.post("/v1/operator/runs/{run_id}/{operation}", dependencies=[Depends(admin)])
-    def control_run(run_id: Identifier, operation: Literal["finish", "cancel"]):
-        return coordinator.runtime.command_current(operation, run_id)
+    @app.post("/v1/operator/runs/{run_id}/{operation}")
+    def control_run(run_id: Identifier, operation: Literal["finish", "cancel"],
+                    by: Actor = Depends(admin)):
+        return coordinator.runtime.command_current(operation, run_id, by=by)
 
     mount_photo_library_routes(app, admin=admin, queries=photo_library, commands=photo_library)
     mount_photo_source_routes(app, admin=admin, queries=photo_sources, commands=photo_sources)
@@ -878,6 +853,8 @@ def create_app(
     mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,
                       content=content)
     app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions, coordinator)
+    app.state.scheduler = Scheduler(app.state.node_reconciler, coordinator,
+                                    media_application.request_measurements, clock)
     # A Node's leaf and Home Assistant's door arrive at Central's origin (erratum E-E3D-CUT-4): relayed to the hub.
     hub_leaf_url = hub_leaf_url or os.environ.get("PHOTO_WALL_HUB_LEAF_URL")
     if hub_leaf_url:

@@ -114,7 +114,7 @@ def _wide_frame_with_scene(registry):
               public_photo(number=3, width=1440, height=1080, captured_at=now))
     queue = _seed_source(registry, photos)
     _runtime(registry).command("set_scene", Scene(scene_id=SCENE_ID, loop=True, contributions=(
-        Contribution(target=f"frame:{FRAME}", source_refs=(SOURCE,)),)))
+        Contribution(target=f"frame:{FRAME}", source_refs=(SOURCE,)),)), by="console")
     return queue
 
 
@@ -235,9 +235,9 @@ def _varied_wall(registry, page):
     route_thumbnails(page, assets)
     runtime = _runtime(registry)
     runtime.command("set_scene", Scene(scene_id=EVENINGS, loop=True, contributions=tuple(
-        Contribution(target=f"frame:{frame}", source_refs=("garden:1",)) for frame in ("hall", "living-room"))))
+        Contribution(target=f"frame:{frame}", source_refs=("garden:1",)) for frame in ("hall", "living-room"))), by="console")
     runtime.command("set_scene", Scene(scene_id=WIDE_ONLY, loop=True, contributions=(
-        Contribution(target="frame:hall", source_refs=("landscapes:1",)),)))
+        Contribution(target="frame:hall", source_refs=("landscapes:1",)),)), by="console")
     return library, ref, assets
 
 
@@ -399,7 +399,7 @@ def test_followup_frame_position_draft(page, registry, scheme, suffix):
     measure_all(registry, assets)
     route_thumbnails(page, assets)
     _runtime(registry).command("set_scene", Scene(scene_id=EVENINGS, loop=True, contributions=(
-        Contribution(target=f"frame:{BOUND}", source_refs=("holiday:1",)),)))
+        Contribution(target=f"frame:{BOUND}", source_refs=("holiday:1",)),)), by="console")
     _sized(page, scheme, WIDTHS[suffix])
     try:
         with operator_server(registry.db, registry.clock) as origin:

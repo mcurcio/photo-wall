@@ -1,6 +1,7 @@
 import React from "react";
 
-import { AttentionList, attentionView } from "./AttentionList.jsx";
+import { attentionView } from "./attention.js";
+import { AttentionList } from "./AttentionList.jsx";
 import { LibraryHealthCard } from "./domain/library-health-card.tsx";
 import { ReadinessNotice } from "./ReadinessNotice.jsx";
 import { readinessRecoveryFrames } from "./readinessRecovery.js";

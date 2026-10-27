@@ -45,7 +45,7 @@ def test_089_seeds_night_off_with_every_frame_and_ends_todays_programs(registry)
         _frame(registry, frame)
     snapshot = _snapshot_with_an_admitted_window()
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO runtime_state(singleton, revision, snapshot, updated_at) VALUES (TRUE, 7, %s, 0) "
+        conn.execute("INSERT INTO runtime_state(singleton, revision, snapshot, changed_at, created_at, created_by, changed_by) VALUES (TRUE, 7, %s, 0, 0, 'console', 'console') "
                      "ON CONFLICT (singleton) DO UPDATE SET revision=7, snapshot=EXCLUDED.snapshot",
                      (Jsonb(snapshot),))
         conn.execute("DROP TABLE house_settings; DROP TABLE night_off")

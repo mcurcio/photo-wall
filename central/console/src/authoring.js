@@ -10,6 +10,7 @@
  * @typedef {{field: string, message: string, immediate?: boolean}} Problem
  */
 
+import { CONSTANTS } from "./generated/contract.ts";
 import { frameOf, toTarget } from "./join.js";
 import { IDENTIFIER_PATTERN } from "./routes.js";
 import { sourceName } from "./sourceNames.js";
@@ -134,12 +135,12 @@ export const ENDINGS = Object.freeze(["none", "black", "fade"]);
 export const TRANSITION_STYLES = Object.freeze(["cross_fade", "fade_out_and_in"]);
 
 /**
- * The seconds of each photo a Transition must leave free (contracts/models.py
- * `PREPARE_SECONDS`, pinned by tests/test_console_flow.py): Central refuses a fade longer than
- * each photo's seconds less this (`Scene.check_transition`), so a Player never holds more than
- * two photos per screen while it gets the next one ready.
+ * The seconds of each photo a Transition must leave free (contracts/models.py `PREPARE_SECONDS`,
+ * from the generated contract): Central refuses a fade longer than each photo's seconds less this
+ * (`Scene.check_transition`), so a Player never holds more than two photos per screen while it
+ * gets the next one ready.
  */
-export const TRANSITION_FREE_SECONDS = 5;
+export const TRANSITION_FREE_SECONDS = CONSTANTS.TRANSITION_FREE_SECONDS;
 
 /**
  * How a Scene's Frames pick from its photos (roadmap 5a, central/wall_plan/selection.py

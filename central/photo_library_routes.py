@@ -37,6 +37,7 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse, Response
 
+from central.actor import Actor
 from central.operator_auth import OPERATOR_PREFIX
 from central.photo_library.model import MAX_CHOSEN, AlbumRef, PersonRef, PoolCursor
 from central.photo_library.ports import (
@@ -168,10 +169,9 @@ def mount_photo_source_routes(app: FastAPI, *, admin: Any, queries: PhotoSourceQ
         commands.set_draft_query(str(draft_ref), request.query)
         return Response(status_code=204)
 
-    @app.post(DRAFTS + "/{draft_ref}/save", dependencies=[Depends(admin)],
-              response_model=DraftSaved)
-    def save_draft(draft_ref: UUID, request: DraftSave) -> DraftSaved:
-        return DraftSaved(source_ref=commands.save_draft(str(draft_ref), request.name))
+    @app.post(DRAFTS + "/{draft_ref}/save", response_model=DraftSaved)
+    def save_draft(draft_ref: UUID, request: DraftSave, by: Actor = Depends(admin)) -> DraftSaved:
+        return DraftSaved(source_ref=commands.save_draft(str(draft_ref), request.name, by=by))
 
     @app.get(DRAFTS + "/{draft_ref}/pool", dependencies=[Depends(admin)],
              response_model=SourcePoolView)

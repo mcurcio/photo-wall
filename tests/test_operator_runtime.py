@@ -20,10 +20,10 @@ def test_the_runtime_read_serves_protection_and_program_windows(registry):
     now = registry.clock.utc()
     target = (Contribution(target="frame:portrait", asset_refs=("a",)),)
     runtime.command("set_scene", Scene(scene_id="guard", protect_frames=True, loop=True,
-                                       contributions=target))
-    runtime.command("set_scene", Scene(scene_id="evening", loop=True, contributions=target))
-    runtime.command("activate", "guard", "guard-act", now, priority=5)
-    runtime.command("create_program", window_program("evening", "evening", 1020, 1080), now)
+                                       contributions=target), by="console")
+    runtime.command("set_scene", Scene(scene_id="evening", loop=True, contributions=target), by="console")
+    runtime.command("activate", "guard", "guard-act", now, priority=5, by="console")
+    runtime.command("create_program", window_program("evening", "evening", 1020, 1080), now, by="console")
     registry.clock.advance(30)
     with TestClient(app) as client:
         body = client.get("/v1/operator/runtime", headers=AUTH).json()
@@ -65,12 +65,12 @@ def test_a_stale_scene_put_is_refused_with_409_and_an_identical_retry_is_not(reg
 def test_scene_delete_route_checks_revision_and_returns_sorted_dependencies(registry):
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     runtime = app.state.coordinator.runtime
-    runtime.command("set_scene", Scene(scene_id="to-delete", revision=2))
+    runtime.command("set_scene", Scene(scene_id="to-delete", revision=2), by="console")
     runtime.command("set_scene", Scene(scene_id="a-parent", children=(
         Child(scene=Scene(scene_id="to-delete")),
-    )))
-    runtime.command_current("create_program", window_program("z-program", "to-delete", 1020, 1080))
-    runtime.command_current("create_program", window_program("a-program", "to-delete", 1080, 1140))
+    )), by="console")
+    runtime.command_current("create_program", window_program("z-program", "to-delete", 1020, 1080), by="console")
+    runtime.command_current("create_program", window_program("a-program", "to-delete", 1080, 1140), by="console")
     with TestClient(app) as client:
         stale = client.delete("/v1/operator/scenes/to-delete?expected_revision=1", headers=AUTH)
         in_use = client.delete("/v1/operator/scenes/to-delete?expected_revision=2", headers=AUTH)

@@ -558,8 +558,8 @@ def test_runs_region_shows_only_synchronous_outcomes(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     runtime = _runtime(registry)
-    runtime.command("set_scene", _scene(SCENE_ID, loop=False))
-    runtime.command_current("create_program", window_program("later", SCENE_ID, 3600, 7200))
+    runtime.command("set_scene", _scene(SCENE_ID, loop=False), by="console")
+    runtime.command_current("create_program", window_program("later", SCENE_ID, 3600, 7200), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
 
@@ -831,7 +831,7 @@ def test_the_problem_summary_is_frozen_at_submit(page, registry):
 
         _runtime(registry).command("set_scene", Scene(
             scene_id="evening",
-            contributions=(Contribution(target=f"frame:{VALID_FRAME}", source_refs=(SOURCE,)),)))
+            contributions=(Contribution(target=f"frame:{VALID_FRAME}", source_refs=(SOURCE,)),)), by="console")
         page.clock.run_for(5000)
         collision = "A Scene called evening already exists; choose another name."
         expect(name).to_have_accessible_description(re.compile(re.escape(collision)))
@@ -850,10 +850,10 @@ def _seed_long_ids(registry):
     runtime = _runtime(registry)
     runtime.command("set_scene", Scene(
         scene_id=LONG_ID, loop=True,
-        contributions=(Contribution(target=f"frame:{VALID_FRAME}", source_refs=(SOURCE,)),)))
+        contributions=(Contribution(target=f"frame:{VALID_FRAME}", source_refs=(SOURCE,)),)), by="console")
     now = registry.clock.utc()
-    runtime.command_current("create_program", window_program(LONG_ID, LONG_ID, 3600, 7200, name=LONG_ID[:80]))
-    runtime.command("activate", LONG_ID, "long-act", now)
+    runtime.command_current("create_program", window_program(LONG_ID, LONG_ID, 3600, 7200, name=LONG_ID[:80]), by="console")
+    runtime.command("activate", LONG_ID, "long-act", now, by="console")
 
 
 def _box(page, region):
@@ -914,11 +914,11 @@ def _refused_by_guard(registry):
     """A protecting Run of "guard" on VALID_FRAME, and a Program for SCENE_ID on the
     same frame whose window starts while guard runs: Central refuses it."""
     runtime = _runtime(registry)
-    runtime.command("set_scene", _scene("guard", protect_frames=True))
-    runtime.command("set_scene", _scene(SCENE_ID))
+    runtime.command("set_scene", _scene("guard", protect_frames=True), by="console")
+    runtime.command("set_scene", _scene(SCENE_ID), by="console")
     now = registry.clock.utc()
-    runtime.command("activate", "guard", "guard-act", now, priority=5)
-    runtime.command_current("create_program", window_program("blocked", SCENE_ID, 1080, 86340))
+    runtime.command("activate", "guard", "guard-act", now, priority=5, by="console")
+    runtime.command_current("create_program", window_program("blocked", SCENE_ID, 1080, 86340), by="console")
     return runtime, now
 
 
@@ -930,9 +930,9 @@ def test_a_refused_program_names_its_protector(page, registry):
     queue = _seed_source(registry)
     runtime, _now = _refused_by_guard(registry)
     registry.clock.advance(120)
-    runtime.command("advance", registry.clock.utc())  # Central refuses "blocked" at +60
+    runtime.command("advance", registry.clock.utc(), by="console")  # Central refuses "blocked" at +60
     # An edit (revision 2): the Scene now reaches only INVALID_FRAME.
-    runtime.command("set_scene", _scene(SCENE_ID, frame=INVALID_FRAME, revision=2))
+    runtime.command("set_scene", _scene(SCENE_ID, frame=INVALID_FRAME, revision=2), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "schedule")
         row = card(page, "blocked")
@@ -974,8 +974,8 @@ def test_why_states_admission_order_and_the_limit_line(page, registry):
     runtime.command("set_scene", Scene(
         scene_id="evening", loop=True,
         contributions=(Contribution(target=f"frame:{VALID_FRAME}", source_refs=(SOURCE,)),),
-        children=(Child(scene=_scene("intro")),)))
-    runtime.command("activate", "evening", "evening-act", registry.clock.utc())
+        children=(Child(scene=_scene("intro")),)), by="console")
+    runtime.command("activate", "evening", "evening-act", registry.clock.utc(), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
         why = page.get_by_role("region", name="Runs", exact=True).get_by_role(
@@ -1005,12 +1005,12 @@ def test_why_names_the_winning_program_from_its_root_run(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     runtime = _runtime(registry)
-    runtime.command("set_scene", _scene("evening"))
-    runtime.command("set_scene", _scene("morning"))
+    runtime.command("set_scene", _scene("evening"), by="console")
+    runtime.command("set_scene", _scene("morning"), by="console")
     now = registry.clock.utc()
     runtime.command_current("create_program", window_program(
-        "weekday-evenings", "evening", 1020, 8160, priority="always-wins", name=EVENINGS))
-    runtime.command("activate", "morning", "morning-act", now, priority=1)
+        "weekday-evenings", "evening", 1020, 8160, priority="always-wins", name=EVENINGS), by="console")
+    runtime.command("activate", "morning", "morning-act", now, priority=1, by="console")
     registry.clock.advance(60)
     named = schedule("named", name=EVENINGS)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
@@ -1125,7 +1125,7 @@ def _retry_after_unknown(page, registry, answer):
     one Run. A fresh id would restart again: two Runs (one cancelled)."""
     _seed(registry)
     queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _scene(SCENE_ID))
+    _runtime(registry).command("set_scene", _scene(SCENE_ID), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
         sent = []
@@ -1166,7 +1166,7 @@ def test_an_activation_retried_after_a_500_reuses_its_key(page, registry):
 
 def test_restart_states_that_the_new_run_has_no_program_end(page, registry):
     _seed(registry)
-    _runtime(registry).command("set_scene", _scene(SCENE_ID))
+    _runtime(registry).command("set_scene", _scene(SCENE_ID), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
         # Bead 5: the choice is on the Show-now flow's Review, under Advanced.
@@ -1180,7 +1180,7 @@ def test_restart_states_that_the_new_run_has_no_program_end(page, registry):
 
 def test_a_one_cycle_restart_says_it_plays_one_cycle(page, registry):
     _seed(registry)
-    _runtime(registry).command("set_scene", _scene("once", loop=False, cycle_seconds=20))
+    _runtime(registry).command("set_scene", _scene("once", loop=False, cycle_seconds=20), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
         form = show_now(page, "once", submit=False)
@@ -1194,11 +1194,11 @@ def test_a_one_cycle_restart_says_it_plays_one_cycle(page, registry):
 def test_an_ended_protecting_run_says_protected_in_the_past(page, registry):
     _seed(registry)
     runtime = _runtime(registry)
-    runtime.command("set_scene", _scene("guard", protect_frames=True))
+    runtime.command("set_scene", _scene("guard", protect_frames=True), by="console")
     now = registry.clock.utc()
-    guard = runtime.command("activate", "guard", "guard-act", now).run_id
+    guard = runtime.command("activate", "guard", "guard-act", now, by="console").run_id
     registry.clock.advance(60)
-    runtime.command("cancel", guard, registry.clock.utc())
+    runtime.command("cancel", guard, registry.clock.utc(), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
         runs = page.get_by_role("region", name="Runs", exact=True)
@@ -1212,9 +1212,9 @@ def test_a_protected_refusal_names_the_protecting_run(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     runtime = _runtime(registry)
-    runtime.command("set_scene", _scene("guard", protect_frames=True))
-    runtime.command("set_scene", _scene(SCENE_ID))
-    runtime.command("activate", "guard", "guard-act", registry.clock.utc(), priority=5)
+    runtime.command("set_scene", _scene("guard", protect_frames=True), by="console")
+    runtime.command("set_scene", _scene(SCENE_ID), by="console")
+    runtime.command("activate", "guard", "guard-act", registry.clock.utc(), priority=5, by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
         response = show_now(page, SCENE_ID, 0)
@@ -1265,8 +1265,8 @@ def test_a_dismissed_confirm_whose_opener_is_gone_moves_focus_to_the_successor(p
     _seed(registry)
     queue = _seed_source(registry)
     runtime = _runtime(registry)
-    runtime.command("set_scene", _scene(SCENE_ID))
-    runtime.command("activate", SCENE_ID, "gone-act", registry.clock.utc())
+    runtime.command("set_scene", _scene(SCENE_ID), by="console")
+    runtime.command("activate", SCENE_ID, "gone-act", registry.clock.utc(), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now", paused_at=registry.clock.utc())
         runs = page.get_by_role("region", name="Runs", exact=True)
@@ -1278,7 +1278,7 @@ def test_a_dismissed_confirm_whose_opener_is_gone_moves_focus_to_the_successor(p
         # Another operator cancels it; the next poll drops the live row and its opener.
         run_id = next(run.run_id for run in runtime.read().project(registry.clock.utc()).runs
                       if run.scene_id == SCENE_ID)
-        runtime.command("cancel", run_id, registry.clock.utc())
+        runtime.command("cancel", run_id, registry.clock.utc(), by="console")
         page.clock.run_for(5000)
         expect(runs.get_by_text("No Run is running.", exact=True)).to_be_visible()
         expect(opener).to_have_count(0)
@@ -1319,7 +1319,7 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
     instead of an emptied form."""
     _seed(registry)
     queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _console_scene(STORED_ID))
+    _runtime(registry).command("set_scene", _console_scene(STORED_ID), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         row = _scene_row(page, STORED_ID)
@@ -1372,11 +1372,11 @@ def test_editing_a_scene_replaces_it_under_its_stored_id_at_the_next_revision(pa
 def test_a_scene_the_console_cannot_author_withholds_edit_with_the_reason(page, registry):
     _seed(registry)
     runtime = _runtime(registry)
-    runtime.command("set_scene", _console_scene("plain"))
+    runtime.command("set_scene", _console_scene("plain"), by="console")
     runtime.command("set_scene", Scene(
         scene_id="evening", loop=True,
         contributions=_console_scene("x").contributions,
-        children=(Child(scene=_console_scene("intro")),)))
+        children=(Child(scene=_console_scene("intro")),)), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "scenes")
         # Not vacuous: a Scene the console can author offers Edit.
@@ -1392,7 +1392,7 @@ def test_scene_cards_summarize_inline_and_outro_frames_and_media(page, registry)
     _seed(registry)
     queue = _seed_source(registry)
     runtime = _runtime(registry)
-    runtime.command("set_scene", _console_scene("plain"))
+    runtime.command("set_scene", _console_scene("plain"), by="console")
     runtime.command("set_scene", Scene(
         scene_id="layered", loop=True, outro_seconds=5,
         children=(Child(scene=Scene(scene_id="inline", contributions=(
@@ -1400,7 +1400,7 @@ def test_scene_cards_summarize_inline_and_outro_frames_and_media(page, registry)
         ))),),
         outro_contributions=(Contribution(
             target=f"frame:{VALID_FRAME}", asset_refs=("chosen-still",)),),
-    ))
+    ), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         layered = _scene_row(page, "layered")
@@ -1514,7 +1514,7 @@ def test_two_editors_replacing_one_scene_the_second_ends_changed(page, registry)
     _seed(registry)
     queue = _seed_source(registry)
     runtime = _runtime(registry)
-    runtime.command("set_scene", _console_scene(SCENE_ID))
+    runtime.command("set_scene", _console_scene(SCENE_ID), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
         _scene_row(page, SCENE_ID).get_by_role("button", name=f"Edit Scene {SCENE_ID}").click()
@@ -1659,8 +1659,8 @@ def _why_chain(page, frame_id=VALID_FRAME):
 def _run_now(registry, scene):
     """Store a Scene and start a Run of it now."""
     runtime = _runtime(registry)
-    runtime.command("set_scene", scene)
-    runtime.command("activate", scene.scene_id, "live-act", registry.clock.utc())
+    runtime.command("set_scene", scene, by="console")
+    runtime.command("activate", scene.scene_id, "live-act", registry.clock.utc(), by="console")
 
 
 def _stop(chain):
@@ -1674,8 +1674,8 @@ def test_why_nothing_new_stops_at_a_one_cycle_run_that_ended_and_its_still(page,
     _seed(registry)
     queue = _seed_source(registry)
     runtime = _runtime(registry)
-    runtime.command("set_scene", _console_scene(SCENE_ID, loop=False))
-    runtime.command("activate", SCENE_ID, "once-act", registry.clock.utc())
+    runtime.command("set_scene", _console_scene(SCENE_ID, loop=False), by="console")
+    runtime.command("activate", SCENE_ID, "once-act", registry.clock.utc(), by="console")
     registry.clock.advance(45)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
@@ -1696,7 +1696,7 @@ def test_why_nothing_new_stops_at_an_authored_scene(page, registry):
     queue = _seed_source(registry, (portrait_a, portrait_b, landscape))
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         _put_authored(page, origin, AUTHORED_SCENE_ID, {VALID_FRAME: portrait_a.asset.asset_id})
-        _runtime(registry).command("activate", AUTHORED_SCENE_ID, "fixed-act", registry.clock.utc())
+        _runtime(registry).command("activate", AUTHORED_SCENE_ID, "fixed-act", registry.clock.utc(), by="console")
         connect(page, origin, "now")
         chain = _why_chain(page)
         expect(_stop(chain)).to_contain_text(

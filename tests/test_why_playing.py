@@ -38,9 +38,9 @@ def test_why_names_the_winner_and_what_it_beat(registry):
     registry.clock.advance(at(LONDON, "2026-10-12T12:00") - registry.clock.utc())
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     store = app.state.coordinator.runtime
-    store.command("set_scene", _scene("evening", loop=True))
-    store.command("set_scene", _scene("calm", loop=True))
-    store.command("set_scene", _scene("party"))
+    store.command("set_scene", _scene("evening", loop=True), by="console")
+    store.command("set_scene", _scene("calm", loop=True), by="console")
+    store.command("set_scene", _scene("party"), by="console")
     with TestClient(app) as client:
         created = client.post("/v1/operator/programs", headers=AUTH, json={
             "name": "Evenings", "scene_id": "evening", "when": {
@@ -92,10 +92,10 @@ def test_a_window_kept_out_by_protected_frames_is_named_and_every_moment_names_i
     registry.clock.advance(at(LONDON, "2026-10-12T12:00") - registry.clock.utc())
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     store = app.state.coordinator.runtime
-    store.command("set_scene", _scene("evening", loop=True))
-    store.command("set_scene", _scene("calm", loop=True))
+    store.command("set_scene", _scene("evening", loop=True), by="console")
+    store.command("set_scene", _scene("calm", loop=True), by="console")
     store.command("set_scene", Scene(scene_id="guard", cycle_seconds=600, loop=True, protect_frames=True,
-                                     contributions=(Contribution(target="frame:hall", source_refs=("library:1",)),)))
+                                     contributions=(Contribution(target="frame:hall", source_refs=("library:1",)),)), by="console")
     with TestClient(app) as client:
         created = client.post("/v1/operator/programs", headers=AUTH, json={
             "name": "Evenings", "scene_id": "evening", "when": {

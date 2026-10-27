@@ -65,7 +65,7 @@ def test_a_saved_zone_and_place_move_night_off_and_the_programs_windows(registry
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     app.state.coordinator.runtime.command("set_scene", Scene(scene_id="evening", cycle_seconds=600, loop=True,
                                                              contributions=(Contribution(target=f"frame:{frame}",
-                                                                                         source_refs=("library:1",)),)))
+                                                                                         source_refs=("library:1",)),)), by="console")
     device = device_id_for_serial(SERIAL)
     wakes = DisplayWakes()
     clock = FixedClock(at(LONDON, "2026-10-12T16:00"))

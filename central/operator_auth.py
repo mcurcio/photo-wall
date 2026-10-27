@@ -37,6 +37,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from central.actor import Actor
 from central.operator_session import SESSION_SECONDS, SessionCodec, origin_scheme
 from central.registry import RegistryError
 from contracts.models import Model
@@ -198,13 +199,15 @@ class OperatorAuth:
         self,
         request: Request,
         credentials: HTTPAuthorizationCredentials | None = Depends(_BEARER),
-    ) -> None:
+    ) -> Actor:
+        """The operator's principal as the actor its writes are recorded under: "api-token" for
+        the bearer token, "console" for the signed session cookie."""
         # 1. Bearer decides alone (HTTPBearer yields None for other schemes and an empty Bearer).
         if credentials is not None and credentials.credentials:
             candidate = _wire(credentials.credentials)
             if candidate is None or not self.codec.token_matches(candidate):
                 raise RegistryError("unauthorized", 401)
-            return
+            return "api-token"
         # 2. The cookie: the first present name in COOKIE_PRECEDENCE decides.
         session = self.codec.verify(_session_cookie(request))
         if session is None:
@@ -215,6 +218,7 @@ class OperatorAuth:
             if request.headers.get("origin") != session.origin:
                 raise RegistryError("origin_mismatch", 403)
             _same_origin_fetch(request)
+        return "console"
 
     def mount(self, app: FastAPI) -> None:
         """Bind the two session routes and the no-store headers (with their unhandled-500

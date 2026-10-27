@@ -265,9 +265,13 @@ work runs inside the serving process, and N pods multiply the load on the origin
   name is fixed per tag (`app_release_service.py:330-334`), so two workers can collide. The
   release enqueue has no savepoint (`app_release_queue.py:83-136`; `media_queue.py:51`
   does it correctly).
-- **There is no `/readyz`; `/healthz` depends on the DB and the playback scheduler**
-  (`app.py:341-377`). The target adds `/livez` and `/readyz` (process + DB) and leaves `/healthz` to
-  its existing pollers.
+- **There is no `/readyz`; `/healthz` is both.** It answers 503 only when Central cannot serve:
+  the database is down, or the scheduler loop is starting (no tick completed yet), stale (none
+  within 10 s) or stopped. A completed tick with a failing step (reconcile, runtime, planning,
+  settle, measurement; `central/scheduler.py`) answers 200 `"degraded"` with each step's facet, so
+  one failing step never takes the pod out of service (the outage of 2026-10-27: planning refused
+  one Scene, `/healthz` answered 503 and the next deploy's pod never became ready). The target
+  still splits `/livez` and `/readyz` (process + DB) and leaves `/healthz` to its pollers.
 - **The hand-upload route still exists, and there is no `.deb` budget or orphan sweep.**
   An unknown netboot serial gets 503 before any release exists; the target returns 404.
 - **Photo sources were built by delivery 4 without `SyncMediaSource`.** Membership lives in the photo pools above, filled by `CheckPool` steps on the media queue, and the Planner reads the pools directly; there is no media catalog snapshot and no `Prefetch` from a source sync. Preparation is a planner-requested `PrepareMedia` job on the kernel job runtime ([media module](module-media.md)).

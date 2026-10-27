@@ -34,9 +34,9 @@ def test_advance_samples_clock_after_both_serialization_locks(registry, monkeypa
         original = coordinator.runtime.edit
 
         @contextmanager
-        def notified_edit(conn=None):
+        def notified_edit(conn=None, *, by):
             entering.set()
-            with original(conn) as runtime:
+            with original(conn, by=by) as runtime:
                 yield runtime
 
         monkeypatch.setattr(coordinator.runtime, "edit", notified_edit)
@@ -49,9 +49,10 @@ def test_advance_samples_clock_after_both_serialization_locks(registry, monkeypa
             with pytest.raises(TimeoutError):
                 pending.result(timeout=.1)
             registry.clock.advance(5)
-        projection = pending.result(timeout=4)
+        advance = pending.result(timeout=4)
 
-    assert projection.now == 1005
+    assert advance.failures == ()
+    assert advance.projection.now == 1005
     assert coordinator.runtime.read().export_state()["now"] == 1005
 
 
@@ -64,7 +65,7 @@ def test_runtime_read_waits_for_writer_then_returns_committed_state(registry):
         return store.read()
 
     with ThreadPoolExecutor(max_workers=1) as workers:
-        with store.edit() as runtime:
+        with store.edit(by="console") as runtime:
             runtime.set_scene(Scene(scene_id="written-under-lock", loop=True))
             pending = workers.submit(read_after_signal)
             assert entering.wait(4)
@@ -85,7 +86,7 @@ def test_direct_runtime_command_waits_for_coordination_lock(registry):
 
     def write_after_signal():
         entering.set()
-        store.command("set_scene", Scene(scene_id="serialized-command", loop=True))
+        store.command("set_scene", Scene(scene_id="serialized-command", loop=True), by="console")
 
     with ThreadPoolExecutor(max_workers=1) as workers:
         with registry.db.transaction() as blocker:
@@ -105,15 +106,14 @@ def test_operator_activation_uses_post_lock_time(registry, monkeypatch):
     store.command("set_scene", Scene(
         scene_id="manual", loop=True,
         contributions=(Contribution(target="frame:left", kind="black"),),
-    ))
+    ), by="console")
     entering = Event()
     original = RuntimeStore.edit
 
     @contextmanager
-    def notified_edit(self, conn=None):
-        if conn is None:
-            entering.set()
-        with original(self, conn) as runtime:
+    def notified_edit(self, conn=None, *, by):
+        entering.set()
+        with original(self, conn, by=by) as runtime:
             yield runtime
 
     monkeypatch.setattr(RuntimeStore, "edit", notified_edit)
@@ -144,24 +144,25 @@ def test_program_save_applies_at_the_clock_after_lock_wait(registry, monkeypatch
     started while it waited keeps its end (R10), so the save applies from the next window."""
     set_house(registry.db, UTC_HOUSE)
     store = RuntimeStore(registry.db, registry.clock)
-    store.command("set_scene", Scene(scene_id="scheduled", loop=True))
+    store.command("set_scene", Scene(scene_id="scheduled", loop=True), by="console")
     registry.clock.advance(17)                                     # 1017: the window starts at 1020
-    expected = store.command_current("create_program", window_program("upcoming", "scheduled", 1020, 1080))
+    expected = store.command_current("create_program", window_program("upcoming", "scheduled", 1020, 1080), by="console")
     draft = ProgramDraft(name="upcoming", scene_id="scheduled", when=daily("00:17", "00:19"))
     entering = Event()
     original = store.edit
 
     @contextmanager
-    def notified_edit(conn=None):
+    def notified_edit(conn=None, *, by):
         entering.set()
-        with original(conn) as runtime:
+        with original(conn, by=by) as runtime:
             yield runtime
 
     monkeypatch.setattr(store, "edit", notified_edit)
     with ThreadPoolExecutor(max_workers=1) as workers:
         with registry.db.transaction() as blocker:
             blocker.execute("SELECT pg_advisory_xact_lock(%s)", (COORDINATION_LOCK,))
-            pending = workers.submit(store.command_current, "save_program", expected, draft)
+            pending = workers.submit(store.command_current, "save_program", expected, draft,
+                                     by="console")
             assert entering.wait(4)
             with pytest.raises(TimeoutError):
                 pending.result(timeout=.1)

@@ -50,7 +50,7 @@ import { wallRoutes } from "./wallRoutes.jsx";
  */
 
 // The Central pill's colour: the shared health severity for each /healthz state.
-const PILL_SEVERITY = { ok: "ok", unavailable: "alarm", unreachable: "alarm" };
+const PILL_SEVERITY = { ok: "ok", degraded: "alarm", unavailable: "alarm", unreachable: "alarm" };
 
 // The drawer serves narrow screens only (index.css repeats this breakpoint).
 const WIDE = "(min-width: 850px)";
@@ -115,7 +115,8 @@ function SectionNav({ current, hrefFor, onChoose, drafts }) {
  * @param {{health: import("./useSnapshot.js").CentralHealth}} props
  */
 function CentralPill({ health }) {
-  const text = health.status === "unavailable" ? health.reason ?? "unavailable" : health.status;
+  const text = health.status === "unavailable" || health.status === "degraded"
+    ? health.reason ?? health.status : health.status;
   return (
     <span
       className={`console__health health--${PILL_SEVERITY[health.status] ?? "unknown"}`}

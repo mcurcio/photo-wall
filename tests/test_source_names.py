@@ -33,10 +33,10 @@ class Names:
 
     def save(self, name: str, *, editing: str | None = None, favourites: bool = False) -> dict:
         query = SourceQuery(connection_ref=self.connection, favourites_only=favourites)
-        return self.service.save_draft(self.library.create_draft(query, editing), name)
+        return self.service.save_draft(self.library.create_draft(query, editing), name, by="console")
 
     def reconcile(self) -> None:
-        with self.registry.db.transaction() as conn, self.runtime.edit(conn) as current:
+        with self.registry.db.transaction() as conn, self.runtime.edit(conn, by="console") as current:
             self.repository.reconcile_source_activity_in(conn, current.planning_source_refs())
 
     def active(self, source_ref: str) -> bool:
@@ -58,13 +58,13 @@ def test_named_edit_revises_future_scenes_but_keeps_admitted_run(names):
     scene = Scene(scene_id="show", loop=True, children=(Child(scene=child),),
                   contributions=(Contribution(target="frame:main",
                                               source_refs=("all-photos:1",)),))
-    runtime.command("set_scene", scene)
+    runtime.command("set_scene", scene, by="console")
     set_house(runtime.db, UTC_HOUSE)
-    runtime.command("create_program", window_program("next", "show", 1020, 1200), 1000)
-    admission = runtime.command("activate", "show", "manual", 1000)
+    runtime.command("create_program", window_program("next", "show", 1020, 1200), 1000, by="console")
+    admission = runtime.command("activate", "show", "manual", 1000, by="console")
     assert admission.status == "admitted"
     queued = runtime.command("activate", "show", "later", 1000,
-                             repeat="queue", expires_at=1100)
+                             repeat="queue", expires_at=1100, by="console")
     assert queued.status == "queued"
 
     edited = names.save("all-photos", editing="all-photos:1", favourites=True)
@@ -76,12 +76,12 @@ def test_named_edit_revises_future_scenes_but_keeps_admitted_run(names):
     assert saved["scenes"]["show"]["children"][0]["scene"]["contributions"][0]["source_refs"] == ["all-photos:2"]
     assert saved["runs"][admission.run_id]["scene"]["contributions"][0]["source_refs"] == ["all-photos:1"]
     with pytest.raises(SceneWriteRefused, match="changed"):
-        runtime.command("set_scene", scene.model_copy(update={"revision": 2, "loop": False}))
-    runtime.command("cancel", admission.run_id, 1001)
+        runtime.command("set_scene", scene.model_copy(update={"revision": 2, "loop": False}), by="console")
+    runtime.command("cancel", admission.run_id, 1001, by="console")
     saved = runtime.read().export_state()
     queued_run = saved["admissions"]["later"]["run_id"]
     assert saved["runs"][queued_run]["scene"]["contributions"][0]["source_refs"] == ["all-photos:1"]
-    runtime.command("advance", 1020)
+    runtime.command("advance", 1020, by="console")
     saved = runtime.read().export_state()
     program_run = saved["admissions"]["program:next:1:1020"]["run_id"]
     assert saved["runs"][program_run]["scene"]["contributions"][0]["source_refs"] == ["all-photos:2"]
@@ -92,12 +92,12 @@ def test_named_edit_revises_future_scenes_but_keeps_admitted_run(names):
 def test_delete_guards_scenes_and_recreate_uses_next_hidden_revision(names):
     names.save("used")
     names.runtime.command("set_scene", Scene(scene_id="dependent", contributions=(
-        Contribution(target="frame:main", source_refs=("used:1",)),)))
+        Contribution(target="frame:main", source_refs=("used:1",)),)), by="console")
     with pytest.raises(SourceInUse) as error:
-        names.service.delete("used", 1)
+        names.service.delete("used", 1, by="console")
     assert error.value.scene_ids == ("dependent",)
     names.save("unused")
-    assert names.service.delete("unused", 1)["deleted"] is True
+    assert names.service.delete("unused", 1, by="console")["deleted"] is True
     assert "unused" not in {row["name"] for row in names.repository.sources()}
     assert names.save("unused", favourites=True)["source_ref"] == "unused:2"
 
@@ -106,8 +106,8 @@ def test_rename_changes_future_scene_and_keeps_old_run(names):
     runtime = names.runtime
     names.save("old")
     runtime.command("set_scene", Scene(scene_id="show", loop=True, contributions=(
-        Contribution(target="frame:main", source_refs=("old:1",)),)))
-    run = runtime.command("activate", "show", "first", 1000)
+        Contribution(target="frame:main", source_refs=("old:1",)),)), by="console")
+    run = runtime.command("activate", "show", "first", 1000, by="console")
     assert names.save("new", editing="old:1")["source_ref"] == "new:1"
     assert [row["name"] for row in names.repository.sources()] == ["new"]
     saved = runtime.read().export_state()
@@ -118,7 +118,7 @@ def test_rename_changes_future_scene_and_keeps_old_run(names):
 def test_planner_pools_exclude_dormant_revisions(names):
     names.save("photos")
     names.runtime.command("set_scene", Scene(scene_id="show", contributions=(
-        Contribution(target="frame:main", source_refs=("photos:1",)),)))
+        Contribution(target="frame:main", source_refs=("photos:1",)),)), by="console")
     names.save("photos", editing="photos:1", favourites=True)
     needed = names.runtime.read().planning_source_refs()
     with names.registry.db.transaction() as conn:
@@ -133,15 +133,15 @@ def test_a_dormant_revision_is_unwanted_until_a_scene_needs_it_again(names):
     runtime = names.runtime
     names.save("photos")
     runtime.command("set_scene", Scene(scene_id="show", loop=True, contributions=(
-        Contribution(target="frame:main", source_refs=("photos:1",)),)))
-    first = runtime.command("activate", "show", "first", 1000)
+        Contribution(target="frame:main", source_refs=("photos:1",)),)), by="console")
+    first = runtime.command("activate", "show", "first", 1000, by="console")
     names.save("photos", editing="photos:1", favourites=True)
     assert names.active("photos:1") is True
-    runtime.command("cancel", first.run_id, 1001)
+    runtime.command("cancel", first.run_id, 1001, by="console")
     names.reconcile()
     assert (names.active("photos:1"), names.active("photos:2")) == (False, True)
     runtime.command("set_scene", Scene(scene_id="old-again", contributions=(
-        Contribution(target="frame:other", source_refs=("photos:1",)),)))
+        Contribution(target="frame:other", source_refs=("photos:1",)),)), by="console")
     names.reconcile()
     assert names.active("photos:1") is True
 
@@ -149,7 +149,7 @@ def test_a_dormant_revision_is_unwanted_until_a_scene_needs_it_again(names):
 def test_the_delete_api_reports_dependent_scene_ids(names, registry):
     names.save("family")
     names.runtime.command("set_scene", Scene(scene_id="old", contributions=(
-        Contribution(target="frame:main", source_refs=("family:1",)),)))
+        Contribution(target="frame:main", source_refs=("family:1",)),)), by="console")
     app = create_app(registry.db, registry.clock, "a" * 32)
     headers = {"Authorization": "Bearer " + "a" * 32}
     with TestClient(app) as client:

@@ -181,7 +181,7 @@ def test_save_and_apply_now_through_the_routes(registry):
             "scene": body, "earlier_version": {"playing": [], "waiting": []}}
         assert client.post("/v1/operator/activations", headers=AUTH, json={
             "scene_id": "evening", "activation_id": "show"}).json()["status"] == "admitted"
-        store.command_current("create_program", window_program("evenings", "evening", 960, 6000))
+        store.command_current("create_program", window_program("evenings", "evening", 960, 6000), by="console")
         registry.clock.advance(60)
         revised = {**body, "revision": 2, "duration_seconds": 1800}
         saved = client.put("/v1/operator/scenes/evening", headers=AUTH, json=revised)
@@ -224,12 +224,12 @@ def test_the_authored_save_and_apply_now_replaces_in_its_own_transaction(registr
     _repo, spec, originals = setup_source(registry)
     coordinator = Coordinator(registry.db, registry.clock)
     asset = originals[0].asset_id
-    saved = coordinator.configure_authored_scene(authored_scene(asset), spec.source_ref, (asset,))
+    saved = coordinator.configure_authored_scene(authored_scene(asset), spec.source_ref, (asset,), by="console")
     assert saved["earlier_version"] == {"playing": [], "waiting": []}
-    show = coordinator.runtime.command_current("activate", "authored-scene", "show")
+    show = coordinator.runtime.command_current("activate", "authored-scene", "show", by="console")
     registry.clock.advance(10)      # inside the Scene's one 30 s photo: the Run still plays
     revised = authored_scene(asset, revision=2)
-    applied = coordinator.configure_authored_scene_and_apply_now(revised, spec.source_ref, (asset,))
+    applied = coordinator.configure_authored_scene_and_apply_now(revised, spec.source_ref, (asset,), by="console")
     assert applied == {"scene": revised.model_dump(mode="json"),
                        "earlier_version": {"playing": [], "waiting": []},
                        "asset_refs": [asset], "created": 0}

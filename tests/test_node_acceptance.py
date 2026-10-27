@@ -62,12 +62,12 @@ class Witnesses:
             self.send(request)
             self.requests[fact.output.output_id] = request
         for run in self.coordinator.runtime.read().project(registry.clock.utc()).runs:
-            self.coordinator.runtime.command('cancel',run.run_id,registry.clock.utc())
+            self.coordinator.runtime.command('cancel',run.run_id,registry.clock.utc(), by="console")
         # Two Frames, so two photos: one photo is never on two Frames at once (roadmap 5a).
         publish_fixture_catalog(registry,also=(('original-a2','c'*64),))
         self.coordinator.runtime.command('set_scene',Scene(scene_id='representative',loop=True,cycle_seconds=300,
-            contributions=tuple(Contribution(target='frame:node-f'+str(i),kind='media',source_refs=('library:1',)) for i in range(2))))
-        self.coordinator.runtime.command('activate','representative','representative-start',registry.clock.utc())
+            contributions=tuple(Contribution(target='frame:node-f'+str(i),kind='media',source_refs=('library:1',)) for i in range(2))), by="console")
+        self.coordinator.runtime.command('activate','representative','representative-start',registry.clock.utc(), by="console")
         self.coordinator.advance()
         self.sequence = 2
         self.coordinator.readiness(self.player["player_id"],report(self.coordinator,self.player,sequence=self.sequence))
@@ -122,10 +122,10 @@ class Witnesses:
 
     def replace_media(self):
         for run in self.coordinator.runtime.read().project(self.registry.clock.utc()).runs:
-            self.coordinator.runtime.command('cancel',run.run_id,self.registry.clock.utc())
+            self.coordinator.runtime.command('cancel',run.run_id,self.registry.clock.utc(), by="console")
         publish_fixture_catalog(self.registry,digest='b'*64,asset='new-representative',
                                 also=(('new-representative-2','d'*64),))
-        self.coordinator.runtime.command('activate','representative','replacement-start',self.registry.clock.utc())
+        self.coordinator.runtime.command('activate','representative','replacement-start',self.registry.clock.utc(), by="console")
         self.coordinator.advance()
         self.sequence += 1
         self.coordinator.readiness(self.player['player_id'],report(self.coordinator,self.player,sequence=self.sequence))

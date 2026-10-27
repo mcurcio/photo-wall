@@ -20,13 +20,13 @@ def _store(registry) -> RuntimeStore:
     store = RuntimeStore(registry.db, registry.clock)
     for scene_id in ("evening", "calm"):
         store.command("set_scene", Scene(scene_id=scene_id, cycle_seconds=600, loop=True, contributions=(
-            Contribution(target="frame:hall", source_refs=("library:1",)),)))
+            Contribution(target="frame:hall", source_refs=("library:1",)),)), by="console")
     return store
 
 
 def _create(store, when, now, *, name="Evenings") -> Program:
     return store.command("create_program", Program(program_id="evenings", name=name, scene_id="evening",
-                                                   when=when), now)
+                                                   when=when), now, by="console")
 
 
 def _roots(view, scene_id="evening"):
@@ -37,13 +37,13 @@ def test_a_weekday_schedule_plays_17_to_23_on_weekdays_only(registry):
     store = _store(registry)
     _create(store, daily("17:00", "23:00", WEEKDAYS), at(LONDON, "2026-10-12T12:00"))
     for index, day in enumerate(DAYS):
-        evening = store.command("advance", at(LONDON, f"2026-10-{day}T17:30"))
+        evening = store.command("advance", at(LONDON, f"2026-10-{day}T17:30"), by="console")
         playing = _roots(evening)
         if index < 5:
             (run,) = playing
             assert (run.started_at, run.program_id) == (at(LONDON, f"2026-10-{day}T17:00"), "evenings")
             assert run.activation_id == f"program:evenings:1:{at(LONDON, f'2026-10-{day}T17:00'):.17g}"
-            night = store.command("advance", at(LONDON, f"2026-10-{day}T23:05"))
+            night = store.command("advance", at(LONDON, f"2026-10-{day}T23:05"), by="console")
             assert next(r for r in night.runs if r.run_id == run.run_id).ended_at == at(LONDON, f"2026-10-{day}T23:00")
         else:
             assert playing == []
@@ -52,10 +52,10 @@ def test_a_weekday_schedule_plays_17_to_23_on_weekdays_only(registry):
 def test_a_window_across_midnight_ends_the_next_day(registry):
     store = _store(registry)
     _create(store, daily("22:00", "02:00"), at(LONDON, "2026-10-12T12:00"))
-    (run,) = _roots(store.command("advance", at(LONDON, "2026-10-12T23:30")))
+    (run,) = _roots(store.command("advance", at(LONDON, "2026-10-12T23:30"), by="console"))
     assert run.started_at == at(LONDON, "2026-10-12T22:00")
-    assert _roots(store.command("advance", at(LONDON, "2026-10-13T01:59")))[0].run_id == run.run_id
-    after = store.command("advance", at(LONDON, "2026-10-13T02:05"))
+    assert _roots(store.command("advance", at(LONDON, "2026-10-13T01:59"), by="console"))[0].run_id == run.run_id
+    after = store.command("advance", at(LONDON, "2026-10-13T02:05"), by="console")
     assert next(r for r in after.runs if r.run_id == run.run_id).ended_at == at(LONDON, "2026-10-13T02:00")
 
 
@@ -64,22 +64,22 @@ def test_a_window_across_both_daylight_saving_changes(registry):
     spring change (2027-03-28) 01:30 does not exist and the window starts at 02:30 BST (01:30 UTC)."""
     store = _store(registry)
     _create(store, daily("01:30", "03:00"), at(LONDON, "2026-10-24T12:00"))
-    (autumn,) = _roots(store.command("advance", at(LONDON, "2026-10-25T02:30")))
+    (autumn,) = _roots(store.command("advance", at(LONDON, "2026-10-25T02:30"), by="console"))
     assert autumn.started_at == 1792888200.0                   # 2026-10-25T00:30:00Z
-    store.command("advance", at(LONDON, "2027-03-27T12:00"))
-    (spring,) = _roots(store.command("advance", 1806197400.0))  # 2027-03-28T01:30:00Z = 02:30 BST
+    store.command("advance", at(LONDON, "2027-03-27T12:00"), by="console")
+    (spring,) = _roots(store.command("advance", 1806197400.0, by="console"))  # 2027-03-28T01:30:00Z = 02:30 BST
     assert spring.started_at == 1806197400.0
 
 
 def test_the_default_scene_plays_in_the_gaps_and_beneath_a_window(registry):
     store = _store(registry)
-    store.command("set_default_scene", "calm", at(LONDON, "2026-10-12T12:00"))
+    store.command("set_default_scene", "calm", at(LONDON, "2026-10-12T12:00"), by="console")
     _create(store, daily("17:00", "23:00"), at(LONDON, "2026-10-12T12:00"))
-    assert store.command("advance", at(LONDON, "2026-10-12T16:00")).for_target("frame:hall").scene_id == "calm"
-    evening = store.command("advance", at(LONDON, "2026-10-12T17:30"))
+    assert store.command("advance", at(LONDON, "2026-10-12T16:00"), by="console").for_target("frame:hall").scene_id == "calm"
+    evening = store.command("advance", at(LONDON, "2026-10-12T17:30"), by="console")
     assert evening.for_target("frame:hall").scene_id == "evening"
     assert _roots(evening, "calm")                         # still playing beneath
-    assert store.command("advance", at(LONDON, "2026-10-12T23:30")).for_target("frame:hall").scene_id == "calm"
+    assert store.command("advance", at(LONDON, "2026-10-12T23:30"), by="console").for_target("frame:hall").scene_id == "calm"
 
 
 def test_a_save_mid_window_keeps_its_end_and_the_next_window_follows_the_new_rule(registry):
@@ -87,14 +87,14 @@ def test_a_save_mid_window_keeps_its_end_and_the_next_window_follows_the_new_rul
     new rule's 18:30 window is admitted beside the playing one."""
     store = _store(registry)
     created = _create(store, daily("17:00", "23:00", EVERY_DAY), at(LONDON, "2026-10-12T12:00"))
-    (playing,) = _roots(store.command("advance", at(LONDON, "2026-10-12T18:00")))
+    (playing,) = _roots(store.command("advance", at(LONDON, "2026-10-12T18:00"), by="console"))
     saved = store.command("save_program", created, ProgramDraft(
-        name="Evenings", scene_id="evening", when=daily("18:30", "22:00")), at(LONDON, "2026-10-12T18:10"))
+        name="Evenings", scene_id="evening", when=daily("18:30", "22:00")), at(LONDON, "2026-10-12T18:10"), by="console")
     assert saved.revision == 2
-    (still,) = _roots(store.command("advance", at(LONDON, "2026-10-12T18:45")))
+    (still,) = _roots(store.command("advance", at(LONDON, "2026-10-12T18:45"), by="console"))
     assert still.run_id == playing.run_id
     assert store.read().export_state()["runs"][playing.run_id]["program_ends_at"] == at(LONDON, "2026-10-12T23:00")
-    (tuesday,) = _roots(store.command("advance", at(LONDON, "2026-10-13T18:35")))
+    (tuesday,) = _roots(store.command("advance", at(LONDON, "2026-10-13T18:35"), by="console"))
     assert tuesday.started_at == at(LONDON, "2026-10-13T18:30")
     assert store.read().export_state()["runs"][tuesday.run_id]["program_ends_at"] == at(LONDON, "2026-10-13T22:00")
 
@@ -109,7 +109,7 @@ def test_a_schedule_created_during_its_window_plays_at_once_for_the_rest_of_it(r
     store = _store(registry)
     now = at(LONDON, "2026-10-12T19:00")
     created = _create(store, daily("17:00", "23:00", EVERY_DAY), now)
-    view = store.command("advance", now)
+    view = store.command("advance", now, by="console")
     (playing,) = _roots(view)
     assert (playing.started_at, playing.program_id) == (now, "evenings")
     assert playing.activation_id == created.window_id(at(LONDON, "2026-10-12T17:00"))
@@ -121,9 +121,9 @@ def test_a_schedule_created_during_its_window_plays_at_once_for_the_rest_of_it(r
     assert card.current.admission.run_id == playing.run_id
     assert runtime.program_windows_between(created, now - 3600, now + 3600) == (
         (Window(start=at(LONDON, "2026-10-12T17:00"), end=at(LONDON, "2026-10-12T23:00")), True),)
-    ended = store.command("advance", at(LONDON, "2026-10-12T23:05"))
+    ended = store.command("advance", at(LONDON, "2026-10-12T23:05"), by="console")
     assert next(run for run in ended.runs if run.run_id == playing.run_id).ended_at == at(LONDON, "2026-10-12T23:00")
-    (tuesday,) = _roots(store.command("advance", at(LONDON, "2026-10-13T17:05")))
+    (tuesday,) = _roots(store.command("advance", at(LONDON, "2026-10-13T17:05"), by="console"))
     assert tuesday.started_at == at(LONDON, "2026-10-13T17:00")
 
 
@@ -136,12 +136,12 @@ def test_save_and_apply_now_finishes_the_playing_window_and_the_new_rule_plays_a
     (`program_from = window.end`, no admission now) -> nothing new plays now."""
     store = _store(registry)
     created = _create(store, daily("17:00", "23:00", EVERY_DAY), at(LONDON, "2026-10-12T12:00"))
-    (playing,) = _roots(store.command("advance", at(LONDON, "2026-10-12T18:00")))
+    (playing,) = _roots(store.command("advance", at(LONDON, "2026-10-12T18:00"), by="console"))
     now = at(LONDON, "2026-10-12T18:10")
     saved = store.command("save_program_and_apply_now", created, ProgramDraft(
-        name="Evenings", scene_id="calm", when=daily("18:00", "22:00")), now)
+        name="Evenings", scene_id="calm", when=daily("18:00", "22:00")), now, by="console")
     assert saved.revision == 2
-    view = store.command("advance", now)
+    view = store.command("advance", now, by="console")
     finishing = next(run for run in view.runs if run.run_id == playing.run_id)
     assert finishing.finish_requested_at == now                 # gracefully: its cycle plays out
     (applied,) = _roots(view, "calm")
@@ -150,14 +150,14 @@ def test_save_and_apply_now_finishes_the_playing_window_and_the_new_rule_plays_a
     assert view.for_target("frame:hall").scene_id == "calm"
     state = store.read().export_state()
     assert state["runs"][applied.run_id]["program_ends_at"] == at(LONDON, "2026-10-12T22:00")
-    ended = store.command("advance", at(LONDON, "2026-10-12T22:05"))
+    ended = store.command("advance", at(LONDON, "2026-10-12T22:05"), by="console")
     assert next(run for run in ended.runs if run.run_id == applied.run_id).ended_at == at(LONDON, "2026-10-12T22:00")
-    (tuesday,) = _roots(store.command("advance", at(LONDON, "2026-10-13T18:05")), "calm")
+    (tuesday,) = _roots(store.command("advance", at(LONDON, "2026-10-13T18:05"), by="console"), "calm")
     assert tuesday.started_at == at(LONDON, "2026-10-13T18:00")
     # The same save again is an idempotent retry: nothing changes.
     assert store.command("save_program_and_apply_now", created, ProgramDraft(
-        name="Evenings", scene_id="calm", when=daily("18:00", "22:00")), at(LONDON, "2026-10-13T18:06")) == saved
-    (still,) = _roots(store.command("advance", at(LONDON, "2026-10-13T18:07")), "calm")
+        name="Evenings", scene_id="calm", when=daily("18:00", "22:00")), at(LONDON, "2026-10-13T18:06"), by="console") == saved
+    (still,) = _roots(store.command("advance", at(LONDON, "2026-10-13T18:07"), by="console"), "calm")
     assert still.run_id == tuesday.run_id
 
 
@@ -172,7 +172,7 @@ def test_save_and_apply_now_through_the_route_answers_as_put(registry):
     store = app.state.coordinator.runtime
     for scene_id in ("evening", "calm"):
         store.command("set_scene", Scene(scene_id=scene_id, cycle_seconds=600, loop=True, contributions=(
-            Contribution(target="frame:hall", source_refs=("library:1",)),)))
+            Contribution(target="frame:hall", source_refs=("library:1",)),)), by="console")
     with TestClient(app) as client:
         when = {"days": list(EVERY_DAY), "start": {"at": "clock", "time": "17:00"}, "end": {"at": "clock", "time": "23:00"}}
         created = client.post("/v1/operator/programs", headers=AUTH,

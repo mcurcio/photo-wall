@@ -94,7 +94,7 @@ def test_a_frame_whose_screen_size_is_not_known_says_so_instead_of_judging(page,
     queue = _photos(registry, wide)
     measure_all(registry, (wide.asset,))
     _runtime(registry).command("set_scene", Scene(scene_id="evenings", loop=True, contributions=(
-        Contribution(target="frame:attic", source_refs=(SOURCE,)),)))
+        Contribution(target="frame:attic", source_refs=(SOURCE,)),)), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         sign_in(page, origin)
         open_frame(page, "attic", "overview")

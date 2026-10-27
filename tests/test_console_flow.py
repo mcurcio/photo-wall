@@ -540,3 +540,41 @@ def test_hand_offs():
     assert out["stale"] == {"same": True, "settled": False}
     assert out["settled"] == {"next": None, "settled": True}
     assert out["none"] == {"next": None, "settled": False}
+
+
+PLANNING_SCRIPT = r"""
+const attention = await import(process.argv[1]);
+const failing = { planning: { status: "failing", since: 14 * 3600 + 3 * 60, reason: "X at y.py:1" } };
+const refused = { planning: { issues: [
+  { code: "intent_refused", scene_id: "s", run_id: "run-1", reason: "refused" },
+  { code: "no_photo_free", scene_id: "t", target: "frame:hall" } ] } };
+const noFrames = { inventory: { frames: [] } };
+const rows = (snapshot, central) => attention.attentionView(snapshot, central).rows
+  .map((row) => ({ key: row.key, text: row.text, href: row.href ?? null }));
+const out = {
+  failing: rows(noFrames, { scheduler: null, steps: failing }),
+  ok: rows(noFrames, { scheduler: null, steps: { planning: { status: "ok", since: null } } }),
+  refused: rows({ ...noFrames, ...refused }, { scheduler: null, steps: {} }),
+  summary: attention.attentionSummary(attention.attentionView(noFrames,
+    { scheduler: null, steps: failing })),
+};
+console.log(JSON.stringify(out));
+"""
+
+
+def test_planning_failing_and_a_refused_scene_need_attention_without_silent_frames():
+    """Central's planning rows stand on their own: while the planning step fails, Needs attention
+    says so with no Frame silent, and each Scene the last pass refused is a row linking to it.
+    Mutation probe: gate the planning row on `silenced.length > 0` again (no row here)."""
+    _require_node()
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", PLANNING_SCRIPT, "--",
+         (SRC / "attention.js").as_uri()],
+        capture_output=True, text=True, timeout=30, check=True, env={**os.environ, "TZ": "UTC"})
+    out = json.loads(result.stdout)
+    assert out["failing"] == [
+        {"key": "planning", "text": "Planning is failing since Thu 14:03", "href": None}]
+    assert out["ok"] == []
+    assert out["refused"] == [{"key": "scene:s", "text": "Scene s could not be planned: refused",
+                               "href": "#/scenes/s/edit/review"}]
+    assert out["summary"].startswith("Central needs attention")

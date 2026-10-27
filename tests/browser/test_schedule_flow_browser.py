@@ -79,7 +79,7 @@ def test_a_weekday_schedule_is_one_post_and_its_card_shows_the_house_clock(page,
     Mutation probe (P-browser-zone): format the card's window in the browser's zone -> the
     house-clock text fails."""
     _seed(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening"))
+    _runtime(registry).command("set_scene", _console_scene("evening"), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         form = schedule_program(page, "Evenings", "evening", "17:00", "23:00", days=WEEKDAYS, submit=False)
@@ -132,7 +132,7 @@ def test_schedule_it_prefills_the_scene_from_the_scene_flow_and_a_card(page, reg
     Mutation probe: seed the draft without `recentSceneId`."""
     _seed(registry)
     queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening"))
+    _runtime(registry).command("set_scene", _console_scene("evening"), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         author_scene(page, "saved-scene", SOURCE, (VALID_FRAME,))
@@ -166,7 +166,7 @@ def test_priority_defaults_to_normal_shown_on_review_and_changes_under_advanced(
     """§7 J6 step 3: Priority's stated default, Normal, is on Review with the other answers,
     and is changed under Review's Advanced. Mutation probe: default the priority to another."""
     _seed(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening"))
+    _runtime(registry).command("set_scene", _console_scene("evening"), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         form = schedule_program(page, "first", "evening", "09:00", "11:00", submit=False)
@@ -195,7 +195,7 @@ def test_continue_checks_only_its_own_step(page, registry):
     """§7 mechanics: Continue validates the current step and shows only its reasons; a
     later step shows none until its own Continue. Mutation probe: check every step."""
     _seed(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening"))
+    _runtime(registry).command("set_scene", _console_scene("evening"), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         form = start_schedule(page)
@@ -223,7 +223,7 @@ def test_review_routes_each_problem_to_its_step(page, registry):
     """§7 Review: Save checks everything; a problem on another step (no day ticked) opens that
     step from the summary. Nothing is sent until it is fixed."""
     _seed(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening"))
+    _runtime(registry).command("set_scene", _console_scene("evening"), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         posts = []
@@ -251,7 +251,7 @@ def test_a_refusal_central_routes_to_a_field_returns_to_its_step(page, registry)
     """Central's 422 "unknown-scene" (the Scene was deleted meanwhile) returns to the Scene step
     with its reason; nothing is stored."""
     _seed(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening"))
+    _runtime(registry).command("set_scene", _console_scene("evening"), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         answer_first(page, "**/v1/operator/programs", lambda route: route.fulfill(
@@ -269,15 +269,15 @@ def test_an_edit_that_meets_a_newer_save_offers_reload(page, registry):
     the stored Schedule; the editor says so and Reload reseeds from it, after which Save works."""
     _seed(registry)
     runtime = _runtime(registry)
-    runtime.command("set_scene", _console_scene("evening"))
-    created = runtime.command_current("create_program", window_program("late-show", "evening", 3600, 7200))
+    runtime.command("set_scene", _console_scene("evening"), by="console")
+    created = runtime.command_current("create_program", window_program("late-show", "evening", 3600, 7200), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "schedule")
         edit_button(card(page, "late-show"), "late-show").click()
         edit = edit_form(page, "late-show")
         # Someone else saves first.
         runtime.command_current("save_program", created, ProgramDraft(
-            name="late-show", scene_id="evening", when=daily("01:00", "03:00")))
+            name="late-show", scene_id="evening", when=daily("01:00", "03:00")), by="console")
         with page.expect_response(lambda r: r.request.method == "PUT") as refused:
             save_button(edit).click()
         assert refused.value.status == 409
@@ -294,7 +294,7 @@ def test_the_draft_survives_a_section_change_and_the_sidebar_says_draft(page, re
     """Rule 2: the Schedule flow never unmounts, so a section change keeps its draft; the
     sidebar marks Schedule "Draft" and the page offers "Resume draft (Draft)"."""
     _seed(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening"))
+    _runtime(registry).command("set_scene", _console_scene("evening"), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         expect(_schedule_link(page)).to_have_accessible_description("")
@@ -321,7 +321,7 @@ def test_save_lands_on_the_schedule_and_back_never_reenters_the_flow(page, regis
     """§6 History: Save replaces the flow's entry with #/schedule, which lists the new
     Schedule's card and says what was saved; Back never re-enters the finished flow."""
     _seed(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening"))
+    _runtime(registry).command("set_scene", _console_scene("evening"), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         schedule_program(page, "Morning", "evening", "09:00", "11:00")
@@ -343,7 +343,7 @@ def test_a_schedule_central_did_not_answer_says_it_may_have_been_saved(page, reg
     """A save that got no answer (a 5xx after Central stored it) says it may have been saved
     and stays on Review; the stored Schedule lists once the snapshot refreshes."""
     _seed(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening"))
+    _runtime(registry).command("set_scene", _console_scene("evening"), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "schedule")
 
@@ -367,7 +367,7 @@ def test_remove_refusal_and_unknown_outcome_can_be_retried(page, registry):
     Schedule may reuse the name, and the old receipt never shows on it. Mutation probe: drop
     outcome feedback or treat a 5xx as success."""
     _seed(registry)
-    _runtime(registry).command("set_scene", _console_scene(SCENE_ID))
+    _runtime(registry).command("set_scene", _console_scene(SCENE_ID), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         program_id = schedule_program(page, "Morning", SCENE_ID, "09:00", "11:00").json()["program_id"]
@@ -413,7 +413,7 @@ def test_a_scene_delete_refusal_names_the_schedule_that_plays_it(page, registry)
     """Deleting a Scene a Schedule plays is refused (409), and both the confirmation and the
     refusal name that Schedule by its name."""
     _seed(registry)
-    _runtime(registry).command("set_scene", _console_scene(SCENE_ID))
+    _runtime(registry).command("set_scene", _console_scene(SCENE_ID), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         schedule_program(page, "Morning", SCENE_ID, "09:00", "11:00")
@@ -450,8 +450,8 @@ def _london_evening(registry):
     _seed(registry)
     set_house(registry.db, LONDON)
     registry.clock.wall = at(LONDON, "2026-10-14T18:00")
-    _runtime(registry).command("set_scene", _console_scene("evening"))
-    _runtime(registry).command("set_scene", _console_scene("calm"))
+    _runtime(registry).command("set_scene", _console_scene("evening"), by="console")
+    _runtime(registry).command("set_scene", _console_scene("calm"), by="console")
 
 
 @pytest.mark.browser_context_args(timezone_id="Pacific/Auckland")

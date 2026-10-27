@@ -89,7 +89,7 @@ def seed_pool(registry, source_ref: str, photos: Iterable[LibraryAsset], *,
             MediaRepository(registry.db, registry.clock,
                             times=ProcessTransactionClock(registry.clock)),
             RuntimeStore(registry.db, registry.clock), library)
-        saved = names.save_draft(library.create_draft(query, None), name)
+        saved = names.save_draft(library.create_draft(query, None), name, by="console")
         assert saved["source_ref"] == source_ref, saved
     with registry.db.transaction() as conn:
         key = library.pool_key_of_source_in(conn, source_ref)

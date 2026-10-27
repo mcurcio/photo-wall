@@ -103,10 +103,10 @@ def _planned_kinds(registry, *, switches: tuple[bool, ...], created_with_video: 
     coordinator = Coordinator(registry.db, registry.clock)
     coordinator.runtime.command("set_scene", Scene(
         scene_id="house", cycle_seconds=30, loop=True,
-        contributions=(Contribution(target="frame:hall", source_refs=(POOL,)),)))
-    coordinator.runtime.command("activate", "house", "calendar", 1000)
+        contributions=(Contribution(target="frame:hall", source_refs=(POOL,)),)), by="console")
+    coordinator.runtime.command("activate", "house", "calendar", 1000, by="console")
     kinds = {still.asset_id: "image", clip.asset_id: "video"}
-    return {kinds[entry.asset_id] for entry in coordinator.advance().plan}
+    return {kinds[entry.asset_id] for entry in coordinator.advance().projection.plan}
 
 
 def test_switched_off_the_next_plan_puts_no_video_on_the_frame_while_its_photos_play(registry):

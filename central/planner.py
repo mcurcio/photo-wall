@@ -28,7 +28,7 @@ from central.catalog import Candidate
 from central.house_time.calculator import house_date
 from central.house_time.model import HouseTime
 from central.installation_models import FrameOutput
-from central.runtime import Intent, Runtime, RuntimeBudgetExceeded
+from central.runtime import Intent, Runtime
 from central.wall_plan.assignment import (
     FixedShowing,
     PlanWindow,
@@ -75,11 +75,9 @@ if TYPE_CHECKING:
 
 
 class PlanningError(ValueError):
-    """Invalid configuration or inconsistent input prevents a complete proposal."""
-
-
-class PlanningBudgetExceeded(PlanningError):
-    """No partial plan is returned after an explicit planning limit is exceeded."""
+    """The caller's input is inconsistent (a Frame bound twice, a pool keyed by another Source, a
+    non-finite time). Raised within one Intent's `add`, it refuses that Intent alone
+    (`intent_refused`); no budget raises it: a budget shortens the plan (`plan_shortened`)."""
 
 
 def handle_execution_outcome(outcome: ExecutionOutcome) -> str:
@@ -100,16 +98,17 @@ PLAN_SECONDS = 3600.0
 
 
 class PlannerLimits(Model):
-    max_horizon_seconds: float = Field(default=PLAN_SECONDS, gt=0)
-    max_cycle_seconds: float = Field(default=300, gt=0, le=300)
+    """The Planner's work budgets. Each one shortens or truncates what a pass returns, never
+    refuses it: Runtime transitions (`max_events`) and layers inside the preparation horizon
+    (`max_assignments`) cut the plan at one instant (`plan_shortened`); diagnostics past
+    `max_diagnostics` are counted (`Projection.diagnostics_dropped`). Nothing here bounds how long
+    a Scene's cycle is, how far ahead the wall plans, or how many Players, bindings or Sources it
+    has: the Scene and the coordination limits own those."""
+
     max_events: int = Field(default=10000, ge=1)
     max_assignments: int = Field(default=4096, ge=1)
-    max_sources: int = Field(default=128, ge=1)
-    max_authored_refs: int = Field(default=10000, ge=1)
     max_acquisitions: int = Field(default=256, ge=1)
     max_diagnostics: int = Field(default=8192, ge=1)
-    max_players: int = Field(default=128, ge=1)
-    max_bindings: int = Field(default=256, ge=1)
     # Roadmap 5a: measurement requests per projection (central/wall_plan/assignment.py).
     max_measurements: int = Field(default=64, ge=0)
     # Follow-up S3: a Scene's line is read `hydrate_factor` members per slot at a time.
@@ -161,6 +160,11 @@ class Diagnostic(Model):
     target: str | None = None
     assignment_id: str | None = None
     source_ref: str | None = None
+    # The Run and Scene of the Intent it is about; `reason` says why for `intent_refused` (the
+    # refusal's message) and `plan_shortened` (which budget cut the plan).
+    run_id: str | None = None
+    scene_id: str | None = None
+    reason: str | None = None
 
 
 class PlayerProposal(Model):
@@ -179,6 +183,8 @@ class Projection(Model):
     # Roadmap 5a: the measurements this plan needs, and the whole wall plan (slice W1).
     measurements: tuple[MeasureRequest, ...] = ()
     plan: tuple[PlannedPhoto, ...] = ()
+    # Diagnostics past `PlannerLimits.max_diagnostics`, counted, not kept.
+    diagnostics_dropped: int = 0
 
     def for_player(self, player_id: str) -> PlayerProposal | None:
         return next((player for player in self.players if player.player_id == player_id), None)
@@ -221,9 +227,19 @@ def _finite(value: float, name: str) -> float:
     return float(value)
 
 
-def _bound(size: int | float, limit: int | float, name: str) -> None:
-    if size > limit:
-        raise PlanningBudgetExceeded(f"{name} budget exceeded")
+def _in_window(intent: Intent, window: PlanWindow) -> bool:
+    """An Intent the plan horizon holds: on a Frame, showing before the plan's end, not over."""
+    return (intent.kind != "actuator" and intent.shows_from < window.plan_end
+            and intent.interval_end > window.now)
+
+
+def _cut_instant(starts: Sequence[float], budget: int) -> float | None:
+    """The one instant a plan holding more than `budget` showings is cut at: the start of the
+    first showing past the budget, in start order (every showing starting at or after it is
+    dropped, so each Frame's plan ends at the same instant). None within the budget."""
+    if len(starts) <= budget:
+        return None
+    return sorted(starts)[budget]
 
 
 Standing = Literal["usable", "preparing", "failed_to_prepare", "no_compatible_variant"]
@@ -289,9 +305,9 @@ class _ProjectionBuilder:
         self.frames: dict[str, tuple[str, OutputBinding]] = {}
         self.layers: dict[str, list[Layer]] = {player: [] for player in bindings_by_player}
         self.diagnostics: dict[tuple, Diagnostic] = {}
+        self.diagnostics_dropped = 0
         self.selections: list[AssignmentSelection] = []
         self.seen: set[str] = set()
-        self.layered = 0
         self.used_locks: dict[str, Layer] = {}
         self.fixed: list[FixedShowing] = []
         self.pending: list[_Pending] = []
@@ -299,10 +315,6 @@ class _ProjectionBuilder:
         self._validate_inputs(bindings_by_player)
 
     def _validate_inputs(self, bindings: Mapping[str, Sequence[OutputBinding]]) -> None:
-        _bound(len(bindings), self.limits.max_players, "Player count")
-        _bound(sum(len(items) for items in bindings.values()), self.limits.max_bindings, "binding count")
-        _bound(len(self.sources), self.limits.max_sources, "source count")
-        _bound(len(self.locks), self.limits.max_assignments, "locked assignment count")
         for source, line in self.sources.items():
             if line.source_ref != source:
                 raise PlanningError("source pool key does not match its immutable source reference")
@@ -322,15 +334,22 @@ class _ProjectionBuilder:
 
     def diagnose(
         self, code: str, *, intent: Intent | None = None,
-        assignment: str | None = None, source: str | None = None,
+        assignment: str | None = None, source: str | None = None, reason: str | None = None,
     ) -> None:
-        target = intent.target if intent else None
-        key = (code, target, assignment, source)
-        if key not in self.diagnostics:
-            _bound(len(self.diagnostics) + 1, self.limits.max_diagnostics, "diagnostic count")
-            self.diagnostics[key] = Diagnostic(
-                code=code, target=target, assignment_id=assignment, source_ref=source
-            )
+        """Record one diagnostic, once per (code, Intent, assignment, Source, reason); past
+        `max_diagnostics` it is counted, not kept."""
+        key = (code, intent.run_id if intent else None, intent.target if intent else None,
+               assignment, source, reason)
+        if key in self.diagnostics:
+            return
+        if len(self.diagnostics) >= self.limits.max_diagnostics:
+            self.diagnostics_dropped += 1
+            return
+        self.diagnostics[key] = Diagnostic(
+            code=code, target=intent.target if intent else None, assignment_id=assignment,
+            source_ref=source, run_id=intent.run_id if intent else None,
+            scene_id=intent.scene_id if intent else None, reason=reason,
+        )
 
     def _source_diagnostics(self, intent: Intent, identity: str) -> None:
         for source in intent.source_refs if not intent.asset_refs else ():
@@ -364,21 +383,13 @@ class _ProjectionBuilder:
         """One Intent of the plan horizon: a lock or a black layer is fixed (a layer when it
         starts inside the preparation horizon); a media Intent becomes a wall-plan slot. Each
         starts when its photo starts to show (`Intent.shows_from`)."""
-        if (intent.kind == "actuator" or intent.shows_from >= window.plan_end
-                or intent.interval_end <= window.now):
+        if not _in_window(intent, window):
             return
-        _bound(len(intent.source_refs), self.limits.max_sources, "authored source reference count")
-        _bound(len(intent.asset_refs), self.limits.max_authored_refs, "authored asset reference count")
         identity = assignment_id(intent)
         if identity in self.seen:
             return
         inside = intent.shows_from < window.preparation_end
-        if inside:
-            _bound(self.layered + 1, self.limits.max_assignments, "assignment count")
-            self.layered += 1
         self.seen.add(identity)
-        if intent.interval_end - intent.interval_start > self.limits.max_cycle_seconds:
-            raise PlanningBudgetExceeded("cycle length exceeds supported preparation extent")
         owner = self.frames.get(intent.target)
         if owner is None:
             if inside:
@@ -538,21 +549,17 @@ class _ProjectionBuilder:
                 self.diagnose("asset_preparation_failed", intent=intent, assignment=identity,
                               source=source)
 
-    def _fit_slot_budget(self, window: PlanWindow, budget: int) -> None:
+    def _fit_slot_budget(self, budget: int) -> None:
         """Content first (owner, 2026-10-11: "always ensuring that frames have content"): a
         wall whose hour of slots exceeds the wall plan's slot budget is planned over a shorter
-        span, never refused. The slots inside the preparation horizon are always kept (more of
-        them than the budget is PlanningBudgetExceeded, as before 5a); the tentative tail is cut
-        at the start of the first slot past the budget, so every Frame's plan ends at one instant,
-        and the diagnostic `plan_shortened` says so."""
+        span, never refused. The slots are cut at the start of the first slot past the budget,
+        inside the preparation horizon or after it, so every Frame's plan ends at one instant,
+        and the diagnostic `plan_shortened` (reason "slots") says so."""
         if len(self.pending) <= budget:
             return
-        inside = sum(item.slot.start < window.preparation_end for item in self.pending)
-        _bound(inside, budget, "plan slot count")
-        ordered = sorted(self.pending, key=lambda item: (item.slot.start, item.slot.slot_id))
-        cutoff = ordered[budget].slot.start
+        cutoff = _cut_instant([item.slot.start for item in self.pending], budget)
         self.pending = [item for item in self.pending if item.slot.start < cutoff]
-        self.diagnose("plan_shortened")
+        self.diagnose("plan_shortened", reason="slots")
 
     def _lock_photos(self, history: WallHistory) -> dict[str, str]:
         """Which photo each lock shows: its selection in the history, else (a lock offered
@@ -572,7 +579,7 @@ class _ProjectionBuilder:
         layers and selections."""
         wall_limits = WallLimits(max_measurements=self.limits.max_measurements,
                                  max_preparations=self.limits.max_acquisitions)
-        self._fit_slot_budget(window, wall_limits.max_slots)
+        self._fit_slot_budget(wall_limits.max_slots)
         candidates, pools, lines = self._read_lines(history, window.now)
         self._failure_diagnostics()
         selected = self._lock_photos(history)
@@ -646,9 +653,8 @@ class _ProjectionBuilder:
             layers=tuple(sorted(layers, key=lambda layer: (
                 *stack_order(layer), layer.output_id, layer.assignment_id))),
         ) for player, layers in sorted(self.layers.items()))
+        # A layer is offered whole, so the plan stays valid to the end of its longest layer.
         extent = max([horizon_end, *(layer.end for p in players for layer in p.layers)])
-        if extent > horizon_end:
-            self.diagnose("execution_extends_preparation_horizon")
         return Projection(
             now=now, horizon_end=horizon_end, valid_until=extent, players=players,
             acquisitions=tuple(acquisitions),
@@ -656,6 +662,7 @@ class _ProjectionBuilder:
             selections=tuple(self.selections),
             measurements=tuple(measurements),
             plan=tuple(planned),
+            diagnostics_dropped=self.diagnostics_dropped,
         )
 
 
@@ -678,17 +685,22 @@ def project(
     """Build complete-cycle proposals without changing any supplied state.
 
     Roadmap 5a (slice W1): the wall plan covers `plan_seconds` (never less than
-    `horizon_seconds`, at most `limits.max_horizon_seconds`) from `now`, every Frame together;
-    layers are proposed only for slots starting before now + `horizon_seconds` (the preparation
-    horizon). `history` is the shown history and the locks' photos
-    (central/infra/shown_history_store.py); `max_clock_uncertainty` sets the on-screen extents'
-    guard (contracts/on_screen.py). Follow-ups B1: every slot is judged with `settings` (the
-    photo fit settings) against `fit_target(frame_outputs[frame_id])` (frame box run fb-8: a
-    Frame without a Frame output, or absent from it, has no shape, so its slots take no photo and
-    keep the Frame's last still, else the fallback); a Scene
-    without its own crop limit follows `settings.crop_limit`. Follow-up S3: `lines` answers the
-    runtime's Source revisions and the top of each Scene's line (`_ProjectionBuilder._read_lines`);
-    nothing reads a whole pool."""
+    `horizon_seconds`) from `now`, every Frame together; layers are proposed only for slots
+    starting before now + `horizon_seconds` (the preparation horizon). `history` is the shown
+    history and the locks' photos (central/infra/shown_history_store.py); `max_clock_uncertainty`
+    sets the on-screen extents' guard (contracts/on_screen.py). Follow-ups B1: every slot is
+    judged with `settings` (the photo fit settings) against `fit_target(frame_outputs[frame_id])`
+    (frame box run fb-8: a Frame without a Frame output, or absent from it, has no shape, so its
+    slots take no photo and keep the Frame's last still, else the fallback); a Scene without its
+    own crop limit follows `settings.crop_limit`. Follow-up S3: `lines` answers the runtime's
+    Source revisions and the top of each Scene's line (`_ProjectionBuilder._read_lines`); nothing
+    reads a whole pool.
+
+    A pass never refuses the wall. Each Intent is planned alone: one `add` raises (a
+    `PlanningError` or an invalid layer) and only that Intent is left out, with the diagnostic
+    `intent_refused` naming its Scene and Run. A budget shortens the plan at one instant
+    (`plan_shortened`, its `reason` the budget: "runtime_events", "assignments" or "slots").
+    Only inconsistent caller input (`_validate_inputs`, a non-finite time) raises."""
     now = _finite(now, "now")
     horizon_seconds = _finite(horizon_seconds, "horizon_seconds")
     if horizon_seconds <= 0:
@@ -697,7 +709,6 @@ def project(
     if plan_span <= 0:
         raise PlanningError("plan_seconds must be positive")
     plan_span = max(plan_span, horizon_seconds)
-    _bound(plan_span, limits.max_horizon_seconds, "horizon length")
     max_clock_uncertainty = _finite(max_clock_uncertainty, "max_clock_uncertainty")
     if max_clock_uncertainty < 0:
         raise PlanningError("max_clock_uncertainty must not be negative")
@@ -709,14 +720,32 @@ def project(
         authored=authored_candidates, locks=locked_assignments, limits=limits,
         settings=settings, frame_outputs=frame_outputs, house=runtime.house,
     )
-    try:
-        # A turn starting up to the longest cross-fade lead past the plan's end may start to
-        # show inside it.
-        timeline = runtime.timeline(now, window.plan_end + runtime.longest_lead(),
-                                    max_events=limits.max_events)
-    except RuntimeBudgetExceeded as error:
-        raise PlanningBudgetExceeded("Runtime event budget exceeded") from error
-    for view in timeline:
-        for intent in view.contributions:
+    # A turn starting up to the longest cross-fade lead past the plan's end may start to show
+    # inside it. Past the transition budget the timeline stops at its last whole boundary, and
+    # the plan holds only the Intents of the views up to it.
+    end = window.plan_end + runtime.longest_lead()
+    cut = runtime.timeline(now, end, max_events=limits.max_events)
+    if cut.until < end:
+        builder.diagnose("plan_shortened", reason="runtime_events")
+    intents = [intent for view in cut.views for intent in view.contributions]
+    # Layers inside the preparation horizon past `max_assignments`: cut at one instant.
+    inside = {assignment_id(intent): intent.shows_from for intent in intents
+              if _in_window(intent, window) and intent.shows_from < window.preparation_end}
+    cutoff = _cut_instant(list(inside.values()), limits.max_assignments)
+    if cutoff is not None:
+        builder.diagnose("plan_shortened", reason="assignments")
+    for intent in intents:
+        if cutoff is not None and intent.shows_from >= cutoff:
+            continue
+        try:
             builder.add(intent, window)
+        except ValueError as error:   # a PlanningError, or a layer that does not validate
+            builder.diagnose("intent_refused", intent=intent, reason=_refusal(error))
     return builder.result(window, history, max_clock_uncertainty)
+
+
+def _refusal(error: ValueError) -> str:
+    """Why one Intent was refused, for its `intent_refused` diagnostic: a PlanningError's own
+    message (the Planner writes it), else only the error's type (a validation error's text can
+    carry the values it judged)."""
+    return str(error) if isinstance(error, PlanningError) else type(error).__name__

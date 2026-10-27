@@ -114,8 +114,8 @@ def test_a_later_grant_at_the_same_readiness_never_changes_an_accepted_commit(re
     # plan's revision holds while a second cue falls due on the Player's same report.
     coordinator = Coordinator(registry.db, registry.clock, CoordinationLimits(horizon_seconds=12))
     coordinator.runtime.command("set_scene", Scene(scene_id="quick", loop=True, cycle_seconds=3,
-        contributions=(Contribution(target="frame:frame-0", kind="black"),)))
-    coordinator.runtime.command("activate", "quick", "now", 1000)
+        contributions=(Contribution(target="frame:frame-0", kind="black"),)), by="console")
+    coordinator.runtime.command("activate", "quick", "now", 1000, by="console")
     registry.clock.advance(6.5)                   # 1006.5: cues to 1009 are due, 1012 is not
     coordinator.advance()
     plan = coordinator.delivery(player["player_id"], 1)["plan"]

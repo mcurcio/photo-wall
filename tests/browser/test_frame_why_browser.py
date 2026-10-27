@@ -74,11 +74,11 @@ def test_the_overview_names_the_winner_and_resting_and_a_display_that_did_not_an
     with registry.db.transaction() as conn:
         conn.execute("""UPDATE night_off SET settings = jsonb_set(settings, '{frames}', '{"kind": "all-frames"}')""")
     runtime = RuntimeStore(registry.db, registry.clock)
-    runtime.command("set_scene", _scene("evening", frame))
-    runtime.command("set_scene", _scene("calm", frame))
+    runtime.command("set_scene", _scene("evening", frame), by="console")
+    runtime.command("set_scene", _scene("calm", frame), by="console")
     runtime.command_current("create_program", Program(program_id="p-evenings", name="Evenings", scene_id="evening",
-                                                      when=daily("17:00", "23:45"), priority="normal"))
-    runtime.command_current("set_default_scene", "calm")
+                                                      when=daily("17:00", "23:45"), priority="normal"), by="console")
+    runtime.command_current("set_default_scene", "calm", by="console")
     registry.clock.wall = LATE
     change = _off_thread(_projected, registry, WhyClock(registry.clock)).change
     _off_thread(_answer, registry, change, PowerResult.CONFIRMED, OFF)

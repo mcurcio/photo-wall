@@ -87,7 +87,7 @@ def test_get_week_serves_the_stored_programs_and_night_off(registry):
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     app.state.coordinator.runtime.command("set_scene", Scene(scene_id="evening", cycle_seconds=600, loop=True,
                                                              contributions=(Contribution(target="frame:hall",
-                                                                                         source_refs=("x:1",)),)))
+                                                                                         source_refs=("x:1",)),)), by="console")
     with TestClient(app) as client:
         assert client.post("/v1/operator/programs", headers=AUTH, json={
             "name": "Evenings", "scene_id": "evening", "when": {

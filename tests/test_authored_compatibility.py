@@ -129,7 +129,7 @@ def test_authored_scene_rejects_incompatible_nested_assignment_atomically(regist
 
     with pytest.raises(RegistryError, match="authored_incompatible"):
         coordinator.configure_authored_scene(scene, spec.source_ref,
-                                              tuple(item.asset_id for item in originals))
+                                              tuple(item.asset_id for item in originals), by="console")
     assert count_authored(registry) == 0
     assert coordinator.runtime.read().export_state()["scenes"] == {}
 
@@ -150,7 +150,7 @@ def test_authored_scene_rejects_incompatible_outro_assignment(registry):
 
     with pytest.raises(RegistryError, match="authored_incompatible"):
         coordinator.configure_authored_scene(scene, spec.source_ref,
-                                              tuple(item.asset_id for item in originals))
+                                              tuple(item.asset_id for item in originals), by="console")
     assert count_authored(registry) == 0
 
 
@@ -164,7 +164,7 @@ def test_authored_scene_accepts_an_eligible_alternative_for_each_frame(registry)
         target="frame:left", asset_refs=(landscape.asset_id, portrait.asset_id)))
 
     result = coordinator.configure_authored_scene(scene, spec.source_ref,
-                                                  tuple(item.asset_id for item in originals))
+                                                  tuple(item.asset_id for item in originals), by="console")
     assert result["created"] == 2
     assert count_authored(registry) == 2
 
@@ -254,7 +254,7 @@ def test_authoring_onto_a_frame_with_no_known_screen_is_refused(registry):
     coordinator = Coordinator(registry.db, registry.clock)
     scene = authored_scene(Contribution(target="frame:left", asset_refs=(portrait.asset_id,)))
     with pytest.raises(RegistryError, match="authored_frame_size_unknown") as refused:
-        coordinator.configure_authored_scene(scene, spec.source_ref, (portrait.asset_id,))
+        coordinator.configure_authored_scene(scene, spec.source_ref, (portrait.asset_id,), by="console")
     assert refused.value.status == 409
     assert count_authored(registry) == 0
     assert coordinator.runtime.read().export_state()["scenes"] == {}

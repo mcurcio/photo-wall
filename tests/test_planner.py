@@ -8,10 +8,12 @@ from support.house_time import UTC_HOUSE, window_program
 from support.key_content_builders import measured
 from support.position import LIGHTING
 
+import central.planner as planner_module
 from central.catalog import Candidate, SourcePool
 from central.house_time.model import HouseTime
-from central.planner import PlannerLimits, PlanningBudgetExceeded, PlanningError, eligible, project
+from central.planner import PlannerLimits, PlanningError, _ProjectionBuilder, eligible, project
 from central.runtime import Child, Contribution, RecordingActuator, Runtime, Scene, Transition
+from central.wall_plan.assignment import WallLimits
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
@@ -331,23 +333,87 @@ def test_stable_recent_cycle_variety_and_snapshot_order_independence():
     assert [selection.asset_id for selection in first.selections] == ["new", "old", "new"]
 
 
-@pytest.mark.parametrize("limits,overrides,scene", [
-    (PlannerLimits(max_sources=1), {"pools": {
-        "holiday:1": pool("holiday:1"), "other:1": pool("other:1"),
-    }}, {"contributions": (
-        Contribution(target="frame:left", source_refs=("holiday:1", "other:1")),)}),
-    (PlannerLimits(max_assignments=1), {}, {}),
-    (PlannerLimits(max_horizon_seconds=5), {}, {}),
-    (PlannerLimits(max_cycle_seconds=5), {}, {}),
-    (PlannerLimits(max_events=1), {}, {}),
-    (PlannerLimits(max_diagnostics=1), {"pools": {}}, {}),
-])
-def test_each_planning_budget_fails_without_mutation(limits, overrides, scene):
-    instance = runtime(**scene)
+def _shortened(projection) -> set:
+    return {d.reason for d in projection.diagnostics if d.code == "plan_shortened"}
+
+
+@pytest.mark.parametrize("now,cycle", [(0, 3600), (1800, 3600), (100, 86400)])
+def test_a_cycle_of_any_length_is_planned_whole(now, cycle):
+    """The outage of 2026-10-27: a Scene saved with one photo an hour (cycle 3600) failed every
+    planning pass ("cycle length exceeds supported preparation extent"), and so every Frame.
+    A cycle of an hour or a day, asked at its start or midway, is one layer over the whole cycle,
+    and the plan stays valid to its end. Mutation probe: reinsert the 300 s cap in `add`."""
+    instance = Runtime(house=UTC_HOUSE)
+    instance.set_scene(Scene(scene_id="hourly", cycle_seconds=cycle, loop=True, contributions=(
+        Contribution(target="frame:left", source_refs=("holiday:1",)),)))
+    instance.activate("hourly", "run", 0)
+    result = propose(instance, now=now, horizon=300)
+    assert [(layer.start, layer.end) for layer in layers(result)] == [(0, cycle)]
+    assert result.valid_until == cycle
+    assert result.diagnostics == ()
+
+
+def test_each_planning_budget_shortens_the_plan_without_mutation(monkeypatch):
+    """A budget never refuses the wall: Runtime events, layers inside the preparation horizon
+    and the wall plan's slots each cut the plan at one instant, keeping what comes before it
+    (`plan_shortened`, its reason the budget); diagnostics past theirs are counted. Mutation
+    probe: raise in any one instead (that case fails)."""
+    instance = runtime()                     # 10 s cycles over a 25 s horizon: 0, 10, 20
     before = instance.export_state()
-    with pytest.raises(PlanningBudgetExceeded):
-        propose(instance, limits=limits, **overrides)
+    events = propose(instance, limits=PlannerLimits(max_events=1))
+    assert [layer.start for layer in layers(events)] == [0, 10]   # the timeline stops at 10
+    assert _shortened(events) == {"runtime_events"}
+    assignments = propose(instance, limits=PlannerLimits(max_assignments=1))
+    assert [layer.start for layer in layers(assignments)] == [0]
+    assert _shortened(assignments) == {"assignments"}
+    diagnostics = propose(instance, pools={}, limits=PlannerLimits(max_diagnostics=1))
+    assert len(diagnostics.diagnostics) == 1 and diagnostics.diagnostics_dropped > 0
+    monkeypatch.setattr(planner_module, "WallLimits",
+                        lambda **limits: WallLimits(max_slots=1, **limits))
+    slots = propose(instance)
+    assert [layer.start for layer in layers(slots)] == [0]
+    assert _shortened(slots) == {"slots"}
     assert instance.export_state() == before
+
+
+def test_one_refused_intent_leaves_every_other_frame_planned(monkeypatch):
+    """The per-Intent bulkhead: an Intent the Planner refuses is left out alone, as
+    `intent_refused` naming its Scene and Run; the other Frame is planned as without it.
+    Mutation probe: drop the try/except around `add` in `project` (the pass raises)."""
+    two = {"player-one": (binding(),), "player-two": (binding("right", "hdmi-1"),)}
+    left = Contribution(target="frame:left", source_refs=("holiday:1",))
+    instance = runtime(contributions=(left, Contribution(target="frame:right",
+                                                         source_refs=("holiday:1",))))
+    baseline = propose(runtime(contributions=(left,)), bindings=two)
+    assert layers(baseline)
+    add = _ProjectionBuilder.add
+
+    def refuse_right(self, intent, window):
+        if intent.target == "frame:right":
+            raise PlanningError("refused for the test")
+        return add(self, intent, window)
+
+    monkeypatch.setattr(_ProjectionBuilder, "add", refuse_right)
+    refused = propose(instance, bindings=two)
+    assert refused.for_player("player-one") == baseline.for_player("player-one")
+    assert refused.for_player("player-two").layers == ()
+    issue = next(d for d in refused.diagnostics if d.code == "intent_refused")
+    assert (issue.scene_id, issue.run_id, issue.target, issue.reason) == (
+        "scene", layers(baseline)[0].run_id, "frame:right", "refused for the test")
+
+
+def test_no_count_of_players_bindings_or_sources_refuses_the_wall():
+    """129 Players, each with its Frame, are all planned: the Planner bounds no count of
+    Players, bindings or Sources. Mutation probe: re-add `max_players=128` with its bound."""
+    assert not {"max_cycle_seconds", "max_sources", "max_authored_refs", "max_players",
+                "max_bindings", "max_horizon_seconds"} & set(PlannerLimits.model_fields)
+    assert not hasattr(planner_module, "PlanningBudgetExceeded")
+    frames = [f"f{n:03}" for n in range(129)]
+    bindings = {f"player-{frame}": (binding(frame),) for frame in frames}
+    instance = runtime(contributions=tuple(
+        Contribution(target=f"frame:{frame}", kind="black") for frame in frames))
+    result = propose(instance, bindings=bindings, horizon=5)
+    assert all(result.for_player(player).layers for player in bindings)
 
 
 def test_invalid_input_and_prepared_variant_fail_safely():
@@ -399,15 +465,6 @@ def test_secured_future_program_preserves_bytes_while_fresh_plan_revises_root_or
     assert replacement.variant == lock.variant
     assert replacement.root_order > lock.root_order
     assert replacement.model_dump(exclude={"root_order"}) == lock.model_dump(exclude={"root_order"})
-
-
-def test_authored_reference_input_budget_is_explicit():
-    instance = runtime(contributions=(Contribution(target="frame:left", source_refs=("holiday:1",) * 3),))
-    with pytest.raises(PlanningBudgetExceeded, match="authored source reference"):
-        propose(instance, limits=PlannerLimits(max_sources=2))
-    authored = runtime(contributions=(Contribution(target="frame:left", asset_refs=("a", "b")),))
-    with pytest.raises(PlanningBudgetExceeded, match="authored asset reference"):
-        propose(authored, authored={"a": candidate("a")}, limits=PlannerLimits(max_authored_refs=1))
 
 
 def test_source_health_remains_observable_when_entire_projection_is_locked():
