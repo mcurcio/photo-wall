@@ -11,6 +11,7 @@ every Pi without waiting.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Protocol
 
 from central.kernel.transactions import Transaction
@@ -77,7 +78,18 @@ class RoomLightReports(Protocol):
 
     def record_refused(self, source: Source, address: str, reason: ReportRefusal) -> None:
         """Keep a report `source` could not record, with what it was about (`address`, the source's
-        own text, cut to ADDRESS_MAX) and why, in the one refusal log; the newest REFUSALS_KEPT stay."""
+        own text, cut to ADDRESS_MAX) and why, in the one refusal log; the newest REFUSALS_KEPT stay.
+        Of the refusals, only UNREADABLE also sets a doubt (DoubtReason.CANT_READ, policy.doubt_after)
+        on every reference at (`source`, `address`); a doubt set or changed raises the document's
+        change and wakes its writer at commit, as a new word does. A store failure is raised."""
+        ...
+
+    def record_link_closed(self, source: Source) -> Recorded:
+        """`source`'s connection to Central's hub closed (its adapter judged it is the connection its
+        latest birth named, never an older one): every reference `source` reports takes a doubt
+        (DoubtReason.LINK_CLOSED, policy.doubt_after), its last word standing. Each clears when its
+        reference states a report again (Galleria restates every state when it reconnects).
+        "recorded" when the document changed, else "unchanged". A store failure is raised."""
         ...
 
     def record_refused_within(self, tx: Transaction, source: Source, address: str, reason: ReportRefusal) -> None:
@@ -160,4 +172,17 @@ class RoomLightsDocuments(Protocol):
         ...
 
 
-__all__ = ["DrawnReports", "ReportSources", "RoomLightReports", "RoomLightSetup", "RoomLightsDocuments"]
+class HouseClockChanges(Protocol):
+    """Injected into Settings › House's store (central/infra/house_store.py PgHouse): a doubt's words
+    are dated on the house's clock, so a save that changes the zone or the 12- or 24-hour clock
+    changes the document too."""
+
+    def house_clock_changing_within(self, tx: Transaction, write: Callable[[], None]) -> Recorded:
+        """Under the house's lock in `tx`: run `write` (the Settings › House save); when the
+        document's words moved, raise its change and wake the WALL writer at commit. "recorded" when
+        they did."""
+        ...
+
+
+__all__ = ["DrawnReports", "HouseClockChanges", "ReportSources", "RoomLightReports", "RoomLightSetup",
+           "RoomLightsDocuments"]

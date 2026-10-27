@@ -1716,3 +1716,23 @@ def test_the_draw_grace_outlasts_a_commit_in_flight_and_a_planning_tick():
     and shows the old one again (issue #130)."""
     from player import executor, pacing, service
     assert pacing.OVERDUE + service.PLANNING_TICK_MS / 1000 < executor.DRAW_GRACE
+
+
+def test_the_drawn_grant_is_the_admitted_grant_of_the_last_presented_commit():
+    """What the Player's `impeded` report names (player/impediment.py): none before a commit and
+    while only a candidate's ground is committed; the grant once a commit is presented under it.
+    Mutation probe: keep the grant across a candidate's ground -> it reads the old grant."""
+    rig = Rig(admitted=False)
+    assert rig.renderer.drawn_grant(OUTPUT) is None
+    rig.present(fallback=True, timebase=None)
+    assert rig.renderer.drawn_grant(OUTPUT) is None              # a candidate's ground only
+    rig.screens.admitted = True
+    rig.settle(fallback=True, timebase=None)
+    assert rig.renderer.drawn_grant(OUTPUT) == str(GRANT)
+    rig.screens.admitted = False
+    rig.clock.tick()
+    rig.present(fallback=True, timebase=None)
+    rig.renderer.finish()
+    rig.clock.tick()
+    rig.present(fallback=True, timebase=None)
+    assert rig.renderer.drawn_grant(OUTPUT) is None

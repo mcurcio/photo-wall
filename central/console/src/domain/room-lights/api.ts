@@ -1,6 +1,7 @@
 import { callApi } from "../../apiWrite.js";
 import type {
-  ColourSensor, ColourSensorView, DrawnView, RefusedReportsView, RoomLight, RoomLightsView, RoomLightView, Sensor, SensorView,
+  CentralErrorsView, ColourSensor, ColourSensorView, DrawnView, FrameImpedimentView, RefusedReportsView, RoomLight,
+  RoomLightsView, RoomLightView, Sensor, SensorView,
 } from "../../generated/contract";
 import type { Answer } from "../answer";
 
@@ -62,4 +63,20 @@ export function readDrawn(): Promise<Answer<"drawn", DrawnView>> {
 /** The one refusal log: the newest reports each source could not record (GET …/house/refused-reports). */
 export function readRefusedReports(): Promise<Answer<"refused", RefusedReportsView>> {
   return callApi("refused", REFUSED, { method: "GET" }) as Promise<Answer<"refused", RefusedReportsView>>;
+}
+
+/* Central's errors (central/central_errors/: Needs attention's source rows and the Frame page's
+ * "Central's error"): the room lights' references Central is in doubt of, and what a Frame's Pi said. */
+const CENTRAL_ERRORS = "/v1/operator/central-errors";
+
+/** Every reference Central is in doubt of now, with its lights, the Frames naming them and what to do
+ * (GET …/central-errors). A store failure on Central is a failed read, never "nothing in doubt". */
+export function readCentralErrors(): Promise<Answer<"view", CentralErrorsView>> {
+  return callApi("view", CENTRAL_ERRORS, { method: "GET" }) as Promise<Answer<"view", CentralErrorsView>>;
+}
+
+/** What the Frame's Pi last said about Central's error on it (GET …/frames/{id}/central-error). */
+export function readFrameImpediment(frameId: string): Promise<Answer<"view", FrameImpedimentView>> {
+  return callApi("view", `/v1/operator/frames/${encodeURIComponent(frameId)}/central-error`, { method: "GET" }) as
+    Promise<Answer<"view", FrameImpedimentView>>;
 }

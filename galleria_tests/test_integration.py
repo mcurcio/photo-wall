@@ -213,11 +213,37 @@ async def test_galleria_s_birth_goes_with_every_publish_of_all_states(hass: Home
     """On start and with every publish of all states: its manifest's version and every kind it publishes."""
     manifest = (await async_get_integration(hass, DOMAIN)).version
     expected = {"component": "galleria", "version": str(manifest),
-                "kinds": ["light", "illuminance", "colour-temperature"]}
+                "kinds": ["light", "illuminance", "colour-temperature"], "connection": {"server": "NHUB", "client": 7}}
     assert door.births == [expected]
     door.state[contract.STATES_EPOCH_KEY] = wire(contract.STATES_EPOCH_KEY, {"epoch": "e" * 32})
     await read_all(hass, entry)
     assert door.births == [expected, expected]
+
+
+async def test_a_reconnect_puts_the_birth_of_the_new_connection_then_every_state(
+        hass: HomeAssistant, entry: MockConfigEntry, door: FakeDoor) -> None:
+    """Each reconnect is a new hub connection: Galleria names it in a new birth first, then restates
+    every state (Central marked Home Assistant's lights "link closed" when the old one closed; each
+    clears as its state is restated), in the same states epoch."""
+    hass.states.async_set("light.test", STATE_ON, {"brightness": 10, "friendly_name": "Test"})
+    await settle(hass)
+    door.published.clear()
+    door.births.clear()
+    door.connection = {"server": "NHUB", "client": 8}
+    await door.reconnected()
+    await settle(hass)
+    assert [birth["connection"] for birth in door.births] == [{"server": "NHUB", "client": 8}]
+    assert [entity for entity, _ in door.published] == ["light.test"]
+
+
+async def test_no_birth_goes_while_no_connection_is_open(hass: HomeAssistant, entry: MockConfigEntry,
+                                                         door: FakeDoor) -> None:
+    """A birth names its connection: while none is open, nothing goes and every state goes later."""
+    door.births.clear()
+    door.connection = None
+    door.state[contract.STATES_EPOCH_KEY] = wire(contract.STATES_EPOCH_KEY, {"epoch": "e" * 32})
+    await read_all(hass, entry)
+    assert door.births == [] and entry.runtime_data.publisher.published_epoch is None
 
 
 async def test_galleria_s_own_entities_are_never_published(hass: HomeAssistant, entry: MockConfigEntry,

@@ -14,8 +14,10 @@ import logging
 import re
 from typing import Any, Final
 
+from central.central_errors.ports import Reference
+from central.infra.node_link_latest import latest_values_in
 from central.infra.transactions import PgTransaction
-from central.room_light.model import ReportRefusal, SensorRef
+from central.room_light.model import DoubtReason, ReportRefusal, SensorRef
 from central.room_light.ports import RoomLightReports
 from contracts.models import IDENTIFIER_PATTERN
 from contracts.room_light import (
@@ -29,8 +31,9 @@ from nodeapi.pull import Read
 log = logging.getLogger(__name__)
 
 PI_SOURCE: Final = "pi"                         # a Pi's sensor reference: (PI_SOURCE, its player id)
-HOST_STATE_STREAM: Final = state_stream("host")
-_SUBJECT: Final = state_prefix("host") + LIGHT_SENSOR_KEY
+HOST_LINE: Final = "host"
+HOST_STATE_STREAM: Final = state_stream(HOST_LINE)
+_SUBJECT: Final = state_prefix(HOST_LINE) + LIGHT_SENSOR_KEY
 _PLAYER: Final = re.compile(IDENTIFIER_PATTERN)
 
 
@@ -77,22 +80,29 @@ def missed_readings_in(conn: Any) -> tuple[tuple[str, Reading], ...]:
     """(player id, reading) for each enrolled Pi whose newest recorded light-sensor value is a reading
     its word (reading_words, PI_SOURCE) was not taken from: heard before that record, or never. A
     value that is not a reading, or a removed key, takes nothing (the judge logged the refusal)."""
-    rows = conn.execute(
-        "SELECT latest.player_id, latest.data, latest.headers FROM ("
-        " SELECT DISTINCT ON (r.device_id) p.id AS player_id, r.data, r.headers, r.recorded_at"
-        " FROM node_link_records r JOIN players p ON p.device_id = r.device_id AND p.retired_at IS NULL"
-        " WHERE r.stream=%s AND r.subject=%s ORDER BY r.device_id, r.recorded_at DESC, r.seq DESC) latest"
-        " LEFT JOIN reading_words w ON w.source=%s AND w.address=latest.player_id"
-        " WHERE w.heard_at IS NULL OR EXTRACT(EPOCH FROM w.heard_at) < latest.recorded_at",
-        (HOST_STATE_STREAM, _SUBJECT, PI_SOURCE)).fetchall()
+    heard = {row["address"]: float(row["heard"]) for row in conn.execute(
+        "SELECT address, EXTRACT(EPOCH FROM heard_at) AS heard FROM reading_words WHERE source=%s",
+        (PI_SOURCE,)).fetchall()}
     missed: list[tuple[str, Reading]] = []
-    for row in rows:
-        if (row["headers"] or {}).get(KV_OPERATION_HEADER):
+    for latest in latest_values_in(conn, HOST_LINE, LIGHT_SENSOR_KEY):
+        if heard.get(latest.player_id, float("-inf")) >= latest.recorded_at or latest.removed:
             continue
         try:
-            missed.append((row["player_id"], decode_light_sensor(bytes(row["data"])).reading))
+            missed.append((latest.player_id, decode_light_sensor(latest.data).reading))
         except ValueError:
             continue
     return tuple(missed)
 
-__all__ = ["HOST_STATE_STREAM", "PI_SOURCE", "LightSensorJudge", "is_player", "missed_readings_in"]
+
+class PiMeterAdvice:
+    """SourceAdvice (central/central_errors/ports.py) for PI_SOURCE references (the address is the
+    Pi's player id): its reading can't be read -> install the current release on it; any other doubt
+    (it can't tell; a Pi's meter has no link of its own to close) -> check its light meter."""
+
+    def what_to_do(self, reference: Reference, reason: DoubtReason) -> str:
+        if reason == DoubtReason.CANT_READ:
+            return f"Install the current release on Player {reference.address}"
+        return f"Check the light meter on Player {reference.address}"
+
+
+__all__ = ["HOST_STATE_STREAM", "PI_SOURCE", "LightSensorJudge", "PiMeterAdvice", "is_player", "missed_readings_in"]

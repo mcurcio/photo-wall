@@ -62,6 +62,7 @@ from contracts.node_link import (
     central_user,
     node_user,
 )
+from nodeapi.hub import DOOR_CLOSES_SUBJECT
 
 FLEET_SYSTEM_USER: Final = "fleet"
 SYSTEM_ACCOUNT: Final = "SYS"
@@ -91,7 +92,7 @@ def hub_configuration(serials: Iterable[str], listeners: HubListeners) -> str:
     node_accounts = {account_id(serial): serial for serial in serials}
     accounts: dict[str, object] = {
         WALL_ACCOUNT: _wall_account(),
-        SYSTEM_ACCOUNT: {"users": [_local(FLEET_SYSTEM_USER)]},
+        SYSTEM_ACCOUNT: {"users": [_local(FLEET_SYSTEM_USER)], "exports": [{"stream": DOOR_CLOSES_SUBJECT}]},
         CENTRAL_ACCOUNT: _central_account(),
         HOME_ASSISTANT_ACCOUNT: _home_assistant_account(),
     }
@@ -179,13 +180,16 @@ def _node_account(serial: str) -> dict[str, object]:
 
 def _central_account() -> dict[str, object]:
     """Central on its hub: its state bucket, its methods and Home Assistant's states bucket (each
-    stream has its own byte cap, as WALL's do), Central's own client on the plain port, and the
+    stream has its own byte cap, as WALL's do), Central's own client on the plain port, the
     services Home Assistant's door imports: publish Home Assistant's states, read Central's state one
-    key at a time, call Central's methods."""
+    key at a time, call Central's methods; and the hub's disconnect events of the door's account,
+    imported from the system account (the system account exports only those), so Central hears its
+    link to Home Assistant close."""
     return {
         "jetstream": {"max_bytes_required": True},
         "users": [_local(CENTRAL_USER)],
         "exports": [{"service": subject} for subject in HOME_ASSISTANT_IMPORTS],
+        "imports": [{"stream": {"account": SYSTEM_ACCOUNT, "subject": DOOR_CLOSES_SUBJECT}}],
     }
 
 

@@ -34,7 +34,7 @@ def _contract() -> ModuleType:
 contract = _contract()
 
 _TAG = "v0.35.0"
-_ENTRY = r.ReportedEntry(colour=r.KelvinColour(kelvin=2712.5), state=r.Dimmer(on=True, brightness=0.5))
+_ENTRY = r.ReportedEntry(colour=r.KelvinColour(kelvin=2712.5), state=r.Dimmer(on=True, brightness=0.5), doubt=None)
 
 # One sample per wire value Galleria reads, each under the repository's own encoder.
 CENTRAL_STATES: dict[str, Any] = {
@@ -49,9 +49,9 @@ CENTRAL_STATES: dict[str, Any] = {
     c.ROOM_LIGHTS_KEY: c.RoomLightsListing(change=4, lights=(
         c.RoomLightListing(id="overheads", name="Overheads", entry=_ENTRY),
         c.RoomLightListing(id="lamp", name="Lamp", entry=r.ReportedEntry(
-            colour=r.RgbColour(rgb=(1.0, 0.6, 0.2)), state=r.NotReported())),
+            colour=r.RgbColour(rgb=(1.0, 0.6, 0.2)), state=r.NotReported(), doubt=None)),
         c.RoomLightListing(id="daylight", name="Daylight", entry=r.MeasuredEntry(
-            colour=r.KelvinColour(kelvin=34000.0), state=r.Measured(lux=812.5))),
+            colour=r.KelvinColour(kelvin=34000.0), state=r.Measured(lux=812.5), doubt=None)),
         c.RoomLightListing(id="sconce", name="Sconce", entry=r.FixedEntry(colour=r.KelvinColour(kelvin=3000))))),
     c.RELEASES_KEY: c.Releases(releases=(
         c.ReleaseListing(version="v0.36.0-rc.1", stable=False, readiness="ready"),

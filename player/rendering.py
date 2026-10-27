@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
+from uuid import uuid4
 
 from contracts.models import AppliedCalibration, Calibration, Layer, OutputBinding
 from contracts.room_light import RoomLightsDocument
@@ -95,6 +96,11 @@ class Renderer(Protocol):
 
     def release(self, assignment_id: str) -> None: ...
 
+    # The shell grant (its id's text) `output_id`'s last presented commit was drawn under; None while
+    # none was (no screen, a candidate's ground only): what the Player's `impeded` report names
+    # (player/impediment.py), so Display Host counts it only while that grant is admitted.
+    def drawn_grant(self, output_id: str) -> str | None: ...
+
 
 class UnavailableRenderer:
     """No picture can be made (player/renderer_root.py): registration remains possible without
@@ -119,6 +125,9 @@ class UnavailableRenderer:
 
     def release(self, assignment_id: str) -> None:
         pass
+
+    def drawn_grant(self, output_id: str) -> str | None:
+        return None
 
 
 class RecordingRenderer:
@@ -146,6 +155,8 @@ class RecordingRenderer:
         self.resident: dict[str, LocalLayer] = {}
         self.player_id: str | None = None
         self.room_lights: list[RoomLightsDocument] = []     # every document drawn with, in order
+        # Each Output's grant, given at its first successful present (a test may set another).
+        self.grants: dict[str, str] = {}
 
     def set_player(self, player_id: str | None) -> None:
         self.player_id = player_id
@@ -182,7 +193,11 @@ class RecordingRenderer:
             return PresentationResult("pending")
         self.presentations.append(composition)
         self.outputs[composition.binding.output_id] = composition
+        self.grants.setdefault(composition.binding.output_id, str(uuid4()))
         return PresentationResult("presented")
 
     def release(self, assignment_id: str) -> None:
         self.resident.pop(assignment_id, None)
+
+    def drawn_grant(self, output_id: str) -> str | None:
+        return self.grants.get(output_id)

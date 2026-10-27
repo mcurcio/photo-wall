@@ -4,6 +4,7 @@ colour sensor names, and the states Central refused (the one refusal log, this s
 from __future__ import annotations
 
 from central.db import Database
+from central.infra.home_assistant.advice import galleria_advice
 from central.infra.home_assistant.references import SOURCE
 from central.infra.home_assistant.views import (
     GalleriaView,
@@ -43,13 +44,14 @@ class PgHomeAssistantSettings:
 
 
 def galleria_view(birth: tuple[GalleriaBirth, float] | None, central_version: str) -> GalleriaView:
-    """Galleria's line: its last birth (and when heard) beside `central_version`; `update` while it
-    cannot send colour sensors (no birth, or "colour-temperature" not among its kinds). Pure."""
+    """Galleria's line: its last birth (and when heard) beside `central_version`; `update` while the
+    one rule of which side to update (advice.py `galleria_advice`) says Galleria. Pure."""
+    update = galleria_advice(None if birth is None else birth[0], central_version) == "update-galleria"
     if birth is None:
-        return GalleriaView(version=None, kinds=(), heard_at=None, central_version=central_version, update=True)
+        return GalleriaView(version=None, kinds=(), heard_at=None, central_version=central_version, update=update)
     stated, heard_at = birth
     return GalleriaView(version=stated.version, kinds=stated.kinds, heard_at=heard_at,
-                        central_version=central_version, update="colour-temperature" not in stated.kinds)
+                        central_version=central_version, update=update)
 
 
 def _entity(each: HeardEntity) -> HeardEntityView:

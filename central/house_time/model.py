@@ -15,7 +15,9 @@ Invariants each model's validator enforces:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Annotated, Final, Literal
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -110,6 +112,22 @@ class HouseSettings(HouseSettingsDraft):
 
 
 @dataclass(frozen=True, slots=True)
+class HouseClock:
+    """How Central words an instant for the house: its zone (#2) and its 12- or 24-hour clock (#5),
+    as the console's timeWords.js `clockWords` does."""
+    zone: ZoneInfo
+    clock: ClockFormat
+
+    def instant_words(self, at: float) -> str:
+        """`at` (epoch seconds) in the house's zone on its clock: "29 Oct 18:05" or "29 Oct 6:05 pm"."""
+        moment = datetime.fromtimestamp(at, self.zone)
+        if self.clock == "24h":
+            return f"{moment.day} {moment:%b %H:%M}"
+        hour = moment.hour % 12 or 12
+        return f"{moment.day} {moment:%b} {hour}:{moment:%M} {'am' if moment.hour < 12 else 'pm'}"
+
+
+@dataclass(frozen=True, slots=True)
 class Window:
     """One occurrence of a When: [start, end) in UTC seconds, start < end. Its identity is its
     `start` (iCalendar's RECURRENCE-ID): Runtime names a Program window
@@ -119,7 +137,7 @@ class Window:
 
 
 __all__ = [
-    "WEEKDAYS", "ClockAt", "ClockFormat", "ClockTime", "HouseModel", "HouseSettings", "HouseSettingsDraft",
+    "WEEKDAYS", "ClockAt", "ClockFormat", "ClockTime", "HouseClock", "HouseModel", "HouseSettings", "HouseSettingsDraft",
     "HouseTime", "IanaZone", "canonical_days", "LocalDateTime", "OffsetMinutes", "Place", "SunAt", "TimeOfDay", "Units",
     "Weekday", "When", "WhenProblem", "Window",
 ]

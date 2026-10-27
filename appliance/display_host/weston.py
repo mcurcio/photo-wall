@@ -22,7 +22,14 @@ from uuid import UUID, uuid4
 
 from contracts.display_turn import DisplayTurn, wayland_transform
 from contracts.node_frame import parse_picture_change
-from contracts.node_output import MAX_SCREEN_SIDE, FrameRegion, Power, encode_frame_region
+from contracts.node_output import (
+    MAX_SCREEN_SIDE,
+    CentralCard,
+    FrameRegion,
+    Power,
+    encode_central_card,
+    encode_frame_region,
+)
 from contracts.node_protocol import NodeProcessIdentity, OutputKey, SurfaceFact
 
 from .domain import DisplayHost, Surface
@@ -348,6 +355,22 @@ class WestonBackend:
                     return False
                 key = self.host.state(output_id).key
                 self._request("region", key, timeout=timeout, region=text)
+                return True
+        except (OSError, ValueError, KeyError, TimeoutError):
+            return False
+
+    def central_card(self, output_id: str, card: CentralCard | None, *, timeout: float = 2) -> bool:
+        """Hand one Output's Central card to the shell (control op `central_card`: its canonical
+        JSON, contracts/node_output.py `encode_central_card`, or "" for none), which keeps it and
+        forwards it verbatim to the overlay client (pw_diagnostic_manager_v1 v6); whether the shell
+        took it. False for an Output the shell does not have (yet), a refusal or a timeout."""
+        text = "" if card is None else encode_central_card(card).decode()
+        try:
+            with self._channel_lock:
+                if self.host is None:
+                    return False
+                key = self.host.state(output_id).key
+                self._request("central_card", key, timeout=timeout, card=text)
                 return True
         except (OSError, ValueError, KeyError, TimeoutError):
             return False

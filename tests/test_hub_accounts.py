@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 
 from central.fleet.leaf_bridge import DOOR_ROUTE, LEAF_ROUTE, hub_door_url
-from central.fleet.node_bus_accounts import hub_configuration
+from central.fleet.node_bus_accounts import SYSTEM_ACCOUNT, hub_configuration
 from central.fleet.node_bus_hub import HUB_LISTENERS
 from contracts.central_api import (
     CENTRAL_ACCOUNT,
@@ -23,6 +23,7 @@ from contracts.central_api import (
 )
 from contracts.node_link import DOOR_CONNECTIONS, LOCAL_CONNECTIONS, WALL_STREAM_BYTES
 from nodeapi.buffers import KeyTable, central_state_bucket, home_assistant_states_bucket
+from nodeapi.hub import DOOR_CLOSES_SUBJECT
 
 
 def test_centrals_account_holds_its_client_and_exports_only_the_doors_services():
@@ -31,7 +32,12 @@ def test_centrals_account_holds_its_client_and_exports_only_the_doors_services()
         "jetstream": {"max_bytes_required": True},
         "users": [
             {"user": CENTRAL_USER, "password": CENTRAL_USER, "allowed_connection_types": list(LOCAL_CONNECTIONS)}],
-        "exports": [{"service": subject} for subject in HOME_ASSISTANT_IMPORTS]}
+        "exports": [{"service": subject} for subject in HOME_ASSISTANT_IMPORTS],
+        # the hub's disconnect events of the door's account only, from the system account, so Central
+        # hears its link to Home Assistant close
+        "imports": [{"stream": {"account": SYSTEM_ACCOUNT,
+                                "subject": f"$SYS.ACCOUNT.{HOME_ASSISTANT_ACCOUNT}.DISCONNECT"}}]}
+    assert DOOR_CLOSES_SUBJECT == f"$SYS.ACCOUNT.{HOME_ASSISTANT_ACCOUNT}.DISCONNECT"
     # The door's user has an account of its own that imports exactly those services, so every reply
     # to it lands in its own account (no confused deputy into CENTRAL_ACCOUNT).
     assert accounts[HOME_ASSISTANT_ACCOUNT] == {

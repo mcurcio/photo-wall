@@ -55,8 +55,9 @@ HeardEntityView = Annotated[HeardLightView | HeardSensorView | HeardColourSensor
 class GalleriaView(Model):
     """Galleria's version beside Central's: `version` and `kinds` as its last birth stated them (None
     and (): no birth heard, a Galleria older than colour sensors), when Central heard it, Central's
-    own version, and whether the page asks to update Galleria (`update`: it cannot send colour
-    sensors yet; the rule is central/infra/home_assistant/settings.py `galleria_view`'s)."""
+    own version, and whether the page asks to update Galleria (`update`: Galleria is older than
+    Central, or stated no birth Central reads; the rule is central/infra/home_assistant/advice.py
+    `galleria_advice`)."""
     version: str | None
     kinds: tuple[EntityKind, ...]
     heard_at: Instant | None

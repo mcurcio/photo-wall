@@ -24,6 +24,7 @@ from central.fleet.node_bus_accounts import HubListeners, hub_configuration
 from custom_components.galleria import contract
 from custom_components.galleria.door import CentralDoor, DoorUnavailable
 from custom_components.galleria.pi import PiReading, read_pi
+from nodeapi.hub import DOOR_CLOSES_SUBJECT
 
 SERVER = os.environ.get("PHOTO_WALL_NATS_SERVER")
 pytestmark = pytest.mark.skipif(not SERVER, reason="PHOTO_WALL_NATS_SERVER names no nats-server binary")
@@ -211,8 +212,10 @@ async def test_central_s_door_reads_publishes_and_installs(hub: Server) -> None:
             await door.publish("light.test", light)
             entry = await states.get("light.test")
             assert contract.decode_home_assistant_state(entry.value) == light
+            connection = door.connection
+            assert connection is not None and connection["client"] >= 1
             galleria = {"component": "galleria", "version": "1.2.3",
-                        "kinds": ["light", "illuminance", "colour-temperature"]}
+                        "kinds": ["light", "illuminance", "colour-temperature"], "connection": connection}
             await door.publish_birth(galleria)
             entry = await states.get(contract.GALLERIA_BIRTH_KEY)
             assert entry.value == contract.encode_galleria_birth(galleria)
@@ -256,4 +259,46 @@ async def test_central_s_door_refuses_home_assistant_writing_central_s_state(hub
             contract.CENTRAL_STATE_STREAM, target)).data == birth
     finally:
         await client.close()
+        await central.close()
+
+
+async def test_a_closed_door_connection_is_heard_by_central_and_galleria_reconnects_as_a_new_one(hub: Server) -> None:
+    """The hub announces the close of a door connection to Central's own client (the hub
+    configuration imports the door account's disconnect events), naming the connection Galleria's
+    birth names; nats-py reconnects as a new connection and Galleria hears it (`on_reconnected`)."""
+    central = await _client(f"nats://127.0.0.1:{hub.client_port}", "central-api")
+    fleet = await _client(f"nats://127.0.0.1:{hub.client_port}", "fleet")
+    closes: list[dict] = []
+    reconnected = asyncio.Event()
+
+    async def heard(message: nats.aio.msg.Msg) -> None:
+        closes.append(json.loads(message.data))
+
+    async def again() -> None:
+        reconnected.set()
+
+    await central.subscribe(DOOR_CLOSES_SUBJECT, cb=heard)
+    await central.flush()
+    try:
+        door = await CentralDoor.connect(f"http://127.0.0.1:{hub.door_port}")
+        door.on_reconnected(again)
+        try:
+            before = door.connection
+            assert before is not None
+            kicked = await fleet.request(f"$SYS.REQ.SERVER.{before['server']}.KICK",
+                                         json.dumps({"cid": before["client"]}).encode(), timeout=2)
+            assert "error" not in json.loads(kicked.data)
+            await asyncio.wait_for(reconnected.wait(), 10)
+            after = door.connection
+            assert after is not None and after != before
+            for _ in range(50):
+                if closes:
+                    break
+                await asyncio.sleep(0.05)
+            assert [(close["server"]["id"], close["client"]["id"]) for close in closes] == [
+                (before["server"], before["client"])]
+        finally:
+            await door.close()
+    finally:
+        await fleet.close()
         await central.close()

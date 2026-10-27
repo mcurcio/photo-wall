@@ -21,8 +21,10 @@ from contracts.lut import LutRef
 from contracts.node_calibration import MAX_LIGHTING_BYTES
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT, DisplayLight
 from contracts.room_light import (
+    CENTRAL_LINE_MAX,
     ROOM_LIGHTS_BYTES,
     ROOM_LIGHTS_MAX,
+    CentralWords,
     Dimmer,
     FixedEntry,
     KelvinColour,
@@ -44,11 +46,11 @@ from contracts.room_light import (
 
 DOCUMENT = RoomLightsDocument(change=7, lights={
     "room": FixedEntry(colour=KelvinColour(kelvin=6500)),
-    "bookshelf-spot": ReportedEntry(colour=RgbColour(rgb=(1.0, 0.5, 0.25)), state=Dimmer(on=True, brightness=0.5)),
-    "daylight": MeasuredEntry(colour=KelvinColour(kelvin=34567.5), state=Measured(lux=320.5)),
-    "overheads": ReportedEntry(colour=KelvinColour(kelvin=1000), state=Dimmer(on=True, brightness=0.25)),
-    "hall": ReportedEntry(colour=KelvinColour(kelvin=3000), state=Dimmer(on=False, brightness=0.0)),
-    "lamp": ReportedEntry(colour=KelvinColour(kelvin=2700), state=NotReported()),
+    "bookshelf-spot": ReportedEntry(colour=RgbColour(rgb=(1.0, 0.5, 0.25)), state=Dimmer(on=True, brightness=0.5), doubt=None),
+    "daylight": MeasuredEntry(colour=KelvinColour(kelvin=34567.5), state=Measured(lux=320.5), doubt=None),
+    "overheads": ReportedEntry(colour=KelvinColour(kelvin=1000), state=Dimmer(on=True, brightness=0.25), doubt=None),
+    "hall": ReportedEntry(colour=KelvinColour(kelvin=3000), state=Dimmer(on=False, brightness=0.0), doubt=None),
+    "lamp": ReportedEntry(colour=KelvinColour(kelvin=2700), state=NotReported(), doubt=None),
 })
 
 
@@ -58,15 +60,46 @@ def test_the_room_lights_document_round_trips_every_state_and_colour():
     assert json.loads(raw)["lights"]["bookshelf-spot"] == {
         "colour": {"kind": "rgb", "rgb": [1.0, 0.5, 0.25]},
         "kind": "reported",
-        "state": {"brightness": 0.5, "kind": "dimmer", "on": True}}
+        "state": {"brightness": 0.5, "kind": "dimmer", "on": True}, "doubt": None}
     assert room_lights_digest(decode_room_lights(raw)) == room_lights_digest(DOCUMENT)
 
 
 def test_the_largest_document_fits_its_cap():
-    """Mutation probe: ROOM_LIGHTS_BYTES 8192 -> the largest valid document is refused."""
-    entry = ReportedEntry(colour=RgbColour(rgb=(1 / 3, 1 / 3, 1 / 3)), state=Dimmer(on=True, brightness=1 / 3))
+    """Every light in doubt, each line at its longest in four-byte characters. Mutation probe:
+    ROOM_LIGHTS_BYTES 32768 -> the largest valid document is refused."""
+    words = CentralWords(line1="\U0001F600" * CENTRAL_LINE_MAX, line2="\U0001F600" * CENTRAL_LINE_MAX)
+    entry = ReportedEntry(colour=RgbColour(rgb=(1 / 3, 1 / 3, 1 / 3)), state=Dimmer(on=True, brightness=1 / 3), doubt=words)
     largest = RoomLightsDocument(change=2**63 - 1, lights={f"{'x' * 29}{i:03d}": entry for i in range(ROOM_LIGHTS_MAX)})
     assert len(encode_room_lights(largest)) <= ROOM_LIGHTS_BYTES
+
+
+def test_a_doubt_travels_as_centrals_words_on_reported_and_measured_entries():
+    words = CentralWords(line1="Photo Wall can't read Family Room Lights · since 29 Oct 18:05",
+                         line2="Its last word: off (26 Oct 15:35) · see Needs attention in Photo Wall")
+    document = RoomLightsDocument(change=8, lights={
+        "family-room": ReportedEntry(colour=KelvinColour(kelvin=2700), state=Dimmer(on=False, brightness=0.0), doubt=words),
+        "daylight": MeasuredEntry(colour=KelvinColour(kelvin=5500), state=Measured(lux=0.0), doubt=words)})
+    raw = encode_room_lights(document)
+    assert decode_room_lights(raw) == document
+    assert json.loads(raw)["lights"]["family-room"]["doubt"] == {"line1": words.line1, "line2": words.line2}
+    assert room_lights_digest(document) != room_lights_digest(DOCUMENT)
+
+
+@pytest.mark.parametrize("change", [
+    lambda value: value["lights"]["hall"].pop("doubt"),
+    lambda value: value["lights"]["daylight"].pop("doubt"),
+    lambda value: value["lights"]["hall"].update(doubt={"line1": "x" * (CENTRAL_LINE_MAX + 1), "line2": "y"}),
+    lambda value: value["lights"]["hall"].update(doubt={"line1": "", "line2": "y"}),
+    lambda value: value["lights"]["hall"].update(doubt={"line1": "two\nlines", "line2": "y"}),
+    lambda value: value["lights"]["hall"].update(doubt={"line1": "x"}),
+    lambda value: value["lights"]["room"].update(doubt=None),
+], ids=["reported-without-doubt", "measured-without-doubt", "line-too-long", "line-empty", "line-not-printable",
+        "one-line", "fixed-with-doubt"])
+def test_a_doubt_is_strict(change):
+    value = json.loads(encode_room_lights(DOCUMENT))
+    change(value)
+    with pytest.raises(ValueError, match="^room_lights_document$"):
+        decode_room_lights(json.dumps(value).encode())
 
 
 @pytest.mark.parametrize("change", [

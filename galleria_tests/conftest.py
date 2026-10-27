@@ -56,9 +56,11 @@ def central_state(epoch: str = EPOCH) -> dict[str, bytes]:
         contract.ROOM_LIGHTS_KEY: wire(contract.ROOM_LIGHTS_KEY, {"change": 2, "lights": [
             {"id": "overheads", "name": "Overheads", "entry": {
                 "kind": "reported", "colour": {"kind": "kelvin", "kelvin": 2700},
-                "state": {"kind": "dimmer", "on": True, "brightness": 0.5}}},
+                "state": {"kind": "dimmer", "on": True, "brightness": 0.5}, "doubt": None}},
             {"id": "lamp", "name": "Lamp", "entry": {
-                "kind": "reported", "colour": {"kind": "kelvin", "kelvin": 3000}, "state": {"kind": "not-reported"}}}]}),
+                "kind": "reported", "colour": {"kind": "kelvin", "kelvin": 3000}, "state": {"kind": "not-reported"},
+                "doubt": {"line1": "Photo Wall can't read Lamp · since 27 Oct 18:05",
+                          "line2": "Its last word: none yet · see Needs attention in Photo Wall"}}}]}),
         contract.RELEASES_KEY: wire(contract.RELEASES_KEY, {"releases": [
             {"version": "v0.36.0-rc.1", "stable": False, "readiness": "ready"},
             {"version": "v0.36.0", "stable": True, "readiness": "downloading"},
@@ -83,6 +85,11 @@ class FakeDoor:
         self.connected = True
         self.down = False
         self.births_refused = 0   # how many births to come the hub does not take
+        self.connection: dict[str, Any] | None = {"server": "NHUB", "client": 7}
+        self.reconnected: Any = None   # what the publisher hears a reconnect with
+
+    def on_reconnected(self, heard: Any) -> None:
+        self.reconnected = heard
 
     async def read(self, key: str) -> bytes | None:
         if self.down:

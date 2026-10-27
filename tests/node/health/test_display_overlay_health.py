@@ -470,7 +470,8 @@ def test_the_stale_page_is_drawn_by_the_loop_after_v(layer):
 
 
 def test_the_production_client_binds_the_manager_v5():
-    assert client.MANAGER_VERSION == 5   # v3 the health layer; v4 the brightness line (1c); v5 the Frame region (#124)
+    assert client.MANAGER_VERSION == 6   # v3 the health layer; v4 the brightness line (1c); v5 the Frame region (#124);
+    # v6 Central's card
 
 
 def test_the_shell_serves_the_version_and_region_size_the_contract_names():
@@ -591,3 +592,131 @@ def test_a_failed_send_closes_the_link():
     assert not link.send(PresentedReport("Virtual-1", 1))
     assert closes == [True]
     assert not link.send(PresentedReport("Virtual-1", 1))      # closed: nothing to send on
+
+
+# -- Central's card (manager v6: the Frame shows Central's error when it blacks the Frame) -------
+
+CENTRAL_WORDS = ("Photo Wall can't read Family Room · since 26 Oct 15:35",
+                 "Drawn with its last word: off · see Needs attention")
+
+
+def central_text(output="Virtual-1", lines=CENTRAL_WORDS):
+    from contracts.node_output import CentralCard, encode_central_card
+    return encode_central_card(CentralCard(output, *lines)).decode()
+
+
+def central_page(lines=CENTRAL_WORDS, width=640, height=480):
+    return render.render_central(width, height, lines, area=OutputArea("no_region"), measure=fake_text_width)
+
+
+def test_centrals_card_shows_when_no_health_card_does_and_the_health_card_always_wins(layer):
+    """R4: the Pi's card wins at once over Central's, and Central's returns when the Pi's ends; the
+    tint-off page that brings it back is reported presented by its commit's presentation.
+
+    Mutation probe: draw Central's card before checking the page's tint -> the second step paints
+    Central's card, not the health page."""
+    hook, overlay, wayland, link, now, painted, configure = layer
+    configure(wayland.manager, "Virtual-1", 640, 480, 1, "", 0)
+    wayland.manager.dispatcher["central_card"](wayland.manager, "Virtual-1", central_text())
+    assert wayland.health() == tinted() and painted[-1] == central_page()    # no page yet: Central's
+    release(wayland)
+    hook.instruction(instruction(7), 1001)                                    # the Pi's card
+    assert wayland.health()[-3:] == tinted()
+    assert painted[-1] == render.render_health(640, 480, HealthPage(7, True, LINES),
+                                               area=OutputArea("no_region"), measure=fake_text_width)
+    release(wayland)
+    wayland.manager.dispatcher["central_card"](wayland.manager, "Virtual-1", central_text(
+        lines=("A newer word from Central", "line two")))
+    assert painted[-1][2].text == LINES[0]                                    # the Pi's card stays
+    hook.instruction(instruction(8, tint=False), 1002)                        # the Pi's card ends
+    assert wayland.health()[-3:] == tinted()                                  # Central's, never unmapped
+    assert painted[-1] == central_page(("A newer word from Central", "line two"))
+    wayland.feedbacks[-1].dispatcher["presented"](wayland.feedbacks[-1], 0, 0, 0, 0, 0, 0, 0)
+    assert link.sent == [PresentedReport("Virtual-1", 8)]
+    assert wayland.solids == []                                               # never the amber
+
+
+def test_centrals_card_gone_unmaps_the_layer_and_an_unchanged_card_is_not_drawn_again(layer):
+    hook, overlay, wayland, link, now, painted, configure = layer
+    configure(wayland.manager, "Virtual-1", 640, 480, 1, "", 0)
+    hook.instruction(instruction(4, tint=False), 1001)
+    assert wayland.health() == cleared()
+    wayland.manager.dispatcher["central_card"](wayland.manager, "Virtual-1", central_text())
+    assert wayland.health()[-3:] == tinted()
+    drawn = len(painted)
+    wayland.manager.dispatcher["central_card"](wayland.manager, "Virtual-1", central_text())
+    hook.service(1002)
+    assert len(painted) == drawn                                              # unchanged: not redrawn
+    wayland.manager.dispatcher["central_card"](wayland.manager, "Virtual-1", "")
+    assert wayland.health()[-3:] == cleared()
+    assert len(painted) == drawn
+
+
+def test_a_resized_output_draws_centrals_card_again(layer):
+    hook, overlay, wayland, link, now, painted, configure = layer
+    configure(wayland.manager, "Virtual-1", 640, 480, 1, "", 0)
+    wayland.manager.dispatcher["central_card"](wayland.manager, "Virtual-1", central_text())
+    release(wayland)
+    configure(wayland.manager, "Virtual-1", 800, 600, 2, "", 0)
+    assert wayland.health()[-3:] == tinted(800, 600) and painted[-1] == central_page(width=800, height=600)
+
+
+@pytest.mark.parametrize("text", ['{"output_id":"Virtual-1"}', "not json", central_text(output="HDMI-A-2")])
+def test_a_malformed_card_or_one_for_another_output_reads_as_none(layer, text, caplog):
+    hook, overlay, wayland, link, now, painted, configure = layer
+    configure(wayland.manager, "Virtual-1", 640, 480, 1, "", 0)
+    wayland.manager.dispatcher["central_card"](wayland.manager, "Virtual-1", central_text())
+    wayland.manager.dispatcher["central_card"](wayland.manager, "Virtual-1", text)
+    assert overlay.outputs["Virtual-1"].central is None
+    assert wayland.health()[-3:] == cleared()
+    assert "malformed Central card for Virtual-1" in caplog.text
+
+
+def test_centrals_card_that_cannot_be_drawn_unmaps_and_never_shows_the_amber(layer):
+    """The amber is the Pi's own fallback (its client alive, its card undrawable); Central's error is
+    not the Pi's, so a failed paint leaves the Frame's picture and shows no tint."""
+    hook, overlay, wayland, link, now, painted, configure = layer
+    configure(wayland.manager, "Virtual-1", 640, 480, 1, "", 0)
+
+    def broken(ops, surface):
+        raise RuntimeError("cairo error")
+    hook.painter = broken
+    wayland.manager.dispatcher["central_card"](wayland.manager, "Virtual-1", central_text())
+    assert wayland.health() == cleared() and wayland.solids == []
+    hook.service(1001)
+    assert wayland.health() == cleared()                                      # not retried every pass
+
+
+def test_centrals_card_has_its_own_look_inside_the_explain_area_with_no_tint():
+    """Central's card: labelled "Central", Central's words verbatim, inside the Frame's area, the
+    rest of the layer transparent (no darkening, no black outside, never the Pi card's colours)."""
+    from appliance.display_host.overlay.area import FrameArea
+    from contracts.node_output import OutputRect
+    area = FrameArea(OutputRect(100, 90, 480, 300))
+    ops = render.render_central(640, 480, CENTRAL_WORDS, area=area, measure=fake_text_width)
+    assert ops[0] == render.Paint((0.0, 0.0, 0.0, 0.0), source=True)
+    rects = [op for op in ops if isinstance(op, render.Rect)]
+    assert [rect.rgba for rect in rects] == [render.CENTRAL_CARD_RGBA]
+    assert render.CENTRAL_CARD_RGBA not in (render.CARD_RGBA, render.HEALTH_TINT_RGBA, render.OUTSIDE_RGBA)
+    (card,) = rects
+    assert 100 <= card.x and card.x + card.width <= 580 and 90 <= card.y and card.y + card.height <= 390
+    texts = [op for op in ops if isinstance(op, render.Text)]
+    assert [text.text for text in texts] == ["Central", *CENTRAL_WORDS]
+    for text in texts:
+        assert card.x <= text.x and text.x + fake_text_width(text.text, text.size, "sans") <= card.x + card.width
+        assert card.y <= text.y <= card.y + card.height
+
+
+def test_the_shell_keeps_centrals_card_within_the_contract_and_drops_it_with_the_grant():
+    """The shell's copy of the card's largest size equals the contract's, and its invalidation (a
+    Player crash, hang, withdrawal or mode change) drops the stored card before it tells the client:
+    an ended run's card never stays up there (R4). Mutation probe: remove the clear in `invalidate`
+    -> RED."""
+    from contracts.node_output import CENTRAL_CARD_BYTES
+    shell = (Path(__file__).resolve().parents[3] / "appliance/display_host/native/shell.c").read_text()
+    assert int(re.search(r"^#define MAX_CENTRAL_CARD (\d+)\b", shell, re.MULTILINE).group(1)) == CENTRAL_CARD_BYTES
+    invalidate = shell[shell.index("static void invalidate(struct output *o"):]
+    invalidate = invalidate[:invalidate.index("\n}\n")]
+    assert invalidate.index("o->central_card[0] = 0;") < invalidate.index("diagnostic_configure(o);")
+    configure = shell[shell.index("static void diagnostic_configure(struct output *o)"):]
+    assert "central_card_to(o);" in configure[:configure.index("\n}\n")]
