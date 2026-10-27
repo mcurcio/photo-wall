@@ -23,6 +23,7 @@ from PIL import Image
 from procrastinate.testing import InMemoryConnector
 from runtime_fakes import PrepareMediaStub, apply_procrastinate_schema
 from support.library_store_fake import FakeLibraryStore
+from support.subject_model import even_subjects
 from test_media_worker import FakePreparer, worker_storage  # noqa: F401
 
 from central.app import create_app
@@ -219,7 +220,7 @@ def test_maintenance_keeps_only_the_files_the_photo_library_still_records(
     (previews / ".tmp-inflight").write_bytes(b"partial")
     library = FakeLibraryStore(worker_storage.clock)
     library.retire_unwanted = lambda: frozenset({kept.asset_id})
-    instance = MediaWorker(worker_storage.repository, library,
+    instance = MediaWorker(worker_storage.repository, library, subjects=even_subjects(),
                            preparer=FakePreparer(), previews=previews)
     asyncio.run(instance.maintain())
     assert sorted(p.name for p in previews.iterdir()) == [".tmp-inflight", f"{kept.asset_id}.jpg"]

@@ -53,6 +53,7 @@ from media.library_thumbnails import LibraryThumbnailOrigin
 from media.media_maker import MediaMaker, PreparationClient
 from media.models import MediaError
 from media.prepare import PreparationLimits, Preparer
+from media.subject_map import SubjectMap, subject_map_from
 from media.task_queue import (
     ProcrastinateCheckQueue,
     RetryableMediaTask,
@@ -97,7 +98,7 @@ async def _blocking(function, *args, **kwargs):
 
 class MediaWorker:
     def __init__(self, repository: MediaRepository,
-                 library: LibraryWorkerStore, *,
+                 library: LibraryWorkerStore, *, subjects: SubjectMap,
                  preparer: PreparationClient | None = None,
                  client_factory: Callable[[ConnectionSecret], LibraryClient] | None = None,
                  limits: WorkerLimits = WorkerLimits(), previews: Path | None = None,
@@ -122,6 +123,9 @@ class MediaWorker:
         # Roadmap 5a (slice M1): where measurements are read and recorded; `_entry` passes the
         # PostgreSQL store, and `measure` refuses with media_config without one.
         self.key_content = key_content
+        # Subject detection (2026-10-26): what stands out in a photo, for its interest grid; one
+        # model per process, loaded by `_entry` before any job is claimed.
+        self.subjects = subjects
         # Follow-up S5: the media cache's one budget, kept on every maintenance pass.
         self.media_cache = media_cache
         self._error: str | None = None
@@ -181,7 +185,7 @@ class MediaWorker:
                 await _blocking(self.library.record_copies, asset_id, measured)
                 boxes = await client.faces(asset.upstream_id)
                 thumbnail = await client.thumbnail(asset.upstream_id, asset.revision)
-                key = await _blocking(measure_key_content, boxes, thumbnail)
+                key = await _blocking(measure_key_content, boxes, thumbnail, self.subjects)
         except MeasureError as error:
             await _blocking(self.key_content.record_failed, asset_id, error.reason)
             return
@@ -317,6 +321,9 @@ def build_repository(dsn: str, clock: Clock | None = None, *,
 
 
 async def _entry():
+    # A required dependency, like cv2 itself: no loadable model, no worker (worker_config),
+    # checked before anything else.
+    subjects = subject_map_from(os.environ)
     try:
         dsn = os.environ["PHOTO_WALL_DATABASE_URL"]
     except KeyError:
@@ -333,7 +340,7 @@ async def _entry():
     ensure_media_directory(cache_root)
     media_store = CacheStore(CacheLayout(cache_root))
     worker = MediaWorker(
-        repository, library, previews=previews,
+        repository, library, subjects=subjects, previews=previews,
         key_content=PgKeyContent(db, times=DatabaseTransactionClock()),
         media_cache=MediaCacheBudget(
             store=media_store, use=PgMediaVariantUse(),
@@ -393,7 +400,9 @@ def main() -> int:
     except Exception as error:
         while isinstance(error, ExceptionGroup):  # the loop that failed first, not the group
             error = error.exceptions[0]
-        print(json.dumps({"error": MediaWorker._code(error)}), file=sys.stderr)
+        reason = error.reason if isinstance(error, MediaError) else None
+        print(json.dumps({"error": MediaWorker._code(error)} | ({"reason": reason} if reason else {})),
+              file=sys.stderr)
         return 1
 
 

@@ -9,7 +9,15 @@ import math
 import pytest
 from support.frame_outputs import target_of
 from support.key_content_builders import banded_grid, face, key_content, measured
-from support.real_crops import EASTER, EASTER_SIZE, FIREPLACE_PX, MICKEY, MICKEY_SIZE
+from support.real_crops import (
+    EASTER,
+    EASTER_SIZE,
+    EASTER_SUBJECTS,
+    FIREPLACE_PX,
+    MICKEY,
+    MICKEY_SIZE,
+    MICKEY_SUBJECTS,
+)
 
 from central.catalog import Candidate
 from central.installation_models import FrameOutput
@@ -18,10 +26,12 @@ from central.wall_plan.fit import (
     Fits,
     FitTarget,
     FitVerdict,
+    JudgedInterest,
     band,
     crop_share,
     faces_judged,
     fit_target,
+    interest_centre,
     interest_judged,
     interest_kept,
     judge,
@@ -30,7 +40,7 @@ from central.wall_plan.fit import (
     shape_fit,
 )
 from central.wall_plan.fit_settings import FitSettings
-from central.wall_plan.key_content import KeyContent, UnitBox
+from central.wall_plan.key_content import InterestGrid, KeyContent, UnitBox
 from contracts.frame_fit import FreeAxis, free_axis
 from contracts.models import Calibration, PhotoCrop, PositionBox, frame_output, frame_size_mm
 from contracts.photo_crop import crop_window
@@ -352,11 +362,14 @@ def test_a_frame_with_no_known_screen_has_no_target() -> None:
 # the one with Easter bunny"; then: "A lone face should sit “in the same relative position within
 # the image as the original (if possible), and cropped only as much as needed to fit the scaled
 # image into the frame." On a photo with faces the window keeps the faces' area-weighted centre at
-# its place in the photo; a photo without faces keeps the most interest.
+# its place in the photo; a photo without faces keeps the most interest. With the skew off
+# (`interest_skew` 0) that is the whole rule, PR 138's: these tests pin it there (FACES_ONLY).
 
 FIREPLACE = FitTarget(output_px=FIREPLACE_PX, video=True, size_mm=None)
 TWO_BY_THREE = target_of(720, 1080, inches=20)
 STEP = 1 / HOUSE.window_steps
+FACES_ONLY = FitSettings(interest_skew=0)
+EVEN = JudgedInterest(InterestGrid(columns=1, rows=1, weights=(1.0,)), True)
 
 
 def _head(centre: float, tall: float, *, x: float = .5) -> UnitBox:
@@ -366,14 +379,15 @@ def _head(centre: float, tall: float, *, x: float = .5) -> UnitBox:
     return face(x - wide / 2, centre - tall / 2, x + wide / 2, centre + tall / 2)
 
 
-def _placed(width: int, height: int, key: KeyContent, target: FitTarget) -> tuple[float, float]:
+def _placed(width: int, height: int, key: KeyContent, target: FitTarget,
+            settings: FitSettings = FACES_ONLY) -> tuple[float, float]:
     """The chosen offset and the judged faces' area-weighted centre along the free axis (a share
     of the photo); the photo must fit with every face whole."""
-    verdict = judge("image", width, height, key, target, .6, HOUSE)
+    verdict = judge("image", width, height, key, target, .6, settings)
     assert isinstance(verdict, Fits), verdict
     window = crop_window(verdict.crop, width, height, target.aspect)
     axis = free_axis(width, height, target.aspect)
-    faces = faces_judged(key, HOUSE)
+    faces = faces_judged(key, settings)
     assert faces and all(_inside(one, window) for one in faces)
     spans = [(one.left, one.right) if axis.along == "x" else (one.top, one.bottom)
              for one in faces]
@@ -400,9 +414,9 @@ def _inside(box: UnitBox, window) -> bool:
 ])
 def test_the_two_photos_cropped_badly_on_the_fireplace_frame_keep_their_faces_in_place(
         size, key, offset) -> None:
-    """Their stored key content on the fireplace Frame: the faces' centre (Mickey 0.347, Easter
-    0.327 of the photo's height) sits at the same share of the window, within half a step, and
-    the verdict's interest kept is that window's.
+    """Their stored key content on the fireplace Frame, with the skew off: the faces' centre
+    (Mickey 0.347, Easter 0.327 of the photo's height) sits at the same share of the window,
+    within half a step, and the verdict's interest kept is that window's.
     Mutation probes: choose the window keeping the most interest -> Mickey 0.453, Easter 0;
     aim the window's centre at the faces' -> Mickey 0.172, Easter 0.125; the faces' window with
     its room shared by their size (PR 138's first aim) -> Mickey 0.172, Easter 0.141; weight the
@@ -412,20 +426,25 @@ def test_the_two_photos_cropped_badly_on_the_fireplace_frame_keep_their_faces_in
     axis = free_axis(*size, FIREPLACE.aspect)
     assert placed == offset
     assert abs(_where(centre, placed, axis) - centre) <= STEP * (1 - axis.length) / axis.length / 2
-    verdict = judge("image", *size, key, FIREPLACE, .6, HOUSE)
+    verdict = judge("image", *size, key, FIREPLACE, .6, FACES_ONLY)
     window = crop_window(verdict.crop, *size, FIREPLACE.aspect)
-    assert verdict.interest_kept == interest_kept(interest_judged(key, HOUSE), window)
+    assert verdict.interest_kept == interest_kept(interest_judged(key, FACES_ONLY).grid, window)
 
 
 @pytest.mark.parametrize(("size", "key", "offset"), [
     (MICKEY_SIZE, MICKEY, 1), (EASTER_SIZE, EASTER, 0),
+    (MICKEY_SIZE, MICKEY_SUBJECTS, 33 / 64), (EASTER_SIZE, EASTER_SUBJECTS, 39 / 64),
 ])
 def test_without_faces_the_window_keeping_the_most_interest_wins(size, key, offset) -> None:
-    """The same photos with no faces found keep today's rule: Mickey's floor and the bunny's tree
-    hold the most interest, and the window goes to them.
-    Mutation probe: centre a photo without faces -> 0.5."""
-    verdict = judge("image", *size, key.model_copy(update={"faces": ()}), FIREPLACE, .6, HOUSE)
-    assert isinstance(verdict, Fits) and verdict.crop.offset == offset
+    """The same photos with no faces found keep today's rule at every skew (design erratum E3):
+    the window keeping the most interest, on the saliency grids (Mickey's floor and the bunny's
+    tree) and on U-2-Netp's alike.
+    Mutation probes: centre a photo without faces -> 0.5; aim it at the interest's centre ->
+    Mickey's saliency grid 0.703125."""
+    for skew in (0, HOUSE.interest_skew, 1):
+        verdict = judge("image", *size, key.model_copy(update={"faces": ()}), FIREPLACE, .6,
+                        FitSettings(interest_skew=skew))
+        assert isinstance(verdict, Fits) and verdict.crop.offset == offset
 
 
 def test_a_lone_face_keeps_its_place_in_the_photo() -> None:
@@ -514,9 +533,10 @@ def test_the_nearest_of_the_windows_that_pass_wins() -> None:
 def test_place_needs_a_window_and_centres_an_equal_shape() -> None:
     """`place` refuses no windows; a photo of the Frame's own shape has one window, offset 0.5."""
     with pytest.raises(ValueError):
-        place((), free_axis(4000, 3000, 1), ())
+        place((), free_axis(4000, 3000, 1), (), EVEN, HOUSE.interest_skew)
+    skewed = JudgedInterest(InterestGrid(columns=1, rows=2, weights=(0.0, 1.0)), False)
     assert place(((0.0, 1.0), (.5, 1.0), (1.0, 1.0)), free_axis(1600, 900, 16 / 9),
-                 (face(0, 0, .1, .1),)) == .5
+                 (face(0, 0, .1, .1),), skewed, 1) == .5
 
 
 @pytest.mark.parametrize(("passing", "centre", "offset"), [
@@ -529,4 +549,134 @@ def test_a_face_midway_between_two_windows_takes_the_central_then_the_lower(pass
     the window whose offset is nearer 0.5 wins, then the lower offset.
     Mutation probes: drop the nearest-0.5 tie -> 0; drop the lower-offset tie -> 0.75."""
     lone = face(.45, centre - .05, .55, centre + .05)
-    assert place(passing, FreeAxis("y", .5), (lone,)) == offset
+    assert place(passing, FreeAxis("y", .5), (lone,), EVEN, HOUSE.interest_skew) == offset
+
+
+# --- The skew toward what stands out (`place`, `interest_skew`) -----------------------------------
+# Owner, 2026-10-25: "it doesn’t have to strictly center on the faces if there is interesting
+# content heavily shifted on one side or another. It could bias towards face centering but also
+# allow a skew to include extra content." Subject detection (2026-10-26): the window keeps the
+# faces' place first, then moves toward the interest's centre by `interest_skew` of the gap, and
+# of the faces' room, so every face keeps at least 1 - `interest_skew` of the room it had.
+
+def _rows_grid(rows: int, low: float, high: float, columns: range = range(16)) -> InterestGrid:
+    """Interest spread evenly over the cells in `columns` whose row middles lie in [low, high]."""
+    cells = [1.0 if low <= (row + .5) / rows <= high and column in columns else 0.0
+             for row in range(rows) for column in range(16)]
+    return InterestGrid(columns=16, rows=rows, weights=tuple(cell / sum(cells) for cell in cells))
+
+
+def _room(faces: tuple[UnitBox, ...], offset: float, size: tuple[int, int],
+          target: FitTarget) -> float:
+    """The least room between a judged face and either end of the window at `offset`, along the
+    free axis, as a share of the photo."""
+    left, top, right, bottom = crop_window(PhotoCrop(offset=offset), *size, target.aspect)
+    return min(min(one.top - top, bottom - one.bottom) for one in faces)
+
+
+@pytest.mark.parametrize(("size", "key", "skewed", "faces_only"), [
+    (MICKEY_SIZE, MICKEY_SUBJECTS, 24 / 64, 22 / 64),   # the family's legs come in, the hat stays in
+    (EASTER_SIZE, EASTER_SUBJECTS, 21 / 64, 21 / 64),   # the dad's face is at the window's top already
+])
+def test_mickey_and_easter_lean_toward_what_stands_out_as_far_as_the_faces_room_allows(
+        size, key, skewed, faces_only) -> None:
+    """The two photos the fireplace Frame cropped badly (owner, 2026-10-25), measured by
+    U-2-Netp: Mickey's people and character stand out below the faces, so at the default skew
+    (0.33) the window moves down one step, 0.375 (0.344 with the skew off), and each face keeps
+    at least two thirds of its room; Easter's window cannot move: the dad's face is already at
+    the top edge of every window keeping all faces whole (0.328).
+    Mutation probes: drop the interest term (aim at o0) -> Mickey 0.34375; drop the room bound
+    -> Mickey 0.390625, the hat at the edge; drop the room bound and place over every window, not
+    only those keeping the faces whole -> Easter 0.390625, a face cut."""
+    assert HOUSE.interest_skew == .33
+    verdict = judge("image", *size, key, FIREPLACE, .6, HOUSE)
+    assert isinstance(verdict, Fits) and verdict.crop.offset == skewed
+    assert judge("image", *size, key, FIREPLACE, .6, FACES_ONLY).crop.offset == faces_only
+    faces = faces_judged(key, HOUSE)
+    window = crop_window(verdict.crop, *size, FIREPLACE.aspect)
+    assert all(_inside(one, window) for one in faces)
+    assert (_room(faces, skewed, size, FIREPLACE)
+            >= (1 - HOUSE.interest_skew) * _room(faces, faces_only, size, FIREPLACE) - 1e-9)
+
+
+def test_a_lone_face_above_its_own_body_keeps_its_headroom() -> None:
+    """One face at 10-22 % of a 3 : 4 photo's height, the person standing out from 8 % to 95 %:
+    the body pulls the window down, but the face is already near the window's top, so the room
+    bound keeps it at PR 138's window, 0.15625.
+    Mutation probe: take the passing window nearest the aim, not one between o0 and the aim
+    -> 0.171875, the face's room nearly gone."""
+    key = key_content(4500, 6000, faces=(face(.42, .10, .58, .22),),
+                      grid=_rows_grid(21, .08, .95, columns=range(5, 11)))
+    assert judge("image", 4500, 6000, key, FIREPLACE, .6, HOUSE).crop.offset == 10 / 64
+    assert judge("image", 4500, 6000, key, FIREPLACE, .6, FACES_ONLY).crop.offset == 10 / 64
+
+
+def test_a_lone_face_below_what_stands_out_keeps_its_room_at_the_bottom() -> None:
+    """The mirror of the lone face above its body: one face at 78-90 % of a 3 : 4 photo's
+    height, the person standing out from 5 % to 92 %, so the interest pulls the window up (toward
+    offset 0). The face is already near the window's bottom, so the room bound keeps PR 138's
+    window, 0.84375, and the face keeps at least 1 - skew of its room below.
+    Mutation probes: bound by the room above the faces, not below -> 0.8125; no room bound
+    -> 0.8125, the face's room below nearly halved."""
+    key = key_content(4500, 6000, faces=(face(.42, .78, .58, .90),),
+                      grid=_rows_grid(21, .05, .92, columns=range(5, 11)))
+    skewed = judge("image", 4500, 6000, key, FIREPLACE, .6, HOUSE).crop.offset
+    faces_only = judge("image", 4500, 6000, key, FIREPLACE, .6, FACES_ONLY).crop.offset
+    assert interest_centre(key.interest, "y") < .5
+    assert (skewed, faces_only) == (54 / 64, 54 / 64)
+    faces = faces_judged(key, HOUSE)
+
+    def below(offset: float) -> float:
+        bottom = crop_window(PhotoCrop(offset=offset), 4500, 6000, FIREPLACE.aspect)[3]
+        return min(bottom - one.bottom for one in faces)
+
+    assert below(skewed) >= (1 - HOUSE.interest_skew) * below(faces_only) - 1e-9
+
+
+def test_an_even_grid_has_no_side_to_lean_toward() -> None:
+    """Mickey's faces and U-2-Netp grid with its spread under `min_salience_spread`: judged
+    even (`interest_judged`, the one home of "even"), so the faces alone place it, 0.34375.
+    Mutation probe: read the even grid's centre (0.5) as the aim -> 0.375."""
+    key = MICKEY_SUBJECTS.model_copy(update={"spread": .01})
+    assert interest_judged(key, HOUSE).even
+    assert judge("image", *MICKEY_SIZE, key, FIREPLACE, .6, HOUSE).crop.offset == 22 / 64
+
+
+def test_interest_to_one_side_across_the_free_axis_does_not_move_the_window() -> None:
+    """A 3 : 4 photo (free axis: down its height) with a face at 40 % and the interest in rows
+    30-50 % of its left quarter: centred on the face along the free axis, one-sided only across
+    it, so the window stays at the face's place, 0.40625, at any skew.
+    Mutation probe: read the interest's centre across the photo (x) -> it moves."""
+    key = key_content(4500, 6000, faces=(face(.45, .35, .55, .45),),
+                      grid=_rows_grid(20, .30, .50, columns=range(0, 4)))
+    assert interest_centre(key.interest, "y") == pytest.approx(.4)
+    for skew in (0, HOUSE.interest_skew, 1):
+        assert judge("image", 4500, 6000, key, FIREPLACE, .6,
+                     FitSettings(interest_skew=skew)).crop.offset == 26 / 64
+
+
+def test_the_skew_moves_the_offset_in_offset_units() -> None:
+    """Design erratum E2: the aim is o0 + skew x (G - F) in offset units. A 4500 x 3030 photo
+    whose window is 0.945 of its width, a small face in the middle (F 0.5) and the interest in
+    its right half (G 0.75): the room bound does not decide, so the offset moves 0.33 x 0.25 to
+    0.5825, the nearest step 0.578125; at skew 1 to G itself, 0.75.
+    Mutation probe: move the window's edge by skew x (G - F) in photo units (the offset by that
+    over 1 - length) -> offset 1."""
+    columns = [1.0 if column >= 8 else 0.0 for _ in range(11) for column in range(16)]
+    key = key_content(4500, 3030, faces=(face(.45, .40, .55, .55),),
+                      grid=InterestGrid(columns=16, rows=11,
+                                        weights=tuple(cell / sum(columns) for cell in columns)))
+    assert free_axis(4500, 3030, FIREPLACE.aspect).length == pytest.approx(.945, abs=.001)
+    assert judge("image", 4500, 3030, key, FIREPLACE, .6, FACES_ONLY).crop.offset == .5
+    assert judge("image", 4500, 3030, key, FIREPLACE, .6, HOUSE).crop.offset == 37 / 64
+    assert judge("image", 4500, 3030, key, FIREPLACE, .6,
+                 FitSettings(interest_skew=1)).crop.offset == .75
+
+
+def test_the_skew_is_a_setting_from_none_to_all_of_the_gap() -> None:
+    """`interest_skew` lives in FitSettings with its range (0, 1) and default 0.33."""
+    assert FitSettings().interest_skew == .33
+    with pytest.raises(ValueError):
+        FitSettings(interest_skew=1.01)
+    with pytest.raises(ValueError):
+        FitSettings(interest_skew=-.01)

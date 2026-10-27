@@ -19,8 +19,10 @@ dependencies = [
   "procrastinate==3.9.0",
   "semver>=3,<4",
   "nats-py==2.16.0",  # the Node API library's client: the worker's hub side (E3d S5)
-  # Roadmap 5a: the key content analyser's interest grid (OpenCV static saliency, spectral
-  # residual; the saliency module ships only in the contrib build). Media worker only.
+  # Roadmap 5a: the key content analyser (media/key_content.py): its interest grid is what stands
+  # out, the U-2-Netp model run by OpenCV's dnn module (media/subject_map.py, subject detection
+  # 2026-10-26). The contrib build was chosen for spectral-residual saliency, which nothing uses
+  # now. Media worker only.
   "opencv-contrib-python-headless==5.0.0.93",
   # Power and the week (roadmap 2a + 2b): house time's sun times and the zone database zoneinfo
   # reads (the slim image has none). Central only; the Pi never imports them.
