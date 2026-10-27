@@ -8,9 +8,11 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from psycopg.conninfo import make_conninfo
 from test_registry import enroll
 
 from central.content_catalog.catalog import device_id_for_serial
+from central.db import Database
 from central.infra import room_light_store
 from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.home_assistant.settings import PgHomeAssistantSettings
@@ -306,13 +308,31 @@ def test_galleria_s_birth_reaches_the_settings_page(registry):
     assert (new.version, new.kinds, new.update) == ("0.41.0", ("light", "illuminance", "colour-temperature"), False)
 
 
-def test_the_new_tables_carry_their_audit_fields(registry):
+@pytest.fixture
+def ticking_db(registry):
+    """The registry's database seen through a `clock_timestamp()` that moves a whole second at every
+    call (a schema ahead of pg_catalog on the search path), so a statement that reads the clock twice
+    stamps two instants every time, never by timing luck."""
+    with registry.db.transaction() as conn:
+        conn.execute("CREATE SCHEMA ticking")
+        conn.execute("CREATE SEQUENCE ticking.tick")
+        conn.execute("CREATE FUNCTION ticking.clock_timestamp() RETURNS timestamptz VOLATILE LANGUAGE sql AS "
+                     "$$ SELECT pg_catalog.clock_timestamp() + nextval('ticking.tick') * interval '1 second' $$")
+    db = Database(make_conninfo(registry.db.dsn, options="-c search_path=ticking,pg_catalog,public"))
+    try:
+        yield db
+    finally:
+        db.close()
+
+
+def test_the_new_tables_carry_their_audit_fields(ticking_db):
     """A colour sensor, a colour sensor's facts and Galleria's birth each keep when and by whom they
-    were created and last changed: a second write moves only when it changed and by whom."""
-    lights = PgRoomLights(registry.db, PgHouseLock())
+    were created and last changed, a new record's two times one instant (one clock read per write,
+    held under a clock that moves at every read): a second write moves only when it changed and by whom."""
+    lights = PgRoomLights(ticking_db, PgHouseLock())
 
     def audit(table: str) -> dict:
-        with registry.db.transaction() as conn:
+        with ticking_db.transaction() as conn:
             return conn.execute(f"SELECT created_at, created_by, changed_at, changed_by FROM {table}").fetchone()  # noqa: S608
 
     writes = {
