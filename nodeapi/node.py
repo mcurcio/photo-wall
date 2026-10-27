@@ -1,6 +1,7 @@
-"""A component's way to use its Node's bus: the Node-role session, and a read-only WALL follower.
+"""A component's way to use its Node's bus: the Node-role session, a read-only WALL follower, and a
+read-only follower of another component's state keys (`StateReader`).
 
-Both run on one lifecycle (`_Lifecycle`): their own thread and event loop, a connect that runs
+Each runs on one lifecycle (`_Lifecycle`): their own thread and event loop, a connect that runs
 forever, **attach** at every connect, and stop. Every store line's declarer is its own component
 (`contracts.node_link.STORE_LINES`; 0017 C4, the Player its own line since 2026-10-16), so a session
 is built only for the line its component declares, and its attach applies its slice; then re-puts
@@ -61,6 +62,7 @@ from nodeapi.buffers import (
     desired_stream,
     role_of,
     state_prefix,
+    state_stream,
     table_of,
     wall_mirror_config,
 )
@@ -93,7 +95,7 @@ class _Lifecycle:
     forever (the client reconnects by itself once connected), `attach` at every connect and whenever
     asked, and stop. `attach(client, refresh)` is retried with backoff until it returns; `refresh` is
     True when it was asked for while already attached. `run(client)` gives the tasks that live as long
-    as the connection does; they wait on `ready` to touch the bus. NodeSession and WallReader each run
+    as the connection does; they wait on `ready` to touch the bus. NodeSession, WallReader and StateReader each run
     on one."""
 
     def __init__(self, name: str, url: str, *, attach: Callable[[Client, bool], Awaitable[None]],
@@ -522,6 +524,62 @@ class WallReader:
 
     def _read(self, answered: bool) -> None:
         self._answered = answered
+
+
+class StateReader:
+    """A read-only follower of another component's state bucket on the same Node's bus (Display Host
+    reads the Player line's `impeded` through one, beside its own line's session). No slice, state,
+    birth or methods, and nothing declared: the bucket is its declarer's, and while it is absent the
+    reader reads again after a pause. It follows the bucket from each key's latest value through the
+    session's own watch and keeps only `keys`, so a busy line's other keys cost one read, never a
+    callback. The view keeps each key's last value until the key is written again (a bus restart
+    clears nothing; the writer restates at its attach), and calls its callbacks on the reader's
+    thread. `start` returns at once; nothing here blocks its caller."""
+
+    def __init__(self, component: str, line: str, keys: frozenset[str], *, url: str) -> None:
+        """ValueError("session_component") unless component matches [a-z]+."""
+        if type(component) is not str or not _COMPONENT.fullmatch(component):
+            raise ValueError("session_component")
+        self._component, self._line, self._keys = component, line, frozenset(keys)
+        self._state = _View[bytes]()
+        self._life = _Lifecycle(component, url, attach=self._attach, run=self._tasks)
+
+    @property
+    def state(self) -> _View[bytes]:
+        """The followed keys of the line's state bucket, read-only."""
+        return self._state
+
+    def start(self) -> None:
+        """Run on its own thread and loop; returns at once. RuntimeError("session_started") twice."""
+        self._life.start(f"nodeapi-state-{self._component}-{self._line}")
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """Stop and join the thread, at most `timeout` seconds."""
+        self._life.stop(timeout)
+
+    def _tasks(self, client: Client) -> list[Coroutine[object, object, None]]:
+        prefix = state_prefix(self._line)
+
+        def kept(item: Read) -> bytes | None:
+            return item.data if item.subject.removeprefix(prefix) in self._keys else None
+
+        return [_watch(client, state_stream(self._line), prefix, _Kept(self._state), kept,
+                       life=self._life, name=self._component)]
+
+    async def _attach(self, client: Client, refresh: bool) -> None:
+        return None
+
+
+class _Kept:
+    """A view's `_changed` that drops the keys a StateReader does not follow (their value None)."""
+
+    def __init__(self, view: _View[bytes]) -> None:
+        self._view = view
+
+    def _changed(self, latest: Mapping[str, bytes | None]) -> None:
+        kept = {key: value for key, value in latest.items() if value is not None}
+        if kept:
+            self._view._changed(kept)
 
 
 class Events:

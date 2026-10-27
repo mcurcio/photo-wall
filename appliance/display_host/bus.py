@@ -20,11 +20,19 @@ stream). Its three streams:
 
 The slice is built at import, so a key table that does not fit the line fails here, on every
 build, before anything ships.
+
+The controller also reads one key of another line (the Frame shows Central's error when it blacks
+the Frame): the Player line's `impeded` (contracts/node_impeded.py), through its own `StateReader`
+on the same bus, never through the Player's process or screen connection (`BusImpededReports`).
 """
 from __future__ import annotations
 
+import logging
+import threading
+from collections.abc import Callable
 from typing import Final
 
+from contracts.node_impeded import IMPEDED_KEY, ImpededFrames, decode_impeded
 from contracts.node_link import NODE_BUS_URL, STORE_LINES
 from contracts.node_output import (
     OUTPUT_DOCUMENT_BYTES,
@@ -48,8 +56,11 @@ from contracts.node_picture import (
     picture_document_key,
     picture_report_key,
 )
+from contracts.node_state import PLAYER_LINE
 from nodeapi.buffers import KeyTable, Slice, desired_bucket, event_buffer, state_bucket
-from nodeapi.node import NodeSession, Release
+from nodeapi.node import NodeSession, Release, StateReader
+
+log = logging.getLogger(__name__)
 
 DISPLAY_COMPONENT: Final = "display"
 DISPLAY_VERSION: Final = "1.0.0"                   # the display component's release version (birth)
@@ -107,3 +118,45 @@ class BusPictureSink:
 
     def put_picture(self, report: PictureReport) -> None:
         self._session.state.put(picture_report_key(report.output_id), encode_picture_report(report))
+
+
+class BusImpededReports:
+    """`central_card.ImpededReports` on the Pi's bus: the Player line's `impeded` key, followed by a
+    StateReader of Display's own (`start` returns at once and it connects forever, so the controller
+    never waits on the bus). `latest` is the last value that decodes; a value that does not decode
+    reads as None (no card), logged once per value. `on_change` callbacks run on the reader's thread
+    after each new value."""
+
+    def __init__(self, *, url: str = NODE_BUS_URL) -> None:
+        self._reader = StateReader(DISPLAY_COMPONENT, PLAYER_LINE, frozenset({IMPEDED_KEY}), url=url)
+        self._lock = threading.Lock()
+        self._raw: bytes | None = None
+        self._latest: ImpededFrames | None = None
+        self._reader.state.on_change(self._changed)
+
+    def start(self) -> None:
+        self._reader.start()
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self._reader.stop(timeout)
+
+    def on_change(self, callback: Callable[[], None]) -> None:
+        """Call `callback()` after each new value of the key (on the reader's thread)."""
+        self._reader.state.on_change(lambda _key, _value: callback())
+
+    def latest(self) -> ImpededFrames | None:
+        with self._lock:
+            return self._latest
+
+    def _changed(self, key: str, raw: bytes) -> None:
+        if key != IMPEDED_KEY:
+            return
+        with self._lock:
+            if raw == self._raw:
+                return
+            self._raw = raw
+            try:
+                self._latest = decode_impeded(raw)
+            except ValueError:
+                self._latest = None
+                log.warning("the Player's impeded report does not decode; no Central card from it")

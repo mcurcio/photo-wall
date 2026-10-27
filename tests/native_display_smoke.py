@@ -47,10 +47,16 @@ sys.path.append("/usr/lib/photo-wall/common")  # contracts, as the installed ove
 from display_harness_judge_feeder import PATH as JUDGE_SOCKET  # noqa: E402
 from display_harness_judge_feeder import JudgeFeeder  # noqa: E402
 from overlay.instruction import INSTRUCTION_STALE_MS  # noqa: E402
-from overlay.render import card_rect  # noqa: E402
+from overlay.render import CENTRAL_CARD_RGBA, CENTRAL_LEAST, CENTRAL_SHARE, card_rect  # noqa: E402
 
 from contracts.node_faults import FAULTS  # noqa: E402
-from contracts.node_output import FrameRegion, OutputRect, encode_frame_region  # noqa: E402
+from contracts.node_output import (  # noqa: E402
+    CentralCard,
+    FrameRegion,
+    OutputRect,
+    encode_central_card,
+    encode_frame_region,
+)
 
 HEALTH_MARKER = "/tmp/pw-health-client-marker"  # display_harness_health_client.py MARKER_FILE
 SLATE_REASONS = "/tmp/pw-slate-reasons"  # display_harness_health_client.py REASONS_FILE
@@ -743,6 +749,7 @@ def explain_area_cases():
           assert_pixel(CARD_X + 2, CARD_Y + 2, SLATE), flush=True)
     assert request("region", region=region_text((640, 480)))["accepted"]
     await_black_outside(FRAME_RECT, 3)
+    central_card_cases(x, y)
     # The client dead (released or not): the shell's amber over the whole Output, until it binds
     # again (2 s). The next spawn is the magenta test client again (the mode file is consumed).
     killed = kill_private_client()
@@ -756,6 +763,44 @@ def explain_area_cases():
     await_pixel(*HEALTH, health_over(SLATE), 6.0 - (time.monotonic() - killed), drained=True)
     time.sleep(0.5)
     drain()
+
+
+def central_card_cases(x, y):
+    """Central's card (manager v6, the Frame shows Central's error when it blacks the Frame), with
+    the Frame region set and the Pi's card up: the shell keeps and forwards the `central_card` op
+    (bounded), the production client draws Central's card only while no Pi card shows, inside the
+    Frame's area in its own look with no tint over the rest of the area, the Pi's card wins again at
+    once, and an empty op takes Central's card down. Mutation probe (client.py `draw` drawing
+    Central's card before the page's tint): the Pi-card-wins capture fails."""
+    name = output["output_id"]
+    card = encode_central_card(CentralCard(name, "Photo Wall can't read Family Room",
+                                           "Drawn with its last word: off")).decode()
+    assert not request("central_card", card="c" * 1025)["accepted"]           # past the shell's bound
+    assert not request("central_card")["accepted"]                            # no card at all
+    assert request("central_card", card=card)["accepted"]
+    # The card's top-left at its narrowest (60 % of the area, centred): inside whatever its width.
+    cx, cy, _, _ = card_rect(FRAME_RECT, share=CENTRAL_SHARE, least=CENTRAL_LEAST)
+    central = cairo_over(CENTRAL_CARD_RGBA[:3], CENTRAL_CARD_RGBA[3], SLATE)
+    pi_tint = cairo_over((0.0, 0.0, 0.0), 0.45, SLATE)
+    hold_pixel(x + 2, y + 2, pi_tint, 0.5)                                   # the Pi's card still shows
+    judge.send(name, 2, False, ("", ""))
+    judge.await_report(name, 2, 3, drain)
+    await_pixel(cx + 2, cy + 2, central, 2)
+    assert_pixel(x + 2, y + 2, SLATE)                                         # no tint in the area
+    await_black_outside(FRAME_RECT, 2)
+    print("PASS centrals_card_inside_the_frame_region_when_no_pi_card_shows", central, flush=True)
+    judge.send(name, 3, True, CARD_LINES)
+    judge.await_report(name, 3, 3, drain)
+    await_pixel(x + 2, y + 2, pi_tint, 2)
+    print("PASS the_pi_card_wins_over_centrals_card", flush=True)
+    judge.send(name, 4, False, ("", ""))
+    judge.await_report(name, 4, 3, drain)
+    await_pixel(cx + 2, cy + 2, central, 2)
+    assert request("central_card", card="")["accepted"]
+    await_pixel(cx + 2, cy + 2, SLATE, 2)
+    print("PASS centrals_card_returns_after_the_pi_card_and_goes_with_an_empty_op", flush=True)
+    judge.send(name, 5, True, CARD_LINES)                                     # as the steps after expect
+    judge.await_report(name, 5, 3, drain)
 
 
 def admit(args, frame_id):

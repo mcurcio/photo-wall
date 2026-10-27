@@ -49,8 +49,9 @@
 #define PING_MS 1000         /* how often an app holding an Output is pinged */
 #define FRAME_VERSION 4      /* pw_frame_manager_v1: v4 carries the picture (1c) */
 #define DIAGNOSTIC_VERSION 6 /* pw_diagnostic_manager_v1: v4 the brightness line, v5 the Frame region (#124),
-                                v6 Central's card (TODO display lane: the `central_card` op and its re-sends) */
+                                v6 Central's card */
 #define MAX_REGION 1024      /* contracts.node_output.REGION_DOCUMENT_BYTES */
+#define MAX_CENTRAL_CARD 1024 /* contracts.node_output.CENTRAL_CARD_BYTES */
 #define MAX_OPERATIONS 1024  /* contracts.node_frame.PICTURE_OPERATIONS_BYTES (picture operations v5) */
 #define MAX_BRIGHTNESS 128
 #define MAX_PICTURE_CHANGE 20
@@ -98,6 +99,10 @@ struct output {
     /* The controller's latest `region` op: the Frame region's canonical JSON, or empty (none);
      * forwarded verbatim to the private client, never parsed (#124). Kept across a hot-plug. */
     char region[MAX_REGION + 1];
+    /* The controller's latest `central_card` op: Central's card's canonical JSON, or empty (none);
+     * forwarded verbatim to the private client, never parsed. Dropped with the app's grant
+     * (invalidate): a card never outlives the run it was composed for. */
+    char central_card[MAX_CENTRAL_CARD + 1];
     struct app_surface *diagnostic;
     bool released;
     bool holding;   /* released and held by hold evidence; false: the holding slate is up */
@@ -244,13 +249,21 @@ static void region_to(struct output *o) {
     if (r && wl_resource_get_version(r) >= 5)
         pw_diagnostic_manager_v1_send_region(r, o->name, o->region);
 }
-/* Every configure is followed by its region, so the client lays the page out in the right area. */
+/* The Output's stored Central card to the private client (manager v6), verbatim. */
+static void central_card_to(struct output *o) {
+    struct wl_resource *r = o->shell->diagnostic_resource;
+    if (r && wl_resource_get_version(r) >= 6)
+        pw_diagnostic_manager_v1_send_central_card(r, o->name, o->central_card);
+}
+/* Every configure is followed by its region and Central's card, so the client lays the page out in
+ * the right area and knows the card (none after an invalidation). */
 static void diagnostic_configure(struct output *o) {
     if (!o->shell->diagnostic_resource) return;
     pw_diagnostic_manager_v1_send_output(o->shell->diagnostic_resource, o->name,
         o->weston ? o->weston->width : 0, o->weston ? o->weston->height : 0,
         ++o->diagnostic_serial, o->reason[0] ? o->reason : "app_absent", o->testing);
     region_to(o);
+    central_card_to(o);
 }
 static void curtain(struct output *o, float alpha) {
     if (o->curtain) weston_shell_utils_curtain_destroy(o->curtain);
@@ -398,6 +411,7 @@ static void invalidate(struct output *o, const char *reason) {
     json_decref(o->identity);
     o->identity = NULL;
     o->grant[0] = o->handoff[0] = 0;
+    o->central_card[0] = 0;   /* Central's card was the ended run's: sent as none below */
     o->released = o->holding = false;
     o->testing = false;
     snprintf(o->reason, sizeof o->reason, "%s", reason);
@@ -1091,6 +1105,16 @@ static bool command(struct shell *s, json_t *j) {
         if (!region || strlen(region) > MAX_REGION) return false;
         snprintf(o->region, sizeof o->region, "%s", region);
         region_to(o);
+        return true;
+    }
+    /* Central's card: canonical JSON of contracts.node_output.CentralCard, or "" (none), composed
+     * by the controller, stored and forwarded verbatim; the shell never reads it (no verdict, no
+     * code). */
+    if (!strcmp(op, "central_card")) {
+        const char *card = string(j, "card");
+        if (!card || strlen(card) > MAX_CENTRAL_CARD) return false;
+        snprintf(o->central_card, sizeof o->central_card, "%s", card);
+        central_card_to(o);
         return true;
     }
     if (!strcmp(op, "withdraw")) {
