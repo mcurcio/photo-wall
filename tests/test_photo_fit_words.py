@@ -33,5 +33,5 @@ def test_every_reason_of_the_fit_rule_has_the_consoles_words():
     assert reasons == rule
     assert set(named) == rule
     assert all(words.strip() for words in named.values())
-    assert named["above_player_limit"] == "needs more detail than this Pi can draw"
+    assert named["below_frame_pixels"] == "too small for this Frame"
     assert set(_SHAPE_REFUSALS) | set(_CONTENT_REFUSALS) == rule

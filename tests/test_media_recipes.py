@@ -13,10 +13,17 @@ from support.frame_outputs import frame_output_of
 from support.frames import Screen
 
 from central.installation_models import FrameOutput
-from central.media_repository import variant_recipe
+from central.media_repository import StoreLimits, variant_recipe
 from central.photo_library.rendition import FrameNeed
 from central.wall_plan.fit_settings import FitSettings
-from media.prepare import HouseRecipes, StillRecipe, VideoRecipe, recipe_id, stored_recipe
+from media.prepare import (
+    HouseRecipes,
+    PreparationLimits,
+    StillRecipe,
+    VideoRecipe,
+    recipe_id,
+    stored_recipe,
+)
 
 NEED = FrameNeed(aspect=16 / 9, width=1920, height=1080)
 P1080 = Screen(1920, 1080, inches=24)
@@ -104,3 +111,9 @@ def test_a_photos_recipe_follows_the_wall_need():
     stepped, _ = variant_recipe(recipes, "image", size, (frame("living", P1080),),
                                 FitSettings(copy_ladder_px=(2560, 3840)))
     assert stepped.long_edge == 2560
+
+
+def test_a_prepared_photos_byte_cap_has_one_home():
+    """A copy kept at its readable size may be up to `max_pixels` (64 MP): preparation and the
+    media store take one cap. Mutation probe AC8 (a 16 MiB literal in StoreLimits): this fails."""
+    assert StoreLimits().max_image_bytes == PreparationLimits().max_image_bytes == 48 * 1024**2

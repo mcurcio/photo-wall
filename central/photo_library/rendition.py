@@ -20,11 +20,18 @@ So:
   whose readable size is None is not placed and its preview is measured (the Planner's
   `MeasureRequest`). A size is never larger than a copy Photo Wall can fetch, so nothing is
   upscaled.
-- **The wall need** (`wall_need`): ONE copy per photo (per revision and recipe), never cropped
-  and never per Frame; the Player composes, scales and masks for each Frame. Its long edge is the
-  smallest step of a coarse ladder (`FitSettings.copy_steps`: 1920, 2560, 3840, then the Player's
-  still limit) that holds the largest need among the Frames the photo could fill, so a photo
-  moving between Frames reuses its copy, and adding a smaller Frame prepares nothing again.
+- **The wall need** (`wall_need`): the copy Central keeps of a photo, never cropped and never per
+  Frame; each Player cuts and scales its Frame's window from it (player/planes.py
+  `still_region`). Owner, 2026-10-26: "I still planned on having central produce an aggregate of
+  the unique frame sizes and aspect ratios so that it can prepare some common copies of assets";
+  asked whether those copies are cropped or only scaled: "Scaled only, but only create then if the
+  asset size is substantially larger than the Player needs." So a photo whose readable long edge
+  is more than `FitSettings.scaled_copy_ratio` times the largest need among the Frames it could
+  fill gets a smaller copy, at the smallest step of a coarse ladder (`FitSettings.copy_steps`:
+  1920, 2560, 3840) that holds that need, or at the need itself above the ladder; a photo closer
+  to its need keeps its readable size. A photo moving between Frames reuses its copy, and adding
+  a smaller Frame prepares nothing again. No copy is sized for a Player limit: the Player decodes
+  only its window at its finish size.
 """
 from __future__ import annotations
 
@@ -185,20 +192,24 @@ def copy_edge(photo: Size, need: FrameNeed) -> int:
     return edge
 
 
-def wall_need(photo_size: Size, fitting_outputs: Sequence[FrameOutput],
-              ladder: Sequence[int]) -> FrameNeed:
-    """The one copy the wall asks of a photo of `photo_size` (its readable size): its own shape
-    at the smallest `ladder` step (ascending; `FitSettings.copy_steps`) that holds the largest
-    need among `fitting_outputs` (`copy_edge` of each `frame_need`), the largest step when none
-    does, the smallest with no Frame. The copy prepared is this need or the photo's readable
-    size, whichever is smaller: preparation never upscales (media/prepare.py `Preparer._size`).
-    Pure; ValueError for an empty ladder."""
+def wall_need(photo_size: Size, fitting_outputs: Sequence[FrameOutput], ladder: Sequence[int],
+              scaled_copy_ratio: float) -> FrameNeed:
+    """The copy the wall asks of a photo of `photo_size` (its readable size), its own shape (module
+    rule, The wall need): with `largest` the largest need among `fitting_outputs` (`copy_edge` of
+    each `frame_need`; 0 with no Frame) and `step` the smallest `ladder` step (ascending;
+    `FitSettings.copy_steps`) holding it (`largest` itself above the ladder), the copy's long edge
+    is `step` when the readable long edge is more than `scaled_copy_ratio` x `largest` (a smaller
+    copy), else the larger of `step` and the readable long edge (no smaller copy). The copy
+    prepared is this need or the photo's readable size, whichever is smaller: preparation never
+    upscales (media/prepare.py `Preparer._size`). Pure; ValueError for an empty ladder."""
     if not ladder:
         raise ValueError("a copy ladder needs at least one step")
     largest = max((copy_edge(photo_size, need) for frame in fitting_outputs
                    if (need := frame_need(frame)) is not None), default=0)
-    step = next((step for step in ladder if step >= largest), ladder[-1])
-    return need_at(photo_size, step)
+    step = next((step for step in ladder if step >= largest), largest)
+    readable = max(photo_size)
+    edge = step if readable > scaled_copy_ratio * largest else max(step, readable)
+    return need_at(photo_size, edge)
 
 
 def need_step(need: FrameNeed) -> int:

@@ -191,8 +191,8 @@ class RefusalCount(Model):
 
 class FrameFit(Model):
     """One Frame's answer. Shape tier (complete): `fit_by_shape` of `photos` pass `shape_fit`;
-    `refused_by_shape` holds no_video_here, beyond_crop_limit, below_frame_pixels and
-    above_player_limit in the rule's order (0 included); `size_unknown` of `photos` are images
+    `refused_by_shape` holds no_video_here, beyond_crop_limit and below_frame_pixels in the
+    rule's order (0 included); `size_unknown` of `photos` are images
     whose readable size is not measured yet, so neither fit nor refused; `measured` of
     `fit_by_shape` have key content;
     `nearest_crop_limit`: when `fit_by_shape` is 0, the smallest crop limit within
@@ -296,7 +296,7 @@ def _drafted(output: FrameOutput, draft: FrameDraft,
 
 # The refusals each tier counts, in the fit rule's order (central/wall_plan/fit.py).
 _SHAPE_REFUSALS: Final[tuple[FitRefusal, ...]] = ("no_video_here", "beyond_crop_limit",
-                                                  "below_frame_pixels", "above_player_limit")
+                                                  "below_frame_pixels")
 _CONTENT_REFUSALS: Final[tuple[FitRefusal, ...]] = ("face_cut", "interest_cut")
 _Size = tuple[MediaKind, int, int]
 

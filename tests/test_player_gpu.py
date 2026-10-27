@@ -60,7 +60,7 @@ def test_importing_the_device_and_the_decode_and_refusing_loads_no_native_librar
         "except player.gpu.GpuUnavailable:\n"
         "    pass\n"
         "try:\n"
-        "    player.decode.StillDecode(Path('photo.jpg'))\n"
+        "    player.decode.StillDecode(Path('photo.jpg'), player.decode.StillRegion((1, 1), (0, 0, 1, 1), (1, 1)))\n"
         "except ValueError:\n"
         "    pass\n"
         "print(sorted(m for m in sys.modules if m.split('.')[0] in {'gi', 'OpenGL', 'ctypes', '_ctypes'}))\n")

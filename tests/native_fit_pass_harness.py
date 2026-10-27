@@ -39,7 +39,7 @@ tracer's):
    PyOpenGL's GLES3 (its glDeleteTextures takes GLES's (n, textures)).
 9. a_still_decodes_on_gstreamer: player/decode.py `StillDecode` decodes an opaque and a
    transparent PNG (the quadrants, written here) to their RGBA pixels and alpha flag, through
-   GStreamer 1.26's caps structures.
+   GStreamer 1.26's caps structures, its whole picture as its region (cut and scaled by nothing).
 
 The pattern pass (render redesign S3, bead B2: run ledger .claude/runs/render-planes/s3-page.md),
 the real `player.pattern_pass.PatternPass` into the whole screen's target: a 64 x 48 screen with
@@ -369,12 +369,12 @@ def png(path: Path, alpha: int | None) -> None:
 
 
 def a_still_decodes_on_gstreamer() -> None:
-    from player.decode import STILL_TIMEOUT, StillDecode
+    from player.decode import STILL_TIMEOUT, StillDecode, StillRegion
 
     for alpha in (None, 200):
         path = Path(f"/tmp/pw-still-{alpha}.png")
         png(path, alpha)
-        decode = StillDecode(path)
+        decode = StillDecode(path, StillRegion((WIDTH, HEIGHT), (0, 0, WIDTH, HEIGHT), (WIDTH, HEIGHT)))
         end = time.monotonic() + STILL_TIMEOUT + 1
         while (result := decode.result()) == "pending" and time.monotonic() < end:
             time.sleep(0.01)

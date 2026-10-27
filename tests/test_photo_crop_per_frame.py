@@ -1,7 +1,7 @@
 """Each Frame gets its own crop of a photo (issue #131), through the real Planner (`project`), the
 fit rule it asks (`judge`) and the Player's real renderer (`player.plane_renderer.PlaneRenderer`
-through test_plane_renderer.py's fakes of its ports), whose draw request is read as the shader reads
-it (`player.geometry.fit_source_uv`).
+through test_plane_renderer.py's fakes of its ports), whose still decode is asked for the Frame's
+window of the photo (`player.planes.still_region`) and whose draw then cuts nothing more.
 
 Owner, 2026-10-21 (#131): "the same photo planned onto two Frames of different viewable shape gets
 two different crops, each matching its Frame." Owner, 2026-10-22: "Do not cut out faces"; smart
@@ -23,7 +23,7 @@ import pytest
 from support.house_time import UTC_HOUSE
 from support.key_content_builders import banded_grid, face, measured
 from support.position import LIGHTING
-from test_plane_renderer import FakeStill, Rig
+from test_plane_renderer import Rig
 
 from central.catalog import Candidate, SourcePool
 from central.installation_models import FrameOutput
@@ -34,8 +34,7 @@ from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import PoolLines, WallHistory
 from central.wall_plan.selection import SceneSelection
 from contracts.models import Calibration, OutputBinding, PositionBox, Variant, frame_output
-from contracts.photo_crop import crop_window
-from player.geometry import fit_source_uv
+from contracts.photo_crop import CENTRED, crop_window
 from player.rendering import LocalLayer
 
 SCREEN = (3840, 2160)
@@ -59,14 +58,6 @@ OFF_CENTRE_FACES = (face(0.70, 0.55, 0.82, 0.80), face(0.60, 0.50, 0.68, 0.70))
 SIDE_EDGE_FACES = (face(0.02, 0.30, 0.12, 0.50), face(0.88, 0.30, 0.98, 0.50))
 # Faces at its top and bottom edges: no window wider than the photo holds both whole.
 TOP_BOTTOM_EDGE_FACES = (face(0.40, 0.02, 0.55, 0.15), face(0.42, 0.85, 0.57, 0.98))
-
-
-class PhotoRig(Rig):
-    """test_plane_renderer.py's rig, each still decoded at the photo's own size."""
-
-    def _still(self, path):
-        self.stills.append(path)
-        return FakeStill(PHOTO_SIZE)
 
 
 def binding_of(frame_id: str, box: PositionBox) -> OutputBinding:
@@ -166,14 +157,16 @@ def test_one_photo_on_two_frames_gets_a_crop_of_each_frames_shape(first: str, se
                      if layer.frame_id == frame and layer.variant is not None
                      and layer.variant.asset_id == "subject")
         assert layer.crop == crop
-        rig = PhotoRig()
+        rig = Rig()
         assert rig.screens.screen_now.size == SCREEN
         rig.ready(LocalLayer(layer, Path("/media/subject.jpg"), 0.0, 1.0), frame=binding_of(frame, box))
+        (region,) = rig.regions
+        assert region.source == PHOTO_SIZE
+        left, top, box_width, box_height = region.box
+        drawn = (left / width, top / height, (left + box_width) / width, (top + box_height) / height)
+        assert drawn == pytest.approx(window, abs=1 / min(PHOTO_SIZE)), (frame, drawn, window)
         request = rig.fitter.draws[-1][0]
-        assert request.source.size == PHOTO_SIZE and request.crop == crop
-        drawn = (*fit_source_uv(0, 0, request.aspect, request.source.size, request.crop),
-                 *fit_source_uv(1, 1, request.aspect, request.source.size, request.crop))
-        assert drawn == pytest.approx(window), (frame, drawn, window)
+        assert request.source.size == region.size and request.crop == CENTRED
 
 
 @pytest.mark.parametrize("faces, refused, taken", [

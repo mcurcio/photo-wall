@@ -240,7 +240,7 @@ import gc, json, os, resource, struct, sys, time, zlib
 from pathlib import Path
 os.environ["GST_REGISTRY"] = "/tmp/gst-registry.bin"
 sys.path[:0] = ["/usr/lib/photo-wall/player"]
-from player.decode import StillDecode, VideoFrames, VideoRefused
+from player.decode import StillDecode, StillRegion, VideoFrames, VideoRefused
 decodes = int(sys.argv[1])
 
 def chunk(tag, data):
@@ -264,7 +264,7 @@ def descriptors():
     return count
 
 def still():
-    decode = StillDecode(photo)
+    decode = StillDecode(photo, StillRegion((width, height), (0, 0, width, height), (width, height)))
     deadline = time.monotonic() + 30
     while (result := decode.result()) == "pending" and time.monotonic() < deadline:
         time.sleep(0.005)
@@ -289,6 +289,55 @@ for _ in range(decodes):
 gc.collect()
 print(json.dumps({"sizes": sizes, "before": before, "stills": stills, "videos": descriptors()}))
 """
+
+
+# Run in the app root as above: a still's decode on the root's GStreamer hands over only its window
+# at its finish size (player/decode.py, The still pipeline). A 600 x 5,000 PNG, taller than the
+# GPU's largest texture (4,096), whose rows encode their index (red: row % 256, green: row // 256),
+# decoded as rows 2,000 to 2,399 halved to 300 x 200.
+STILL_WINDOW = r"""
+import json, os, struct, sys, time, zlib
+from pathlib import Path
+os.environ["GST_REGISTRY"] = "/tmp/gst-registry.bin"
+sys.path[:0] = ["/usr/lib/photo-wall/player"]
+from player.decode import StillDecode, StillRegion
+
+def chunk(tag, data):
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+
+width, height = 600, 5000
+photo = Path("/tmp/tall.png")
+photo.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+                  + chunk(b"IDAT", zlib.compress(b"".join(b"\x00" + bytes((row % 256, row // 256, 0)) * width
+                                                          for row in range(height))))
+                  + chunk(b"IEND", b""))
+decode = StillDecode(photo, StillRegion((width, height), (0, 2000, width, 400), (300, 200)))
+deadline = time.monotonic() + 30
+while (result := decode.result()) == "pending" and time.monotonic() < deadline:
+    time.sleep(0.005)
+decode.close()
+assert not isinstance(result, str), result
+rows = [result.pixels[row * result.stride + 150 * 4:row * result.stride + 150 * 4 + 2] for row in (0, result.size[1] - 1)]
+print(json.dumps({"size": list(result.size), "rows": [pixel[0] + 256 * pixel[1] for pixel in rows]}))
+"""
+
+
+def test_a_still_decode_hands_over_only_its_window_at_its_finish_size(mounted) -> None:
+    """Mutation probe AC4 (no videocrop in the still pipeline): the rows are the whole picture's."""
+    role, mount = mounted
+    if role != "app":
+        return                          # the Player is the app root's alone
+    result = subprocess.run(
+        as_root(["unshare", "--fork", "--pid", "--mount", "--kill-child", "sh", "-ec",
+                 'mount -t tmpfs tmpfs "$1/tmp"\n'
+                 'exec chroot "$1" /usr/bin/python3 -I -B -c "$2"',
+                 "sh", str(mount / "rootfs"), STILL_WINDOW]),
+        capture_output=True, text=True, timeout=240)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert report["size"] == [300, 200], report
+    first, last = report["rows"]
+    assert abs(first - 2000) <= 2 and abs(last - 2399) <= 2, report
 
 
 def test_the_players_decodes_free_their_descriptors(mounted) -> None:

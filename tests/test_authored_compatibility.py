@@ -231,7 +231,7 @@ def test_the_candidates_route_lists_what_fits_and_counts_what_it_skips(registry)
             wide.asset_id: "fits", unmeasured.asset_id: "not_measured"}
         assert answer["count"] == 2
         assert answer["skipped"] == {"beyond_crop_limit": 2, "below_frame_pixels": 1,
-                                     "above_player_limit": 0, "face_cut": 0, "interest_cut": 1, "no_video_here": 0,
+                                     "face_cut": 0, "interest_cut": 1, "no_video_here": 0,
                                      "not_measured": 1}
         looser = client.get(route, params={"frame_id": "wide", "crop_limit": 0.5},
                             headers=headers).json()

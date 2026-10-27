@@ -55,8 +55,8 @@ const ADVANCED: readonly Row[] = [
 const DETAILS: readonly Row[] = [
   { key: "window_steps", label: "Crop positions tried", control: "number", scale: 1, unit: "positions", step: 1, whole: true,
     help: "How finely a crop is slid across a photo to find its best place." },
-  { key: "max_still_edge", label: "Longest picture a Player shows", control: "number", scale: 1, unit: "px", step: 1, whole: true,
-    help: "No photo's copy is longer than this, and a Frame that would need a longer one shows other photos." },
+  { key: "scaled_copy_ratio", label: "Make a smaller copy above", control: "number", scale: 1, unit: "times what its Frames need", step: 0.05,
+    help: "A photo this many times larger than its largest Frame needs gets one smaller copy, made once and kept. A photo closer to that size is kept at its own size, and each Player scales it." },
 ];
 const ROWS = [...SHOWN, ...ADVANCED, ...DETAILS];
 

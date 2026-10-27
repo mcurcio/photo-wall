@@ -5,7 +5,9 @@ s1-page.md; owner, 2026-10-18: "the look-and-feel should be applied at the minim
 and the frame size"). Photos once; a video once per decoded frame (owner, gate answer Q1,
 2026-10-17: video carries the same look as photos).
 
-One GPU draw from the source to the target: Central's crop window, scaled to the finish size,
+One GPU draw from the source to the target: Central's crop window (for a still, the source is
+already that window at the finish size, player/planes.py `still_region`, so its request's crop is
+CENTRED and the draw cuts nothing more; a video's frame is cut here), scaled to the finish size,
 turned for the screen, decoded to linear light (a photo's sRGB, a video's BT.709), then the look
 (player/look_shader.py: the Frame's paper under the room's light and its mat shadow, the paper
 profile's LUT, the Display's software settings, encode, contrast, gamma, dither), written as stored

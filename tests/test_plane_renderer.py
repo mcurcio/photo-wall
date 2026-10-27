@@ -24,19 +24,20 @@ from contracts.frame_lighting import AT_FULL, FarLight, FrameLighting, Paper, Wa
 from contracts.models import Calibration, PositionBox
 from contracts.node_frame import neutral_operations
 from contracts.node_picture import DisplayLight
+from contracts.photo_crop import CENTRED
 from contracts.room_light import FixedEntry, KelvinColour, RoomLightsDocument
 from contracts.tuning import TestPattern
 from player import geometry as geometry_module
 from player import plane_renderer as plane_renderer_module
 from player.calibration_target import target_modules
 from player.calibration_trial import AppliedTrial
-from player.decode import StillPicture
+from player.decode import StillPicture, StillRegion
 from player.geometry import BoardDraw, encode_srgb
 from player.gpu import LINEAR, NV12, XR24, DmabufFrame, Target
 from player.pacing import DEFAULT_REFRESH, Word
 from player.plane_renderer import BAND_BYTES, FENCE_POLL, VIDEO_TARGETS, PlaneRenderer
 from player.plane_screen import FrameGrant, ScreenPicture
-from player.planes import MIN_STRENGTH, Composition, Screen, plane_strength
+from player.planes import MIN_STRENGTH, Composition, Screen, plane_strength, still_region
 from player.rendering import LocalLayer, OutputComposition
 
 OUTPUT = "hdmi1"
@@ -151,6 +152,8 @@ class FakeDevice:
     made: int = 0
     freed: list[int] = field(default_factory=list)
     textures: int = 0
+    sizes: list[tuple[int, int]] = field(default_factory=list)      # each texture's size
+    deleted: list[int] = field(default_factory=list)                # each texture deleted
     uploads: list[tuple[int, int]] = field(default_factory=list)    # each upload's rows
     imports: list[int] = field(default_factory=list)
     hold: bool = False
@@ -170,6 +173,7 @@ class FakeDevice:
     def texture(self, size):
         self.log.append("texture")
         self.textures += 1
+        self.sizes.append(size)
         return 500 + self.textures
 
     def upload(self, texture, size, stride, pixels, rows):
@@ -177,7 +181,7 @@ class FakeDevice:
         self.uploads.append(rows)
 
     def delete_texture(self, texture):
-        pass
+        self.deleted.append(texture)
 
     def import_frame(self, frame):
         self.log.append("import")
@@ -232,13 +236,16 @@ class FakePatterns:
 
 @dataclass
 class FakeStill:
+    """A still's decode of its region: done at once unless `held` (then "pending" until let go)."""
     size: tuple[int, int] = (1920, 1080)
+    held: bool = False
+    closed: bool = False
 
     def result(self):
-        return StillPicture(self.size, self.size[0] * 4, b"", False)
+        return "pending" if self.held else StillPicture(self.size, self.size[0] * 4, b"", False)
 
     def close(self):
-        pass
+        self.closed = True
 
 
 @dataclass
@@ -283,12 +290,16 @@ class Rig:
             log=self.log)
         self.videos: list[FakeVideo] = []
         self.stills: list[Path] = []
+        self.regions: list[StillRegion] = []
+        self.decodes: list[FakeStill] = []
         self.renderer = PlaneRenderer(self.screens, self.device, self.fitter, self.patterns, NoLuts(),
                                       stills=self._still, videos=self._video, clock=self.clock)
 
-    def _still(self, path):
+    def _still(self, path, region):
         self.stills.append(path)
-        return FakeStill()
+        self.regions.append(region)
+        self.decodes.append(FakeStill(region.size))
+        return self.decodes[-1]
 
     def _video(self, path, on_frame):
         video = FakeVideo(on_frame)
@@ -1021,12 +1032,10 @@ def test_a_picture_is_committed_only_once_the_gpu_has_finished_it():
 
 
 def test_a_still_is_finished_in_steps_at_most_one_a_refresh():
-    """A 4K still: its decode taken, its rows uploaded BAND_BYTES at a time, its draw: one step a
-    refresh over every layer, however often prepare is asked."""
+    """A 4K still: its decode started, then taken, its rows uploaded BAND_BYTES at a time, its draw:
+    one step a refresh over every layer, however often prepare is asked."""
     rig = Rig()
-    rig.renderer = PlaneRenderer(rig.screens, rig.device, rig.fitter, rig.patterns, NoLuts(),
-                                 stills=lambda path: FakeStill((3840, 2160)), videos=rig._video, clock=rig.clock)
-    first, second = photo("first", start=0), photo("second", start=1)
+    first, second = sized("first", 3840, 2160, start=0), sized("second", 3840, 2160, start=1)
     frame = framed()
     bands = -(-3840 * 4 * 2160 // BAND_BYTES)
     steps = []
@@ -1270,6 +1279,81 @@ def test_a_photo_is_finished_at_the_smaller_of_its_source_and_its_placement(sour
     plane, = rig.screens.commits[-1][0].planes
     assert plane.at == Placement(960, 540, 1920, 1080) and plane.size == finished and plane.enlarged is enlarged
     assert rig.screens.commits[-1][1]["still"].size == finished
+
+
+# The fireplace Frame as read from production on 2026-10-26: a 3,004 x 2,140 box on a 3,840 x 2,160
+# screen, showing a 2:3 photo whose copy is 3,004 x 4,506 (its window holds the Frame exactly).
+FIREPLACE = framed(PositionBox(left=418 / 3840, top=10 / 2160, width=3004 / 3840, height=2140 / 2160))
+TALL = (3004, 4506)
+
+
+def test_a_still_hands_the_gpu_only_its_window_at_its_finish_size():
+    """V3D's largest texture is 4,096 on a side: the copy's 4,506 rows never reach the GPU, only
+    its window at the finish size (player/planes.py `still_region`), drawn uncut. Mutation probe
+    AC4 (decode the whole copy): this fails."""
+    rig = Rig()
+    portrait = sized("portrait", *TALL, start=0)
+    rig.ready(portrait, frame=FIREPLACE)
+    plane_at = rig.renderer.present(OutputComposition(FIREPLACE, (portrait,), False, 0.0))
+    assert plane_at.status == "presented"
+    placement = rig.screens.commits[-1][0].planes[0].at
+    assert (placement.width, placement.height) == (3004, 2140)
+    assert rig.stills == [Path("/media/portrait.jpg")]
+    assert rig.regions == [still_region(portrait.layer, placement)]
+    assert rig.regions[0].size == (3004, 2140)
+    assert rig.device.sizes == [(3004, 2140)]
+    request, _ = rig.fitter.draws[-1]
+    assert request.source.size == request.size == (3004, 2140)
+    assert request.crop == CENTRED
+
+
+def test_a_new_window_decodes_the_still_again_and_nothing_else_does():
+    """A Position whose box changes shape is a new window: the still is decoded again and its old
+    texture deleted. The picture operations, the lights and the turn only draw it again."""
+    rig = Rig()
+    still = sized("still", 1280, 720, start=0)            # finished at its own size on every box below
+    rig.settle(still)
+    assert (len(rig.regions), rig.device.deleted) == (1, [])
+    rig.screens.operations = neutral_operations(OUTPUT, 7, DisplayLight(200, .01))
+    rig.settle(still)
+    rig.renderer.set_room_lights(RoomLightsDocument(change=1, lights={"room": FixedEntry(colour=KelvinColour(kelvin=6500))}))
+    rig.settle(still)
+    rig.screens.screen_now = Screen(OUTPUT, (2160, 3840), 90)
+    rig.settle(still, frame=framed(PositionBox(top=1313 / 3840, height=1215 / 3840)))
+    assert len(rig.regions) == 1 and rig.device.deleted == []
+    rig.screens.screen_now = Screen(OUTPUT, (3840, 2160), 0)
+    rig.settle(still, frame=framed(PositionBox(width=0.5)))      # 1,920 x 2,160: another shape
+    assert len(rig.regions) == 2 and rig.device.deleted == [501]
+    assert rig.regions[-1].box[2] < rig.regions[0].box[2]
+
+
+def test_one_still_decode_is_in_flight_at_a_time():
+    """The second still's decode is not started until the first's answers. Mutation probe AC7
+    (no gate): this fails."""
+    rig = Rig()
+    first, second = photo("first", start=0), photo("second", start=1)
+    frame = framed()
+    holding = []
+
+    def held(path, region):
+        holding.append(FakeStill(region.size, held=True))
+        return holding[-1]
+
+    rig.renderer = PlaneRenderer(rig.screens, rig.device, rig.fitter, rig.patterns, NoLuts(),
+                                 stills=held, videos=rig._video, clock=rig.clock)
+    for _ in range(10):
+        rig.renderer.prepare(first, frame)
+        rig.renderer.prepare(second, frame)
+        rig.renderer.finish()
+        rig.clock.tick()
+    assert len(holding) == 1
+    holding[0].held = False
+    for _ in range(10):
+        rig.renderer.prepare(first, frame)
+        rig.renderer.prepare(second, frame)
+        rig.renderer.finish()
+        rig.clock.tick()
+    assert len(holding) == 2
 
 
 def test_a_turned_screen_finishes_the_picture_at_its_size_laid_out_turned():

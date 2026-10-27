@@ -27,12 +27,20 @@ Rules this module owns (one home each):
   (the screen keeps its last commit) until finished. A calibration target's QR names the Player
   once `set_player` gave an id. The composition reported and tagged stays the looked one: a
   pattern is a tuning overlay, not a change of what plays.
+- **When a still is decoded**: in `finish`, never in `prepare` or `present`, and at most one still
+  decode in flight over every Output (the next starts once it answers). A still's decode hands
+  the GPU only its crop window at its finish size (player/planes.py `still_region`), so its
+  texture is at most the finish size, never the whole copy. A new crop window or a new finish
+  size (a new crop, a Position whose box changes shape, or size below the source) decodes it
+  again and deletes its old texture; the turn, the picture operations, the lights and the LUT
+  only draw it again from the texture it has.
 - **When a picture is finished again**: a still when anything its pixels depend on changes (its
   decode, its finish size (player/planes.py `finish_size`: the smaller of its cropped source and
-  the placement, which the display controller enlarges to the placement), the turn, the crop, the placement's aspect, the Output's picture
-  operations, the Frame's lights, its LUT's generation); a playing video on each new decoded
-  frame while it is seen (in its screen's last commit), into the first of its VIDEO_TARGETS
-  targets the screen has released. Never a fade: a fade is a strength.
+  the placement, which the display controller enlarges to the placement), the turn, the crop,
+  the placement's aspect, the Output's picture operations, the Frame's lights, its LUT's
+  generation); a playing video on each new decoded frame while it is seen (in its screen's last
+  commit), into the first of its VIDEO_TARGETS targets the screen has released. Never a fade: a
+  fade is a strength.
 - **A video's targets are made together**: all VIDEO_TARGETS, at its finish size, by the `finish`
   that draws its first frame (during its prepare lead), never one by one on its first frames
   during the fade that reveals it (Pi diagnosis, milestone 3: ~10 ms of CPU and an import each).
@@ -44,8 +52,8 @@ Rules this module owns (one home each):
   work owed, in this order: each seen started video's newest waiting frame (or a prepared video's
   first) drawn into a released target and fenced, one draw per video per call; every pattern ground
   and black picture owed, drawn and fenced; at most one still step over every Output (its decode
-  taken, a band of BAND_BYTES of its rows uploaded, or its draw) once STEP_GAP has passed since the
-  last, seen layers first, then by start. A still not needed before a fade under way on any Output
+  started, its decode taken, a band of BAND_BYTES of its rows uploaded, or its draw) once STEP_GAP
+  has passed since the last, seen layers first, then by start. A still not needed before a fade under way on any Output
   is over (it starts after that fade ends) takes no step during it.
 - **Every fence is asked**: `finish` ends by asking every outstanding fence (each black picture's,
   each pattern ground's, each layer's draw), so none waits for a present to ask for its picture
@@ -105,15 +113,23 @@ from typing import Final, Literal, Protocol
 from contracts.calibration_target import QrModules, TargetCode
 from contracts.frame_fit import Placement, place_box
 from contracts.frame_lighting import FrameLighting
-from contracts.models import AppliedCalibration, Calibration, Layer, OutputBinding, frame_size_mm
+from contracts.models import (
+    AppliedCalibration,
+    Calibration,
+    Layer,
+    OutputBinding,
+    PhotoCrop,
+    frame_size_mm,
+)
 from contracts.node_frame import PictureOperations, neutral_operations
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
+from contracts.photo_crop import CENTRED
 from contracts.room_light import RoomLightsDocument
 from contracts.tuning import TARGET_PATTERNS
 from player.calibration_target import target_modules
 from player.calibration_trial import AppliedTrial
 from player.controller_budget import PI5, ControllerBudget, fits
-from player.decode import StillPicture
+from player.decode import StillPicture, StillRegion
 from player.fit_pass import DrawTarget, FitRequest, FitSource, target_size
 from player.geometry import FrameLights, picture_board, picture_lights
 from player.gpu import DmabufFrame, Target
@@ -129,7 +145,15 @@ from player.plane_screen import (
     commit_tag,
     overlay_corners,
 )
-from player.planes import Composition, FrameLayers, Plane, Screen, compose, finish_size
+from player.planes import (
+    Composition,
+    FrameLayers,
+    Plane,
+    Screen,
+    compose,
+    finish_size,
+    still_region,
+)
 from player.rendering import (
     CapacityResult,
     LocalLayer,
@@ -234,7 +258,7 @@ class Video(Protocol):
     def close(self) -> None: ...
 
 
-StillFactory = Callable[[Path], Still]
+StillFactory = Callable[[Path, StillRegion], Still]
 VideoFactory = Callable[[Path, Callable[[], None]], Video]
 
 
@@ -320,9 +344,9 @@ class _Setting:
 
 @dataclass
 class _Layer:
-    """One media layer's decode and its finished pictures. A still: its source taken from the
-    decode, uploaded into `texture` a band at a time (`uploaded` rows so far), then one picture,
-    finished again when its key changes. A video: up to VIDEO_TARGETS pictures, the newest decoded
+    """One media layer's decode and its finished pictures. A still: its decode of `region` (none
+    until `finish` starts it), its source taken from the decode, uploaded into `texture` a band at
+    a time (`uploaded` rows so far), then one picture, finished again when its key changes. A video: up to VIDEO_TARGETS pictures, the newest decoded
     frame drawn into the first the screen has released. `picture` is the newest finished picture
     and `key` what it was finished for; `drawing` a picture drawn whose fence has not signalled,
     for `drawing_key` (a video's, of the frame `drawing_frame`); `held` is a video's frame in
@@ -333,6 +357,7 @@ class _Layer:
     local: LocalLayer
     binding: OutputBinding
     still: Still | None = None
+    region: StillRegion | None = None
     video: Video | None = None
     source: StillPicture | None = None
     texture: int = 0
@@ -396,6 +421,7 @@ class PlaneRenderer:
         self._newest: dict[str, Composition] = {}   # every Output's newest composition, for the budget
         self._fades: dict[str, tuple[float, float]] = {}    # Output -> its fade's end (plan, monotonic)
         self._stepped = -float("inf")               # when the last finishing step was taken
+        self._decoding: _Layer | None = None        # the one still decode in flight (module rule)
 
     @property
     def finishing(self) -> bool:
@@ -493,6 +519,7 @@ class PlaneRenderer:
             except (RuntimeError, ValueError):
                 self._refused_blacks.add(owed)
         self._owed_blacks.clear()
+        self._settle_decoding()
         if self._may_step():
             for entry in self._owed_stills():
                 if self._still_step(entry):
@@ -684,6 +711,8 @@ class PlaneRenderer:
         entry = self._layers.pop(assignment_id, None)
         if entry is None:
             return
+        if self._decoding is entry:
+            self._decoding = None
         if entry.still is not None:
             entry.still.close()
         if entry.video is not None:
@@ -848,8 +877,9 @@ class PlaneRenderer:
     def _ready(self, local: LocalLayer, binding: OutputBinding, setting: _Setting, *,
                live: bool = False) -> ScreenPicture | Literal["pending", "failed"]:
         """`local`'s finished picture for `setting` (module rule), else "pending" with the picture
-        owed to `finish`; its decode started when it has none. `live`: for a present (a video
-        starts, module rule), not a prepare. No GPU work."""
+        owed to `finish`; a video's decode started when it has none (a still's is started by
+        `finish`, module rule). `live`: for a present (a video starts, module rule), not a
+        prepare. No GPU work."""
         if local.layer.presentation == "black":
             return self._black(binding.output_id, setting.size)
         entry = self._layers.get(local.layer.assignment_id)
@@ -872,14 +902,14 @@ class PlaneRenderer:
         return self._video_ready(entry, setting)
 
     def _decode(self, local: LocalLayer, binding: OutputBinding, live: bool) -> _Layer:
+        """`local`'s entry: a video's decode started; a still's waits for `finish` (module rule,
+        When a still is decoded). Failed for a layer with no file or no variant."""
         entry = _Layer(local, binding, started=live)
         variant = local.layer.variant
         try:
             if local.path is None or variant is None:
                 raise ValueError("decode_path")
-            if variant.duration is None:
-                entry.still = self._stills(local.path)
-            else:
+            if variant.duration is not None:
                 assignment_id = local.layer.assignment_id
                 entry.video = self._videos(local.path, lambda: self._video_frame(assignment_id))
                 entry.failed = not entry.video.seek(local.position)
@@ -894,8 +924,10 @@ class PlaneRenderer:
                 setting.operations, setting.lights, setting.generation)
 
     @staticmethod
-    def _request(entry: _Layer, source: FitSource, setting: _Setting) -> FitRequest:
-        return FitRequest(source, entry.local.layer.crop, setting.placement.aspect, setting.finish(entry.local.layer),
+    def _request(entry: _Layer, source: FitSource, setting: _Setting, crop: PhotoCrop | None) -> FitRequest:
+        """The fit pass's request for `entry` from `source`: a still's source is its crop window
+        already (`crop` CENTRED), a video's frame is cut by the layer's crop."""
+        return FitRequest(source, crop, setting.placement.aspect, setting.finish(entry.local.layer),
                           setting.screen.turn, setting.operations, setting.lights, setting.lut)
 
     def _may_step(self) -> bool:
@@ -923,23 +955,66 @@ class PlaneRenderer:
     def _owed_stills(self) -> list[_Layer]:
         """The stills owed a step for what they were last asked (module rule): seen layers first,
         then by start; none drawing (its fence answers first) and none waiting for a fade."""
-        owed = [entry for entry in self._layers.values()
-                if entry.still is not None and not entry.failed and entry.want is not None and entry.drawing is None
-                and (entry.picture is None or entry.key != self._key(entry, entry.want))
-                and not self._deferred(entry.local)]
+        owed = [entry for entry in self._layers.values() if self._still_owed(entry) and not self._deferred(entry.local)]
         return sorted(owed, key=lambda entry: (not self._seen(entry.local.layer.assignment_id),
                                                entry.local.layer.start))
 
+    def _still_owed(self, entry: _Layer) -> bool:
+        """Whether `entry` is a still owed a step for what it was last asked, a fade aside: not
+        failed, asked, not drawing (its fence answers first), its picture not finished for it."""
+        return (entry.video is None and not entry.failed and entry.want is not None and entry.drawing is None
+                and (entry.picture is None or entry.key != self._key(entry, entry.want)))
+
+    def _settle_decoding(self) -> None:
+        """The still decode in flight never holds up the others (module rule, When a still is
+        decoded): one whose layer now waits for a fade has its result taken once it is done (no
+        GPU work, so no step), and one whose layer no longer needs it (its picture is finished for
+        what it is asked again, or it failed) is given up, its region forgotten so it decodes again
+        when asked."""
+        entry = self._decoding
+        if entry is None or entry.drawing is not None:
+            return
+        if self._still_owed(entry):
+            if self._deferred(entry.local) and entry.still is not None and entry.source is None:
+                result = entry.still.result()
+                if result != "pending":
+                    self._decoding = None
+                    entry.failed = result == "failed"
+                    entry.source = None if result == "failed" else result
+            return
+        self._decoding = None
+        if entry.still is not None:
+            entry.still.close()
+        entry.still = entry.region = None
+
     def _still_step(self, entry: _Layer) -> bool:
         """One step towards the still's picture for what it was last asked (module rule): its decode
-        taken, a band of its rows uploaded, or its draw; whether a step was spent (a decode not
-        done yet spends none)."""
+        started (for a new crop window or finish size, once no other still decode is in flight), its
+        decode taken, a band of its rows uploaded, or its draw; whether a step was spent (a decode
+        not done yet, or waiting for another, spends none)."""
         if self._still_ready(entry, entry.want) != "pending" or entry.drawing is not None:
             return False
+        wanted = still_region(entry.local.layer, entry.want.placement)
+        if entry.region != wanted:
+            if self._decoding is not None and self._decoding is not entry:
+                return False                        # one still decode in flight
+            if entry.still is not None:
+                entry.still.close()
+            if entry.texture:
+                self._device.delete_texture(entry.texture)
+            entry.uploaded, entry.source, entry.texture, entry.region = 0, None, 0, wanted
+            self._decoding = entry
+            self._stepped = self._clock()
+            try:
+                entry.still = self._stills(entry.local.path, wanted)
+            except (RuntimeError, ValueError):
+                entry.still, entry.failed, self._decoding = None, True, None
+            return True
         if entry.source is None:
             result = entry.still.result()
             if result == "pending":
                 return False                        # nothing taken: no step spent
+            self._decoding = None
             self._stepped = self._clock()
             if result == "failed":
                 entry.failed = True
@@ -962,7 +1037,7 @@ class PlaneRenderer:
                 return True
             setting = entry.want
             request = self._request(entry, FitSource(entry.texture, False, source.size, "srgb", source.alpha),
-                                    setting)
+                                    setting, CENTRED)
             entry.drawing = self._draw(lambda target: self._fitter.draw(request, target),
                                        setting.target(entry.local.layer), opaque=not source.alpha)
             entry.drawing_key = self._key(entry, setting)
@@ -1032,7 +1107,8 @@ class PlaneRenderer:
             if target is None:
                 return
             texture = self._device.import_frame(source)
-            request = self._request(entry, FitSource(texture, True, source.size, "bt709", False), setting)
+            request = self._request(entry, FitSource(texture, True, source.size, "bt709", False), setting,
+                                    entry.local.layer.crop)
             self._fitter.draw(request, target.target)
             target.fence = self._device.fence()
             entry.drawing, entry.drawing_key, entry.drawing_frame = target, self._key(entry, setting), source
