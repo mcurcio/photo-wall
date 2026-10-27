@@ -1,11 +1,13 @@
 import {
-  type ColourLineView, type ColourSensor, type ColourSensorView, CONSTANTS, type HeardEntityView, type LightColour,
+  type ColourLineView, type ColourSensor, type ColourSensorView, CONSTANTS, type DoubtReason, type DoubtView,
+  type FrameImpediment, type HeardEntityView, type LightColour,
   type Measured, PATTERNS, type PlayerDrawnView, type RefusedReportView, type ReportedColourSource, type ReportRefusal,
   type RoomLight, type RoomLightRefusal, type RoomLightsView, type RoomLightView, type Sensor, type SensorView,
-  type Unavailable,
+  type SourceAttentionView, type Unavailable,
 } from "../../generated/contract";
-import type { TruthKind } from "../../design/tokens";
+import type { Severity, TruthKind } from "../../design/tokens";
 import type { ColourLine } from "../../patterns/colour-swatch";
+import type { Verdict } from "../../patterns/health-badge";
 import { unitWords } from "../../patterns/units";
 
 /*
@@ -92,10 +94,31 @@ function outsideWords(colour: LightColour): string {
   return drawn === colour.kelvin ? "" : ` · outside what the screen draws (drawn at ${unitWords(drawn, "K")})`;
 }
 
-/** A fact kept while its source can't tell: "Can't tell since 18:42 (keeping 3,400 K)" (`clock` says
- * the time); `kept` null (nothing was ever stated): "Can't tell since 18:42". */
-export function keptWords(cantTellSince: number, kept: string | null, clock: (epochSeconds: number) => string): string {
-  const since = `Can't tell since ${clock(cantTellSince)}`;
+/** Why Central can't stand behind a reference's last word, in words: it can't read what its source
+ * says (Central's error), its source says it can't tell, or the link to its source closed. Every
+ * reason Central has (a reason without words fails the typecheck). */
+export const DOUBT_WORDS: Record<DoubtReason, string> = {
+  "cant-read": "Can't read",
+  "cant-tell": "Can't tell",
+  "link-closed": "Link closed",
+};
+
+/** A doubt's tier: a source that can't tell is Can't tell (`unknown`); Photo Wall unable to read it, or
+ * its link closed, is a problem with a fix (`alarm`). */
+export function doubtSeverity(reason: DoubtReason): Severity {
+  return reason === "cant-tell" ? "unknown" : "alarm";
+}
+
+/** A doubt and since when: "Can't read since 18:42", "Link closed since 18:42" (`clock` says the time). */
+export function doubtSince(doubt: DoubtView, clock: (epochSeconds: number) => string): string {
+  return `${DOUBT_WORDS[doubt.reason]} since ${clock(doubt.since)}`;
+}
+
+/** A fact kept while Central is in doubt of it: "Can't tell since 18:42 (keeping 3,400 K)", "Can't
+ * read since 18:42 (keeping Off)" (`clock` says the time); `kept` null (nothing was ever stated):
+ * "Can't tell since 18:42". */
+export function keptWords(doubt: DoubtView, kept: string | null, clock: (epochSeconds: number) => string): string {
+  const since = doubtSince(doubt, clock);
   return kept === null ? since : `${since} (keeping ${kept})`;
 }
 
@@ -103,8 +126,9 @@ export function keptWords(cantTellSince: number, kept: string | null, clock: (ep
  * A light's colour line, from Central's ColourLineView: "Typed 5,500 K"; "Following its bulb 3,400 K",
  * "Following Sky colour 3,400 K" (a colour sensor, named by `names`), "Following its bulb's colour" (a
  * bulb in a colour mode, drawn beside its swatch, `colourSwatch`); "Typed 5,500 K until its bulb says" (its source never stated one); while
- * its source can't tell, "Can't tell since 18:42 (keeping 3,400 K)", or when it never stated one,
- * "Typed 5,500 K until its bulb says · can't tell since 18:42" (a typed value is never "kept"). A kelvin outside the screen's
+ * Central is in doubt of its source, "Can't tell since 18:42 (keeping 3,400 K)" (or "Can't read …",
+ * "Link closed …"), or when it never stated one, "Typed 5,500 K until its bulb says · can't tell since
+ * 18:42" (a typed value is never "kept"). A kelvin outside the screen's
  * colour table adds " · outside what the screen draws (drawn at 10,000 K)". `clock` says a time.
  */
 export function colourLineWords(line: ColourLineView, names: Readonly<Record<string, string>>,
@@ -116,17 +140,17 @@ export function colourLineWords(line: ColourLineView, names: Readonly<Record<str
   else if (line.colour_from === "never-stated") {
     // Nothing stated, so nothing is kept: the typed colour stands, and can't tell is said beside it.
     said = `Typed ${kelvin ?? "(colour)"} until ${source} says`;
-    if (line.cant_tell_since !== null) said += ` · can't tell since ${clock(line.cant_tell_since)}`;
-  } else if (line.cant_tell_since !== null) said = keptWords(line.cant_tell_since, kelvin ?? "its colour", clock);
+    if (line.doubt !== null) said += ` · ${DOUBT_WORDS[line.doubt.reason].toLowerCase()} since ${clock(line.doubt.since)}`;
+  } else if (line.doubt !== null) said = keptWords(line.doubt, kelvin ?? "its colour", clock);
   else if (line.colour_from === "following") said = kelvin === null ? `Following ${source}'s colour` : `Following ${source} ${kelvin}`;
   else said = `Typed ${kelvin ?? "(colour)"}`;
   return said + outsideWords(line.colour);
 }
 
-/** The truth kind a colour line is shown in: can't tell is unknown, following is what its source
+/** The truth kind a colour line is shown in: in doubt is unknown, following is what its source
  * reported, typed (also until its source says) is what was set. */
 function colourLineTone(line: ColourLineView): TruthKind {
-  if (line.source !== "typed" && line.cant_tell_since !== null) return "unknown";
+  if (line.source !== "typed" && line.doubt !== null) return "unknown";
   return line.source !== "typed" && line.colour_from === "following" ? "reported" : "set";
 }
 
@@ -147,26 +171,28 @@ export function colourLineSaid(line: ColourLineView, names: Readonly<Record<stri
   return { words: colourLineWords(line, names, clock), tone: colourLineTone(line), swatch: colourSwatch(line) };
 }
 
-/** A light's state now: its entry's words ("On, 60 %"), or while its reporter can't tell, the kept
- * state, "Can't tell since 18:42 (keeping On, 60 %)". */
+/** A light's state now: its entry's words ("On, 60 %"), or while Central is in doubt of its reporter,
+ * the kept state, "Can't tell since 18:42 (keeping On, 60 %)", "Can't read since 18:42 (keeping Off)",
+ * "Link closed since 18:42 (keeping Off)". */
 export function brightnessWords(view: RoomLightView, clock: (epochSeconds: number) => string): string {
   const said = entryWords(view.entry);
-  if (view.cant_tell_since === null) return said;
+  if (view.doubt === null) return said;
   const stated = view.entry.kind !== "fixed" && view.entry.state.kind !== "not-reported";
-  return keptWords(view.cant_tell_since, stated ? said : null, clock);
+  return keptWords(view.doubt, stated ? said : null, clock);
 }
 
-/** A Sensor's reading now: "320 lx", or while it can't tell, "Can't tell since 18:42 (keeping 320 lx)". */
+/** A Sensor's reading now: "320 lx", or while Central is in doubt of it, "Can't tell since 18:42
+ * (keeping 320 lx)" (or "Can't read …", "Link closed …"). */
 export function sensorReadingWords(view: SensorView, clock: (epochSeconds: number) => string): string {
-  if (view.cant_tell_since === null) return readingWords(view.reading);
-  return keptWords(view.cant_tell_since, view.reading === null ? null : readingWords(view.reading), clock);
+  if (view.doubt === null) return readingWords(view.reading);
+  return keptWords(view.doubt, view.reading === null ? null : readingWords(view.reading), clock);
 }
 
-/** A colour sensor's last colour: "3,400 K", "Not reported yet", or while it can't tell, "Can't tell
- * since 18:42 (keeping 3,400 K)". */
+/** A colour sensor's last colour: "3,400 K", "Not reported yet", or while Central is in doubt of it,
+ * "Can't tell since 18:42 (keeping 3,400 K)" (or "Can't read …", "Link closed …"). */
 export function colourReadingWords(view: ColourSensorView, clock: (epochSeconds: number) => string): string {
   const said = view.colour === null ? null : unitWords(view.colour.kelvin, "K");
-  if (view.cant_tell_since !== null) return keptWords(view.cant_tell_since, said, clock);
+  if (view.doubt !== null) return keptWords(view.doubt, said, clock);
   return said ?? "Not reported yet";
 }
 
@@ -302,4 +328,60 @@ export function reportedThrough(name: string, entity: string, colour: ReportedCo
 /** A Sensor named `name` whose readings smart-home illuminance entity `entity` reports. */
 export function smartSensor(name: string, entity: string): Sensor {
   return { name, at: { source: CONSTANTS.HOME_ASSISTANT_SOURCE, address: entity } };
+}
+
+/*
+ * Central's errors in the console's words (central/central_errors/: Needs attention's source rows and
+ * the Frame page's "Central's error"). Central judges which reference it is in doubt of, why and what
+ * to do (`what_to_do`, its source's advice, in the owner's terms); a Frame's Pi judges whether that
+ * doubt blacks its Frame. The console only words them. Pure: no React, no request.
+ */
+
+/** Why a source's word is in doubt, as the cause of a Needs attention row: every reason Central has. */
+const CAUSE_WORDS: Record<DoubtReason, string> = {
+  "cant-read": "Photo Wall can't read what its source reports.",
+  "cant-tell": "Its source says it can't tell.",
+  "link-closed": "Photo Wall's link to its source closed.",
+};
+
+/** What Photo Wall does meanwhile: the last word stands (the room lights document keeps it). */
+export const KEEPING_WORDS = "Until then, the Frames that use it draw with its last word.";
+
+/** A sentence from Central's advice: its own words, with a full stop when it has none. */
+function sentence(words: string): string {
+  return /[.!?]$/.test(words) ? words : `${words}.`;
+}
+
+/** A Needs attention row's verdict: its doubt in the status words, on the one severity scale. */
+export function doubtVerdict(row: SourceAttentionView): Verdict {
+  return { severity: doubtSeverity(row.doubt.reason), label: DOUBT_WORDS[row.doubt.reason], receipt: null };
+}
+
+/** What is wrong and what to do, in one line: "Photo Wall can't read what its source reports. Update
+ * Galleria in Home Assistant (HACS) to its newest release." */
+export function causeAndFix(row: SourceAttentionView): string {
+  return `${CAUSE_WORDS[row.doubt.reason]} ${sentence(row.what_to_do)}`;
+}
+
+/** Who a row is about: the room lights its source reports, by name ("Family Room Lights, Hall lamp"),
+ * else its address (a Sensor that measures no light, a colour sensor). */
+export function subjectWords(row: SourceAttentionView, names: Readonly<Record<string, string>>): string {
+  return row.lights.length === 0 ? row.address : row.lights.map((id) => names[id] ?? id).join(", ");
+}
+
+/** The evidence under Details: where the word comes from ("home-assistant · light.family_room"). */
+export function referenceWords(row: SourceAttentionView): string {
+  return `${row.source} · ${row.address}`;
+}
+
+/** The Frame page's "Central's error" in words, by what the Frame's Pi last said. */
+export function impedimentWords(impediment: FrameImpediment): string {
+  switch (impediment.kind) {
+    case "impeded":
+      return "Its Pi reports this Frame is black because Central can't stand behind a room light it uses, and draws Central's card over it.";
+    case "clear":
+      return "Its Pi reports no error of Central's blacks this Frame.";
+    default:
+      return "Its Pi has not said whether an error of Central's blacks this Frame: it may run an older release, or not be connected yet.";
+  }
 }

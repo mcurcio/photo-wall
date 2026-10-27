@@ -303,7 +303,8 @@ type Removing = { kind: "light"; light: RoomLightView } | { kind: "sensor"; sens
  * it is, its last colour and the lights that follow it. Lights are added, changed and removed here,
  * a smart light picked from the smart home's light entities; a smart Sensor is added here from its
  * illuminance entities, a wired one on its Pi's Hardware page; a colour sensor from its
- * colour-temperature entities. A fact its source can't tell is kept: "Can't tell since …". Central's
+ * colour-temperature entities. A fact Central is in doubt of is kept: "Can't tell since …", "Can't read
+ * since …", "Link closed since …". Central's
  * refusals in words. The page reads and writes; this is what a story draws.
  */
 export function RoomLights({

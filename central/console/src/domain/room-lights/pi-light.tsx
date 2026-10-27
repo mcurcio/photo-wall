@@ -7,7 +7,7 @@ import { Button } from "../../ui/button";
 import { Field, TextInput } from "../../ui/field";
 import { Inline, Stack } from "../../ui/stack";
 import { DrawnLine } from "./drawn-line";
-import { readingWords, REFUSED_READING_WORDS } from "./model";
+import { REFUSED_READING_WORDS, sensorReadingWords } from "./model";
 
 export interface PiLightProps {
   /** The Sensor wired to this Pi (undefined: none set up). */
@@ -60,7 +60,7 @@ export function PiLight({ sensor, drawn, refused, since, unread, note, onSaveSen
       ) : (
         <>
           <FactRow label="Light Sensor" tone="set">{sensor.sensor.name}</FactRow>
-          <FactRow label="Reading" tone="reported">{readingWords(sensor.reading)}</FactRow>
+          <FactRow label="Reading" tone={sensor.doubt === null ? "reported" : "unknown"}>{sensorReadingWords(sensor, since)}</FactRow>
         </>
       )}
       {refused.length > 0 && (

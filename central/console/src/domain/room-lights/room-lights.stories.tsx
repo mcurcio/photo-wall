@@ -55,9 +55,29 @@ export const OffAndUnavailable: Story = {
         { ...OVERHEADS, entry: { kind: "reported", colour: { kind: "rgb", rgb: [1, 0.8, 0.6] },
           state: { kind: "dimmer", on: false, brightness: 0 }, doubt: null } },
         { ...SPOT, entry: { kind: "reported", colour: { kind: "kelvin", kelvin: 2700 },
-          state: { kind: "dimmer", on: true, brightness: 0.4 }, doubt: null }, heard_at: HEARD, cant_tell_since: HEARD,
-          colour: { ...SPOT.colour, cant_tell_since: HEARD } },
+          state: { kind: "dimmer", on: true, brightness: 0.4 }, doubt: null }, heard_at: HEARD, doubt: { reason: "cant-tell", since: HEARD },
+          colour: { ...SPOT.colour, doubt: { reason: "cant-tell", since: HEARD } } },
       ],
+    },
+  },
+};
+/** Photo Wall can't read a light's reports (its last state, Off, kept with its colour), and the link
+ * to the smart home closed for a Sensor (its last reading kept): Central's doubts, said as the light's
+ * and the Sensor's own facts, never naming the integration. */
+export const CantReadAndLinkClosed: Story = {
+  tags: WHOLE,
+  args: {
+    view: {
+      ...ROOMS,
+      lights: [
+        { ...OVERHEADS, entry: { kind: "reported", colour: { kind: "rgb", rgb: [1, 0.8, 0.6] },
+          state: { kind: "dimmer", on: false, brightness: 0 }, doubt: null }, heard_at: HEARD,
+          doubt: { reason: "cant-read", since: HEARD - 1800 },
+          colour: { ...OVERHEADS.colour, doubt: { reason: "cant-read", since: HEARD - 1800 } } },
+        LAMP,
+      ],
+      sensors: ROOMS.sensors.map((sensor, index) => index === 0
+        ? { ...sensor, doubt: { reason: "link-closed" as const, since: HEARD - 600 } } : sensor),
     },
   },
 };
@@ -76,7 +96,7 @@ export const ColourLines: Story = {
         DAYLIGHT,
         SPOT,
         lined(DAYLIGHT, "Porch light", { colour: { kind: "kelvin", kelvin: 5500 }, colour_from: "never-stated", stated_at: null }),
-        lined(DAYLIGHT, "Window light", { cant_tell_since: HEARD - 3600 }),
+        lined(DAYLIGHT, "Window light", { doubt: { reason: "cant-tell", since: HEARD - 3600 } }),
         following("Cold bulb", 34000),
       ],
       colour_sensors: [{ ...SKY, followed_by: ["daylight", "porch-light", "window-light"] }],
@@ -89,8 +109,8 @@ export const ColourSensorCantTell: Story = {
   args: {
     view: {
       ...ROOMS,
-      lights: [{ ...DAYLIGHT, colour: { ...DAYLIGHT.colour, cant_tell_since: HEARD - 600 } }],
-      colour_sensors: [{ ...SKY, cant_tell_since: HEARD - 600 }],
+      lights: [{ ...DAYLIGHT, colour: { ...DAYLIGHT.colour, doubt: { reason: "cant-tell", since: HEARD - 600 } } }],
+      colour_sensors: [{ ...SKY, doubt: { reason: "cant-tell", since: HEARD - 600 } }],
     },
   },
 };
@@ -114,11 +134,17 @@ const checks: [string, string][] = [
   [idFromName("Spot-"), "spot"],
   [colourLineWords(DAYLIGHT.colour, names, clock), "Following Sky colour 3,400 K"],
   [colourLineWords(OVERHEADS.colour, names, clock), "Following its bulb's colour"],
-  [colourLineWords({ ...SPOT.colour, cant_tell_since: HEARD }, names, clock), "Typed 2,700 K until its bulb says · can't tell since 18:42"],
+  [colourLineWords({ ...SPOT.colour, doubt: { reason: "cant-tell", since: HEARD } }, names, clock), "Typed 2,700 K until its bulb says · can't tell since 18:42"],
   [colourLineWords(SPOT.colour, names, clock), "Typed 2,700 K until its bulb says"],
-  [colourLineWords({ ...DAYLIGHT.colour, cant_tell_since: HEARD }, names, clock), "Can't tell since 18:42 (keeping 3,400 K)"],
+  [colourLineWords({ ...DAYLIGHT.colour, doubt: { reason: "cant-tell", since: HEARD } }, names, clock), "Can't tell since 18:42 (keeping 3,400 K)"],
   [brightnessWords({ ...SPOT, entry: { kind: "reported", colour: { kind: "kelvin", kelvin: 2700 },
-    state: { kind: "dimmer", on: true, brightness: 0.6 }, doubt: null }, cant_tell_since: HEARD }, clock), "Can't tell since 18:42 (keeping On, 60 %)"],
+    state: { kind: "dimmer", on: true, brightness: 0.6 }, doubt: null }, doubt: { reason: "cant-tell", since: HEARD } }, clock), "Can't tell since 18:42 (keeping On, 60 %)"],
+  [brightnessWords({ ...SPOT, entry: { kind: "reported", colour: { kind: "kelvin", kelvin: 2700 },
+    state: { kind: "dimmer", on: false, brightness: 0 }, doubt: null }, doubt: { reason: "cant-read", since: HEARD } }, clock), "Can't read since 18:42 (keeping Off)"],
+  [colourLineWords({ ...SPOT.colour, doubt: { reason: "link-closed", since: HEARD } }, names, clock), "Typed 2,700 K until its bulb says · link closed since 18:42"],
+  // Only the doubt's words are lowered after the dot, never the time's.
+  [colourLineWords({ ...SPOT.colour, doubt: { reason: "cant-read", since: HEARD } }, names, () => "Tue 18:42"),
+    "Typed 2,700 K until its bulb says · can't read since Tue 18:42"],
 ];
 for (const [said, meant] of checks) {
   if (said !== meant) throw new Error(`room light words: ${JSON.stringify(said)} is not ${JSON.stringify(meant)}`);

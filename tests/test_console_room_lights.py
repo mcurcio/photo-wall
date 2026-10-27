@@ -1,7 +1,7 @@
 """Room lights in the console's words: central/console/src/domain/room-lights/model.ts, the one home
 of a room light's state line, who reports it in light terms, its colour line (Central's
 ColourLineView in words: typed, following its bulb or a colour sensor, typed until its source says,
-"Can't tell since …" with the colour kept, and "outside what the screen draws" past the screen's
+"Can't tell since …", "Can't read since …" or "Link closed since …" (Central's doubt) with the colour kept, and "outside what the screen draws" past the screen's
 colour table), a Sensor's reading and the id a name gives, bundled by the console's own esbuild and run under Node (it is pure). The ids it
 derives are checked against contracts/room_light.py's own rule. Every refusal code having words is
 the typecheck's (a `Record` over the generated refusal union).
@@ -40,14 +40,16 @@ HEARD = [
 ]
 # Central's instants: the clock the test hands the model says 18:42 for CANT_TELL.
 CANT_TELL = 1_791_000_000
+# Central's doubts (DoubtView), each since CANT_TELL.
+DOUBT = {reason: {"reason": reason, "since": CANT_TELL} for reason in ("cant-tell", "cant-read", "link-closed")}
 SKY = {"sky": "Sky colour"}
 
 
-def _line(kelvin=None, rgb=None, *, source="typed", sensor=None, colour_from="typed", cant_tell_since=None):
+def _line(kelvin=None, rgb=None, *, source="typed", sensor=None, colour_from="typed", doubt=None):
     """A ColourLineView, as Central sends it."""
     colour = {"kind": "rgb", "rgb": rgb} if rgb is not None else {"kind": "kelvin", "kelvin": kelvin}
     return {"colour": colour, "source": source, "sensor": sensor, "colour_from": colour_from,
-            "stated_at": None if colour_from != "following" else CANT_TELL - 60, "cant_tell_since": cant_tell_since}
+            "stated_at": None if colour_from != "following" else CANT_TELL - 60, "doubt": doubt}
 
 
 BULB = {"source": "its-bulb"}
@@ -60,12 +62,16 @@ LINES = [
     (_line(rgb=[1, 0.8, 0.6], **BULB, colour_from="following"), "Following its bulb's colour"),
     (_line(5500, **BULB, colour_from="never-stated"), "Typed 5,500 K until its bulb says"),
     (_line(5500, **SENSOR, colour_from="never-stated"), "Typed 5,500 K until Sky colour says"),
-    (_line(3400, **SENSOR, colour_from="following", cant_tell_since=CANT_TELL), "Can't tell since 18:42 (keeping 3,400 K)"),
-    (_line(3400, **BULB, colour_from="following", cant_tell_since=CANT_TELL), "Can't tell since 18:42 (keeping 3,400 K)"),
+    (_line(3400, **SENSOR, colour_from="following", doubt=DOUBT["cant-tell"]), "Can't tell since 18:42 (keeping 3,400 K)"),
+    (_line(3400, **BULB, colour_from="following", doubt=DOUBT["cant-tell"]), "Can't tell since 18:42 (keeping 3,400 K)"),
     # Production `room` (a brightness-only bulb, 5,000 K typed) while Home Assistant says unavailable:
     # its typed colour is never said to be kept.
-    (_line(5000, **BULB, colour_from="never-stated", cant_tell_since=CANT_TELL),
+    (_line(5000, **BULB, colour_from="never-stated", doubt=DOUBT["cant-tell"]),
      "Typed 5,000 K until its bulb says · can't tell since 18:42"),
+    # Central can't read the bulb's reports (an older Galleria), or its link closed: the colour kept.
+    (_line(3400, **BULB, colour_from="following", doubt=DOUBT["cant-read"]), "Can't read since 18:42 (keeping 3,400 K)"),
+    (_line(5000, **BULB, colour_from="never-stated", doubt=DOUBT["link-closed"]),
+     "Typed 5,000 K until its bulb says · link closed since 18:42"),
     (_line(34000, **BULB, colour_from="following"),
      "Following its bulb 34,000 K · outside what the screen draws (drawn at 10,000 K)"),
     (_line(1500, **SENSOR, colour_from="following"),
@@ -78,7 +84,7 @@ SCRIPT = r"""
 const words = await import(process.argv[1]);
 const input = JSON.parse(process.argv[2]);
 const clock = (at) => (at === input.cantTell ? "18:42" : `at ${at}`);
-const light = (cant_tell_since, state) => ({ entry: { kind: "reported", colour: input.kelvin, state }, cant_tell_since });
+const light = (doubt, state) => ({ entry: { kind: "reported", colour: input.kelvin, state }, doubt });
 const white = (state) => words.entryWords({ kind: "reported", colour: input.kelvin, state });
 const sensors = [{ id: "window-meter", sensor: { name: "Window meter", at: { source: "x", address: "y" } },
                    reading: null, heard_at: null, reports: null }];
@@ -102,18 +108,21 @@ process.stdout.write(JSON.stringify({
   swatches: input.lines.map((line) => words.colourSwatch(line)),
   brightness: [
     words.brightnessWords(light(null, { kind: "dimmer", on: true, brightness: 0.6 }), clock),
-    words.brightnessWords(light(input.cantTell, { kind: "dimmer", on: true, brightness: 0.6 }), clock),
-    words.brightnessWords(light(input.cantTell, { kind: "dimmer", on: false, brightness: 0 }), clock),
-    words.brightnessWords(light(input.cantTell, { kind: "not-reported" }), clock),
+    words.brightnessWords(light(input.doubt["cant-tell"], { kind: "dimmer", on: true, brightness: 0.6 }), clock),
+    words.brightnessWords(light(input.doubt["cant-tell"], { kind: "dimmer", on: false, brightness: 0 }), clock),
+    words.brightnessWords(light(input.doubt["cant-tell"], { kind: "not-reported" }), clock),
+    words.brightnessWords(light(input.doubt["cant-read"], { kind: "dimmer", on: false, brightness: 0 }), clock),
+    words.brightnessWords(light(input.doubt["link-closed"], { kind: "dimmer", on: true, brightness: 0.6 }), clock),
   ],
   sensorReadings: [
-    words.sensorReadingWords({ reading: { kind: "measured", lux: 320 }, cant_tell_since: input.cantTell }, clock),
-    words.sensorReadingWords({ reading: null, cant_tell_since: input.cantTell }, clock),
+    words.sensorReadingWords({ reading: { kind: "measured", lux: 320 }, doubt: input.doubt["cant-tell"] }, clock),
+    words.sensorReadingWords({ reading: null, doubt: input.doubt["cant-tell"] }, clock),
+    words.sensorReadingWords({ reading: { kind: "measured", lux: 0 }, doubt: input.doubt["link-closed"] }, clock),
   ],
   colourSensors: [
-    words.colourReadingWords({ colour: { kind: "kelvin", kelvin: 3400 }, cant_tell_since: null }, clock),
-    words.colourReadingWords({ colour: { kind: "kelvin", kelvin: 3400 }, cant_tell_since: input.cantTell }, clock),
-    words.colourReadingWords({ colour: null, cant_tell_since: null }, clock),
+    words.colourReadingWords({ colour: { kind: "kelvin", kelvin: 3400 }, doubt: null }, clock),
+    words.colourReadingWords({ colour: { kind: "kelvin", kelvin: 3400 }, doubt: input.doubt["cant-tell"] }, clock),
+    words.colourReadingWords({ colour: null, doubt: null }, clock),
     words.followedWords({ followed_by: ["daylight", "porch"] }, { daylight: "Daylight" }),
     words.followedWords({ followed_by: [] }, {}),
   ],
@@ -141,7 +150,8 @@ def said(tmp_path_factory):
                     "--log-level=error"], check=True, timeout=60)
     result = subprocess.run(["node", "--input-type=module", "-e", SCRIPT, bundle.as_uri(),
                              json.dumps({"names": NAMES, "fixed": FIXED, "kelvin": KELVIN, "heard": HEARD,
-                                         "lines": [line for line, _ in LINES], "sky": SKY, "cantTell": CANT_TELL})],
+                                         "lines": [line for line, _ in LINES], "sky": SKY, "cantTell": CANT_TELL,
+                                         "doubt": DOUBT})],
                             capture_output=True, text=True, check=True, timeout=30)
     return json.loads(result.stdout)
 
@@ -168,10 +178,14 @@ def test_a_bulb_s_rgb_is_drawn_as_its_swatch_and_a_kelvin_is_not(said):
     assert {swatch for words, swatch in swatches.items() if words != "Following its bulb's colour"} == {None}
 
 
-def test_what_a_source_cant_tell_is_kept_and_said(said):
+def test_what_central_is_in_doubt_of_is_kept_and_said_with_its_reason(said):
+    """Each doubt reason (its source can't tell, Photo Wall can't read it, its link closed) says the
+    last word kept, never a new one."""
     assert said["brightness"] == ["On, 60 %", "Can't tell since 18:42 (keeping On, 60 %)",
-                                  "Can't tell since 18:42 (keeping Off)", "Can't tell since 18:42"]
-    assert said["sensorReadings"] == ["Can't tell since 18:42 (keeping 320 lx)", "Can't tell since 18:42"]
+                                  "Can't tell since 18:42 (keeping Off)", "Can't tell since 18:42",
+                                  "Can't read since 18:42 (keeping Off)", "Link closed since 18:42 (keeping On, 60 %)"]
+    assert said["sensorReadings"] == ["Can't tell since 18:42 (keeping 320 lx)", "Can't tell since 18:42",
+                                      "Link closed since 18:42 (keeping 0 lx)"]
     assert said["colourSensors"] == ["3,400 K", "Can't tell since 18:42 (keeping 3,400 K)", "Not reported yet",
                                      "Daylight, porch", "No light"]
 
