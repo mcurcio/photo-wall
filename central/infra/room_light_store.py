@@ -312,7 +312,7 @@ def _doubts_in(conn: Any, house: HouseLock, source: Source, address: str | None,
     when the document changed."""
     house.changing_within(PgTransaction(conn))
     before = document_in(conn)
-    now = _now_in(conn)
+    now = _CLOCK.now_in(conn)
     facts = facts_in(conn)
     named = named_in(conn, source) if reason == DoubtReason.CANT_READ else {}
 
