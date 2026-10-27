@@ -24,6 +24,7 @@ from typing import Final
 
 from pydantic import BaseModel, TypeAdapter
 
+from central.central_errors.views import CentralErrorsView, FrameImpedimentView
 from central.content_catalog.views import ReleasesView, VersionChoice
 from central.displays.views import LightView, PictureHistoryView
 from central.fleet.models import TrialRefusal
@@ -77,6 +78,7 @@ from contracts.node_picture import (
     PANEL_BLACK_MIN,
 )
 from contracts.room_light import (
+    CENTRAL_LINE_MAX,
     LUX_MAX,
     ROOM_LIGHT_ID_PATTERN,
     ROOM_LIGHTS_MAX,
@@ -90,7 +92,8 @@ CONSOLE_BODIES: Final[tuple[type[BaseModel], ...]] = (   # bodies the console se
     FrameVideoChange)
 CONSOLE_VIEWS: Final[tuple[type[BaseModel], ...]] = (    # answers the console reads
     RoomLightsView, DrawnView, RefusedReportsView, PaperProfileView, PaperProfilesView,
-    PositionHistoryView, PictureHistoryView, LightView, HomeAssistantStatesView, ReleasesView, InstallStarted)
+    PositionHistoryView, PictureHistoryView, LightView, HomeAssistantStatesView, ReleasesView, InstallStarted,
+    CentralErrorsView, FrameImpedimentView)
 CONSOLE_ALIASES: Final[Mapping[str, object]] = {     # named types a view's fields take, by their name
     "Lux": Lux, "LightColour": LightColour, "Reading": Reading}
 CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
@@ -103,7 +106,7 @@ CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
     "KELVIN_STATED_MIN": KELVIN_STATED_MIN, "KELVIN_STATED_MAX": KELVIN_STATED_MAX, "ROOM_LIGHT_NAME_MAX": ROOM_LIGHT_NAME_MAX,
     "ROOM_LIGHT_ID_PATTERN": ROOM_LIGHT_ID_PATTERN, "HOME_ASSISTANT_SOURCE": references.SOURCE, "PI_SOURCE": PI_SOURCE,
     "MATCHED_LUX_MIN": MATCHED_LUX_MIN, "MATCHED_LUX_MAX": MATCHED_LUX_MAX, "PANEL_BLACK_MIN": PANEL_BLACK_MIN,
-    "PANEL_BLACK_MAX": PANEL_BLACK_MAX,
+    "PANEL_BLACK_MAX": PANEL_BLACK_MAX, "CENTRAL_LINE_MAX": CENTRAL_LINE_MAX,
 }
 CONSOLE_REFUSALS: Final[tuple[type[StrEnum], ...]] = (   # each context's closed refusal enum
     RoomLightRefusal, FrameLightingRefusal, PaperProfileRefusal, ReportRefusal, DrawnReportRefusal, TrialRefusal,

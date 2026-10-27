@@ -470,7 +470,8 @@ def test_the_stale_page_is_drawn_by_the_loop_after_v(layer):
 
 
 def test_the_production_client_binds_the_manager_v5():
-    assert client.MANAGER_VERSION == 5   # v3 the health layer; v4 the brightness line (1c); v5 the Frame region (#124)
+    assert client.MANAGER_VERSION == 6   # v3 the health layer; v4 the brightness line (1c); v5 the Frame region (#124);
+    # v6 Central's card
 
 
 def test_the_shell_serves_the_version_and_region_size_the_contract_names():

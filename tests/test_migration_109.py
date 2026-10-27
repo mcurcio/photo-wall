@@ -119,11 +119,11 @@ def test_109_upgrades_lights_and_words_to_colour_sources_and_facts(database_prov
                 document = document_in(conn)
             assert document.change == change + 1
             assert document.lights["white"] == ReportedEntry(colour=KelvinColour(kelvin=5000),
-                                                             state=Dimmer(on=True, brightness=0.5))
+                                                             state=Dimmer(on=True, brightness=0.5), doubt=None)
             assert document.lights["colour"] == ReportedEntry(colour=KelvinColour(kelvin=6500),
-                                                              state=Dimmer(on=True, brightness=0.25))
-            assert document.lights["away"] == ReportedEntry(colour=KelvinColour(kelvin=2700), state=NotReported())
-            assert document.lights["window"] == MeasuredEntry(colour=KelvinColour(kelvin=5500), state=Measured(lux=80.0))
+                                                              state=Dimmer(on=True, brightness=0.25), doubt=None)
+            assert document.lights["away"] == ReportedEntry(colour=KelvinColour(kelvin=2700), state=NotReported(), doubt=None)
+            assert document.lights["window"] == MeasuredEntry(colour=KelvinColour(kelvin=5500), state=Measured(lux=80.0), doubt=None)
             assert document.lights["room"] == FixedEntry(colour=KelvinColour(kelvin=6500))
             view = {each.id: each for each in PgRoomLights(db, PgHouseLock()).lights().lights}
             assert view["away"].cant_tell_since == 300 and view["white"].cant_tell_since is None

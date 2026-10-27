@@ -217,9 +217,16 @@ class StatePublisher:
         return True
 
     async def _put_birth(self) -> bool:
-        """Galleria's birth: its manifest's version and KINDS (False: the hub did not take it)."""
+        """Galleria's birth: its manifest's version, KINDS and the hub connection it goes on (False:
+        the hub did not take it, or no connection is open). TODO(galleria lane): put it again on every
+        reconnect (a new connection), so Central's hub judges the close of the newest one."""
         integration = await async_get_integration(self._hass, DOMAIN)
-        birth: GalleriaBirth = {"component": "galleria", "version": str(integration.version), "kinds": list(KINDS)}
+        connection = self._door.connection
+        if connection is None:
+            self.published_epoch = None
+            return False
+        birth: GalleriaBirth = {"component": "galleria", "version": str(integration.version), "kinds": list(KINDS),
+                                "connection": connection}
         try:
             await self._door.publish_birth(birth)
         except DoorUnavailable as error:

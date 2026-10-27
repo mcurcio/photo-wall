@@ -26,6 +26,7 @@ from .contract import (
     INSTALL_PLAYER_SUBJECT,
     KV_OPERATION_HEADER,
     GalleriaBirth,
+    GalleriaConnection,
     HomeAssistantState,
     InstallRefused,
     InstallStarted,
@@ -96,6 +97,16 @@ class CentralDoor:
     @property
     def connected(self) -> bool:
         return self._client.is_connected
+
+    @property
+    def connection(self) -> GalleriaConnection | None:
+        """The hub connection open now, as the hub names it (its server's id, the client id it gave
+        this connection: what its disconnect event names); None while not connected."""
+        info = self._client._server_info   # nats-py keeps the server's INFO; no public accessor of its id
+        server, client = info.get("server_id"), self._client.client_id
+        if not self._client.is_connected or not server or not client:
+            return None
+        return {"server": str(server), "client": int(client)}
 
     async def read(self, key: str) -> bytes | None:
         """Central's state `key` (one STREAM.MSG.GET by last subject); None: not yet written."""

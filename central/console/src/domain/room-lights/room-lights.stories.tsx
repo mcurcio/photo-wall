@@ -30,7 +30,7 @@ const lined = (light: RoomLightView, name: string, colour: Partial<ColourLineVie
 /** A bulb that reports itself, heard on at 60 % and following its own kelvin: its entry and its
  * colour line from the same facts, as Central gives them. */
 const following = (name: string, kelvin: number): RoomLightView => lined({
-  ...SPOT, entry: { kind: "reported", colour: { kind: "kelvin", kelvin }, state: { kind: "dimmer", on: true, brightness: 0.6 } },
+  ...SPOT, entry: { kind: "reported", colour: { kind: "kelvin", kelvin }, state: { kind: "dimmer", on: true, brightness: 0.6 }, doubt: null },
   heard_at: HEARD,
 }, name, { colour: { kind: "kelvin", kelvin }, colour_from: "following", stated_at: HEARD });
 
@@ -53,9 +53,9 @@ export const OffAndUnavailable: Story = {
       ...ROOMS,
       lights: [
         { ...OVERHEADS, entry: { kind: "reported", colour: { kind: "rgb", rgb: [1, 0.8, 0.6] },
-          state: { kind: "dimmer", on: false, brightness: 0 } } },
+          state: { kind: "dimmer", on: false, brightness: 0 }, doubt: null } },
         { ...SPOT, entry: { kind: "reported", colour: { kind: "kelvin", kelvin: 2700 },
-          state: { kind: "dimmer", on: true, brightness: 0.4 } }, heard_at: HEARD, cant_tell_since: HEARD,
+          state: { kind: "dimmer", on: true, brightness: 0.4 }, doubt: null }, heard_at: HEARD, cant_tell_since: HEARD,
           colour: { ...SPOT.colour, cant_tell_since: HEARD } },
       ],
     },
@@ -104,10 +104,10 @@ export const Phone: Story = { tags: WHOLE, parameters: { phone: true } };
 const clock = () => "18:42";
 const names = { sky: "Sky colour" };
 const checks: [string, string][] = [
-  [entryWords({ kind: "reported", colour: { kind: "kelvin", kelvin: 2700 }, state: { kind: "dimmer", on: true, brightness: 0.6 } }), "On, 60 %"],
-  [entryWords({ kind: "reported", colour: { kind: "kelvin", kelvin: 2700 }, state: { kind: "dimmer", on: false, brightness: 0 } }), "Off"],
-  [entryWords({ kind: "measured", colour: { kind: "kelvin", kelvin: 6500 }, state: { kind: "measured", lux: 1234.4 } }), "1,234 lx"],
-  [entryWords({ kind: "reported", colour: { kind: "kelvin", kelvin: 2700 }, state: { kind: "not-reported" } }), "Not reported yet"],
+  [entryWords({ kind: "reported", colour: { kind: "kelvin", kelvin: 2700 }, state: { kind: "dimmer", on: true, brightness: 0.6 }, doubt: null }), "On, 60 %"],
+  [entryWords({ kind: "reported", colour: { kind: "kelvin", kelvin: 2700 }, state: { kind: "dimmer", on: false, brightness: 0 }, doubt: null }), "Off"],
+  [entryWords({ kind: "measured", colour: { kind: "kelvin", kelvin: 6500 }, state: { kind: "measured", lux: 1234.4 }, doubt: null }), "1,234 lx"],
+  [entryWords({ kind: "reported", colour: { kind: "kelvin", kelvin: 2700 }, state: { kind: "not-reported" }, doubt: null }), "Not reported yet"],
   [entryWords({ kind: "fixed", colour: { kind: "kelvin", kelvin: 3000 } }), "On, 100 %"],
   [readingWords(null), "Not reported yet"],
   [idFromName("Café lamp"), "cafe-lamp"],
@@ -118,7 +118,7 @@ const checks: [string, string][] = [
   [colourLineWords(SPOT.colour, names, clock), "Typed 2,700 K until its bulb says"],
   [colourLineWords({ ...DAYLIGHT.colour, cant_tell_since: HEARD }, names, clock), "Can't tell since 18:42 (keeping 3,400 K)"],
   [brightnessWords({ ...SPOT, entry: { kind: "reported", colour: { kind: "kelvin", kelvin: 2700 },
-    state: { kind: "dimmer", on: true, brightness: 0.6 } }, cant_tell_since: HEARD }, clock), "Can't tell since 18:42 (keeping On, 60 %)"],
+    state: { kind: "dimmer", on: true, brightness: 0.6 }, doubt: null }, cant_tell_since: HEARD }, clock), "Can't tell since 18:42 (keeping On, 60 %)"],
 ];
 for (const [said, meant] of checks) {
   if (said !== meant) throw new Error(`room light words: ${JSON.stringify(said)} is not ${JSON.stringify(meant)}`);

@@ -305,6 +305,9 @@ class PgRoomLights:
         with conn.transaction():
             _refusal_in(conn, source, address, reason)
 
+    def record_link_closed(self, source: Source) -> Recorded:
+        raise NotImplementedError("room-lights lane: DoubtReason.LINK_CLOSED on every reference of `source`")
+
     # ---- RoomLightsDocuments ----
 
     def current(self) -> RoomLightsDocument:

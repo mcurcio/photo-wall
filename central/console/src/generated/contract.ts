@@ -21,6 +21,17 @@ export interface Calibration {
   revision?: number;
 }
 
+export interface CentralErrorsView {
+  in_doubt: SourceAttentionView[];
+}
+
+export type CentralLine = string;
+
+export interface CentralWords {
+  line1: CentralLine;
+  line2: CentralLine;
+}
+
 export interface CloseLight {
   across_mm: number;
   inner_beam_degrees: number;
@@ -74,6 +85,13 @@ export interface DisplayRefView {
   name: string;
 }
 
+export type DoubtReason = "cant-read" | "cant-tell" | "link-closed";
+
+export interface DoubtView {
+  reason: DoubtReason;
+  since: number;
+}
+
 export interface DrawnView {
   players: PlayerDrawnView[];
 }
@@ -101,10 +119,30 @@ export interface FixedLight {
   name: string;
 }
 
+export interface FrameClear {
+  kind: "clear";
+}
+
+export interface FrameImpeded {
+  by: Impeded;
+  kind: "impeded";
+}
+
+export type FrameImpediment = FrameNotReported | FrameClear | FrameImpeded;
+
+export interface FrameImpedimentView {
+  frame_id: string;
+  impediment: FrameImpediment;
+}
+
 export interface FrameLighting {
   lights: (WashLight | FarLight | CloseLight)[];
   mat_depth_mm: number;
   paper: Paper;
+}
+
+export interface FrameNotReported {
+  kind: "not-reported";
 }
 
 export interface FrameRefView {
@@ -128,6 +166,8 @@ export interface GalleriaView {
   update: boolean;
   version: string | null;
 }
+
+export type GrantId = string;
 
 export interface HeardColourSensorView {
   entity: EntityId;
@@ -160,6 +200,14 @@ export interface HomeAssistantStatesView {
   galleria: GalleriaView;
   heard_at: number | null;
   refused: RefusedReportView[];
+}
+
+export interface Impeded {
+  frame_id: string;
+  grant_id: GrantId;
+  lights: RoomLightId[];
+  output_id: OutputId;
+  words: CentralWords;
 }
 
 export interface InstallStarted {
@@ -202,6 +250,7 @@ export interface Measured {
 
 export interface MeasuredEntry {
   colour: KelvinColour;
+  doubt: CentralWords | null;
   kind: "measured";
   state: Measured | NotReported;
 }
@@ -216,6 +265,8 @@ export interface MeasuredLight {
 export interface NotReported {
   kind: "not-reported";
 }
+
+export type OutputId = string;
 
 export interface Paper {
   ink_density: number;
@@ -359,6 +410,7 @@ export type ReportedColourSource = TypedColour | BulbColour;
 
 export interface ReportedEntry {
   colour: LightColour;
+  doubt: CentralWords | null;
   kind: "reported";
   state: Dimmer | NotReported;
 }
@@ -437,6 +489,15 @@ export interface SoftwarePictureView {
   gamma_tenths: number;
 }
 
+export interface SourceAttentionView {
+  address: string;
+  doubt: DoubtView;
+  frames: string[];
+  lights: RoomLightId[];
+  source: string;
+  what_to_do: string;
+}
+
 export type StatedKelvin = number;
 
 export type TestPattern = "white" | "grey-ramp" | "black-level" | "target-pre-software" | "target-post-software";
@@ -499,6 +560,22 @@ export const LIMITS = {
     revision: {
       integer: true,
       minimum: 1,
+    },
+  },
+  CentralLine: {
+    value: {
+      maxLength: 96,
+      minLength: 1,
+    },
+  },
+  CentralWords: {
+    line1: {
+      maxLength: 96,
+      minLength: 1,
+    },
+    line2: {
+      maxLength: 96,
+      minLength: 1,
     },
   },
   CloseLight: {
@@ -597,6 +674,11 @@ export const LIMITS = {
       minLength: 1,
     },
   },
+  FrameImpedimentView: {
+    frame_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
   FrameLighting: {
     lights: {
       maxItems: 4,
@@ -618,6 +700,11 @@ export const LIMITS = {
       minimum: 0,
     },
   },
+  GrantId: {
+    value: {
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    },
+  },
   HeardColourSensorView: {
     entity: {
       maxLength: 255,
@@ -634,6 +721,21 @@ export const LIMITS = {
     entity: {
       maxLength: 255,
       pattern: "^[a-z0-9_]+\\.[a-z0-9_]+$",
+    },
+  },
+  Impeded: {
+    frame_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$",
+    },
+    grant_id: {
+      pattern: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    },
+    lights: {
+      maxItems: 4,
+      minItems: 1,
+    },
+    output_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$",
     },
   },
   InstallStarted: {
@@ -686,6 +788,11 @@ export const LIMITS = {
     },
     sensor: {
       pattern: "^[a-z0-9][a-z0-9-]{0,31}$",
+    },
+  },
+  OutputId: {
+    value: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$",
     },
   },
   Paper: {
@@ -858,6 +965,15 @@ export const LIMITS = {
       minimum: 18,
     },
   },
+  SourceAttentionView: {
+    address: {
+      maxLength: 255,
+      minLength: 1,
+    },
+    source: {
+      pattern: "^[a-z][a-z0-9-]{0,31}$",
+    },
+  },
   StatedKelvin: {
     value: {
       maximum: 40000,
@@ -912,6 +1028,8 @@ export const LIMITS = {
 export const PATTERNS = {
   ColourSensorId: "^[a-z0-9][a-z0-9-]{0,31}$",
   EntityId: "^[a-z0-9_]+\\.[a-z0-9_]+$",
+  GrantId: "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+  OutputId: "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$",
   ReleaseTag: "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$",
   RoomLightId: "^[a-z0-9][a-z0-9-]{0,31}$",
   SensorId: "^[a-z0-9][a-z0-9-]{0,31}$",
@@ -919,6 +1037,7 @@ export const PATTERNS = {
 
 export const CONSTANTS = {
   BEAM_DEGREES_MAX: 170,
+  CENTRAL_LINE_MAX: 96,
   CLOSE_REACH_MM: 5000,
   COLOUR_SENSORS_MAX: 32,
   FRAME_LIGHTS_MAX: 4,

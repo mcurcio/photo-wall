@@ -14,7 +14,12 @@ Three wire shapes:
   (an rgb colour only on a reported light, a reading only on a measured light). Each entry carries
   the light's colour as stated (real kelvin, or a bulb's rgb) and its brightness as last stated:
   Central chose the source and kept the last stated values (central/room_light/policy.py), the Pi
-  bounds and rounds a kelvin to what it draws (player/geometry.py). It never rides the Player's
+  bounds and rounds a kelvin to what it draws (player/geometry.py). A reported or measured entry
+  also carries `doubt`: Central's own two lines (`CentralWords`) when it cannot stand behind the
+  light's brightness now, else None. Only the words travel: why (can't read, can't tell, link
+  closed), since when, and colour doubts stay on Central (central/room_light/model.py `Doubt`), so a
+  new reason needs no Pi install. The Pi never reads the words; its Player judges whether a doubt
+  stops its Frame's picture and passes the words on verbatim (contracts/node_impeded.py). It never rides the Player's
   control State: a light switching ten times changes this document ten times and the control
   State's delivery not at all.
 - A **light sensor reading** (HostCore -> Central, the host line's state bucket, key
@@ -46,7 +51,7 @@ from __future__ import annotations
 import hashlib
 from typing import Annotated, Final, Literal
 
-from pydantic import Field, model_validator
+from pydantic import AfterValidator, Field, model_validator
 
 from contracts.kelvin import KELVIN_STATED_MAX, KELVIN_STATED_MIN
 from contracts.wire_codec import encode
@@ -57,7 +62,10 @@ ROOM_LIGHTS_MAX: Final = 32                     # room lights in one house
 LUX_MAX: Final = 200_000.0                      # above direct sun (about 120,000 lx)
 
 ROOM_LIGHTS_KEY: Final = "room-lights"          # the WALL key of the room-lights document
-ROOM_LIGHTS_BYTES: Final = 16384                # its largest encoding (ROOM_LIGHTS_MAX lights at their longest fit)
+# Its largest encoding: ROOM_LIGHTS_MAX lights at their longest, each with CentralWords of
+# CENTRAL_LINE_MAX four-byte characters a line (about 7 KiB without words, about 26 KiB of words).
+ROOM_LIGHTS_BYTES: Final = 40960
+CENTRAL_LINE_MAX: Final = 96                    # characters in one of Central's two lines
 LIGHT_SENSOR_KEY: Final = "light-sensor"        # the host line's state key of LightSensorReading
 LIGHT_SENSOR_BYTES: Final = 64
 ROOM_LIGHTS_DRAWN_PATH: Final = "/v1/player/room-lights-drawn"   # PUT RoomLightsDrawn, the Player's control link
@@ -135,6 +143,27 @@ class NotReported(Model):
 Reading = Annotated[Measured | Unavailable, Field(discriminator="kind", title="Reading")]
 
 
+# ---- Central's words: why Central can't stand behind a light's brightness now ----
+
+def _printable(line: str) -> str:
+    """ValueError unless every character of `line` is printable (no newline, no control)."""
+    if not line.isprintable():
+        raise ValueError("a line of Central's words is printable")
+    return line
+
+
+CentralLine = Annotated[str, Field(min_length=1, max_length=CENTRAL_LINE_MAX, title="CentralLine"),
+                        AfterValidator(_printable)]
+
+
+class CentralWords(Model):
+    """Central's two lines about a light it can't stand behind (central/room_light/policy.py words
+    them): `line1` what is wrong, `line2` what the Frame is drawn with. They name the light, never an
+    integration. Carried verbatim to the Frame (Central's card), never reworded on the Pi."""
+    line1: CentralLine
+    line2: CentralLine
+
+
 # ---- Entries: one per reporter kind, so mismatched colour and state pairs cannot be built ----
 
 class FixedEntry(Model):
@@ -145,18 +174,22 @@ class FixedEntry(Model):
 
 class ReportedEntry(Model):
     """A light an integration reports: its last stated brightness and its colour (typed, or its bulb's
-    own as last stated: kelvin or rgb)."""
+    own as last stated: kelvin or rgb), and Central's words when it can't stand behind that
+    brightness now (None: it can). The last stated value stands under a doubt."""
     kind: Literal["reported"] = "reported"
     colour: LightColour
     state: Annotated[Dimmer | NotReported, Field(discriminator="kind")]
+    doubt: CentralWords | None
 
 
 class MeasuredEntry(Model):
     """A light one Sensor reports: its state is that Sensor's last stated reading; its colour typed,
-    or its colour sensor's."""
+    or its colour sensor's; and Central's words when it can't stand behind that reading now (None:
+    it can)."""
     kind: Literal["measured"] = "measured"
     colour: KelvinColour
     state: Annotated[Measured | NotReported, Field(discriminator="kind")]
+    doubt: CentralWords | None
 
 
 RoomLightEntry = Annotated[FixedEntry | ReportedEntry | MeasuredEntry, Field(discriminator="kind")]
@@ -215,7 +248,7 @@ def decode_light_sensor(raw: bytes) -> LightSensorReading:
 
 
 __all__ = [
-    "LIGHT_SENSOR_BYTES", "LIGHT_SENSOR_KEY", "LUX_MAX", "ROOM_LIGHTS_BYTES", "ROOM_LIGHTS_DRAWN_BYTES",
+    "CENTRAL_LINE_MAX", "CentralLine", "CentralWords", "LIGHT_SENSOR_BYTES", "LIGHT_SENSOR_KEY", "LUX_MAX", "ROOM_LIGHTS_BYTES", "ROOM_LIGHTS_DRAWN_BYTES",
     "ROOM_LIGHTS_DRAWN_LEASE_SECONDS", "ROOM_LIGHTS_DRAWN_REPEAT_SECONDS",
     "ROOM_LIGHTS_DRAWN_PATH", "ROOM_LIGHTS_KEY", "ROOM_LIGHTS_MAX", "ROOM_LIGHT_ID_PATTERN", "Dimmer",
     "DocumentDigest", "FixedEntry", "KelvinColour", "LightColour", "LightSensorReading", "Lux", "Measured",

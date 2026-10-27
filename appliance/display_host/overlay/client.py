@@ -82,7 +82,8 @@ MAX_PIXELS = 4096 * 2160
 MAX_MEMORY = 128 * 1024 * 1024
 MAX_BUFFERS = 2                     # per Output: one on screen, one being drawn
 MAX_NAME = 96
-MANAGER_VERSION = 5                 # v3: the health layer (get_health_layer); v4: `brightness`; v5: `region`
+MANAGER_VERSION = 6                 # v3: the health layer (get_health_layer); v4: `brightness`; v5: `region`;
+                                    # v6: `central_card` (TODO display lane: draw it when no health card shows)
 MAX_BRIGHTNESS = 128                # the shell's bound on a `brightness` line
 OOM_SCORE_ADJ = 900                 # the first thing the kernel kills, never Weston (-500)
 WL_SHM_FORMAT_ARGB8888 = 0

@@ -12,6 +12,7 @@ Central never bounds a stated colour to what a screen draws (the Pi does, player
 from __future__ import annotations
 
 from collections.abc import Mapping
+from zoneinfo import ZoneInfo
 
 from central.room_light.model import (
     COLOUR_SENSORS_MAX,
@@ -21,6 +22,8 @@ from central.room_light.model import (
     ColourReading,
     ColourSensor,
     ColourSensorId,
+    Doubt,
+    DoubtReason,
     Facts,
     FixedLight,
     Kept,
@@ -43,6 +46,8 @@ from central.room_light.views import ColourLineView, DrawnState
 from contracts.room_light import (
     ROOM_LIGHTS_DRAWN_LEASE_SECONDS,
     ROOM_LIGHTS_MAX,
+    CentralWords,
+    Dimmer,
     FixedEntry,
     KelvinColour,
     LightColour,
@@ -104,6 +109,25 @@ def _since(before: LightFacts | ReadingFacts | ColourFacts | None, at: float) ->
     return at if before is None or before.cant_tell_since is None else before.cant_tell_since
 
 
+# ---- Doubt: why Central can't stand behind a reference's last word, and its words ----
+
+def doubt_after(before: Doubt | None, reason: DoubtReason, at: float) -> Doubt:
+    """The doubt after an event of `reason` at `at` (Central's clock): the newest reason wins; a
+    repeat of the same reason keeps `before.since`. A stated report clears a doubt (its caller keeps
+    None); `out_of_range` and `unknown_address` refusals never reach here (log only)."""
+    raise NotImplementedError("room-lights lane")
+
+
+def doubt_words(name: str, doubt: Doubt, last: Kept[Dimmer] | Kept[Measured] | None, zone: ZoneInfo) -> CentralWords:
+    """Central's two lines for a light whose brightness reference is in `doubt` (DESIGN-r8 §7):
+    line 1 what is wrong and since when ("Photo Wall can't read Family Room Lights · since 29 Oct
+    18:05"; "Daylight (windows): its sensor can't tell · since …"; "Photo Wall lost Home Assistant ·
+    since …"), line 2 the last word the Frame is drawn with and where to look ("Its last word: off
+    (26 Oct 15:35) · see Needs attention in Photo Wall"). Dates in the house's `zone`, each line cut
+    to CENTRAL_LINE_MAX. Names the light, never an integration's internals."""
+    raise NotImplementedError("room-lights lane")
+
+
 # ---- Which colour a light takes ----
 
 def colour_line(light: RoomLight, facts: Facts,
@@ -159,10 +183,12 @@ def entry_of(light: RoomLight, facts: Facts, sensors: Mapping[SensorId, Sensor],
         sensor = sensors.get(light.sensor)
         kept = None if sensor is None else facts.readings.get(sensor.at)
         reading = None if kept is None or kept.reading is None else kept.reading.value
-        return MeasuredEntry(colour=colour, state=NotReported() if reading is None else reading)
+        return MeasuredEntry(colour=colour, state=NotReported() if reading is None else reading,
+                             doubt=None)   # TODO(room-lights lane): doubt_words for the Sensor's doubt
     kept_light = facts.lights.get(light.reporter)
     state = None if kept_light is None or kept_light.state is None else kept_light.state.value
-    return ReportedEntry(colour=colour, state=NotReported() if state is None else state)
+    return ReportedEntry(colour=colour, state=NotReported() if state is None else state,
+                         doubt=None)   # TODO(room-lights lane): doubt_words for the reporter's doubt
 
 
 def room_lights_document(lights: Mapping[RoomLightId, RoomLight], sensors: Mapping[SensorId, Sensor],
@@ -297,5 +323,6 @@ def drawn_state(report: RoomLightsDrawn | None, age_seconds: float | None, diges
 
 
 __all__ = ["check_colour_sensor", "check_colour_sensor_removal", "check_room_light", "check_room_light_removal",
-           "check_sensor", "check_sensor_removal", "colour_facts_after", "colour_line", "colour_of", "drawn_state",
+           "check_sensor", "check_sensor_removal", "colour_facts_after", "colour_line", "colour_of", "doubt_after",
+           "doubt_words", "drawn_state",
            "entry_of", "followed_by", "light_facts_after", "measured_by", "reading_facts_after", "room_lights_document"]

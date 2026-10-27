@@ -74,6 +74,7 @@ from contracts.central_api import (
     StatesEpoch,
     encode_central_state,
 )
+from contracts.home_assistant import GalleriaConnection
 from contracts.node_link import (
     CENTRAL_INBOX_PREFIX,
     CENTRAL_WRITER,
@@ -652,6 +653,12 @@ class ListenedStates(Protocol):
     async def heard(self, epoch: str, items: Sequence[Heard]) -> None: ...
         # the newest value of each key in one read, in stream order, from the bucket's epoch `epoch`;
         # raising re-reads the same items after a backoff (a database away loses nothing)
+
+    async def closed(self, connection: GalleriaConnection) -> None: ...
+        # a connection of the door's user (HOME_ASSISTANT_USER) to the hub closed, as the hub's
+        # disconnect event names it (its server's id, its client id); the listener judges whether it
+        # is the one Galleria's latest birth names (BUILD.md Q3 B). TODO(central edge lane): the hub
+        # session follows the door user's disconnect events and hands each here.
 
 
 async def run_hub_session(url: str, *, version: str, state: CentralState, listened: ListenedStates,

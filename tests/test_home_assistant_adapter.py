@@ -20,6 +20,7 @@ from central.room_light.model import (
 from contracts.home_assistant import (
     GALLERIA_BIRTH_KEY,
     GalleriaBirth,
+    GalleriaConnection,
     HomeAssistantColourTemperature,
     HomeAssistantIlluminance,
     HomeAssistantKelvin,
@@ -162,7 +163,8 @@ def test_colour_temperature_states_and_galleria_s_birth():
     never an entity; an unreadable birth is refused; a removed birth records nothing."""
     reports = Reports()
     listener = HomeAssistantListener(reports, reports, reports)   # type: ignore[arg-type]
-    birth = GalleriaBirth(version="1.2.3", kinds=("light", "illuminance", "colour-temperature"))
+    birth = GalleriaBirth(version="1.2.3", kinds=("light", "illuminance", "colour-temperature"),
+                          connection=GalleriaConnection(server="NHUB", client=7))
     sky = HomeAssistantColourTemperature(name="Sky", kelvin=4321.5)
     asyncio.run(listener.heard("e" * 32, (
         Heard("sensor.sky", encode_home_assistant_state(sky)),

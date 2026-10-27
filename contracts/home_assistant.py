@@ -9,8 +9,12 @@ colour-temperature entity except the integration's own, on each change and all a
 (re)connects or Central's hub names a new states epoch (contracts/central_api.py STATES_EPOCH_KEY).
 The key of a state is its entity id (`HOME_ASSISTANT_STATES_PREFIX + entity id`,
 contracts/central_api.py). One more key, GALLERIA_BIRTH_KEY (not an entity id: it has no dot), holds
-`GalleriaBirth`: Galleria's version and the entity kinds it publishes, put on start and with every
-publish of all states, so Central's Home Assistant page can say "update Galleria".
+`GalleriaBirth`: Galleria's version, the entity kinds it publishes and the hub connection it
+publishes on (`GalleriaConnection`), put at every (re)connect and with every publish of all states,
+so Central's Home Assistant page can say "update Galleria", and so Central's hub judges only the
+close of the connection Galleria's latest birth names: when it closes, every reference Home
+Assistant reports takes the "link closed" doubt (BUILD.md Q3 B); a late close of an older
+connection never marks a newer one (connection identity, never time).
 
 Which kind an entity is, and which colour a light states, are Galleria's to judge from Home
 Assistant's own fields (custom_components/galleria/states.py): a light by its domain; a lux sensor by
@@ -47,7 +51,8 @@ LEVEL_MAX: Final = 255                     # Home Assistant's brightness and eac
 NAME_MAX: Final = 255                      # a friendly name, for Central's setup picker
 VERSION_MAX: Final = 64                    # Galleria's version, as its manifest states it
 HOME_ASSISTANT_STATE_BYTES: Final = 512    # one state's largest encoding
-GALLERIA_BIRTH_BYTES: Final = 256          # GalleriaBirth's largest encoding
+GALLERIA_BIRTH_BYTES: Final = 512          # GalleriaBirth's largest encoding
+HUB_SERVER_ID_MAX: Final = 64              # a NATS server's id (its INFO `server_id`, 56 characters today)
 HOME_ASSISTANT_ENTITIES_MAX: Final = 1024  # the bucket keeps the newest this many entities' states
 GALLERIA_BIRTH_KEY: Final = "galleria"     # the bucket's one key that is not an entity id
 
@@ -113,12 +118,23 @@ HomeAssistantState = Annotated[
     Field(discriminator="kind", title="HomeAssistantState")]
 
 
+class GalleriaConnection(Model):
+    """One connection of Galleria's to Central's hub, as the hub names it: the hub server's id (its
+    INFO `server_id`, new at every hub start) and the client id that server gave this connection (its
+    INFO `client_id`). The pair the hub's disconnect event names, so Central matches a close to the
+    birth that connection carried."""
+    server: Annotated[str, Field(min_length=1, max_length=HUB_SERVER_ID_MAX, pattern=r"^[A-Za-z0-9]+$")]
+    client: int = Field(ge=1)
+
+
 class GalleriaBirth(Model):
     """Galleria as a component on Central's hub (GALLERIA_BIRTH_KEY): its version (its manifest's,
-    the release tag it came from) and every entity kind it publishes."""
+    the release tag it came from), every entity kind it publishes, and the connection it is
+    published on (put again on every new connection)."""
     component: Literal["galleria"] = "galleria"
     version: Annotated[str, Field(min_length=1, max_length=VERSION_MAX)]
     kinds: tuple[EntityKind, ...] = Field(max_length=8)
+    connection: GalleriaConnection
 
 
 class _StateValue(Model):
@@ -151,7 +167,7 @@ def decode_galleria_birth(raw: bytes) -> GalleriaBirth:
 __all__ = [
     "ENTITY_ID_MAX", "ENTITY_ID_PATTERN", "GALLERIA_BIRTH_BYTES", "GALLERIA_BIRTH_KEY", "HOME_ASSISTANT_ENTITIES_MAX",
     "HOME_ASSISTANT_STATE_BYTES", "LEVEL_MAX", "NAME_MAX", "VERSION_MAX", "EntityId", "EntityKind", "EntityName",
-    "GalleriaBirth", "HomeAssistantColour", "HomeAssistantColourTemperature", "HomeAssistantIlluminance",
+    "GalleriaBirth", "GalleriaConnection", "HUB_SERVER_ID_MAX", "HomeAssistantColour", "HomeAssistantColourTemperature", "HomeAssistantIlluminance",
     "HomeAssistantKelvin", "HomeAssistantLight", "HomeAssistantRgb", "HomeAssistantState", "HomeAssistantUnavailable",
     "KelvinNumber", "Level", "LuxNumber",
     "decode_galleria_birth", "decode_home_assistant_state", "encode_galleria_birth", "encode_home_assistant_state",

@@ -66,6 +66,7 @@ from contracts.central_api import STATES_EPOCH_KEY
 from contracts.home_assistant import (
     GALLERIA_BIRTH_KEY,
     GalleriaBirth,
+    GalleriaConnection,
     HomeAssistantColourTemperature,
     HomeAssistantKelvin,
     HomeAssistantLight,
@@ -200,7 +201,7 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
             await until(cant_tell, SECONDS, "Central marks that the spot can't tell")
             kept = RoomLightsView.model_validate(await asyncio.to_thread(call, "GET", HOUSE_LIGHTS))
             assert [light.entry for light in kept.lights if light.id == "bookshelf-spot"] == [
-                ReportedEntry(colour=KelvinColour(kelvin=4000), state=FULL)]   # the last stated brightness stands
+                ReportedEntry(colour=KelvinColour(kelvin=4000), state=FULL, doubt=None)]   # the last stated brightness stands
             assert _spot(followed.latest()) == FULL
             await house.publish("Not_An_Entity", ON)
             await house.publish("light.garbage", b"not a state")
@@ -232,7 +233,7 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
                 name="Hall meter", at=SensorRef(source=PI_SOURCE, address=player["player_id"])))
             await asyncio.to_thread(call, "PUT", f"{HOUSE_LIGHTS}/window", json=MeasuredLight(
                 name="Window", sensor="hall-meter", colour=TypedColour(kelvin=6500)))
-            window = MeasuredEntry(colour=KelvinColour(kelvin=6500), state=Measured(lux=LUX))
+            window = MeasuredEntry(colour=KelvinColour(kelvin=6500), state=Measured(lux=LUX), doubt=None)
             await until(latest(lambda d: d.lights.get("window") == window, followed), SECONDS,
                         "the Player sees the window at the Pi's reading")
 
@@ -261,18 +262,19 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
                 name="Lamp", reporter=light_reporter(LAMP), colour=BulbColour(typed_kelvin=2700)))
             for state, entry in (
                     (HomeAssistantLight(name="Lamp", on=True, brightness=255, colour=HomeAssistantKelvin(kelvin=2200)),
-                     ReportedEntry(colour=KelvinColour(kelvin=2200), state=FULL)),
+                     ReportedEntry(colour=KelvinColour(kelvin=2200), state=FULL, doubt=None)),
                     (HomeAssistantLight(name="Lamp", on=True, brightness=255, colour=HomeAssistantRgb(rgb=(255, 0, 0))),
-                     ReportedEntry(colour=RgbColour(rgb=(1.0, 0.0, 0.0)), state=FULL)),
+                     ReportedEntry(colour=RgbColour(rgb=(1.0, 0.0, 0.0)), state=FULL, doubt=None)),
                     (HomeAssistantLight(name="Lamp", on=False, brightness=None, colour=None),
-                     ReportedEntry(colour=RgbColour(rgb=(1.0, 0.0, 0.0)), state=Dimmer(on=False, brightness=0.0)))):
+                     ReportedEntry(colour=RgbColour(rgb=(1.0, 0.0, 0.0)), state=Dimmer(on=False, brightness=0.0), doubt=None))):
                 await house.publish(LAMP, state)
                 await until(latest(lambda d, entry=entry: d.lights.get("lamp") == entry, followed), SECONDS,
                             f"the Player draws the lamp as {entry}")
 
             # E5: Galleria's birth on the hub reaches the Home Assistant page.
             await house.publish(GALLERIA_BIRTH_KEY, encode_galleria_birth(GalleriaBirth(
-                version="9.9.9", kinds=("light", "illuminance", "colour-temperature"))))
+                version="9.9.9", kinds=("light", "illuminance", "colour-temperature"),
+                connection=GalleriaConnection(server="NHUB", client=1))))
 
             async def galleria_heard():
                 page = await asyncio.to_thread(call, "GET", "/v1/operator/integrations/home-assistant")

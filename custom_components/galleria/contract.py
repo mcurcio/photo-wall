@@ -28,7 +28,7 @@ CENTRAL_STATE_TABLE: Final = {'birth': 256,
  'installation': 65536,
  'listening': 32768,
  'releases': 8192,
- 'room-lights': 24576,
+ 'room-lights': 65536,
  'states-epoch': 128,
  'versions': 32768}
 INSTALL_PLAYER: Final = 'installPlayer'
@@ -41,7 +41,7 @@ ENTITY_ID_PATTERN: Final = '[a-z0-9_]+\\.[a-z0-9_]+'
 ENTITY_NAME_MAX: Final = 255
 LEVEL_MAX: Final = 255
 GALLERIA_BIRTH_KEY: Final = 'galleria'
-GALLERIA_BIRTH_BYTES: Final = 256
+GALLERIA_BIRTH_BYTES: Final = 512
 NODE_DOOR_PORT: Final = 4280
 NODE_DOOR_API_PREFIX: Final = 'ACC.NODE.API'
 SERIAL_PATTERN: Final = '[A-Za-z0-9:_.-]{1,128}'
@@ -80,6 +80,11 @@ class Birth(TypedDict):
 class CentralBirth(TypedDict):
     component: Literal['central']
     version: str
+
+
+class CentralWords(TypedDict):
+    line1: str
+    line2: str
 
 
 class Dimmer(TypedDict):
@@ -121,6 +126,12 @@ class GalleriaBirth(TypedDict):
     component: Literal['galleria']
     version: str
     kinds: list[Literal['light', 'illuminance', 'colour-temperature']]
+    connection: GalleriaConnection
+
+
+class GalleriaConnection(TypedDict):
+    server: str
+    client: int
 
 
 class HomeAssistantColourTemperature(TypedDict):
@@ -218,6 +229,7 @@ class MeasuredEntry(TypedDict):
     kind: Literal['measured']
     colour: KelvinColour
     state: Measured | NotReported
+    doubt: CentralWords | None
 
 
 class NotReported(TypedDict):
@@ -250,6 +262,7 @@ class ReportedEntry(TypedDict):
     kind: Literal['reported']
     colour: LightColour
     state: Dimmer | NotReported
+    doubt: CentralWords | None
 
 
 class RgbColour(TypedDict):
@@ -302,6 +315,11 @@ _SCHEMAS: Final[dict[str, Any]] = {'Birth': {'additionalProperties': False,
                                  'version': {'maxLength': 64, 'minLength': 1, 'type': 'string'}},
                   'required': ['version'],
                   'type': 'object'},
+ 'CentralWords': {'additionalProperties': False,
+                  'properties': {'line1': {'maxLength': 96, 'minLength': 1, 'type': 'string'},
+                                 'line2': {'maxLength': 96, 'minLength': 1, 'type': 'string'}},
+                  'required': ['line1', 'line2'],
+                  'type': 'object'},
  'Dimmer': {'additionalProperties': False,
             'properties': {'brightness': {'maximum': 1, 'minimum': 0, 'type': 'number'},
                            'kind': {'const': 'dimmer', 'type': 'string'},
@@ -345,13 +363,22 @@ _SCHEMAS: Final[dict[str, Any]] = {'Birth': {'additionalProperties': False,
                   'type': 'object'},
  'GalleriaBirth': {'additionalProperties': False,
                    'properties': {'component': {'const': 'galleria', 'type': 'string'},
+                                  'connection': {'$ref': 'GalleriaConnection'},
                                   'kinds': {'items': {'enum': ['light', 'illuminance', 'colour-temperature'],
                                                       'type': 'string'},
                                             'maxItems': 8,
                                             'type': 'array'},
                                   'version': {'maxLength': 64, 'minLength': 1, 'type': 'string'}},
-                   'required': ['version', 'kinds'],
+                   'required': ['version', 'kinds', 'connection'],
                    'type': 'object'},
+ 'GalleriaConnection': {'additionalProperties': False,
+                        'properties': {'client': {'minimum': 1, 'type': 'integer'},
+                                       'server': {'maxLength': 64,
+                                                  'minLength': 1,
+                                                  'pattern': '^[A-Za-z0-9]+$',
+                                                  'type': 'string'}},
+                        'required': ['server', 'client'],
+                        'type': 'object'},
  'HomeAssistantColourTemperature': {'additionalProperties': False,
                                     'properties': {'kelvin': {'anyOf': [{'exclusiveMinimum': 0,
                                                                          'type': 'number'},
@@ -483,9 +510,10 @@ _SCHEMAS: Final[dict[str, Any]] = {'Birth': {'additionalProperties': False,
               'type': 'object'},
  'MeasuredEntry': {'additionalProperties': False,
                    'properties': {'colour': {'$ref': 'KelvinColour'},
+                                  'doubt': {'anyOf': [{'$ref': 'CentralWords'}, {'type': 'null'}]},
                                   'kind': {'const': 'measured', 'type': 'string'},
                                   'state': {'oneOf': [{'$ref': 'Measured'}, {'$ref': 'NotReported'}]}},
-                   'required': ['colour', 'state'],
+                   'required': ['colour', 'state', 'doubt'],
                    'type': 'object'},
  'NotReported': {'additionalProperties': False,
                  'properties': {'kind': {'const': 'not-reported', 'type': 'string'}},
@@ -524,9 +552,10 @@ _SCHEMAS: Final[dict[str, Any]] = {'Birth': {'additionalProperties': False,
               'type': 'object'},
  'ReportedEntry': {'additionalProperties': False,
                    'properties': {'colour': {'oneOf': [{'$ref': 'KelvinColour'}, {'$ref': 'RgbColour'}]},
+                                  'doubt': {'anyOf': [{'$ref': 'CentralWords'}, {'type': 'null'}]},
                                   'kind': {'const': 'reported', 'type': 'string'},
                                   'state': {'oneOf': [{'$ref': 'Dimmer'}, {'$ref': 'NotReported'}]}},
-                   'required': ['colour', 'state'],
+                   'required': ['colour', 'state', 'doubt'],
                    'type': 'object'},
  'RgbColour': {'additionalProperties': False,
                'properties': {'kind': {'const': 'rgb', 'type': 'string'},

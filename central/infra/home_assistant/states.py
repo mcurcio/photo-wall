@@ -45,6 +45,7 @@ from contracts.home_assistant import (
     EntityKind,
     EntityName,
     GalleriaBirth,
+    GalleriaConnection,
     HomeAssistantColourTemperature,
     HomeAssistantIlluminance,
     HomeAssistantLight,
@@ -85,6 +86,13 @@ class HomeAssistantListener:
     async def heard(self, epoch: str, items: Sequence[Heard]) -> None:
         """Record each item, in order, in a thread (the stores block); see the module's rules."""
         await asyncio.to_thread(self._record_all, items)
+
+    async def closed(self, connection: GalleriaConnection) -> None:
+        """A door connection closed (nodeapi.hub ListenedStates): when it is the connection Galleria's
+        latest birth names, every reference Home Assistant reports takes the "link closed" doubt
+        (RoomLightReports.record_link_closed(SOURCE)); a close of any other connection (an older
+        one, closed late) changes nothing. Cleared when Galleria reconnects and restates."""
+        raise NotImplementedError("central edge lane")
 
     def _record_all(self, items: Sequence[Heard]) -> None:
         for item in items:

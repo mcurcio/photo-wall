@@ -85,10 +85,10 @@ def test_each_light_reads_its_references_kept_facts():
                                                     heard_at=1.0)},
                   colours={})
     assert entry_of(ROOM, facts, SENSORS, {}) == FixedEntry(colour=KelvinColour(kelvin=6500))
-    assert entry_of(SPOT, facts, SENSORS, {}) == ReportedEntry(colour=KELVIN, state=Dimmer(on=True, brightness=0.5))
+    assert entry_of(SPOT, facts, SENSORS, {}) == ReportedEntry(colour=KELVIN, state=Dimmer(on=True, brightness=0.5), doubt=None)
     assert entry_of(BULB, facts, SENSORS, {}) == ReportedEntry(
-        colour=RgbColour(rgb=(1.0, 0.5, 0.0)), state=Dimmer(on=True, brightness=0.25))
-    assert entry_of(WINDOW, facts, SENSORS, {}) == MeasuredEntry(colour=KELVIN, state=Measured(lux=240.0))
+        colour=RgbColour(rgb=(1.0, 0.5, 0.0)), state=Dimmer(on=True, brightness=0.25), doubt=None)
+    assert entry_of(WINDOW, facts, SENSORS, {}) == MeasuredEntry(colour=KELVIN, state=Measured(lux=240.0), doubt=None)
 
 
 def test_no_word_or_no_sensor_is_not_reported():

@@ -14,8 +14,9 @@ import logging
 import re
 from typing import Any, Final
 
+from central.central_errors.ports import Reference
 from central.infra.transactions import PgTransaction
-from central.room_light.model import ReportRefusal, SensorRef
+from central.room_light.model import DoubtReason, ReportRefusal, SensorRef
 from central.room_light.ports import RoomLightReports
 from contracts.models import IDENTIFIER_PATTERN
 from contracts.room_light import (
@@ -95,4 +96,12 @@ def missed_readings_in(conn: Any) -> tuple[tuple[str, Reading], ...]:
             continue
     return tuple(missed)
 
-__all__ = ["HOST_STATE_STREAM", "PI_SOURCE", "LightSensorJudge", "is_player", "missed_readings_in"]
+class PiMeterAdvice:
+    """SourceAdvice (central/central_errors/ports.py) for PI_SOURCE references: cant-read ->
+    "Install the current release on Player p-…"; cant-tell -> "Check the light meter on Player p-…"."""
+
+    def what_to_do(self, reference: Reference, reason: DoubtReason) -> str:
+        raise NotImplementedError("central edge lane")
+
+
+__all__ = ["HOST_STATE_STREAM", "PI_SOURCE", "LightSensorJudge", "PiMeterAdvice", "is_player", "missed_readings_in"]

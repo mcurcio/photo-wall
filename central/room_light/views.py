@@ -7,6 +7,7 @@ from typing import Literal
 from central.room_light.model import (
     ColourSensor,
     ColourSensorId,
+    DoubtReason,
     ReportRefusal,
     RoomLight,
     Sensor,
@@ -20,6 +21,13 @@ DrawnState = Literal["drawn", "behind", "not-following", "not-reported"]
 # Where a light's colour comes from now: the typed kelvin by choice; its source's last stated colour;
 # the typed kelvin standing in because its source never stated one.
 ColourFrom = Literal["typed", "following", "never-stated"]
+
+
+class DoubtView(Model):
+    """Why Central can't stand behind a reference's last word now, and since when (Central's clock).
+    Replaces `cant_tell_since` across House › Lights' views (TODO room-lights lane)."""
+    reason: DoubtReason
+    since: Instant
 
 
 class ColourLineView(Model):
@@ -108,5 +116,5 @@ class RefusedReportsView(Model):
     refused: tuple[RefusedReportView, ...]
 
 
-__all__ = ["ColourFrom", "ColourLineView", "ColourSensorView", "DrawnState", "DrawnView", "PlayerDrawnView",
+__all__ = ["ColourFrom", "ColourLineView", "ColourSensorView", "DoubtView", "DrawnState", "DrawnView", "PlayerDrawnView",
            "RefusedReportView", "RefusedReportsView", "RoomLightView", "RoomLightsView", "SensorView"]

@@ -48,7 +48,8 @@
 #define LEASE_MS 5000
 #define PING_MS 1000         /* how often an app holding an Output is pinged */
 #define FRAME_VERSION 4      /* pw_frame_manager_v1: v4 carries the picture (1c) */
-#define DIAGNOSTIC_VERSION 5 /* pw_diagnostic_manager_v1: v4 the brightness line, v5 the Frame region (#124) */
+#define DIAGNOSTIC_VERSION 6 /* pw_diagnostic_manager_v1: v4 the brightness line, v5 the Frame region (#124),
+                                v6 Central's card (TODO display lane: the `central_card` op and its re-sends) */
 #define MAX_REGION 1024      /* contracts.node_output.REGION_DOCUMENT_BYTES */
 #define MAX_OPERATIONS 1024  /* contracts.node_frame.PICTURE_OPERATIONS_BYTES (picture operations v5) */
 #define MAX_BRIGHTNESS 128

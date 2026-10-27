@@ -219,7 +219,7 @@ WASHED = FrameLighting(mat_depth_mm=0, lights=(WashLight(light=LIGHT, lux=150, r
 
 def _wash(change: int, on: bool) -> RoomLightsDocument:
     return RoomLightsDocument(change=change, lights={
-        LIGHT: ReportedEntry(colour=KelvinColour(kelvin=2700), state=Dimmer(on=on, brightness=1.0))})
+        LIGHT: ReportedEntry(colour=KelvinColour(kelvin=2700), state=Dimmer(on=on, brightness=1.0), doubt=None)})
 
 
 async def _line(node) -> dict:
