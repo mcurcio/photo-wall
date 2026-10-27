@@ -10,12 +10,11 @@ of the seen Display's size.
 """
 from __future__ import annotations
 
-from psycopg.types.json import Jsonb
 from support.frames import frame_create
 from support.position import save_position
-from test_display_identity import _bind, enroll_pi
+from test_display_identity import _bind, _report, enroll_pi
 from test_display_size import _sized
-from test_registry import enroll
+from test_registry import enroll, report_modes
 
 from central.db import ProcessTransactionClock
 from central.infra.display_store import frame_outputs_in
@@ -39,18 +38,16 @@ def test_the_frame_output_follows_the_position_not_the_display():
 
 def test_every_frame_reads_its_frame_output_by_frame_id(registry):
     """A bound Frame with a reported Output reads its picture's pixels; a Frame whose Output
-    reported 0 x 0 and an unbound Frame read None for both; ordered by frame id."""
-    player, _key, _request = enroll(registry, count=2)
+    reports no mode (disconnected) and an unbound Frame read None for both; ordered by frame id."""
+    player, _key, request = enroll(registry, count=2)
     registry.create_frame(frame_create("c-lounge"))
     registry.create_frame(frame_create("a-hall"))
     registry.create_frame(frame_create("b-attic"))
     registry.bind("c-lounge", player["player_id"], "HDMI-A-1", expected_generation=0)
     registry.bind("b-attic", player["player_id"], "HDMI-A-2", expected_generation=0)
     save_position(registry, "c-lounge", OPENING)
+    report_modes(registry, request.device_id, ("HDMI-A-2",), None)
     with registry.db.transaction() as conn:
-        conn.execute("UPDATE outputs SET observation=%s WHERE player_id=%s AND output_id=%s",
-                     (Jsonb({"output_id": "HDMI-A-2", "width_px": 0, "height_px": 0,
-                             "connected": False}), player["player_id"], "HDMI-A-2"))
         outputs = frame_outputs_in(conn)
     assert outputs == (
         FrameOutput(frame_id="a-hall", turn=0, video=True, output_px=None, display_px=None,
@@ -90,6 +87,7 @@ def test_a_frame_reads_its_videos_setting_and_its_size_from_its_display(registry
     its box's share of the seen Display's picture area (950 x 540 mm here: a box half as wide and
     high is 475 x 270 mm); a Display that states no size gives none."""
     pi = enroll_pi(registry, "pi-a")
+    _report(registry, "pi-a", "HDMI-A-1", None, current_mode=(1920, 1080))
     registry.create_frame(frame_create("kitchen"))
     _bind(registry, "kitchen", pi, "HDMI-A-1")
     save_position(registry, "kitchen", OPENING)

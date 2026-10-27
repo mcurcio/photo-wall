@@ -16,7 +16,6 @@ import pytest
 from console_tasks import choose_source, connect, scene_continue, start_scene
 from operator_harness import operator_server
 from playwright.sync_api import expect
-from psycopg.types.json import Jsonb
 from public_media import public_photo
 from support.frames import Screen, frame_create
 from support.measured_photos import measure_all
@@ -37,12 +36,9 @@ WIDE = Screen(192, 108)
 
 def _wide_frame(registry):
     """FRAME, 16:9, bound to a Pi's output with its position saved (a Scene may target it)."""
-    identity, _key, _request = enroll(registry, count=1)
+    # The Output's report runs WIDE (the mode Weston runs, issue #124).
+    identity, _key, _request = enroll(registry, count=1, size=(WIDE.width_px, WIDE.height_px))
     registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
-    with registry.db.transaction() as conn:
-        conn.execute("UPDATE outputs SET observation = observation || %s WHERE player_id=%s",
-                     (Jsonb({"width_px": WIDE.width_px, "height_px": WIDE.height_px}),
-                      identity["player_id"]))
     registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
     save_position(registry, FRAME)
 

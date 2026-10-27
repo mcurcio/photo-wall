@@ -214,7 +214,7 @@ out.prior = {
   stagedHasNone: prior(operation("staged", { command_response: { decision: "rejected", received_at: 990 } })),
   // G2: a finished stage a later boot ended keeps what the broker reported.
   endedRunning: prior(operation("ended_by_later_boot", {
-    latest_effect: { phase: "fallback_running", sequence: 5, received_at: 995 } })),
+    latest_effect: { phase: "running", sequence: 5, received_at: 995 } })),
 };
 
 // --- rebootResult: Central's answer in the equipment outcome vocabulary.
@@ -433,7 +433,7 @@ def test_superseded_and_interrupted_operations_keep_the_brokers_earlier_answer()
         "interruptedSwitching": "App Effect Broker reported phase stopping current · first received 5 s ago",
         "supersededNothing": None,
         "stagedHasNone": None,
-        "endedRunning": "App Effect Broker reported phase fallback running · first received 5 s ago",
+        "endedRunning": "App Effect Broker reported phase running · first received 5 s ago",
     }
 
 

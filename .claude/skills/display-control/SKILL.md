@@ -1,12 +1,12 @@
 ---
 name: display-control
-description: Operate a Photo Wall Pi's displays by hand over SSH - read a display's EDID (identity, and its size from the base block, never a detailed timing), map HDMI ports to CEC devices and DDC/CI buses, turn a display off and on with cec-ctl or ddcutil, ask a display for the picture list (`getvcp <codes> --terse`, `capabilities`) and read and set its picture settings (brightness VCP 10, contrast VCP 12, colour preset 14, gains…), and read what the display controller did. Read the HDMI signal range (Broadcast RGB, is_limited_range, the AVI InfoFrame) and whether a display honours it (the EDID's quantization-selectable bit). Use it for the 1b bench step (Test off and on), the display-tuning bench steps (Full and Limited on a TV, the time without photos per change), the 1c and picture-split bench steps (display and Photo Wall brightness from the console read back, which codes a display answers, the time of an ask, power during an ask, Cover on the test monitor, write timing), to diagnose "Display didn't answer", "The display did not take it", "Checking what this display offers" that never clears or a power method that never answers, or to probe a new display's support. Also, when the owner sends a photo of a Frame while tuning, read the picture and Position values Central sent it at that time (configuration snapshots); when he AirDrops a photo of the calibration targets, read it with the reader script and tell him what to change. The rules (what the controller does, what Central decides) live in the docs it links; this is the runbook and its traps.
+description: Operate a Photo Wall Pi's displays by hand over SSH - read a display's EDID (identity, and its size from the base block, never a detailed timing), map HDMI ports to CEC devices and DDC/CI buses, turn a display off and on with cec-ctl or ddcutil, ask a display for the picture list (`getvcp <codes> --terse`, `capabilities`) and read and set its picture settings (brightness VCP 10, contrast VCP 12, colour preset 14, gains…), and read what the display controller did. Read the HDMI signal range (Broadcast RGB, is_limited_range, the AVI InfoFrame) and whether a display honours it (the EDID's quantization-selectable bit). Use it for the 1b bench step (Test off and on), the display-tuning bench steps (Full and Limited on a TV, the time without photos per change), the 1c and picture-split bench steps (display and Photo Wall brightness from the console read back, which codes a display answers, the time of an ask, power during an ask, Cover on the test monitor, write timing), to diagnose "Display didn't answer", "The display did not take it", "Checking what this display offers" that never clears or a power method that never answers, or to probe a new display's support. Also, when the owner sends a photo of a Frame while tuning, read the picture and Position values Central sent it at that time (configuration snapshots); when he AirDrops a photo of the calibration targets, read it with the reader script and tell him what to change. Read the debug overlay on a Pi: the health judge's verdict (why a Frame is dark, since when), the hold and the Frame region the overlay draws in, and what Central recorded. The rules (what the controller does, what Central decides) live in the docs it links; this is the runbook and its traps.
 ---
 
 # display-control
 
 How to reach and drive the displays on a Photo Wall Pi 5, learned in the 1b spike on the test Pi
-(2026-10-10), the 1b build, the 1c build, the picture split ([0022](../../../docs/decisions/0022-picture-hardware-and-software-apart.md)) and the display-tuning probe on the owner's Samsung QN43Q8F (2026-10-13, [0024](../../../docs/decisions/0024-display-tuning.md)), configuration snapshots (2026-10-13, [0025](../../../docs/decisions/0025-configuration-snapshots.md)) and the calibration targets (2026-10-13, [0026](../../../docs/decisions/0026-calibration-targets.md); v2 2026-10-14, [0027](../../../docs/decisions/0027-calibration-targets-v2.md)). The rules are not here; they have one home each:
+(2026-10-10), the 1b build, the 1c build, the picture split ([0022](../../../docs/decisions/0022-picture-hardware-and-software-apart.md)) and the display-tuning probe on the owner's Samsung QN43Q8F (2026-10-13, [0024](../../../docs/decisions/0024-display-tuning.md)), configuration snapshots (2026-10-13, [0025](../../../docs/decisions/0025-configuration-snapshots.md)) the calibration targets (2026-10-13, [0026](../../../docs/decisions/0026-calibration-targets.md); v2 2026-10-14, [0027](../../../docs/decisions/0027-calibration-targets-v2.md)) and the debug overlay build (2026-10-23, issues #123 to #127). The rules are not here; they have one home each:
 
 | Rules | Home |
 |---|---|
@@ -17,6 +17,7 @@ How to reach and drive the displays on a Photo Wall Pi 5, learned in the 1b spik
 | The signal range and test patterns (what each is, Done and Revert, set before Weston starts, how to tune a display with no controls) | [0024](../../../docs/decisions/0024-display-tuning.md), [Display host backend › Units](../../../docs/display-host-backend.md#units-and-weston-incarnations), [Runbook › Tune a display with no controls](../../../docs/runbook.md#tune-a-display-with-no-controls) |
 | What the picture and Position were at a time (configuration snapshots: the kinds, Restore, the routes, tables and SQL) | [0025](../../../docs/decisions/0025-configuration-snapshots.md), [Runbook › Configuration snapshots](../../../docs/runbook.md#configuration-snapshots); `GET /v1/operator/frames/{id}/tuning-snapshot?at=`, `GET /v1/operator/displays/{id}/picture-history`, `GET /v1/operator/frames/{id}/position-history` |
 | The calibration targets (both stages, what each aims at, the layout, the reader's rules) | [0026](../../../docs/decisions/0026-calibration-targets.md) (the stages), [0027](../../../docs/decisions/0027-calibration-targets-v2.md) (the boards and the reader), [Runbook › Calibration targets](../../../docs/runbook.md#calibration-targets); the layout `contracts/calibration_target.py`, the reader's thresholds `scripts/calibration_target/model.py` |
+| The debug overlay (liveness and hold apart, the card and its codes, the Frame region and its fallback, no automatic restarts) | [Player architecture › The debug overlay](../../../docs/player-architecture.md#the-debug-overlay), [Display host backend › The hold](../../../docs/display-host-backend.md#the-hold-what-the-compositor-shows) and [› The Frame region](../../../docs/display-host-backend.md#the-frame-region-diagnostic-manager-v5), [Runbook › A dark Frame](../../../docs/runbook.md#a-dark-frame-read-the-card-then-reboot) |
 | SSH access to a Node | [Runbook › Reaching a Node over SSH](../../../docs/runbook.md#reaching-a-node-over-ssh) |
 | The code | `appliance/display_host/ddc.py` (the one place `ddcutil` runs), `power_methods.py` (the exact power tool calls), `picture_list.py` (the ask), `picture.py` (writes and the base page line), `signal_range.py` (the connector's range), `output_power.py`, `edid.py`; `contracts/node_output.py`, `contracts/node_picture.py` (the picture list and its names) |
 
@@ -377,13 +378,82 @@ tab is hidden (the picture session's idle limit, `central/displays/picture.py` `
    (NOT RUN until the first bench check): treat its first answers with care and look at the photo
    yourself.
 
+## The debug overlay on a Pi
+
+The rules are in [Player architecture › The debug overlay](../../../docs/player-architecture.md#the-debug-overlay);
+this is how to read them on a live Pi. Read before any reboot: the journal and the judge's state
+are in RAM, and nothing restarts a dead Player on its own, so what you see is the failure itself.
+
+**The health judge's verdict** (`status` on `health.sock` answers uid 0 only, one SOCK_SEQPACKET
+request; the same read the node-pid1 `dark` leg makes):
+
+```sh
+sudo /usr/bin/python3 -I -c 'import json,socket
+s=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET);s.settimeout(5)
+s.connect("/run/photo-wall-health/health.sock");s.send(b"{\"op\":\"status\"}")
+print(json.dumps(json.loads(s.recv(1<<20)),indent=1))'
+```
+
+- `verdict.outputs[]`: per connected Output its `underlay` (`live`, `held` for a frozen admitted
+  run, `slate` for none admitted), the raised `codes`, the `card` (the first by `CARD_PRECEDENCE`:
+  `app_absent`, `app_unresponsive`, `app_descriptor_limit`, `nothing_to_show`) and `card_age_ms`.
+- `overlay.instructions[]`: what the overlay client is told to draw: `tint` and the two lines
+  exactly as on the wall (line 1 "... · since HH:MM" on the Pi's clock and zone). `overlay.clients`
+  0 means the overlay client is not connected: the shell's amber should cover the whole Output.
+- `verdict.conditions[]` and `ring`: each condition's state (`pending`, `raised`) and age, and the
+  recent transitions; `feeds` the read position on the broker and display feeds.
+
+**The hold and the slate.** The shell's `hold` events and the slate reasons reach the controller's
+journal only as events it acts on; read the judge's view instead: `holding` is in every display
+feed snapshot, and a released Output with `holding` false shows the slate ("Waiting for a
+picture") and, after 120 s, `nothing_to_show`. A pattern or calibration target holds the Output
+(the `picture` op's `drawing`), so a Frame on a test pattern never reads dark.
+
+**The Frame region.** The Pi computes none; it draws where Central placed the Frame. Central sends
+`region-<port>` beside `picture-<port>` with its own change number. On Central's database (the
+number rises only when the rectangle's digest changes):
+
+```sql
+SELECT player_id, output_id, region_change, region_digest FROM output_documents ORDER BY player_id, output_id;
+```
+
+The rectangle itself is `central/displays/model.py` `frame_region`: the Frame's Position box placed
+on `screen_px` (the Output report's `current_mode`, the mode Weston runs, else the Display's
+preferred mode), the same pixels the console's Position tab shows. On the Pi the overlay falls back
+to the whole Display, with no log line, when the region cannot be met (`overlay/area.py`: none
+sent, the screen now differs from the one Central placed on, or the rectangle is under 448 x 252).
+The controller logs only the exceptions:
+
+```sh
+sudo journalctl -b --no-pager -u photo-wall-display-controller.service | grep -i region
+# "region document under region-HDMI-A-1 refused (...)": the overlay uses the whole Display
+# "region for HDMI-A-1 not taken by the shell; sent again when it announces the Output"
+```
+
+**What Central recorded.** Each verdict lands in `node_link_records`; the Frame page's Player status
+reads the newest ("Dark since 08:10 · ..."):
+
+```sql
+SELECT recorded_at, seq, convert_from(data, 'UTF8') AS verdict
+FROM node_link_records
+WHERE device_id = '<device id>' AND stream = 'KV_state_health' AND subject = '$KV.state_health.verdict'
+ORDER BY recorded_at DESC, seq DESC LIMIT 5;
+```
+
+**Whether the Player stayed down, and why.** `systemctl show photo-wall-node-player.service -p
+ActiveState,InvocationID,ExecMainStatus` and `journalctl -b -u photo-wall-app-broker.service`: the
+broker records a run that exited under its own Weston as `down` (fault `process_exited`) and
+starts nothing until a person reboots; only Display's own Weston restart (a signal range change)
+starts it again. Recover with the Pi's Hardware page › **Reboot Player**.
+
 ## Traps
 
 - **Some monitors drop the hot-plug signal on a DDC/CI standby or input write** (the test monitor,
   for about 250 ms). Weston tears its Output down and builds it again. Before 1b that killed the
-  Player (SIGSEGV with descriptors exhausted) and nothing restarted it. After every write, check
+  Player (SIGSEGV with descriptors exhausted). After every write, check
   `journalctl _PID=<weston>` for `connector … disconnected` and that `photo-wall-node-player` is
-  running.
+  running: nothing restarts a Player that died (issue #125), so a write that kills it leaves the
+  Frame dark under the debug overlay's card until a reboot.
 - **The controller acts when a display comes back.** A hand `setvcp D6 4` that blips the signal
   makes the display reappear, and the controller then works it toward its document (standing on),
   so it may turn it back on. That is by design; test power through the console.

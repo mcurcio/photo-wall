@@ -4,6 +4,8 @@
 
 **Superseded** wherever Central is assumed in charge: see [0016](0016-central-and-node-relationship.md) and the node redesign ([0017](0017-node-redesign-r3.md)). The sections marked below are replaced by 0017's current choices.
 
+**R8's restart half is reversed** (issue #125). Owner, 2026-10-20: "a human. dont do automated reboots yet. i want to see every time it fails for now"; asked whether that covers the Player program alone: "No auto-restarts at all". App restarts do not "never give up": nothing restarts or kills a Player that exits or stops answering, the debug overlay's card says why, and a person reboots. R8's three reboots stay, the hardware watchdog included (owner: "keep"). As built: [Player architecture › no automatic restarts](../player-architecture.md#processes-and-supervision).
+
 Briefing reviewed by the owner (private to the owner): <https://claude.ai/artifact/V39dLhUzAwhyMhafaDAx2v>
 
 ## Problem

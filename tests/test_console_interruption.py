@@ -131,3 +131,77 @@ def test_a_missing_or_later_record_time_never_prints_a_bad_age():
     out = _run()
     assert out["noTime"] == f"Output interrupted (Central's inference: {DISPLAY_HOST_REPORT})"
     assert out["future"].endswith("recorded 0 s ago)")
+
+
+DARK_SCRIPT = r"""
+const health = await import(process.argv[1]);
+const time = await import(process.argv[2]);
+time.setHouseClock({ zone: "Europe/London", clock: "24h" });
+const DARK = { code: "app_descriptor_limit", line: "Photos stopped — out of open files",
+  since: "2026-10-20T07:10:37Z" };
+const snapshot = ({ dark = DARK, reportAt = 995, bound = true, connected = true, rows = [] } = {}) => ({
+  readAt: 1000, runtime: null, outputInterruptions: rows,
+  inventory: {
+    read_at: 1000, silent_after_seconds: 30, report_interval_seconds: 5,
+    players: [{ id: "p-1", device_id: "device-1", authority_epoch: 2, registered_at: 10,
+      last_seen: 10, retired_at: null, last_report_at: reportAt }],
+    outputs: [{ player_id: "p-1", output_id: "HDMI-A-1", observation: { connected } }],
+    frames: [{ id: "hearth", player_id: bound ? "p-1" : null, output_id: bound ? "HDMI-A-1" : null,
+      generation: 3, readiness: bound ? "ready" : "unbound", dark }],
+  },
+});
+const view = (served) => {
+  const h = health.frameHealth(served, "hearth");
+  return { state: h.state, severity: h.severity, cause: h.cause, tab: h.tab, label: h.label,
+    tileLabel: h.tileLabel };
+};
+const row = { frame_id: "hearth", player_id: "p-1", output_id: "HDMI-A-1", binding_generation: 3,
+  cause_layer: "display_host", interrupted_at: 940 };
+const out = {
+  dark: view(snapshot()),
+  silent: view(snapshot({ reportAt: 900 })).state,
+  awaiting: view(snapshot({ reportAt: null })).state,
+  interrupted: view(snapshot({ rows: [row] })).state,
+  noPanel: view(snapshot({ connected: false })).state,
+  unbound: view(snapshot({ bound: false })).state,
+  lit: view(snapshot({ dark: null })).state,
+  absent: (() => {   // no `dark` key at all
+    const served = snapshot({ dark: null });
+    delete served.inventory.frames[0].dark;
+    return view(served).state;
+  })(),
+  attention: health.wallAttention(snapshot()).alarms.map((entry) => [entry.frame.id, entry.health.label]),
+};
+time.setHouseClock({ zone: "Europe/London", clock: "12h" });
+out.twelve = view(snapshot()).label;
+console.log(JSON.stringify(out));
+"""
+
+
+def _dark():
+    _require_node()
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", DARK_SCRIPT, "--", (SRC / "health.js").as_uri(),
+         (SRC / "timeWords.js").as_uri()],
+        capture_output=True, text=True, timeout=30, check=True)
+    return json.loads(result.stdout)
+
+
+DARK_LABEL = "Dark since 08:10 · Photos stopped — out of open files"
+
+
+def test_a_dark_frame_is_an_alarm_worded_with_the_pis_time_on_the_house_clock():
+    # Issue #126: "Dark since 08:10 · out of open files"; the Pi's 07:10:37 UTC is 08:10 in London
+    # (BST), to the minute.
+    out = _dark()
+    assert out["dark"] == {"state": "dark", "severity": "alarm", "cause": "dark", "tab": "hardware",
+                           "label": DARK_LABEL, "tileLabel": "Dark"}
+    assert out["attention"] == [["hearth", DARK_LABEL]]
+    assert out["twelve"] == "Dark since 8:10 am · Photos stopped — out of open files"
+
+
+def test_dark_follows_unbound_and_precedes_every_liveness_and_output_state():
+    out = _dark()
+    assert out["unbound"] == "unbound"
+    assert [out[case] for case in ("silent", "awaiting", "interrupted", "noPanel")] == ["dark"] * 4
+    assert [out["lit"], out["absent"]] == ["ok", "ok"]

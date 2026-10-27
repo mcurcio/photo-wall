@@ -3,6 +3,12 @@
 Backend requests are never presentation evidence. Only the qualified backend calls
 ``presented``/``diagnostic_presented``; an application frame token cannot call them.
 The native Weston adapter is separate; this domain makes no claim about physical pixels.
+
+One lease rule (issue #123): the shell's. Its lease (LEASE_MS) is renewed by a presented commit
+or the app's ping answer, and its handoff op takes only a buffer presented within it, so this
+domain keeps no lease of its own. ``holding`` is the shell's answer to the other question, asked
+every tick on the compositor's scene: whether a picture plane or Display's own drawing holds the
+released Output (``hold``); without it the holding slate covers the Output, the grant kept.
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ class OutputState:
     presented: Surface | None = None
     admitted: Surface | None = None
     buffer_token: str | None = None
-    lease_expires_ms: int = 0
+    holding: bool = False
     diagnostic: str = "requested"
     handoff_id: UUID | None = None
     fault: str | None = None
@@ -51,17 +57,13 @@ class DisplayHost:
         boot_id: UUID,
         incarnation_id: UUID,
         backend: DisplayBackend,
-        lease_ms: int = 5000,
         max_outputs: int = 16,
     ):
-        if type(lease_ms) is not int or not 1 <= lease_ms <= 60000:
-            raise ValueError("surface_lease_invalid")
         if type(max_outputs) is not int or not 1 <= max_outputs <= 64:
             raise ValueError("output_bound_invalid")
         self.boot_id = boot_id
         self.incarnation_id = incarnation_id
         self.backend = backend
-        self.lease_ms = lease_ms
         self.max_outputs = max_outputs
         self._outputs: dict[str, OutputState] = {}
 
@@ -156,7 +158,7 @@ class DisplayHost:
         # Preparing candidates cannot withdraw an admitted operational surface.
         state = replace(state, candidate=surface)
         if state.admitted is None and state.presented != surface:
-            state = replace(state, presented=None, buffer_token=None, lease_expires_ms=0)
+            state = replace(state, presented=None, buffer_token=None)
         self._outputs[state.key.output_id] = state
         return state
 
@@ -200,12 +202,7 @@ class DisplayHost:
         ):
             raise ValueError("presentation_not_current")
         fact = surface.fact("presented_to_compositor", buffer_token)
-        state = replace(
-            state,
-            presented=surface,
-            buffer_token=buffer_token,
-            lease_expires_ms=now_ms + self.lease_ms,
-        )
+        state = replace(state, presented=surface, buffer_token=buffer_token)
         self._outputs[state.key.output_id] = state
         return fact
 
@@ -216,7 +213,8 @@ class DisplayHost:
         """Authorize a fresh handoff, independently of first-frame evidence.
 
         Its UUID correlates backend acknowledgment even if opaque buffer IDs are
-        reused across withdrawal and re-admission of the same surface tuple.
+        reused across withdrawal and re-admission of the same surface tuple. Whether the named
+        buffer was presented within the lease is the shell's check (its `handoff` op).
         """
         state = self._current(surface)
         if (
@@ -224,7 +222,7 @@ class DisplayHost:
             or state.presented != surface
             or state.buffer_token is None
             or type(now_ms) is not int
-            or not 0 <= now_ms < state.lease_expires_ms
+            or now_ms < 0
         ):
             raise ValueError("handoff_without_current_presentation")
         handoff_id = handoff_id or uuid4()
@@ -250,6 +248,15 @@ class DisplayHost:
         self._outputs[state.key.output_id] = state
         return state
 
+    def hold(self, output_id: str, *, holding: bool) -> OutputState:
+        """The shell's word on whether the released Output is held (a `hold` event): a picture
+        plane or Display's own drawing keeps it; without either the holding slate covers it."""
+        if type(holding) is not bool:
+            raise ValueError("hold_invalid")
+        state = replace(self.state(output_id), holding=holding)
+        self._outputs[output_id] = state
+        return state
+
     def diagnostic_presented(self, key: OutputKey) -> OutputState:
         state = self.state(key.output_id)
         if state.key != key or not state.connected or state.diagnostic != "requested":
@@ -267,7 +274,7 @@ class DisplayHost:
             presented=None,
             admitted=None,
             buffer_token=None,
-            lease_expires_ms=0,
+            holding=False,
             diagnostic="requested",
             handoff_id=None,
             fault=reason,
@@ -300,14 +307,4 @@ class DisplayHost:
                 self._outputs[output_id] = replace(state, candidate=None, presented=state.admitted)
             else:
                 self._diagnostic(output_id, "app_exited")
-        return tuple(facts)
-
-    def expire(self, *, now_ms: int) -> tuple[SurfaceFact, ...]:
-        if type(now_ms) is not int or now_ms < 0:
-            raise ValueError("clock_invalid")
-        facts = []
-        for output_id, state in tuple(self._outputs.items()):
-            if state.presented is not None and now_ms >= state.lease_expires_ms:
-                facts.append(state.presented.fact("invalidated"))
-                self._diagnostic(output_id, "surface_lease_expired")
         return tuple(facts)

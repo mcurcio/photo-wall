@@ -185,7 +185,7 @@ class Fleet:
         for command in box["commands"]:
             command["outstanding"] = False
         for operation in box["operations"][:1]:
-            operation["state"] = ("ended_by_later_boot" if operation["state"] in ("target_running", "fallback_running")
+            operation["state"] = ("ended_by_later_boot" if operation["state"] == "target_running"
                                   else "interrupted_by_reboot")
 
     def run_stage(self, device):

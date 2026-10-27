@@ -1,7 +1,10 @@
 """Host-owned local recovery authority, independent of remote command sessions.
 
-One writer persists immutable deadlines and reboot intent. Transport and Linux
-observation are ports; this module cannot access broker journals or app roots.
+One writer persists immutable deadlines. A missed stop or restore deadline is a fault
+(`deadline_missed`, reported as `local_recovery_<diagnostic>`), never a reboot: the owner,
+2026-10-20, "a human. dont do automated reboots yet. i want to see every time it fails for
+now" (issue #125). Transport and Linux observation are ports; this module cannot access
+broker journals or app roots.
 """
 from __future__ import annotations
 
@@ -67,9 +70,12 @@ class RecoveryObligation:
         return cls(**row)
 
 
+_PHASES = ("armed", "stopped", "controlled", "deadline_missed")
+
+
 class RecoverySupervisor:
-    def __init__(self, store, driver, observer):
-        self.store, self.driver, self.observer = store, driver, observer
+    def __init__(self, store, observer):
+        self.store, self.observer = store, observer
 
     def _load(self):
         value = self.store.read("local-recovery")
@@ -82,7 +88,7 @@ class RecoverySupervisor:
                 raise ValueError("recovery_journal")
             obligation = RecoveryObligation.parse(row["obligation"])
             if (row["diagnostic"] not in (None, "stop_deadline", "restore_deadline") or key != str(obligation.operation_id) or str(obligation.boot_id) != self.store.binding["boot_id"]
-                    or row["phase"] not in ("armed", "stopped", "controlled", "reboot_intent", "reboot_requested", "reboot_unknown")):
+                    or row["phase"] not in _PHASES):
                 raise ValueError("recovery_journal")
         return value
 
@@ -90,8 +96,10 @@ class RecoverySupervisor:
         rows = tuple(self._load()["records"].values())
         active = tuple(row for row in rows if row["phase"] != "controlled")
         fault = next(("local_recovery_" + row["diagnostic"] for row in active if row["diagnostic"]), None)
+        # Nothing reboots any more: the row keeps its contract name (contracts/node_observation.py)
+        # and counts the obligations whose deadline was missed, the rows that once rebooted.
         return (("local_recovery_active", len(active), "count", "base_recovery"),
-                ("local_recovery_reboot", sum(row["phase"].startswith("reboot") for row in active), "count", "base_recovery")), fault
+                ("local_recovery_reboot", sum(row["phase"] == "deadline_missed" for row in active), "count", "base_recovery")), fault
 
     def _save(self, value, key, row):
         self.store.write("local-recovery", {**value, "records": {**value["records"], key: row}})
@@ -105,8 +113,8 @@ class RecoverySupervisor:
         if prior is not None:
             if prior["obligation"] != obligation.document():
                 raise ValueError("recovery_conflict")
-            if prior["phase"].startswith("reboot"):
-                raise ValueError("recovery_reboot_already_intended")
+            if prior["phase"] == "deadline_missed":
+                raise ValueError("recovery_deadline_missed")
             return obligation.receipt
         if (len(value["records"]) >= 1024 or any(r["phase"] != "controlled" for r in value["records"].values())
                 or not obligation.armed_ms <= now_ms < obligation.stop_deadline_ms):
@@ -121,8 +129,8 @@ class RecoverySupervisor:
         obligation = RecoveryObligation.parse(row["obligation"])
         if receipt != obligation.receipt:
             raise ValueError("recovery_receipt")
-        if row["phase"].startswith("reboot"):
-            raise ValueError("recovery_reboot_already_intended")
+        if row["phase"] == "deadline_missed":
+            raise ValueError("recovery_deadline_missed")
         if row["phase"] == "controlled":
             return
         if progress == {"kind": "stopped"}:
@@ -151,11 +159,6 @@ class RecoverySupervisor:
             deadline = obligation.stop_deadline_ms if row["phase"] == "armed" else obligation.restore_deadline_ms
             if now_ms < deadline:
                 continue
-            # An uncertain reboot dispatch can never be repeated after restart.
-            row = {**row, "phase": "reboot_intent", "diagnostic": "stop_deadline" if row["phase"] == "armed" else "restore_deadline"}
-            self._save(value, key, row)
-            try:
-                initiated = self.driver.initiate()
-            except (OSError, ValueError, subprocess.SubprocessError):
-                initiated = False
-            self._save(value, key, {**row, "phase": "reboot_requested" if initiated else "reboot_unknown"})
+            # A fault for a person to see (telemetry), never a reboot; terminal for this boot.
+            self._save(value, key, {**row, "phase": "deadline_missed",
+                                    "diagnostic": "stop_deadline" if row["phase"] == "armed" else "restore_deadline"})

@@ -228,7 +228,7 @@ def strengths_at(tracer: Tracer, at: float, screen_size: tuple[int, int]) -> dic
     what the nearest kept layer beneath it is (a media layer's picture, else black): a layer the
     cut gave up shows nothing, so the bottom kept layer is over the screen's black. Pure."""
     looked, kept = _kept(tracer, at, screen_size)
-    kept_ids = {plane.layer.layer.assignment_id for plane in kept.planes}
+    kept_ids = {plane.key for plane in kept.planes}
     strengths: dict[str, float] = {}
     beneath: Beneath = "black"
     for local in visible_now(looked.layers):

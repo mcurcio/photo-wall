@@ -93,10 +93,17 @@ for file in files:
                                   Path(file).read_text().splitlines()
                                   if line.startswith(("ExecStart=", "ExecStartPre="))]
 report["units"] = units
+def words(command):
+    # A command's words, a shell's script (/bin/sh -ec '...') split into its own words too, so
+    # every binary a unit's script runs is held to the same rule as one it starts directly.
+    tokens = shlex.split(command)
+    if tokens[:1] == ["/bin/sh"] and len(tokens) == 3 and tokens[1].startswith("-") and "c" in tokens[1]:
+        return [token for token in shlex.split(tokens[2]) if token not in ("&&", "||", ";", ">")]
+    return tokens
 paths = {}
 for commands in units.values():
     for command in commands:
-        for token in shlex.split(command):
+        for token in words(command):
             value = token.partition("=")[2] if token.startswith("--") else token
             if value.startswith("/usr/"):
                 paths[value] = Path(value).is_file() or (Path(value) / "__main__.py").is_file()

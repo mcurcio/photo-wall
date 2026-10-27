@@ -74,7 +74,6 @@ const PUT_UNKNOWN = "Outcome unknown: Central did not answer. The next read of t
 const HIDDEN = "the tab was hidden; this page sends no reboots while it is not shown";
 const KEEP_THEN = "When you confirm, this page reboots these Players one at a time, each after the "
   + "previous one rejoins:";
-const FALLBACK_LOOK = "The new app did not start; the Player fell back on its own. Back out is recommended.";
 const COUNT_FACT = fact({ kind: "derived", value: "each Rejoined row is this page's judgement",
   basis: "a later kernel boot than this page's reboot, or a linked app that identifies this release, and every bound "
     + "Output's Frame live with no current readiness failure; see each row's Evidence" });
@@ -560,7 +559,6 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
           <p>{`Look at the Frames ${triedName} drives.`}</p>
           <FramesNow snapshot={snapshot} frames={triedEntry.frames} />
           <OperationLine operation={step.stage} readAt={triedNode.operations?.read_at ?? null} />
-          {step.stage.state === "fallback_running" && <p className="roster__note" role="alert">{FALLBACK_LOOK}</p>}
           {putButton}
           <button type="button" onClick={onBackOut} disabled={backOutInFlight}>{backOut !== null ? "Send the same back-out reboot again" : `Back out: reboot ${triedName}`}</button>
           <p className="roster__note">{`Back out reboots ${triedName}; its next boot is offered its own version. No version changes.`}</p>

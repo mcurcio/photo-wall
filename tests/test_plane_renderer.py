@@ -36,7 +36,7 @@ from player.gpu import LINEAR, NV12, XR24, DmabufFrame, Target
 from player.pacing import DEFAULT_REFRESH, Word
 from player.plane_renderer import BAND_BYTES, FENCE_POLL, VIDEO_TARGETS, PlaneRenderer
 from player.plane_screen import FrameGrant, ScreenPicture
-from player.planes import MIN_STRENGTH, Composition, Screen, plane_strength
+from player.planes import DARK_KEY, MIN_STRENGTH, Composition, Screen, plane_strength
 from player.rendering import LocalLayer, OutputComposition
 
 OUTPUT = "hdmi1"
@@ -323,7 +323,7 @@ class Rig:
     def strengths(self, commit: int = -1) -> list[tuple[str, float]]:
         """Each committed plane's assignment and strength, to 9 places (full strength over black is
         encode_srgb(1), 1 within a float's last bit)."""
-        return [(plane.layer.layer.assignment_id, round(plane.strength, 9))
+        return [(plane.key, round(plane.strength, 9))
                 for plane in self.screens.commits[commit][0].planes]
 
 
@@ -745,6 +745,39 @@ def test_a_trial_over_a_fallback_with_nothing_playing_draws_the_commissioning_gr
     rig.clock.tick()
     rig.present(fallback=True, timebase=None)
     assert len(rig.patterns.draws) == 1 and rig.screens.grounds[-1].handle != rig.screens.grounds[-2].handle
+
+
+def test_a_frame_with_nothing_to_play_shows_a_black_plane_the_compositor_sees():
+    """Issue #123: with nothing kept and nothing playing (an empty fallback) the Frame is dark on
+    purpose, drawn as a black picture plane over its placement (Display Host's shell keeps the
+    Output with a picture plane, never with the ground alone), so it is never read as "nothing to
+    show". The plane is the Player's own drawing: the presented composition stays empty, so no
+    assignment is invented or reported presented; the candidate's commit stays the bare ground."""
+    rig = Rig(admitted=False)
+    frame = framed(centred(0.5))
+    rig.present(frame=frame, fallback=True, timebase=None)
+    rig.renderer.finish()
+    rig.clock.tick()
+    rig.present(frame=frame, fallback=True, timebase=None)
+    assert rig.screens.commits[-1][0].planes == ()      # a candidate is not judged: its ground only
+    rig.screens.admitted = True
+    result = rig.settle(frame=frame, fallback=True, timebase=None)
+    composition, pictures, _tag, _change = rig.screens.commits[-1]
+    (plane,) = composition.planes
+    at = Placement(960, 540, 1920, 1080)
+    assert plane.dark and plane.key == DARK_KEY + frame.frame_id and plane.at == at and plane.strength == 1.0
+    assert pictures[plane.key].size == (1920, 1080) and pictures[plane.key] != rig.screens.grounds[-1]
+    assert rig.fitter.draws == [] and len(rig.fitter.blacks) == 2      # the ground's black and the Frame's
+    assert result.status == "presented" and result.composition.layers == () and result.composition.fallback
+    commits = len(rig.screens.commits)
+    rig.clock.tick()
+    rig.present(frame=frame, fallback=True, timebase=None)
+    assert len(rig.screens.commits) == commits          # nothing changed, nothing committed
+    still = photo("kept", start=0)
+    rig.ready(still, frame=frame)
+    rig.clock.tick()
+    rig.settle(still, frame=frame, fallback=True, timebase=None)
+    assert rig.strengths() == [("kept", 1.0)]            # a kept photo is its own plane: no dark one
 
 
 @pytest.mark.parametrize("pattern", list(TestPattern))

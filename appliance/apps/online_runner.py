@@ -7,10 +7,8 @@ prepared, the switch runs even while Central is unreachable.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from pathlib import Path
 
-from appliance.apps.broker import RelaunchPacingStore
 from appliance.apps.import_worker import RootImportWorker
 from appliance.apps.online_broker import OnlineEffectBroker
 from contracts.node_lifecycle import parse_stage_command
@@ -21,11 +19,9 @@ PREPARED = Path("/run/photo-wall-node-storage/preparation/prepared.json")
 
 class OnlineRunner:
     def __init__(self, store, driver, session, recovery, *, worker: RootImportWorker,
-                 pacing: RelaunchPacingStore, now_ms: Callable[[], int],
                  prepared: Path = PREPARED):
         self.store, self.driver, self.session = store, driver, session
-        self.broker = OnlineEffectBroker(store, driver, session, recovery, pacing=pacing,
-                                         now_ms=now_ms)
+        self.broker = OnlineEffectBroker(store, driver, session, recovery)
         self.worker = worker
         self.prepared = prepared
 

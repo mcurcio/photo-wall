@@ -43,9 +43,8 @@ from contracts.node_lifecycle import (
 from contracts.node_protocol import counter, identifier, token
 
 # Projection of an operation's latest reported effect phase. Phases not listed
-# (intent_stop, stopped, starting_new, target_failed, fallback_starting) are mid-switch.
-_TERMINAL_STATES = {"running": "target_running", "fallback_running": "fallback_running",
-                    "effect_unknown": "effect_unknown"}
+# (intent_stop, stopped, starting_new, target_failed) are mid-switch.
+_TERMINAL_STATES = {"running": "target_running", "effect_unknown": "effect_unknown"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,7 +156,9 @@ class NodeLifecycle:
             return {"command": json.loads(encode_stage_command(command)), "duplicate": False}
 
     def _qualified_fallback_in(self, conn, device_id, generation, base_content_key, target_sha256, now):
-        """The broker restores this accepted environment if the target fails to start."""
+        """The stage's `fallback`: this Pi's newest accepted environment other than the target.
+        Since issue #125 no Node starts it when the target fails (the broker reports
+        `target_failed`); the stage contract still carries it and the Node still stages it."""
         try:
             cohort = current_cohort_in(conn, device_id, generation, now)
         except NodeControlError as exc:
@@ -222,8 +223,7 @@ class NodeLifecycle:
                     raise NodeControlError("node_app_effect_identity_conflict")
                 return {"stored": True, "duplicate": True, "received_at": prior["received_at"]}
             if event.phase in RUNNING_PHASES:
-                expected = command.fallback if event.phase.startswith("fallback") else command.target
-                if (event.environment_sha256 != expected.environment_sha256
+                if (event.environment_sha256 != command.target.environment_sha256
                         or event.process == command.old_process or event.app_epoch <= command.old_app_epoch):
                     raise NodeControlError("node_app_effect_environment_mismatch")
             collision = conn.execute("SELECT 1 FROM node_app_effects WHERE operation_id=%s AND producer_id=%s "
@@ -302,7 +302,7 @@ class NodeLifecycle:
                 rebooted = current is not None and current["kernel_boot_id"] != command.producer.kernel_boot_id
                 if rebooted and state in ("staged", "switching", "effect_unknown"):
                     state = "interrupted_by_reboot"
-                elif rebooted and state in ("target_running", "fallback_running"):
+                elif rebooted and state == "target_running":
                     state = "ended_by_later_boot"
                 results.append({"operation_id": str(operation["operation_id"]),
                     "command_id": str(operation["command_id"]), "operator_audit_ref": operation["operator_audit_ref"],

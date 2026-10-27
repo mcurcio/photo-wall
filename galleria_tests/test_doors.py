@@ -40,9 +40,21 @@ def _sockets(socket_enabled: None) -> Iterator[None]:
 
 
 def _free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+    return _free_ports(1)[0]
+
+
+def _free_ports(count: int) -> tuple[int, ...]:
+    """`count` loopback ports free now, all different: each probe stays bound until every one is
+    taken, so the kernel never hands one port out twice (one at a time, a closed probe's port
+    could come back for the next listener of the same server, which then fails to bind)."""
+    probes = [socket.socket() for _ in range(count)]
+    try:
+        for probe in probes:
+            probe.bind(("127.0.0.1", 0))
+        return tuple(probe.getsockname()[1] for probe in probes)
+    finally:
+        for probe in probes:
+            probe.close()
 
 
 @dataclass(frozen=True)
@@ -76,12 +88,13 @@ def pi_bus() -> Iterator[Server]:
     """A Pi's bus on the shipped node-bus.conf, its per-Node values from the environment as the unit
     gives them (appliance/boot/bus_environment.py): local programs in account API over the loopback
     client port; the door's anonymous WebSocket clients land in `reader`. Its leaf dials nobody."""
-    server = Server(_free_port(), _free_port())
+    client, door, leaf = _free_ports(3)
+    server = Server(client, door)
     yield from _serve(NODE_BUS_CONF, server, {
         "PHOTO_WALL_BUS_NAME": json.dumps(contract.bus_server_name(SERIAL)),
         "PHOTO_WALL_BUS_PORT": str(server.client_port),
         "PHOTO_WALL_BUS_DOOR_PORT": str(server.door_port),
-        "PHOTO_WALL_BUS_LEAF_URL": json.dumps(f"ws://nobody:nobody@127.0.0.1:{_free_port()}"),
+        "PHOTO_WALL_BUS_LEAF_URL": json.dumps(f"ws://nobody:nobody@127.0.0.1:{leaf}"),
     })
 
 
@@ -89,11 +102,12 @@ def pi_bus() -> Iterator[Server]:
 def hub(tmp_path: Path) -> Iterator[Server]:
     """Central's hub on the configuration Fleet generates, with no Pi enrolled: Central's client on
     the client port, Home Assistant's door on the WebSocket listener."""
-    server = Server(_free_port(), _free_port())
+    client, door, leaf = _free_ports(3)
+    server = Server(client, door)
     path = tmp_path / "hub.json"
     path.write_text(hub_configuration([], HubListeners(
         server_name="hub", client_host="127.0.0.1", client_port=server.client_port, websocket_host="127.0.0.1",
-        websocket_port=server.door_port, leaf_host="127.0.0.1", leaf_port=_free_port(), monitor_port=None,
+        websocket_port=server.door_port, leaf_host="127.0.0.1", leaf_port=leaf, monitor_port=None,
         max_memory_store_bytes=4 * 1024 * 1024)))
     yield from _serve(path, server)
 

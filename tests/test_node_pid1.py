@@ -3,7 +3,11 @@
 Each scenario boots the actual sealed node in a privileged arm64 systemd container against a
 real HTTP Central on its own database: success (ordered stop-before-start, natural completion;
 before its stage, three signal range restarts of Weston under the running Player: the broker alone
-starts the Player again, never exits, and no unit fails), failure (fallback), outage (Central unreachable for 35 s once the broker holds its stage),
+starts the Player again, never exits, and no unit fails; after it, a crashed Player and then a
+crashed Weston leave the Player down, issue #125), failure (the target exits: target_failed and
+effect_unknown, no fallback start, and the debug overlay's card shows), dark (a Player at its
+open-file limit, then a frozen one, then a killed one: the card names the cause and the Pi-clock
+time, and nothing starts the Player again; issues #123, #125), outage (Central unreachable for 35 s once the broker holds its stage),
 reboot (a second kernel boot of the same device re-enrolls, supersedes the first and is
 commandable), refused (a board below the smallest memory class: storage refuses, nothing
 after it runs, and Host Management reports the refusal with its numbers) and join (the Node API
@@ -19,6 +23,7 @@ they fail. Each test removes its own containers, database and archive copies.
 """
 
 import asyncio
+import dataclasses
 import datetime
 import hashlib
 import json
@@ -47,10 +52,12 @@ from test_fleet_attempts import DEVICE_ID, SERIAL
 from appliance.kernel.capacity import LINES
 from appliance.kernel.display_paths import DISPLAY_UNIT, RUNTIME, WAYLAND_SOCKET
 from central.fleet.node_bus_presence import bus_links_in
+from central.infra.health_report_store import HEALTH_REPORT_SUBJECT, HEALTH_STATE_STREAM
 from central.infra.node_link_store import PgWallMarks
 from central.node_bus_wiring import WALL_TABLE
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_commands import parse_session_claim
+from contracts.node_health import decode_health_report
 from contracts.node_link import (
     NODE_BUS_GOMEMLIMIT,
     NODE_BUS_MEMORY_MAX,
@@ -65,7 +72,7 @@ from nodeapi.hub import WallWriter
 pytestmark = pytest.mark.node_pid1
 FIXTURE_VARIABLE = "PHOTO_WALL_NODE_PID1_FIXTURE"
 REQUIRE_VARIABLE = "PHOTO_WALL_TEST_REQUIRE_NODE_PID1"
-SCENARIOS = ("success", "failure", "outage", "reboot", "refused", "join")
+SCENARIOS = ("success", "failure", "outage", "reboot", "refused", "join", "dark")
 
 MASKS = (
     *HOST_ACTING_UNITS,
@@ -99,10 +106,46 @@ SIGNAL_UNIT = "photo-wall-display-signal.service"  # a signal range change's Wes
 DISPLAY_RESTARTS = 3
 # Weston's RestartSec and READY=1, the broker's next turn, the Player's start and its app link.
 PLAYER_RELAUNCH_SECONDS = 60
-# A Player that dies on its own: the broker's first paced relaunch (1 s), its next turn, the
-# collection of the old unit and the new unit's start.
-PLAYER_CRASH_RELAUNCH_SECONDS = 15
+# Issue #125: a Player that dies on its own stays down. The old paced relaunch started it within
+# about 2 s; this watch is long enough to see any start a turn or a unit collection would make.
+PLAYER_STAYS_DOWN_SECONDS = 15
 BROKER_LAUNCH = "/run/photo-wall-app-broker/launch.json"  # the broker's current launch record
+# The dark scenario: the debug overlay's card shows within CARD_SECONDS of the signal (k misses
+# of T plus the raise window for a frozen Player; the raise window for a dead one), and nothing
+# starts the Player again within STAYS_DARK_SECONDS of it (the removed kill came at K = 35 s).
+CARD_SECONDS = 20
+STAYS_DARK_SECONDS = 45
+DARK_OUTPUT = "Virtual-1"  # the fixture's synthetic Output (tests/node_pid1_fixture/Dockerfile)
+# Household lines of the run causes (contracts/node_faults.py), as the card's line 1 starts.
+UNRESPONSIVE_LINE = "Photos paused — the player stopped responding"
+ABSENT_LINE = "Photos paused — the player stopped"
+LIMIT_LINE = "Photos paused — the player ran out of open files"
+NOTHING_LINE = "Nothing to show on this Frame"
+# Issue #123's lowered limit: this many above what the Player holds open, inside the judge's
+# DESCRIPTOR_LIMIT_HEADROOM (16), so its next descriptor sample (every 10 s) is at the limit.
+LIMIT_ABOVE_OPEN = 8
+# The judge's `status` (uid 0) on health.sock, one SOCK_SEQPACKET request.
+HEALTH_STATUS = """import json,socket
+s=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET);s.settimeout(5)
+s.connect('/run/photo-wall-health/health.sock');s.send(b'{"op":"status"}')
+print(s.recv(1<<20).decode())"""
+# The broker's node feed (uid 0 may read it): `latest` prints the newest sequence; `after N` the
+# kind and sequence of every event after N, page by page.
+BROKER_FEED = """import json,socket,sys
+def read(after):
+ s=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET);s.settimeout(5)
+ s.connect('/run/photo-wall-app-feed/feed.sock')
+ s.send(json.dumps({'op':'events','after':after,'incarnation':None}).encode())
+ page=json.loads(s.recv(1<<17));s.close();assert page['accepted'],page;return page
+if sys.argv[1]=='latest':
+ print(json.dumps({'latest':read(0)['latest']}));raise SystemExit
+after=int(sys.argv[2]);seen=[]
+while True:
+ page=read(after);events=page['events']
+ seen+=[{'sequence':e['sequence'],'kind':e['kind']} for e in events]
+ if not events:break
+ after=events[-1]['sequence']
+print(json.dumps(seen))"""
 CONTROL_SOCKET = str(RUNTIME / "control.sock")
 # The controller's journal must never hold these: its connect to a control.sock not yet bound
 # (started before Weston's READY=1), or a sandbox set up on a vanished runtime directory.
@@ -338,26 +381,6 @@ class Node:
             time.sleep(0.5)
         self.verify_display_ready(name)
 
-    def player_follows_display(self, fixture):
-        """Weston crashes: the Player stops with it (StopPropagatedFrom=), and the broker starts
-        the same environment again for the new Weston incarnation, which links to Central again."""
-        before = unit_properties_of(self, PLAYER_UNIT, "ActiveState,InvocationID")
-        linked = status_of(fixture, self.work)["current"]
-        assert before["ActiveState"] == "active" and linked, (before, linked)
-        self.recover_display("SIGSEGV", "display-under-player")
-        deadline = time.monotonic() + PLAYER_RELAUNCH_SECONDS
-        while True:
-            now = unit_properties_of(self, PLAYER_UNIT, "ActiveState,SubState,InvocationID")
-            current = status_of(fixture, self.work)["current"]
-            if (now["InvocationID"] not in ("", before["InvocationID"])
-                    and now["SubState"] == "running"
-                    and current and current["process"] != linked["process"]):
-                break
-            assert time.monotonic() < deadline, ("no Player for the new Weston", before, now, current)
-            time.sleep(0.5)
-        (self.work / "player-after-display.json").write_text(
-            json.dumps({"before": before, "after": now, "linked": current}, sort_keys=True))
-
     def player_survives_display_restarts(self, times):
         """Incident 2026-10-13 (v0.35.0): a signal range change restarts Weston through
         photo-wall-display-signal.service. Each of `times` restarts, under the broker's running
@@ -402,28 +425,116 @@ class Node:
         assert failed == [], failed
         self.verify_display_ready("display-after-restarts")
 
-    def player_restarts_after_a_crash(self):
-        """The Player dies on its own (SIGSEGV), Weston untouched: the broker starts it again on
-        its relaunch pacing, as a new launch epoch, within the same kernel boot (1b P1b)."""
+    def player_stays_down(self, before, epoch, until, name):
+        """Until `until` (monotonic), no Player run but `before`'s: its InvocationID is the same
+        or gone, never a new one, and the broker's launch epoch is still `epoch` (issue #125)."""
+        watched = []
+        while True:
+            now = unit_properties_of(self, PLAYER_UNIT, "ActiveState,SubState,InvocationID")
+            launch = json.loads(self.run("cat", BROKER_LAUNCH))
+            watched.append({"unit": now, "epoch": launch["epoch"]})
+            assert now["InvocationID"] in ("", before["InvocationID"]), ("a new Player run", name,
+                                                                         before, now, launch)
+            assert launch["epoch"] == epoch, ("a new launch epoch", name, epoch, launch)
+            if time.monotonic() >= until:
+                break
+            time.sleep(1)
+        (self.work / (name + ".json")).write_text(json.dumps(
+            {"before": before, "epoch": epoch, "watched": watched[-3:]}, sort_keys=True))
+
+    def player_stays_down_after_crashes(self):
+        """The Player dies on its own (SIGSEGV), Weston untouched: nothing starts it again, and
+        a Weston crash after that does not either (no mark from Display names the Player's
+        Weston), within the same kernel boot (issue #125, the removed relaunches)."""
         boot = self.run("cat", "/proc/sys/kernel/random/boot_id").strip()
         before = unit_properties_of(self, PLAYER_UNIT, "ActiveState,InvocationID")
         epoch = json.loads(self.run("cat", BROKER_LAUNCH))["epoch"]
         assert before["ActiveState"] == "active", before
         self.run("systemctl", "kill", "--signal=SIGSEGV", PLAYER_UNIT)
-        deadline = time.monotonic() + PLAYER_CRASH_RELAUNCH_SECONDS
+        self.player_stays_down(before, epoch, time.monotonic() + PLAYER_STAYS_DOWN_SECONDS,
+                               "player-after-crash")
+        self.recover_display("SIGSEGV", "display-after-player-crash")
+        self.player_stays_down(before, epoch, time.monotonic() + PLAYER_STAYS_DOWN_SECONDS,
+                               "player-after-display-crash")
+        assert self.run("cat", "/proc/sys/kernel/random/boot_id").strip() == boot
+
+    def health_status(self):
+        """The health judge's `status`, read as root on health.sock."""
+        return json.loads(self.run("/usr/bin/python3", "-I", "-c", HEALTH_STATUS))
+
+    def card(self, code, line, since, name, *, alternatives=()):
+        """Within CARD_SECONDS of `since` (monotonic), DARK_OUTPUT's overlay instruction is tinted
+        with `line` and its time (" · since HH:MM") on line 1 and `code` on line 2 (or one of the
+        `alternatives`' (code, line) pairs); returned."""
+        deadline = since + CARD_SECONDS
+        wanted = ((code, line), *alternatives)
         while True:
-            now = unit_properties_of(self, PLAYER_UNIT, "ActiveState,InvocationID")
-            launch = json.loads(self.run("cat", BROKER_LAUNCH))
-            if (now["ActiveState"] == "active"
-                    and now["InvocationID"] not in ("", before["InvocationID"])
-                    and launch["running"]):
+            status = self.health_status()
+            shown = {each["output"]: each for each in status["overlay"]["instructions"]}
+            instruction = shown.get(DARK_OUTPUT)
+            if instruction and instruction["tint"] and any(
+                    instruction["lines"][0].startswith(each_line + " · since ")
+                    and each_code in instruction["lines"][1] for each_code, each_line in wanted):
                 break
-            assert time.monotonic() < deadline, ("no Player after its crash", before, now, launch)
+            if time.monotonic() >= deadline:
+                (self.work / (name + "-status.json")).write_text(json.dumps(status, sort_keys=True))
+                raise AssertionError((f"no {code} card within {CARD_SECONDS} s", instruction,
+                                      status["verdict"]))
             time.sleep(0.5)
-        evidence = {"before": before, "after": now, "epochs": [epoch, launch["epoch"]]}
-        (self.work / "player-after-crash.json").write_text(json.dumps(evidence, sort_keys=True))
-        assert launch["epoch"] == epoch + 1, evidence
-        assert self.run("cat", "/proc/sys/kernel/random/boot_id").strip() == boot, evidence
+        (self.work / (name + ".json")).write_text(json.dumps(
+            {"instruction": instruction, "verdict": status["verdict"]}, sort_keys=True))
+        return instruction
+
+    def feed_latest(self):
+        return json.loads(self.run("/usr/bin/python3", "-I", "-c", BROKER_FEED, "latest"))["latest"]
+
+    def started_after(self, sequence):
+        """The broker feed's `app_started` facts after `sequence`."""
+        events = json.loads(self.run("/usr/bin/python3", "-I", "-c", BROKER_FEED, "after",
+                                     str(sequence)))
+        return [event for event in events if event["kind"] == "app_started"]
+
+    def stays_dark(self, signal, code, line, name, *, then=None):
+        """`signal` to the Player's main process: the card (`code`, `line`, its time) shows
+        within CARD_SECONDS, and until STAYS_DARK_SECONDS after the signal no new Player run, no
+        new launch epoch and no `app_started` fact (`then` runs once the card shows)."""
+        before = unit_properties_of(self, PLAYER_UNIT, "ActiveState,MainPID,InvocationID")
+        epoch = json.loads(self.run("cat", BROKER_LAUNCH))["epoch"]
+        assert before["MainPID"] not in ("", "0"), before
+        mark = self.feed_latest()
+        self.run("/usr/bin/python3", "-I", "-c", "import os,signal,sys;"
+                 "os.kill(int(sys.argv[1]),getattr(signal,sys.argv[2]))", before["MainPID"], signal)
+        since = time.monotonic()
+        instruction = self.card(code, line, since, name + "-card")
+        if then is not None:
+            then()
+        self.player_stays_down(before, epoch, since + STAYS_DARK_SECONDS, name)
+        started = self.started_after(mark)
+        assert started == [], ("app_started after the signal", name, started)
+        return instruction
+
+    def at_open_file_limit(self, name):
+        """Issue #123, the fireplace's 2026-10-20 in a minute: the Player's open-file limit lowered
+        to LIMIT_ABOVE_OPEN above what it holds open (`prlimit` on its MainPID). Within
+        CARD_SECONDS the card shows app_descriptor_limit (or nothing_to_show) with its time. The
+        limit is then put back, so the same run is there for the cases that follow; the cause stays
+        on the card until another run starts (below the run causes, by the judge's precedence)."""
+        pid = unit_properties_of(self, PLAYER_UNIT, "MainPID")["MainPID"]
+        assert pid not in ("", "0"), pid
+        soft, hard = self.run("prlimit", "--pid", pid, "--nofile", "--noheadings",
+                              "--output=SOFT,HARD").split()
+        held = int(self.run("/usr/bin/python3", "-I", "-c",
+                            "import os,sys;print(len(os.listdir('/proc/'+sys.argv[1]+'/fd')))", pid))
+        lowered = held + LIMIT_ABOVE_OPEN
+        self.run("prlimit", "--pid", pid, f"--nofile={lowered}:{lowered}")
+        since = time.monotonic()
+        try:
+            instruction = self.card("app_descriptor_limit", LIMIT_LINE, since, name + "-card",
+                                    alternatives=(("nothing_to_show", NOTHING_LINE),))
+        finally:
+            self.run("prlimit", "--pid", pid, f"--nofile={soft}:{hard}")
+        assert unit_properties_of(self, PLAYER_UNIT, "MainPID")["MainPID"] == pid, "the Player restarted"
+        return {"instruction": instruction, "open": held, "limit": lowered}
 
     def cold(self, fixture, components_dir, previous=None):
         """Boot PID1, bind the exact packages, start real units; return the cold app-link."""
@@ -607,9 +718,16 @@ class Node:
             "photo-wall-app-broker.service",
             "photo-wall-manager-supervisor.service",
         )
-        run(
-            "systemctl", "stop", "photo-wall-node-player.service", "photo-wall-node-manager.service"
-        )
+        # The Player is a collected transient unit (`systemd-run --collect`): once it has died
+        # and nothing started it again (issue #125: the failure phase's stopped release, the
+        # success phase's crash), systemd has unloaded it and `systemctl stop` would fail on it.
+        units = ["photo-wall-node-manager.service"]
+        player = unit_properties_of(self, PLAYER_UNIT, "LoadState,ActiveState")
+        if player["LoadState"] == "loaded":
+            units.append(PLAYER_UNIT)
+        else:
+            assert player["ActiveState"] == "inactive", player
+        run("systemctl", "stop", *units)
         components = json.loads((components_dir / "components.json").read_text())
         # Every root is an image (E2c): staged by the predicate the Node itself uses, and its
         # pool image re-hashed.
@@ -861,7 +979,8 @@ def stage_and_complete(fixture, node, phase, reference):
     else:
         (node.work / "status-failed.json").write_text(json.dumps(status, sort_keys=True))
         raise AssertionError("real online phase did not complete: " + str(node.work))
-    observation = node.verify_process(status["current"])
+    # A failed switch has no current process to observe: nothing runs (issue #125).
+    observation = None if phase == "failure" else node.verify_process(status["current"])
     (node.work / "result.json").write_text(
         json.dumps(
             {
@@ -960,17 +1079,21 @@ def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, ph
                 node.verify_image_mounts(components_dir)
                 node.verify_bus()
                 reported = assert_bus_memory_reported(fixture, node)
-                node.player_follows_display(fixture)
                 node.player_survives_display_restarts(DISPLAY_RESTARTS)
             stage_and_complete(fixture, node, phase, reference)
             if phase == "success":
                 node.verify_target_mount(reference)
+            if phase == "failure":
+                # No fallback start: the old release stays stopped, the target is gone, and the
+                # debug overlay's card says the Player stopped.
+                node.card("app_absent", ABSENT_LINE, time.monotonic(), "failure-card")
+                assert unit_properties_of(node, PLAYER_UNIT, "SubState")["SubState"] != "running"
             assert_memory_lines(node)
             if phase == "success":
                 # After assert_memory_lines, whose every slice reads oom_kill 0.
                 node.induce_bus_oom()
                 assert_bus_oom_reported(fixture, node, reported)
-                node.player_restarts_after_a_crash()
+                node.player_stays_down_after_crashes()
             node.stop_and_verify_roots(components_dir, reference)
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
@@ -1138,6 +1261,86 @@ def test_node_pid1_refused(node_pid1_inputs, node_host, registry, tmp_path):
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
             node.capture_and_remove(fixture, sys.exc_info()[1])
+
+
+def test_node_pid1_dark(node_pid1_inputs, node_host, registry, tmp_path):
+    """Issues #123 and #125 under real systemd: the cold Player's open-file limit is lowered to
+    just above what it holds open (`prlimit`), then it is frozen (SIGSTOP), then killed (kill -9
+    of its MainPID). Each time the debug overlay's card on Virtual-1 shows within CARD_SECONDS,
+    naming the cause (app_descriptor_limit, then app_unresponsive, then app_absent) and the
+    Pi-clock time it began; after the signals, for STAYS_DARK_SECONDS nothing starts the Player
+    again: no new InvocationID, the same launch epoch, no `app_started` fact. After the kill a
+    crashed Weston starts nothing either. On main (943e8e71) running out of open files is
+    pressure only (no tint), the broker kills the frozen Player at K = 35 s and relaunches a dead
+    one within about 2 s, so each case fails there.
+
+    Issue #126: Central runs with its hub (as in `join`), and after the kill its database holds the
+    judge's verdict from the Pi's `health` line, Virtual-1 dark with app_absent (on main the judge
+    writes no line, so nothing is recorded)."""
+    if os.environ.get(REQUIRE_VARIABLE) == "1" and not os.environ.get(NATS_SERVER_VARIABLE):
+        pytest.fail(f"{REQUIRE_VARIABLE}=1 but {NATS_SERVER_VARIABLE} is unset: the dark leg needs the hub",
+                    pytrace=False)
+    phase = "dark"
+    components_dir, _, image = node_pid1_inputs
+    work = tmp_path
+    with central_fixture(registry, components_dir, {}, work / "central", node_host, hub=True) as fixture:
+        node = Node(image, work, phase)
+        try:
+            node.cold(fixture, components_dir)
+            limit = node.at_open_file_limit("dark-limit")
+            frozen = node.stays_dark("SIGSTOP", "app_unresponsive", UNRESPONSIVE_LINE, "dark-sigstop")
+            killed = node.stays_dark(
+                "SIGKILL", "app_absent", ABSENT_LINE, "dark-kill",
+                then=lambda: node.recover_display("SIGSEGV", "dark-display-crash"))
+            received = await_verdict(fixture["registry"].db, work, "dark-verdict",
+                                     lambda report: dark_with(report, DARK_OUTPUT, "app_absent"),
+                                     JOIN_SECONDS)
+            (work / "dark.json").write_text(json.dumps(
+                {"limit": limit, "sigstop": frozen, "kill": killed, "verdict": received}, sort_keys=True))
+            print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
+        finally:
+            node.capture_and_remove(fixture, sys.exc_info()[1])
+
+
+def verdict_rows(db):
+    """Every value of the health line's verdict key Central recorded from the Node, oldest first,
+    decoded (None for a value that does not decode)."""
+    with db.transaction() as conn:
+        rows = conn.execute(
+            "SELECT epoch,seq,data FROM node_link_records WHERE device_id=%s AND stream=%s AND subject=%s "
+            "ORDER BY recorded_at,seq", (DEVICE_ID, HEALTH_STATE_STREAM, HEALTH_REPORT_SUBJECT)).fetchall()
+    decoded = []
+    for row in rows:
+        try:
+            report = decode_health_report(bytes(row["data"]))
+        except ValueError:
+            report = None
+        decoded.append({"epoch": row["epoch"], "seq": row["seq"],
+                        "report": None if report is None else dataclasses.asdict(report)})
+    return decoded
+
+
+def dark_with(report, output_id, code):
+    """Whether a decoded verdict (dataclasses.asdict) names `output_id` dark with `code`."""
+    return report is not None and any(
+        (output["output_id"], output["dark"], output["code"]) == (output_id, True, code)
+        for output in report["outputs"])
+
+
+def await_verdict(db, work, name, until, seconds):
+    """The first recorded verdict for which `until(report)` holds, every recorded one written to
+    <name>.json; fails past `seconds` (a leaf links up to about 40 s after boot, erratum
+    E-E3D-S2-3)."""
+    deadline = time.monotonic() + seconds
+    while True:
+        rows = verdict_rows(db)
+        found = next((row for row in rows if until(row["report"])), None)
+        if found is not None or time.monotonic() > deadline:
+            break
+        time.sleep(0.5)
+    (work / f"{name}.json").write_text(json.dumps(rows, sort_keys=True, default=str))
+    assert found is not None, f"{name}: Central received no such verdict within {seconds:.0f}s; see {work / (name + '.json')}"
+    return found
 
 
 def link_rows(db):

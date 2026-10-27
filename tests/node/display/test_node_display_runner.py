@@ -23,6 +23,7 @@ from appliance.display_host.domain import OutputState
 from appliance.display_host.runner import Controller, OutputReporter
 from appliance.display_host.weston import MAX_PACKET, CompositorPresentation
 from contracts.node_display import Surface
+from contracts.node_output import Power
 from contracts.node_protocol import NodeProcessIdentity, OutputKey
 
 LINUX = sys.platform.startswith("linux")
@@ -104,13 +105,24 @@ def surface(output: OutputKey, *, frame_id="frame-1", pid=4242) -> Surface:
     return Surface(output, NodeProcessIdentity(pid, 777, uuid4()), 5, 1, 2, frame_id)
 
 
+class FakePower:
+    """The power controller's `report`: Virtual-1 has a power in force (Night off: off)."""
+
+    def report(self, output_id):
+        if output_id != "Virtual-1":
+            return None
+        return SimpleNamespace(in_force=SimpleNamespace(power=Power.OFF))
+
+
 def test_every_events_read_carries_each_output_and_its_admission():
+    """Each entry carries the shell's `holding` and the power in force (issue #123), None for an
+    Output the power controller has no report of."""
     backend = FakeBackend()
-    controller = Controller(backend)
+    controller = Controller(backend, power=FakePower())
     host = backend.host
     admitted = surface(key(host))
     backend.states = (
-        OutputState(key(host), admitted=admitted, diagnostic="released", fault=None),
+        OutputState(key(host), admitted=admitted, holding=True, diagnostic="released", fault=None),
         OutputState(key(host, "HDMI-A-2"), connected=False, diagnostic="unknown",
                     fault="output_disconnected"),
     )
@@ -119,9 +131,9 @@ def test_every_events_read_carries_each_output_and_its_admission():
          "admitted": {"pid": 4242, "start_ticks": 777,
                       "invocation_id": str(admitted.process.invocation_id),
                       "app_epoch": 5, "frame_id": "frame-1"},
-         "diagnostic": "released", "fault": None},
+         "diagnostic": "released", "fault": None, "holding": True, "power": "off"},
         {"output_id": "HDMI-A-2", "connected": False, "admitted": None,
-         "diagnostic": "unknown", "fault": "output_disconnected"},
+         "diagnostic": "unknown", "fault": "output_disconnected", "holding": False, "power": None},
     ]
     # Ingress and feed socket alike; with no event at all (a reader that lapped the ring, or a
     # restarted judge, still learns the Output set from one read).
@@ -362,7 +374,7 @@ def test_the_signal_range_request_and_its_units_say_the_same():
     bound = sorted(unit.name for unit in units.glob("*.service")
                    if f"BindsTo={paths.DISPLAY_UNIT}" in unit.read_text().splitlines())
     assert bound == ["photo-wall-display-controller.service"]
-    assert [line for line in oneshot if line.startswith("ExecStart")] == [
+    assert [line for line in oneshot if line.startswith("ExecStart=")] == [
         f"ExecStart=-/usr/bin/systemctl reset-failed {' '.join([paths.DISPLAY_UNIT, *bound])}",
         f"ExecStart=/usr/bin/systemctl --no-block restart {paths.DISPLAY_UNIT}"]
     target = (units / "photo-wall-node.target").read_text().splitlines()
@@ -408,9 +420,11 @@ def test_power_reports_carry_what_the_output_reporter_saw():
     turns = SimpleNamespace(output=lambda output_id, **observed: turned.append((output_id, observed)))
     backend = FakeBackend()
     backend.states = (OutputState(key(backend.host, "HDMI-A-1")),)
-    Controller(backend, reports=OutputReporter(PowerObservations(power, picture, turns), read=lambda output_id: None))
+    Controller(backend, reports=OutputReporter(PowerObservations(power, picture, turns), read=lambda output_id: None,
+                                               mode={"HDMI-A-1": (1920, 1080)}.get))
     (report,) = sink.puts
     assert (report.output_id, report.connected, report.answers, report.method) == ("HDMI-A-1", True, (), None)
+    assert report.current_mode == (1920, 1080)                              # the mode Weston runs (#124)
     assert seen == [("HDMI-A-1", {"connected": True, "identity": None})]   # the picture controller saw it too
     assert turned == [("HDMI-A-1", {"connected": True})]                   # and the screen turns (S3)
 
@@ -522,10 +536,11 @@ def test_the_document_feed_routes_each_document_by_its_key_and_ignores_the_rest(
     )
     from nodeapi.documents import Document
 
-    got, pictures, turned = [], [], []
+    got, pictures, turned, regions = [], [], [], []
     feed = document_feed(SimpleNamespace(document=lambda output_id, document: got.append((output_id, document))),
                          SimpleNamespace(document=lambda output_id, document: pictures.append((output_id, document))),
-                         SimpleNamespace(document=lambda output_id, document: turned.append((output_id, document))))
+                         SimpleNamespace(document=lambda output_id, document: turned.append((output_id, document))),
+                         SimpleNamespace(document=lambda output_id, region: regions.append((output_id, region))))
     wanted = OutputDocument("HDMI-A-1", 2, OutputPower(Power.ON, (), "2099-01-01T00:00:00Z", Darkness.DISPLAY_OFF, None),
                             BEST_DETECTED, False, False, 90)
     picture = PictureDocument("HDMI-A-1", 3, {"10": 46}, NEUTRAL_SOFTWARE, light=UPGRADE_DISPLAY_LIGHT)
@@ -539,3 +554,156 @@ def test_the_document_feed_routes_each_document_by_its_key_and_ignores_the_rest(
     assert got == [("HDMI-A-1", wanted)]
     assert turned == [("HDMI-A-1", wanted)]                  # an Output document only, never a picture one
     assert pictures == [("HDMI-A-1", picture)]
+    assert regions == []                                     # no region document came
+
+
+def region_feed():
+    """document_feed over recording fakes: (feed, powered, turned, regions)."""
+    from appliance.display_host.runner import document_feed
+
+    powered, turned, regions = [], [], []
+    feed = document_feed(SimpleNamespace(document=lambda output_id, document: powered.append(output_id)),
+                         SimpleNamespace(document=lambda output_id, document: None),
+                         SimpleNamespace(document=lambda output_id, document: turned.append(output_id)),
+                         SimpleNamespace(document=lambda output_id, region: regions.append((output_id, region))))
+    return feed, powered, turned, regions
+
+
+def output_document():
+    from contracts.node_output import (
+        BEST_DETECTED,
+        Darkness,
+        OutputDocument,
+        OutputPower,
+        encode_output_document,
+    )
+    from nodeapi.documents import Document
+
+    wanted = OutputDocument("HDMI-A-1", 2, OutputPower(Power.ON, (), "2099-01-01T00:00:00Z", Darkness.DISPLAY_OFF, None),
+                            BEST_DETECTED, False, False, 90)
+    return Document(encode_output_document(wanted), "central", None)
+
+
+def test_a_region_document_gives_its_output_the_frame_region():
+    from contracts.node_output import (
+        FrameRegion,
+        FrameRegionDocument,
+        OutputRect,
+        encode_region_document,
+    )
+    from nodeapi.documents import Document
+
+    feed, _, _, regions = region_feed()
+    region = FrameRegion("frame-1", (1920, 1080), OutputRect(480, 135, 960, 810))
+    feed("region-HDMI-A-1", Document(encode_region_document(FrameRegionDocument("HDMI-A-1", 4, region)), "central", None))
+    feed("region-HDMI-A-1", Document(encode_region_document(FrameRegionDocument("HDMI-A-1", 5, None)), "central", None))
+    assert regions == [("HDMI-A-1", region), ("HDMI-A-1", None)]
+
+
+def test_a_refused_region_document_gives_no_region_and_leaves_power_and_turn_applied(caplog):
+    """Undecodable, or under another Output's key: the Output gets no region (the debug overlay on
+    the whole Display), logged once per change; the Output document still reaches power and turn."""
+    from contracts.node_output import FrameRegionDocument, encode_region_document
+    from nodeapi.documents import Document
+
+    feed, powered, turned, regions = region_feed()
+    feed("output-HDMI-A-1", output_document())
+    bad = Document(b'{"output_id":"HDMI-A-1","change":1}', "central", None)
+    feed("region-HDMI-A-1", bad)
+    feed("region-HDMI-A-1", bad)                                   # the same refusal again: no new line
+    other = Document(encode_region_document(FrameRegionDocument("HDMI-A-2", 1, None)), "central", None)
+    feed("region-HDMI-A-1", other)                                 # another Output's document
+    feed("output-HDMI-A-1", output_document())
+    assert regions == [("HDMI-A-1", None)] * 3
+    assert powered == turned == ["HDMI-A-1", "HDMI-A-1"]
+    assert caplog.text.count("region document under region-HDMI-A-1 refused") == 2
+
+
+class RegionShell:
+    """The shell's `region` op: records each send; `taken` says whether the shell takes it."""
+
+    def __init__(self, taken=True):
+        self.sent, self.taken, self.event = [], taken, threading.Event()
+
+    def region(self, output_id, region, *, timeout):
+        self.sent.append((output_id, region))
+        self.event.set()
+        return self.taken
+
+
+def wait_sent(shell, count):
+    for _ in range(200):
+        if len(shell.sent) >= count:
+            return
+        shell.event.wait(0.05)
+        shell.event.clear()
+    raise AssertionError(shell.sent)
+
+
+def test_regions_reach_the_shell_newest_once_and_again_when_the_shell_announces_the_output():
+    from appliance.display_host.runner import ShellRegions
+    from contracts.node_output import FrameRegion, OutputRect
+
+    shell = RegionShell(taken=False)                  # at start the shell has no Output yet
+    regions = ShellRegions(shell)
+    region = FrameRegion("frame-1", (1920, 1080), OutputRect(480, 135, 960, 810))
+    regions.shell_output("HDMI-A-1")                  # nothing wanted yet: nothing sent
+    regions.start()
+    try:
+        regions.document("HDMI-A-1", region)
+        wait_sent(shell, 1)
+        regions.document("HDMI-A-1", region)          # unchanged: not sent again
+        shell.taken = True
+        regions.shell_output("HDMI-A-1")              # the shell (re)created the Output
+        wait_sent(shell, 2)
+        regions.document("HDMI-A-1", None)
+        wait_sent(shell, 3)
+    finally:
+        regions.stop()
+    assert shell.sent == [("HDMI-A-1", region), ("HDMI-A-1", region), ("HDMI-A-1", None)]
+
+
+@pytest.mark.skipif(not LINUX, reason="the shell's control socket is SOCK_SEQPACKET with SO_PEERCRED (Linux)")
+def test_the_backend_sends_the_region_op_keeps_the_mode_and_tells_its_output_listeners():
+    from appliance.display_host.weston import WestonBackend
+    from contracts.node_output import FrameRegion, OutputRect, decode_frame_region
+
+    ours, shell = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+    boot, incarnation = uuid4(), uuid4()
+    output = {"kernel_boot_id": str(boot), "display_host_incarnation": str(incarnation),
+              "output_id": "HDMI-A-1", "connection_generation": 1, "mode_generation": 1}
+
+    def send(value):
+        shell.send(json.dumps(value).encode())
+
+    send({"event": "hello", "protocol": 1, "boot_id": str(boot), "incarnation_id": str(incarnation)})
+    send({"event": "output", "output": output, "connected": True, "width": 1080, "height": 1920,
+          "power": "on", "black": False, "mode": [1920, 1080]})
+    asked = []
+
+    def play_shell():
+        request = json.loads(shell.recv(16384))
+        asked.append(request)
+        send({"event": "response", "request_id": request["request_id"], "accepted": True})
+
+    region = FrameRegion("frame-1", (1080, 1920), OutputRect(0, 420, 1080, 1080))
+    with ours, shell:
+        backend = WestonBackend(ours, display_uid=os.getuid(), compositor_pid=os.getpid(),
+                                verify_process=lambda grant: True)
+        backend.initialize()
+        told = []
+        backend.output_listeners.append(told.append)
+        assert backend.region("HDMI-A-1", region, timeout=1) is False      # not announced yet
+        backend.dispatch()
+        assert told == ["HDMI-A-1"] and backend.current_mode("HDMI-A-1") == (1920, 1080)
+        playing = threading.Thread(target=play_shell)
+        playing.start()
+        assert backend.region("HDMI-A-1", region, timeout=2) is True
+        playing.join(5)
+        assert (asked[0]["op"], asked[0]["output"]) == ("region", output)
+        assert decode_frame_region(asked[0]["region"].encode()) == region
+        unplugged = {**output, "connection_generation": 2, "mode_generation": 2}
+        send({"event": "output", "output": unplugged, "connected": False, "width": 0, "height": 0,
+              "mode": None})
+        backend.dispatch()
+        assert told == ["HDMI-A-1"] and backend.current_mode("HDMI-A-1") is None

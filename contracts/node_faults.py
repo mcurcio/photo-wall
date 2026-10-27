@@ -3,8 +3,10 @@
 Stdlib only, pure data. On the node only the health judge reads it (Display never does: an
 import-linter contract forbids it); Central will serve it to the console (M4). A fault code is
 data here: adding one is one change to this module, deployed Central-first, and the judge
-refuses a code that is not in it. The probe constants T, k, S and K belong to App lifecycle
-(`appliance.node.probe`) and D to Display; a row owns only its own raise window and clear hold.
+refuses a code that is not in it. The probe constants T, k and S belong to App lifecycle
+(`appliance.kernel.probe_timing`) and D to Display; a row owns only its own raise window and clear
+hold. Nothing kills or restarts a Player that stops answering or exits (issue #125), so there is
+no K, and a raised run cause stays on the card until a new run starts (`appliance.health.judge`).
 """
 
 from __future__ import annotations
@@ -49,15 +51,18 @@ def _catalogue(*rows: Fault) -> Mapping[str, Fault]:
 
 
 FAULTS: Mapping[str, Fault] = _catalogue(
+    # A run cause: pinned to its run once raised, cleared only when another run starts (an answer
+    # from the frozen run never clears it), so it has no clear hold.
     Fault("app_unresponsive", True, "Photos paused — the player stopped responding",
-          raise_window_ms=5000, clear_hold_ms=10000),
+          raise_window_ms=5000, clear_hold_ms=0),
     # Degraded, not a fault: content still shows (0015), so no tint. A reported fact, not a
     # window: raised when the run reports a software renderer, cleared when one reports the GPU.
     Fault("software_renderer", False, "Photos are drawn without the graphics processor",
           raise_window_ms=0, clear_hold_ms=0),
     # 1b P1b: no app process. Opened when the broker reports the run exited, withdrawn or cleared
-    # when it reports a new run started (a paced relaunch inside the window is never shown);
-    # whether that run answers is app_unresponsive's question, not this one's.
+    # when it reports a new run started; its 5 s window absorbs Display's purposeful Weston restart
+    # (a signal range change), so that is never shown. Whether the new run answers is
+    # app_unresponsive's question, not this one's.
     Fault("app_absent", True, "Photos paused — the player stopped",
           raise_window_ms=5000, clear_hold_ms=0),
     # 1b P1b: degraded, content still shows. Raised at once when the run holds at least 80 % of
@@ -65,6 +70,17 @@ FAULTS: Mapping[str, Fault] = _catalogue(
     # minute below it, or when that run exits.
     Fault("app_resource_exhausted", False, "The player is running out of open files",
           raise_window_ms=0, clear_hold_ms=60000),
+    # Issue #123: per Output. Opened while the Output is on (not Night off or Resting) and no run
+    # holds it (no picture plane the compositor sees, no pattern or trial of Display's own); its
+    # outcome window lets a healthy run find its first photo untinted (a placeholder of r2's). It
+    # clears at once when the Output is held again, powered off or gone.
+    Fault("nothing_to_show", True, "Nothing to show on this Frame",
+          raise_window_ms=120000, clear_hold_ms=0),
+    # Issue #123: the run at its open-file limit (within the judge's DESCRIPTOR_LIMIT_HEADROOM)
+    # can open no photo, so it tints at once, unlike the pressure above; a run cause, it stays
+    # until another run starts.
+    Fault("app_descriptor_limit", True, "Photos paused — the player ran out of open files",
+          raise_window_ms=0, clear_hold_ms=0),
 )
 
 

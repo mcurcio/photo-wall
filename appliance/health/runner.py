@@ -14,17 +14,22 @@ packet and admitted per `SO_PEERCRED` uid): `status` (uid 0 only) answers the ve
 and each feed's read position, then closes; `overlay` (uid 10005, pw-display's overlay client,
 only) stays open: the judge pushes each connected Output's `OverlayInstruction` (one packet each)
 at once, whenever one changes, and every V/3, and reads back `PresentedReport` packets into the
-ring. It never connects to the compositor, launches or kills anything, or talks to Central (its
-unit allows AF_UNIX only).
+ring. Each new verdict also goes on its Node's bus, the `health` line's HEALTH_REPORT_KEY
+(appliance/health/bus.py), from which Central records it (issue #126): the session runs on its own
+thread and the judge only queues. It never connects to the compositor, launches or kills anything,
+or talks to Central directly (its unit allows AF_UNIX, and AF_INET to localhost only: the bus).
 
-The judge is built from the published constants: T, k, S and K from App lifecycle
+The judge is built from the published constants: T, k and S from App lifecycle
 (`appliance.kernel.probe_timing`), D from Display (`appliance.display_host.overlay.instruction`) and the
-catalogue (`contracts.node_faults`); a K that could kill before the card shows refuses to start.
+catalogue (`contracts.node_faults`). Each card's time is the Pi's own wall clock in its local
+zone, read with the boot clock whenever instructions are projected.
 """
 
 from __future__ import annotations
 
+import datetime
 import json
+import logging
 import os
 import selectors
 import socket
@@ -42,7 +47,9 @@ from appliance.display_host.overlay.instruction import (
 )
 from appliance.feed import READ_LIMIT, FeedCursor, FeedEvent
 from appliance.feed_socket import peer_uid
+from appliance.health.bus import HEALTH_SLICE, BusHealthSink, health_session
 from appliance.health.judge import HealthJudge, Presented, display_outputs
+from appliance.health.report import health_report, report_key
 from appliance.kernel.clock import boottime_ms
 from appliance.kernel.probe_timing import SHIPPED_TIMING
 from contracts.node_faults import FAULTS, catalogue_digest
@@ -71,13 +78,34 @@ MAX_REPORT = 512
 REPORTS_PER_WAKE = 16
 SEQPACKET = socket.SOCK_SEQPACKET
 
+log = logging.getLogger(__name__)
+
 
 def shipped_judge() -> HealthJudge:
-    """The judge as released: refuses to construct if the shipped K breaks the K rule."""
+    """The judge as released, from the published constants."""
     return HealthJudge(period_ms=SHIPPED_TIMING.period_ms, miss_limit=SHIPPED_TIMING.miss_limit,
                        startup_ms=SHIPPED_TIMING.startup_ms,
-                       kill_after_ms=SHIPPED_TIMING.kill_after_ms,
                        pulse_deadline_ms=PULSE_DEADLINE_MS, catalogue=FAULTS)
+
+
+def wall_ms() -> int:
+    """The Pi's wall clock in ms: the card's time, never compared with the boot clock."""
+    return time.time_ns() // 1_000_000
+
+
+def local_zone() -> datetime.tzinfo:
+    """The Pi's local zone now (read each time, so a daylight-saving change is followed)."""
+    return datetime.datetime.now().astimezone().tzinfo
+
+
+class CardClock:
+    """The wall clock and local zone a card's time is read in (`wall_ms`, `local_zone`)."""
+
+    def __init__(self, wall=wall_ms, zone=local_zone):
+        self.wall, self.zone = wall, zone
+
+    def instructions(self, judge: HealthJudge, now_ms: int) -> tuple[OverlayInstruction, ...]:
+        return judge.instructions(now_ms, wall_ms=self.wall(), zone=self.zone())
 
 
 class FeedReader:
@@ -166,18 +194,20 @@ def _ring_document(entry, now_ms: int) -> dict:
 
 
 def status_document(judge: HealthJudge, readers: Sequence[FeedReader], now_ms: int, *,
-                    overlay_clients: int = 0) -> dict:
-    """The `status` answer: verdict (with each Output's underlay), the overlay instructions,
+                    overlay_clients: int = 0, card: CardClock | None = None) -> dict:
+    """The `status` answer: verdict (with each Output's underlay and card), the overlay instructions,
     the ring (ages on the judge's clock) and feed positions."""
+    card = card or CardClock()
     verdict = judge.verdict(now_ms)
     return {
         "verdict": {"sequence": verdict.sequence, "conditions": [
             {"code": condition.code, "run": condition.run, "state": condition.state,
              "age_ms": condition.age_ms} for condition in verdict.conditions],
             "outputs": [{"output": output.output, "underlay": output.underlay,
-                         "codes": list(output.codes)} for output in verdict.outputs]},
+                         "codes": list(output.codes), "card": output.card,
+                         "card_age_ms": output.card_age_ms} for output in verdict.outputs]},
         "overlay": {"instructions": [_instruction_document(instruction)
-                                     for instruction in judge.instructions(now_ms)],
+                                     for instruction in card.instructions(judge, now_ms)],
                     "clients": overlay_clients},
         "ring": [_ring_document(entry, now_ms) for entry in judge.transitions()],
         "ring_dropped": judge.ring_dropped,
@@ -193,8 +223,9 @@ class OverlayClients:
     closes is dropped (the client reconnects and is re-pushed everything)."""
 
     def __init__(self, judge: HealthJudge, *, limit: int = MAX_OVERLAY_CLIENTS,
-                 refresh_ms: int = OVERLAY_REFRESH_MS):
+                 refresh_ms: int = OVERLAY_REFRESH_MS, card: CardClock | None = None):
         self.judge, self.limit, self.refresh_ms = judge, limit, refresh_ms
+        self.card = card or CardClock()
         self.connections: list[socket.socket] = []
         self.selector: selectors.BaseSelector | None = None
         self._sent: dict[str, OverlayInstruction] = {}
@@ -212,12 +243,12 @@ class OverlayClients:
         self.connections.append(connection)
         if self.selector is not None:
             self.selector.register(connection, selectors.EVENT_READ, "overlay")
-        for instruction in self.judge.instructions(now_ms):
+        for instruction in self.card.instructions(self.judge, now_ms):
             if not self._send(connection, instruction):
                 return
 
     def publish(self, now_ms: int) -> None:
-        current = self.judge.instructions(now_ms)
+        current = self.card.instructions(self.judge, now_ms)
         refresh = self._refreshed_ms is None or now_ms - self._refreshed_ms >= self.refresh_ms
         due = [instruction for instruction in current
                if refresh or self._sent.get(instruction.output) != instruction]
@@ -357,23 +388,44 @@ class HealthSocket:
 
 class HealthRunner:
     """One judge, its feed readers, its socket and the overlay clients on one thread: reads
-    and publishes every READ_PERIOD, answers requests and reads reports in between."""
+    and publishes every READ_PERIOD, answers requests and reads reports in between. With a
+    `sink`, each turn whose report differs from the last one put (appliance/health/report.py
+    `report_key`) hands the verdict to it as a HealthReport (appliance/health/report.py); the sink only queues, so the judge never
+    waits on the bus, and a verdict the contract refuses is logged and skipped."""
 
     def __init__(self, judge: HealthJudge, readers: Sequence[FeedReader], *,
-                 clock: Callable[[], int] = boottime_ms):
-        self.judge, self.readers, self.clock = judge, tuple(readers), clock
-        self.overlay = OverlayClients(judge)
+                 clock: Callable[[], int] = boottime_ms, wall: Callable[[], int] = wall_ms,
+                 sink: BusHealthSink | None = None, card: CardClock | None = None):
+        self.judge, self.readers, self.clock, self.wall, self.sink = judge, tuple(readers), clock, wall, sink
+        self.card = card or CardClock()
+        self.overlay = OverlayClients(judge, card=self.card)
+        self._put_key: tuple | None = None  # what the report last handed to the sink said
 
     def turn(self) -> None:
         for reader in self.readers:
             reader.drain(self.judge, self.clock)
+        self._report(self.clock())
         self.overlay.publish(self.clock())
+
+    def _report(self, now_ms: int) -> None:
+        if self.sink is None:
+            return
+        verdict = self.judge.verdict(now_ms)
+        key = report_key(verdict, now_ms)
+        if key == self._put_key:
+            return
+        self._put_key = key
+        try:
+            self.sink.put(health_report(verdict, now_ms=now_ms, wall_ms=self.wall(),
+                                        catalogue=catalogue_digest()))
+        except ValueError as error:   # outside the contract: the overlay still shows it
+            log.warning("health verdict %s not put on the bus: %s", verdict.sequence, error)
 
     def answer(self, operation: str) -> dict:
         if operation != "status":
             raise ValueError("health_request")
         return status_document(self.judge, self.readers, self.clock(),
-                               overlay_clients=len(self.overlay.connections))
+                               overlay_clients=len(self.overlay.connections), card=self.card)
 
     def stream(self, operation: str, connection: socket.socket) -> None:
         if operation != "overlay":
@@ -397,14 +449,20 @@ class HealthRunner:
 
 
 def main() -> None:
+    # The health line's session: it connects on its own thread forever, so the judge never waits on
+    # the bus, and it is kept for the process's life.
+    session = health_session(HEALTH_SLICE.digest)
+    session.start()
     runner = HealthRunner(shipped_judge(), (FeedReader("broker", BROKER_FEED_SOCKET),
-                                            DisplayFeedReader("display", DISPLAY_FEED_SOCKET)))
+                                            DisplayFeedReader("display", DISPLAY_FEED_SOCKET)),
+                          sink=BusHealthSink(session))
     server = HealthSocket(HEALTH_SOCKET, runner.answer, stream=runner.stream)
     try:
         runner.run(server)
     finally:
         runner.overlay.close()
         server.close()
+        session.stop()
 
 
 if __name__ == "__main__":

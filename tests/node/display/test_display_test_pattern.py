@@ -133,6 +133,26 @@ def test_turning_a_pattern_on_and_off_moves_no_ddc(run):
     assert run.reports.latest().results == taken and run.reports.latest().identity == IDENTITY
 
 
+def test_display_draws_exactly_while_a_pattern_or_target_rides(run):
+    """Issue #123: the shell op's `drawing` is True exactly while the operations sent carry a pattern
+    or a calibration target (the Player draws those on its ground, so Display's own drawing is what
+    holds the Output), and False with the photos: before any pattern, and from the bound on. Mutation
+    probe: send `drawing=False` always -> the pattern's call is not drawing."""
+    run.controller.document(OUTPUT, document(4, None))
+    sent_with(run, 4, None)
+    assert run.shell.drawing[-1] is False
+    run.controller.document(OUTPUT, document(5, WHITE))
+    sent_with(run, 5, TestPattern.WHITE)
+    assert run.shell.drawing[-1] is True
+    target = TestPatternAsk(TestPattern.TARGET_POST_SOFTWARE, 6)
+    run.controller.document(OUTPUT, document(6, target))
+    sent_with(run, 6, TestPattern.TARGET_POST_SOFTWARE)
+    assert run.shell.drawing[-1] is True
+    run.clock.now += TEST_PATTERN_SECONDS
+    sent_with(run, 6, None)
+    assert run.shell.drawing[-1] is False
+
+
 @pytest.mark.parametrize(("ask", "received", "now", "expected"), [
     (None, None, 1000.0, None),
     (WHITE, None, 1000.0, None),

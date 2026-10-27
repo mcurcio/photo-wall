@@ -3,17 +3,19 @@ HostFactsV2 wire rule, the sampler's `facts()` (kernel, default-route interface,
 the fib_trie address) and Host Management's in-memory sender. No database; Central's ingest
 and G12 are proven in tests/test_node_host_facts_ingest.py."""
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
-from appliance.host.host_linux import LinuxHostSampler
+from appliance.host.host_linux import LinuxHostSampler, reset_cause
 from appliance.host.host_runner import HostRunner
 from contracts.node_commands import producer_document
 from contracts.node_host_facts import (
     LINK_STATES,
     MAX_HOST_FACTS_BYTES,
+    RESET_CAUSES,
     BootReportV2,
     BootStageV2,
     HostFactsV2,
@@ -68,10 +70,70 @@ def test_a_stored_row_of_an_older_shape_reads_its_missing_or_refused_facts_as_no
         parse_host_facts(raw)
     assert stored_fact_values(raw) == {"kernel_release": "6.6.51+rpt-rpi-v8", "interface": "eth0",
                                        "link_state": "up", "address": "192.168.1.40", "base_tag": None,
-                                       "boot": None}
+                                       "reset_cause": None, "boot": None}
     assert stored_fact_values(json.dumps(_document(link_state="UP")).encode())["link_state"] is None
     assert stored_fact_values(encode_host_facts(_facts())) == fact_values_document(_facts())
     assert set(stored_fact_values(b"not json").values()) == {None}
+
+
+# Why this boot began: the hardware watchdog's reset (issue #125).
+
+def test_the_reset_cause_round_trips_and_is_one_of_its_causes():
+    assert RESET_CAUSES == ("watchdog", "other")
+    for cause in (*RESET_CAUSES, None):
+        value = _facts(reset_cause=cause)
+        raw = encode_host_facts(value)
+        assert parse_host_facts(raw) == value and json.loads(raw)["reset_cause"] == cause
+        assert stored_fact_values(raw) == fact_values_document(value)
+        assert fact_values_document(value)["reset_cause"] == cause
+    with pytest.raises(ValueError, match="^invalid_host_fact_reset_cause$"):
+        _facts(reset_cause="panic")
+    for refused in ("panic", 1):
+        with pytest.raises(ValueError):
+            parse_host_facts(json.dumps(_document(reset_cause=refused)).encode())
+    # The field is part of the record: a document without it is refused at ingest, and a stored row
+    # without it (or with a refused cause) reads as not read.
+    old = _document()
+    del old["reset_cause"]
+    with pytest.raises(ValueError):
+        parse_host_facts(json.dumps(old).encode())
+    assert stored_fact_values(json.dumps(old).encode())["reset_cause"] is None
+    assert stored_fact_values(json.dumps(_document(reset_cause="panic")).encode())["reset_cause"] is None
+
+
+def _watchdog(tmp_path, bootstatus, options="0x8120"):
+    """A watchdog's sysfs directory: `bootstatus` and `options` as the driver prints them (None:
+    absent). 0x8120 is KEEPALIVEPING | SETTIMEOUT | CARDRESET; the Pi 5's bcm2835-wdt prints 0x8180."""
+    directory = tmp_path / "watchdog0"
+    directory.mkdir()
+    if bootstatus is not None:
+        (directory / "bootstatus").write_text(bootstatus)
+    if options is not None:
+        (directory / "options").write_text(options)
+    return directory / "bootstatus"
+
+
+@pytest.mark.parametrize(("bootstatus", "options", "cause"), [
+    ("32\n", "0x8120\n", "watchdog"),     # WDIOF_CARDRESET set
+    ("288\n", "0x8120\n", "watchdog"),    # with another bit beside it
+    ("0\n", "0x8120\n", "other"),
+    ("256\n", "0x8120\n", "other"),
+    ("32\n", None, "watchdog"),            # no options file: bootstatus alone
+    ("0\n", "0x8180\n", None),            # the Pi 5: its driver cannot report a card reset
+    ("32\n", "0x8180\n", None),
+    (None, "0x8120\n", None),              # no watchdog
+    ("garbage\n", "0x8120\n", None),
+])
+def test_the_host_reads_the_watchdogs_bootstatus(tmp_path, bootstatus, options, cause):
+    assert reset_cause(_watchdog(tmp_path, bootstatus, options)) == cause
+
+
+def test_a_watchdog_start_reaches_the_facts_record(monkeypatch, tmp_path):
+    clock = [100.0]
+    runner, sent = _runner(monkeypatch, clock, dict(VALUES), {})
+    runner.watchdog_bootstatus = _watchdog(tmp_path, "32\n")
+    _run(runner, clock, 110)
+    assert [parse_host_facts(body).reset_cause for _, body in sent] == ["watchdog"]
 
 
 # The boot stage report (docs/node-4gb-memory-design.md §4.3 T2).
@@ -107,7 +169,7 @@ def test_the_worst_case_boot_report_fits_the_facts_record():
     kernel = max((chr(code) for code in range(128) if valid_fact("kernel_release", chr(code))),
                  key=lambda character: len(json.dumps(character)))
     worst = HostFactsV2(producer, 2**63 - 1, 2**63 - 1, kernel * 64, "e" * 15, "lowerlayerdown",
-                        "255.255.255.255", "t" * 128, BootReportV2(stages, units, 2**63 - 1))
+                        "255.255.255.255", "t" * 128, BootReportV2(stages, units, 2**63 - 1), "watchdog")
     assert len(encode_host_facts(worst)) <= MAX_HOST_FACTS_BYTES
 
 
@@ -322,6 +384,7 @@ def _runner(monkeypatch, clock, facts, answers):
     runner.delivery = SimpleNamespace(flush=lambda *args, **kwargs: 0)
     sequence = iter(range(1, 10_000))
     runner.journal = SimpleNamespace(next_sequence=lambda: next(sequence))
+    runner.watchdog_bootstatus = Path("/nonexistent/watchdog0/bootstatus")   # not read: None
     sent = []
 
     def request(method, path, body=None):
@@ -356,7 +419,7 @@ def test_facts_are_sent_once_per_process_start_and_unchanged_facts_send_nothing(
     runner, sent = _runner(monkeypatch, clock, facts, {})
     _run(runner, clock, 200)
     assert len(sent) == 1 and sent[0][0] == 100.0
-    assert fact_values_document(parse_host_facts(sent[0][1])) == {**VALUES, "base_tag": None, "boot": None}
+    assert fact_values_document(parse_host_facts(sent[0][1])) == {**VALUES, "base_tag": None, "reset_cause": None, "boot": None}
     # A process start (a new runner) sends again; Central answers duplicate or keeps
     # first_received_at.
     again, resent = _runner(monkeypatch, clock, facts, {})
