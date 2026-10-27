@@ -13,7 +13,9 @@ WORDS_KEPT_PER_SOURCE references and REFUSALS_KEPT refusals.
 Every write that changes the room-lights document raises `room_lights_change.change` in its own
 transaction, under that row's lock (the house's lock, taken first through the HouseLock
 the store is handed, central/infra/frame_lighting_store.py), and sends `NOTIFY ROOM_LIGHTS_CHANNEL`, delivered at commit: the worker's WALL writer listens
-and puts the document again. Every instant is PostgreSQL's `clock_timestamp()` (Central's one clock).
+and puts the document again. Every instant is PostgreSQL's `clock_timestamp()` (Central's one clock);
+a write stamping several columns reads it once (`_CLOCK`) and binds that one instant to each, so a new
+record's created_at and changed_at are equal (`clock_timestamp()` moves within a statement).
 No trigger, no stored procedure, no range in SQL: the rules are central/room_light/policy.py's and
 the ranges pydantic's.
 """
@@ -25,7 +27,7 @@ from typing import Any, Final
 from psycopg.types.json import Jsonb
 from pydantic import TypeAdapter
 
-from central.db import Database
+from central.db import Database, DatabaseTransactionClock
 from central.frame_lighting.ports import HouseLock
 from central.infra.light_sensor_judge import PI_SOURCE, missed_readings_in
 from central.infra.room_light_rows import ROOM_LIGHT, lights_in
@@ -186,9 +188,8 @@ def _json(value: Any) -> Jsonb | None:
     return None if value is None else Jsonb(value.model_dump(mode="json"))
 
 
-def _now_in(conn: Any) -> float:
-    """Central's clock now (epoch seconds), the instant every fact this write keeps is stamped with."""
-    return float(conn.execute("SELECT EXTRACT(EPOCH FROM clock_timestamp()) AS now").fetchone()["now"])
+_CLOCK: Final = DatabaseTransactionClock()
+"""Central's clock, read once per write (epoch seconds): the instant every column the write stamps takes."""
 
 
 def _kept_in(conn: Any, house: HouseLock, table: str, source: str, address: str,
@@ -199,7 +200,7 @@ def _kept_in(conn: Any, house: HouseLock, table: str, source: str, address: str,
     document changed."""
     house.changing_within(PgTransaction(conn))
     before = document_in(conn)
-    write(_now_in(conn))
+    write(_CLOCK.now_in(conn))
     named = sorted({reference.address for reference in named_in(conn, source)})
     conn.execute(f"DELETE FROM {table} WHERE source=%(source)s AND NOT (address = ANY(%(named)s)) "  # noqa: S608
                  f"AND address NOT IN (SELECT address FROM {table} WHERE source=%(source)s "
@@ -348,11 +349,11 @@ class PgRoomLights:
     def record_galleria_birth(self, birth: GalleriaBirth) -> None:
         with self._db.transaction() as conn:
             conn.execute("INSERT INTO galleria_birth(one, birth, heard_at, created_at, created_by, changed_at, "
-                         "changed_by) VALUES (true, %(birth)s, clock_timestamp(), clock_timestamp(), %(by)s, "
-                         "clock_timestamp(), %(by)s) "
+                         "changed_by) VALUES (true, %(birth)s, to_timestamp(%(now)s), to_timestamp(%(now)s), %(by)s, "
+                         "to_timestamp(%(now)s), %(by)s) "
                          "ON CONFLICT (one) DO UPDATE SET birth=EXCLUDED.birth, heard_at=EXCLUDED.heard_at, "
                          "changed_at=EXCLUDED.changed_at, changed_by=EXCLUDED.changed_by",
-                         {"birth": Jsonb(birth.model_dump(mode="json")), "by": GALLERIA})
+                         {"birth": Jsonb(birth.model_dump(mode="json")), "by": GALLERIA, "now": _CLOCK.now_in(conn)})
 
     # ---- RoomLightSetup ----
 
@@ -434,10 +435,11 @@ class PgRoomLights:
                 raise refused
             before = document_in(conn)
             conn.execute("INSERT INTO colour_sensors(id, sensor, created_at, created_by, changed_at, changed_by) "
-                         "VALUES (%(id)s, %(sensor)s, clock_timestamp(), %(by)s, clock_timestamp(), %(by)s) "
+                         "VALUES (%(id)s, %(sensor)s, to_timestamp(%(now)s), %(by)s, to_timestamp(%(now)s), %(by)s) "
                          "ON CONFLICT (id) DO UPDATE SET sensor=EXCLUDED.sensor, changed_at=EXCLUDED.changed_at, "
                          "changed_by=EXCLUDED.changed_by",
-                         {"id": sensor_id, "sensor": Jsonb(sensor.model_dump(mode="json")), "by": OPERATOR})
+                         {"id": sensor_id, "sensor": Jsonb(sensor.model_dump(mode="json")), "by": OPERATOR,
+                          "now": _CLOCK.now_in(conn)})
             _changed_in(conn, before)
             return next(view for view in _view_in(conn, self._house).colour_sensors if view.id == sensor_id)
 
