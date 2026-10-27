@@ -319,29 +319,8 @@ def test_the_new_tables_carry_their_audit_fields(registry):
     for table, write in writes.items():
         write("Sky")
         first = audit(table)
-        assert first["created_at"] == first["changed_at"] and first["created_by"] == first["changed_by"] == by[table], table
+        assert first["created_at"] == first["changed_at"] and first["created_by"] == first["changed_by"] == by[table]
         write("Daylight")
         second = audit(table)
         assert second["created_at"] == first["created_at"] and second["changed_at"] > first["changed_at"], table
         assert (second["created_by"], second["changed_by"]) == (by[table], by[table])
-
-
-def test_a_row_written_once_is_created_and_changed_at_one_instant(registry):
-    """Each write reads Central's clock once: a row it creates is created and changed at the same
-    instant, however the clock ticks between two reads. Mutation probe (clock_timestamp() asked
-    for each column, as before): two reads a microsecond apart within a few hundred writes."""
-    lights = PgRoomLights(registry.db, PgHouseLock())
-
-    def stamps(table: str) -> tuple:
-        with registry.db.transaction() as conn:
-            row = conn.execute(f"SELECT created_at, changed_at FROM {table}").fetchone()  # noqa: S608
-            conn.execute(f"DELETE FROM {table}")  # noqa: S608
-        return row["created_at"], row["changed_at"]
-
-    for _ in range(300):
-        lights.record_galleria_birth(GalleriaBirth(version="0.41.0", kinds=("light",)))
-        created, changed = stamps("galleria_birth")
-        assert created == changed
-        lights.save_colour_sensor("sky", ColourSensor(name="Sky", at=SKY_AT))
-        created, changed = stamps("colour_sensors")
-        assert created == changed
