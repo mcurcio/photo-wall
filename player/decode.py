@@ -1,5 +1,5 @@
 """Decoding a layer's media for the Player's new path (render redesign, run ledger
-.claude/runs/render-planes/s1-page.md): a still to RGBA once, a video to the hardware decoder's
+.claude/runs/render-planes/s1-page.md): a still's crop window to RGBA once, a video to the hardware decoder's
 dmabuf frames as it plays. GStreamer runs on its own threads; every method here belongs to the
 Player's owning thread except the `on_frame` callback. Importing this module needs no GStreamer:
 it is loaded through gi in the constructors.
@@ -16,8 +16,15 @@ Rules this module owns (one home each):
   each frame's buffer goes back to the decoder exactly at `done`.
 - **The decoder's format** (`_drm_format`): the caps' `drm-format` names NV12 and its modifier;
   any other format is refused.
-- **The still pipeline** (`StillDecode`): filesrc ! decodebin ! videoconvert ! RGBA appsink,
-  prerolled once; JPEG and PNG.
+- **The still pipeline** (`StillDecode`): a still's decode holds only its crop window at its
+  finish size (`StillRegion`, worked out by player/planes.py `still_region`): filesrc ! decodebin
+  ! videocrop (the window's box) ! videoconvertscale (Lanczos, no borders) ! RGBA at the finish
+  size ! appsink, prerolled once; JPEG and PNG. So the texture the GPU is handed is at most the
+  finish size, never the whole copy, whatever the copy's size: Central's copy may be longer than
+  the GPU's largest texture (V3D's GL_MAX_TEXTURE_SIZE is 4096) and the Pi still draws it
+  (2026-10-26: a 5,232 x 7,848 photo on a 3,004 x 2,140 Frame). A decoded picture whose size is
+  not the copy's as the layer states it (`StillRegion.source`), or whose result is not the finish
+  size, fails.
 - **Paths**: absolute filesystem paths only, never a URL (ValueError("decode_path")).
 - **Teardown** (`_Handlers`, player/architecture G13 and the 2026-10-20 fireplace incident): every
   signal handler a decode connects goes through its `_Handlers`, which holds the decode only weakly
@@ -140,39 +147,60 @@ def _weakly(method: weakref.WeakMethod) -> Callable[..., Any]:
     return call
 
 
+@dataclass(frozen=True)
+class StillRegion:
+    """What a still's decode hands over (module rule): of the copy `source` = (width, height),
+    upright, the box (left, top, width, height) in its pixels, scaled to `size` = (width, height),
+    the finish size. Built by player/planes.py `still_region`."""
+    source: tuple[int, int]
+    box: tuple[int, int, int, int]
+    size: tuple[int, int]
+
+
 class StillDecode:
     """One still's decode (module rule), started at construction and polled."""
 
-    def __init__(self, path: Path) -> None:
-        """Start decoding `path` (absolute; never a URL). ValueError("decode_path") otherwise."""
+    def __init__(self, path: Path, region: StillRegion) -> None:
+        """Start decoding `region` of `path` (absolute; never a URL). ValueError("decode_path")
+        otherwise."""
         location = _absolute(path)
         gst = self._gst = _gst()
+        self._region = region
         self._started = time.monotonic()
         self._outcome: StillPicture | Literal["failed"] | None = None
         self._alpha = False
+        self._mismatched = False
         self._handlers = _Handlers(self)
         self._sink: Any = None
         self._pipeline: Any = gst.Pipeline.new(None)
+        (width, height), (left, top, box_width, box_height) = region.source, region.box
+        finish_width, finish_height = region.size
         try:
             source = _element(gst, "filesrc", location=str(location))
             decode = _element(gst, "decodebin")
-            convert = _element(gst, "videoconvert")
-            caps = _element(gst, "capsfilter", caps=gst.Caps.from_string("video/x-raw,format=RGBA"))
+            crop = _element(gst, "videocrop", left=left, top=top, right=width - left - box_width,
+                            bottom=height - top - box_height)
+            scale = _element(gst, "videoconvertscale", add_borders=False)
+            gst.util_set_object_arg(scale, "method", "lanczos")
+            caps = _element(gst, "capsfilter", caps=gst.Caps.from_string(
+                f"video/x-raw,format=RGBA,width={finish_width},height={finish_height},pixel-aspect-ratio=1/1"))
             self._sink = _element(gst, "appsink", sync=False, max_buffers=1, emit_signals=False)
-        except VideoRefused:
+        except (VideoRefused, TypeError, ValueError):
             self._fail()
             return
-        for element in (source, decode, convert, caps, self._sink):
+        for element in (source, decode, crop, scale, caps, self._sink):
             self._pipeline.add(element)
-        source.link(decode)
-        convert.link(caps)
-        caps.link(self._sink)
-        self._handlers.connect(decode, "pad-added", self._decoded, convert)
+        if not (source.link(decode) and crop.link(scale) and scale.link(caps) and caps.link(self._sink)):
+            self._fail()
+            return
+        self._handlers.connect(decode, "pad-added", self._decoded, crop)
         if self._pipeline.set_state(gst.State.PAUSED) == gst.StateChangeReturn.FAILURE:
             self._fail()
 
-    def _decoded(self, _decode: Any, pad: Any, convert: Any) -> None:
-        """decodebin's pad (a streaming thread): link it, and note whether its format has alpha."""
+    def _decoded(self, _decode: Any, pad: Any, crop: Any) -> None:
+        """decodebin's pad (a streaming thread): link it, and note whether its format has alpha; a
+        picture whose fixed size is not the copy's (`StillRegion.source`) is not linked and fails the
+        decode."""
         caps = pad.get_current_caps() or pad.query_caps(None)
         if caps is None or not caps.get_size():
             return
@@ -180,22 +208,27 @@ class StillDecode:
             if not structure.get_name().startswith("video/"):
                 return
             self._alpha = _has_alpha(structure.get_string("format"))
-        pad.link(convert.get_static_pad("sink"))
+            found_width, width = structure.get_int("width")
+            found_height, height = structure.get_int("height")
+        if found_width and found_height and (width, height) != self._region.source:
+            self._mismatched = True
+            return
+        pad.link(crop.get_static_pad("sink"))
 
     def result(self) -> StillPicture | Literal["pending", "failed"]:
         """The picture once decoded, handed over once: the caller owns its pixels and this decode
-        keeps none (a 4K still's 33 MB would otherwise live as long as its layer), so asked again it
+        keeps none (a 4K picture's 33 MB would otherwise live as long as its layer), so asked again it
         answers "failed". "pending" while decoding; "failed" on an error or after STILL_TIMEOUT
         seconds."""
         if self._outcome is not None:
             return self._outcome
         gst = self._gst
-        if self._pipeline.get_bus().pop_filtered(gst.MessageType.ERROR) is not None:
+        if self._mismatched or self._pipeline.get_bus().pop_filtered(gst.MessageType.ERROR) is not None:
             return self._fail()
         sample = self._sink.emit("try-pull-preroll", 0)
         if sample is not None:
             picture = _still_of(sample, self._alpha)
-            if picture is None:
+            if picture is None or picture.size != self._region.size:
                 return self._fail()
             self.close()                                # handed over: nothing kept
             return picture
@@ -500,4 +533,5 @@ class _GstNative:
             serial=serial, position=0.0 if pts == _CLOCK_TIME_NONE else pts / 1e9)
 
 
-__all__ = ["DECODE_QUEUE", "DMABUF_CAPS", "VIDEO_DECODER", "STILL_TIMEOUT", "StillDecode", "StillPicture", "VideoFrames", "VideoRefused"]
+__all__ = ["DECODE_QUEUE", "DMABUF_CAPS", "VIDEO_DECODER", "STILL_TIMEOUT", "StillDecode", "StillPicture", "StillRegion",
+           "VideoFrames", "VideoRefused"]

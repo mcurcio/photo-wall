@@ -1,4 +1,5 @@
-"""One copy per photo, sized for the wall (follow-up to 5a, slice S1). Owner, 2026-10-12: "i
+"""One copy per photo, sized for the wall (follow-up to 5a, slice S1; scaled only when the photo
+is substantially larger than its Frames need, 2026-10-26). Owner, 2026-10-12: "i
 expect the final composition to be handled on the Player, via scaling and masking. it would be
 inefficient for Central to scale and crop every conceivable variation for every Frame. Dont forget
 that a photo can map to multiple Frames at different times".
@@ -13,7 +14,7 @@ coordination's preparation requests and the Planner's hydration both use).
 from __future__ import annotations
 
 from media_queue import RecordingMediaQueue
-from support.frame_outputs import target_of
+from support.frame_outputs import frame_output_of, target_of
 from support.frames import Screen, frame_create
 from support.key_content_builders import key_content
 from support.photo_pools import library_of, photo, seed_pool
@@ -26,7 +27,7 @@ from central.kernel.types import split_media_variant_key
 from central.media_repository import MediaRepository
 from central.photo_library.model import MeasuredCopy
 from central.planner import AcquisitionRequest, MeasureRequest
-from central.wall_plan.fit import DoesNotFit, shape_fit
+from central.wall_plan.fit import Fits, fitting_outputs, judge, shape_fit
 from central.wall_plan.fit_settings import FitSettings
 from media.prepare import VideoRecipe, stored_recipe
 
@@ -150,16 +151,49 @@ def test_a_raw_photo_is_sized_once_its_preview_is_measured_and_asked_for_until_t
     assert repository.request_measurements((MeasureRequest(asset_id=raw.asset_id),)) == 0
 
 
-def test_above_the_players_still_limit_a_4k_frame_refuses_the_photo():
-    """Acceptance 5. Mutation probe 4 (drop the limit): the 4K Frame accepts it."""
-    limited = FitSettings(max_still_edge=3000)
-    uhd, hd = target_of(3840, 2160, inches=55), target_of(1920, 1080, inches=24)
-    assert shape_fit("image", 6000, 4000, uhd, 0.35, limited, size_known=True) == DoesNotFit(
-        reason="above_player_limit")
-    assert shape_fit("image", 6000, 4000, hd, 0.35, limited, size_known=True) is None
-    assert shape_fit("image", 6000, 4000, uhd, 0.35, FitSettings(), size_known=True) is None
-    # The ladder's steps stop at the limit: no copy is longer than the Player shows.
-    assert limited.copy_steps == (1920, 2560, 3000)
+# The fireplace Frame as read from production on 2026-10-26: a 3004 x 2140 Frame output on a
+# 3840 x 2160 screen, and a 41 MP portrait photo (5232 x 7848) in its Source.
+FIREPLACE = Screen(3004, 2140)
+LARGE = (5232, 7848)
+
+
+def test_a_photo_larger_than_its_frame_needs_fits():
+    """Owner, 2026-10-26: "the too-large picture being rejected is ridiculous." Mutation probe
+    AC1 (refuse a copy longer than 4,096): this fails."""
+    settings = FitSettings(crop_limit=0.6)
+    target = target_of(*FIREPLACE[:2])
+    assert shape_fit("image", *LARGE, target, 0.6, settings, size_known=True) is None
+    assert isinstance(judge("image", *LARGE, key_content(*LARGE), target, 0.6, settings), Fits)
+    output = frame_output_of("fireplace", FIREPLACE[:2])
+    assert fitting_outputs("image", *LARGE, (output,), settings) == (output,)
+
+
+def test_a_41_mp_photo_gets_one_copy_at_its_frames_need(registry):
+    """The 41 MP photo on the fireplace Frame: one copy at exactly the Frame's need for its shape
+    (3,004 x 4,506 holds a 3,004 x 2,140 window), above the ladder's largest step and never cut
+    to a Player limit. Mutation probe AC2a (the step above the ladder falls back to its largest):
+    this fails."""
+    repository = wall(registry, ("fireplace", FIREPLACE))
+    large = photo("large", taken_at=1, width=LARGE[0], height=LARGE[1])
+    seed_pool(registry, "family:1", (large,))
+    (key,) = prepared(repository, large.asset_id, "fireplace")
+    assert step_of(repository, key) == 4506
+
+
+def test_a_photo_only_slightly_larger_than_needed_gets_no_smaller_copy(registry):
+    """Owner, 2026-10-26: "Scaled only, but only create then if the asset size is substantially
+    larger than the Player needs." A 3,300 x 4,950 photo is 1.1 times the fireplace Frame's need
+    (4,506): its copy keeps its readable size; at a ratio of 1.0 it is scaled to the need.
+    Mutation probe AC3 (always scale to the step): this fails."""
+    repository = wall(registry, ("fireplace", FIREPLACE))
+    store = PgFitSettings(registry.db, times=ProcessTransactionClock(registry.clock))
+    near = photo("near", taken_at=1, width=3300, height=4950)
+    seed_pool(registry, "family:1", (near,))
+    (key,) = prepared(repository, near.asset_id, "fireplace")
+    assert step_of(repository, key) == 4950
+    store.save_fit_settings(FitSettings(scaled_copy_ratio=1.0))
+    (key,) = prepared(repository, near.asset_id, "fireplace") - {key}
+    assert step_of(repository, key) == 4506
 
 
 def test_a_frame_with_no_known_screen_asks_no_copy(registry):

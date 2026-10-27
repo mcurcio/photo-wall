@@ -41,7 +41,7 @@ FIT_SETTING_RANGES: Final[Mapping[str, tuple[float, float]]] = {
     "large_frame_inches": (1.0, 200.0),
     "large_frame_video_short_side": (1, 4320),
     "window_steps": (8, 256),
-    "max_still_edge": (1024, 16384),
+    "scaled_copy_ratio": (1.0, 4.0),
 }
 # Each step of `FitSettings.copy_ladder_px`, inclusive (a tuple has no one range the console's
 # controls offer, so it is not in FIT_SETTING_RANGES).
@@ -91,24 +91,29 @@ class FitSettings(Model):
                                               le=_R["large_frame_video_short_side"][1])
     # How many steps the crop window is slid across its free axis (precision, not taste).
     window_steps: int = Field(default=64, ge=_R["window_steps"][0], le=_R["window_steps"][1])
-    # Follow-up to 5a, slice S1: the longest edge a Player shows a still at (a placeholder, to be
-    # measured on the bench Pi 5 from its renderer's texture limit). A Frame whose need for a
-    # photo's copy is longer refuses the photo ("above_player_limit"); no copy is longer.
-    max_still_edge: int = Field(default=4096, ge=_R["max_still_edge"][0],
-                                le=_R["max_still_edge"][1])
-    # The coarse steps of a photo's one copy (owner, 2026-10-12: one copy per photo, the Player
-    # composes): a copy's long edge is the smallest step holding the wall's largest need for it,
-    # so a smaller Frame added, or a photo moved between Frames, prepares nothing again.
+    # When Central makes a smaller copy of a photo (central/photo_library/rendition.py
+    # `wall_need`). Owner, 2026-10-26: "Scaled only, but only create then if the asset size is
+    # substantially larger than the Player needs." A photo whose readable long edge is more than
+    # this many times the largest Frame need gets a smaller copy, scaled (never cropped); one
+    # closer to that need keeps its readable size and each Player cuts and scales it. The 1.5
+    # default is a revisable design choice, not the owner's number. A row saved before this field
+    # reads it at its default (`Model` fills a missing field).
+    scaled_copy_ratio: float = Field(default=1.5, ge=_R["scaled_copy_ratio"][0],
+                                     le=_R["scaled_copy_ratio"][1], allow_inf_nan=False)
+    # The coarse steps of a photo's smaller copy: when a photo is scaled down
+    # (`scaled_copy_ratio`), its copy's long edge is the smallest step holding the wall's largest
+    # need for it, so a smaller Frame added, or a photo moved between Frames, prepares nothing
+    # again; above the largest step the copy is scaled to the need itself. Owner, 2026-10-26: "I
+    # still planned on having central produce an aggregate of the unique frame sizes and aspect
+    # ratios so that it can prepare some common copies of assets."
     copy_ladder_px: tuple[Annotated[int, Field(ge=COPY_STEP_RANGE[0], le=COPY_STEP_RANGE[1])],
                           ...] = Field(default=(1920, 2560, 3840), min_length=1, max_length=8)
 
     @property
     def copy_steps(self) -> tuple[int, ...]:
-        """The steps a copy's long edge takes, ascending: each of `copy_ladder_px` below
-        `max_still_edge`, then `max_still_edge` (central/photo_library/rendition.py
-        `wall_need`)."""
-        return (*sorted({step for step in self.copy_ladder_px if step < self.max_still_edge}),
-                self.max_still_edge)
+        """The steps a copy's long edge takes, ascending and distinct: `copy_ladder_px` sorted
+        (central/photo_library/rendition.py `wall_need`)."""
+        return tuple(sorted(set(self.copy_ladder_px)))
 
 
 class FitSettingsView(Model):

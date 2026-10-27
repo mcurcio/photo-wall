@@ -119,8 +119,7 @@ def test_the_shape_tier_is_the_fit_rule_photo_by_photo() -> None:
         refused = Counter(v.reason for v in verdicts if v is not None)
         assert {count.reason: count.photos for count in frame.refused_by_shape} == {
             reason: refused.get(reason, 0)
-            for reason in ("no_video_here", "beyond_crop_limit", "below_frame_pixels",
-                           "above_player_limit")}
+            for reason in ("no_video_here", "beyond_crop_limit", "below_frame_pixels")}
         assert frame.measured == sum(v is None and p.key is not None
                                      for v, p in zip(verdicts, photos, strict=True))
         assert frame.photos == len(photos)

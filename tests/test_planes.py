@@ -19,6 +19,7 @@ from player.planes import (
     compose,
     finish_size,
     plane_strength,
+    still_region,
 )
 from player.rendering import LocalLayer
 
@@ -240,3 +241,45 @@ def test_the_finish_size_is_the_crop_window_taken_at_the_placements_own_aspect(a
 
 def test_a_black_layer_is_finished_at_its_placement():
     assert finish_size(black("dark", 1.0).layer, HD) == (1920, 1080)
+
+
+FIREPLACE = Placement(418, 10, 3004, 2140)      # the fireplace Frame read from production, 2026-10-26
+
+
+def copy_of(width: int, height: int) -> LocalLayer:
+    return LocalLayer(layer("photo", variant=media(b"photo").model_copy(update={
+        "media_type": "image/jpeg", "width": width, "height": height})), None, 0.0, 1.0)
+
+
+def test_a_still_hands_the_gpu_its_window_at_its_finish_size():
+    """A copy taller than the GPU's largest texture (4,096) on the fireplace Frame: its decode hands
+    over the centred window, in whole pixels, at the Frame's 3,004 x 2,140, never the whole copy."""
+    region = still_region(copy_of(3004, 4506).layer, FIREPLACE)
+    window = 4506 * (3004 / 4506) / (3004 / 2140)
+    assert region.source == (3004, 4506)
+    assert region.box == (0, round((4506 - window) / 2), 3004, 2140)
+    assert region.size == (3004, 2140)
+    # Each edge is rounded on its own, so the box is the window's 3,727.3 rows to within one.
+    larger = still_region(copy_of(5232, 7848).layer, FIREPLACE)
+    window = 7848 * (5232 / 7848) / (3004 / 2140)
+    top, bottom = (7848 - window) / 2, (7848 + window) / 2
+    assert larger.box == (0, round(top), 5232, round(bottom) - round(top)) == (0, 2060, 5232, 3728)
+    assert larger.size == (3004, 2140)
+
+
+@pytest.mark.parametrize(("offset", "box"), [(0, (0, 0, 1, 1)), (1, (9999, 0, 1, 1))])
+def test_a_window_under_a_pixel_still_lies_within_the_copy(offset, box):
+    """A window narrower than a pixel is one pixel wide, at the copy's edge when the crop reaches
+    it, never past the copy (a box past it would decode another window: videocrop only warns of a
+    negative edge). Mutation probe (no clamp to the copy): the right edge's box starts at 10,000."""
+    local = LocalLayer(layer("strip", crop=PhotoCrop(offset=offset), variant=media(b"strip").model_copy(update={
+        "media_type": "image/jpeg", "width": 10000, "height": 1})), None, 0.0, 1.0)
+    region = still_region(local.layer, Placement(0, 0, 1, 1000))
+    assert region.box == box
+    left, top, width, height = region.box
+    assert left + width <= 10000 and top + height <= 1
+
+
+def test_a_black_layer_has_no_still_region():
+    with pytest.raises(ValueError, match="^still_region$"):
+        still_region(black("dark", 1.0).layer, FIREPLACE)

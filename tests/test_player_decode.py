@@ -12,19 +12,21 @@ from pathlib import Path
 
 import pytest
 
-from player.decode import StillDecode, VideoFrames, _drm_format, _Handlers
+from player.decode import StillDecode, StillRegion, VideoFrames, _drm_format, _Handlers
 from player.gpu import NV12
+
+WHOLE = StillRegion((64, 48), (0, 0, 64, 48), (64, 48))
 
 
 @pytest.mark.parametrize("path", [Path("photo.jpg"), Path("cache/photo.png"), Path("https:/host/photo.jpg")])
 def test_a_still_needs_an_absolute_path(path):
     with pytest.raises(ValueError, match="^decode_path$"):
-        StillDecode(path)
+        StillDecode(path, WHOLE)
 
 
 def test_a_still_path_must_be_a_path():
     with pytest.raises(ValueError, match="^decode_path$"):
-        StillDecode("/cache/photo.jpg")  # type: ignore[arg-type]
+        StillDecode("/cache/photo.jpg", WHOLE)  # type: ignore[arg-type]
 
 
 def test_a_video_needs_an_absolute_path():

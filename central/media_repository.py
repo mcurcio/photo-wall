@@ -7,10 +7,14 @@ candidates from those records, names the recipe each planned photo is prepared u
 reference mutation shares Database.MEDIA_LOCK with coordination.
 
 Follow-up S1 (owner, 2026-10-12: "i expect the final composition to be handled on the Player,
-via scaling and masking"): each photo has ONE copy for the whole wall, named by `variant_names_in`
-from the photo's readable size, the wall's Frame outputs and the photo fit settings
-(central/photo_library/rendition.py `wall_need` over central/wall_plan/fit.py
-`fitting_outputs`), so it is the same name whichever Frame shows the photo.
+via scaling and masking"): each photo has one copy for the whole wall, never cropped, named by
+`variant_names_in` from the photo's readable size, the wall's Frame outputs and the photo fit
+settings (central/photo_library/rendition.py `wall_need` over central/wall_plan/fit.py
+`fitting_outputs`), so it is the same name whichever Frame shows the photo. It is scaled down only
+when the photo is more than `FitSettings.scaled_copy_ratio` times larger than its largest Frame
+needs (owner, 2026-10-26: "Scaled only, but only create then if the asset size is substantially
+larger than the Player needs"); otherwise it keeps its readable size, and each Player cuts and
+scales its window.
 
 Render planes S4 (owner, gate answer Q5, 2026-10-18: "HEVC now, one 1080p copy per video"): a
 video's one copy is named by the video recipe alone (`variant_recipe`), the same whatever the
@@ -58,7 +62,13 @@ from central.wall_plan.key_content import Analysis
 from central.wall_plan.order import LineAnswer, LineMember, LineQuery, SourceLine
 from contracts.models import Model, Variant
 from contracts.time import Clock
-from media.prepare import HouseRecipes, PreparationRecipe, recipe_id, stored_recipe
+from media.prepare import (
+    HouseRecipes,
+    PreparationLimits,
+    PreparationRecipe,
+    recipe_id,
+    stored_recipe,
+)
 
 
 class StoreLimits(Model):
@@ -66,7 +76,7 @@ class StoreLimits(Model):
     max_sources: int = Field(default=128, ge=1, le=128)
     max_jobs: int = Field(default=256, ge=1, le=256)
     max_original_bytes: int = Field(default=256 * 1024**2, gt=0)
-    max_image_bytes: int = Field(default=16 * 1024**2, gt=0)
+    max_image_bytes: int = Field(default=PreparationLimits.model_fields["max_image_bytes"].default, gt=0)
     max_video_bytes: int = Field(default=256 * 1024**2, gt=0)
     lease_seconds: float = Field(default=600, ge=360, le=3600)
 
@@ -99,13 +109,16 @@ def variant_recipe(recipes: HouseRecipes, kind: Kind, size: tuple[int, int],
                    frames: Sequence[FrameOutput], settings: FitSettings
                    ) -> tuple[PreparationRecipe, FrameNeed]:
     """The recipe and need a copy of a photo of `size` is prepared by. A still: the wall need
-    over the Frames it could fill (`fitting_outputs`) on `settings.copy_steps`, and the house
-    still recipe with its long edge at that need's step (`need_step`). A video: the house video
+    over the Frames it could fill (`fitting_outputs`) on `settings.copy_steps` and
+    `settings.scaled_copy_ratio` (a smaller copy only for a photo substantially larger than its
+    Frames need), and the house still recipe with its long edge at that need's step
+    (`need_step`). A video: the house video
     recipe and the video's own shape at its long edge (`need_at`), whatever `frames` and
     `settings` are, so the wall and the copy ladder never rename a video. Pure."""
     if kind == "video":
         return recipes.video, need_at(size, recipes.video.long_edge)
-    need = wall_need(size, fitting_outputs(kind, *size, frames, settings), settings.copy_steps)
+    need = wall_need(size, fitting_outputs(kind, *size, frames, settings), settings.copy_steps,
+                     settings.scaled_copy_ratio)
     return recipes.still.model_copy(update={"long_edge": need_step(need)}), need
 
 

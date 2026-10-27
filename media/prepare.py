@@ -152,7 +152,9 @@ class PreparationLimits(Model):
     max_pixels: int = Field(default=64_000_000, ge=1, strict=True)
     max_dimension: int = Field(default=16384, ge=1, strict=True)
     max_video_seconds: Positive = 300
-    max_image_bytes: int = Field(default=16 * 1024**2, ge=1, strict=True)
+    # A copy up to `max_pixels` (64 MP) at about 6 bits a pixel: a photo kept at its readable
+    # size (central/wall_plan/fit_settings.py `scaled_copy_ratio`) may be that large. Not measured.
+    max_image_bytes: int = Field(default=48 * 1024**2, ge=1, strict=True)
     max_video_bytes: int = Field(default=256 * 1024**2, ge=1, strict=True)
     max_staging_bytes: int = Field(default=512 * 1024**2, ge=1, strict=True)
     wall_seconds: Positive = 180
@@ -714,7 +716,13 @@ class Preparer:
                     recipe.long_edge / max(display_width, display_height))
         if video:
             scale = min(scale, math.sqrt(recipe.max_pixels / (display_width * display_height)))
-        step = 2 if video else 1
+        if not video:
+            # Rounded to the nearest pixel (as central/photo_library/rendition.py `need_at`
+            # rounds), so a copy at a Frame's exact need is never a pixel short of it; `scale`
+            # keeps each side within the oriented raster.
+            return (max(1, math.floor(display_width * scale + 0.5)),
+                    max(1, math.floor(display_height * scale + 0.5)))
+        step = 2
         result = (math.floor(display_width * scale / step) * step,
                   math.floor(display_height * scale / step) * step)
         if min(result) < step:

@@ -35,7 +35,7 @@ flowchart LR
 | Fit pass | [`player/fit_pass.py`](../player/fit_pass.py), [`player/look_shader.py`](../player/look_shader.py) | one draw from the source to a finished picture; the look's one GLSL copy |
 | Pattern pass | [`player/pattern_pass.py`](../player/pattern_pass.py) | a test pattern, a calibration target or the commissioning grid as the screen's ground |
 | GPU device | [`player/gpu.py`](../player/gpu.py) | EGL on GBM, scan-out-able targets, decoder frame imports, fences |
-| Decoding | [`player/decode.py`](../player/decode.py) | stills to RGBA once; HEVC to the hardware decoder's frames |
+| Decoding | [`player/decode.py`](../player/decode.py) | a still's crop window to RGBA once, at its finish size; HEVC to the hardware decoder's frames |
 | Screens | [`player/plane_screen.py`](../player/plane_screen.py) over the frame client | the Player's Wayland connection: one screen per Output, one sub-window per plane |
 | Frame loop | [`player/mainloop.py`](../player/mainloop.py) `FrameLoop` | when a frame turn runs on the GLib main loop |
 | Pacing | [`player/pacing.py`](../player/pacing.py) `FramePacer.free` | one commit in flight per screen |
@@ -194,10 +194,28 @@ transparency (a PNG) pre-multiplied. Within one level of 256 of the reference.
   one drawn, all made and imported by the `finish` that draws its first frame during its prepare
   lead, never on its first frames during the fade that reveals it (about 10 ms of CPU and an import
   each, milestone 3).
+- **A still's decode holds only its window** (`player/decode.py` `StillDecode`,
+  `player/planes.py` `still_region`): `filesrc ! decodebin ! videocrop ! videoconvertscale !
+  RGBA appsink` cuts Central's crop window from the copy and scales it to the finish size on the
+  CPU, so the texture the GPU is given is at most the finish size (at most the screen), never the
+  whole copy. Central's copy of a photo is never cropped and may be longer than the Pi 5's largest
+  texture (V3D's `GL_MAX_TEXTURE_SIZE` is 4,096): a 5,232 x 7,848 photo on a 3,004 x 2,140 Frame
+  has a 3,004 x 4,506 copy, and the Pi draws its 3,004 x 2,140 window. Cutting in the decode
+  pipeline is GStreamer's own way; uploading a region with `GL_UNPACK_SKIP_*` would still fail once
+  the window itself is over 4,096 (a portrait copy on a full 4K Frame), and `jpegdec` has no scaled
+  decode. At most one still decode is in flight over every Output; `finish` starts the next once it
+  answers, its layer is released, its start is refused, or its layer no longer needs it (its
+  picture is right again for what it is asked, or it failed; the decode is given up), and a decode
+  that answers while its layer waits for a fade is taken then, so no decode nobody polls holds up
+  the others. A new crop window or finish size (a new crop, a box of another shape, or a size below
+  the source) decodes the still again and deletes its old texture. Costs: a Position trial that
+  changes the box's shape decodes the still again (its lag is measured on the render bench), and
+  the CPU scales the window (Lanczos) instead of the GPU.
 - **When a picture is finished again**: a still when anything its pixels depend on changes (its
   decode, its finish size, the turn, the crop, the box's shape, the Display's picture
-  operations, the Frame's lights, its LUT's generation); a video on each new decoded frame while
-  it is seen. Never for a fade.
+  operations, the Frame's lights, its LUT's generation); the turn, the picture operations, the
+  lights and the LUT draw it again from the texture it has, with no new decode; a video on each
+  new decoded frame while it is seen. Never for a fade.
 - **When a Frame's lights are worked out**: `prepare` and `present` ask for them on every tick, and
   `player/geometry.py` `picture_lights` works them out (its peak a 33 x 33 grid in Python) only when
   what they read changes: the Frame's lighting, its room lights' entries, its physical size or the
@@ -206,8 +224,8 @@ transparency (a PNG) pre-multiplied. Within one level of 256 of the reference.
 - **Finishing is off the present path.** `present`, `frame` and `prepare` never draw, upload,
   import or fence. `finish`, run after a turn's commits, does the work owed: each seen video's
   newest frame (one draw per video per call), every pattern ground and black picture, then at most
-  one still step over every Output (its decode taken, a band of `BAND_BYTES` of rows uploaded, or
-  its draw) once `STEP_GAP` (one refresh) has passed. Every draw ends with an EGL fence, and a
+  one still step over every Output (its decode started, its decode taken, a band of `BAND_BYTES`
+  of rows uploaded, or its draw) once `STEP_GAP` (one refresh) has passed. Every draw ends with an EGL fence, and a
   picture is committed only once its fence has signalled (asked, never waited for), so no GPU work
   sits between a due commit and the screen. A still that starts after a fade under way takes no
   step during it (tracer 2's finding D: finishing five 4K stills held a fade 350-417 ms).
@@ -217,9 +235,13 @@ transparency (a PNG) pre-multiplied. Within one level of 256 of the reference.
   (a 1080p one 8 MB);
   a changing still holds two, a playing video three. An Output keeps black pictures of two sizes
   at most (its ground's and its Frame's); a present retires the others.
-- **Memory.** A still's decoded pixels are handed over once (`StillDecode.result`) and dropped once
-  uploaded; the still keeps its source texture (so a key change finishes it again without a new
-  decode) and its target. There is no separate memory budget: what is held is bounded by the layers
+- **Memory.** A still's decoded pixels, its window at its finish size, are handed over once
+  (`StillDecode.result`) and dropped once uploaded; the still keeps its source texture, at most
+  its finish size (so a key change other than a new window finishes it again without a new
+  decode), and its target. One still decode is in flight at a time, so the decode's own memory is
+  one picture's: the whole copy before the cut, 3 bytes a pixel for a 4:4:4 JPEG (about 91 MB for
+  a 4,506 x 6,759 copy, about 192 MB at preparation's 64-megapixel ceiling). There is no separate
+  memory budget: what is held is bounded by the layers
   alive, which the executor's prepare lead and the controller budget bound (the old renderer's
   texture and decoder limits went with it).
 - **Patterns are the ground** (`player/pattern_pass.py`): while the Display's picture operations

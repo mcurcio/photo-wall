@@ -44,6 +44,8 @@ Rules this module owns (one home each):
   asset size and the frame size"). So the controller only ever enlarges or shows a picture 1:1,
   never shrinks it (bench T2: shrinking large sources glitches), and no picture is shown from a
   buffer larger than it appears. A black layer's picture, and a dark plane's, is the placement's size.
+- **What a still's decode hands the GPU** (`still_region`): the crop window of the copy, in whole
+  pixels, scaled to the finish size; never the whole copy (player/decode.py, The still pipeline).
 
 Rules it does NOT own: the fade curve (contracts/models.py `fade_share`); a layer's alpha at a frame
 time (player/look.py `look`); the controller's limits (player/controller_budget.py); pixels and
@@ -60,6 +62,7 @@ from contracts.display_turn import DisplayTurn
 from contracts.frame_fit import Placement
 from contracts.models import Layer
 from contracts.photo_crop import CENTRED, crop_window
+from player.decode import StillRegion
 from player.geometry import encode_srgb
 from player.rendering import LocalLayer
 from player.visibility import opaque, visible_now
@@ -105,6 +108,25 @@ def finish_size(layer: Layer, at: Placement) -> tuple[int, int]:
     left, top, right, bottom = crop_window(layer.crop or CENTRED, width, height, at.width / at.height)
     scale = min(1.0, (right - left) * width / at.width, (bottom - top) * height / at.height)
     return max(1, math.floor(at.width * scale + 0.5)), max(1, math.floor(at.height * scale + 0.5))
+
+
+def still_region(layer: Layer, at: Placement) -> StillRegion:
+    """What `layer`'s still decode hands the GPU for a Frame placed at `at` (module rule; the one
+    home of it): of the variant's width W x height H, the box of its crop window
+    (contracts/photo_crop.py `crop_window` of the layer's crop, CENTRED when none, at the
+    placement's aspect), each edge times W or H rounded half up (floor(v + 0.5)), as (left, top,
+    width, height) with each side at least 1 and the box within the copy (a window under a pixel at
+    its far edge is that edge's last pixel), scaled to `finish_size(layer, at)`. Pure;
+    ValueError("still_region") for a black layer or one with no variant."""
+    if layer.presentation != "media" or layer.variant is None:
+        raise ValueError("still_region")
+    width, height = layer.variant.width, layer.variant.height
+    left, top, right, bottom = (math.floor(edge * side + 0.5) for edge, side in zip(
+        crop_window(layer.crop or CENTRED, width, height, at.width / at.height), (width, height, width, height),
+        strict=True))
+    box_width, box_height = max(1, right - left), max(1, bottom - top)
+    return StillRegion((width, height), (min(left, width - box_width), min(top, height - box_height), box_width,
+                                         box_height), finish_size(layer, at))
 
 
 @dataclass(frozen=True)
@@ -204,4 +226,5 @@ def _stacked(seen: Sequence[LocalLayer]) -> list[tuple[LocalLayer, float]]:
     return stacked
 
 
-__all__ = ["DARK_KEY", "MIN_STRENGTH", "Composition", "FrameLayers", "Plane", "Screen", "compose", "finish_size", "plane_strength"]
+__all__ = ["DARK_KEY", "MIN_STRENGTH", "Composition", "FrameLayers", "Plane", "Screen", "compose", "finish_size",
+           "plane_strength", "still_region"]
