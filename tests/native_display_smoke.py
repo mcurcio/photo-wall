@@ -47,7 +47,7 @@ sys.path.append("/usr/lib/photo-wall/common")  # contracts, as the installed ove
 from display_harness_judge_feeder import PATH as JUDGE_SOCKET  # noqa: E402
 from display_harness_judge_feeder import JudgeFeeder  # noqa: E402
 from overlay.instruction import INSTRUCTION_STALE_MS  # noqa: E402
-from overlay.render import CENTRAL_CARD_RGBA, CENTRAL_LEAST, CENTRAL_SHARE, card_rect  # noqa: E402
+from overlay.render import CENTRAL_CARD_RGBA, card_rect, render_central  # noqa: E402
 
 from contracts.node_faults import FAULTS  # noqa: E402
 from contracts.node_output import (  # noqa: E402
@@ -683,21 +683,35 @@ def card_ink_stays_in_the_explain_area():
     3406). The installed overlay's own render, measure and cairo paint, the card's longest real
     lines (appliance/health/judge.py `_card`), its text alone on a clear surface: every inked pixel
     lies inside the card, and the card inside the area, in the smallest Frame region the overlay
-    takes (MIN_AREA), the bench's region and the whole-Display fallback. Mutation probe:
-    render.py `fit_size` returning `size` unchanged -> the MIN_AREA case inks past its card."""
+    takes (MIN_AREA), the bench's region and the whole-Display fallback. Central's card (its label
+    and its two lines at the contract's longest, CENTRAL_LINE_MAX characters) is held the same way.
+    Mutation probe: render.py `fit_size` returning `size` unchanged -> the MIN_AREA case inks past
+    its card."""
     import cairo
     from overlay.area import MIN_AREA, FrameArea, OutputArea, area_rect
     from overlay.health import HealthPage
     from overlay.paint import paint, text_width
     from overlay.render import CARD_RGBA, Rect, Text, render_health
 
+    from contracts.node_output import CENTRAL_CARD_LINE_MAX
+
     width, height = 3840, 2160
     lines = (max((f"{fault.household_line} · since 12:09" for fault in FAULTS.values()), key=len),
              f"{max(FAULTS, key=len)} · Player p-5c85e236873353bec06574c31ee5aae6 · Output HDMI-A-1")
-    for area in (FrameArea(OutputRect(402, 20, *MIN_AREA)), FrameArea(OutputRect(402, 20, 3004, 2140)),
-                 OutputArea("no_region")):
-        ops = render_health(width, height, HealthPage(1, True, lines), area=area, measure=text_width)
-        (card,) = [op for op in ops if isinstance(op, Rect) and op.rgba == CARD_RGBA]
+    central = tuple((start + " W" * CENTRAL_CARD_LINE_MAX)[:CENTRAL_CARD_LINE_MAX] for start in (
+        "Photo Wall can't read Family Room Floor Lamp · since 26 Oct 15:35",
+        "Drawn with its last word: off (26 Oct 15:35) · see Needs attention in Photo Wall"))
+    pages = (
+        ("health", CARD_RGBA, lambda area: render_health(width, height, HealthPage(1, True, lines), area=area,
+                                                          measure=text_width)),
+        ("central", CENTRAL_CARD_RGBA, lambda area: render_central(width, height, central, area=area,
+                                                                    measure=text_width)),
+    )
+    for (kind, colour, render_page), area in ((page, area) for page in pages for area in (
+            FrameArea(OutputRect(402, 20, *MIN_AREA)), FrameArea(OutputRect(402, 20, 3004, 2140)),
+            OutputArea("no_region"))):
+        ops = render_page(area)
+        (card,) = [op for op in ops if isinstance(op, Rect) and op.rgba == colour]
         left, top, area_width, area_height = area_rect(area, (width, height))
         assert (left <= card.x and card.x + card.width <= left + area_width and top <= card.y
                 and card.y + card.height <= top + area_height), (area, card)
@@ -711,7 +725,7 @@ def card_ink_stays_in_the_explain_area():
                min(y for _, _, y in inked), max(y for _, _, y in inked))
         assert (card.x <= ink[0] and ink[1] < card.x + card.width and card.y <= ink[2]
                 and ink[3] < card.y + card.height), (area, card, ink)
-        print("PASS card_ink_stays_in_the_explain_area", area, (card.x, card.width), ink, flush=True)
+        print("PASS card_ink_stays_in_the_explain_area", kind, area, (card.x, card.width), ink, flush=True)
 
 
 def explain_area_cases():
@@ -749,7 +763,7 @@ def explain_area_cases():
           assert_pixel(CARD_X + 2, CARD_Y + 2, SLATE), flush=True)
     assert request("region", region=region_text((640, 480)))["accepted"]
     await_black_outside(FRAME_RECT, 3)
-    central_card_cases(x, y)
+    central_card_cases()
     # The client dead (released or not): the shell's amber over the whole Output, until it binds
     # again (2 s). The next spawn is the magenta test client again (the mode file is consumed).
     killed = kill_private_client()
@@ -765,42 +779,23 @@ def explain_area_cases():
     drain()
 
 
-def central_card_cases(x, y):
+def central_card_cases():
     """Central's card (manager v6, the Frame shows Central's error when it blacks the Frame), with
-    the Frame region set and the Pi's card up: the shell keeps and forwards the `central_card` op
-    (bounded), the production client draws Central's card only while no Pi card shows, inside the
-    Frame's area in its own look with no tint over the rest of the area, the Pi's card wins again at
-    once, and an empty op takes Central's card down. Mutation probe (client.py `draw` drawing
-    Central's card before the page's tint): the Pi-card-wins capture fails."""
+    the Pi's card up: the shell bounds and keeps the `central_card` op and forwards it verbatim (the
+    production client reads it: a card naming another Output, as every card on this harness's
+    `headless` Output does, since a card names an HDMI port, is read as none and logged), and an
+    empty op is taken. The client's drawing of a card (only while no Pi card shows, inside the Frame
+    region, its own look) is held over fake Wayland (tests/node/health/test_display_overlay_health.py)
+    and its ink by `card_ink_stays_in_the_explain_area`."""
     name = output["output_id"]
-    card = encode_central_card(CentralCard(name, "Photo Wall can't read Family Room",
+    card = encode_central_card(CentralCard("HDMI-A-1", "Photo Wall can't read Family Room",
                                            "Drawn with its last word: off")).decode()
     assert not request("central_card", card="c" * 1025)["accepted"]           # past the shell's bound
     assert not request("central_card")["accepted"]                            # no card at all
     assert request("central_card", card=card)["accepted"]
-    # The card's top-left at its narrowest (60 % of the area, centred): inside whatever its width.
-    cx, cy, _, _ = card_rect(FRAME_RECT, share=CENTRAL_SHARE, least=CENTRAL_LEAST)
-    central = cairo_over(CENTRAL_CARD_RGBA[:3], CENTRAL_CARD_RGBA[3], SLATE)
-    pi_tint = cairo_over((0.0, 0.0, 0.0), 0.45, SLATE)
-    hold_pixel(x + 2, y + 2, pi_tint, 0.5)                                   # the Pi's card still shows
-    judge.send(name, 2, False, ("", ""))
-    judge.await_report(name, 2, 3, drain)
-    await_pixel(cx + 2, cy + 2, central, 2)
-    assert_pixel(x + 2, y + 2, SLATE)                                         # no tint in the area
-    await_black_outside(FRAME_RECT, 2)
-    print("PASS centrals_card_inside_the_frame_region_when_no_pi_card_shows", central, flush=True)
-    judge.send(name, 3, True, CARD_LINES)
-    judge.await_report(name, 3, 3, drain)
-    await_pixel(x + 2, y + 2, pi_tint, 2)
-    print("PASS the_pi_card_wins_over_centrals_card", flush=True)
-    judge.send(name, 4, False, ("", ""))
-    judge.await_report(name, 4, 3, drain)
-    await_pixel(cx + 2, cy + 2, central, 2)
+    await_log(f"malformed Central card for {name}", 3)
+    print("PASS the_shell_forwards_centrals_card_verbatim_to_the_overlay_client", flush=True)
     assert request("central_card", card="")["accepted"]
-    await_pixel(cx + 2, cy + 2, SLATE, 2)
-    print("PASS centrals_card_returns_after_the_pi_card_and_goes_with_an_empty_op", flush=True)
-    judge.send(name, 5, True, CARD_LINES)                                     # as the steps after expect
-    judge.await_report(name, 5, 3, drain)
 
 
 def admit(args, frame_id):
