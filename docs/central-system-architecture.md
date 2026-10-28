@@ -268,7 +268,7 @@ work runs inside the serving process, and N pods multiply the load on the origin
 - **There is no `/readyz`; `/healthz` is both.** It answers 503 only when Central cannot serve:
   the database is down, or the scheduler loop is starting (no tick completed yet), stale (none
   within 10 s) or stopped. A completed tick with a failing step (reconcile, runtime, planning,
-  settle, measurement; `central/scheduler.py`) answers 200 `"degraded"` with each step's facet, so
+  settle, measurement, retention; `central/scheduler.py`) answers 200 `"degraded"` with each step's facet, so
   one failing step never takes the pod out of service (the outage of 2026-10-27: planning refused
   one Scene, `/healthz` answered 503 and the next deploy's pod never became ready). The target
   still splits `/livez` and `/readyz` (process + DB) and leaves `/healthz` to its pollers.

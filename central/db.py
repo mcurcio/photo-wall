@@ -56,7 +56,21 @@ class ProcessTransactionClock:
 
 
 class Database:
-    def __init__(self, dsn: str, *, pool_size: int = 10):
+    """One process's PostgreSQL pool and transaction boundary.
+
+    The pool recovers by itself once the database is back, whatever the outage's length: it
+    sets no `max_waiting`. psycopg_pool takes a timed-out waiter out of its queue only when a
+    connection is added or returned, and refuses a request (`TooManyRequests`) before asking
+    the pool to grow once the queue holds `max_waiting`. With a cap, an outage longer than
+    `reconnect_timeout` left the queue full of timed-out waiters and the pool empty: every
+    request was refused, none grew the pool, and Central needed a restart (2026-10-28). Without
+    one, every request waits at most `timeout` (5 s) and asks the pool to grow, so the first
+    connection after the outage clears the queue. Load stays bounded by that wait and by the
+    caller's own thread limit. `reconnect_timeout` is psycopg_pool's own setting (how long one
+    growth attempt retries before it gives up); only tests lower it.
+    """
+
+    def __init__(self, dsn: str, *, pool_size: int = 10, reconnect_timeout: float = 300.0):
         if type(pool_size) is not int or not 1 <= pool_size <= 100:
             raise ValueError("pool_size must be between 1 and 100")
         self.dsn = dsn
@@ -66,7 +80,7 @@ class Database:
             min_size=0,
             max_size=pool_size,
             timeout=5,
-            max_waiting=pool_size * 2,
+            reconnect_timeout=reconnect_timeout,
             open=False,
             name="photo-wall-central",
         )
