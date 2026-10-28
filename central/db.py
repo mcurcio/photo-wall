@@ -1,13 +1,13 @@
 """PostgreSQL transaction boundary and forward-only, checksum-verified migrations."""
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from hashlib import sha256
 from pathlib import Path
 from threading import Lock
 from typing import Any, Protocol
 
 from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, TooManyRequests
 
 from contracts.time import Clock
 
@@ -58,16 +58,18 @@ class ProcessTransactionClock:
 class Database:
     """One process's PostgreSQL pool and transaction boundary.
 
-    The pool recovers by itself once the database is back, whatever the outage's length: it
-    sets no `max_waiting`. psycopg_pool takes a timed-out waiter out of its queue only when a
-    connection is added or returned, and refuses a request (`TooManyRequests`) before asking
-    the pool to grow once the queue holds `max_waiting`. With a cap, an outage longer than
-    `reconnect_timeout` left the queue full of timed-out waiters and the pool empty: every
-    request was refused, none grew the pool, and Central needed a restart (2026-10-28). Without
-    one, every request waits at most `timeout` (5 s) and asks the pool to grow, so the first
-    connection after the outage clears the queue. Load stays bounded by that wait and by the
-    caller's own thread limit. `reconnect_timeout` is psycopg_pool's own setting (how long one
-    growth attempt retries before it gives up); only tests lower it.
+    Its waiting queue is bounded and the pool recovers by itself once the database is back,
+    whatever the outage's length. psycopg_pool takes a timed-out waiter out of its queue only
+    when a connection is added or returned, so during an outage the queue keeps every timed-out
+    waiter (and the traceback its error holds). `max_waiting` bounds that queue; past it a
+    request is refused (`TooManyRequests`) before psycopg_pool would ask the pool to grow. So
+    `transaction` turns a refusal into the event that grows the pool: it calls the pool's own
+    `check()`, which starts a growth attempt when none runs. Once the database answers, that
+    connection is handed down the queue, every timed-out waiter is dropped, and requests run
+    again. Before 2026-10-28 a refusal grew nothing: an outage longer than `reconnect_timeout`
+    left the queue full of timed-out waiters and the pool empty, and Central needed a restart.
+    `reconnect_timeout` is psycopg_pool's own setting (how long one growth attempt retries
+    before it gives up); only tests lower it.
     """
 
     def __init__(self, dsn: str, *, pool_size: int = 10, reconnect_timeout: float = 300.0):
@@ -80,6 +82,7 @@ class Database:
             min_size=0,
             max_size=pool_size,
             timeout=5,
+            max_waiting=pool_size * 2,
             reconnect_timeout=reconnect_timeout,
             open=False,
             name="photo-wall-central",
@@ -104,7 +107,12 @@ class Database:
     @contextmanager
     def transaction(self):
         self.open()
-        with self._pool.connection(timeout=5) as conn:
+        with ExitStack() as held:
+            try:
+                conn = held.enter_context(self._pool.connection(timeout=5))
+            except TooManyRequests:
+                self._pool.check()   # the refusal grows the pool when nothing else is
+                raise
             conn.execute("SET LOCAL lock_timeout='5s'")
             conn.execute("SET LOCAL statement_timeout='10s'")
             yield conn

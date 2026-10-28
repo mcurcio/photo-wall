@@ -10,10 +10,11 @@ disk filled.
 
 Here retention is its own scheduler step (`central/scheduler.py`, "retention"), never inside a
 coordinator transaction: each batch is its own short transaction that takes no advisory lock and
-deletes at most `batch_rows` of the oldest rows below the cut (`kept` below the newest). A step
-deletes at most `batches` batches, so a tick stays short, and the next tick goes on where it
-stopped: deleting a row twice is impossible and a cancelled batch loses nothing, so the step is
-idempotent and a backlog of any size drains at `batch_rows x batches` rows a tick.
+deletes at most `batch_rows` of the oldest rows at or below the cut, the newest row beyond the
+`kept` newest (so exactly `kept` rows stay, whatever gaps rolled-back inserts left in the
+sequence). A step deletes at most `batches` batches, so a tick stays short, and the next tick
+goes on where it stopped: deleting a row twice is impossible and a cancelled batch loses
+nothing, so the step is idempotent and a backlog of any size drains at `batch_rows x batches` rows a tick.
 """
 
 from __future__ import annotations
@@ -24,12 +25,16 @@ EVENTS_KEPT = 10_000
 BATCH_ROWS = 5_000
 BATCHES_PER_STEP = 4
 
-# The oldest rows at or below the cut (so exactly `kept` stay), by the primary key's index: a bounded range scan, never the
-# whole table. An empty table has no max, so the cut is NULL and nothing is deleted.
+# The cut is the (`kept` + 1)-th newest row, counted by rows, not sequence numbers: a rolled-back
+# insert leaves a gap in the BIGSERIAL, so `max(sequence) - kept` would keep fewer. Rows at or below
+# it go, so exactly `kept` stay. Both scans walk the primary key's index (bounded: `kept` + 1 rows
+# from the top, `batch_rows` from the bottom), never the whole table. With `kept` or fewer rows the
+# cut is NULL and nothing is deleted.
 _PRUNE_BATCH = (
     "DELETE FROM execution_events WHERE sequence IN ("
     "SELECT sequence FROM execution_events "
-    "WHERE sequence <= (SELECT max(sequence) FROM execution_events) - %s "
+    "WHERE sequence <= (SELECT sequence FROM execution_events "
+    "ORDER BY sequence DESC OFFSET %s LIMIT 1) "
     "ORDER BY sequence LIMIT %s)"
 )
 
