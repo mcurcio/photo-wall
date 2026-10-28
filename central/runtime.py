@@ -322,6 +322,14 @@ class RuntimeView(FrozenModel):
         return next((intent for intent in self.visible if intent.target == target), None)
 
 
+class TimelineCut(FrozenModel):
+    """`Runtime.timeline`'s answer: the settled views of every boundary it processed in full, and
+    `until`, the last of them (the requested end when the whole span fit the transition budget).
+    A reader plans what these views hold and no further."""
+    views: tuple[RuntimeView, ...]
+    until: FiniteFloat
+
+
 class RunRef(FrozenModel):
     """A root Run playing an earlier revision of a saved Scene."""
     run_id: str
@@ -1144,21 +1152,27 @@ class Runtime:
                   *(item.scene for item in self._state.queue)]
         return max((lead(scene) for scene in scenes), default=0.0)
 
-    def timeline(
-        self, start: float, end: float, *, max_events: int = 10000
-    ) -> tuple[RuntimeView, ...]:
-        """Pure settled views at start and every discrete boundary in [start, end)."""
+    def timeline(self, start: float, end: float, *, max_events: int = 10000) -> TimelineCut:
+        """Pure settled views at start and every discrete boundary in [start, end). The
+        transition budget shortens the timeline, never refuses it: when it runs out (or a
+        cycle too small for finite arithmetic is reached), the answer holds the views of every
+        boundary processed in full, `until` the last of them (`start` when not even the first
+        fit). Complete, `until` is `end`."""
         start, end = _finite(start), _finite(end)
         if end <= start:
             raise ValueError("timeline end must follow start")
         budget = _TransitionBudget(max_events)
         projected = self._copy()
-        views = [projected._advance(start, budget)]
-        budget.consume()
-        while (boundary := projected._next_event()) is not None and boundary < end:
-            views.append(projected._advance(boundary, budget))
+        views: list[RuntimeView] = []
+        try:
+            views.append(projected._advance(start, budget))
             budget.consume()
-        return tuple(views)
+            while (boundary := projected._next_event()) is not None and boundary < end:
+                views.append(projected._advance(boundary, budget))
+                budget.consume()
+        except RuntimeBudgetExceeded:
+            return TimelineCut(views=tuple(views), until=views[-1].now if views else start)
+        return TimelineCut(views=tuple(views), until=end)
 
     def activate(
         self,

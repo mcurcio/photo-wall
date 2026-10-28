@@ -540,3 +540,68 @@ def test_hand_offs():
     assert out["stale"] == {"same": True, "settled": False}
     assert out["settled"] == {"next": None, "settled": True}
     assert out["none"] == {"next": None, "settled": False}
+
+
+PLANNING_SCRIPT = r"""
+const attention = await import(process.argv[1]);
+const failing = { planning: { status: "failing", since: 14 * 3600 + 3 * 60, reason: "X at y.py:1" } };
+const refused = { planning: { issues: [
+  { code: "intent_refused", scene_id: "s", run_id: "run-1", reason: "refused" },
+  { code: "no_photo_free", scene_id: "t", target: "frame:hall" } ] } };
+const noFrames = { inventory: { frames: [] } };
+const rows = (snapshot, central) => attention.attentionView(snapshot, central).rows
+  .map((row) => ({ key: row.key, text: row.text, href: row.href ?? null }));
+const out = {
+  failing: rows(noFrames, { scheduler: null, steps: failing }),
+  ok: rows(noFrames, { scheduler: null, steps: { planning: { status: "ok", since: null } } }),
+  refused: rows({ ...noFrames, ...refused }, { scheduler: null, steps: {} }),
+  summary: attention.attentionSummary(attention.attentionView(noFrames,
+    { scheduler: null, steps: failing })),
+  steps: rows(noFrames, { scheduler: null, steps: {
+    settle: { status: "failing", since: 14 * 3600 }, reconcile: { status: "failing", since: null },
+    measurement: { status: "skipped", since: 14 * 3600 } } }),
+  shortened: rows({ ...noFrames, planning: { dropped: 3, issues: [
+    { code: "plan_shortened", reason: "runtime_events" },
+    { code: "plan_shortened", reason: "slots" } ] } }, { scheduler: null, steps: {} }),
+};
+console.log(JSON.stringify(out));
+"""
+
+
+def test_planning_failing_and_a_refused_scene_need_attention_without_silent_frames():
+    """Central's planning rows stand on their own: while the planning step fails, Needs attention
+    says so with no Frame silent, and each Scene the last pass refused is a row linking to it.
+    Mutation probe: gate the planning row on `silenced.length > 0` again (no row here)."""
+    _require_node()
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", PLANNING_SCRIPT, "--",
+         (SRC / "attention.js").as_uri()],
+        capture_output=True, text=True, timeout=30, check=True, env={**os.environ, "TZ": "UTC"})
+    out = json.loads(result.stdout)
+    assert out["failing"] == [
+        {"key": "planning", "text": "Planning is failing since Thu 14:03", "href": None}]
+    assert out["ok"] == []
+    assert out["refused"] == [{"key": "scene:s", "text": "Scene s could not be planned: refused",
+                               "href": "#/scenes/s/edit/review"}]
+    assert out["summary"].startswith("Central needs attention")
+
+
+def test_every_failing_scheduler_step_and_a_shortened_plan_need_attention():
+    """Each scheduler step that fails is its own Central row, in the operator's words (a skipped
+    step is not a failure), and a pass that cut the plan short, or counted issues it could not
+    keep, says so. Mutation probe: list only planning and the Runtime in `STEP_WORDS` (no
+    settle or reconcile row)."""
+    _require_node()
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", PLANNING_SCRIPT, "--",
+         (SRC / "attention.js").as_uri()],
+        capture_output=True, text=True, timeout=30, check=True, env={**os.environ, "TZ": "UTC"})
+    out = json.loads(result.stdout)
+    assert out["steps"] == [
+        {"key": "settle", "text": "Plans are not being committed since Thu 14:00", "href": None},
+        {"key": "reconcile", "text": "Players are not being brought up to date", "href": None}]
+    assert out["shortened"] == [
+        {"key": "plan_shortened", "href": None,
+         "text": "Plans are cut short (too many schedule changes in the hour ahead; too many "
+                 "photo turns in the hour ahead); Frames may go dark past the cut"},
+        {"key": "planning_dropped", "text": "3 more planning issues were not kept", "href": None}]

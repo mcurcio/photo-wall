@@ -1,6 +1,7 @@
 import React, { useId, useRef, useState } from "react";
 
-import { AttentionList, attentionSummary, attentionView } from "./AttentionList.jsx";
+import { attentionSummary, attentionView } from "./attention.js";
+import { AttentionList } from "./AttentionList.jsx";
 import { formatRoute, isPlainClick } from "./routes.js";
 
 // At most this many rows in the detail list; the rest are counted.
@@ -14,13 +15,13 @@ const LIST_CAP = 8;
  *
  * Every state and label comes from the one classifier (health.js
  * `wallAttention`) and the one host classifier (hostHealth.js `hostIncidents`). It
- * counts incidents only (AttentionList.jsx `attentionSummary`): structural to-dos are
+ * counts incidents only (attention.js `attentionSummary`): structural to-dos are
  * the Wall's To finish list (console DDD §61). The live region carries STATE ONLY
  * ("2 Frames · 1 Player need attention"); ages live in the list, outside it, so a screen reader is not
  * re-announced on every poll.
  *
  * The rows, including the one causal line that replaces the liveness alarms
- * while Central's scheduler is not ok, come from AttentionList.jsx
+ * while Central's scheduler is not ok, come from attention.js
  * (`attentionView`), which the Needs attention page (#/attention) shares. This
  * is the only place the strip mentions Central; the pill owns Central's health.
  *

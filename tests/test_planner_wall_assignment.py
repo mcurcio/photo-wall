@@ -422,8 +422,8 @@ def test_the_layer_carries_the_crop_that_keeps_the_faces():
 def test_a_wall_past_the_slot_budget_plans_a_shorter_hour_and_fills_every_frame():
     """Content first: 16 Frames at 5 s cycles hold 11,520 slots in the hour, past the wall
     plan's 8,192. The tentative tail is cut at one instant (`plan_shortened`), and every slot of
-    the preparation horizon is still planned and filled. Mutation probe: refuse the plan
-    (PlanningBudgetExceeded) as before."""
+    the preparation horizon is still planned and filled. Mutation probe: raise in
+    `_fit_slot_budget` instead of cutting (the pass fails)."""
     frames = {f"f{n:02}": FrameSetup("wide") for n in range(16)}
     photos = [photo(f"p{n:02}", "wide", captured=n) for n in range(24)]
     projection = plan(scene(frames, cycle=5), frames, photos,

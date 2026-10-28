@@ -15,6 +15,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import Field, SecretStr
 
+from central.actor import Actor
 from central.house_time.model import IanaZone
 from central.installation_models import FrameOutput
 from central.photo_library.model import (
@@ -185,7 +186,7 @@ class PhotoSourceCommands(Protocol):
         pool), queueing its check. ("draft_unknown", 404), ("connection_unknown", 404)."""
         ...
 
-    def save_draft(self, draft: DraftRef, name: str) -> SourceRef:
+    def save_draft(self, draft: DraftRef, name: str, *, by: Actor) -> SourceRef:
         """Save at any time: the next revision of `editing`'s name (renamed to `name` when it
         differs), or revision 1 of a new name; the pool carries over (same pool key) and Scenes
         using the edited Source move to the new revision (Runtime, as Source edits do today).

@@ -10,9 +10,7 @@ Instant); the migration's SQL then runs on the real tables.
 
 from pathlib import Path
 
-import pytest
 from psycopg.types.json import Jsonb
-from pydantic import ValidationError
 from test_coordination import schedule, setup_players
 
 from central.coordination import Coordinator
@@ -30,7 +28,7 @@ WITH_PREVIEW = """jsonb_set({column}, '{{bindings}}', (
 
 def test_stored_bindings_from_before_1c_read_back_and_the_scheduler_advances(registry):
     """Mutation probe: drop the plan_offers statement from 087 -> the offered plan still fails to
-    validate and `advance` raises."""
+    validate."""
     player = setup_players(registry, count=1)[0]
     coordinator = Coordinator(registry.db, registry.clock)
     schedule(coordinator, ["frame-0"])
@@ -39,8 +37,9 @@ def test_stored_bindings_from_before_1c_read_back_and_the_scheduler_advances(reg
                      + WITH_PREVIEW.format(column="configuration"), (Jsonb(PRE_1C),))
         conn.execute("UPDATE plan_offers SET manifest=" + WITH_PREVIEW.format(column="manifest"),
                      (Jsonb(PRE_1C),))
-    with pytest.raises(ValidationError):   # the outage: the stale offer stops the tick
-        coordinator.advance()
+    # Once the outage: the stale offer stopped planning and settling. Now it is left out alone
+    # (each stored offer is read on its own) and the tick runs through.
+    assert coordinator.advance().failures == ()
 
     with registry.db.transaction() as conn:
         conn.execute(MIGRATION.read_text())
@@ -51,5 +50,5 @@ def test_stored_bindings_from_before_1c_read_back_and_the_scheduler_advances(reg
     assert PlayerConfiguration.model_validate(configuration["configuration"]).bindings
     assert manifests and all(Plan.model_validate(row["manifest"]).bindings for row in manifests)
     registry.clock.advance(1)
-    coordinator.advance()
+    assert coordinator.advance().failures == ()
     assert coordinator.delivery(player["player_id"], 1)["plan"].layers

@@ -109,15 +109,15 @@ def test_the_house_crop_limit_moves_scenes_without_their_own_at_the_next_pass(
     measure(registry, four_three)
     prepare(registry, (four_three,))
     coordinator = Coordinator(registry.db, registry.clock)
-    coordinator.runtime.command("set_scene", _scene(scene_crop_limit))
-    coordinator.runtime.command("activate", "house", "calendar", 1000)
-    assert {entry.asset_id for entry in coordinator.advance().plan} == {four_three.asset_id}
+    coordinator.runtime.command("set_scene", _scene(scene_crop_limit), by="console")
+    coordinator.runtime.command("activate", "house", "calendar", 1000, by="console")
+    assert {entry.asset_id for entry in coordinator.advance().projection.plan} == {four_three.asset_id}
 
     response = _client(registry).put(SETTINGS_PATH, headers=AUTH, json=FitSettings(
         crop_limit=0.2).model_dump(mode="json"))
     assert response.status_code == 200
     registry.clock.advance(3600)          # past the offered layers: the next pass plans anew
-    following = coordinator.advance()
+    following = coordinator.advance().projection
     fresh = [entry for entry in following.plan if entry.state != "locked"]
     assert fresh
     if placed:

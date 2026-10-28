@@ -179,9 +179,9 @@ class Wall:
         runtime.command("set_scene", Scene(scene_id="tracer", loop=True, cycle_seconds=60,
             contributions=tuple(Contribution(target=f"frame:{frame_id}", kind="media",
                                              source_refs=tuple(source_refs))
-                                for frame_id in frame_ids)))
-        runtime.command("activate", "tracer", "tracer-start", self.registry.clock.utc())
-        return self.measured(self.coordinator.advance())
+                                for frame_id in frame_ids)), by="console")
+        runtime.command("activate", "tracer", "tracer-start", self.registry.clock.utc(), by="console")
+        return self.measured(self.coordinator.advance().projection)
 
     def measured(self, projection):
         """The scheduler's measurement requests, each run by the worker's `measure` against
@@ -192,7 +192,7 @@ class Wall:
                 return projection
             for request in projection.measurements:
                 self.run(self.worker.measure(request.asset_id))
-            projection = self.coordinator.advance()
+            projection = self.coordinator.advance().projection
         raise AssertionError("measurement never settled")
 
     def prepare_all(self, acquisitions) -> list[dict]:
@@ -264,13 +264,13 @@ def test_what_the_draft_shows_is_what_the_planner_plans_and_every_planned_photo_
     assert set(shown.values()) == ANNA_AND_BEN and gone.asset_id not in shown
 
     # 2. Saved, and beside a second Source ("Garden") on two Frames.
-    anna = wall.names.save_draft(draft, "anna-and-ben")["source_ref"]
+    anna = wall.names.save_draft(draft, "anna-and-ben", by="console")["source_ref"]
     garden_draft, garden_key = wall.draft(SourceQuery(
         connection_ref=wall.ref, albums=(immich_library.albums["Garden"],)))
     assert wall.check_to_end(garden_key) == "complete"
     garden_shown = wall.shown(garden_draft)
     assert set(garden_shown.values()) == GARDEN
-    garden = wall.names.save_draft(garden_draft, "garden")["source_ref"]
+    garden = wall.names.save_draft(garden_draft, "garden", by="console")["source_ref"]
     union = set(shown) | set(garden_shown)
 
     # 3. Once measured, the Planner asks to have every pool photo prepared (all fit the
@@ -296,7 +296,7 @@ def test_what_the_draft_shows_is_what_the_planner_plans_and_every_planned_photo_
 
     # 5. Prepared, the Planner places pool photos only, on both Frames, and every pool photo
     # is on the wall within the hour's plan.
-    projection = wall.coordinator.advance()
+    projection = wall.coordinator.advance().projection
     chosen = {selection.asset_id for selection in projection.selections}
     assert chosen and chosen <= union
     assert len({selection.assignment_id for selection in projection.selections}) >= 2
@@ -315,7 +315,7 @@ def test_an_edited_photo_plays_as_immich_shows_it(wall, immich_library):
     assert wall.check_to_end(key) == "complete"
     shown = wall.shown(draft)
     assert set(shown.values()) == {"edited"}
-    source = wall.names.save_draft(draft, "edited")["source_ref"]
+    source = wall.names.save_draft(draft, "edited", by="console")["source_ref"]
     wall.frames("edited-frame", box_px=PORTRAIT)
     projection = wall.show(("edited-frame",), (source,))
     assert {request.asset_id for request in projection.acquisitions} == set(shown)
@@ -324,5 +324,5 @@ def test_an_edited_photo_plays_as_immich_shows_it(wall, immich_library):
     assert (edited.width, edited.height) == (64, 96)
     assert job["variant"]["height"] > job["variant"]["width"]
     assert job["variant"]["width"] / job["variant"]["height"] == pytest.approx(64 / 96, rel=0.05)
-    projection = wall.coordinator.advance()
+    projection = wall.coordinator.advance().projection
     assert {selection.asset_id for selection in projection.selections} == set(shown)

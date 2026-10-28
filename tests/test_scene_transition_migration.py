@@ -59,8 +59,8 @@ def _migrate(registry, snapshot: dict):
     """`snapshot` stored as runtime_state at revision 7, 098 run on it; the migrated row and the
     Runtime Central restores from it."""
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO runtime_state(singleton, revision, snapshot, updated_at) "
-                     "VALUES (TRUE, 7, %s, 0) ON CONFLICT (singleton) DO UPDATE "
+        conn.execute("INSERT INTO runtime_state(singleton, revision, snapshot, changed_at, created_at, created_by, changed_by) "
+                     "VALUES (TRUE, 7, %s, 0, 0, 'console', 'console') ON CONFLICT (singleton) DO UPDATE "
                      "SET revision=7, snapshot=EXCLUDED.snapshot", (Jsonb(snapshot),))
         assert "fade_in_seconds" in json.dumps(
             conn.execute("SELECT snapshot FROM runtime_state").fetchone()["snapshot"])
@@ -155,7 +155,7 @@ def test_central_boots_on_a_migrated_snapshot_and_offers_the_same_layers(registr
     with TestClient(app) as client:
         _save_and_start(client, _scene("faded", fade=3, ending=("fade", 4)))
         registry.clock.advance(12)
-        offered = coordinator.advance().for_player(player["player_id"]).layers
+        offered = coordinator.advance().projection.for_player(player["player_id"]).layers
     assert [(layer.fade_in, layer.fade_out) for layer in offered][:2] == [(1.5, 1.5)] * 2
     with registry.db.transaction() as conn:
         snapshot = conn.execute("SELECT snapshot FROM runtime_state").fetchone()["snapshot"]
@@ -164,7 +164,7 @@ def test_central_boots_on_a_migrated_snapshot_and_offers_the_same_layers(registr
         conn.execute(MIGRATION.read_text())
     booted = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     with TestClient(booted) as client:
-        projection = booted.state.coordinator.advance()
+        projection = booted.state.coordinator.advance().projection
         stored = client.get("/v1/operator/runtime", headers={"Authorization": "Bearer " + ADMIN}
                             ).json()["definitions"]["faded"]
     assert projection.for_player(player["player_id"]).layers == offered

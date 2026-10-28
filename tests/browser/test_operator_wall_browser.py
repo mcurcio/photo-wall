@@ -116,8 +116,8 @@ def _seed_now_showing(registry):
     store.command("set_scene", Scene(
         scene_id=SCENE, loop=True, cycle_seconds=30,
         contributions=(Contribution(target="frame:" + SHOWING,
-                                     source_refs=("lobby-photos:1",)),)))
-    store.command("activate", SCENE, "lobby-activation", registry.clock.utc())
+                                     source_refs=("lobby-photos:1",)),)), by="console")
+    store.command("activate", SCENE, "lobby-activation", registry.clock.utc(), by="console")
     # Returned for callers (Bead 3 Inspector) that assert the bound Player id;
     # the Bead 2 tile tests ignore the return.
     return player_id
@@ -211,8 +211,8 @@ def test_an_unbound_frames_planned_fact_says_central_sends_it_no_layers(page, re
     store = RuntimeStore(registry.db, registry.clock)
     store.command("set_scene", Scene(
         scene_id=SCENE, loop=True, cycle_seconds=30,
-        contributions=(Contribution(target="frame:spare-frame", source_refs=("lobby-photos:1",)),)))
-    store.command("activate", SCENE, "spare-activation", registry.clock.utc())
+        contributions=(Contribution(target="frame:spare-frame", source_refs=("lobby-photos:1",)),)), by="console")
+    store.command("activate", SCENE, "spare-activation", registry.clock.utc(), by="console")
     planned = (f"On top: {SCENE} · started directly, by Show now or the API (Central's Runs; "
                "this Frame is unbound, so Central sends it no layers; the Panel is not observed)")
     with operator_server(registry.db, registry.clock) as origin:
@@ -619,8 +619,8 @@ def test_delete_frame_lists_stored_scene_roots_and_the_schedules_playing_them(pa
     store = RuntimeStore(registry.db, registry.clock)
     store.command("set_scene", Scene(scene_id="nested-gallery", children=(Child(scene=Scene(
         scene_id="inline", contributions=(Contribution(
-            target="frame:" + CLEAR, kind="black"),))),)))
-    store.command_current("create_program", window_program("morning-show", "nested-gallery", 1080, 1140, name="Morning show"))
+            target="frame:" + CLEAR, kind="black"),))),)), by="console")
+    store.command_current("create_program", window_program("morning-show", "nested-gallery", 1080, 1140, name="Morning show"), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         edit_layout(page)

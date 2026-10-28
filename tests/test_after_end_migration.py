@@ -63,7 +63,8 @@ def test_stored_scenes_runs_plans_and_locks_move_to_the_after_state(registry):
     with registry.db.transaction() as conn:
         for table in ("runtime_state", "plan_offers", "assignment_locks"):
             conn.execute(f"CREATE TEMP TABLE {table} (LIKE {table} INCLUDING DEFAULTS)")
-        conn.execute("INSERT INTO runtime_state VALUES(TRUE,1,%s,0)",
+        conn.execute("INSERT INTO runtime_state(singleton,revision,snapshot,changed_at,created_at,"
+                     "created_by,changed_by) VALUES(TRUE,1,%s,0,0,'console','console')",
                      (Jsonb(_previous_build(snapshot)),))
         conn.execute("INSERT INTO plan_offers VALUES('p',1,1,'plan-1',%s,'{}',0,20)",
                      (Jsonb(_previous_build(plan.model_dump(mode="json"))),))

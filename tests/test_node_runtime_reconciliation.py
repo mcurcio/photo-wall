@@ -49,8 +49,8 @@ def rig(registry):
     coordinator.runtime.command("set_scene", Scene(scene_id="node-scene", loop=True, cycle_seconds=60,
         contributions=(Contribution(target="frame:node-f0", kind="black"),
                        Contribution(target="frame:node-f1", kind="black"),
-                       Contribution(target="actuator:lamp", kind="actuator", ramp_to=1))))
-    coordinator.runtime.command("activate", "node-scene", "node-run", 990)
+                       Contribution(target="actuator:lamp", kind="actuator", ramp_to=1))), by="console")
+    coordinator.runtime.command("activate", "node-scene", "node-run", 990, by="console")
     coordinator.advance()
     coordinator.readiness(player["player_id"], report(coordinator, player))
     registry.control_hello(player["player_id"], ControlHello(authority_epoch=1, schemas=(2,), capabilities=()))
@@ -255,8 +255,8 @@ def test_equal_counter_frame_rebind_preserves_historical_loss_without_fencing_re
         rows = conn.execute("SELECT frame_id,resolved_at FROM node_output_losses").fetchall()
         assert rows == [{"frame_id": old.frame_id, "resolved_at": None}]
     coordinator.runtime.command("set_scene", Scene(scene_id="replacement-scene", loop=True, cycle_seconds=60,
-        contributions=(Contribution(target="frame:replacement-frame", kind="black"),)))
-    coordinator.runtime.command("activate", "replacement-scene", "replacement-run", 1000)
+        contributions=(Contribution(target="frame:replacement-frame", kind="black"),)), by="console")
+    coordinator.runtime.command("activate", "replacement-scene", "replacement-run", 1000, by="console")
     coordinator.advance()
     coordinator.readiness(player["player_id"], report(coordinator, player, sequence=2))
     delivery = coordinator.delivery(player["player_id"], 1)

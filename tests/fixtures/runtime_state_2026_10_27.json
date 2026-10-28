@@ -1,0 +1,218 @@
+{
+ "admissions": {
+  "console-mum5iopj-d9e0e0ea": {
+   "activation_id": "console-mum5iopj-d9e0e0ea",
+   "reason": null,
+   "run_id": "run-f38fe604df6bbb680ebc07084ac95467",
+   "status": "admitted"
+  },
+  "console-muswc13r-24b0b93e": {
+   "activation_id": "console-muswc13r-24b0b93e",
+   "reason": null,
+   "run_id": "run-0cb34a1b6309a5b4fb79e6a112bae322",
+   "status": "admitted"
+  },
+  "console-muswel64-766507c2": {
+   "activation_id": "console-muswel64-766507c2",
+   "reason": null,
+   "run_id": "run-0cb34a1b6309a5b4fb79e6a112bae322",
+   "status": "ignored"
+  },
+  "console-muu8ci3w-2dabe812": {
+   "activation_id": "console-muu8ci3w-2dabe812",
+   "reason": null,
+   "run_id": "run-f023185a024268a0e6fab9c7dd146c71",
+   "status": "admitted"
+  },
+  "console-mv5dqjgy-35ca4a0b": {
+   "activation_id": "console-mv5dqjgy-35ca4a0b",
+   "reason": null,
+   "run_id": "run-f023185a024268a0e6fab9c7dd146c71",
+   "status": "ignored"
+  },
+  "console-mv5e79m4-9c3e4204": {
+   "activation_id": "console-mv5e79m4-9c3e4204",
+   "reason": null,
+   "run_id": "run-cabf09cb419d64dbef5712c89788c1cc",
+   "status": "admitted"
+  },
+  "restart-57aa66d42872:scene-7": {
+   "activation_id": "restart-57aa66d42872:scene-7",
+   "reason": null,
+   "run_id": "run-57d02fffe41975f73a993fc8148e1f9b",
+   "status": "admitted"
+  },
+  "restart-57aa66d42872:scene-8": {
+   "activation_id": "restart-57aa66d42872:scene-8",
+   "reason": null,
+   "run_id": "run-45e5407f92215605822ab5eb14f7444a",
+   "status": "admitted"
+  }
+ },
+ "default_scene": null,
+ "now": 1793065486.7498522,
+ "program_from": {},
+ "programs": {},
+ "queue": [],
+ "runs": {
+  "run-45e5407f92215605822ab5eb14f7444a": {
+   "activation_id": "restart-57aa66d42872:scene-8",
+   "body_done_at": null,
+   "children": [],
+   "children_finished_at": null,
+   "cycle_index": 0,
+   "descendant_sequence": 3,
+   "duration_from": 1792134060.4841478,
+   "ended_at": null,
+   "finish_requested_at": null,
+   "launched_children": [],
+   "local_order": 3,
+   "order": 9,
+   "outro_started_at": null,
+   "parent_id": null,
+   "phase": "body",
+   "priority": 0,
+   "program_ends_at": null,
+   "program_id": null,
+   "root_id": "run-45e5407f92215605822ab5eb14f7444a",
+   "root_order": 6,
+   "run_id": "run-45e5407f92215605822ab5eb14f7444a",
+   "scene": {
+    "children": [],
+    "contributions": [
+     {
+      "after_end": "keep_this_photo",
+      "asset_refs": [],
+      "kind": "media",
+      "opacity": 1.0,
+      "ramp_from": 0.0,
+      "ramp_to": 0.0,
+      "role": "my-frame",
+      "source_refs": [
+       "photos:2"
+      ],
+      "target": "frame:my-frame"
+     }
+    ],
+    "cycle_seconds": 3600.0,
+    "duration_seconds": null,
+    "loop": true,
+    "outro_contributions": [],
+    "outro_seconds": 0.0,
+    "protect_frames": false,
+    "revision": 8,
+    "scene_id": "test-scene",
+    "selection": {
+     "crop_limit": null,
+     "no_repeat_days": 7,
+     "order": "shuffle"
+    },
+    "transition": {
+     "seconds": 2.0,
+     "style": "cross_fade"
+    }
+   },
+   "scheduled_finish_at": null,
+   "started_at": 1793065486.7498522
+  },
+  "run-57d02fffe41975f73a993fc8148e1f9b": {
+   "activation_id": "restart-57aa66d42872:scene-7",
+   "body_done_at": null,
+   "children": [],
+   "children_finished_at": null,
+   "cycle_index": 20408,
+   "descendant_sequence": 2,
+   "duration_from": 1792134060.4841478,
+   "ended_at": null,
+   "finish_requested_at": 1793065486.7498522,
+   "launched_children": [],
+   "local_order": 2,
+   "order": 8,
+   "outro_started_at": null,
+   "parent_id": null,
+   "phase": "body",
+   "priority": 0,
+   "program_ends_at": null,
+   "program_id": null,
+   "root_id": "run-57d02fffe41975f73a993fc8148e1f9b",
+   "root_order": 6,
+   "run_id": "run-57d02fffe41975f73a993fc8148e1f9b",
+   "scene": {
+    "children": [],
+    "contributions": [
+     {
+      "after_end": "keep_this_photo",
+      "asset_refs": [],
+      "kind": "media",
+      "opacity": 1.0,
+      "ramp_from": 0.0,
+      "ramp_to": 0.0,
+      "role": "my-frame",
+      "source_refs": [
+       "photos:2"
+      ],
+      "target": "frame:my-frame"
+     }
+    ],
+    "cycle_seconds": 30.0,
+    "duration_seconds": null,
+    "loop": true,
+    "outro_contributions": [],
+    "outro_seconds": 0.0,
+    "protect_frames": false,
+    "revision": 7,
+    "scene_id": "test-scene",
+    "selection": {
+     "crop_limit": null,
+     "no_repeat_days": 7,
+     "order": "shuffle"
+    },
+    "transition": {
+     "seconds": 3.0,
+     "style": "cross_fade"
+    }
+   },
+   "scheduled_finish_at": 1793065486.7498522,
+   "started_at": 1792453229.1534288
+  }
+ },
+ "scenes": {
+  "test-scene": {
+   "children": [],
+   "contributions": [
+    {
+     "after_end": "keep_this_photo",
+     "asset_refs": [],
+     "kind": "media",
+     "opacity": 1.0,
+     "ramp_from": 0.0,
+     "ramp_to": 0.0,
+     "role": "my-frame",
+     "source_refs": [
+      "photos:2"
+     ],
+     "target": "frame:my-frame"
+    }
+   ],
+   "cycle_seconds": 3600.0,
+   "duration_seconds": null,
+   "loop": true,
+   "outro_contributions": [],
+   "outro_seconds": 0.0,
+   "protect_frames": false,
+   "revision": 8,
+   "scene_id": "test-scene",
+   "selection": {
+    "crop_limit": null,
+    "no_repeat_days": 7,
+    "order": "shuffle"
+   },
+   "transition": {
+    "seconds": 2.0,
+    "style": "cross_fade"
+   }
+  }
+ },
+ "sequence": 9,
+ "version": 1
+}

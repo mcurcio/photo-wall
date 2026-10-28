@@ -31,6 +31,7 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, Query, Request
 from fastapi.responses import JSONResponse, Response
 
+from central.actor import Actor
 from central.runtime import Program, ProgramDraft, ProgramRefused
 from central.runtime_store import RuntimeStore
 from contracts.models import Identifier, Model
@@ -66,31 +67,35 @@ def mount_program_routes(app: FastAPI, *, admin: Any, runtime: RuntimeStore) -> 
             body["current"] = exc.current.model_dump(mode="json")
         return JSONResponse(body, status_code=_STATUS.get(exc.code, 422))
 
-    @app.post(PROGRAMS, dependencies=[Depends(admin)], status_code=201, response_model=Program)
-    def create_program(draft: ProgramDraft) -> Program:
+    @app.post(PROGRAMS, status_code=201, response_model=Program)
+    def create_program(draft: ProgramDraft, by: Actor = Depends(admin)) -> Program:
         program = Program(**draft.model_dump(), program_id=new_program_id())
-        return runtime.command_current("create_program", program)
+        return runtime.command_current("create_program", program, by=by)
 
-    @app.put(PROGRAMS + "/{program_id}", dependencies=[Depends(admin)], response_model=Program)
-    def save_program(program_id: Identifier, request: ProgramSave) -> Program:
+    @app.put(PROGRAMS + "/{program_id}", response_model=Program)
+    def save_program(program_id: Identifier, request: ProgramSave,
+                     by: Actor = Depends(admin)) -> Program:
         if request.expected.program_id != program_id:
             raise ValueError("Program identity mismatch")
-        return runtime.command_current("save_program", request.expected, request.next)
+        return runtime.command_current("save_program", request.expected, request.next, by=by)
 
-    @app.post(PROGRAMS + "/{program_id}/apply-now", dependencies=[Depends(admin)], response_model=Program)
-    def save_program_and_apply_now(program_id: Identifier, request: ProgramSave) -> Program:
+    @app.post(PROGRAMS + "/{program_id}/apply-now", response_model=Program)
+    def save_program_and_apply_now(program_id: Identifier, request: ProgramSave,
+                                   by: Actor = Depends(admin)) -> Program:
         if request.expected.program_id != program_id:
             raise ValueError("Program identity mismatch")
-        return runtime.command_current("save_program_and_apply_now", request.expected, request.next)
+        return runtime.command_current("save_program_and_apply_now", request.expected,
+                                       request.next, by=by)
 
-    @app.delete(PROGRAMS + "/{program_id}", dependencies=[Depends(admin)], status_code=204)
-    def remove_program(program_id: Identifier, revision: int = Query(ge=1)) -> Response:
-        runtime.command_current("remove_program", program_id, revision)
+    @app.delete(PROGRAMS + "/{program_id}", status_code=204)
+    def remove_program(program_id: Identifier, revision: int = Query(ge=1),
+                       by: Actor = Depends(admin)) -> Response:
+        runtime.command_current("remove_program", program_id, revision, by=by)
         return Response(status_code=204)
 
-    @app.put("/v1/operator/default-scene", dependencies=[Depends(admin)], status_code=204)
-    def set_default_scene(request: DefaultSceneRequest) -> Response:
-        runtime.command_current("set_default_scene", request.scene_id)
+    @app.put("/v1/operator/default-scene", status_code=204)
+    def set_default_scene(request: DefaultSceneRequest, by: Actor = Depends(admin)) -> Response:
+        runtime.command_current("set_default_scene", request.scene_id, by=by)
         return Response(status_code=204)
 
 

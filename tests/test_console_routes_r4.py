@@ -128,7 +128,7 @@ WRITE_MODULES = {"apiWrite.js", "framesApi.js", "ConfirmAction.jsx", "useMutate.
                  "equipmentApi.js"}
 # G1's list modules (console DDD §49): Needs attention (its page, its list and the strip), the
 # Wall's To finish list and model, the one host classifier they read, and the Overview host chip.
-G1_LIST_MODULES = ["AttentionPage.jsx", "AttentionList.jsx", "AttentionStrip.jsx", "WallUnfinished.jsx",
+G1_LIST_MODULES = ["AttentionPage.jsx", "attention.js", "AttentionStrip.jsx", "WallUnfinished.jsx",
                    "unfinished.js", "hostHealth.js", "domain/host-health-link.tsx"]
 # The shell's own page-level modules, besides the route tables and every `*Page.jsx`.
 SHELL_PAGES = {"main.jsx", "App.jsx", "Shell.jsx"}
@@ -620,10 +620,10 @@ def test_g1_catches_the_classifier_reaching_the_polling_hook(tmp_path):
     # Needs attention, and the check names it.
     src = tmp_path / "src"
     shutil.copytree(SRC, src)
-    assert not g1_forbidden(scan_closure(src / "AttentionList.jsx", tmp_path))
+    assert not g1_forbidden(scan_closure(src / "attention.js", tmp_path))
     classifier = src / "hostHealth.js"
     classifier.write_text('import { useFleetHosts } from "./fleetHosts.js";\n' + classifier.read_text())
-    for name in ("AttentionPage.jsx", "AttentionList.jsx", "AttentionStrip.jsx", "hostHealth.js",
+    for name in ("AttentionPage.jsx", "attention.js", "AttentionStrip.jsx", "hostHealth.js",
                  "domain/host-health-link.tsx"):
         assert "apiWrite.js" in g1_forbidden(scan_closure(src / name, tmp_path)), name
 

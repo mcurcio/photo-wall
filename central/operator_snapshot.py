@@ -6,6 +6,7 @@ from central.coordination import Coordinator
 from central.db import Database
 from central.installation_models import InstallationInventory, OutputInterruption
 from central.media_repository import MediaRepository
+from central.planning_outcome import PlanningOutcomeView
 from central.readiness_diagnostics import ReadinessDiagnostic, project_readiness_diagnostics
 from central.registry import Registry
 from central.runtime import Runtime
@@ -34,6 +35,9 @@ class OperatorSnapshot(Model):
     # Unresolved Output losses on current Bindings only (console DDD §16); read in the same
     # snapshot as the inventory, so each row agrees with the Binding beside it.
     output_interruptions: tuple[OutputInterruption, ...] = ()
+    # What the last planning pass could not do (central/planning_outcome.py): a refused Scene
+    # names its Scene and Run; read in the same snapshot.
+    planning: PlanningOutcomeView = PlanningOutcomeView()
 
 
 def runtime_document(runtime: Runtime, read_at: float) -> dict[str, Any]:
@@ -75,6 +79,7 @@ class OperatorSnapshotReader:
             runtime = self.runtime_store.read_in(conn)
             media = self.media.media_read_in(conn)
             interruptions = self.coordinator.output_interruptions_in(conn)
+            planning = self.coordinator.planning.read_in(conn)
             return OperatorSnapshot(
                 read_at=read_at,
                 player_reports_read_at=reports.read_at,
@@ -83,4 +88,5 @@ class OperatorSnapshotReader:
                 media=media,
                 readiness_diagnostics=readiness_diagnostics,
                 output_interruptions=interruptions,
+                planning=planning,
             )

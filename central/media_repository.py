@@ -182,9 +182,12 @@ class PgSceneLines:
         return PgPhotoLibrary.source_lines_in(self._conn, source_refs)
 
     def line(self, query: LineQuery) -> LineAnswer:
-        ranked = PgPhotoLibrary.ranked_line_in(self._conn, query)
-        hydrations = self._repository.hydrate_in(
-            self._conn, [member.asset_id for member in ranked.members], now=self._now)
+        """One Scene's read, in its own savepoint: a read that fails rolls back to it, so the
+        Planner refuses that Scene alone and the planning transaction goes on."""
+        with self._conn.transaction():
+            ranked = PgPhotoLibrary.ranked_line_in(self._conn, query)
+            hydrations = self._repository.hydrate_in(
+                self._conn, [member.asset_id for member in ranked.members], now=self._now)
         return LineAnswer(
             members=tuple(LineMember(
                 candidate=_candidate_of(member).model_copy(

@@ -67,9 +67,9 @@ def test_a_photo_that_fills_a_mat_opening_is_judged_against_the_opening_everywhe
     coordinator = Coordinator(registry.db, registry.clock)
     coordinator.runtime.command("set_scene", Scene(
         scene_id="house", cycle_seconds=30, loop=True,
-        contributions=(Contribution(target="frame:hall", source_refs=(POOL,)),)))
-    coordinator.runtime.command("activate", "house", "calendar", 1000)
-    assert {entry.asset_id for entry in coordinator.advance().plan} == {opening.asset_id}
+        contributions=(Contribution(target="frame:hall", source_refs=(POOL,)),)), by="console")
+    coordinator.runtime.command("activate", "house", "calendar", 1000, by="console")
+    assert {entry.asset_id for entry in coordinator.advance().projection.plan} == {opening.asset_id}
 
 
 def test_a_bound_frame_with_no_known_screen_is_judged_for_no_photo_anywhere(registry):
@@ -103,8 +103,8 @@ def test_a_bound_frame_with_no_known_screen_is_judged_for_no_photo_anywhere(regi
     coordinator = Coordinator(registry.db, registry.clock)
     coordinator.runtime.command("set_scene", Scene(
         scene_id="house", cycle_seconds=30, loop=True,
-        contributions=(Contribution(target="frame:hall", source_refs=(POOL,)),)))
-    coordinator.runtime.command("activate", "house", "calendar", 1000)
-    plan = coordinator.advance().plan
+        contributions=(Contribution(target="frame:hall", source_refs=(POOL,)),)), by="console")
+    coordinator.runtime.command("activate", "house", "calendar", 1000, by="console")
+    plan = coordinator.advance().projection.plan
     assert plan
     assert {entry.asset_id for entry in plan} == {None}

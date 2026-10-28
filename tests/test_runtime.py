@@ -680,8 +680,6 @@ def test_nested_protection_reserves_its_frames_without_protecting_unrelated_sibl
 
 
 def test_timeline_contains_short_child_and_all_loop_boundaries_without_effects():
-    from central.runtime import RuntimeBudgetExceeded
-
     runtime = Runtime(house=UTC_HOUSE)
     runtime.set_scene(Scene(scene_id="root", cycle_seconds=2, loop=True, children=(Child(
         scene=Scene(scene_id="brief", cycle_seconds=0.05, contributions=(media(),)),
@@ -689,13 +687,16 @@ def test_timeline_contains_short_child_and_all_loop_boundaries_without_effects()
     ),)))
     runtime.activate("root", "root", 0)
     before = runtime.export_state()
-    timeline = runtime.timeline(0, 3)
+    cut = runtime.timeline(0, 3)
+    timeline = cut.views
     assert [view.now for view in timeline] == [0, 0.125, 0.175, 2, 2.125, 2.175]
+    assert cut.until == 3
     assert timeline[1].for_target("frame:left").scene_id == "brief"
     assert timeline[2].for_target("frame:left") is None
     assert runtime.export_state() == before
-    with pytest.raises(RuntimeBudgetExceeded):
-        runtime.timeline(0, 3, max_events=3)
+    short = runtime.timeline(0, 3, max_events=3)
+    assert short.until < 3 and short.views == timeline[:len(short.views)]
+    assert short.until == short.views[-1].now
     assert runtime.export_state() == before
 
 
@@ -705,45 +706,46 @@ def test_timeline_does_not_skip_leaf_cycles_and_retains_authored_fade_origin():
         media(opacity=0.8),
     ), transition=Transition(style="fade_out_and_in", seconds=4)))
     runtime.activate("scene", "scene", 0)
-    timeline = runtime.timeline(5, 31)
+    timeline = runtime.timeline(5, 31).views
     assert [v.now for v in timeline] == [5, 10, 20, 30]
     intent = timeline[0].for_target("frame:left")
     assert intent.interval_start == intent.shows_from == 0
     assert intent.base_opacity == 0.8
     assert intent.fade_in_seconds == 2
     assert intent.fade_out_seconds == 2
-    assert runtime.timeline(5, 10)[-1].now == 5
+    assert runtime.timeline(5, 10).views[-1].now == 5
 
 
-def test_pathologically_tiny_cycles_fail_bounded_projection():
-    from central.runtime import RuntimeBudgetExceeded
-
-    runtime = Runtime(house=UTC_HOUSE)
-    runtime.set_scene(Scene(scene_id="tiny", cycle_seconds=1e-12, loop=True, contributions=(media(),)))
-    runtime.activate("tiny", "tiny", 0)
-    before = runtime.export_state()
-    with pytest.raises(RuntimeBudgetExceeded):
-        runtime.timeline(0, 300, max_events=20)
-    assert runtime.export_state() == before
+def test_pathologically_tiny_cycles_shorten_the_timeline():
+    """A cycle far shorter than the budget can walk is a prefix of the timeline, never a
+    refusal. Mutation probe: re-raise RuntimeBudgetExceeded on the budget (this raises)."""
+    for cycle in (1e-12, 0.001):
+        runtime = Runtime(house=UTC_HOUSE)
+        runtime.set_scene(Scene(scene_id="tiny", cycle_seconds=cycle, loop=True,
+                                contributions=(media(),)))
+        runtime.activate("tiny", "tiny", 0)
+        before = runtime.export_state()
+        cut = runtime.timeline(0, 3600, max_events=1000)
+        assert cut.until < 3600
+        assert cut.views and all(view.now <= cut.until for view in cut.views)
+        assert cut.views[-1].now == cut.until
+        assert runtime.export_state() == before
 
 
 def test_timeline_budget_counts_simultaneous_program_admissions_and_extreme_cycles():
-    from central.runtime import RuntimeBudgetExceeded
-
     instance = Runtime(house=UTC_HOUSE)
     instance.set_scene(Scene(scene_id="empty", cycle_seconds=10))
     for index in range(20):
         schedule(instance, f"p{index}", "empty", 10, 20)
     instance.advance(0)
     before = instance.export_state()
-    with pytest.raises(RuntimeBudgetExceeded):
-        instance.timeline(600, 660, max_events=5)
+    assert instance.timeline(600, 660, max_events=5).until < 660
     assert instance.export_state() == before
     tiny = Runtime(house=UTC_HOUSE)
     tiny.set_scene(Scene(scene_id="tiny", loop=True, cycle_seconds=1e-320))
     tiny.activate("tiny", "tiny", 0)
-    with pytest.raises(RuntimeBudgetExceeded):
-        tiny.timeline(1, 2)
+    cut = tiny.timeline(1, 2)    # past finite arithmetic: not even the first view
+    assert (cut.views, cut.until) == ((), 1)
 
 
 def test_early_v1_snapshot_without_local_order_restores_child_precedence():
@@ -1165,7 +1167,7 @@ def test_an_intent_carries_its_own_scenes_selection_and_a_childs_carries_the_chi
     assert view.for_target("frame:left").selection == parent_selection
     assert view.for_target("frame:right").scene_id == "child"
     assert view.for_target("frame:right").selection == child_selection
-    timeline = runtime.timeline(0, 30)
+    timeline = runtime.timeline(0, 30).views
     assert {intent.scene_id: intent.selection for v in timeline for intent in v.contributions} == {
         "parent": parent_selection, "child": child_selection}
 
@@ -1364,7 +1366,7 @@ def _turns(runtime, end, scene_id="scene"):
     """Each turn of `scene_id`'s Runs on frame:left up to `end`, once each, as (phase, turn
     start, shows from, fade in, fade out), as the last view holding it planned it."""
     turns = {}
-    for view in runtime.timeline(runtime._state.now or 0, end):
+    for view in runtime.timeline(runtime._state.now or 0, end).views:
         for intent in view.contributions:
             if intent.scene_id == scene_id and intent.target == "frame:left":
                 turns[(intent.run_id, intent.phase, intent.interval_start)] = (
@@ -1501,7 +1503,7 @@ def test_actuators_never_fade_under_a_cross_fade():
     runtime.activate("scene", "scene", 0)
     turns = {(intent.target, intent.interval_start): (intent.shows_from, intent.fade_in_seconds,
                                                        intent.fade_out_seconds)
-             for view in runtime.timeline(0, 15) for intent in view.contributions}
+             for view in runtime.timeline(0, 15).views for intent in view.contributions}
     assert turns[("actuator:lamp", 10)] == (10, 0, 0)
     assert turns[("frame:left", 10)] == (7, 3, 0)
 

@@ -82,10 +82,10 @@ def _covered(registry):
     """A Run of "evening" at priority 5 on VALID_FRAME; SCENE_ID on the same frame and
     "elsewhere" on INVALID_FRAME, which no Run covers."""
     runtime = _runtime(registry)
-    runtime.command("set_scene", _scene("evening"))
-    runtime.command("set_scene", _scene(SCENE_ID))
-    runtime.command("set_scene", _scene("elsewhere", frame=INVALID_FRAME))
-    runtime.command("activate", "evening", "evening-act", registry.clock.utc(), priority=5)
+    runtime.command("set_scene", _scene("evening"), by="console")
+    runtime.command("set_scene", _scene(SCENE_ID), by="console")
+    runtime.command("set_scene", _scene("elsewhere", frame=INVALID_FRAME), by="console")
+    runtime.command("activate", "evening", "evening-act", registry.clock.utc(), priority=5, by="console")
     return runtime
 
 
@@ -111,7 +111,7 @@ def test_show_now_names_the_scenes_sources_in_one_line_with_no_check_now(page, r
     Mutation probe: render the old Saved Sources section -> the boilerplate assertion fails."""
     _seed(registry)
     _library, garden = _garden(registry)
-    _runtime(registry).command("set_scene", _on(SCENE_ID, garden))
+    _runtime(registry).command("set_scene", _on(SCENE_ID, garden), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
         form = start_show_now(page, SCENE_ID)
@@ -137,7 +137,7 @@ def test_show_now_shows_a_failed_check_as_its_problem_naming_immich(page, regist
         key = conn.execute("SELECT pool_key FROM media_sources WHERE source_ref=%s",
                            (garden,)).fetchone()["pool_key"]
     filled(library, key, [], CheckFailed(problem="connection"))
-    _runtime(registry).command("set_scene", _on(SCENE_ID, garden))
+    _runtime(registry).command("set_scene", _on(SCENE_ID, garden), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
         form = start_show_now(page, SCENE_ID)
@@ -152,9 +152,9 @@ def test_show_now_handles_historical_and_authored_scenes(page, registry):
     _seed(registry)
     runtime = _runtime(registry)
     runtime.command("set_scene", Scene(scene_id="historical", contributions=(
-        Contribution(target=f"frame:{VALID_FRAME}", source_refs=("gone:1",)),)))
+        Contribution(target=f"frame:{VALID_FRAME}", source_refs=("gone:1",)),)), by="console")
     runtime.command("set_scene", Scene(scene_id="fixed", contributions=(
-        Contribution(target=f"frame:{VALID_FRAME}", asset_refs=("fixed-item",)),)))
+        Contribution(target=f"frame:{VALID_FRAME}", asset_refs=("fixed-item",)),)), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now")
         form = start_show_now(page, "historical")
@@ -214,8 +214,8 @@ def test_unhealthy_scene_frame_opens_its_recovery_tab_and_keeps_show_draft(page,
     players = _seed(registry)
     _seed_source(registry)
     runtime = _runtime(registry)
-    runtime.command("set_scene", _scene(SCENE_ID, frame=INVALID_FRAME))
-    runtime.command("set_scene", _scene("healthy", frame=VALID_FRAME))
+    runtime.command("set_scene", _scene(SCENE_ID, frame=INVALID_FRAME), by="console")
+    runtime.command("set_scene", _scene("healthy", frame=VALID_FRAME), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now", paused_at=registry.clock.utc())
         form = show_now(page, SCENE_ID, submit=False)
@@ -289,8 +289,8 @@ def test_a_priority_below_the_default_opens_advanced_and_says_where_it_stays_und
         expect(form).to_contain_text("Priority 5")
 
         # Another Run starts above it: Advanced opens by itself and says so.
-        runtime.command("set_scene", _scene("late"))
-        runtime.command("activate", "late", "late-act", registry.clock.utc(), priority=7)
+        runtime.command("set_scene", _scene("late"), by="console")
+        runtime.command("activate", "late", "late-act", registry.clock.utc(), priority=7, by="console")
         drive_poll(page)
         expect(toggle).to_have_attribute("aria-expanded", "true")
         expect(underneath).to_have_text(
@@ -304,7 +304,7 @@ def test_the_activation_key_outlives_steps_sections_the_wall_and_the_overlay(pag
     stored and there is one Run. Mutation probe: a new key on a section change."""
     _seed(registry)
     queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _scene(SCENE_ID))
+    _runtime(registry).command("set_scene", _scene(SCENE_ID), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now", paused_at=registry.clock.utc())
         sent = _keys(page)
@@ -352,7 +352,7 @@ def test_changing_the_form_makes_a_new_activation(page, registry):
     after a form change."""
     _seed(registry)
     queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _scene(SCENE_ID))
+    _runtime(registry).command("set_scene", _scene(SCENE_ID), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
         sent = _keys(page)
@@ -378,7 +378,7 @@ def test_an_activation_refused_as_signed_out_keeps_the_draft(page, registry):
     stays on Review for after sign-in instead of ending the flow."""
     _seed(registry)
     queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _scene(SCENE_ID))
+    _runtime(registry).command("set_scene", _scene(SCENE_ID), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
         answer_first(page, ACTIVATIONS, lambda route: route.fulfill(
@@ -420,9 +420,9 @@ def test_run_cards_and_the_why_disclosures(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     runtime = _covered(registry)
-    runtime.command("set_scene", _scene("earlier"))
-    earlier = runtime.command("activate", "earlier", "earlier-act", registry.clock.utc()).run_id
-    runtime.command("cancel", earlier, registry.clock.utc())
+    runtime.command("set_scene", _scene("earlier"), by="console")
+    earlier = runtime.command("activate", "earlier", "earlier-act", registry.clock.utc(), by="console").run_id
+    runtime.command("cancel", earlier, registry.clock.utc(), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
         runs = _runs(page)
@@ -475,9 +475,9 @@ def test_a_priority_zero_run_covering_the_frames_is_named_as_the_default(page, r
     _seed(registry)
     queue = _seed_source(registry)
     runtime = _runtime(registry)
-    runtime.command("set_scene", _scene("evening"))
-    runtime.command("set_scene", _scene(SCENE_ID))
-    runtime.command("activate", "evening", "evening-act", registry.clock.utc(), priority=0)
+    runtime.command("set_scene", _scene("evening"), by="console")
+    runtime.command("set_scene", _scene(SCENE_ID), by="console")
+    runtime.command("activate", "evening", "evening-act", registry.clock.utc(), priority=0, by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
         form = show_now(page, SCENE_ID, submit=False)
@@ -494,9 +494,9 @@ def test_a_protecting_scene_below_a_covering_run_says_central_will_refuse_it(pag
     _seed(registry)
     queue = _seed_source(registry)
     runtime = _runtime(registry)
-    runtime.command("set_scene", _scene("evening"))
-    runtime.command("set_scene", _scene(SCENE_ID, protect_frames=True))
-    runtime.command("activate", "evening", "evening-act", registry.clock.utc(), priority=5)
+    runtime.command("set_scene", _scene("evening"), by="console")
+    runtime.command("set_scene", _scene(SCENE_ID, protect_frames=True), by="console")
+    runtime.command("activate", "evening", "evening-act", registry.clock.utc(), priority=5, by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
         form = show_now(page, SCENE_ID, priority=3, submit=False)
@@ -518,9 +518,9 @@ def test_a_run_protecting_the_frames_is_said_to_refuse_it_at_any_priority(page, 
     _seed(registry)
     queue = _seed_source(registry)
     runtime = _runtime(registry)
-    runtime.command("set_scene", _scene("evening", protect_frames=True))
-    runtime.command("set_scene", _scene(SCENE_ID))
-    runtime.command("activate", "evening", "evening-act", registry.clock.utc(), priority=5)
+    runtime.command("set_scene", _scene("evening", protect_frames=True), by="console")
+    runtime.command("set_scene", _scene(SCENE_ID), by="console")
+    runtime.command("activate", "evening", "evening-act", registry.clock.utc(), priority=5, by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
         form = show_now(page, SCENE_ID, submit=False)
@@ -631,7 +631,7 @@ def test_an_activation_refused_for_its_origin_keeps_the_draft_and_its_key(page, 
     a known outcome (the flow would end and the draft be discarded)."""
     _seed(registry)
     queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _scene(SCENE_ID))
+    _runtime(registry).command("set_scene", _scene(SCENE_ID), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
         sent = _keys(page)

@@ -559,7 +559,7 @@ def test_a_stale_edit_offers_reload_and_never_sends_a_replace(page, registry):
     base revision."""
     _seed(registry)
     queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening"))
+    _runtime(registry).command("set_scene", _console_scene("evening"), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
         _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
@@ -670,8 +670,8 @@ def test_another_instance_never_replaces_a_dirty_draft(page, registry):
     _seed(registry)
     queue = _seed_source(registry)
     runtime = _runtime(registry)
-    runtime.command("set_scene", _console_scene("evening"))
-    runtime.command("set_scene", _console_scene("morning"))
+    runtime.command("set_scene", _console_scene("evening"), by="console")
+    runtime.command("set_scene", _console_scene("morning"), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         form = start_scene(page)
@@ -863,7 +863,7 @@ def test_browser_back_from_a_discard_confirmation_leaves_the_page_usable(page, r
     inert, and the draft is kept."""
     _seed(registry)
     queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening"))
+    _runtime(registry).command("set_scene", _console_scene("evening"), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "now")
         form = start_scene(page)
@@ -890,7 +890,7 @@ def test_a_replace_in_flight_on_a_hidden_page_neither_blocks_nor_moves_the_opera
     and the Scenes page says what happened."""
     _seed(registry)
     queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening"))
+    _runtime(registry).command("set_scene", _console_scene("evening"), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
@@ -957,7 +957,7 @@ def test_resuming_a_draft_whose_scene_is_gone_asks_for_no_focus(page, registry):
     and its step shows, focus does not jump to the step heading."""
     _seed(registry)
     queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening"))
+    _runtime(registry).command("set_scene", _console_scene("evening"), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
         _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
@@ -986,7 +986,7 @@ def test_a_scene_restored_at_a_lower_revision_is_stale_too(page, registry):
     stored revision is greater."""
     _seed(registry)
     queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening", revision=3))
+    _runtime(registry).command("set_scene", _console_scene("evening", revision=3), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
         _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
@@ -1013,7 +1013,7 @@ def test_reload_names_what_storage_changed_and_the_changes_it_replaced(page, reg
     operator's own edits) and says the operator's unsaved changes were replaced."""
     _seed(registry)
     queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening"))
+    _runtime(registry).command("set_scene", _console_scene("evening"), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes", paused_at=registry.clock.utc())
         _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()
@@ -1138,7 +1138,7 @@ def test_a_save_in_flight_holds_its_draft(page, registry):
     Mutation probe: leave Discard enabled while busy."""
     _seed(registry)
     queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening"))
+    _runtime(registry).command("set_scene", _console_scene("evening"), by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         form = author_scene(page, "inflight", SOURCE, (VALID_FRAME,), submit=False)
@@ -1441,8 +1441,8 @@ def test_save_and_apply_now_changes_what_plays_the_scene(page, registry):
     not said)."""
     _seed(registry)
     queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening", cycle_seconds=20))
-    _runtime(registry).command_current("activate", "evening", "show-evening")
+    _runtime(registry).command("set_scene", _console_scene("evening", cycle_seconds=20), by="console")
+    _runtime(registry).command_current("activate", "evening", "show-evening", by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         assert _playing_revision(page, origin, "evening") == [1]
@@ -1504,11 +1504,11 @@ def test_save_and_apply_now_names_what_it_could_not_replace(page, registry):
     `earlierKept` with `savedNowKept` again -> said twice; drop the request's `tone` -> red."""
     _seed(registry)
     queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _console_scene("evening", cycle_seconds=20))
+    _runtime(registry).command("set_scene", _console_scene("evening", cycle_seconds=20), by="console")
     _runtime(registry).command("set_scene", _console_scene("guard", cycle_seconds=20,
-                                                           protect_frames=True))
-    _runtime(registry).command_current("activate", "evening", "show-evening")
-    _runtime(registry).command_current("activate", "guard", "show-guard", priority=5)
+                                                           protect_frames=True), by="console")
+    _runtime(registry).command_current("activate", "evening", "show-evening", by="console")
+    _runtime(registry).command_current("activate", "guard", "show-guard", priority=5, by="console")
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "scenes")
         _scenes(page).get_by_role("button", name="Edit Scene evening", exact=True).click()

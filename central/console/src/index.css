@@ -263,7 +263,8 @@ label {
   border-bottom: 1px solid var(--color-line);
 }
 
-.attention-page__link {
+.attention-page__link,
+.attention__scene {
   color: inherit;
 }
 

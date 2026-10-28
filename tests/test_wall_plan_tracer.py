@@ -268,9 +268,9 @@ def test_the_wall_through_the_real_advance_measures_crops_and_remembers_what_was
         scene_id="tracer", cycle_seconds=30, loop=True,
         contributions=tuple(Contribution(target=f"frame:{frame}", source_refs=(POOL,),
                                          after_end="keep_this_photo")
-                            for frame in ("frame-wide", "frame-tall"))))
-    coordinator.runtime.command("activate", "tracer", "calendar", 1000)
-    first = coordinator.advance()
+                            for frame in ("frame-wide", "frame-tall"))), by="console")
+    coordinator.runtime.command("activate", "tracer", "calendar", 1000, by="console")
+    first = coordinator.advance().projection
     assert [request.asset_id for request in first.measurements] == [four_three]
     assert four_three not in {entry.asset_id for entry in first.plan}
 
@@ -288,7 +288,7 @@ def test_the_wall_through_the_real_advance_measures_crops_and_remembers_what_was
         asyncio.run(measurer.measure(asset_id))
 
     registry.clock.advance(1)
-    second = coordinator.advance()
+    second = coordinator.advance().projection
     assert second.measurements == ()
     assert four_three in {entry.asset_id for entry in second.plan
                           if entry.frame_id == "frame-wide"}
@@ -312,7 +312,7 @@ def test_the_wall_through_the_real_advance_measures_crops_and_remembers_what_was
     assert [row["asset_id"] for row in rows] == [asset_of[shown.variant.sha256]]
     locked = {layer.assignment_id for layers_ in media.values() for layer in layers_}
     registry.clock.advance(1)
-    third = coordinator.advance()
+    third = coordinator.advance().projection
     fresh = sorted((entry for entry in third.plan
                     if entry.frame_id == "frame-wide" and entry.asset_id is not None
                     and entry.assignment_id not in locked), key=lambda entry: entry.start)

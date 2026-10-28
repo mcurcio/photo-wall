@@ -103,7 +103,7 @@ def _scene(registry, frames=(HALL, LIVING), crop_limit=None):
 
     _runtime(registry).command("set_scene", Scene(
         scene_id=SCENE_ID, loop=True, selection=SceneSelection(crop_limit=crop_limit),
-        contributions=tuple(Contribution(target=f"frame:{frame}", source_refs=(SOURCE,)) for frame in frames)))
+        contributions=tuple(Contribution(target=f"frame:{frame}", source_refs=(SOURCE,)) for frame in frames)), by="console")
 
 
 def _row(board, frame):
@@ -325,7 +325,7 @@ def test_a_position_drafted_as_a_mat_opening_changes_what_fits_before_done(page,
     route_thumbnails(page, assets)
     from test_operator_showrunner_browser import _runtime
     _runtime(registry).command("set_scene", Scene(scene_id=SCENE_ID, loop=True, contributions=(
-        Contribution(target=f"frame:{FRAME}", source_refs=(SOURCE,)),)))
+        Contribution(target=f"frame:{FRAME}", source_refs=(SOURCE,)),)), by="console")
     try:
         with operator_server(registry.db, registry.clock) as origin:
             sign_in(page, origin)

@@ -140,6 +140,9 @@ export function SnapshotProvider({ children }) {
         playerReportsReadAt: aggregate.player_reports_read_at,
         readinessDiagnostics: aggregate.readiness_diagnostics,
         outputInterruptions: aggregate.output_interruptions,
+        // What the last planning pass could not do (central/planning_outcome.py): Needs
+        // attention lists each Scene it refused.
+        planning: aggregate.planning ?? { issues: [], since: null, dropped: 0 },
       };
     } catch (error) {
       failure = error;
@@ -379,37 +382,45 @@ export function useSnapshotAge() {
 }
 
 /**
- * @typedef {"unknown"|"ok"|"unavailable"|"unreachable"} HealthState
- * @typedef {{status: HealthState, reason: string|null, scheduler: string|null}} CentralHealth
+ * @typedef {"unknown"|"ok"|"degraded"|"unavailable"|"unreachable"} HealthState
+ * @typedef {{status: "ok"|"failing", since: number|null, reason: string|null}} SchedulerStep
+ * @typedef {{status: HealthState, reason: string|null, scheduler: string|null,
+ *            steps: Record<string, SchedulerStep>}} CentralHealth
  */
 
+// The scheduler states in which Players may be unable to report (the attention strip's one
+// silent-Frames row): its loop is not ticking. A failing step ("degraded") is not one of them.
+const STALLED = new Set(["stale", "stopped"]);
+
 /**
- * Read Central's `/healthz` body (central/app.py `health`) into the pill's facts:
- * the coarse state, the reason it is not ok ("database unavailable" or
- * "scheduler <status>"), and the scheduler status when it is neither "ok" nor
- * "disabled" (the attention strip's causal line reads it).
+ * Read Central's `/healthz` body (central/app.py `health`) into the pill's facts: the coarse
+ * state ("degraded" when Central serves but a scheduler step fails), the reason it is not ok
+ * ("database unavailable", "scheduler <status>", or the failing steps), the scheduler status
+ * when its loop is stale or stopped (the attention strip's causal line reads it), and each
+ * scheduler step's facet (the attention strip's "Planning is failing" row reads them).
  *
  * @param {boolean} httpOk
  * @param {any} body the parsed JSON body, or null
  * @returns {CentralHealth}
  */
-function readHealth(httpOk, body) {
+export function readHealth(httpOk, body) {
   const schedulerStatus = body?.scheduler?.status ?? null;
-  const scheduler =
-    schedulerStatus === null || schedulerStatus === "ok" || schedulerStatus === "disabled"
-      ? null
-      : String(schedulerStatus);
-  const healthy = body == null ? httpOk : body.status === "ok";
-  const status = healthy ? "ok" : "unavailable";
+  const scheduler = STALLED.has(schedulerStatus) ? String(schedulerStatus) : null;
+  const steps = body?.scheduler?.steps ?? {};
+  const status = body == null ? (httpOk ? "ok" : "unavailable")
+    : body.status === "ok" ? "ok" : body.status === "degraded" ? "degraded" : "unavailable";
   let reason = null;
-  if (status !== "ok") {
+  if (status === "degraded") {
+    const failing = Object.keys(steps).filter((name) => steps[name]?.status === "failing");
+    reason = failing.length > 0 ? `${failing.join(", ")} failing` : "degraded";
+  } else if (status !== "ok") {
     if (body?.database === false) {
       reason = "database unavailable";
-    } else if (scheduler !== null) {
-      reason = `scheduler ${scheduler.replaceAll("_", " ")}`;
+    } else if (schedulerStatus !== null && schedulerStatus !== "ok") {
+      reason = `scheduler ${String(schedulerStatus).replaceAll("_", " ")}`;
     }
   }
-  return { status, reason, scheduler };
+  return { status, reason, scheduler, steps };
 }
 
 /**
@@ -417,6 +428,8 @@ function readHealth(httpOk, body) {
  * `GET /healthz` every ~10s (design §9 cadence — matches the legacy health pill)
  * and reports Central's health, independent of Plane A and of the operator token:
  *  - status "ok"          — 200 with body status "ok"
+ *  - status "degraded"    — 200 with body status "degraded": Central serves, a scheduler step
+ *                           fails (`reason` names the failing steps)
  *  - status "unavailable" — a response that is not healthy (e.g. 503); `reason`
  *                           names the cause the body reports, when it does
  *  - status "unreachable" — the request failed / timed out (no response)
@@ -428,7 +441,7 @@ function readHealth(httpOk, body) {
  */
 export function useHealth(intervalMs = 10000) {
   const [health, setHealth] = useState(
-    /** @type {CentralHealth} */ ({ status: "unknown", reason: null, scheduler: null }),
+    /** @type {CentralHealth} */ ({ status: "unknown", reason: null, scheduler: null, steps: {} }),
   );
   useEffect(() => {
     let live = true;
@@ -438,7 +451,8 @@ export function useHealth(intervalMs = 10000) {
       setHealth((previous) =>
         previous.status === next.status &&
         previous.reason === next.reason &&
-        previous.scheduler === next.scheduler
+        previous.scheduler === next.scheduler &&
+        JSON.stringify(previous.steps) === JSON.stringify(next.steps)
           ? previous
           : next,
       );
@@ -459,7 +473,7 @@ export function useHealth(intervalMs = 10000) {
       } catch {
         // No response at all (network error / timeout) — central is unreachable.
         if (live) {
-          update({ status: "unreachable", reason: null, scheduler: null });
+          update({ status: "unreachable", reason: null, scheduler: null, steps: {} });
         }
       }
     };

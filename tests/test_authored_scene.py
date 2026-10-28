@@ -40,14 +40,14 @@ def test_authored_scene_commit_is_atomic_and_idempotent(registry):
     coordinator = Coordinator(registry.db, registry.clock)
     scene = authored_scene(originals[0].asset_id)
 
-    result = coordinator.configure_authored_scene(scene, spec.source_ref, (originals[0].asset_id,))
+    result = coordinator.configure_authored_scene(scene, spec.source_ref, (originals[0].asset_id,), by="console")
     assert result == {"scene": scene.model_dump(mode="json"),
                       "earlier_version": {"playing": [], "waiting": []},
                       "asset_refs": [originals[0].asset_id], "created": 1}
     assert coordinator.runtime.read().export_state()["scenes"][scene.scene_id] == scene.model_dump(mode="json")
     assert count_authored(registry) == 1
 
-    retry = coordinator.configure_authored_scene(scene, spec.source_ref, (originals[0].asset_id,))
+    retry = coordinator.configure_authored_scene(scene, spec.source_ref, (originals[0].asset_id,), by="console")
     assert retry["created"] == 0
     assert count_authored(registry) == 1
 
@@ -57,7 +57,7 @@ def test_runtime_failure_rolls_back_authored_rows_and_snapshot(registry, monkeyp
     coordinator = Coordinator(registry.db, registry.clock)
     baseline = Scene(scene_id="baseline", contributions=(Contribution(target="frame:left",
                                                                         asset_refs=("old",)),))
-    coordinator.runtime.command("set_scene", baseline)
+    coordinator.runtime.command("set_scene", baseline, by="console")
     before = coordinator.runtime.read().export_state()
 
     def fail_set_scene(self, scene):
@@ -66,7 +66,7 @@ def test_runtime_failure_rolls_back_authored_rows_and_snapshot(registry, monkeyp
     monkeypatch.setattr(Runtime, "set_scene", fail_set_scene)
     with pytest.raises(RuntimeError, match="injected runtime failure"):
         coordinator.configure_authored_scene(authored_scene(originals[0].asset_id),
-                                             spec.source_ref, (originals[0].asset_id,))
+                                             spec.source_ref, (originals[0].asset_id,), by="console")
     assert count_authored(registry) == 0
     assert coordinator.runtime.read().export_state() == before
 
@@ -75,11 +75,11 @@ def test_authored_scene_requires_exact_asset_refs_and_no_live_refs(registry):
     repo, spec, originals = setup_source(registry)
     coordinator = Coordinator(registry.db, registry.clock)
     with pytest.raises(RegistryError, match="invalid_authored_scene"):
-        coordinator.configure_authored_scene(authored_scene(originals[0].asset_id), spec.source_ref, ())
+        coordinator.configure_authored_scene(authored_scene(originals[0].asset_id), spec.source_ref, (), by="console")
     with pytest.raises(RegistryError, match="invalid_authored_scene"):
         coordinator.configure_authored_scene(
             authored_scene(originals[0].asset_id, source_refs=(spec.source_ref,)),
-            spec.source_ref, (originals[0].asset_id,))
+            spec.source_ref, (originals[0].asset_id,), by="console")
     assert count_authored(registry) == 0
 
 
@@ -88,10 +88,10 @@ def test_authored_scene_preserves_media_membership_checks(registry):
     coordinator = Coordinator(registry.db, registry.clock)
     missing = "asset-never-seen"
     with pytest.raises(RegistryError, match="authored_asset_not_found"):
-        coordinator.configure_authored_scene(authored_scene(missing), spec.source_ref, (missing,))
+        coordinator.configure_authored_scene(authored_scene(missing), spec.source_ref, (missing,), by="console")
     with pytest.raises(RegistryError, match="source_not_found"):
         coordinator.configure_authored_scene(authored_scene(originals[0].asset_id),
-                                             "unknown:1", (originals[0].asset_id,))
+                                             "unknown:1", (originals[0].asset_id,), by="console")
     assert count_authored(registry) == 0
 
 
@@ -127,8 +127,8 @@ def test_refresh_membership_change_serializes_before_atomic_scene(registry, monk
     original_edit = coordinator.runtime.edit
 
     @contextmanager
-    def observed_edit(conn):
-        with original_edit(conn) as runtime:
+    def observed_edit(conn, *, by, command):
+        with original_edit(conn, by=by, command=command) as runtime:
             entered.set()
             yield runtime
 
@@ -137,7 +137,7 @@ def test_refresh_membership_change_serializes_before_atomic_scene(registry, monk
         with repo.transaction() as conn:
             future = executor.submit(coordinator.configure_authored_scene,
                                      authored_scene(originals[0].asset_id),
-                                     spec.source_ref, (originals[0].asset_id,))
+                                     spec.source_ref, (originals[0].asset_id,), by="console")
             assert entered.wait(2), "composite operation did not enter its Runtime transaction"
             with pytest.raises(TimeoutError):
                 future.result(timeout=.1)

@@ -105,7 +105,7 @@ def test_before_pages(page, registry, scheme):
 
     _seed(registry)
     queue = _seed_source(registry)
-    _runtime(registry).command("set_scene", _scene(SCENE_ID))
+    _runtime(registry).command("set_scene", _scene(SCENE_ID), by="console")
     _open(page, scheme)
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         connect(page, origin, "sources")
@@ -216,7 +216,7 @@ def test_after_pages(page, registry, scheme, suffix):
     _library(registry, page)
     garden = "garden:1"
     _runtime(registry).command("set_scene", Scene(scene_id=SCENE_ID, loop=True, contributions=(
-        Contribution(target=f"frame:{VALID_FRAME}", source_refs=(garden,)),)))
+        Contribution(target=f"frame:{VALID_FRAME}", source_refs=(garden,)),)), by="console")
     _sized(page, scheme, WIDTHS[suffix])
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "sources")

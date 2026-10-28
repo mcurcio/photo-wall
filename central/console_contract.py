@@ -71,6 +71,7 @@ from contracts.kelvin import (
     KELVIN_TABLE_MIN,
     KELVIN_TABLE_STEP,
 )
+from contracts.models import PREPARE_SECONDS
 from contracts.node_picture import (
     MATCHED_LUX_MAX,
     MATCHED_LUX_MIN,
@@ -96,6 +97,9 @@ CONSOLE_VIEWS: Final[tuple[type[BaseModel], ...]] = (    # answers the console r
     CentralErrorsView, FrameImpedimentView)
 CONSOLE_ALIASES: Final[Mapping[str, object]] = {     # named types a view's fields take, by their name
     "Lux": Lux, "LightColour": LightColour, "Reading": Reading}
+# The seconds of each photo a Transition must leave free: the Player's preparation time
+# (`Scene.check_transition` refuses a fade longer than each photo's seconds less this).
+TRANSITION_FREE_SECONDS: Final = PREPARE_SECONDS
 CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
     "FRAME_LIGHTS_MAX": FRAME_LIGHTS_MAX, "MAT_DEPTH_MM_MAX": MAT_DEPTH_MM_MAX, "CLOSE_REACH_MM": CLOSE_REACH_MM,
     "BEAM_DEGREES_MAX": BEAM_DEGREES_MAX, "WHITENESS_MIN": WHITENESS_MIN, "INK_DENSITY_MIN": INK_DENSITY_MIN,
@@ -107,6 +111,7 @@ CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
     "ROOM_LIGHT_ID_PATTERN": ROOM_LIGHT_ID_PATTERN, "HOME_ASSISTANT_SOURCE": references.SOURCE, "PI_SOURCE": PI_SOURCE,
     "MATCHED_LUX_MIN": MATCHED_LUX_MIN, "MATCHED_LUX_MAX": MATCHED_LUX_MAX, "PANEL_BLACK_MIN": PANEL_BLACK_MIN,
     "PANEL_BLACK_MAX": PANEL_BLACK_MAX, "CENTRAL_LINE_MAX": CENTRAL_LINE_MAX,
+    "TRANSITION_FREE_SECONDS": TRANSITION_FREE_SECONDS,
 }
 CONSOLE_REFUSALS: Final[tuple[type[StrEnum], ...]] = (   # each context's closed refusal enum
     RoomLightRefusal, FrameLightingRefusal, PaperProfileRefusal, ReportRefusal, DrawnReportRefusal, TrialRefusal,
@@ -127,4 +132,5 @@ def console_contract() -> dict[str, object]:
     return json.loads(json.dumps(contract, sort_keys=True))
 
 
-__all__ = ["CONSOLE_ALIASES", "CONSOLE_BODIES", "CONSOLE_CONSTANTS", "CONSOLE_REFUSALS", "CONSOLE_VIEWS", "console_contract"]
+__all__ = ["CONSOLE_ALIASES", "CONSOLE_BODIES", "CONSOLE_CONSTANTS", "CONSOLE_REFUSALS", "CONSOLE_VIEWS",
+           "TRANSITION_FREE_SECONDS", "console_contract"]
