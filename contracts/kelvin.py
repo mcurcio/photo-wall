@@ -23,8 +23,6 @@ from collections.abc import Mapping
 from types import MappingProxyType
 from typing import Final
 
-from contracts.colour import srgb_to_linear
-
 KELVIN_TABLE_MIN: Final = 2000                  # the table's rows, in KELVIN_TABLE_STEP
 KELVIN_TABLE_MAX: Final = 10000
 KELVIN_TABLE_STEP: Final = 100
@@ -33,8 +31,10 @@ KELVIN_STATED_MAX: Final = 40000              # to the table until the Pi draws 
 KELVIN_WHITE: Final = 6500                      # the Display's white: kelvin_white(6500) is exactly (1, 1, 1)
 
 # Mitchell Charity's blackbody colours (http://www.vendian.org/mncharity/dir3/blackbody/,
-# bbr_color.txt version 2001-Jun-22): the CIE 1931 2-degree rows, R G B normalised, sRGB primaries
-# with a D65 white point, KELVIN_TABLE_MIN..KELVIN_TABLE_MAX in KELVIN_TABLE_STEP.
+# bbr_color.txt version 2001-Jun-22): the CIE 1931 2-degree rows' decimal R G B, KELVIN_TABLE_MIN..
+# KELVIN_TABLE_MAX in KELVIN_TABLE_STEP. They are LINEAR light in sRGB primaries (D65 white), largest
+# channel 1: the file's 0-255 r g b columns are these values sRGB-encoded (4300 K: 0.7083 -> 219), and
+# as linear sRGB they give the file's own chromaticity (4300 K: x 0.3704, y 0.3738).
 _CHARITY: Final[Mapping[int, tuple[float, float, float]]] = MappingProxyType({
     2000: (1.0000, 0.2647, 0.0033), 2100: (1.0000, 0.2889, 0.0120), 2200: (1.0000, 0.3126, 0.0219),
     2300: (1.0000, 0.3360, 0.0331), 2400: (1.0000, 0.3589, 0.0454), 2500: (1.0000, 0.3814, 0.0588),
@@ -69,15 +69,14 @@ _CHARITY: Final[Mapping[int, tuple[float, float, float]]] = MappingProxyType({
 
 
 def kelvin_white(kelvin: int) -> tuple[float, float, float]:
-    """`kelvin`'s white in linear light, against the Display's white: Charity's row (gamma-encoded
-    sRGB) taken to linear light (`srgb_to_linear`), divided by its linear KELVIN_WHITE row and
-    scaled so the largest is 1. So kelvin_white(KELVIN_WHITE) is exactly (1.0, 1.0, 1.0), and white
-    multiplied by it shows as the table's colour. Pure. ValueError("kelvin") for anything but an int
+    """`kelvin`'s white in linear light, against the Display's white: Charity's row (linear light as
+    published) divided by the KELVIN_WHITE row and scaled so the largest is 1. So
+    kelvin_white(KELVIN_WHITE) is exactly (1.0, 1.0, 1.0), and white multiplied by it shows as the
+    table's colour. Pure. ValueError("kelvin") for anything but an int
     (never a bool) in KELVIN_TABLE_MIN..KELVIN_TABLE_MAX in KELVIN_TABLE_STEP."""
     if type(kelvin) is not int or kelvin not in _CHARITY:
         raise ValueError("kelvin")
-    red, green, blue = (srgb_to_linear(value) / srgb_to_linear(white)
-                        for value, white in zip(_CHARITY[kelvin], _CHARITY[KELVIN_WHITE], strict=True))
+    red, green, blue = (value / white for value, white in zip(_CHARITY[kelvin], _CHARITY[KELVIN_WHITE], strict=True))
     largest = max(red, green, blue)
     return red / largest, green / largest, blue / largest
 
