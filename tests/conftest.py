@@ -1,7 +1,9 @@
 """Shared fixtures; each database test owns a whole disposable database (support/database.py)."""
 
+import faulthandler
 import json
 import os
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -26,6 +28,12 @@ DATABASE_ROOT = "database_provisioner"
 # `db`): CI's software-e2e.yml photo-sources job runs them against a published fixture.
 IMMICH_ROOT = "immich_library"
 BROWSER_TESTS = Path(__file__).parent / "browser"
+# A browser test's whole life (setup, call, teardown) is held to this; the slowest takes about
+# 12 s in CI. Playwright's own timeouts bound only what the browser is asked to do: a wait with
+# none (an evaluate's promise, a route handler, a fixture's teardown) would otherwise stall its
+# leg silently until checks.yml cancels the job (PR 121's browser leg, 2026-10-20, named nothing).
+BROWSER_TEST_SECONDS = 60
+_STDERR = pytest.StashKey[int]()
 
 # A skip in CI (`CI` set) fails the run unless its reason starts with one of these: each is a
 # capability that the job running the test deliberately lacks, and names who runs it instead.
@@ -51,6 +59,9 @@ def pytest_configure(config):
     shard()   # a malformed PHOTO_WALL_TEST_SHARD stops the run here, in every process
     # One id per run, shared by its xdist workers: it names the run's databases.
     config.stash[_RUN_ID] = getattr(config, "workerinput", {}).get("testrunuid") or uuid.uuid4().hex
+    # The process's own stderr, kept as pytest's faulthandler plugin keeps it: during a test fd 2
+    # is captured, and under xdist sys.stderr is not a file.
+    config.stash[_STDERR] = os.dup(sys.__stderr__.fileno())
     config.addinivalue_line("markers", "db: needs PostgreSQL (derived from its fixtures)")
     config.addinivalue_line("markers", "browser: drives the console in a browser (tests/browser)")
     config.addinivalue_line("markers", "node_pid1: the node under real systemd (node-pid1.yml)")
@@ -79,6 +90,25 @@ def pytest_collection_modifyitems(config, items):
                 # One system for the whole module, its tests in order: keep them on one worker.
                 item.add_marker(pytest.mark.xdist_group(item.module.__name__))
     select_shard(config, items)
+
+
+@pytest.hookimpl(wrapper=True)
+def pytest_runtest_protocol(item):
+    """A browser test still running after BROWSER_TEST_SECONDS dumps every thread's stack to
+    stderr and ends its process: the xdist controller reports it failed by its name ("worker
+    crashed while running ...") and starts a fresh worker for the rest. A hung test is often a
+    deadlock, which an exception raised in one thread could not undo."""
+    if item.get_closest_marker("browser") is None:
+        return (yield)
+    faulthandler.dump_traceback_later(BROWSER_TEST_SECONDS, exit=True, file=item.config.stash[_STDERR])
+    try:
+        return (yield)
+    finally:
+        faulthandler.cancel_dump_traceback_later()
+
+
+def pytest_unconfigure(config):
+    os.close(config.stash[_STDERR])
 
 
 def pytest_sessionfinish(session):
