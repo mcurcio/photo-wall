@@ -46,7 +46,8 @@ ExecStartPre=+-/usr/bin/python3 -I -B /usr/lib/photo-wall/node/display-signal-ra
 # env restates XDG_RUNTIME_DIR because pam_systemd (PAMName=login) replaces it with /run/user/<uid>;
 # env execs Weston, so the main PID (NotifyAccess=main) is Weston's.
 # --debug is Weston's own introspection switch: the weston_debug_v1 protocol (weston-debug and its
-# scopes) and every client on the Wayland socket allowed to capture any Output (weston-screenshooter);
+# scopes) and every client on the Wayland socket allowed to capture any Output (weston-screenshooter),
+# within the shell's capture gate (shell.c capture_ask, the memory line below);
 # see docs/display-host-backend.md#seeing-what-the-compositor-shows.
 ExecStart=/usr/bin/env XDG_RUNTIME_DIR=/run/photo-wall-display /usr/bin/weston --backend=drm --shell=/usr/lib/photo-wall/node-display/photo-wall-shell.so --modules=systemd-notify.so --socket=/run/photo-wall-display-wayland/wayland-0 --idle-time=0 --debug
 Restart=always
@@ -56,7 +57,7 @@ OOMScoreAdjust=-500
 # A memory-cgroup OOM kill of one child (the diagnostic client) must not stop Weston and spend
 # its start limit; Weston itself being killed still ends the unit.
 OOMPolicy=continue
-# Weston's line, which holds one Output's capture (appliance/kernel/capacity.py, "display").
+# Weston's line, which holds the capture the shell allows (appliance/kernel/capacity.py, "display").
 MemoryMax=160M
 TasksMax=64
 NoNewPrivileges=yes

@@ -24,6 +24,7 @@ import json
 import mmap
 import os
 import pathlib
+import re
 import shutil
 import signal
 import socket
@@ -35,6 +36,8 @@ import uuid
 DISPLAY = "/usr/lib/photo-wall/node-display"
 CLIENT = "/usr/lib/photo-wall/frame-client"
 PROTOCOL_XML = "/current-native/photo-wall-frame-v1.xml"
+# The shell's source, read for its capture line (CAPTURE_PIXELS), not compiled.
+SHELL_SOURCE = pathlib.Path("/current-native/shell.c")
 # The private client the shell spawns becomes B5's overlay client plus a health layer per Output.
 SPAWNED = DISPLAY + "/diagnostic-client"
 shutil.copyfile("/smoke/display_harness_health_client.py", SPAWNED)
@@ -348,26 +351,40 @@ def capture_box(x0, y0, x1, y1):
         pixels[row * stride + x0 * 4: row * stride + x1 * 4] for row in range(y0, y1)))
 
 
-def capture(read):
-    """`read(pixels, stride)` over one capture of Weston's framebuffer (weston_capture_v1)."""
-    display = Display(str(root / "wayland-0"))
-    display.connect()
-    try:
-        found = {}
-        registry = display.get_registry()
-        registry.dispatcher["global"] = lambda _r, name, iface, _v: found.setdefault(iface, name)
-        display.roundtrip()
-        out = registry.bind(found["wl_output"], WlOutput, 1)
-        shm = registry.bind(found["wl_shm"], WlShm, 1)
-        capture = registry.bind(found["weston_capture_v1"], WestonCaptureV1, 1)
-        source = capture.create(out, WestonCaptureV1.source.framebuffer)
-        state = {}
-        source.dispatcher["format"] = lambda _s, drm: state.update(format=drm)
-        source.dispatcher["size"] = lambda _s, w, h: state.update(size=(w, h))
-        source.dispatcher["complete"] = lambda _s: state.update(done="complete")
-        source.dispatcher["retry"] = lambda _s: state.update(done="retry")
-        source.dispatcher["failed"] = lambda _s, msg: state.update(done="failed", message=msg)
-        display.roundtrip()
+class CaptureRefused(AssertionError):
+    """Weston answered a capture `failed`, with its message."""
+
+
+class Capturer:
+    """One Wayland client with one capture source on the Output (weston_capture_v1), connected
+    until `close`: the shell's capture gate counts a client's captures over its life."""
+
+    def __init__(self):
+        self.display = Display(str(root / "wayland-0"))
+        self.display.connect()
+        try:
+            found = {}
+            registry = self.display.get_registry()
+            registry.dispatcher["global"] = lambda _r, name, iface, _v: found.setdefault(iface, name)
+            self.display.roundtrip()
+            out = registry.bind(found["wl_output"], WlOutput, 1)
+            self.shm = registry.bind(found["wl_shm"], WlShm, 1)
+            capture = registry.bind(found["weston_capture_v1"], WestonCaptureV1, 1)
+            self.source = capture.create(out, WestonCaptureV1.source.framebuffer)
+            self.state = state = {}
+            self.source.dispatcher["format"] = lambda _s, drm: state.update(format=drm)
+            self.source.dispatcher["size"] = lambda _s, w, h: state.update(size=(w, h))
+            self.source.dispatcher["complete"] = lambda _s: state.update(done="complete")
+            self.source.dispatcher["retry"] = lambda _s: state.update(done="retry")
+            self.source.dispatcher["failed"] = lambda _s, msg: state.update(done="failed", message=msg)
+            self.display.roundtrip()
+        except BaseException:
+            self.display.disconnect()
+            raise
+
+    def take(self, read):
+        """`read(pixels, stride)` over one capture; CaptureRefused when Weston fails it."""
+        state = self.state
         for _ in range(5):
             assert state.get("format") in SHM_FORMAT and "size" in state, state
             width, height = state["size"]
@@ -375,13 +392,13 @@ def capture(read):
             fd = os.memfd_create("pw-capture")
             try:
                 os.ftruncate(fd, stride * height)
-                pool = shm.create_pool(fd, stride * height)
+                pool = self.shm.create_pool(fd, stride * height)
                 buffer = pool.create_buffer(0, width, height, stride, SHM_FORMAT[state["format"]])
                 state.pop("done", None)
-                source.capture(buffer)
+                self.source.capture(buffer)
                 end = time.monotonic() + 3
                 while "done" not in state and time.monotonic() < end:
-                    display.roundtrip()
+                    self.display.roundtrip()
                     time.sleep(0.02)
                 if state.get("done") == "complete":
                     with mmap.mmap(fd, stride * height, prot=mmap.PROT_READ) as pixels:
@@ -390,10 +407,57 @@ def capture(read):
                 pool.destroy()
             finally:
                 os.close(fd)
+            if state.get("done") == "failed":
+                raise CaptureRefused(state.get("message"))
             assert state.get("done") == "retry", ("capture", state)
         raise AssertionError(("capture_retries", state))
+
+    def close(self):
+        self.display.disconnect()
+
+
+def capture(read):
+    """`read(pixels, stride)` over one capture of Weston's framebuffer, by a client of its own."""
+    capturer = Capturer()
+    try:
+        return capturer.take(read)
     finally:
-        display.disconnect()
+        capturer.close()
+
+
+def capture_gate_cases():
+    """The shell's capture gate (shell.c `capture_ask`, Weston's memory line): one client captures
+    at a time, from its first capture until it disconnects, and at most CAPTURE_PIXELS of Output
+    in its life; a refused capture fails "unauthorized"."""
+    budget = int(re.search(r"^#define CAPTURE_PIXELS (\d+)\b", SHELL_SOURCE.read_text(),
+                           re.MULTILINE).group(1))
+    allowed = budget // (640 * 480)
+    holder, other = Capturer(), Capturer()
+    try:
+        holder.take(lambda _pixels, _stride: None)
+        try:
+            other.take(lambda _pixels, _stride: None)
+        except CaptureRefused as refused:
+            assert str(refused) == "unauthorized", refused
+        else:
+            raise AssertionError("a second client captured while the first held the gate")
+        print("PASS capture_refused_while_another_client_holds_the_gate", flush=True)
+    finally:
+        holder.close()
+    try:
+        for _ in range(allowed):   # the refused attempt above spent nothing
+            other.take(lambda _pixels, _stride: None)
+        try:
+            other.take(lambda _pixels, _stride: None)
+        except CaptureRefused as refused:
+            assert str(refused) == "unauthorized", refused
+        else:
+            raise AssertionError(f"capture {allowed + 1} of 640 x 480 passed CAPTURE_PIXELS {budget}")
+        print("PASS capture_allowed_after_the_holder_left_until_the_line", allowed, flush=True)
+    finally:
+        other.close()
+    capture(lambda _pixels, _stride: None)   # the line is the client's: a new one captures again
+    print("PASS capture_line_ends_with_its_client", flush=True)
 
 
 def health_views():
@@ -1271,6 +1335,7 @@ try:
     picture_v4()
     print("PASS health_layer_survives_invalidate", assert_pixel(*HEALTH, health_over(SLATE)),
           flush=True)
+    capture_gate_cases()
     explain_area_cases()
     card_ink_stays_in_the_explain_area()
     killed = kill_private_client()

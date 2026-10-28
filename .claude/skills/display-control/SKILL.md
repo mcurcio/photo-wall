@@ -475,12 +475,15 @@ scp -i ~/.ssh/photo_wall_agent -o StrictHostKeyChecking=no -o UserKnownHostsFile
   `position: (x, y) -> (x2, y2)` per Output): crop there for one Output. It is the picture as the
   GPU composes it for that one frame (the Player's planes, the debug overlay's card or the slate,
   the amber), at the Output's mode in pixels.
-- **"Output capture error: unauthorized"** or "does not support weston_debug_v1 interface": a
-  release from before `--debug` (through v0.46). `systemctl cat photo-wall-display.service | grep
+- **"does not support weston_debug_v1 interface"**, or every capture "unauthorized" with nothing
+  in the journal: a release from before `--debug` (through v0.46). `systemctl cat photo-wall-display.service | grep
   ExecStart` shows the flag.
-- **Never capture two 4K Outputs at once.** `weston-screenshooter` captures every lit Output
-  together, and two 4K captures are more than Weston's memory line holds: Weston is killed and the
-  Player stays down until a reboot. With one Output, or one 4K and one smaller, it fits.
+- **"Output capture error: unauthorized" on a current release** is the shell's capture gate
+  (`journalctl -u photo-wall-display | grep 'capture of'` says which): another client is
+  capturing (one at a time, until it disconnects), or the lit Outputs add up to more than one
+  4096 x 2160, which Weston's memory line holds (two 4K Outputs, or a 4K and a 1080p:
+  `weston-screenshooter` captures them all at once, so such a Pi is not captured whole; Display
+  host backend › The capture gate).
 - `scene-graph` names each view's client PID: the Player's (`systemctl show -p MainPID
   photo-wall-node-player.service`) and the overlay client's; `drm-backend` says, each repaint, which
   view went to which plane and why one did not.

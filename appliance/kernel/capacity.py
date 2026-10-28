@@ -40,15 +40,20 @@ class DeviceClass:
 
 MEMORY_ROUND: Final = 32 * MIB
 
-# What one Output's capture costs Weston (`--debug`, weston-screenshooter, weston_capture_v1's
-# framebuffer source): its GL renderer reads the Output into a pixel buffer object and copies it
-# into the client's shared-memory buffer, whose pages Weston's copy touches first, so all of it is
-# charged to Weston's cgroup and kept by Mesa's buffer cache afterwards (no growth on later
-# captures). Measured on the fireplace Pi (2026-10-28, a headless GL Weston in its own transient
-# unit): three times the Output's 4-byte pixels (1920 x 1080: +24 MB peak; 3840 x 2160: +98 MB).
-# Sized for the largest mode the Pi 5's HDMI drives, 4096 x 2160; one Output at a time
+# What a capture costs Weston (`--debug`, weston-screenshooter, weston_capture_v1's framebuffer
+# source): its GL renderer reads the Output into a pixel buffer object and copies it into the
+# client's shared-memory buffer, whose pages Weston's copy touches first, so all of it is charged
+# to Weston's cgroup and kept by Mesa's buffer cache afterwards (no growth on later captures).
+# Measured on the fireplace Pi (2026-10-28, a headless GL Weston in its own transient unit): three
+# times the Output's 4-byte pixels (1920 x 1080: +24 MB peak; 3840 x 2160: +98 MB). The line holds
+# CAPTURE_PIXELS of Output, the largest mode the Pi 5's HDMI drives (4096 x 2160), and the shell
+# refuses any capture past it: one capturing client at a time, at most CAPTURE_PIXELS in its life
+# (appliance/display_host/native/shell.c `capture_ask`, its `#define CAPTURE_PIXELS` bound to this
+# one by tests/node/apps/test_memory_lines.py), so every lit Output captured at once, or a second
+# client's capture, never passes the line
 # (docs/display-host-backend.md#seeing-what-the-compositor-shows).
-CAPTURE_BYTES: Final = 3 * 4096 * 2160 * 4
+CAPTURE_PIXELS: Final = 4096 * 2160
+CAPTURE_BYTES: Final = 3 * 4 * CAPTURE_PIXELS
 
 
 def cap_from_peak(peak_bytes: int, floor_bytes: int = 0) -> int:
@@ -108,8 +113,8 @@ LINES: Final[tuple[MemoryLine, ...]] = (
                cgroup="photo-wall-app-broker.service", parent="base"),
     MemoryLine("manager-supervisor", 96 * MIB, "E (W4); leaves with AppManager",
                cgroup="photo-wall-manager-supervisor.service", parent="base"),
-    MemoryLine("display", 160 * MIB, "M 12 (the fireplace Pi, 2026-10-28) + one Output's capture "
-               "(CAPTURE_BYTES, floor)", peak_bytes=12 * MIB, floor_bytes=CAPTURE_BYTES,
+    MemoryLine("display", 160 * MIB, "M 12 (the fireplace Pi, 2026-10-28) + the capture the shell "
+               "allows (CAPTURE_BYTES, floor)", peak_bytes=12 * MIB, floor_bytes=CAPTURE_BYTES,
                cgroup="photo-wall-display.service", parent="base"),
     MemoryLine("display-controller", 64 * MIB, "E (W4)",
                cgroup="photo-wall-display-controller.service", parent="base"),

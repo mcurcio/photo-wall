@@ -254,23 +254,39 @@ screenshooter's, which allows only the client the frontend itself spawns for Sup
 capture failed "unauthorized", and `weston-debug` found no `weston_debug_v1`.
 
 **What it opens.** Any client on the Wayland socket (root, and the apps in group `pw-display`:
-the Player) may capture any Output and read every scope, `proto` included; Weston logs a
-"debug protocol has been enabled" warning at each start. A subscribed scope costs Weston CPU for
-as long as it streams; an unsubscribed one costs nothing.
+the Player) may read every scope, `proto` included, and capture within the shell's capture gate
+(below); Weston logs a "debug protocol has been enabled" warning at each start. A subscribed
+scope costs Weston CPU for as long as it streams; an unsubscribed one costs nothing.
 
 **What a capture costs.** All of a capture's memory is charged to Weston's cgroup and Mesa keeps
 it after: three times the Output's 4-byte pixels (measured on the fireplace Pi, 2026-10-28, with
 a headless GL Weston in its own transient unit: 1920 x 1080 +24 MB, 3840 x 2160 +98 MB at the
 peak), held after the first capture and reused by the next. The display line
-(`appliance/kernel/capacity.py` `CAPTURE_BYTES`, `MemoryMax=160M`) holds one Output's capture at
-the largest mode the Pi 5's HDMI drives, 4096 x 2160. It does not hold two 4K Outputs captured
-at once, which `weston-screenshooter` does when both are lit: on such a Pi, an out-of-memory kill
-of Weston leaves the Player down until a reboot.
+(`appliance/kernel/capacity.py` `CAPTURE_BYTES`, `MemoryMax=160M`) holds the capture of
+`CAPTURE_PIXELS` of Output, the largest mode the Pi 5's HDMI drives (4096 x 2160), and no more:
+the 4 GB Pi's content line (88 MiB) has no room for two 4K captures.
+
+**The capture gate.** An out-of-memory kill of Weston would leave the Player down until a reboot,
+so the shell refuses every capture past the line (`shell.c` `capture_ask`, a screenshot authority
+beside `--debug`'s: `--debug` allows, the shell only refuses, and a refusal wins). One client
+captures at a time, from its first allowed capture until it disconnects, and that client may
+capture at most `CAPTURE_PIXELS` of Output (each capture's mode, in pixels) in its life; a refused
+capture fails "unauthorized" and Weston logs `photo-wall-shell: capture of <Output> refused`.
+So `weston-screenshooter`, which captures every lit Output at once, works while the lit Outputs
+add up to one 4096 x 2160 or less, and on a Pi lighting more (two 4K Outputs, or a 4K and a
+1080p) it is refused rather than killing Weston. Costs: such a Pi cannot be captured whole with
+the stock client (a client capturing one named Output at a time, one client per Output, is the
+way, not built); a client that stays connected after a capture keeps the gate closed to every
+other client until it leaves; a `retry` after an allowed capture counts again. What the gate does
+not bound is Mesa's cache across clients: one client's capture of a 4K Output and a later
+client's capture of another of a different size are not shown to share it (unmeasured).
 
 CI: the node-pid1 `dark` scenario runs the packaged unit's command line and, with the card up,
 requires `weston-debug` to list the scopes and dump the scene graph naming `Virtual-1`, and
 `weston-screenshooter` to write a PNG of the Output's size (`tests/test_node_pid1.py`
-`introspect`). A capture of a real HDMI Output is a manual bench step
+`introspect`). The display harness holds the gate (`tests/native_display_smoke.py`
+`capture_gate_cases`: a second client refused while the first holds it, allowed after it leaves,
+up to `CAPTURE_PIXELS` and refused past it). A capture of a real HDMI Output is a manual bench step
 ([display-control skill](../.claude/skills/display-control/SKILL.md#seeing-what-the-compositor-shows)).
 
 ## Base controller ingress
