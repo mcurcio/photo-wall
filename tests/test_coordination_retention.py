@@ -94,6 +94,20 @@ def test_each_retention_transaction_stays_within_its_row_budget(registry):
     assert events(registry.db) == 10
 
 
+def test_retention_keeps_exactly_kept_rows_across_sequence_gaps(registry):
+    """Inserts rolled back (a 503, a statement timeout, an outage) use up sequence numbers and
+    leave no rows; the cut counts rows, so exactly `kept` stay. Mutation probe: cut at
+    `max(sequence) - kept` again (35 rows stay, not 40)."""
+    seed(registry.db, 30)
+    with pytest.raises(RuntimeError), registry.db.transaction() as conn:
+        conn.execute("INSERT INTO execution_events(occurred_at,kind) "
+                     "SELECT 1000, 'observation' FROM generate_series(1, 5)")
+        raise RuntimeError("rolled back")
+    seed(registry.db, 30)
+    ExecutionEventRetention(registry.db, kept=40, batch_rows=100, batches=1).prune()
+    assert events(registry.db) == 40
+
+
 def test_a_prune_that_cannot_finish_holds_no_lock_and_never_fails_the_cycle(registry, wall):
     """The oldest event is held by another transaction, so no prune can finish (as when the old
     DELETE ran into its statement timeout). The coordinator's steps stay ok, an expired pin is
