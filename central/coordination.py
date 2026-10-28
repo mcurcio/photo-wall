@@ -710,7 +710,8 @@ class Coordinator:
         self._record_selected(conn, plan, projection)
 
     def _settle(self) -> None:
-        """Commit the cues that are due, release expired pins, clean up expired offers."""
+        """Commit the cues that are due, release expired pins, clean up expired offers (execution
+        events are pruned by their own step, never here)."""
         with self._transaction() as conn:
             now = self.clock.utc()
             configurations = self._configurations(conn, report=False)
@@ -745,7 +746,13 @@ class Coordinator:
         self.shown.record_selected_in(conn, showings)
 
     def _cleanup(self, conn, now, active_sessions: set[tuple[str, int]]):
-        """Expiry releases leases, while one latest manifest preserves revision high-water."""
+        """Expiry releases leases, while one latest manifest preserves revision high-water.
+
+        Every table pruned here is written only for what planning offered (an offer, its group,
+        its commits and locks, one feedback row per session, keyed so a repeat is a no-op), so it
+        cannot grow while this step fails. Execution events are written by every Player report
+        whatever this step does, so their retention is its own step, outside this transaction
+        and its locks (`central/infra/execution_event_retention.py`)."""
         self.shown.prune_in(conn, now=now)
         conn.execute("DELETE FROM assignment_locks WHERE valid_until<=%s", (now,))
         conn.execute(
@@ -785,10 +792,6 @@ class Coordinator:
                     "DELETE FROM player_feedback WHERE player_id=%s AND authority_epoch=%s",
                     session,
                 )
-        conn.execute(
-            "DELETE FROM execution_events WHERE sequence<(SELECT COALESCE(max(sequence),0)-10000 "
-            "FROM execution_events)"
-        )
 
     def _presented_from_an_earlier_offer(self, conn, player_id: str, observation: Observation,
                                          config) -> bool:

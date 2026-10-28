@@ -2,8 +2,10 @@
 
 One tick runs, in order: the Node reconciler ("reconcile"), the coordinator's three steps
 ("runtime": the Runtime moves to now; "planning": plan and offer; "settle": commits due, pin
-expiry and cleanup, central/coordination.py `Coordinator.advance`) and the measurement requests
-of the plan ("measurement"). A step that fails never skips a later one: the Runtime keeps moving
+expiry and cleanup, central/coordination.py `Coordinator.advance`), the measurement requests
+of the plan ("measurement") and execution events' retention ("retention", bounded batches in
+their own transactions outside the coordinator's locks,
+central/infra/execution_event_retention.py). A step that fails never skips a later one: the Runtime keeps moving
 when planning fails, and planning still runs when the reconciler fails. Measurement alone needs
 an earlier step's answer (the plan): when planning fails it is "skipped" this tick, so no facet
 claims a step ran that did not. Each step's health is its
@@ -64,13 +66,14 @@ class SchedulerHealth:
 
 
 class Scheduler:
-    """`reconciler.advance()`, `coordinator.advance() -> Advance` and `measurements(requests)`
-    are the steps; `clock` stamps their facets and the completed tick."""
+    """`reconciler.advance()`, `coordinator.advance() -> Advance`, `measurements(requests)` and
+    `retention()` are the steps; `clock` stamps their facets and the completed tick."""
 
     def __init__(self, reconciler, coordinator,
-                 measurements: Callable[[Sequence[MeasureRequest]], object], clock: Clock) -> None:
+                 measurements: Callable[[Sequence[MeasureRequest]], object], clock: Clock, *,
+                 retention: Callable[[], object]) -> None:
         self.reconciler, self.coordinator = reconciler, coordinator
-        self.measurements, self.clock = measurements, clock
+        self.measurements, self.clock, self.retention = measurements, clock, retention
         self._steps: dict[str, StepHealth] = {}
         self._last_tick_monotonic: float | None = None
 
@@ -82,6 +85,7 @@ class Scheduler:
             self._run("measurement", lambda: self.measurements(projection.measurements))
         else:
             self._skipped("measurement", "planning failed")
+        self._run("retention", self.retention)
         self._last_tick_monotonic = self.clock.monotonic()
 
     def _coordinate(self) -> Advance | None:

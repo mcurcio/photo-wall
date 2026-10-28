@@ -48,6 +48,7 @@ from central.infra.display_store import (
     PgPictureSessions,
     frame_outputs_in,
 )
+from central.infra.execution_event_retention import ExecutionEventRetention
 from central.infra.fit_analysis_store import PgFitAnalysisReader
 from central.infra.fit_settings_store import PgFitSettings
 from central.infra.frame_lighting_store import PgFrameLighting, PgHouseLock
@@ -860,7 +861,8 @@ def create_app(
                       content=content)
     app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions, coordinator)
     app.state.scheduler = Scheduler(app.state.node_reconciler, coordinator,
-                                    media_application.request_measurements, clock)
+                                    media_application.request_measurements, clock,
+                                    retention=ExecutionEventRetention(db).prune)
     # A Node's leaf and Home Assistant's door arrive at Central's origin (erratum E-E3D-CUT-4): relayed to the hub.
     hub_leaf_url = hub_leaf_url or os.environ.get("PHOTO_WALL_HUB_LEAF_URL")
     if hub_leaf_url:
