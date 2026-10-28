@@ -4,6 +4,7 @@ stays inside its line; the content line left on every class, and each shipped im
 line. Config-file test: no systemd, no database."""
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import replace
 from pathlib import Path
@@ -15,6 +16,7 @@ from test_netboot_liveness import _parse_unit
 
 from appliance.apps.process_linux import app_unit_properties
 from appliance.kernel.capacity import (
+    CAPTURE_PIXELS,
     CLASSES,
     GIB,
     LINES,
@@ -69,6 +71,16 @@ def test_every_line_unit_ships_and_sits_in_its_lines_slice() -> None:
             unit = _parse_unit((SYSTEMD / item.cgroup).read_text())
             assert unit["Service"]["Slice"] == [line(item.parent).cgroup], (item, unit["Service"].get("Slice"))
             assert cgroup_path(item.name) == f"{line(item.parent).cgroup}/{item.cgroup}"
+
+
+def test_the_shell_refuses_captures_past_the_display_line() -> None:
+    # Weston's line holds CAPTURE_BYTES, the capture of CAPTURE_PIXELS; the shell's capture gate
+    # counts the same pixels (shell.c `capture_ask`; its refusals: tests/native_display_smoke.py
+    # `capture_gate_cases`). Mutation probe: `#define CAPTURE_PIXELS 17694720` fails here.
+    shell = (REPO / "appliance/display_host/native/shell.c").read_text()
+    defined = re.findall(r"^#define CAPTURE_PIXELS (\d+)\b", shell, re.MULTILINE)
+    assert defined == [str(CAPTURE_PIXELS)], defined
+    assert line("display").floor_bytes == 3 * 4 * CAPTURE_PIXELS
 
 
 def test_members_fit_inside_their_slice() -> None:

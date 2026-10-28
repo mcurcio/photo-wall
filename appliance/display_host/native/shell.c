@@ -12,6 +12,8 @@
  * never evidence, so an app that answers pings and shows nothing loses the screen.
  * The shell also serves the standard window alpha (wp_alpha_modifier_v1, `struct alpha`) and turns
  * an Output's screen on the controller's `turn` op (render redesign, .claude/runs/render-planes).
+ * Weston's `--debug` allows every Output capture; the shell refuses the ones past Weston's memory
+ * line (`capture_ask`, docs/display-host-backend.md#seeing-what-the-compositor-shows).
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -55,6 +57,9 @@
 #define MAX_OPERATIONS 1024  /* contracts.node_frame.PICTURE_OPERATIONS_BYTES (picture operations v5) */
 #define MAX_BRIGHTNESS 128
 #define MAX_PICTURE_CHANGE 20
+/* The Output pixels one capturing client may capture in its life: appliance.kernel.capacity
+ * CAPTURE_PIXELS (4096 x 2160), the capture Weston's memory line holds. */
+#define CAPTURE_PIXELS 8847360
 
 struct shell;
 struct app_surface;
@@ -152,6 +157,10 @@ struct shell {
     struct wl_client *diagnostic_client;
     struct wl_resource *diagnostic_resource;
     struct wl_listener diagnostic_client_destroyed;
+    /* The one client allowed to capture, the Output pixels it has captured, and its end. */
+    struct wl_client *capture_holder;
+    uint64_t capture_spent;
+    struct wl_listener capture_ask, capture_holder_destroyed;
     pid_t diagnostic_pid;
     uint64_t next_diagnostic_start;
     struct wl_event_source *listen_source, *control_source, *timer;
@@ -1331,6 +1340,37 @@ static void output_resized(struct wl_listener *l, void *data) {
     if (!o) return;
     remode(o);
 }
+/* Every capture's memory is charged to Weston and Mesa keeps it (capacity.py CAPTURE_BYTES): one
+ * client captures at a time, from its first allowed capture until it disconnects, and at most
+ * CAPTURE_PIXELS of Output in its life, so two clients' captures, one client's captures of every
+ * lit Output at once, or a second source on one Output never pass the line. Only refuses: the
+ * `--debug` authority allows. A refused capture fails "unauthorized". */
+static void capture_holder_gone(struct wl_listener *l, void *data) {
+    (void)data;
+    struct shell *s = wl_container_of(l, s, capture_holder_destroyed);
+    wl_list_remove(&s->capture_holder_destroyed.link);
+    s->capture_holder = NULL;
+    s->capture_spent = 0;
+}
+static void capture_ask(struct wl_listener *l, struct weston_output_capture_attempt *att) {
+    struct shell *s = wl_container_of(l, s, capture_ask);
+    const struct weston_mode *mode = att->who->output->current_mode;
+    uint64_t pixels = mode ? (uint64_t)mode->width * (uint64_t)mode->height : CAPTURE_PIXELS + 1;
+    if ((s->capture_holder && s->capture_holder != att->who->client) ||
+        s->capture_spent + pixels > CAPTURE_PIXELS) {
+        att->denied = true;
+        weston_log("photo-wall-shell: capture of %s refused: %s\n", att->who->output->name,
+                   s->capture_holder && s->capture_holder != att->who->client
+                       ? "another client is capturing" : "past the capture line");
+        return;
+    }
+    if (!s->capture_holder) {
+        s->capture_holder = att->who->client;
+        s->capture_holder_destroyed.notify = capture_holder_gone;
+        wl_client_add_destroy_listener(s->capture_holder, &s->capture_holder_destroyed);
+    }
+    s->capture_spent += pixels;
+}
 static void diagnostic_client_gone(struct wl_listener *l, void *data) {
     (void)data;
     struct shell *s = wl_container_of(l, s, diagnostic_client_destroyed);
@@ -1394,6 +1434,8 @@ static void shell_destroyed(struct wl_listener *l, void *data) {
     wl_list_remove(&s->destroyed.link);
     wl_list_remove(&s->output_created.link);
     wl_list_remove(&s->output_resized.link);
+    wl_list_remove(&s->capture_ask.link);
+    if (s->capture_holder) wl_list_remove(&s->capture_holder_destroyed.link);
     wl_protocol_logger_destroy(s->logger);
     wl_global_destroy(s->frame_global);
     wl_global_destroy(s->diagnostic_global);
@@ -1478,6 +1520,7 @@ WL_EXPORT int wet_shell_init(struct weston_compositor *ec, int *argc, char *argv
     wl_signal_add(&ec->output_resized_signal, &s->output_resized);
     s->destroyed.notify = shell_destroyed;
     wl_signal_add(&ec->destroy_signal, &s->destroyed);
+    weston_compositor_add_screenshot_authority(ec, &s->capture_ask, capture_ask);
     struct weston_output *w;
     wl_list_for_each(w, &ec->output_list, link) add_output(s, w);
     struct wl_event_loop *loop = wl_display_get_event_loop(ec->wl_display);
