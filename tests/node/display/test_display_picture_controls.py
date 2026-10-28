@@ -348,22 +348,19 @@ def test_judged_and_the_write_order():
     assert write_order({"87": 1, "DC": 0, "10": 2, "14": 5}, (*offered, preset, mode)) == ("14", "DC", "10", "87")
 
 
-def _linear(encoded: float) -> float:
-    """IEC 61966-2-1, written out here so the test does not lean on the code it checks."""
-    return encoded / 12.92 if encoded <= 0.04045 else ((encoded + 0.055) / 1.055) ** 2.4
-
-
 def _encoded(linear: float) -> float:
+    """IEC 61966-2-1's encode, written out here so the test does not lean on the code it checks."""
     return 12.92 * linear if linear <= 0.0031308 else 1.055 * linear ** (1 / 2.4) - 0.055
 
 
 @pytest.mark.parametrize("kelvin", [3000, 9300])
 def test_colour_temperature_shows_white_as_charitys_table(kelvin):
-    """Charity's R G B are gamma-encoded sRGB; the Player multiplies linear light. So the
-    multipliers are the table's rows in linear light, relative to 6500 K, and white comes out of
-    the final pass as the table's colour (relative to 6500 K, largest 1). Mutation probe: divide
-    the encoded rows -> 3000 K white shows green 0.75 where the table's is 0.53."""
-    ratio = [_linear(value) / _linear(neutral) for value, neutral in zip(CHARITY[kelvin], CHARITY[6500], strict=True)]
+    """Charity's decimal R G B are linear light (its 0-255 columns are their sRGB encoding); the
+    Player multiplies linear light. So the multipliers are the table's rows as published, relative
+    to 6500 K, and white comes out of the final pass as the table's colour (relative to 6500 K,
+    largest 1). Mutation probe: linearise the rows a second time -> 3000 K white shows green 0.23
+    where the table's is 0.52."""
+    ratio = [value / neutral for value, neutral in zip(CHARITY[kelvin], CHARITY[6500], strict=True)]
     expected = [value / max(ratio) for value in ratio]
     multipliers = kelvin_white(kelvin)
     assert multipliers == pytest.approx(expected, abs=1e-3)

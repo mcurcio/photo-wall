@@ -1,6 +1,6 @@
 """The sRGB transfer curve: the one home of the decode every side works its colour in (the Player's
-final pass, the Pi's white balance, a room light's kelvin white). Stdlib only: the Pi runs it, and
-contracts/kelvin.py and contracts/node_frame.py both import it without importing each other.
+final pass, a bulb's rgb colour, the calibration target reader). Stdlib only: the Pi runs it. The
+kelvin table (contracts/kelvin.py) needs no decode: Charity's rows are linear light already.
 """
 from __future__ import annotations
 

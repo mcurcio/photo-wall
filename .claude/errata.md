@@ -7165,3 +7165,5 @@ Owner, 2026-10-17: "seems like a baseline feature. The render loop should not fi
   same explicit Runtime budget error"; `advance()` still raises both.
 - **Left as whole-pass failures (follow-up):** `_locks` raising `inconsistent_content_lock`, and a
   layer whose cue `_groups` did not compute (KeyError); both fail the planning step alone now.
+
+- E-KELVIN-1 (CORRECTION, 2026-10-28; reverses E-1C-PI-3 and E-1C-R1F-1): Charity's decimal R G B columns are LINEAR light, not gamma-encoded; the gamma-encoded values are the file's separate 0-255 columns (4300 K: 0.7083 encodes to 219, the published byte; read as linear the row gives the published x y 0.3704 0.3738). The header's "sRGB primaries and gamma correction" describes the bytes. E-1C-R1F-1's extra linearisation doubled every colour temperature and room-light colour (4300 K white balance (1, 0.525, 0.170) instead of (1, 0.751, 0.448); the fireplace Frame showed "very orange"). `kelvin_white` divides the rows as published; `tests/test_print_look_contract.py` holds the table's meaning against the bytes. Do not linearise `_CHARITY` again.
