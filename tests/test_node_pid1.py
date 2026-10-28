@@ -23,6 +23,7 @@ they fail. Each test removes its own containers, database and archive copies.
 """
 
 import asyncio
+import base64
 import dataclasses
 import datetime
 import hashlib
@@ -153,6 +154,16 @@ CONTROLLER_FAULTS = ("FileNotFoundError", "226/NAMESPACE")
 # Weston's WatchdogSec (photo-wall-display.service), plus its RestartSec, start and the controller's.
 DISPLAY_RECOVERY_SECONDS = 30
 EPOCH = datetime.datetime(1970, 1, 1)
+# Weston's introspection (`--debug` in the packaged unit): the PNG weston-screenshooter writes,
+# read inside the container as its name, size and bytes (base64).
+CAPTURE_DIR = "/var/tmp/pw-capture"
+FIXTURE_OUTPUT_PX = (640, 480)  # the fixture's headless size (tests/node_pid1_central_inner.py)
+CAPTURED_PNG = """import base64,json,pathlib,struct,sys
+(png,)=sorted(pathlib.Path(sys.argv[1]).glob('*.png'))
+data=png.read_bytes()
+assert data[:8]==bytes([137,80,78,71,13,10,26,10]) and data[12:16]==b'IHDR',png
+width,height=struct.unpack('>II',data[16:24])
+print(json.dumps({'name':png.name,'width':width,'height':height,'png':base64.b64encode(data).decode()}))"""
 
 
 @pytest.fixture
@@ -358,6 +369,30 @@ class Node:
         # its init, before the module that sends READY=1 loads.
         assert bound_ns <= started_ns, evidence
         return display, controller
+
+    def introspect(self, name):
+        """Weston as the packaged unit runs it can be introspected by root over its Wayland
+        socket, as the agent does on a Pi (.claude/skills/display-control/SKILL.md): weston-debug
+        lists the debug scopes and dumps the scene graph naming DARK_OUTPUT, and
+        weston-screenshooter captures it as a PNG of the Output's size. On main, without
+        `--debug`, weston-debug finds no weston_debug_v1 and the capture is refused
+        "unauthorized". The PNG is kept as evidence."""
+        wayland = "WAYLAND_DISPLAY=" + str(WAYLAND_SOCKET)
+        scopes = self.run("env", wayland, "weston-debug", "--list", timeout=30)
+        scene = self.run("env", wayland, "weston-debug", "scene-graph", timeout=30)
+        self.run("rm", "-rf", CAPTURE_DIR)
+        self.run("mkdir", "-p", CAPTURE_DIR)
+        # weston-screenshooter exits 0 when the capture fails: the PNG is the proof.
+        self.run("env", wayland, "XDG_PICTURES_DIR=" + CAPTURE_DIR, "weston-screenshooter",
+                 timeout=30)
+        captured = json.loads(self.run("/usr/bin/python3", "-I", "-c", CAPTURED_PNG, CAPTURE_DIR))
+        (self.work / (name + ".png")).write_bytes(base64.b64decode(captured.pop("png")))
+        evidence = {"scopes": scopes, "scene_graph": scene, "capture": captured}
+        (self.work / (name + ".json")).write_text(json.dumps(evidence, sort_keys=True))
+        assert "scene-graph" in scopes and "proto" in scopes, evidence
+        assert f"({DARK_OUTPUT}):" in scene, evidence
+        assert (captured["width"], captured["height"]) == FIXTURE_OUTPUT_PX, evidence
+        return evidence
 
     def recover_display(self, signal, name):
         """Weston's main process gets `signal`; within DISPLAY_RECOVERY_SECONDS a new Weston
@@ -1276,7 +1311,10 @@ def test_node_pid1_dark(node_pid1_inputs, node_host, registry, tmp_path):
 
     Issue #126: Central runs with its hub (as in `join`), and after the kill its database holds the
     judge's verdict from the Pi's `health` line, Virtual-1 dark with app_absent (on main the judge
-    writes no line, so nothing is recorded)."""
+    writes no line, so nothing is recorded).
+
+    With the frozen Player's card up, Weston as the packaged unit runs it is introspected over its
+    Wayland socket: debug scopes, the scene graph and a PNG capture (`Node.introspect`)."""
     if os.environ.get(REQUIRE_VARIABLE) == "1" and not os.environ.get(NATS_SERVER_VARIABLE):
         pytest.fail(f"{REQUIRE_VARIABLE}=1 but {NATS_SERVER_VARIABLE} is unset: the dark leg needs the hub",
                     pytrace=False)
@@ -1289,6 +1327,8 @@ def test_node_pid1_dark(node_pid1_inputs, node_host, registry, tmp_path):
             node.cold(fixture, components_dir)
             limit = node.at_open_file_limit("dark-limit")
             frozen = node.stays_dark("SIGSTOP", "app_unresponsive", UNRESPONSIVE_LINE, "dark-sigstop")
+            # The card is up: Weston's introspection, as the agent reads a dark Frame on a Pi.
+            introspected = node.introspect("dark-introspect")
             killed = node.stays_dark(
                 "SIGKILL", "app_absent", ABSENT_LINE, "dark-kill",
                 then=lambda: node.recover_display("SIGSEGV", "dark-display-crash"))
@@ -1296,7 +1336,8 @@ def test_node_pid1_dark(node_pid1_inputs, node_host, registry, tmp_path):
                                      lambda report: dark_with(report, DARK_OUTPUT, "app_absent"),
                                      JOIN_SECONDS)
             (work / "dark.json").write_text(json.dumps(
-                {"limit": limit, "sigstop": frozen, "kill": killed, "verdict": received}, sort_keys=True))
+                {"limit": limit, "sigstop": frozen, "introspect": introspected["capture"], "kill": killed,
+                 "verdict": received}, sort_keys=True))
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
             node.capture_and_remove(fixture, sys.exc_info()[1])

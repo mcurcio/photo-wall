@@ -1,6 +1,6 @@
 ---
 name: display-control
-description: Operate a Photo Wall Pi's displays by hand over SSH - read a display's EDID (identity, and its size from the base block, never a detailed timing), map HDMI ports to CEC devices and DDC/CI buses, turn a display off and on with cec-ctl or ddcutil, ask a display for the picture list (`getvcp <codes> --terse`, `capabilities`) and read and set its picture settings (brightness VCP 10, contrast VCP 12, colour preset 14, gains…), and read what the display controller did. Read the HDMI signal range (Broadcast RGB, is_limited_range, the AVI InfoFrame) and whether a display honours it (the EDID's quantization-selectable bit). Use it for the 1b bench step (Test off and on), the display-tuning bench steps (Full and Limited on a TV, the time without photos per change), the 1c and picture-split bench steps (display and Photo Wall brightness from the console read back, which codes a display answers, the time of an ask, power during an ask, Cover on the test monitor, write timing), to diagnose "Display didn't answer", "The display did not take it", "Checking what this display offers" that never clears or a power method that never answers, or to probe a new display's support. Also, when the owner sends a photo of a Frame while tuning, read the picture and Position values Central sent it at that time (configuration snapshots); when he AirDrops a photo of the calibration targets, read it with the reader script and tell him what to change. Read the debug overlay on a Pi: the health judge's verdict (why a Frame is dark, since when), the hold and the Frame region the overlay draws in, and what Central recorded. The rules (what the controller does, what Central decides) live in the docs it links; this is the runbook and its traps.
+description: Operate a Photo Wall Pi's displays by hand over SSH - read a display's EDID (identity, and its size from the base block, never a detailed timing), map HDMI ports to CEC devices and DDC/CI buses, turn a display off and on with cec-ctl or ddcutil, ask a display for the picture list (`getvcp <codes> --terse`, `capabilities`) and read and set its picture settings (brightness VCP 10, contrast VCP 12, colour preset 14, gains…), and read what the display controller did. Read the HDMI signal range (Broadcast RGB, is_limited_range, the AVI InfoFrame) and whether a display honours it (the EDID's quantization-selectable bit). Use it for the 1b bench step (Test off and on), the display-tuning bench steps (Full and Limited on a TV, the time without photos per change), the 1c and picture-split bench steps (display and Photo Wall brightness from the console read back, which codes a display answers, the time of an ask, power during an ask, Cover on the test monitor, write timing), to diagnose "Display didn't answer", "The display did not take it", "Checking what this display offers" that never clears or a power method that never answers, or to probe a new display's support. Also, when the owner sends a photo of a Frame while tuning, read the picture and Position values Central sent it at that time (configuration snapshots); when he AirDrops a photo of the calibration targets, read it with the reader script and tell him what to change. Read the debug overlay on a Pi: the health judge's verdict (why a Frame is dark, since when), the hold and the Frame region the overlay draws in, and what Central recorded. See what the compositor shows without a person looking: capture the Outputs as a PNG (weston-screenshooter) and read Weston's state (weston-debug: scene-graph, drm-backend). The rules (what the controller does, what Central decides) live in the docs it links; this is the runbook and its traps.
 ---
 
 # display-control
@@ -445,6 +445,47 @@ ActiveState,InvocationID,ExecMainStatus` and `journalctl -b -u photo-wall-app-br
 broker records a run that exited under its own Weston as `down` (fault `process_exited`) and
 starts nothing until a person reboots; only Display's own Weston restart (a signal range change)
 starts it again. Recover with the Pi's Hardware page › **Reboot Player**.
+
+## Seeing what the compositor shows
+
+Weston runs with `--debug` ([Display host backend › Seeing what the compositor
+shows](../../../docs/display-host-backend.md#seeing-what-the-compositor-shows): what it turns on,
+what it opens, what a capture costs). As root, against the public Wayland socket, with the stock
+clients of the `weston` package:
+
+```sh
+W=WAYLAND_DISPLAY=/run/photo-wall-display-wayland/wayland-0
+sudo rm -rf /tmp/pw-capture && sudo mkdir /tmp/pw-capture
+sudo env $W XDG_PICTURES_DIR=/tmp/pw-capture weston-screenshooter   # exits 0 even when it fails: look for the PNG
+ls -l /tmp/pw-capture                                                # wayland-screenshot-<date>.png
+sudo env $W weston-debug --list                                      # the scopes
+sudo env $W weston-debug scene-graph                                 # one dump: Outputs, layers, views, planes
+sudo env $W timeout 5 weston-debug drm-backend                       # streams: stop it with timeout
+```
+
+Then copy the PNG to the Mac and look at it (Read shows an image; SendUserFile puts it in front of
+the owner):
+
+```sh
+scp -i ~/.ssh/photo_wall_agent -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  'photowall@<pi-ip>:/tmp/pw-capture/*.png' /Volumes/Dock/tmp/
+```
+
+- **One PNG holds every lit Output**, each at its position in Weston's layout (`scene-graph`'s
+  `position: (x, y) -> (x2, y2)` per Output): crop there for one Output. It is the picture as the
+  GPU composes it for that one frame (the Player's planes, the debug overlay's card or the slate,
+  the amber), at the Output's mode in pixels.
+- **"Output capture error: unauthorized"** or "does not support weston_debug_v1 interface": a
+  release from before `--debug` (through v0.46). `systemctl cat photo-wall-display.service | grep
+  ExecStart` shows the flag.
+- **Never capture two 4K Outputs at once.** `weston-screenshooter` captures every lit Output
+  together, and two 4K captures are more than Weston's memory line holds: Weston is killed and the
+  Player stays down until a reboot. With one Output, or one 4K and one smaller, it fits.
+- `scene-graph` names each view's client PID: the Player's (`systemctl show -p MainPID
+  photo-wall-node-player.service`) and the overlay client's; `drm-backend` says, each repaint, which
+  view went to which plane and why one did not.
+- Each capture holds on to its memory in Weston (Mesa's cache), and the next reuses it; read
+  `systemctl show photo-wall-display.service -p MemoryCurrent -p MemoryPeak` if in doubt.
 
 ## Traps
 
