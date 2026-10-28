@@ -258,7 +258,8 @@ class Node:
         argv.extend("systemd.mask=" + unit for unit in MASKS if "systemd.mask=" + unit not in argv)
         self.argv = argv
 
-    def run(self, *args, timeout=180):
+    def run(self, *args, timeout=180, stderr=False):
+        """Run in the container; return its stdout, or its stderr when `stderr`."""
         result = self.container.exec(*args, timeout=timeout)
         with (self.work / "commands.log").open("a") as log:
             log.write(result.stdout + result.stderr)
@@ -266,7 +267,7 @@ class Node:
             raise AssertionError(
                 "container command failed: " + args[0] + "; see " + str(self.work / "commands.log")
             )
-        return result.stdout
+        return result.stderr if stderr else result.stdout
 
     def boot(self, fixture, components_dir, scenario=None):
         """Boot PID1, bind the exact packages and run the inner composition (with `scenario`)."""
@@ -378,7 +379,10 @@ class Node:
         `--debug`, weston-debug finds no weston_debug_v1 and the capture is refused
         "unauthorized". The PNG is kept as evidence."""
         wayland = "WAYLAND_DISPLAY=" + str(WAYLAND_SOCKET)
-        scopes = self.run("env", wayland, "weston-debug", "--list", timeout=30)
+        # weston-debug prints the list to stderr, one "    <name> [will not bind]" line per
+        # scope (Weston 14.0.2 clients/weston-debug.c list_streams, lines 247-259).
+        listing = self.run("env", wayland, "weston-debug", "--list", timeout=30, stderr=True)
+        scopes = [line.split()[0] for line in listing.splitlines() if line.endswith("[will not bind]")]
         scene = self.run("env", wayland, "weston-debug", "scene-graph", timeout=30)
         self.run("rm", "-rf", CAPTURE_DIR)
         self.run("mkdir", "-p", CAPTURE_DIR)
@@ -387,7 +391,7 @@ class Node:
                  timeout=30)
         captured = json.loads(self.run("/usr/bin/python3", "-I", "-c", CAPTURED_PNG, CAPTURE_DIR))
         (self.work / (name + ".png")).write_bytes(base64.b64decode(captured.pop("png")))
-        evidence = {"scopes": scopes, "scene_graph": scene, "capture": captured}
+        evidence = {"scopes": listing, "scene_graph": scene, "capture": captured}
         (self.work / (name + ".json")).write_text(json.dumps(evidence, sort_keys=True))
         assert "scene-graph" in scopes and "proto" in scopes, evidence
         assert f"({DARK_OUTPUT}):" in scene, evidence
