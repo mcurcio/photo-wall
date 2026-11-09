@@ -9,15 +9,18 @@ values baked at its tick.
 """
 from __future__ import annotations
 
+import math
+
 from hypothesis import given, settings
 from hypothesis import strategies as st
 from test_executor import Rig, binding, layer
 
-from contracts.time import ManualClock, TimeMapping
+from contracts.time import ManualClock
 from player.cache import Cache
 from player.executor import TIMEBASE_TOLERANCE, Executor
 from player.look import look, moments, next_change
 from player.rendering import LocalLayer, OutputComposition, PresentationResult
+from player.show_clock import ShowClock
 from player.visibility import visible_now
 
 
@@ -138,9 +141,8 @@ def test_the_tick_hands_the_renderer_a_composition_it_reads_at_any_frame_time(tm
 
 
 def test_the_executor_re_anchors_its_timeline_only_when_it_really_moved(tmp_path):
-    """Each tick re-anchors a healthy clock mapping from two clock readings; a move within
-    TIMEBASE_TOLERANCE hands over the same timebase (the renderer compares it by equality), a
-    larger one the new timebase."""
+    """A re-anchor within TIMEBASE_TOLERANCE hands over the same timebase (the renderer compares
+    it by equality), a larger one the new timebase."""
     rig = Rig(tmp_path)
     rig.play(layer(start=100, end=200, fade_in=4))
     first = rig.renderer.outputs["hdmi1"].timebase
@@ -181,26 +183,30 @@ def test_a_continuation_keeps_the_executors_timebase(tmp_path):
     assert look(kept, at + 99).layers[0].alpha < look(kept, at + 74).layers[0].alpha
 
 
-def test_a_mapping_gone_unhealthy_keeps_its_anchor_through_a_utc_step(tmp_path):
-    """Anchored while healthy; once the mapping ages out a UTC step is not a new timeline: the
-    executor keeps handing over the anchor it took while the mapping was healthy."""
-    clock = ManualClock(100)
-    mapping = TimeMapping(clock)
-    mapping.establish(.01)
+def _anchored_executor(tmp_path, clock: ManualClock) -> tuple[Executor, ShowClock]:
+    show_clock = ShowClock(clock.monotonic)
+    show_clock.sample(server_time=clock.utc(), sent_monotonic=clock.monotonic(),
+                      received_monotonic=clock.monotonic())
     executor = Executor("player1", Cache(tmp_path / "cache", 4096), Rig(tmp_path / "r").renderer,
-                        clock, mapping)
+                        clock, show_clock)
+    return executor, show_clock
+
+
+def test_a_show_clock_gone_stale_keeps_its_timebase(tmp_path):
+    """Too long without a sample is doubt, not a new timeline: the executor keeps handing over
+    the timebase it has, until a sample says Central has moved."""
+    clock = ManualClock(100)
+    executor, show_clock = _anchored_executor(tmp_path, clock)
     anchored = executor._timebase()
-    clock.advance(mapping.max_age + 1)
-    assert not mapping.healthy()
-    clock.step_utc(5)
+    clock.advance(1_100)
+    assert not show_clock.healthy()
+    clock.step_utc(5)       # the Pi's wall clock is not read
     assert executor._timebase() == anchored
 
 
-def test_an_unanchored_clock_mapping_hands_over_utc_less_monotonic(tmp_path):
-    """Never healthy, so nothing is anchored: the timebase is this moment's UTC less monotonic."""
+def test_an_unanchored_show_clock_hands_over_no_timeline(tmp_path):
+    """Never anchored: plan time is unknown, so the timebase says so (-inf), never a guess."""
     clock = ManualClock(100)
-    clock.step_utc(5)
-    clock.advance(3)
     executor = Executor("player1", Cache(tmp_path / "cache", 4096), Rig(tmp_path / "r").renderer,
-                        clock, TimeMapping(clock))
-    assert executor._timebase() == clock.utc() - clock.monotonic()
+                        clock, ShowClock(clock.monotonic))
+    assert executor._timebase() == -math.inf

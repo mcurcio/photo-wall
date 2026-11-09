@@ -34,11 +34,12 @@ from test_registry import ADMIN
 
 from central.app import create_app
 from contracts.frame_fit import Placement
-from contracts.time import ManualClock, TimeMapping
+from contracts.time import ManualClock
 from player.cache import Cache
 from player.executor import AuthorityError, Executor
 from player.planes import FrameLayers, Screen, compose
 from player.rendering import RecordingRenderer
+from player.show_clock import ShowClock
 
 AUTH = {"Authorization": "Bearer " + ADMIN}
 FRAME = "frame-0"
@@ -183,12 +184,18 @@ class _Frame:
     def __init__(self, registry, coordinator, player, directory, *, capacity=4):
         self.registry, self.coordinator, self.player = registry, coordinator, player
         self.clock = ManualClock(registry.clock.utc())
-        self.mapping = TimeMapping(self.clock)
-        self.mapping.establish(.01)
+        self.show_clock = ShowClock(self.clock.monotonic)
+        self._sync_clock()
         self.renderer = RecordingRenderer(capacity)  # the real Pi's default decoder limit
         self.executor = Executor(player["player_id"], Cache(directory / "cache", 1 << 20),
-                                 self.renderer, self.clock, self.mapping)
+                                 self.renderer, self.clock, self.show_clock)
         self.output = None
+
+    def _sync_clock(self):
+        """One instant round trip to Central's clock."""
+        monotonic = self.clock.monotonic()
+        self.show_clock.sample(server_time=self.registry.clock.utc(), sent_monotonic=monotonic,
+                               received_monotonic=monotonic)
 
     def _apply(self):
         delivery = self.coordinator.delivery(self.player["player_id"], self.player["authority_epoch"])
@@ -234,13 +241,13 @@ class _Frame:
         for step in self._steps(seconds, 2):
             self.registry.clock.advance(step)
             self.clock.advance(step)
-            self.mapping.establish(.01)
+            self._sync_clock()
             composition = self.sync()
         return composition
 
     def lose_central(self, seconds):
         """Central is unreachable: time passes and the Frame draws every second, but nothing
-        arrives (after 30 s the Player's mapping of Central's time is stale)."""
+        arrives (the Player's ShowClock carries Central's time on, freewheeling)."""
         for step in self._steps(seconds, 1):
             self.registry.clock.advance(step)
             self.clock.advance(step)
@@ -306,7 +313,7 @@ def test_after_a_black_ending_the_kept_photo_does_not_come_back(registry, tmp_pa
 
 def test_after_a_black_ending_an_outage_stays_black(registry, tmp_path):
     """Owner, 2026-10-10: a Black ending during an outage should "Stay black". Central is lost
-    while the (long) ending shows; the Player's time goes stale mid-ending, the ending plays
+    while the (long) ending shows; the Player's time freewheels through the ending, which plays
     out, and the Frame keeps nothing. Mutation probe: skip the ending's after-state (the kept
     photo comes back at 66 s)."""
     player, app, coordinator = _rig(registry)
@@ -314,7 +321,7 @@ def test_after_a_black_ending_an_outage_stays_black(registry, tmp_path):
     with TestClient(app) as client:
         _play_one_cycle(client, frame, _scene("black-end", ending=("black", 40), keep_last=True))
         assert _shown(frame.advance(11)) == (False, [("black", 1.0)])  # 21 s: the ending shows
-        assert _shown(frame.lose_central(35)) == (False, [("black", 1.0)])  # 56 s: time is stale
+        assert _shown(frame.lose_central(35)) == (False, [("black", 1.0)])  # 56 s: freewheeling
         assert _shown(frame.lose_central(10)) == BLACK  # 66 s: after the ending
         assert _shown(frame.lose_central(60)) == BLACK
 

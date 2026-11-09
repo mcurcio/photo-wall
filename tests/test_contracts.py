@@ -1,4 +1,3 @@
-import math
 
 import pytest
 from pydantic import ValidationError
@@ -15,35 +14,11 @@ from contracts.models import (
     fade_share,
 )
 from contracts.photo_crop import CENTRED
-from contracts.time import ManualClock, TimeMapping
+from contracts.time import ManualClock
 
 
-def test_local_monotonic_mapping_invalidates_step_staleness_and_bad_clock():
-    clock = ManualClock(100)
-    mapping = TimeMapping(clock)
-    assert not mapping.healthy()
-    mapping.establish(.01)
-    assert mapping.deadline(110) == 10
-    clock.advance(3)
-    assert mapping.deadline(110) == 10
-    clock.step_utc(1)
-    assert not mapping.healthy()
-    mapping.establish(.01)
-    clock.advance(31)
-    assert not mapping.healthy()
-    mapping.establish(.01)
-    clock.wall = math.nan
-    assert not mapping.healthy()
-    with pytest.raises(ValueError):
-        mapping.establish(.01)
-
-
-def test_clock_uncertainty_is_not_pipeline_position():
+def test_a_layers_position_comes_from_plan_time():
     clock = ManualClock(1_000)
-    mapping = TimeMapping(clock)
-    mapping.establish(.5)
-    assert not mapping.healthy()
-    mapping.establish(.05)
     clock.advance(20)  # A paused pipeline cannot stop this clock.
     layer = Layer(assignment_id="a", run_id="run", output_id="hdmi-1", frame_id="f",
                   binding_generation=1, start=1000, end=1100, media_origin=988,

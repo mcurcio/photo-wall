@@ -260,7 +260,7 @@ while not (stopping[0] and service.stopped):
             fault=service.last_fault,
             outputs=count, events=list(renderer.events), recent_readiness=readiness_samples, commit_checks=checks,
             commit_failures=failures, deliveries=deliveries,
-            clock=dataclasses.asdict(service.mapping.diagnostics),
+            clock=dataclasses.asdict(service.show_clock.diagnostics),
             forbidden_imports_absent=all(importlib.util.find_spec(name) is None
                                          for name in ('central', 'media', 'immich')))
         data = json.dumps(report, sort_keys=True, separators=(',', ':')).encode()

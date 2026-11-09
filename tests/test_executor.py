@@ -22,10 +22,11 @@ from contracts.models import (
     Variant,
 )
 from contracts.photo_crop import CENTRED
-from contracts.time import ManualClock, TimeMapping
+from contracts.time import ManualClock
 from player.cache import Cache
 from player.executor import AuthorityError, Executor
 from player.rendering import PresentationResult, RecordingRenderer
+from player.show_clock import MAX_UNCERTAINTY, ShowClock
 
 
 def media(data: bytes = b"picture", video: bool = False) -> Variant:
@@ -285,14 +286,15 @@ def layer(key: str = "picture", *, output: str = "hdmi1", frame: str = "frame1",
 
 class Rig:
     def __init__(self, directory: Path, *, capacity=4, cache_bytes=4096,
-                 bindings: tuple[OutputBinding, ...] | None = None, epoch=1):
-        self.clock = ManualClock(100)
-        self.mapping = TimeMapping(self.clock)
-        self.mapping.establish(.01)
+                 bindings: tuple[OutputBinding, ...] | None = None, epoch=1,
+                 max_uncertainty: float = MAX_UNCERTAINTY):
+        self.clock = ManualClock(100)     # its wall reading stands for Central's time
+        self.show_clock = ShowClock(self.clock.monotonic, max_uncertainty=max_uncertainty)
+        self.sync_clock()
         self.cache = Cache(directory / "cache", cache_bytes)
         self.renderer = RecordingRenderer(capacity)
         self.executor = Executor("player1", self.cache, self.renderer, self.clock,
-                                 self.mapping)
+                                 self.show_clock)
         self.configuration = PlayerConfiguration(
             player_id="player1", authority_epoch=epoch, configuration_revision=1,
             bindings=bindings or (binding(), binding("hdmi2", "frame2")),
@@ -332,10 +334,16 @@ class Rig:
         self.commit(*(item.assignment_id for item in layers))
         return self.executor.tick()
 
+    def sync_clock(self) -> None:
+        """One instant round trip to Central."""
+        monotonic = self.clock.monotonic()
+        self.show_clock.sample(server_time=self.clock.utc(), sent_monotonic=monotonic,
+                               received_monotonic=monotonic)
+
     def advance(self, amount: float, *, refresh=True) -> None:
         self.clock.advance(amount)
         if refresh:
-            self.mapping.establish(.01)
+            self.sync_clock()
 
 
 def test_two_outputs_secured_is_not_prepared_committed_or_observed(tmp_path):
@@ -543,26 +551,25 @@ def test_no_successful_still_means_black_beyond_horizon(tmp_path):
     assert rig.renderer.outputs["hdmi1"].layers == ()
 
 
-def test_clock_step_and_stale_sample_refuse_unexecuted_commit_retain_visible(tmp_path):
-    rig = Rig(tmp_path)
+def test_a_stale_clock_refuses_an_unexecuted_commit_and_keeps_what_is_visible(tmp_path):
+    rig = Rig(tmp_path, max_uncertainty=.001)    # stale after 10 s without a sample
     rig.play(layer(after_end="keep_this_photo"))
     future = layer("future", start=103, data=b"future")
     rig.offer(layer(after_end="keep_this_photo"), future, revision=2)
     rig.secure("future", b"future")
     rig.executor.prepare_imminent()
     rig.commit("future")
-    rig.clock.step_utc(20)
+    rig.advance(10.5, refresh=False)
     readiness = rig.executor.readiness()
     assert {f.code for f in readiness.failures} == {"clock"}
-    rig.clock.advance(3)
     rig.executor.tick()
     assert rig.renderer.outputs["hdmi1"].layers[0].layer.assignment_id == "picture"
     with pytest.raises(AuthorityError):
         rig.commit("future")
-    rig.mapping.establish(.01)
+    rig.sync_clock()
     rig.executor.prepare_imminent()
     rig.commit("future")
-    rig.clock.advance(31)
+    rig.advance(10.5, refresh=False)
     with pytest.raises(AuthorityError):
         rig.commit("future")
 
@@ -652,7 +659,7 @@ def test_restart_restores_no_authority_or_pins_and_rejects_old_epoch(tmp_path):
     rig.cache.close()
     cache = Cache(tmp_path / "cache", 4096)
     restarted_renderer = RecordingRenderer()
-    restarted = Executor("player1", cache, restarted_renderer, rig.clock, rig.mapping)
+    restarted = Executor("player1", cache, restarted_renderer, rig.clock, rig.show_clock)
     restarted.maintain_cache()
     assert cache.stats()["pinned_bytes"] == 0
     assert restarted.tick() == ()
@@ -860,11 +867,11 @@ def test_a_rolling_revision_before_start_keeps_the_granted_start(tmp_path):
     assert rig.renderer.outputs["hdmi1"].layers[-1].layer.priority == -10
 
 
-@pytest.mark.parametrize("ended_by", ["revocation", "clock_step"])
+@pytest.mark.parametrize("ended_by", ["revocation", "stale_clock"])
 def test_a_carried_grant_ends_as_a_commit_does(tmp_path, ended_by):
     """The carried grant is the Commit itself, not a new authority: Central's revocation or a
-    clock step ends it exactly as it ends a Commit of the current revision."""
-    rig = Rig(tmp_path)
+    clock gone stale ends it exactly as it ends a Commit of the current revision."""
+    rig = Rig(tmp_path, max_uncertainty=.0001)    # stale after 1 s without a sample
     upcoming = layer("next", start=103, media_origin=103, data=b"next")
     rig.offer(upcoming)
     rig.secure("next", b"next")
@@ -875,9 +882,9 @@ def test_a_carried_grant_ends_as_a_commit_does(tmp_path, ended_by):
     if ended_by == "revocation":
         rig.executor.invalidate(["next"])
     else:
-        rig.clock.step_utc(1)
+        rig.advance(1.5, refresh=False)
         rig.executor.readiness()
-        rig.mapping.establish(.01)
+        rig.sync_clock()
     rig.advance(2.1)
     rig.executor.prepare_imminent()
     rig.executor.tick()
