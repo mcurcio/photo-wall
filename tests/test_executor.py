@@ -19,13 +19,16 @@ from contracts.models import (
     PlayerConfiguration,
     PositionBox,
     Revocation,
+    UnfilledSpan,
     Variant,
 )
+from contracts.node_app_link import FrameBlack, FrameBlackCause
 from contracts.photo_crop import CENTRED
-from contracts.time import ManualClock, TimeMapping
+from contracts.time import ManualClock
 from player.cache import Cache
 from player.executor import AuthorityError, Executor
 from player.rendering import PresentationResult, RecordingRenderer
+from player.show_clock import MAX_UNCERTAINTY, ShowClock
 
 
 def media(data: bytes = b"picture", video: bool = False) -> Variant:
@@ -285,14 +288,15 @@ def layer(key: str = "picture", *, output: str = "hdmi1", frame: str = "frame1",
 
 class Rig:
     def __init__(self, directory: Path, *, capacity=4, cache_bytes=4096,
-                 bindings: tuple[OutputBinding, ...] | None = None, epoch=1):
-        self.clock = ManualClock(100)
-        self.mapping = TimeMapping(self.clock)
-        self.mapping.establish(.01)
+                 bindings: tuple[OutputBinding, ...] | None = None, epoch=1,
+                 max_uncertainty: float = MAX_UNCERTAINTY):
+        self.clock = ManualClock(100)     # its wall reading stands for Central's time
+        self.show_clock = ShowClock(self.clock.monotonic, max_uncertainty=max_uncertainty)
+        self.sync_clock()
         self.cache = Cache(directory / "cache", cache_bytes)
         self.renderer = RecordingRenderer(capacity)
         self.executor = Executor("player1", self.cache, self.renderer, self.clock,
-                                 self.mapping)
+                                 self.show_clock)
         self.configuration = PlayerConfiguration(
             player_id="player1", authority_epoch=epoch, configuration_revision=1,
             bindings=bindings or (binding(), binding("hdmi2", "frame2")),
@@ -332,10 +336,16 @@ class Rig:
         self.commit(*(item.assignment_id for item in layers))
         return self.executor.tick()
 
+    def sync_clock(self) -> None:
+        """One instant round trip to Central."""
+        monotonic = self.clock.monotonic()
+        self.show_clock.sample(server_time=self.clock.utc(), sent_monotonic=monotonic,
+                               received_monotonic=monotonic)
+
     def advance(self, amount: float, *, refresh=True) -> None:
         self.clock.advance(amount)
         if refresh:
-            self.mapping.establish(.01)
+            self.sync_clock()
 
 
 def test_two_outputs_secured_is_not_prepared_committed_or_observed(tmp_path):
@@ -543,28 +553,41 @@ def test_no_successful_still_means_black_beyond_horizon(tmp_path):
     assert rig.renderer.outputs["hdmi1"].layers == ()
 
 
-def test_clock_step_and_stale_sample_refuse_unexecuted_commit_retain_visible(tmp_path):
-    rig = Rig(tmp_path)
+def test_a_stale_clock_refuses_an_unexecuted_commit_and_keeps_what_is_visible(tmp_path):
+    rig = Rig(tmp_path, max_uncertainty=.001)    # stale after 10 s without a sample
     rig.play(layer(after_end="keep_this_photo"))
     future = layer("future", start=103, data=b"future")
     rig.offer(layer(after_end="keep_this_photo"), future, revision=2)
     rig.secure("future", b"future")
     rig.executor.prepare_imminent()
     rig.commit("future")
-    rig.clock.step_utc(20)
+    rig.advance(10.5, refresh=False)
     readiness = rig.executor.readiness()
     assert {f.code for f in readiness.failures} == {"clock"}
-    rig.clock.advance(3)
     rig.executor.tick()
     assert rig.renderer.outputs["hdmi1"].layers[0].layer.assignment_id == "picture"
     with pytest.raises(AuthorityError):
         rig.commit("future")
-    rig.mapping.establish(.01)
+    rig.sync_clock()
     rig.executor.prepare_imminent()
     rig.commit("future")
-    rig.clock.advance(31)
+    rig.advance(10.5, refresh=False)
     with pytest.raises(AuthorityError):
         rig.commit("future")
+
+
+def test_a_commit_arriving_after_the_clock_went_stale_is_refused(tmp_path):
+    """Mutation probe: drop the gate in `accept_commit` -> a grant taken while uncertain stands."""
+    rig = Rig(tmp_path, max_uncertainty=.001)    # stale after 10 s without a sample
+    rig.offer(layer())
+    rig.secure()
+    rig.executor.prepare_imminent()
+    readiness = rig.executor.readiness()
+    rig.advance(10.5, refresh=False)
+    with pytest.raises(AuthorityError, match="clock or capacity"):
+        rig.executor.accept_commit(Commit(plan_id=rig.plan.plan_id, revision=1, authority_epoch=1,
+                                          readiness_sequence=readiness.sequence, assignment_ids=("picture",),
+                                          committed_at=rig.clock.utc()))
 
 
 def test_cache_pressure_and_corruption_revoke_precommit_readiness(tmp_path):
@@ -652,7 +675,7 @@ def test_restart_restores_no_authority_or_pins_and_rejects_old_epoch(tmp_path):
     rig.cache.close()
     cache = Cache(tmp_path / "cache", 4096)
     restarted_renderer = RecordingRenderer()
-    restarted = Executor("player1", cache, restarted_renderer, rig.clock, rig.mapping)
+    restarted = Executor("player1", cache, restarted_renderer, rig.clock, rig.show_clock)
     restarted.maintain_cache()
     assert cache.stats()["pinned_bytes"] == 0
     assert restarted.tick() == ()
@@ -860,11 +883,11 @@ def test_a_rolling_revision_before_start_keeps_the_granted_start(tmp_path):
     assert rig.renderer.outputs["hdmi1"].layers[-1].layer.priority == -10
 
 
-@pytest.mark.parametrize("ended_by", ["revocation", "clock_step"])
+@pytest.mark.parametrize("ended_by", ["revocation", "stale_clock"])
 def test_a_carried_grant_ends_as_a_commit_does(tmp_path, ended_by):
     """The carried grant is the Commit itself, not a new authority: Central's revocation or a
-    clock step ends it exactly as it ends a Commit of the current revision."""
-    rig = Rig(tmp_path)
+    clock gone stale ends it exactly as it ends a Commit of the current revision."""
+    rig = Rig(tmp_path, max_uncertainty=.0001)    # stale after 1 s without a sample
     upcoming = layer("next", start=103, media_origin=103, data=b"next")
     rig.offer(upcoming)
     rig.secure("next", b"next")
@@ -875,9 +898,9 @@ def test_a_carried_grant_ends_as_a_commit_does(tmp_path, ended_by):
     if ended_by == "revocation":
         rig.executor.invalidate(["next"])
     else:
-        rig.clock.step_utc(1)
+        rig.advance(1.5, refresh=False)
         rig.executor.readiness()
-        rig.mapping.establish(.01)
+        rig.sync_clock()
     rig.advance(2.1)
     rig.executor.prepare_imminent()
     rig.executor.tick()
@@ -1070,3 +1093,130 @@ def test_a_photo_dissolving_in_is_drawn_over_the_one_it_replaces_whatever_the_pl
     drawn = rig.renderer.outputs["hdmi1"].layers
     assert [local.layer.assignment_id for local in drawn] == ["current", "following"]
     assert drawn[-1].alpha == pytest.approx(.5)
+
+
+def black(rig):
+    return {report.output_id: report.cause for report in rig.executor.frames_black()}
+
+
+def test_frames_black_no_current_plan(tmp_path):
+    rig = Rig(tmp_path)
+    assert black(rig) == {"hdmi1": FrameBlackCause.NO_PLAN, "hdmi2": FrameBlackCause.NO_PLAN}
+
+
+def test_frames_black_an_expired_plan(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(layer(end=120), valid_until=120)
+    rig.clock.advance(30)
+    rig.sync_clock()
+    assert black(rig)["hdmi1"] is FrameBlackCause.NO_PLAN
+
+
+def test_frames_black_only_for_enabled_bindings_and_sorted(tmp_path):
+    rig = Rig(tmp_path)
+    assert [report.output_id for report in rig.executor.frames_black()] == ["hdmi1", "hdmi2"]
+    rig.executor.accept_configuration(rig.configuration.model_copy(update={
+        "configuration_revision": 2, "enabled_outputs": ("hdmi2",)}))
+    assert [report.output_id for report in rig.executor.frames_black()] == ["hdmi2"]
+
+
+def test_frames_black_a_due_photo_walks_its_causes(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(layer())
+    assert black(rig)["hdmi1"] is FrameBlackCause.NO_PHOTO
+    rig.secure()
+    assert black(rig)["hdmi1"] is FrameBlackCause.CANNOT_DRAW    # secured, not prepared
+    rig.executor.prepare_imminent()
+    assert black(rig)["hdmi1"] is FrameBlackCause.NOT_STARTED
+    rig.commit("picture")
+    assert black(rig)["hdmi1"] is FrameBlackCause.CANNOT_DRAW    # granted, nothing drawn yet
+    rig.executor.tick()
+    assert "hdmi1" not in black(rig)
+
+
+def test_frames_black_a_deferred_layer_is_ready_to_start(tmp_path):
+    """A layer deferred by the decoder budget is prepared as far as a grant goes. Mutation probe:
+    read only `prepared` -> it is called undrawable."""
+    rig = Rig(tmp_path)
+    rig.offer(layer())
+    rig.secure()
+    rig.executor._assignments["picture"].deferred = True
+    assert black(rig)["hdmi1"] is FrameBlackCause.NOT_STARTED
+
+
+def test_frames_black_a_layer_executing_under_its_lease_is_started(tmp_path):
+    """Its grant has gone, its execution lease has not, and nothing is drawn: a draw failure, not
+    a wait for Central. Mutation probe: read only the grant."""
+    rig = Rig(tmp_path)
+    rig.play(layer())
+    executing = rig.executor._assignments["picture"]
+    executing.granted_layer = None
+    rig.executor._current.clear()
+    assert black(rig)["hdmi1"] is FrameBlackCause.CANNOT_DRAW
+
+
+def test_frames_black_a_layer_and_a_span_not_yet_begun_are_silent(tmp_path):
+    """Mutation probe: drop the start of `_in_force` -> a future photo blacks the Frame now."""
+    rig = Rig(tmp_path)
+    rig.offer(layer(start=300, end=350), unfilled=(UnfilledSpan(output_id="hdmi2", start=300, end=350),))
+    assert black(rig) == {}
+
+
+def test_frames_black_a_failed_download_and_a_failed_decode(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(layer())
+    assert not rig.executor.acquire("picture", [b"wrong"], sha256="0" * 64, size=5)
+    assert black(rig)["hdmi1"] is FrameBlackCause.NO_PHOTO
+    rig.secure()
+    rig.renderer.prepare_failures.add("picture")
+    rig.executor.prepare_imminent()
+    assert black(rig)["hdmi1"] is FrameBlackCause.CANNOT_DRAW
+
+
+def test_frames_black_an_unhealthy_clock(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(layer())
+    rig.show_clock._anchor = replace(rig.show_clock._anchor, bound=MAX_UNCERTAINTY * 2)
+    assert black(rig)["hdmi1"] is FrameBlackCause.NO_TIME
+
+
+def test_frames_black_a_clock_never_anchored_counts_every_layer(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(layer(start=300, end=350))
+    rig.offer(layer(start=300, end=350), revision=2, unfilled=(UnfilledSpan(output_id="hdmi2", start=300, end=350),))
+    rig.show_clock._anchor = None
+    assert black(rig) == {"hdmi1": FrameBlackCause.NO_TIME, "hdmi2": FrameBlackCause.NO_CONTENT}
+
+
+def test_frames_black_a_black_layer_kept_photo_and_pattern_draw_no_card(tmp_path):
+    rig = Rig(tmp_path)
+    rig.play(layer("dark", presentation="black", variant=None))
+    assert "hdmi1" not in black(rig)
+
+    rig = Rig(tmp_path / "kept")
+    rig.play(layer(end=140, after_end="keep_this_photo"))
+    rig.clock.advance(50)
+    rig.sync_clock()
+    rig.executor.tick()
+    assert "hdmi1" not in black(rig)
+
+    rig = Rig(tmp_path / "pattern")
+    rig.offer(layer())
+    rig.renderer.patterns.add("hdmi1")
+    assert "hdmi1" not in black(rig)
+
+
+def test_frames_black_an_unfilled_span_is_no_content_only_while_it_lasts(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(unfilled=(UnfilledSpan(output_id="hdmi1", start=100, end=150),))
+    assert black(rig)["hdmi1"] is FrameBlackCause.NO_CONTENT and "hdmi2" not in black(rig)
+    rig.clock.advance(60)
+    rig.sync_clock()
+    assert "hdmi1" not in black(rig)
+
+
+def test_frames_black_with_no_configuration_is_no_report(tmp_path):
+    rig = Rig(tmp_path)
+    fresh = Executor("other", rig.cache, rig.renderer, rig.clock, rig.show_clock)
+    assert fresh.frames_black() == ()
+    assert isinstance(rig.executor.frames_black()[0], FrameBlack)

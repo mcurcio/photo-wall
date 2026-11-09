@@ -353,7 +353,7 @@ Every Frame tile, the Frame page header, the Unplaced tray, the frame badges on 
 
 ### A dark Frame: read the card, then reboot
 
-A Frame whose Player stopped, froze, ran out of open files or has nothing to show keeps the **debug overlay** on the Frame (on the whole Display when the Frame's region cannot be met): a dimmed tint with a two-line card, or the black holding slate with its reason. Nothing restarts the Player on its own (owner, 2026-10-20: "No auto-restarts at all"; [Player architecture](player-architecture.md#processes-and-supervision)), so it stays that way until you act.
+A Frame whose Player stopped, froze, ran out of open files, has nothing to show, or is black when a photo is due keeps the **debug overlay** on the Frame (on the whole Display when the Frame's region cannot be met): a dimmed tint with a two-line card, or the black holding slate with its reason. Nothing restarts the Player on its own (owner, 2026-10-20: "No auto-restarts at all"; [Player architecture](player-architecture.md#processes-and-supervision)), so it stays that way until you act.
 
 1. **Read the card.** Line 1 is what happened and since when, on the Pi's clock ("Photos paused — the player stopped · since 08:10"); line 2 names the code, the Player and the Output (`app_absent · Player … · Output HDMI-A-1`). The Frame page's Player status says the same: "Dark since 08:10 · …". The codes:
 
@@ -363,6 +363,14 @@ A Frame whose Player stopped, froze, ran out of open files or has nothing to sho
    | Photos paused — the player stopped responding | `app_unresponsive` | The Player stopped answering its progress probe for 5 s (frozen or hung). |
    | Photos paused — the player ran out of open files | `app_descriptor_limit` | The Player is at its open-file limit and can open no photo (a leak, 2026-10-20). |
    | Nothing to show on this Frame | `nothing_to_show` | For 2 minutes the Output is on but no picture of the Player's holds it. |
+   | Photos paused — no plan from Central | `frame_no_plan` | For 2 minutes the Player is alive and drawing only its dark fallback, and it holds no plan: Central has sent none, or the Player has not taken it. Check that Central is reachable and planning. |
+   | Photos paused — no time from Central | `frame_no_time` | For 2 minutes a photo is due but the Player has no reading of Central's time it trusts (none yet, or none for over 16 minutes). Check that the Player can reach Central; the Pi's own clock does not matter here. |
+   | Photos paused — the photo has not arrived | `frame_no_photo` | For 2 minutes a photo is due but its bytes are not on the Pi (the download failed or is not finished). Check Central's media and the Pi's network. |
+   | Photos paused — the photo could not be drawn | `frame_cannot_draw` | For 2 minutes a photo is due and on the Pi but the Player could not prepare or draw it (decode or capacity). Keep the journal and reboot. |
+   | Photos paused — waiting for Central to start it | `frame_not_started` | For 2 minutes a photo is prepared but Central has not started it on this Frame. Keep the journal; the Frame starts as soon as Central grants it. |
+   | Photos paused — no photo for this Frame | `frame_no_content` | For 2 minutes the Scene wanted a photo here and Central could place none (no photo of the Scene fits this Frame, or its Sources are empty). Read the Scene's planning outcome on the console. |
+
+   The six `frame_*` cards are the Player's own statement that its Frame is black while something should be showing ([0031](decisions/0031-show-clock-and-late-join.md)). They never show for Night off or a hold, a Scene that is black on purpose, a kept photo, a room-light black, a test pattern or calibration target, or a black layer: those are deliberate and show no card. Only `frame_no_content` is about the Scene; the others clear by themselves when the cause does, and rebooting is for a card that stays.
 
    A black slate without a card says why in words: "Player stopped - recover with Hardware > Reboot" (the Player's grant was lost) or "Waiting for a picture" (it is alive but shows nothing; the card follows after 2 minutes). An amber tint over the whole Display means the overlay's own drawing program is down.
 2. **Keep the evidence first, if you want the cause.** The Pi's journal is in RAM and a reboot loses it. Over SSH ([Reaching a Node over SSH](#reaching-a-node-over-ssh)): `sudo journalctl -b --no-pager -u photo-wall-node-player.service -u photo-wall-app-broker.service`, and the judge's verdict as the [display-control skill](../.claude/skills/display-control/SKILL.md#the-debug-overlay-on-a-pi) reads it.
@@ -371,6 +379,16 @@ A Frame whose Player stopped, froze, ran out of open files or has nothing to sho
 If the same card comes back after a reboot, the cause is in the release or the Pi, not a passing fault: report it with the journal you kept.
 
 **A light card labelled "Central" is not the Pi's.** It is Central's card: the Frame is black because Central can't stand behind a room light it uses, and the Pi draws what Central sent with Central's words over it. Do not reboot; [read Central's error](#centrals-error-on-a-frame).
+
+### The Pi's clock and its time client
+
+The base runs **systemd-timesyncd** ([0031](decisions/0031-show-clock-and-late-join.md)), so the Pi's wall clock becomes right by itself, about 30 s after a time server can be reached, with no reboot. It asks the DHCP option-42 servers first (the router's, when it offers one), then `debian.pool.ntp.org`, the same sources stage 1 tries once at boot. Nothing restarts it: its restart and watchdog are off, so a crashed time client stays down until a reboot, and only the wall clock suffers.
+
+The show does not read this clock. The Player follows Central's time on its own monotonic clock, so a Pi with a wrong clock still shows photos while it can reach Central. What does read the wall clock is the display power timetable (it holds at Central's last word until the clock is right) and the card's "since" time (wrong until then). Read it over SSH ([Reaching a Node over SSH](#reaching-a-node-over-ssh)) with `timedatectl` (`System clock synchronized: yes`) and `timedatectl timesync-status`.
+
+**After an outage with the internet down,** a Pi that booted with no time source keeps its clock at the build's floor until it can reach a time server: photos keep playing, but Night off follows Central's last word and the card's "since" is wrong. Offering the router's time server over DHCP (option 42) closes this. The first power cut with the internet down on a real Pi is a bench check that has not been run ([the render bench and Pi testing](#the-render-bench-and-pi-testing-before-merge)).
+
+**After deploying Central, reboot the Pis.** An old Player refuses a plan that names a Frame with no photo until it runs the new release, and a reboot is the only way a Pi changes release. Nothing reboots one on its own.
 
 ### Central's error on a Frame
 

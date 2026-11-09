@@ -101,7 +101,7 @@ _PREPARATION_MEMBERS: Final = (
 )
 
 LINES: Final[tuple[MemoryLine, ...]] = (
-    MemoryLine("kernel", 200 * MIB, "E: kernel, slab, page tables, PID1, journald, udev"),
+    MemoryLine("kernel", 200 * MIB, "E: kernel, slab, page tables, PID1, journald, udev, systemd-timesyncd"),
     MemoryLine("cma", 64 * MIB, "E"),
     MemoryLine("base-image", 320 * MIB, "M 311, image size"),
     MemoryLine("overlay", 128 * MIB, "E use; the 512 MiB mount size is unchanged (§2.4 rule 6)"),

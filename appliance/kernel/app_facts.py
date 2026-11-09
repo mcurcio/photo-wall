@@ -13,6 +13,8 @@ live here, the lowest layer both reach. Stdlib only.
   never exiting over it.
 - `app_descriptors`: every `appliance.apps.descriptors.DESCRIPTOR_SAMPLE_MS` while a run is
   current, how many file descriptors it holds against its soft limit, read from /proc.
+- `app_frames_black`: the Player's own statement, on its probe channel, of which of its Outputs
+  are black while content is wanted and why (the channel's run, not the Player's word for it).
 
 The probe facts (`probe_*`, `app_renderer`, ...) keep their names where they are
 written today; moving them here is a residual, not 1b's.
@@ -25,6 +27,7 @@ APP_STARTED: Final = "app_started"
 APP_EXITED: Final = "app_exited"
 APP_DESCRIPTORS: Final = "app_descriptors"
 APP_OBSERVATION_FAILED: Final = "app_observation_failed"
+APP_FRAMES_BLACK: Final = "app_frames_black"
 
 
 class RunDocument(TypedDict):
@@ -57,5 +60,20 @@ class AppDescriptorsValue(TypedDict):
     soft_limit: int
 
 
-__all__ = ["APP_DESCRIPTORS", "APP_EXITED", "APP_OBSERVATION_FAILED", "APP_STARTED", "AppDescriptorsValue",
-           "AppObservationFailedValue", "AppRunValue", "RunDocument"]
+class FrameBlackFact(TypedDict):
+    """One Output named by `app_frames_black`: `cause` is a `FrameBlackCause` value."""
+
+    output: str
+    cause: str
+
+
+class AppFramesBlackValue(TypedDict):
+    """The value of `app_frames_black`: every Output the run states black; empty, none is."""
+
+    run: RunDocument
+    frames: list[FrameBlackFact]
+
+
+__all__ = ["APP_DESCRIPTORS", "APP_EXITED", "APP_FRAMES_BLACK", "APP_OBSERVATION_FAILED", "APP_STARTED",
+           "AppDescriptorsValue", "AppFramesBlackValue", "AppObservationFailedValue", "AppRunValue",
+           "FrameBlackFact", "RunDocument"]

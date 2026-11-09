@@ -29,8 +29,11 @@ in 2026-09.
 - **The CA list is the Debian bundle**, with the Player's optional `ca_file`
   able to replace it. See
   [0014 R5](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules).
-- **Only stage 1 steps the clock**, from a build-time floor plus one SNTP
-  step, and writes a clock record read by provisioning and the Player. See
+- **Stage 1 takes the first step of the clock**, from a build-time floor plus one SNTP
+  step, and writes a clock record read by provisioning and the Player. After
+  handoff the base's own time client, systemd-timesyncd, keeps the wall clock
+  right ([0031](0031-show-clock-and-late-join.md); amended 2026-11-08, it was
+  "only stage 1 steps the clock"). See
   [0014 R6](0014-reaching-central-from-every-boot-stage.md#requirements-hard-rules).
 - **Every failure is logged with a named cause**, not a generic network
   error. See

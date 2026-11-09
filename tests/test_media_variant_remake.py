@@ -108,6 +108,7 @@ def test_the_player_accepts_a_re_made_copy_under_the_plan_s_name(wall, registry,
             assert job.layer.variant.sha256 == hashlib.sha256(FIRST).hexdigest()  # the plan's
             assert await service.download(job)
             assert service.cache.path_for(plan.layers[0].variant).read_bytes() == SECOND
+            assert await service.probe_time()               # readiness needs Central's time
             assert service._feedback()[0].secured == ("assignment",)
         finally:
             await close(service)

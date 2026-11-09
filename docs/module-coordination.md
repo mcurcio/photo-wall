@@ -114,8 +114,14 @@ Normal due work commits only within the 5-second preparation lead, with fresh
 (initially 2-second) whole-Player capacity/clock/prepared feedback from every
 required assignment. First reconciliation of an already-active cue receives a
 5-second late-join preparation deadline and retains its original media origin.
-Failure at a normal intended start skips that cue. Recording Actuator effects
+Recording Actuator effects
 remain current-state operations owned by Runtime and are never projected effects.
+
+### Cue start and late join
+
+Each cue has two phases ([`central/cue_start.py`](../central/cue_start.py), pure; [0031](decisions/0031-show-clock-and-late-join.md)). Before its deadline (a normal cue's deadline is its start; a cue first seen late gets the 5-second late-join deadline above) the cue starts whole: `_commit_due` commits it only when every member is ready, so exact multi-Frame starts stand wherever they can be kept. From the deadline to the cue's end each member is committed alone as soon as its own Player reports it ready, with the ordinary Commit (committed at now, media position now minus the media origin, accepted by the Player's gate). Nothing waits for a timer: `readiness()` already runs `_commit_due` on each report. A multi-Frame cue with a laggard starts without it, and the laggard's start is not exact, only its position. Only the grant is whole: a member that loses readiness after the Commit and before the start loses its own grant, the others keep theirs and start on time, and it joins alone when ready again.
+
+A skip means only that the cue was superseded (`superseded`). A cue is no longer skipped for a missed start (`not_ready`), a lost readiness or a membership change (`cue_membership_changed`): a started cue that would grow takes the new member in and what it granted stands, and a Player's lost readiness is that member's own, re-granted when it reports ready again. A skipped cue that comes back on the timeline gets a fresh cohort on every branch, because `_groups` tests a skipped latest cohort first, before any membership comparison, so a skip is never terminal. Central's freshness of a Player's report is its `received_at` plus the readiness sequence the Player echoes, never the Player's own clock.
 
 Readiness sequence numbers increase across an epoch. A secured receipt checks the
 retained offered manifest and creates an immutable byte lock before commitment.

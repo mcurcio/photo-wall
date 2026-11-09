@@ -23,15 +23,18 @@ from contracts.models import (
     Revocation,
     stack_order,
 )
+from contracts.node_app_link import FrameBlack
 from contracts.on_screen import kept_from
-from contracts.time import Clock, TimeMapping
+from contracts.time import Monotonic
 from player.cache import Cache, CacheCapacityError, CacheError
+from player.frame_black import DueLayer, frame_black
 from player.rendering import (
     LocalLayer,
     OutputComposition,
     PresentationResult,
     Renderer,
 )
+from player.show_clock import ShowClock
 from player.visibility import beneath_shown, shed, shown_within, visible_now
 
 DRAW_GRACE = 0.5
@@ -102,8 +105,8 @@ def _binding_identity(binding: OutputBinding) -> tuple:
 
 
 TIMEBASE_TOLERANCE = 0.001
-"""Seconds the clock mapping may move before compositions carry the new one (`_timebase`): each
-re-anchor reads two clocks, which moves it by microseconds that no frame can show."""
+"""Seconds the ShowClock's timebase may move before compositions carry the new one (`_timebase`):
+a re-anchor that small is no change any frame can show."""
 
 
 class Executor:
@@ -120,15 +123,15 @@ class Executor:
         player_id: str,
         cache: Cache,
         renderer: Renderer,
-        clock: Clock,
-        mapping: TimeMapping,
+        clock: Monotonic,
+        show_clock: ShowClock,
         prepare_lead: float = PREPARE_SECONDS,
     ):
         if not math.isfinite(prepare_lead) or prepare_lead <= 0:
             raise ValueError("prepare_lead must be finite and positive")
         self.player_id = player_id
         self.cache, self.renderer = cache, renderer
-        self.clock, self.mapping = clock, mapping
+        self.clock, self.show_clock = clock, show_clock
         self.prepare_lead = prepare_lead
         self._lock = RLock()
         self._cache_work = RLock()
@@ -152,7 +155,6 @@ class Executor:
         self._last_revocation_sequence = 0
         self._last_configuration_revision = 0
         self._frame_generations: dict[str, int] = {}
-        self._anchor: float | None = None       # the timebase while the mapping was last healthy
         self._handed: float | None = None       # the timebase compositions carry (`_timebase`)
         self._capacity_ok = False
         self._renderer_releases: set[str] = set()
@@ -164,18 +166,16 @@ class Executor:
 
     def _timebase(self) -> float:
         """Plan time less this machine's monotonic time, so a renderer reads a composition's
-        layers at its own frame times (player/look.py): anchored while the mapping is healthy,
-        and handed over unchanged until it moves by more than TIMEBASE_TOLERANCE, so the renderer
-        compares it by equality and two clock readings' jitter never redraws a still picture."""
-        if self.mapping.healthy():
-            self._anchor = self.clock.utc() - self.clock.monotonic()
-        mapped = self._anchor if self._anchor is not None else self.clock.utc() - self.clock.monotonic()
-        if self._handed is None or abs(mapped - self._handed) > TIMEBASE_TOLERANCE:
-            self._handed = mapped
+        layers at its own frame times (player/look.py): the ShowClock's, handed over unchanged
+        until it moves by more than TIMEBASE_TOLERANCE, so the renderer compares it by equality
+        and a re-anchor no frame can show never redraws a still picture."""
+        timebase = self.show_clock.timebase()
+        if self._handed is None or abs(timebase - self._handed) > TIMEBASE_TOLERANCE:
+            self._handed = timebase
         return self._handed
 
     def _now(self) -> float:
-        return self._timebase() + self.clock.monotonic()
+        return self.show_clock.now()
 
     def _binding(self, output_id: str) -> OutputBinding | None:
         if self._config:
@@ -262,8 +262,8 @@ class Executor:
                     or plan.authority_epoch != self._last_epoch):
                 raise AuthorityError("plan authority mismatch")
             now = self._now()
-            if plan.valid_until <= now or plan.issued_at > now + self.mapping.max_uncertainty:
-                raise AuthorityError("expired or future-issued plan")
+            if plan.valid_until <= now:
+                raise AuthorityError("expired plan")
             if self._last_plan_id is not None and plan.plan_id != self._last_plan_id:
                 raise AuthorityError("plan identity must remain stable within its epoch")
             if plan == self._plan:
@@ -546,7 +546,7 @@ class Executor:
                 and max(a.layer.start, self._plan.valid_from) <= now + self.prepare_lead]
 
     def _clock_gate(self) -> bool:
-        healthy = self.mapping.healthy()
+        healthy = self.show_clock.healthy()
         if not healthy:
             for assignment in self._assignments.values():
                 self._end_grant(assignment)
@@ -698,6 +698,62 @@ class Executor:
                     and (current.binding.frame_id, current.binding.generation) == (binding.frame_id, binding.generation)
                     and bool(visible_now(current.layers)))
 
+    def frames_black(self) -> tuple[FrameBlack, ...]:
+        """Renderer thread: each enabled Output that is black while content is wanted, and why
+        (player/frame_black.py), sorted by Output. Nothing here draws or decides what is drawn."""
+        with self._lock:
+            if not self._config:
+                return ()
+            now, plan = self._now(), self._plan
+            has_plan = plan is not None and plan.valid_until > now
+            clock_ok = self.show_clock.healthy()
+            found = []
+            for binding in self._config.bindings:
+                if binding.output_id not in self._config.enabled_outputs:
+                    continue
+                cause = frame_black(
+                    showing=self.showing(binding),
+                    own_drawing=self.renderer.patterned(binding.output_id),
+                    has_plan=has_plan, clock_ok=clock_ok,
+                    due=[self._due_layer(a, now) for a in self._assignments.values()
+                         if a.layer.output_id == binding.output_id
+                         and self._in_force(a.layer.start, a.layer.end, now)],
+                    unfilled=plan is not None and any(
+                        span.output_id == binding.output_id and self._in_force(span.start, span.end, now)
+                        for span in plan.unfilled))
+                if cause is not None:
+                    found.append(FrameBlack(binding.output_id, cause))
+            return tuple(sorted(found, key=lambda black: black.output_id))
+
+    def _in_force(self, start: float, end: float, now: float) -> bool:
+        """Whether something planned over [start, end) is in force at `now`, within the plan. Until
+        the ShowClock is anchored there is no `now` to tell by, so all of it counts."""
+        if not self.show_clock.anchored:
+            return True
+        return (self._plan is not None
+                and max(start, self._plan.valid_from) <= now < min(end, self._plan.valid_until))
+
+    def _due_layer(self, assignment: _Assignment, now: float) -> DueLayer:
+        return DueLayer(assignment.layer.presentation, stack_order(assignment.layer),
+                        secured=assignment.secured,
+                        prepared=assignment.prepared or assignment.deferred,
+                        granted=self._grant_covers(assignment, now) or self._executing(assignment, now),
+                        failure=assignment.failure)
+
+    @staticmethod
+    def _grant_covers(assignment: _Assignment, now: float) -> bool:
+        """Whether the Commit accepted for `assignment` authorizes it at `now`."""
+        granted = assignment.granted_layer
+        return (granted is not None and max(granted.start, assignment.granted_from) <= now
+                < min(granted.end, assignment.granted_until))
+
+    @staticmethod
+    def _executing(assignment: _Assignment, now: float) -> bool:
+        """Whether `assignment`'s execution lease, the grant it started under, runs at `now`."""
+        executing = assignment.execution_layer
+        return (executing is not None
+                and executing.start <= now < min(executing.end, assignment.execution_until))
+
     @property
     def failures(self) -> tuple[Failure, ...]:
         with self._lock:
@@ -705,15 +761,24 @@ class Executor:
                          for key, assignment in sorted(self._assignments.items())
                          if assignment.failure is not None)
 
-    def readiness(self) -> Readiness:
+    def secured_ids(self) -> frozenset[str]:
+        """The current-authority assignments whose bytes are secured, regardless of the clock:
+        what downloads and Readiness both read, so downloads never wait for Central's time."""
+        with self._lock:
+            return frozenset(key for key, assignment in self._assignments.items()
+                             if assignment.secured and self._current_authority(assignment))
+
+    def readiness(self) -> Readiness | None:
+        """Readiness for the current plan; None while the ShowClock is not anchored, the one
+        decider of "no readiness yet" (a Player without Central's time claims nothing)."""
         with self._lock:
             if not self._plan:
                 raise AuthorityError("no current plan")
+            if not self.show_clock.anchored:
+                return None
             now = self._now()
             clock_ok = self._clock_gate()
             imminent = self._imminent(now)
-            current = [a for a in self._assignments.values() if self._current_authority(a)
-                       and now < min(a.layer.end, self._plan.valid_until)]
             failures = {f.assignment_id: f for f in self.failures}
             for assignment in imminent:
                 key = assignment.layer.assignment_id
@@ -722,8 +787,8 @@ class Executor:
                 elif not self._capacity_ok:
                     failures[key] = Failure(assignment_id=key, code="capacity")
             self._sequence += 1
-            # Wire values remain finite; unhealthy mapping is also explicitly coded.
-            uncertainty = self.mapping.uncertainty
+            # Wire values remain finite; an unhealthy ShowClock is also explicitly coded.
+            uncertainty = self.show_clock.uncertainty
             if not math.isfinite(uncertainty):
                 uncertainty = 86400.0
             prepared = tuple(sorted(a.layer.assignment_id for a in imminent
@@ -737,7 +802,7 @@ class Executor:
             readiness = Readiness(
                 plan_id=self._plan.plan_id, revision=self._plan.revision,
                 authority_epoch=self._last_epoch, sequence=self._sequence,
-                secured=tuple(sorted(a.layer.assignment_id for a in current if a.secured)),
+                secured=tuple(sorted(self.secured_ids())),
                 prepared=prepared, capacity_ok=self._capacity_ok, clock_uncertainty=uncertainty,
                 observed_at=now, failures=tuple(failures[key] for key in sorted(failures)),
                 lost_grants=lost,
@@ -767,10 +832,8 @@ class Executor:
                     for key in commit.assignment_ids):
                 return False
             now = self._now()
-            if (not self._clock_gate() or not self._capacity_ok
-                    or commit.committed_at > now + self.mapping.max_uncertainty
-                    or commit.committed_at < self._plan.issued_at):
-                raise AuthorityError("commit clock, time or capacity gate failed")
+            if not self._clock_gate() or not self._capacity_ok:
+                raise AuthorityError("commit clock or capacity gate failed")
             assignments = []
             reported = self._reported.get(commit.readiness_sequence, {})
             for key in commit.assignment_ids:
@@ -785,7 +848,7 @@ class Executor:
                     raise AuthorityError("commit references revoked or unknown readiness")
                 intended_start = max(assignment.layer.start, self._plan.valid_from)
                 if (assignment.execution_layer is None
-                        and now > intended_start + self.mapping.max_uncertainty
+                        and now > intended_start + self.show_clock.max_uncertainty
                         and commit.committed_at < intended_start):
                     raise AuthorityError("missed start requires fresh late-join authorization")
                 assignments.append(assignment)
@@ -976,18 +1039,13 @@ class Executor:
                 if (not assignment.secured or not (assignment.prepared or assignment.deferred)
                         or assignment.failure or not self._current_authority(assignment)):
                     continue
-                granted = assignment.granted_layer
-                if (granted is not None and self.mapping.healthy()
-                        and max(granted.start, assignment.granted_from) <= now
-                        < min(granted.end, assignment.granted_until)):
-                    assignment.execution_layer = granted
+                if self.show_clock.healthy() and self._grant_covers(assignment, now):
+                    assignment.execution_layer = assignment.granted_layer
                     assignment.execution_until = assignment.granted_until
-                executing = assignment.execution_layer
-                if (executing is not None and executing.start <= now
-                        < min(executing.end, assignment.execution_until)):
+                if self._executing(assignment, now):
                     # Revisions renew offers, not old execution leases. Until a
                     # fresh commit, use the original authorized ordering/effects.
-                    active.append(replace(assignment, layer=executing))
+                    active.append(replace(assignment, layer=assignment.execution_layer))
             # Every playing layer, a covered one included; what is drawn leaves out a deferred one
             # while it is covered (it holds no decoder).
             playing = {c.binding.output_id: c for c in self._compositions(active, now, timebase)}

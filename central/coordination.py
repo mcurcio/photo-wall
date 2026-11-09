@@ -18,6 +18,7 @@ from psycopg.types.json import Jsonb
 from pydantic import Field, ValidationError
 
 from central.actor import Actor
+from central.cue_start import CueReadiness, grantable, starts_whole
 from central.db import Database, DatabaseTransactionClock
 from central.execution_outcomes import ExecutionOutcome, ExecutionOutcomeRouter
 from central.infra.display_store import frame_outputs_in
@@ -428,7 +429,7 @@ class Coordinator:
         assignments = {}
         cue_keys = {identity("cue-", list(key)) for key in cues}
         # A future cue is a forecast until it starts; one the timeline no longer holds is
-        # withdrawn now rather than surfacing later as a not_ready skip.
+        # withdrawn now.
         for orphan in conn.execute(
             "SELECT id,cue_key FROM coordination_groups WHERE status IN ('pending','committed') "
             "AND starts_at>%s AND starts_at<%s ORDER BY starts_at,id",
@@ -444,30 +445,33 @@ class Coordinator:
                 (cue_key,),
             ).fetchone()
             superseding = False
-            if previous:
+            # A skipped cohort is over: a cue the timeline still holds takes a fresh one.
+            if previous and previous["status"] != "skipped":
                 grows = not cue["members"].keys() <= previous["members"].keys()
                 moved = not grows and any(
                     (tuple(previous["members"][a]) if previous["members"][a] else None) != owner
                     for a, owner in cue["members"].items()
                 )
-                if (
-                    starts > now
-                    and previous["status"] != "skipped"
-                    and (moved or cue["members"].keys() != previous["members"].keys())
-                ):
+                if starts > now and (moved or cue["members"].keys() != previous["members"].keys()):
                     # An edit rewrote a cue that has not started: a fresh cohort replaces it,
                     # and skipping the old one withdraws any commit it had already granted.
                     self._skip_group(conn, previous["id"], "superseded", root=root)
                     superseding = True
                 elif grows:
-                    # A started cue is immutable. Growth invalidates this one cue, never
-                    # the tick that offers every other Frame its plan.
-                    if previous["status"] != "skipped":
-                        self._skip_group(conn, previous["id"], "cue_membership_changed", root=root)
+                    # A started cue that grows takes the new member in; what it granted stands.
+                    conn.execute(
+                        "UPDATE coordination_groups SET members=%s,member_ends=%s,valid_until=%s "
+                        "WHERE id=%s",
+                        (
+                            Jsonb({**previous["members"], **cue["members"]}),
+                            Jsonb({**previous["member_ends"], **cue["ends"]}),
+                            max(previous["valid_until"], cue["end"]),
+                            previous["id"],
+                        ),
+                    )
                     assignments.update({a: previous["id"] for a in cue["members"]})
                     continue
                 elif not moved:
-                    # A child completing cannot shrink a skipped cue into a new successful one.
                     assignments.update({a: previous["id"] for a in cue["members"]})
                     continue
             # The previous cohort names the new one, so a forecast that returns to an
@@ -525,7 +529,9 @@ class Coordinator:
             ),
         ).fetchone()["sequence"]
 
-    def _skip_group(self, conn, group_id, code, *, root=None):
+    def _skip_group(
+        self, conn, group_id: str, code: Literal["superseded"], *, root: str | None = None
+    ) -> None:
         cue_key = conn.execute(
             "SELECT cue_key FROM coordination_groups WHERE id=%s", (group_id,)
         ).fetchone()["cue_key"]
@@ -682,8 +688,8 @@ class Coordinator:
         membership = {layer.assignment_id: groups[layer.assignment_id] for layer in proposal.layers}
         if (
             latest
-            and (latest.layers, latest.bindings, latest.valid_until)
-            == (proposal.layers, bindings, projection.valid_until)
+            and (latest.layers, latest.bindings, latest.unfilled, latest.valid_until)
+            == (proposal.layers, bindings, proposal.unfilled, projection.valid_until)
             and self._plan_groups(conn, latest) == membership
         ):
             return
@@ -705,6 +711,7 @@ class Coordinator:
             valid_until=projection.valid_until,
             bindings=bindings,
             layers=proposal.layers,
+            unfilled=proposal.unfilled,
         )
         self._offer(conn, plan, groups)
         self._record_selected(conn, plan, projection)
@@ -979,8 +986,6 @@ class Coordinator:
             ).fetchone()
             if old and report.sequence <= old["sequence"]:
                 return False
-            if report.observed_at > now + self.limits.max_uncertainty:
-                raise CoordinationError("future_readiness")
             plan = Plan.model_validate(row["manifest"])
             layers = {layer.assignment_id: layer for layer in plan.layers}
             reported = (
@@ -1051,15 +1056,6 @@ class Coordinator:
                         or not report.capacity_ok
                         or report.clock_uncertainty > self.limits.max_uncertainty
                     ):
-                        groups = conn.execute(
-                            "SELECT DISTINCT g.id FROM execution_commits c "
-                            "JOIN coordination_groups g ON g.id=c.group_id "
-                            "WHERE c.player_id=%s AND c.authority_epoch=%s "
-                            "AND c.assignment_id=%s AND c.valid AND g.starts_at>%s",
-                            (player_id, report.authority_epoch, layer.assignment_id, now),
-                        ).fetchall()
-                        for group in groups:
-                            self._skip_group(conn, group["id"], "readiness_lost")
                         conn.execute(
                             "UPDATE execution_commits SET valid=FALSE WHERE player_id=%s "
                             "AND authority_epoch=%s AND assignment_id=%s AND valid",
@@ -1235,88 +1231,89 @@ class Coordinator:
             "AND valid_until>%s AND starts_at<=%s ORDER BY starts_at,id",
             (now, now + PREPARE_SECONDS),
         ).fetchall():
-            if group["status"] == "pending" and now > group["deadline"]:
-                self._skip_group(conn, group["id"], "not_ready")
-                continue
-            ready, participants = True, []
+            members, participants = [], {}
             for assignment, owner in group["members"].items():
-                if (
-                    group["status"] == "committed"
-                    and group["member_ends"].get(assignment, group["valid_until"]) <= now
-                ):
-                    continue
-                if owner is None:
-                    ready = False
-                    break
-                player, epoch, output, generation = owner
-                plan, state = plans.get(player), feedback.get(player)
-                layer = (
-                    next((a for a in plan.layers if a.assignment_id == assignment), None)
-                    if plan
-                    else None
+                participant = self._participant(
+                    assignment, owner, group["id"], plans, plan_groups, feedback, configurations,
+                    interrupted, now,
                 )
-                if (
-                    not plan
-                    or not state
-                    or not layer
-                    or (player, epoch, output, layer.frame_id, generation) in interrupted
-                    or not self._authorized(layer, configurations[player])
-                    or plan.bindings != configurations[player].bindings
-                    or plan.valid_until <= now
-                    or plan_groups[player].get(assignment) != group["id"]
-                ):
-                    ready = False
-                    break
-                row, report = state
-                if (
-                    plan.authority_epoch != epoch
-                    or plan.revision != report.revision
-                    or plan.plan_id != report.plan_id
-                    or assignment not in report.prepared
-                    or not report.capacity_ok
-                    or report.clock_uncertainty > self.limits.max_uncertainty
-                    or now - report.observed_at > self.limits.readiness_seconds
-                    or now - row["received_at"] > self.limits.readiness_seconds
-                    or layer.output_id != output
-                    or layer.binding_generation != generation
-                ):
-                    ready = False
-                    break
-                participants.append((plan, layer, report.sequence))
-            if ready and participants:
-                # Only a missing or invalidated grant is written: a grant the Player holds is
-                # never rewritten, so its Commit and the control delivery stay unchanged.
-                held = {(r["player_id"], r["authority_epoch"], r["revision"], r["assignment_id"])
-                        for r in conn.execute(
-                            "SELECT player_id,authority_epoch,revision,assignment_id "
-                            "FROM execution_commits WHERE group_id=%s AND valid", (group["id"],))}
-                for plan, layer, sequence in participants:
-                    if (plan.player_id, plan.authority_epoch, plan.revision,
-                            layer.assignment_id) in held:
-                        continue
-                    conn.execute(
-                        "INSERT INTO execution_commits VALUES(%s,%s,%s,%s,%s,%s,TRUE,%s) "
-                        "ON CONFLICT(player_id,authority_epoch,revision,assignment_id) "
-                        "DO UPDATE SET valid=TRUE,group_id=EXCLUDED.group_id,"
-                        "committed_at=EXCLUDED.committed_at,"
-                        "readiness_sequence=EXCLUDED.readiness_sequence",
-                        (
-                            plan.player_id,
-                            plan.authority_epoch,
-                            plan.revision,
-                            layer.assignment_id,
-                            group["id"],
-                            now,
-                            sequence,
-                        ),
-                    )
-                if group["status"] != "committed":
-                    conn.execute(
-                        "UPDATE coordination_groups SET status='committed' WHERE id=%s",
-                        (group["id"],),
-                    )
-            elif group["status"] == "pending" and now >= group["deadline"]:
-                self._skip_group(conn, group["id"], "not_ready")
+                if participant is not None:
+                    participants[assignment] = participant
+                members.append(CueReadiness(
+                    assignment_id=assignment,
+                    ended=group["member_ends"].get(assignment, group["valid_until"]) <= now,
+                    ready=participant is not None,
+                ))
+            granted = grantable(members, whole=starts_whole(group["status"], now, group["deadline"]))
+            if not granted:
+                continue
+            # Only a missing or invalidated grant is written: a grant the Player holds is
+            # never rewritten, so its Commit and the control delivery stay unchanged.
+            held = {(r["player_id"], r["authority_epoch"], r["revision"], r["assignment_id"])
+                    for r in conn.execute(
+                        "SELECT player_id,authority_epoch,revision,assignment_id "
+                        "FROM execution_commits WHERE group_id=%s AND valid", (group["id"],))}
+            for assignment in granted:
+                plan, layer, sequence = participants[assignment]
+                if (plan.player_id, plan.authority_epoch, plan.revision,
+                        layer.assignment_id) in held:
+                    continue
+                conn.execute(
+                    "INSERT INTO execution_commits VALUES(%s,%s,%s,%s,%s,%s,TRUE,%s) "
+                    "ON CONFLICT(player_id,authority_epoch,revision,assignment_id) "
+                    "DO UPDATE SET valid=TRUE,group_id=EXCLUDED.group_id,"
+                    "committed_at=EXCLUDED.committed_at,"
+                    "readiness_sequence=EXCLUDED.readiness_sequence",
+                    (
+                        plan.player_id,
+                        plan.authority_epoch,
+                        plan.revision,
+                        layer.assignment_id,
+                        group["id"],
+                        now,
+                        sequence,
+                    ),
+                )
+            if group["status"] != "committed":
+                conn.execute(
+                    "UPDATE coordination_groups SET status='committed' WHERE id=%s",
+                    (group["id"],),
+                )
+
+    def _participant(self, assignment, owner, group_id, plans, plan_groups, feedback,
+                     configurations, interrupted, now) -> tuple[Plan, Layer, int] | None:
+        """What a grant to this cue member is written from, or None while its Player does not
+        report it prepared on this cue's plan. Freshness is when Central heard the report."""
+        if owner is None:
+            return None
+        player, epoch, output, generation = owner
+        plan, state = plans.get(player), feedback.get(player)
+        layer = next((a for a in plan.layers if a.assignment_id == assignment), None) if plan else None
+        if (
+            not plan
+            or not state
+            or not layer
+            or (player, epoch, output, layer.frame_id, generation) in interrupted
+            or not self._authorized(layer, configurations[player])
+            or plan.bindings != configurations[player].bindings
+            or plan.valid_until <= now
+            or plan_groups[player].get(assignment) != group_id
+        ):
+            return None
+        row, report = state
+        if (
+            plan.authority_epoch != epoch
+            or plan.revision != report.revision
+            or plan.plan_id != report.plan_id
+            or assignment not in report.prepared
+            or not report.capacity_ok
+            or report.clock_uncertainty > self.limits.max_uncertainty
+            or now - row["received_at"] > self.limits.readiness_seconds
+            or layer.output_id != output
+            or layer.binding_generation != generation
+        ):
+            return None
+        return plan, layer, report.sequence
 
     def observe(self, player_id: str, observation: Observation):
         if not self._observe(player_id, observation):

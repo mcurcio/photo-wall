@@ -101,6 +101,11 @@ class Renderer(Protocol):
     # (player/impediment.py), so Display Host counts it only while that grant is admitted.
     def drawn_grant(self, output_id: str) -> str | None: ...
 
+    # Whether `output_id`'s last presented commit drew a pattern ground (a test pattern, a
+    # calibration target or a commissioning grid), the Output's own drawing whatever a Frame's
+    # content is; False when nothing was presented.
+    def patterned(self, output_id: str) -> bool: ...
+
 
 class UnavailableRenderer:
     """No picture can be made (player/renderer_root.py): registration remains possible without
@@ -128,6 +133,9 @@ class UnavailableRenderer:
 
     def drawn_grant(self, output_id: str) -> str | None:
         return None
+
+    def patterned(self, output_id: str) -> bool:
+        return False
 
 
 class RecordingRenderer:
@@ -157,6 +165,7 @@ class RecordingRenderer:
         self.room_lights: list[RoomLightsDocument] = []     # every document drawn with, in order
         # Each Output's grant, given at its first successful present (a test may set another).
         self.grants: dict[str, str] = {}
+        self.patterns: set[str] = set()     # the Outputs showing a pattern ground (a test sets it)
 
     def set_player(self, player_id: str | None) -> None:
         self.player_id = player_id
@@ -201,3 +210,6 @@ class RecordingRenderer:
 
     def drawn_grant(self, output_id: str) -> str | None:
         return self.grants.get(output_id)
+
+    def patterned(self, output_id: str) -> bool:
+        return output_id in self.patterns

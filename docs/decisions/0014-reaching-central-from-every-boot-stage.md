@@ -29,7 +29,7 @@ error.
 | R2 | http and https are both legal; https is better. LAN trust is not a main concern, so no host allowlist. | Owner |
 | R3 | Redirects are followed across hosts, with a hop limit above 3. One redirect policy covers every Central fetch. | Owner |
 | R5 | The initramfs trusts the Debian CA bundle, the same list the booted base of the same release uses. | Owner (amended 2026-09-26) |
-| R6 | Clock: a build-time floor, then one SNTP step that never sets the clock below the floor (DHCP option 42, then a public pool zone the product may use). No new `photowall.*` cmdline parameter. A failed step does not block TLS; a certificate date failure is reported as `time`. | Owner (amended at this gate and on 2026-09-26) |
+| R6 | Clock: a build-time floor, then one SNTP step that never sets the clock below the floor (DHCP option 42, then a public pool zone the product may use). No new `photowall.*` cmdline parameter. A failed step does not block TLS; a certificate date failure is reported as `time`. Amended 2026-11-08 ([0031](0031-show-clock-and-late-join.md)): after handoff the base's time client (systemd-timesyncd, through the `photo-wall-os` layer, with option 42 first and then the pool) corrects the clock whenever a source can be reached, with no reboot; stage 1 keeps its floor and its one step, and is no longer the only thing that steps the clock. | Owner (amended at this gate and on 2026-09-26) |
 | R7 | No plain-HTTP workaround, and no sidestepping the ingress. | Owner |
 | R8 | Never downgrade https to http while following redirects. | Owner (confirmed 2026-09-25) |
 | R9 | Every failure names its real cause (TLS, time, redirect, DNS/connect). | Owner (confirmed 2026-09-25) |
@@ -160,7 +160,7 @@ Known defects against these rules, fixed in PR #28:
 
 An internet (WAN) outage, and a stale clock floor against a renewed certificate (U5: deferred by
 the owner on 2026-09-27, no requirement); Central-served time between option 42 and the pool;
-writing a stepped clock back to the Pi 5 RTC; a private CA in the initramfs; DHCP lease renewal
+writing a stepped clock back to the Pi 5 RTC (no longer deferred in effect: a disciplined clock may clear the kernel's unsynchronised state, so the kernel may copy time to the RTC by itself, [0031](0031-show-clock-and-late-join.md); stage 1 still reads the RTC only as a hint against the floor); a private CA in the initramfs; DHCP lease renewal
 in stage 2; a `time` failure in a running Player (persists until reboot); pinning the Raspberry
 Pi archive packages.
 

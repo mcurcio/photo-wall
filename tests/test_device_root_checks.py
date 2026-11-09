@@ -18,6 +18,11 @@ from scripts.device_root_checks import (
     MASKED_UNITS,
     SNAPSHOT_LIST,
     SSH_UNITS,
+    TIME_CLIENT_DROP_IN,
+    TIME_CLIENT_ENABLED,
+    TIME_CLIENT_POOL_CONF,
+    TIME_POOL_HOST,
+    TIME_SERVERS_SCRIPT,
     InstalledPackage,
     agent_ssh,
     base_os,
@@ -181,10 +186,10 @@ def test_a_stock_minbase_has_no_time_daemon_and_no_resolver_writer(tmp_path):
     assert resolver_writers(tmp_path) == []
 
 
-def test_every_package_that_provides_time_daemon_is_flagged(tmp_path):
+def test_every_package_that_provides_time_daemon_but_the_time_client_is_flagged(tmp_path):
     debian_root(tmp_path, stanza("systemd-timesyncd", provides="time-daemon"),
-                stanza("chrony", provides="time-daemon"))
-    assert time_daemons(tmp_path) == ["systemd-timesyncd", "chrony"]
+                stanza("chrony", provides="time-daemon"), stanza("ntpsec", provides="time-daemon"))
+    assert time_daemons(tmp_path) == ["chrony", "ntpsec"]
 
 
 def test_a_resolver_writer_is_flagged_by_name_or_by_what_it_provides(tmp_path):
@@ -404,13 +409,13 @@ def test_the_ca_bundle_is_installed_before_apt_runs_in_the_base():
 def test_the_image_tree_names_no_package_the_composition_depends_on():
     """The base's OS packages are its layers' (R4), but a package photo-wall-node already
     Depends on (its debian control stanza), named again in the rpi-image-gen tree, would be a
-    second home for one fact."""
+    second home for one fact. A path is not a package: /etc/systemd names none."""
     node_base = set(declared(REPO / "debian/control")["photo-wall-node"].third_party)
     assert {"systemd", "udev", "nats-server"} <= node_base
     named = {(path.relative_to(REPO).as_posix(), line)
              for path in sorted(IMAGE_TREE.rglob("*")) if path.is_file()
              for line in _statements(path)
-             if set(re.findall(r"[a-z0-9][a-z0-9+.-]+", line)) & node_base}
+             if set(re.findall(r"[a-z0-9][a-z0-9+.-]+", re.sub(r"\S*/\S*", " ", line))) & node_base}
     assert named == set()
 
 
@@ -526,11 +531,15 @@ def test_the_base_enables_rpi_image_gens_ssh_layer_with_the_one_key_and_ci_check
 
 # --- base OS configuration (rpi_image_gen/layer/photo-wall-os.yaml) ----------------------------
 
+TIME_CLIENT_SERVICE = ("[Service]\nRestart=no\nWatchdogSec=0\n"
+                       f"ExecStartPre=+/{TIME_SERVERS_SCRIPT}\n")
+
+
 def base_os_root(root: Path) -> Path:
     """What the photo-wall-os layer, the device layer's neutral hostname and libnss-myhostname's
     postinst leave in the base; trixie ships etc/default/locale as a link to ../locale.conf.
     ddcutil, v4l-utils (cec-ctl) and i2c-tools' postinst (the i2c group) add display power's
-    tools; the layer's hook writes the DDC/CI modules-load file."""
+    tools; the layer's hook writes the DDC/CI modules-load file and the time client's files."""
     system = root / "etc/systemd/system"
     system.mkdir(parents=True)
     for unit in MASKED_UNITS:
@@ -544,6 +553,12 @@ def base_os_root(root: Path) -> Path:
         write(root, tool, "\x7fELF")
     write(root, DDC_MODULES_LOAD, "i2c-dev\n")
     write(root, "etc/group", "root:x:0:\nvideo:x:44:\ni2c:x:994:\n")
+    write(root, "var/lib/dpkg/status", stanza("systemd-timesyncd", provides="time-daemon"))
+    (root / TIME_CLIENT_ENABLED).parent.mkdir(parents=True)
+    (root / TIME_CLIENT_ENABLED).symlink_to("/usr/lib/systemd/system/systemd-timesyncd.service")
+    write(root, TIME_CLIENT_POOL_CONF, f"[Time]\nNTP={TIME_POOL_HOST}\nFallbackNTP=\n")
+    write(root, TIME_CLIENT_DROP_IN, TIME_CLIENT_SERVICE)
+    write(root, TIME_SERVERS_SCRIPT, "#!/bin/sh\nexit 0\n").chmod(0o755)
     return root
 
 
@@ -585,6 +600,29 @@ def _mask_elsewhere(root):
     (lambda root: write(root, "etc/group", "root:x:0:\ni2cx:x:994:\n"),
      "missing group: i2c (etc/group)"),
     (lambda root: (root / "etc/group").unlink(), "missing group: i2c (etc/group)"),
+    # The time client (rpi_image_gen/layer/photo-wall-os.yaml).
+    (lambda root: write(root, "var/lib/dpkg/status", stanza("bash")),
+     "time client: systemd-timesyncd not installed"),
+    (lambda root: (root / TIME_CLIENT_ENABLED).unlink(),
+     "time client: not enabled: systemd-timesyncd.service"),
+    (lambda root: (root / "etc/systemd/system/systemd-timesyncd.service").symlink_to("/dev/null"),
+     "time client: masked: systemd-timesyncd.service"),
+    (lambda root: (root / TIME_CLIENT_POOL_CONF).unlink(),
+     f"time client: {TIME_CLIENT_POOL_CONF} does not name {TIME_POOL_HOST}"),
+    (lambda root: write(root, TIME_CLIENT_POOL_CONF,
+                        f"[Time]\n#NTP={TIME_POOL_HOST}\nNTP=time.example\n"),
+     f"time client: {TIME_CLIENT_POOL_CONF} does not name {TIME_POOL_HOST}"),
+    (lambda root: (root / TIME_CLIENT_DROP_IN).unlink(), f"time client: missing {TIME_CLIENT_DROP_IN}"),
+    (lambda root: write(root, TIME_CLIENT_DROP_IN, TIME_CLIENT_SERVICE.replace("Restart=no\n", "")),
+     f"time client: {TIME_CLIENT_DROP_IN} without Restart=no"),
+    (lambda root: write(root, TIME_CLIENT_DROP_IN, TIME_CLIENT_SERVICE.replace("WatchdogSec=0\n", "")),
+     f"time client: {TIME_CLIENT_DROP_IN} without WatchdogSec=0"),
+    (lambda root: write(root, TIME_CLIENT_DROP_IN, "[Service]\nRestart=no\nWatchdogSec=0\n"),
+     f"time client: {TIME_CLIENT_DROP_IN} without ExecStartPre=+/{TIME_SERVERS_SCRIPT}"),
+    (lambda root: (root / TIME_SERVERS_SCRIPT).unlink(),
+     f"time client: missing executable {TIME_SERVERS_SCRIPT}"),
+    (lambda root: (root / TIME_SERVERS_SCRIPT).chmod(0o644),
+     f"time client: missing executable {TIME_SERVERS_SCRIPT}"),
 ])
 def test_an_unconfigured_base_os_is_refused(tmp_path, break_it, refused):
     root = base_os_root(tmp_path)
@@ -660,5 +698,6 @@ def test_the_base_is_built_with_its_os_configuration_and_ci_checks_it():
     extract = workflow.partition('unsquashfs -no-xattrs -d "$extract"')[2].partition(">/dev/null")[0]
     for path in ("etc/systemd", "etc/hostname", "etc/nsswitch.conf", "etc/default/locale",
                  "etc/locale.conf", "usr/lib/systemd/system", "usr/lib/photo-wall-bootstrapper",
-                 *DISPLAY_POWER_TOOLS, "etc/modules-load.d", "etc/group"):
+                 *DISPLAY_POWER_TOOLS, "etc/modules-load.d", "etc/group",
+                 TIME_SERVERS_SCRIPT):
         assert re.search(rf"(^|\s){re.escape(path)}(\s|$)", extract), path

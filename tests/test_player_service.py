@@ -10,7 +10,6 @@ import hashlib
 import itertools
 import json
 import logging
-import math
 import re
 import tempfile
 import threading
@@ -36,7 +35,7 @@ from central.db import ProcessTransactionClock
 from contracts.enrollment import Enrollment, OutputReport, enrollment_message
 from contracts.models import Commit, Plan, PlayerConfiguration, Revocation
 from contracts.player_control import ControlSelection
-from contracts.time import ManualClock, TimeMapping
+from contracts.time import ManualClock
 from player.executor import AcquisitionStopped
 from player.identity import load_identity
 from player.luts import PlayerLuts
@@ -244,6 +243,7 @@ class Server:
         self.data = b"picture"
         self.media_response = None
         self.time_epoch = None
+        self.time_player = None
         self.time_offset = 0
 
     def __call__(self, request):
@@ -263,7 +263,7 @@ class Server:
                 "authority_epoch": self.epoch, "token": str(self.epoch) * 32})
         if path == "/v1/player/time":
             return httpx.Response(200, json={
-                "player_id": self.player_id,
+                "player_id": self.time_player or self.player_id,
                 "authority_epoch": self.time_epoch or self.epoch,
                 "server_time": self.clock.utc() + self.time_offset,
             })
@@ -293,10 +293,11 @@ class Server:
         return self.state
 
 
-async def rig(tmp_path, *, server=None, negotiate=False, **options):
+async def rig(tmp_path, *, server=None, negotiate=False, clock=None, probe=True, **options):
+    """`clock` is the Pi's; a `server` built on another stands for Central's clock apart from it."""
     directory = tmp_path / "cache"
     directory.mkdir(mode=0o700, exist_ok=True)
-    clock = ManualClock(100)
+    clock = clock or ManualClock(100)
     server = server or Server(clock)
     config = PlayerConfig(central_origin="http://central", cache_dir=str(directory),
                           cache_bytes=1024**2)
@@ -309,7 +310,8 @@ async def rig(tmp_path, *, server=None, negotiate=False, **options):
     await service.enroll()
     if negotiate:
         await service.hello_protocol()
-    await service.probe_time()
+    if probe:
+        await service.probe_time()
     server.offer()
     await service.poll_state()
     return service, server
@@ -1063,20 +1065,15 @@ def test_revocation_and_full_plan_omission_cancel_jobs_before_draw(tmp_path):
     asyncio.run(check())
 
 
-def test_bad_clock_measurement_withholds_preparation(tmp_path):
+def test_central_stepping_its_clock_re_anchors_on_the_next_sample(tmp_path):
     async def check():
         service, server = await rig(tmp_path)
         try:
-            service._feedback()
-            assert await service.download(service._jobs[0])
+            before = service.show_clock.timebase()
             server.time_offset = 10
-            assert not await service.probe_time()
-            readiness, _ = service._feedback()
-            assert not readiness.prepared
-            assert service.mapping.diagnostics.status == "uncertainty"
-            server.time_offset = 0
             assert await service.probe_time()
-            assert service.mapping.healthy()
+            assert service.show_clock.timebase() == pytest.approx(before + 10)
+            assert service.show_clock.healthy()
         finally:
             await close(service)
     asyncio.run(check())
@@ -1089,7 +1086,7 @@ def test_a_slow_clock_answer_keeps_readiness(tmp_path):
     reported readiness_lost "clock", Central could not commit the next wall-wide group, and every
     Frame of both Players fell back.
 
-    Mutation: drop the mapping on every refused probe (the old rule) -> nothing is prepared."""
+    Mutation: a too_slow sample re-anchors, or ends the grant -> the readiness below changes."""
     async def check():
         service, server = await rig(tmp_path)
 
@@ -1117,7 +1114,8 @@ def test_a_slow_clock_answer_keeps_readiness(tmp_path):
             await service.poll_state()
             service.link.time_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
             assert not await service.probe_time()
-            assert service.mapping.diagnostics.status == "uncertainty"
+            assert service.show_clock.diagnostics.rejected == 1
+            assert service.show_clock.healthy()
             service.tick_main()
             readiness, observations = service._feedback()
             assert readiness.prepared == ("picture",)
@@ -1126,45 +1124,6 @@ def test_a_slow_clock_answer_keeps_readiness(tmp_path):
         finally:
             await close(service)
     asyncio.run(check())
-
-
-@pytest.mark.parametrize(
-    ("reason", "changes", "kept"),
-    [
-        ("player_mismatch", {"sample_player_id": "wrong"}, False),
-        ("stale_epoch", {"sample_epoch": 2}, False),
-        ("transport_time", {"received_monotonic": -1}, False),
-        ("transport_drift", {"received_utc": 100.02}, True),
-        # Central's clock a second ahead with no round trip to blame: the clocks disagree.
-        ("uncertainty", {"server_time": 101}, False),
-        # A 0.4 s round trip with Central at its midpoint: too slow to measure, no disagreement.
-        ("uncertainty", {"server_time": 100.2, "received_utc": 100.4, "received_monotonic": .4,
-                         "applied_utc": 100.4, "applied_monotonic": .4}, True),
-        # 0.15 s off even at the round trip's edge (0.25 - 0.1): a disagreement past 100 ms.
-        ("uncertainty", {"server_time": 100.35, "received_utc": 100.2, "received_monotonic": .2,
-                         "applied_utc": 100.2, "applied_monotonic": .2}, False),
-        ("apply_age", {"applied_utc": 102, "applied_monotonic": 2}, True),
-        ("apply_drift", {"applied_utc": 100.02}, True),
-    ],
-)
-def test_a_refused_probe_drops_the_mapping_only_when_it_is_evidence_against_it(reason, changes, kept):
-    """A trusted sample stays through a probe too slow or disturbed to measure; a probe for another
-    Player or epoch, an impossible reading, or a proven disagreement drops it.
-
-    Mutation: keep the mapping through every refusal -> the False rows fail; drop it on every
-    refusal -> the True rows fail."""
-    clock = ManualClock(100)
-    mapping = TimeMapping(clock)
-    mapping.establish(.01)
-    values = dict(sample_epoch=1, authority_epoch=1, server_time=100,
-                  sent_utc=100, sent_monotonic=0, received_utc=100,
-                  received_monotonic=0, applied_utc=100, applied_monotonic=0)
-    values.update(changes)
-    assert not mapping.apply_probe(**values)
-    assert mapping.diagnostics.status == reason
-    assert mapping.diagnostics.rejected == 1
-    assert mapping.healthy() is kept
-    assert mapping.uncertainty == (.01 if kept else math.inf)
 
 
 @pytest.mark.parametrize("stage", ["json", "schema"])
@@ -1183,8 +1142,8 @@ def test_slow_state_parsing_does_not_change_independent_clock_mapping(
                 return parsed
             monkeypatch.setattr(owner, attribute, delayed)
             await service.poll_state()
-            assert service.mapping.healthy()
-            assert service.mapping.uncertainty == 0
+            assert service.show_clock.healthy()
+            assert service.show_clock.uncertainty == pytest.approx(0, abs=.001)
         finally:
             await close(service)
     asyncio.run(check())
@@ -1198,7 +1157,7 @@ def test_clock_transport_sample_includes_delayed_body_receipt(tmp_path):
                 body = json.dumps({"player_id": server.player_id,
                                    "authority_epoch": 1, "server_time": 100}).encode()
                 yield body[:20]
-                service.clock.advance(.2)
+                service.clock.advance(.3)
                 yield body[20:]
         def respond(request):
             assert request.method == "GET" and request.url.path == "/v1/player/time"
@@ -1207,19 +1166,19 @@ def test_clock_transport_sample_includes_delayed_body_receipt(tmp_path):
         try:
             service.link.time_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
             assert not await service.probe_time()
-            assert service.mapping.diagnostics.uncertainty == pytest.approx(.2)
-            assert service.mapping.diagnostics.status == "uncertainty"
-            # Central's 100 lies inside the 0.2 s round trip: too slow to measure, not a
-            # disagreement, so the rig's trusted sample stays (TimeMapping).
-            assert service.mapping.uncertainty == 0
-            assert service.mapping.healthy()
+            assert service.show_clock.diagnostics.rtt == pytest.approx(.3)
+            assert service.show_clock.diagnostics.rejected == 1
+            # The late body made the sample too slow to measure; the rig's anchor stands.
+            assert service.show_clock.healthy()
         finally:
             await close(service)
     asyncio.run(check())
 
 
-@pytest.mark.parametrize("fault", ["dispatch_delay", "parse_clock_step"])
-def test_clock_receipt_sample_rejects_stale_dispatch_and_post_receipt_step(tmp_path, monkeypatch, fault):
+@pytest.mark.parametrize("fault", ["dispatch_delay", "parse_delay"])
+def test_a_late_dispatch_or_slow_parse_never_moves_the_show_clock(tmp_path, monkeypatch, fault):
+    """The receipt was read off the wire; neither its dispatch to the main thread nor parsing the
+    body is transport latency, so neither changes the sample."""
     async def check():
         from player import service as module
         service, _ = await rig(tmp_path)
@@ -1234,58 +1193,16 @@ def test_clock_receipt_sample_rejects_stale_dispatch_and_post_receipt_step(tmp_p
                 original = module._json
                 def parse(value):
                     parsed = original(value)
-                    service.clock.step_utc(.02)
+                    service.clock.advance(1.1)
                     return parsed
                 monkeypatch.setattr(module, "_json", parse)
-            assert not await service.probe_time()
-            assert service.mapping.diagnostics.status == {
-                "dispatch_delay": "apply_age", "parse_clock_step": "apply_drift"
-            }[fault]
-            assert service.mapping.diagnostics.rejected == 1
-            # The probe is refused; the rig's trusted sample is not evidence of anything wrong
-            # and stays until its own age or a step past max_step ends it.
-            assert service.mapping.uncertainty == 0
-            assert service.mapping.healthy()
+            before = service.show_clock.timebase()
+            assert await service.probe_time()
+            assert service.show_clock.timebase() == before
+            assert service.show_clock.diagnostics.rejected == 0
         finally:
             await close(service)
     asyncio.run(check())
-
-
-@pytest.mark.parametrize(
-    ("reason", "changes"),
-    [
-        ("player_mismatch", {"sample_player_id": "wrong"}),
-        ("stale_epoch", {"sample_epoch": 2}),
-        ("transport_time", {"received_monotonic": -1}),
-        ("transport_drift", {"received_utc": 100.02}),
-        ("uncertainty", {"server_time": 101}),
-        ("apply_age", {"applied_utc": 102, "applied_monotonic": 2}),
-        ("apply_drift", {"applied_utc": 100.02}),
-    ],
-)
-def test_clock_probe_rejection_reasons_are_exact(reason, changes):
-    clock = ManualClock(100)
-    mapping = TimeMapping(clock)
-    values = dict(sample_epoch=1, authority_epoch=1, server_time=100,
-                  sent_utc=100, sent_monotonic=0, received_utc=100,
-                  received_monotonic=0, applied_utc=100, applied_monotonic=0)
-    values.update(changes)
-    assert not mapping.apply_probe(**values)
-    assert mapping.diagnostics.status == reason
-    assert mapping.diagnostics.samples == mapping.diagnostics.rejected == 1
-
-
-@pytest.mark.parametrize("reason", ["mapping_age", "clock_step"])
-def test_established_mapping_reports_runtime_rejection(reason):
-    clock = ManualClock(100)
-    mapping = TimeMapping(clock)
-    mapping.establish(0)
-    if reason == "mapping_age":
-        clock.advance(31)
-    else:
-        clock.step_utc(.3)
-    assert not mapping.healthy()
-    assert mapping.diagnostics.status == reason
 
 
 def test_glib_dispatch_is_bounded_ordered_and_cancellation_skips_work():
@@ -2150,3 +2067,17 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
         thread.join(timeout=5)
         listener.close()
         assert not thread.is_alive()
+
+
+def test_frames_black_with_no_executor_cannot_tell(tmp_path):
+    """None, never (): an empty report would claim nothing is black."""
+    async def scenario():
+        service, _server = await rig(tmp_path)
+        try:
+            assert service.frames_black() is not None
+            service.executor = None
+            assert service.frames_black() is None
+        finally:
+            await close(service)
+
+    asyncio.run(scenario())

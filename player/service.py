@@ -45,6 +45,7 @@ from contracts.models import (
     PlayerTime,
     Revocation,
 )
+from contracts.node_app_link import FrameBlack
 from contracts.node_impeded import ImpededFrames
 from contracts.node_link import NODE_BUS_URL
 from contracts.node_state import FrameReport, FrameReports
@@ -62,7 +63,7 @@ from contracts.room_light import (
     RoomLightsDrawn,
     room_lights_digest,
 )
-from contracts.time import Clock, SystemClock, TimeMapping
+from contracts.time import Monotonic, SystemClock
 from nodeapi.node import WallReader
 from player.cache import Cache, CacheError
 from player.central_link import CentralLink, Session, read_refusal
@@ -79,6 +80,7 @@ from player.probe_responder import ProbeResponder
 from player.renderer_root import start_renderer
 from player.rendering import Renderer
 from player.room_lights import start_room_lights
+from player.show_clock import ShowClock
 from uplink.causes import Cause, UplinkError
 from uplink.clock import RunClockRecord
 from uplink.diagnosis import failure_text
@@ -353,7 +355,7 @@ class PlayerService:
     def __init__(self, config: PlayerConfig, identity: Identity,
                  outputs: tuple[OutputReport, ...], renderer: Renderer, dispatcher: Callable,
                  *, find_central: Callable[[], Awaitable[Found]], trust: Trust,
-                 clock: Clock | None = None, client: httpx.AsyncClient | None = None,
+                 clock: Monotonic | None = None, client: httpx.AsyncClient | None = None,
                  time_client: httpx.AsyncClient | None = None,
                  clock_record: Callable[[], ClockRecord | None] = RunClockRecord().read,
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
@@ -388,7 +390,7 @@ class PlayerService:
         self._drawn_reported: RoomLightsDrawn | None = None
         self._drawn_due = -math.inf
         self.clock = clock or SystemClock()
-        self.mapping = TimeMapping(self.clock)
+        self.show_clock = ShowClock(self.clock.monotonic)
         self.link = CentralLink(trust, unauthorized=Unauthorized, client=client,
                                 time_client=time_client, websocket_connect=websocket_connect)
         self.clock_record = clock_record
@@ -674,7 +676,7 @@ class PlayerService:
         return value
 
     async def _request_with_receipt(self, method: str, path: str, *, body=None,
-                                    authenticated=True, time=False) -> tuple[dict, tuple[float, float]]:
+                                    authenticated=True, time=False) -> tuple[dict, float]:
         async with self.link.stream(self.session, method, path, body=body,
                                     authenticated=authenticated, time=time) as response:
             await self._check_status(response, path)
@@ -688,9 +690,9 @@ class PlayerService:
                 if len(data) + len(chunk) > MAX_JSON:
                     raise ServiceError("body_limit")
                 data.extend(chunk)
-            # Local JSON/schema work is not transport latency. Keep its delay
-            # visible to the later sample-age gate instead of inflating RTT.
-            received = self.clock.utc(), self.clock.monotonic()
+            # Local JSON/schema work is not transport latency: the receipt is read before it,
+            # so a sample's round trip is the wire's alone.
+            received = self.clock.monotonic()
             return _json(bytes(data)), received
 
     async def _check_status(self, response, target: str):
@@ -748,7 +750,7 @@ class PlayerService:
                 def create():
                     self._main()
                     self.executor = self.executor_factory(registered.player_id, self.cache,
-                        self.renderer, self.clock, self.mapping)
+                        self.renderer, self.clock, self.show_clock)
 
                 # A late loop never discards the registration: an abandoned create() never
                 # ran, so it is posted again until the loop runs it (main waited the same way).
@@ -910,11 +912,13 @@ class PlayerService:
             readiness = None
             if self.executor is not None and self._plan is not None:
                 readiness = self.executor.readiness()
-                if any(failure.code in ("decode", "integrity") for failure in readiness.failures):
+                if readiness is not None and any(failure.code in ("decode", "integrity")
+                                                  for failure in readiness.failures):
                     self._verify_due.set()
+                secured = self.executor.secured_ids()
                 self._jobs = tuple(Download(self._plan.authority_epoch, self._plan.plan_id,
                     self._plan.revision, layer) for layer in self._plan.layers
-                    if layer.variant is not None and layer.assignment_id not in readiness.secured
+                    if layer.variant is not None and layer.assignment_id not in secured
                     and layer.assignment_id not in self._cancelled) if self._offered else ()
             observations = tuple({observation.assignment_id: observation for observation in
                 self._observations if self._observation_current(observation)}.values())
@@ -938,7 +942,7 @@ class PlayerService:
                 and (job.epoch, job.plan_id, job.revision) == (plan.authority_epoch, plan.plan_id, plan.revision)
                 and job.layer in plan.layers and job.layer.assignment_id not in self._cancelled
                 and configuration.authorizes(job.layer)
-                and self.clock.utc() < min(job.layer.end, plan.valid_until))
+                and self.show_clock.now() < min(job.layer.end, plan.valid_until))
 
     async def download(self, job: Download) -> bool:
         if not self._authorized(job):
@@ -1103,29 +1107,23 @@ class PlayerService:
     async def probe_time(self) -> bool:
         if self.registration is None:
             raise Unauthorized("not_registered")
-        sent_utc, sent_monotonic = self.clock.utc(), self.clock.monotonic()
-        body, (received_utc, received_monotonic) = await self._request_with_receipt(
+        sent_monotonic = self.clock.monotonic()
+        body, received_monotonic = await self._request_with_receipt(
             "GET", "/v1/player/time", time=True
         )
         sample = PlayerTime.model_validate(body)
 
         def apply() -> bool:
             self._main()
-            if self.registration is None:
-                return False
-            return self.mapping.apply_probe(
-                sample_epoch=sample.authority_epoch,
-                authority_epoch=self.registration.authority_epoch,
-                sample_player_id=sample.player_id,
-                player_id=self.registration.player_id,
+            registration = self.registration
+            if (registration is None or sample.player_id != registration.player_id
+                    or sample.authority_epoch != registration.authority_epoch):
+                return False                # not this registration's: the ShowClock is untouched
+            return self.show_clock.sample(
                 server_time=sample.server_time,
-                sent_utc=sent_utc,
                 sent_monotonic=sent_monotonic,
-                received_utc=received_utc,
                 received_monotonic=received_monotonic,
-                applied_utc=self.clock.utc(),
-                applied_monotonic=self.clock.monotonic(),
-            )
+            ) in ("anchored", "kept")
 
         return await self.dispatch(apply)
 
@@ -1394,6 +1392,11 @@ class PlayerService:
         self.line.start()
         self._room_lights_reader = start_room_lights(self, self._node_bus_url)
 
+    def frames_black(self) -> tuple[FrameBlack, ...] | None:
+        """Which Frames are black while content is wanted (GLib thread: the probe's answer). None
+        with no executor: this Player cannot tell, which is never the same as nothing black."""
+        return None if self.executor is None else self.executor.frames_black()
+
     def request_relink(self):
         """Thread-safe: the proof loop forgets its recorded app link and proves it again now."""
         self._relink.set()
@@ -1511,7 +1514,7 @@ def main():
     Tick(GLib, PLANNING_TICK_MS, tick)
     service.start()
     # Probes are answered at control dispatch's priority (own one-slot lane), never here.
-    ProbeResponder(dispatcher, on_relink=service.request_relink,
+    ProbeResponder(dispatcher, on_relink=service.request_relink, frames_black=service.frames_black,
                    gl_renderer=lambda: root.renderer.gl_renderer).start()
     try:
         with contextlib.suppress(KeyboardInterrupt):

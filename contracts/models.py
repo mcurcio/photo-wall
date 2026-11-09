@@ -322,6 +322,22 @@ def stack_order(layer: Layer) -> tuple[int, int, int, float]:
     return (layer.priority, layer.root_order, layer.admission_order, layer.start)
 
 
+class UnfilledSpan(Model):
+    """A span of plan time a Frame wanted a photo and Central could place none (no photo fits, no
+    screen known, a Source empty, a Scene line that failed): the Plan's own record, so "nothing
+    due" on a Frame always means nothing was wanted there. Read by the Player's Frame-black rule
+    (player/frame_black.py), never by what it draws."""
+    output_id: Identifier
+    start: Instant
+    end: Instant
+
+    @model_validator(mode="after")
+    def interval(self) -> Self:
+        if self.end <= self.start:
+            raise ValueError("unfilled span end must follow start")
+        return self
+
+
 class Plan(Model):
     protocol: Literal[1] = 1
     plan_id: Identifier
@@ -333,6 +349,15 @@ class Plan(Model):
     valid_until: Instant
     bindings: tuple[OutputBinding, ...]
     layers: tuple[Layer, ...]
+    # Serialised only when non-empty (the Observation precedent): a plan with none reads as before.
+    unfilled: tuple[UnfilledSpan, ...] = ()
+
+    @model_serializer(mode="wrap")
+    def serialize_unfilled(self, handler):
+        value = handler(self)
+        if not self.unfilled:
+            value.pop("unfilled", None)
+        return value
 
     @model_validator(mode="after")
     def authority(self) -> Self:
@@ -353,6 +378,8 @@ class Plan(Model):
                 raise ValueError("layer binding authority mismatch")
             if layer.end <= self.valid_from or layer.start >= self.valid_until or layer.end > self.valid_until:
                 raise ValueError("layer exceeds plan validity")
+        if not {span.output_id for span in self.unfilled} <= set(bindings):
+            raise ValueError("unfilled span binding authority mismatch")
         return self
 
 
