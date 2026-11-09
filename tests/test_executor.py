@@ -19,8 +19,10 @@ from contracts.models import (
     PlayerConfiguration,
     PositionBox,
     Revocation,
+    UnfilledSpan,
     Variant,
 )
+from contracts.node_app_link import FrameBlack, FrameBlackCause
 from contracts.photo_crop import CENTRED
 from contracts.time import ManualClock
 from player.cache import Cache
@@ -1077,3 +1079,102 @@ def test_a_photo_dissolving_in_is_drawn_over_the_one_it_replaces_whatever_the_pl
     drawn = rig.renderer.outputs["hdmi1"].layers
     assert [local.layer.assignment_id for local in drawn] == ["current", "following"]
     assert drawn[-1].alpha == pytest.approx(.5)
+
+
+def black(rig):
+    return {report.output_id: report.cause for report in rig.executor.frames_black()}
+
+
+def test_frames_black_no_current_plan(tmp_path):
+    rig = Rig(tmp_path)
+    assert black(rig) == {"hdmi1": FrameBlackCause.NO_PLAN, "hdmi2": FrameBlackCause.NO_PLAN}
+
+
+def test_frames_black_an_expired_plan(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(layer(end=120), valid_until=120)
+    rig.clock.advance(30)
+    rig.sync_clock()
+    assert black(rig)["hdmi1"] is FrameBlackCause.NO_PLAN
+
+
+def test_frames_black_only_for_enabled_bindings_and_sorted(tmp_path):
+    rig = Rig(tmp_path)
+    assert [report.output_id for report in rig.executor.frames_black()] == ["hdmi1", "hdmi2"]
+    rig.executor.accept_configuration(rig.configuration.model_copy(update={
+        "configuration_revision": 2, "enabled_outputs": ("hdmi2",)}))
+    assert [report.output_id for report in rig.executor.frames_black()] == ["hdmi2"]
+
+
+def test_frames_black_a_due_photo_walks_its_causes(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(layer())
+    assert black(rig)["hdmi1"] is FrameBlackCause.NO_PHOTO
+    rig.secure()
+    assert black(rig)["hdmi1"] is FrameBlackCause.CANNOT_DRAW    # secured, not prepared
+    rig.executor.prepare_imminent()
+    assert black(rig)["hdmi1"] is FrameBlackCause.NOT_STARTED
+    rig.commit("picture")
+    assert black(rig)["hdmi1"] is FrameBlackCause.CANNOT_DRAW    # granted, nothing drawn yet
+    rig.executor.tick()
+    assert "hdmi1" not in black(rig)
+
+
+def test_frames_black_a_failed_download_and_a_failed_decode(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(layer())
+    assert not rig.executor.acquire("picture", [b"wrong"], sha256="0" * 64, size=5)
+    assert black(rig)["hdmi1"] is FrameBlackCause.NO_PHOTO
+    rig.secure()
+    rig.renderer.prepare_failures.add("picture")
+    rig.executor.prepare_imminent()
+    assert black(rig)["hdmi1"] is FrameBlackCause.CANNOT_DRAW
+
+
+def test_frames_black_an_unhealthy_clock(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(layer())
+    rig.show_clock._anchor = replace(rig.show_clock._anchor, bound=MAX_UNCERTAINTY * 2)
+    assert black(rig)["hdmi1"] is FrameBlackCause.NO_TIME
+
+
+def test_frames_black_a_clock_never_anchored_counts_every_layer(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(layer(start=300, end=350))
+    rig.offer(layer(start=300, end=350), revision=2, unfilled=(UnfilledSpan(output_id="hdmi2", start=300, end=350),))
+    rig.show_clock._anchor = None
+    assert black(rig) == {"hdmi1": FrameBlackCause.NO_TIME, "hdmi2": FrameBlackCause.NO_CONTENT}
+
+
+def test_frames_black_a_black_layer_kept_photo_and_pattern_draw_no_card(tmp_path):
+    rig = Rig(tmp_path)
+    rig.play(layer("dark", presentation="black", variant=None))
+    assert "hdmi1" not in black(rig)
+
+    rig = Rig(tmp_path / "kept")
+    rig.play(layer(end=140, after_end="keep_this_photo"))
+    rig.clock.advance(50)
+    rig.sync_clock()
+    rig.executor.tick()
+    assert "hdmi1" not in black(rig)
+
+    rig = Rig(tmp_path / "pattern")
+    rig.offer(layer())
+    rig.renderer.patterns.add("hdmi1")
+    assert "hdmi1" not in black(rig)
+
+
+def test_frames_black_an_unfilled_span_is_no_content_only_while_it_lasts(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(unfilled=(UnfilledSpan(output_id="hdmi1", start=100, end=150),))
+    assert black(rig)["hdmi1"] is FrameBlackCause.NO_CONTENT and "hdmi2" not in black(rig)
+    rig.clock.advance(60)
+    rig.sync_clock()
+    assert "hdmi1" not in black(rig)
+
+
+def test_frames_black_with_no_configuration_is_no_report(tmp_path):
+    rig = Rig(tmp_path)
+    fresh = Executor("other", rig.cache, rig.renderer, rig.clock, rig.show_clock)
+    assert fresh.frames_black() == ()
+    assert isinstance(rig.executor.frames_black()[0], FrameBlack)

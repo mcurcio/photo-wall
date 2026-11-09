@@ -900,3 +900,24 @@ def test_two_frames_of_one_shape_show_different_photos_with_their_crops(registry
     assert {row["scene_id"] for row in selected} == {"scheduled"}
     passes = [row["pass_number"] for row in selected]
     assert passes[0] == 1 and passes == sorted(passes)
+
+
+def test_an_unfilled_span_is_offered_and_a_change_to_it_alone_is_a_new_plan(registry):
+    """A Frame with no photo gets its span on the Plan; a span that changes while the layers and
+    the validity stand is still a new revision (the Player would otherwise keep a wrong "nothing
+    wanted"). Mutation probe: drop `unfilled` from the unchanged-plan comparison."""
+    player = setup_players(registry, 1)[0]
+    coordinator = Coordinator(registry.db, registry.clock)
+    schedule(coordinator, ["frame-0"], media=True)
+    delivered = coordinator.delivery(player["player_id"], 1)["plan"]
+    assert delivered.layers == () and delivered.unfilled
+    assert delivered.unfilled[0].output_id == "HDMI-A-1"
+    coordinator.advance()
+    assert coordinator.delivery(player["player_id"], 1)["plan"].revision == delivered.revision
+    coordinator.runtime.command("set_scene", Scene(
+        scene_id="scheduled", revision=2, loop=True, cycle_seconds=45,
+        contributions=(Contribution(target="frame:frame-0", kind="media", source_refs=("library:1",)),)), by="console")
+    coordinator.advance()
+    revised = coordinator.delivery(player["player_id"], 1)["plan"]
+    assert revised.revision > delivered.revision
+    assert revised.unfilled != delivered.unfilled and revised.layers == ()

@@ -67,6 +67,7 @@ from contracts.models import (
     Model,
     OutputBinding,
     PhotoCrop,
+    UnfilledSpan,
     stack_order,
 )
 
@@ -190,6 +191,8 @@ class CueMember(Model):
 class PlayerProposal(Model):
     player_id: str
     layers: tuple[Layer, ...]
+    # Media Intents inside the preparation horizon that ended the pass with no layer.
+    unfilled: tuple[UnfilledSpan, ...] = ()
 
 
 class Projection(Model):
@@ -339,6 +342,7 @@ class _ProjectionBuilder:
         self.pool_refs: dict[str, tuple[str, ...]] = {}
         self.cut: float | None = None
         self.cues: dict[str, CueMember] = {}
+        self.wanted: dict[str, tuple[str, UnfilledSpan]] = {}   # media Intents inside the horizon
         self._validate_inputs(bindings_by_player)
 
     def _validate_inputs(self, bindings: Mapping[str, Sequence[OutputBinding]]) -> None:
@@ -436,11 +440,29 @@ class _ProjectionBuilder:
         if identity in self.seen:
             return
         self.seen.add(identity)
+        self._want(intent, window, identity)
         self._place(intent, window, identity)
         if intent.shows_from < window.preparation_end or identity in self.locks:
             self.cues[identity] = CueMember(
                 assignment_id=identity, root_id=intent.root_id, target=intent.target,
                 shows_from=intent.shows_from, interval_end=intent.interval_end)
+
+    def _want(self, intent: Intent, window: PlanWindow, identity: str) -> None:
+        """Record a media Intent inside the preparation horizon on a bound Frame, before anything
+        can refuse it: `_unfilled` makes every one that ends the pass with no layer a span, so no
+        refusal path can forget one."""
+        owner = self.frames.get(intent.target)
+        if intent.kind == "media" and owner is not None and intent.shows_from < window.preparation_end:
+            self.wanted[identity] = (owner[0], UnfilledSpan(
+                output_id=owner[1].output_id, start=intent.shows_from, end=intent.interval_end))
+
+    def _unfilled(self, player: str, layers: Sequence[Layer]) -> tuple[UnfilledSpan, ...]:
+        """`player`'s wanted showings that have no layer and are not past the cut, one span each."""
+        placed = {layer.assignment_id for layer in layers}
+        spans = [span for identity, (owner, span) in self.wanted.items()
+                 if owner == player and identity not in placed
+                 and not self.past_cut(span.start, identity)]
+        return tuple(sorted(spans, key=lambda span: (span.output_id, span.start)))
 
     def _place(self, intent: Intent, window: PlanWindow, identity: str) -> None:
         inside = intent.shows_from < window.preparation_end
@@ -752,6 +774,7 @@ class _ProjectionBuilder:
             player_id=player,
             layers=tuple(sorted(layers, key=lambda layer: (
                 *stack_order(layer), layer.output_id, layer.assignment_id))),
+            unfilled=self._unfilled(player, layers),
         ) for player, layers in sorted(self.layers.items()))
         # A layer is offered whole, so the plan stays valid to the end of its longest layer; a
         # cut plan holds nothing new past its cut, so it is valid no further than the cut.

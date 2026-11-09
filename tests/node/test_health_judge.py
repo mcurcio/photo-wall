@@ -22,6 +22,7 @@ from appliance.health.judge import (
     APP_UNRESPONSIVE,
     CARD_PRECEDENCE,
     DESCRIPTOR_LIMIT_HEADROOM,
+    FRAME_BLACK_CODES,
     MAX_OUTPUTS,
     NOTHING_TO_SHOW,
     RING_CAPACITY,
@@ -35,7 +36,7 @@ from appliance.health.judge import (
     evidence_wall_s,
 )
 from contracts import node_faults
-from contracts.node_faults import FAULTS, Fault, catalogue_digest
+from contracts.node_faults import FAULTS, FIRST_PHOTO_WINDOW_MS, Fault, catalogue_digest
 
 RAISE = FAULTS[APP_UNRESPONSIVE].raise_window_ms
 # The Pi's wall clock read when the judge's boot clock read 0: 2026-10-20 07:17 UTC.
@@ -90,7 +91,14 @@ def test_the_catalogue_has_the_m1_row_the_degraded_rows_and_the_absent_app_row()
             SOFTWARE_RENDERER, False, "Photos are drawn without the graphics processor", 0, 0),
         APP_ABSENT: Fault(APP_ABSENT, True, "Photos paused — the player stopped", 5000, 0),
         APP_RESOURCE_EXHAUSTED: Fault(
-            APP_RESOURCE_EXHAUSTED, False, "The player is running out of open files", 0, 60000)}
+            APP_RESOURCE_EXHAUSTED, False, "The player is running out of open files", 0, 60000),
+        **{code: Fault(code, True, line, FIRST_PHOTO_WINDOW_MS, 0) for code, line in (
+            ("frame_no_plan", "Photos paused — no plan from Central"),
+            ("frame_no_time", "Photos paused — no time from Central"),
+            ("frame_no_photo", "Photos paused — the photo has not arrived"),
+            ("frame_cannot_draw", "Photos paused — the photo could not be drawn"),
+            ("frame_not_started", "Photos paused — waiting for Central to start it"),
+            ("frame_no_content", "Photos paused — no photo for this Frame"))}}
     with pytest.raises(TypeError):
         FAULTS["other"] = FAULTS[APP_UNRESPONSIVE]
 
@@ -527,7 +535,8 @@ def descriptors(open_descriptors, soft_limit=1024, run=RUN):
 
 
 def test_the_card_precedence_puts_the_run_causes_before_the_frame_showing_nothing():
-    assert CARD_PRECEDENCE == (APP_ABSENT, APP_UNRESPONSIVE, APP_DESCRIPTOR_LIMIT, NOTHING_TO_SHOW)
+    assert CARD_PRECEDENCE == (APP_ABSENT, APP_UNRESPONSIVE, APP_DESCRIPTOR_LIMIT,
+                               *FRAME_BLACK_CODES.values(), NOTHING_TO_SHOW)
     assert all(FAULTS[code].display_affecting for code in CARD_PRECEDENCE)
 
 

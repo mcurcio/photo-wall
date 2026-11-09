@@ -10,6 +10,7 @@ from contracts.models import (
     PhotoCrop,
     Plan,
     Readiness,
+    UnfilledSpan,
     Variant,
     fade_share,
 )
@@ -220,3 +221,30 @@ def test_overlapping_fades_take_the_lesser_never_the_product():
         assert fade_share(now, start=0, end=2, fade_in=1.5, fade_out=1.5) == pytest.approx(expected)
     assert fade_share(5, start=0, end=10, fade_in=0, fade_out=0) == 1
     assert fade_share(-1, start=0, end=10, fade_in=2, fade_out=2) == 0
+
+
+def _plan(**fields):
+    binding = OutputBinding(output_id="hdmi1", frame_id="frame1", generation=1, lighting=LIGHTING,
+                            display_mm=None)
+    return Plan(plan_id="plan", revision=1, player_id="player", authority_epoch=1, issued_at=0,
+                valid_from=0, valid_until=60, bindings=(binding,), layers=(), **fields)
+
+
+def test_a_plan_with_no_unfilled_span_serialises_without_the_key_and_an_old_plan_validates():
+    plan = _plan()
+    document = plan.model_dump(mode="json")
+    assert "unfilled" not in document and "unfilled" not in plan.model_dump_json()
+    assert Plan.model_validate(document) == plan
+
+
+def test_an_unfilled_span_crosses_the_wire():
+    plan = _plan(unfilled=(UnfilledSpan(output_id="hdmi1", start=0, end=10),))
+    assert plan.model_dump(mode="json")["unfilled"] == [{"output_id": "hdmi1", "start": 0, "end": 10}]
+    assert Plan.model_validate(plan.model_dump(mode="json")) == plan
+
+
+def test_an_unfilled_span_ends_after_it_starts_and_names_a_bound_output():
+    with pytest.raises(ValidationError):
+        UnfilledSpan(output_id="hdmi1", start=10, end=10)
+    with pytest.raises(ValidationError):
+        _plan(unfilled=(UnfilledSpan(output_id="hdmi2", start=0, end=10),))

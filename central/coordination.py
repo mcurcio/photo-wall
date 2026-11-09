@@ -688,8 +688,8 @@ class Coordinator:
         membership = {layer.assignment_id: groups[layer.assignment_id] for layer in proposal.layers}
         if (
             latest
-            and (latest.layers, latest.bindings, latest.valid_until)
-            == (proposal.layers, bindings, projection.valid_until)
+            and (latest.layers, latest.bindings, latest.unfilled, latest.valid_until)
+            == (proposal.layers, bindings, proposal.unfilled, projection.valid_until)
             and self._plan_groups(conn, latest) == membership
         ):
             return
@@ -711,6 +711,7 @@ class Coordinator:
             valid_until=projection.valid_until,
             bindings=bindings,
             layers=proposal.layers,
+            unfilled=proposal.unfilled,
         )
         self._offer(conn, plan, groups)
         self._record_selected(conn, plan, projection)

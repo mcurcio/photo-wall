@@ -17,9 +17,13 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
+from typing import Final
 
 MAX_HOUSEHOLD_LINE = 96  # one overlay card line (Display's bound)
 _CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+# How long a Frame may go without its first photo before the wall says so: a healthy cold start
+# draws within it, untinted.
+FIRST_PHOTO_WINDOW_MS: Final = 120000
 
 
 def _duration(value: object) -> bool:
@@ -75,12 +79,26 @@ FAULTS: Mapping[str, Fault] = _catalogue(
     # outcome window lets a healthy run find its first photo untinted (a placeholder of r2's). It
     # clears at once when the Output is held again, powered off or gone.
     Fault("nothing_to_show", True, "Nothing to show on this Frame",
-          raise_window_ms=120000, clear_hold_ms=0),
+          raise_window_ms=FIRST_PHOTO_WINDOW_MS, clear_hold_ms=0),
     # Issue #123: the run at its open-file limit (within the judge's DESCRIPTOR_LIMIT_HEADROOM)
     # can open no photo, so it tints at once, unlike the pressure above; a run cause, it stays
     # until another run starts.
     Fault("app_descriptor_limit", True, "Photos paused — the player ran out of open files",
           raise_window_ms=0, clear_hold_ms=0),
+    # A Frame black while content is wanted, as its Player states it (player/frame_black.py): per
+    # Output, and an Output the next report no longer names clears at once.
+    Fault("frame_no_plan", True, "Photos paused — no plan from Central",
+          raise_window_ms=FIRST_PHOTO_WINDOW_MS, clear_hold_ms=0),
+    Fault("frame_no_time", True, "Photos paused — no time from Central",
+          raise_window_ms=FIRST_PHOTO_WINDOW_MS, clear_hold_ms=0),
+    Fault("frame_no_photo", True, "Photos paused — the photo has not arrived",
+          raise_window_ms=FIRST_PHOTO_WINDOW_MS, clear_hold_ms=0),
+    Fault("frame_cannot_draw", True, "Photos paused — the photo could not be drawn",
+          raise_window_ms=FIRST_PHOTO_WINDOW_MS, clear_hold_ms=0),
+    Fault("frame_not_started", True, "Photos paused — waiting for Central to start it",
+          raise_window_ms=FIRST_PHOTO_WINDOW_MS, clear_hold_ms=0),
+    Fault("frame_no_content", True, "Photos paused — no photo for this Frame",
+          raise_window_ms=FIRST_PHOTO_WINDOW_MS, clear_hold_ms=0),
 )
 
 
@@ -97,4 +115,4 @@ def catalogue_digest() -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-__all__ = ["FAULTS", "MAX_HOUSEHOLD_LINE", "Fault", "catalogue_digest"]
+__all__ = ["FAULTS", "FIRST_PHOTO_WINDOW_MS", "MAX_HOUSEHOLD_LINE", "Fault", "catalogue_digest"]

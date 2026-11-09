@@ -2066,3 +2066,17 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
         thread.join(timeout=5)
         listener.close()
         assert not thread.is_alive()
+
+
+def test_frames_black_with_no_executor_cannot_tell(tmp_path):
+    """None, never (): an empty report would claim nothing is black."""
+    async def scenario():
+        service, _server = await rig(tmp_path)
+        try:
+            assert service.frames_black() is not None
+            service.executor = None
+            assert service.frames_black() is None
+        finally:
+            await close(service)
+
+    asyncio.run(scenario())

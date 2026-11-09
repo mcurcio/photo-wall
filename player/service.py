@@ -45,6 +45,7 @@ from contracts.models import (
     PlayerTime,
     Revocation,
 )
+from contracts.node_app_link import FrameBlack
 from contracts.node_impeded import ImpededFrames
 from contracts.node_link import NODE_BUS_URL
 from contracts.node_state import FrameReport, FrameReports
@@ -1391,6 +1392,11 @@ class PlayerService:
         self.line.start()
         self._room_lights_reader = start_room_lights(self, self._node_bus_url)
 
+    def frames_black(self) -> tuple[FrameBlack, ...] | None:
+        """Which Frames are black while content is wanted (GLib thread: the probe's answer). None
+        with no executor: this Player cannot tell, which is never the same as nothing black."""
+        return None if self.executor is None else self.executor.frames_black()
+
     def request_relink(self):
         """Thread-safe: the proof loop forgets its recorded app link and proves it again now."""
         self._relink.set()
@@ -1508,7 +1514,7 @@ def main():
     Tick(GLib, PLANNING_TICK_MS, tick)
     service.start()
     # Probes are answered at control dispatch's priority (own one-slot lane), never here.
-    ProbeResponder(dispatcher, on_relink=service.request_relink,
+    ProbeResponder(dispatcher, on_relink=service.request_relink, frames_black=service.frames_black,
                    gl_renderer=lambda: root.renderer.gl_renderer).start()
     try:
         with contextlib.suppress(KeyboardInterrupt):

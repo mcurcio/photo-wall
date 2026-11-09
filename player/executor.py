@@ -23,9 +23,11 @@ from contracts.models import (
     Revocation,
     stack_order,
 )
+from contracts.node_app_link import FrameBlack
 from contracts.on_screen import kept_from
 from contracts.time import Monotonic
 from player.cache import Cache, CacheCapacityError, CacheError
+from player.frame_black import DueLayer, frame_black
 from player.rendering import (
     LocalLayer,
     OutputComposition,
@@ -696,6 +698,62 @@ class Executor:
                     and (current.binding.frame_id, current.binding.generation) == (binding.frame_id, binding.generation)
                     and bool(visible_now(current.layers)))
 
+    def frames_black(self) -> tuple[FrameBlack, ...]:
+        """Renderer thread: each enabled Output that is black while content is wanted, and why
+        (player/frame_black.py), sorted by Output. Nothing here draws or decides what is drawn."""
+        with self._lock:
+            if not self._config:
+                return ()
+            now, plan = self._now(), self._plan
+            has_plan = plan is not None and plan.valid_until > now
+            clock_ok = self.show_clock.healthy()
+            found = []
+            for binding in self._config.bindings:
+                if binding.output_id not in self._config.enabled_outputs:
+                    continue
+                cause = frame_black(
+                    showing=self.showing(binding),
+                    own_drawing=self.renderer.patterned(binding.output_id),
+                    has_plan=has_plan, clock_ok=clock_ok,
+                    due=[self._due_layer(a, now) for a in self._assignments.values()
+                         if self._current_authority(a) and a.layer.output_id == binding.output_id
+                         and self._in_force(a.layer.start, a.layer.end, now)],
+                    unfilled=plan is not None and any(
+                        span.output_id == binding.output_id and self._in_force(span.start, span.end, now)
+                        for span in plan.unfilled))
+                if cause is not None:
+                    found.append(FrameBlack(binding.output_id, cause))
+            return tuple(sorted(found, key=lambda black: black.output_id))
+
+    def _in_force(self, start: float, end: float, now: float) -> bool:
+        """Whether something planned over [start, end) is in force at `now`, within the plan. Until
+        the ShowClock is anchored there is no `now` to tell by, so all of it counts."""
+        if not self.show_clock.anchored:
+            return True
+        return (self._plan is not None
+                and max(start, self._plan.valid_from) <= now < min(end, self._plan.valid_until))
+
+    def _due_layer(self, assignment: _Assignment, now: float) -> DueLayer:
+        return DueLayer(assignment.layer.presentation, stack_order(assignment.layer),
+                        secured=assignment.secured,
+                        prepared=assignment.prepared or assignment.deferred,
+                        granted=self._grant_covers(assignment, now) or self._executing(assignment, now),
+                        failure=assignment.failure)
+
+    @staticmethod
+    def _grant_covers(assignment: _Assignment, now: float) -> bool:
+        """Whether the Commit accepted for `assignment` authorizes it at `now`."""
+        granted = assignment.granted_layer
+        return (granted is not None and max(granted.start, assignment.granted_from) <= now
+                < min(granted.end, assignment.granted_until))
+
+    @staticmethod
+    def _executing(assignment: _Assignment, now: float) -> bool:
+        """Whether `assignment`'s execution lease, the grant it started under, runs at `now`."""
+        executing = assignment.execution_layer
+        return (executing is not None
+                and executing.start <= now < min(executing.end, assignment.execution_until))
+
     @property
     def failures(self) -> tuple[Failure, ...]:
         with self._lock:
@@ -981,18 +1039,13 @@ class Executor:
                 if (not assignment.secured or not (assignment.prepared or assignment.deferred)
                         or assignment.failure or not self._current_authority(assignment)):
                     continue
-                granted = assignment.granted_layer
-                if (granted is not None and self.show_clock.healthy()
-                        and max(granted.start, assignment.granted_from) <= now
-                        < min(granted.end, assignment.granted_until)):
-                    assignment.execution_layer = granted
+                if self.show_clock.healthy() and self._grant_covers(assignment, now):
+                    assignment.execution_layer = assignment.granted_layer
                     assignment.execution_until = assignment.granted_until
-                executing = assignment.execution_layer
-                if (executing is not None and executing.start <= now
-                        < min(executing.end, assignment.execution_until)):
+                if self._executing(assignment, now):
                     # Revisions renew offers, not old execution leases. Until a
                     # fresh commit, use the original authorized ordering/effects.
-                    active.append(replace(assignment, layer=executing))
+                    active.append(replace(assignment, layer=assignment.execution_layer))
             # Every playing layer, a covered one included; what is drawn leaves out a deferred one
             # while it is covered (it holds no decoder).
             playing = {c.binding.output_id: c for c in self._compositions(active, now, timebase)}

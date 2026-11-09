@@ -667,3 +667,49 @@ def test_a_cut_plan_never_replaces_an_offer_holding_layers_past_the_cut():
     assert _withdraws(latest, cut.for_player("player-one"), cut, now=0)
     assert not _withdraws(latest, whole.for_player("player-one"), whole, now=0)
     assert not _withdraws(latest, cut.for_player("player-one"), cut, now=30)
+
+
+def test_a_frame_with_no_photo_that_fits_gets_one_span_for_the_showing():
+    """A media showing inside the horizon that ends the pass with no layer: one span each, sorted."""
+    result = propose(runtime(), pools={"holiday:1": pool()})
+    proposal = result.for_player("player-one")
+    assert proposal.layers == ()
+    assert [(s.output_id, s.start, s.end) for s in proposal.unfilled] == [
+        ("hdmi-1", 0, 10), ("hdmi-1", 10, 20), ("hdmi-1", 20, 30)]
+
+
+def test_every_refusal_path_leaves_a_span():
+    """The Scene line raises, a slot refused and a Frame of unknown screen all end with no layer.
+    Mutation probe: record spans only in `_settle_slot`'s unfilled branch -> the raise leaves none."""
+    class FailingLines(PoolLines):
+        def line(self, query):
+            raise RuntimeError("the read failed")
+
+    instance, bindings = runtime(), {"player-one": (binding(),)}
+    raised = project(instance, 0, bindings_by_player=bindings, settings=FitSettings(),
+                     frame_outputs=full_screen(bindings),
+                     lines=FailingLines({"holiday:1": pool("holiday:1", candidate())}),
+                     authored_candidates={}, locked_assignments={}, history=WallHistory(),
+                     horizon_seconds=25, plan_seconds=25)
+    assert raised.for_player("player-one").layers == ()
+    assert raised.for_player("player-one").unfilled
+    unknown = propose(runtime(), frame_outputs={"left": frame_output_of("left", None)})
+    assert unknown.for_player("player-one").unfilled
+
+
+def test_a_placed_showing_and_a_frame_with_no_run_get_no_span():
+    assert propose(runtime()).for_player("player-one").unfilled == ()
+    assert propose(Runtime(house=UTC_HOUSE)).for_player("player-one").unfilled == ()
+
+
+def test_a_black_showing_is_authored_black_and_no_span():
+    instance = runtime(contributions=(Contribution(target="frame:left", kind="black"),))
+    assert propose(instance).for_player("player-one").unfilled == ()
+
+
+def test_a_cut_showing_is_not_a_span():
+    """Past the cut nothing is planned at all, so nothing is wanted there."""
+    instance, bindings = runtime(), {"player-one": (binding(),)}
+    cut = propose(instance, pools={"holiday:1": pool()}, limits=PlannerLimits(max_assignments=1))
+    assert [span.start for span in cut.for_player("player-one").unfilled] == [0]
+    assert bindings

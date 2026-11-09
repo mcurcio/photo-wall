@@ -390,6 +390,7 @@ class _Output:
     shown: frozenset[int] = frozenset()
     seen: frozenset[str] = frozenset()
     committed: tuple | None = None
+    patterned: bool = False                     # the last presented commit drew a pattern ground
     submitted: float = -float("inf")
     expires: float | None = None
     grant: str | None = None                # the admitted grant of its last presented commit
@@ -698,6 +699,7 @@ class PlaneRenderer:
         state.seen = frozenset(pictures)
         state.committed = shows
         state.grant = str(grant.grant_id)
+        state.patterned = pattern is not None
         state.last = PresentationResult("presented", composition=looked, presented_at=now,
                                         applied_calibration=drawn.applied)
         self._newest[output_id] = composed
@@ -709,6 +711,12 @@ class PlaneRenderer:
         binding the composition matches); None before one, and after a candidate's ground."""
         state = self._outputs.get(output_id)
         return None if state is None else state.grant
+
+    def patterned(self, output_id: str) -> bool:
+        """Whether `output_id`'s last presented commit drew a pattern ground (module rule, When a
+        pattern shows); False before one, and after a candidate's ground."""
+        state = self._outputs.get(output_id)
+        return state is not None and state.patterned
 
     def release(self, assignment_id: str) -> None:
         """Drop the layer's decode, targets and compositor buffers once no commit shows them, and
@@ -882,6 +890,7 @@ class PlaneRenderer:
         state.submitted = now
         state.shown = frozenset(() if ground is None else (ground.handle,))
         state.seen, state.committed, state.grant = frozenset(), None, None
+        state.patterned = False
         self._sweep()
         state.last = _PENDING
         return _PENDING

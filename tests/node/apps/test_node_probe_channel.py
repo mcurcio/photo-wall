@@ -16,7 +16,10 @@ from appliance.feed import Feed
 from appliance.node import app_link
 from appliance.node.app_link import BrokerLinkService
 from contracts.node_app_link import (
+    FrameBlack,
+    FrameBlackCause,
     encode_node_app_link_result,
+    encode_node_frames_black,
     encode_node_probe_answer,
     encode_node_probe_open,
     encode_node_renderer,
@@ -500,3 +503,46 @@ def test_other_first_packets_take_the_proof_path(monkeypatch):
     monkeypatch.setattr(BrokerLinkService, "handle", ORIGINAL_HANDLE)
     links.serve_one()  # today's refusal: no grant, so `handle` refuses
     assert adopted == [] and connection.sent == [REFUSED] and connection.closed
+
+
+def test_the_players_frames_black_report_is_a_fact_for_the_channels_run_and_keeps_the_channel_open(stepped):
+    ours, theirs = packet_pair()
+    try:
+        stepped.publish_run(RUN)
+        stepped.adopt(ours, RUN)
+        stepped.step(0)
+        theirs.send(encode_node_frames_black((FrameBlack("HDMI-A-1", FrameBlackCause.NO_PLAN),)))
+        stepped.step(1)
+        assert [e.value["frames"] for e in facts(stepped.feed, "app_frames_black")] == [
+            [{"output": "HDMI-A-1", "cause": "no_plan"}]]
+        assert [e.value["run"] for e in facts(stepped.feed, "app_frames_black")] == [RUN.document()]
+        assert stepped._channel is not None
+    finally:
+        theirs.close()
+
+
+def test_a_malformed_frames_black_report_is_dropped_and_the_channel_stays_open(stepped):
+    ours, theirs = packet_pair()
+    try:
+        stepped.publish_run(RUN)
+        stepped.adopt(ours, RUN)
+        stepped.step(0)
+        theirs.send(b'{"schema": 2, "kind": "frames_black", "frames": [{"output": "a", "cause": "new"}]}')
+        stepped.step(1)
+        assert facts(stepped.feed, "app_frames_black") == []
+        assert stepped._channel is not None
+    finally:
+        theirs.close()
+
+
+def test_an_unknown_packet_still_ends_the_channel(stepped):
+    ours, theirs = packet_pair()
+    try:
+        stepped.publish_run(RUN)
+        stepped.adopt(ours, RUN)
+        stepped.step(0)
+        theirs.send(b'{"schema": 2, "kind": "something_else"}')
+        stepped.step(1)
+        assert stepped._channel is None
+    finally:
+        theirs.close()
