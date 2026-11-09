@@ -396,7 +396,7 @@ print(json.dumps(json.loads(s.recv(1<<20)),indent=1))'
 
 - `verdict.outputs[]`: per connected Output its `underlay` (`live`, `held` for a frozen admitted
   run, `slate` for none admitted), the raised `codes`, the `card` (the first by `CARD_PRECEDENCE`:
-  `app_absent`, `app_unresponsive`, `app_descriptor_limit`, `nothing_to_show`) and `card_age_ms`.
+  `app_absent`, `app_unresponsive`, `app_descriptor_limit`, the six `frame_*` codes, `nothing_to_show`) and `card_age_ms`.
 - `overlay.instructions[]`: what the overlay client is told to draw: `tint` and the two lines
   exactly as on the wall (line 1 "... · since HH:MM" on the Pi's clock and zone). `overlay.clients`
   0 means the overlay client is not connected: the shell's amber should cover the whole Output.
@@ -408,6 +408,8 @@ journal only as events it acts on; read the judge's view instead: `holding` is i
 feed snapshot, and a released Output with `holding` false shows the slate ("Waiting for a
 picture") and, after 120 s, `nothing_to_show`. A pattern or calibration target holds the Output
 (the `picture` op's `drawing`), so a Frame on a test pattern never reads dark.
+
+**A black Frame with its Player alive** (0031). The Player states which of its Frames are black while content is wanted, and why, on the probe channel (feed fact `app_frames_black`, one cause per Output); the judge turns each into a code after 120 s, and the card says it. Read the card's code, then the cause behind it: `frame_no_plan` (no plan from Central: Central's planning and the Player's link), `frame_no_time` (no usable reading of Central's time: the probe `GET /v1/player/time`; the Pi's own clock is irrelevant to this), `frame_no_photo` (the photo's bytes are not on the Pi: the Player's cache and Central's media), `frame_cannot_draw` (secured but not prepared or drawn: the Player's journal for decode and capacity), `frame_not_started` (prepared, Central has not granted the start: the group in Central's coordination), `frame_no_content` (the Plan's `unfilled` span: the Scene's planning outcome on the console). Deliberate black (Night off, a hold, a black layer, a kept photo, a pattern, Central's room-light card) never produces one. The Pi's wall clock is `timedatectl` and `timedatectl timesync-status` (systemd-timesyncd, runbook: the Pi's clock and its time client); a wrong wall clock does not stop photos but makes the card's "since" wrong.
 
 **The Frame region.** The Pi computes none; it draws where Central placed the Frame. Central sends
 `region-<port>` beside `picture-<port>` with its own change number. On Central's database (the
