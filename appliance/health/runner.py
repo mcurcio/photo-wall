@@ -37,6 +37,7 @@ import stat
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import Final
 
 from appliance.display_host.overlay.instruction import (
     INSTRUCTION_STALE_MS,
@@ -76,6 +77,7 @@ OVERLAY_REFRESH_MS = INSTRUCTION_STALE_MS // 3  # every instruction re-pushed th
 MAX_OVERLAY_CLIENTS = 4  # a fifth connection replaces the oldest (a respawned client)
 MAX_REPORT = 512
 REPORTS_PER_WAKE = 16
+WALL_STEP_MS: Final = 2000  # the wall clock moved by more than this against the boot clock: a step
 SEQPACKET = socket.SOCK_SEQPACKET
 
 log = logging.getLogger(__name__)
@@ -391,7 +393,10 @@ class HealthRunner:
     and publishes every READ_PERIOD, answers requests and reads reports in between. With a
     `sink`, each turn whose report differs from the last one put (appliance/health/report.py
     `report_key`) hands the verdict to it as a HealthReport (appliance/health/report.py); the sink only queues, so the judge never
-    waits on the bus, and a verdict the contract refuses is logged and skipped."""
+    waits on the bus, and a verdict the contract refuses is logged and skipped. A wall clock
+    stepped by more than WALL_STEP_MS since the last put (the time client recovering it) moves
+    every card's `since`, which `report_key` cannot see on the boot clock, so the report is put
+    again."""
 
     def __init__(self, judge: HealthJudge, readers: Sequence[FeedReader], *,
                  clock: Callable[[], int] = boottime_ms, wall: Callable[[], int] = wall_ms,
@@ -400,6 +405,7 @@ class HealthRunner:
         self.card = card or CardClock()
         self.overlay = OverlayClients(judge, card=self.card)
         self._put_key: tuple | None = None  # what the report last handed to the sink said
+        self._put_wall_offset: int | None = None  # wall_ms - now_ms at that put
 
     def turn(self) -> None:
         for reader in self.readers:
@@ -412,11 +418,14 @@ class HealthRunner:
             return
         verdict = self.judge.verdict(now_ms)
         key = report_key(verdict, now_ms)
-        if key == self._put_key:
+        wall_ms = self.wall()
+        offset = wall_ms - now_ms
+        stepped = self._put_wall_offset is not None and abs(offset - self._put_wall_offset) > WALL_STEP_MS
+        if key == self._put_key and not stepped:
             return
-        self._put_key = key
+        self._put_key, self._put_wall_offset = key, offset
         try:
-            self.sink.put(health_report(verdict, now_ms=now_ms, wall_ms=self.wall(),
+            self.sink.put(health_report(verdict, now_ms=now_ms, wall_ms=wall_ms,
                                         catalogue=catalogue_digest()))
         except ValueError as error:   # outside the contract: the overlay still shows it
             log.warning("health verdict %s not put on the bus: %s", verdict.sequence, error)

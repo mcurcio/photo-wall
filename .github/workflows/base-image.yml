@@ -270,8 +270,8 @@ jobs:
       # built squashfs via `unsquashfs -ll` (permissions/type + path) rather
       # than trusting the build's own exit code, then extracts only what
       # scripts/device_root_checks.py reads (systemd config and units, apt
-      # sources, the dpkg database): no watchdog override, no time daemon, no
-      # resolver writer, the node packages installed, nothing of the V1 lane,
+      # sources, the dpkg database): no watchdog override, no time daemon but
+      # the base's own time client, no resolver writer, the node packages installed, nothing of the V1 lane,
       # and apt sources that are exactly snapshot.list's pin (none foreign,
       # none missing).
       #
@@ -375,7 +375,7 @@ jobs:
           # config and units, the apt sources, the dpkg database, sshd's config,
           # the logins' authorized keys, the hostname, the hosts database, the
           # default locale, where the V1 bootstrapper lived, and display power's
-          # tools, modules-load file and groups. An extract path
+          # tools, modules-load file and groups, and the time client's script. An extract path
           # the image lacks is skipped, not an error; xattrs are not needed and
           # an unprivileged extract cannot set them.
           extract="$RUNNER_TEMP/photo-wall-base-extract"
@@ -385,7 +385,8 @@ jobs:
             usr/lib/systemd/system usr/lib/photo-wall-bootstrapper \
             etc/apt etc/passwd etc/ssh home root/.ssh var/lib/dpkg/status \
             etc/hostname etc/nsswitch.conf etc/default/locale etc/locale.conf \
-            usr/bin/ddcutil usr/bin/cec-ctl etc/modules-load.d etc/group >/dev/null
+            usr/bin/ddcutil usr/bin/cec-ctl etc/modules-load.d etc/group \
+            usr/libexec/photo-wall-time-servers >/dev/null
 
           echo "== DEVICE ROOT CHECKS (scripts/device_root_checks.py) =="
           # photo-wall-node (dpkg installs it only with every Depends: the
@@ -393,14 +394,15 @@ jobs:
           # version, and the OS packages the layers'
           # `packages:` lists name are installed (dpkg's own database:
           # `install ok installed`); no watchdog override,
-          # time daemon or resolver writer; the image's apt sources are exactly
+          # other time daemon or resolver writer; the image's apt sources are exactly
           # snapshot.list's pin; the agent's SSH login admits exactly the repo
           # key, by key only, with the server and its per-boot host-key
           # generator enabled; the binfmt units are masked, no build hostname is
           # baked in, the hosts database has myhostname, the default locale
           # sets LANG, no V1 unit or bootstrapper directory is left, and
           # ddcutil, cec-ctl, the DDC/CI modules-load file and the i2c group
-          # are there.
+          # are there, and systemd-timesyncd is enabled with its pool conf,
+          # drop-in (no restart, no watchdog) and option-42 script.
           # Photo Wall's Weston must be the one installed, at exactly its local version
           # (debian-packaging/weston/upstream.env): Debian's has no 64-bit plane masks.
           weston=$(sed -n 's/^WESTON_LOCAL_VERSION=//p' debian-packaging/weston/upstream.env)

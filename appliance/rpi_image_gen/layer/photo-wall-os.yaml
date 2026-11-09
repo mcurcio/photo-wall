@@ -3,8 +3,8 @@
 # X-Env-Layer-Category: sys
 # X-Env-Layer-Desc: The base's OS configuration, set in the OS itself (owner,
 #  2026-10-09: OS configuration goes straight into the OS through
-#  rpi-image-gen, never through a Photo Wall package). Three settings and
-#  three packages:
+#  rpi-image-gen, never through a Photo Wall package). Three settings, three
+#  packages and the time client:
 #
 #  binfmt: Debian's python3.13-minimal ships /usr/lib/binfmt.d/python3.13.conf,
 #  so systemd-binfmt.service and the binfmt_misc mount start at every boot and
@@ -34,9 +34,16 @@
 #  No device-tree overlay: vc4-kms-v3d-pi5 already makes each HDMI port's DDC
 #  bus (i2c-13, i2c-14) and its CEC device.
 #
+#  Time client: stage 1 takes at most one step, so a boot with no time source
+#  left the clock at the build's floor until a reboot. systemd-timesyncd keeps
+#  trying, from stage 1's sources (uplink/clock.py): the option-42 servers,
+#  through /usr/libexec/photo-wall-time-servers, then the pool. Restart=no and
+#  WatchdogSec=0 override the unit's own restart and watchdog: nothing here
+#  restarts on its own (owner, 2026-10-20), and shows do not read this clock.
+#
 #  base-image.yml checks all of these on the built image
 #  (scripts/device_root_checks.py).
-# X-Env-Layer-Version: 1.2.0
+# X-Env-Layer-Version: 1.3.0
 # X-Env-Layer-Requires: systemd-min
 # METAEND
 ---
@@ -45,6 +52,7 @@ mmdebstrap:
     - libnss-myhostname
     - ddcutil
     - v4l-utils
+    - systemd-timesyncd
   customize-hooks:
     - |-
       set -eu
@@ -53,3 +61,61 @@ mmdebstrap:
       printf 'LANG=C.UTF-8\n' > "$1/etc/locale.conf"
       mkdir -p "$1/etc/modules-load.d"
       printf 'i2c-dev\n' > "$1/etc/modules-load.d/photo-wall-ddc.conf"
+      mkdir -p "$1/etc/systemd/timesyncd.conf.d"
+      cat > "$1/etc/systemd/timesyncd.conf.d/50-photo-wall.conf" <<'EOF'
+      [Time]
+      NTP=debian.pool.ntp.org
+      FallbackNTP=
+      EOF
+      mkdir -p "$1/etc/systemd/system/systemd-timesyncd.service.d"
+      cat > "$1/etc/systemd/system/systemd-timesyncd.service.d/50-photo-wall.conf" <<'EOF'
+      [Service]
+      ExecStartPre=+/usr/libexec/photo-wall-time-servers
+      Restart=no
+      WatchdogSec=0
+      EOF
+      mkdir -p "$1/usr/libexec"
+      cat > "$1/usr/libexec/photo-wall-time-servers" <<'EOF'
+      #!/bin/sh
+      # BEGIN photo-wall-time-servers
+      # The NTP servers the kernel took from DHCP (option 42) go ahead of the
+      # pool, as in stage 1. Without any it writes nothing: the pool conf stands.
+      # A failure here must never stop the time client, so it always exits 0.
+      ntp_servers="${PROC_NTP:-/proc/net/ipconfig/ntp_servers}"
+      dropin="${DROPIN:-/run/systemd/timesyncd.conf.d/60-photo-wall-dhcp.conf}"
+
+      is_ipv4() {
+        case "$1" in
+          ""|.*|*.|*..*|*[!0-9.]*) return 1 ;;
+        esac
+        (
+          IFS=.
+          set -- $1
+          [ "$#" -eq 4 ] || exit 1
+          for octet do
+            [ "${#octet}" -le 3 ] && [ "$octet" -le 255 ] || exit 1
+          done
+        )
+      }
+
+      set -f
+      servers=""
+      count=0
+      for server in $(cat "$ntp_servers" 2>/dev/null); do
+        case "$server" in
+          0.0.0.0|255.255.255.255) continue ;;
+        esac
+        is_ipv4 "$server" || continue
+        servers="${servers:+$servers }$server"
+        count=$((count + 1))
+        [ "$count" -lt 3 ] || break
+      done
+      if [ -n "$servers" ]; then
+        mkdir -p "${dropin%/*}" 2>/dev/null
+        printf '[Time]\nNTP=\nNTP=%s debian.pool.ntp.org\n' "$servers" 2>/dev/null > "$dropin"
+      fi
+      exit 0
+      # END photo-wall-time-servers
+      EOF
+      chmod 0755 "$1/usr/libexec/photo-wall-time-servers"
+      chroot "$1" systemctl enable systemd-timesyncd.service
