@@ -183,12 +183,14 @@ def test_a_wall_clock_step_while_a_photo_plays_changes_nothing(tmp_path, step):
     asyncio.run(check())
 
 
-def test_a_probe_naming_another_epoch_leaves_anchor_and_picture_untouched(tmp_path):
+@pytest.mark.parametrize("field,value", [("time_epoch", 2), ("time_player", "another-player")])
+def test_a_probe_naming_another_epoch_or_player_leaves_anchor_and_picture_untouched(tmp_path, field, value):
+    """Mutation probe: drop the player check in `probe_time`."""
     async def check():
         service, server = await rig(tmp_path)
         try:
             before = service.show_clock.timebase(), service.show_clock.diagnostics.samples
-            server.time_epoch = 2
+            setattr(server, field, value)
             server.time_offset = 50     # were it believed, the timeline would move
             assert not await service.probe_time()
             assert (service.show_clock.timebase(), service.show_clock.diagnostics.samples) == before

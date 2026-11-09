@@ -531,6 +531,10 @@ def test_the_base_enables_rpi_image_gens_ssh_layer_with_the_one_key_and_ci_check
 
 # --- base OS configuration (rpi_image_gen/layer/photo-wall-os.yaml) ----------------------------
 
+TIME_CLIENT_SERVICE = ("[Service]\nRestart=no\nWatchdogSec=0\n"
+                       f"ExecStartPre=+/{TIME_SERVERS_SCRIPT}\n")
+
+
 def base_os_root(root: Path) -> Path:
     """What the photo-wall-os layer, the device layer's neutral hostname and libnss-myhostname's
     postinst leave in the base; trixie ships etc/default/locale as a link to ../locale.conf.
@@ -553,7 +557,7 @@ def base_os_root(root: Path) -> Path:
     (root / TIME_CLIENT_ENABLED).parent.mkdir(parents=True)
     (root / TIME_CLIENT_ENABLED).symlink_to("/usr/lib/systemd/system/systemd-timesyncd.service")
     write(root, TIME_CLIENT_POOL_CONF, f"[Time]\nNTP={TIME_POOL_HOST}\nFallbackNTP=\n")
-    write(root, TIME_CLIENT_DROP_IN, "[Service]\nRestart=no\nWatchdogSec=0\n")
+    write(root, TIME_CLIENT_DROP_IN, TIME_CLIENT_SERVICE)
     write(root, TIME_SERVERS_SCRIPT, "#!/bin/sh\nexit 0\n").chmod(0o755)
     return root
 
@@ -609,10 +613,12 @@ def _mask_elsewhere(root):
                         f"[Time]\n#NTP={TIME_POOL_HOST}\nNTP=time.example\n"),
      f"time client: {TIME_CLIENT_POOL_CONF} does not name {TIME_POOL_HOST}"),
     (lambda root: (root / TIME_CLIENT_DROP_IN).unlink(), f"time client: missing {TIME_CLIENT_DROP_IN}"),
-    (lambda root: write(root, TIME_CLIENT_DROP_IN, "[Service]\nWatchdogSec=0\n"),
+    (lambda root: write(root, TIME_CLIENT_DROP_IN, TIME_CLIENT_SERVICE.replace("Restart=no\n", "")),
      f"time client: {TIME_CLIENT_DROP_IN} without Restart=no"),
-    (lambda root: write(root, TIME_CLIENT_DROP_IN, "[Service]\nRestart=no\n"),
+    (lambda root: write(root, TIME_CLIENT_DROP_IN, TIME_CLIENT_SERVICE.replace("WatchdogSec=0\n", "")),
      f"time client: {TIME_CLIENT_DROP_IN} without WatchdogSec=0"),
+    (lambda root: write(root, TIME_CLIENT_DROP_IN, "[Service]\nRestart=no\nWatchdogSec=0\n"),
+     f"time client: {TIME_CLIENT_DROP_IN} without ExecStartPre=+/{TIME_SERVERS_SCRIPT}"),
     (lambda root: (root / TIME_SERVERS_SCRIPT).unlink(),
      f"time client: missing executable {TIME_SERVERS_SCRIPT}"),
     (lambda root: (root / TIME_SERVERS_SCRIPT).chmod(0o644),

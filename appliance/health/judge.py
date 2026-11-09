@@ -80,7 +80,6 @@ import datetime
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from types import MappingProxyType
 from typing import Final, Literal
 
 from appliance.display_host.overlay.instruction import (
@@ -91,7 +90,7 @@ from appliance.display_host.overlay.instruction import (
 from appliance.feed import FeedEvent
 from appliance.kernel.app_facts import APP_DESCRIPTORS, APP_EXITED, APP_FRAMES_BLACK, APP_STARTED
 from contracts.node_app_link import FrameBlackCause
-from contracts.node_faults import Fault
+from contracts.node_faults import FRAME_BLACK_CODES, Fault
 
 APP_UNRESPONSIVE = "app_unresponsive"
 SOFTWARE_RENDERER = "software_renderer"
@@ -102,15 +101,6 @@ NOTHING_TO_SHOW = "nothing_to_show"  # #123: an Output on that no run holds, per
 # A run within this many descriptors of its soft limit is at it (#123, a placeholder of r2's): it
 # can open nothing a photo needs, so its Frame shows nothing new.
 DESCRIPTOR_LIMIT_HEADROOM = 16
-# The catalogue row of each cause a Player can state (total over FrameBlackCause, held by a test).
-FRAME_BLACK_CODES: Final[Mapping[FrameBlackCause, str]] = MappingProxyType({
-    FrameBlackCause.NO_PLAN: "frame_no_plan",
-    FrameBlackCause.NO_TIME: "frame_no_time",
-    FrameBlackCause.NO_PHOTO: "frame_no_photo",
-    FrameBlackCause.CANNOT_DRAW: "frame_cannot_draw",
-    FrameBlackCause.NOT_STARTED: "frame_not_started",
-    FrameBlackCause.NO_CONTENT: "frame_no_content",
-})
 # Which raised display-affecting code an Output's card shows: the first of these it has.
 CARD_PRECEDENCE: Final = (APP_ABSENT, APP_UNRESPONSIVE, APP_DESCRIPTOR_LIMIT, *FRAME_BLACK_CODES.values(),
                           NOTHING_TO_SHOW)

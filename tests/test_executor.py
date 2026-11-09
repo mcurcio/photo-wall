@@ -576,6 +576,20 @@ def test_a_stale_clock_refuses_an_unexecuted_commit_and_keeps_what_is_visible(tm
         rig.commit("future")
 
 
+def test_a_commit_arriving_after_the_clock_went_stale_is_refused(tmp_path):
+    """Mutation probe: drop the gate in `accept_commit` -> a grant taken while uncertain stands."""
+    rig = Rig(tmp_path, max_uncertainty=.001)    # stale after 10 s without a sample
+    rig.offer(layer())
+    rig.secure()
+    rig.executor.prepare_imminent()
+    readiness = rig.executor.readiness()
+    rig.advance(10.5, refresh=False)
+    with pytest.raises(AuthorityError, match="clock or capacity"):
+        rig.executor.accept_commit(Commit(plan_id=rig.plan.plan_id, revision=1, authority_epoch=1,
+                                          readiness_sequence=readiness.sequence, assignment_ids=("picture",),
+                                          committed_at=rig.clock.utc()))
+
+
 def test_cache_pressure_and_corruption_revoke_precommit_readiness(tmp_path):
     rig = Rig(tmp_path, cache_bytes=7)
     rig.offer(layer(), layer("new", data=b"new"))
@@ -1118,6 +1132,34 @@ def test_frames_black_a_due_photo_walks_its_causes(tmp_path):
     assert black(rig)["hdmi1"] is FrameBlackCause.CANNOT_DRAW    # granted, nothing drawn yet
     rig.executor.tick()
     assert "hdmi1" not in black(rig)
+
+
+def test_frames_black_a_deferred_layer_is_ready_to_start(tmp_path):
+    """A layer deferred by the decoder budget is prepared as far as a grant goes. Mutation probe:
+    read only `prepared` -> it is called undrawable."""
+    rig = Rig(tmp_path)
+    rig.offer(layer())
+    rig.secure()
+    rig.executor._assignments["picture"].deferred = True
+    assert black(rig)["hdmi1"] is FrameBlackCause.NOT_STARTED
+
+
+def test_frames_black_a_layer_executing_under_its_lease_is_started(tmp_path):
+    """Its grant has gone, its execution lease has not, and nothing is drawn: a draw failure, not
+    a wait for Central. Mutation probe: read only the grant."""
+    rig = Rig(tmp_path)
+    rig.play(layer())
+    executing = rig.executor._assignments["picture"]
+    executing.granted_layer = None
+    rig.executor._current.clear()
+    assert black(rig)["hdmi1"] is FrameBlackCause.CANNOT_DRAW
+
+
+def test_frames_black_a_layer_and_a_span_not_yet_begun_are_silent(tmp_path):
+    """Mutation probe: drop the start of `_in_force` -> a future photo blacks the Frame now."""
+    rig = Rig(tmp_path)
+    rig.offer(layer(start=300, end=350), unfilled=(UnfilledSpan(output_id="hdmi2", start=300, end=350),))
+    assert black(rig) == {}
 
 
 def test_frames_black_a_failed_download_and_a_failed_decode(tmp_path):

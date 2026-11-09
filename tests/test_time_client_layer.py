@@ -67,6 +67,12 @@ def test_the_layer_builds_a_time_client_the_image_check_accepts(built_root):
     assert time_client(built_root) == []
 
 
+def test_the_time_servers_script_runs_before_the_client_starts(built_root):
+    """Mutation probe: drop ExecStartPre from the layer's drop-in -> the option-42 script never runs."""
+    drop_in = built_root / "etc/systemd/system/systemd-timesyncd.service.d/50-photo-wall.conf"
+    assert f"ExecStartPre=+/{TIME_SERVERS_SCRIPT}\n" in drop_in.read_text()
+
+
 def test_the_layers_pool_host_is_stage_ones(built_root):
     assert TIME_POOL_HOST == POOL_HOST
     conf = built_root / "etc/systemd/timesyncd.conf.d/50-photo-wall.conf"

@@ -13,7 +13,7 @@ import pytest
 from support.frame_outputs import frame_output_of
 from support.house_time import UTC_HOUSE
 from support.packet_pair import packet_pair
-from test_planner import binding, candidate, pool, propose, runtime
+from test_planner import FailingLines, binding, candidate, pool, propose, runtime
 from test_player_probe_responder import FakeGLib
 
 from appliance.apps.probe import AppRunKey, ProbeTiming
@@ -160,6 +160,19 @@ def test_power_off_clears_a_card_and_power_on_opens_a_fresh_window():
     assert cards(subject, WINDOW + 1) == {OUTPUT: None}
     assert transitions(subject)[-1] == ("frame_no_plan", "cleared", "released")
     on_wall(subject, WINDOW + 2, power="on")   # the report still stands: the Frame is still black
+    assert cards(subject, WINDOW * 2 + 1) == {OUTPUT: None}
+    assert cards(subject, WINDOW * 2 + 2) == {OUTPUT: "Photos paused — no plan from Central"}
+
+
+def test_a_disconnected_output_clears_a_card_and_a_reconnect_opens_a_fresh_window():
+    """Mutation probe: ignore `connected` in `_admitted_report` -> the condition outlives the wire."""
+    subject = judge()
+    on_wall(subject)
+    subject.observe(report((OUTPUT, "no_plan")), 0)
+    assert cards(subject, WINDOW) == {OUTPUT: "Photos paused — no plan from Central"}
+    on_wall(subject, WINDOW + 1, connected=False)
+    assert transitions(subject)[-1] == ("frame_no_plan", "cleared", "released")
+    on_wall(subject, WINDOW + 2, connected=True)
     assert cards(subject, WINDOW * 2 + 1) == {OUTPUT: None}
     assert cards(subject, WINDOW * 2 + 2) == {OUTPUT: "Photos paused — no plan from Central"}
 
@@ -325,6 +338,7 @@ def walls(tmp_path):
 def unfilled_frames():
     return {"no photo fits": dict(assets=[candidate("wide", width=1920, height=1080)]),
             "the Source is empty": dict(pools={"holiday:1": pool()}),
+            "the Scene line raises": dict(lines=FailingLines({"holiday:1": pool("holiday:1", candidate())})),
             "the screen is unknown": dict(frame_outputs={"left": frame_output_of("left", None)})}
 
 

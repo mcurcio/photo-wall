@@ -167,23 +167,24 @@ class ProbeResponder:
                 if renderer:
                     self._connection.send(encode_node_renderer(renderer), socket.MSG_DONTWAIT)
                     self._renderer_sent = True
-                self._report_frames_black()
             except (OSError, ValueError):
                 pass    # EAGAIN, a closing channel or an unreportable name: the next probe tries again
+            self._report_frames_black()
 
     def _report_frames_black(self) -> None:
-        """The report, on change. Called holding the lock; a failed send raises OSError to
-        `_answer` and stays owed. A report that cannot be made or encoded is skipped."""
+        """The report, on change, whatever became of the answer and the renderer's report. Called
+        holding the lock. A failed send stays owed for the next answer; a report that cannot be
+        made or encoded is logged and skipped, and never reaches the probe path."""
         try:
             report = self.frames_black()
             if report is None or report == self._black_sent:
                 return
-            packet = encode_node_frames_black(report)
-        except ValueError as error:
+            self._connection.send(encode_node_frames_black(report), socket.MSG_DONTWAIT)
+            self._black_sent = report
+        except OSError:
+            pass    # EAGAIN or a closing channel: the next answer tries again
+        except Exception as error:     # any fault of the report: "cannot tell" until it can
             LOG.warning("player: frames black report skipped: %s", type(error).__name__)
-            return
-        self._connection.send(packet, socket.MSG_DONTWAIT)
-        self._black_sent = report
 
 
 __all__ = ["RETRY_DELAYS", "Dispatcher", "ProbeResponder"]

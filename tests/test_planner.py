@@ -1,5 +1,6 @@
 import hashlib
 from datetime import UTC, datetime
+from functools import partial
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -75,13 +76,20 @@ def full_screen(bindings) -> dict:
             for items in bindings.values() for item in items}
 
 
+class FailingLines(PoolLines):
+    """A Scene line that raises when it is read."""
+
+    def line(self, query):
+        raise RuntimeError("the read failed")
+
+
 def propose(instance, *, now=0, horizon=25, assets=None, pools=None, bindings=None,
-            authored=None, locks=None, limits=None, frame_outputs=None):
+            authored=None, locks=None, limits=None, frame_outputs=None, lines=None):
     bindings = bindings or {"player-one": (binding(),)}
     options = dict(
         bindings_by_player=bindings, settings=FitSettings(),
         frame_outputs=full_screen(bindings) if frame_outputs is None else frame_outputs,
-        lines=PoolLines(pools if pools is not None else {
+        lines=lines or PoolLines(pools if pools is not None else {
             "holiday:1": pool("holiday:1", *(assets or [candidate()])),
         }),
         authored_candidates=authored or {}, locked_assignments=locks or {},
@@ -681,16 +689,7 @@ def test_a_frame_with_no_photo_that_fits_gets_one_span_for_the_showing():
 def test_every_refusal_path_leaves_a_span():
     """The Scene line raises, a slot refused and a Frame of unknown screen all end with no layer.
     Mutation probe: record spans only in `_settle_slot`'s unfilled branch -> the raise leaves none."""
-    class FailingLines(PoolLines):
-        def line(self, query):
-            raise RuntimeError("the read failed")
-
-    instance, bindings = runtime(), {"player-one": (binding(),)}
-    raised = project(instance, 0, bindings_by_player=bindings, settings=FitSettings(),
-                     frame_outputs=full_screen(bindings),
-                     lines=FailingLines({"holiday:1": pool("holiday:1", candidate())}),
-                     authored_candidates={}, locked_assignments={}, history=WallHistory(),
-                     horizon_seconds=25, plan_seconds=25)
+    raised = propose(runtime(), lines=FailingLines({"holiday:1": pool("holiday:1", candidate())}))
     assert raised.for_player("player-one").layers == ()
     assert raised.for_player("player-one").unfilled
     unknown = propose(runtime(), frame_outputs={"left": frame_output_of("left", None)})
@@ -705,6 +704,23 @@ def test_a_placed_showing_and_a_frame_with_no_run_get_no_span():
 def test_a_black_showing_is_authored_black_and_no_span():
     instance = runtime(contributions=(Contribution(target="frame:left", kind="black"),))
     assert propose(instance).for_player("player-one").unfilled == ()
+
+
+def test_a_showing_past_the_preparation_horizon_is_not_a_span():
+    """Mutation probe: drop the horizon check -> a showing this pass cannot yet place is a span."""
+    bindings = {"player-one": (binding(),)}
+    plan = project(runtime(), 0, bindings_by_player=bindings, settings=FitSettings(),
+                   frame_outputs=full_screen(bindings), lines=PoolLines({"holiday:1": pool()}),
+                   authored_candidates={}, locked_assignments={}, history=WallHistory(),
+                   horizon_seconds=15, plan_seconds=40)
+    assert [(s.start, s.end) for s in plan.for_player("player-one").unfilled] == [(0, 10), (10, 20)]
+
+
+def test_a_showing_the_slot_budget_cuts_is_not_a_span(monkeypatch):
+    """Mutation probe: drop `past_cut` from `_unfilled` -> the showings the budget cut read as black."""
+    monkeypatch.setattr("central.planner.WallLimits", partial(WallLimits, max_slots=1))
+    proposal = propose(runtime()).for_player("player-one")
+    assert len(proposal.layers) == 1 and proposal.unfilled == ()
 
 
 def test_a_cut_showing_is_not_a_span():

@@ -152,6 +152,28 @@ def test_one_player_losing_readiness_before_the_start_loses_only_its_grant(regis
     assert coordinator.delivery(players[0]["player_id"], 1)["commits"]
 
 
+def test_a_member_that_lost_readiness_before_the_start_rejoins_after_it_and_the_rest_start_on_time(registry):
+    """Whole-cue start is the grant's, not the start's: after the Commit, a loss withdraws that
+    member's grant alone, the others start on time and it joins late when ready again
+    (central/cue_start.py). Mutation probe: withdraw the whole cue on one loss."""
+    players = setup_players(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    schedule(coordinator, ["frame-0", "frame-1"])
+    registry.clock.advance(5)  # 1015: both ready before the start
+    for player in players:
+        coordinator.readiness(player["player_id"], report(coordinator, player))
+    registry.clock.advance(4)  # 1019: the second loses readiness a second before the start
+    coordinator.readiness(players[1]["player_id"], report(coordinator, players[1], sequence=2, prepared=False))
+    assert coordinator.delivery(players[1]["player_id"], 1)["commits"] == ()
+    [kept] = coordinator.delivery(players[0]["player_id"], 1)["commits"]
+    assert kept.committed_at == 1015 and coordinator.delivery(players[0]["player_id"], 1)["revocations"] == ()
+    assert skip_codes(registry) == {}
+    registry.clock.advance(3)  # 1022: past the start, ready again
+    coordinator.readiness(players[1]["player_id"], report(coordinator, players[1], sequence=3))
+    [late] = coordinator.delivery(players[1]["player_id"], 1)["commits"]
+    assert late.committed_at == 1022
+
+
 def test_a_frame_ready_early_waits_for_the_deadline_and_the_other_starts_when_ready(registry):
     players = setup_players(registry)
     coordinator = Coordinator(registry.db, registry.clock)
@@ -450,7 +472,7 @@ def ending_scene(scene_id="ending"):
 
 def cohorts(registry):
     with registry.db.transaction() as conn:
-        return conn.execute("SELECT id,cue_key,starts_at,members,status FROM coordination_groups "
+        return conn.execute("SELECT id,cue_key,starts_at,members,member_ends,valid_until,status FROM coordination_groups "
                             "ORDER BY starts_at,cohort_sequence").fetchall()
 
 
@@ -646,8 +668,9 @@ def test_a_started_cue_that_grows_takes_the_new_member_and_revokes_nothing(regis
     # No Runtime edit grows a started cue; forge the stored cohort narrower to reach the rule.
     frame_1 = layer_at(coordinator, players[1], 1020).assignment_id
     with registry.db.transaction() as conn:
-        conn.execute("UPDATE coordination_groups SET members=members-%s WHERE id=%s",
-                     (frame_1, started["id"]))
+        conn.execute("UPDATE coordination_groups SET members=members-%s,member_ends=member_ends-%s,"
+                     "valid_until=%s WHERE id=%s",
+                     (frame_1, frame_1, started["valid_until"] - 5, started["id"]))
         conn.execute("DELETE FROM execution_commits WHERE assignment_id=%s", (frame_1,))
     coordinator.runtime.command("set_scene", Scene(scene_id="other", loop=True, cycle_seconds=60,
         contributions=(Contribution(target="frame:frame-2", kind="black"),)), by="console")
@@ -656,6 +679,9 @@ def test_a_started_cue_that_grows_takes_the_new_member_and_revokes_nothing(regis
     assert group_events(registry, started["id"]) == []
     grown = [g for g in cohorts(registry) if g["cue_key"] == started["cue_key"]]
     assert [g["id"] for g in grown] == [started["id"]] and frame_1 in grown[0]["members"]
+    # The new member's end is merged and the cue lasts to its end, so its grant is not cut short.
+    assert grown[0]["member_ends"] == started["member_ends"]
+    assert grown[0]["valid_until"] == started["valid_until"]
     assert all(coordinator.delivery(p["player_id"], 1)["revocations"] == () for p in players[:2])
     assert coordinator.delivery(players[2]["player_id"], 1)["plan"].layers
     for player in players[:2]:

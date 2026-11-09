@@ -73,6 +73,14 @@ def test_the_plane_renderer_says_when_its_last_commit_drew_a_pattern():
     rig.clock.tick()
     rig.settle(still)
     assert rig.renderer.patterned(OUTPUT) is True
+    rig.clock.tick()
+    rig.screens.admitted = False                                  # a candidate's bare ground
+    assert rig.present(still).status == "pending"
+    assert rig.renderer.patterned(OUTPUT) is False                # mutation probe: keep the flag
+    rig.screens.admitted = True
+    rig.clock.tick()
+    rig.settle(still)
+    assert rig.renderer.patterned(OUTPUT) is True
     rig.screens.operations = None
     rig.clock.tick()
     rig.settle(still)

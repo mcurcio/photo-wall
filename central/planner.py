@@ -448,11 +448,11 @@ class _ProjectionBuilder:
                 shows_from=intent.shows_from, interval_end=intent.interval_end)
 
     def _want(self, intent: Intent, window: PlanWindow, identity: str) -> None:
-        """Record a media Intent inside the preparation horizon on a bound Frame, before anything
-        can refuse it: `_unfilled` makes every one that ends the pass with no layer a span, so no
-        refusal path can forget one."""
+        """Record an Intent inside the preparation horizon on a bound Frame, before anything can
+        refuse it: `_unfilled` makes every one that ends the pass with no layer a span, so no
+        refusal path can forget one. A black Intent always ends with its layer, so never one."""
         owner = self.frames.get(intent.target)
-        if intent.kind == "media" and owner is not None and intent.shows_from < window.preparation_end:
+        if owner is not None and intent.shows_from < window.preparation_end:
             self.wanted[identity] = (owner[0], UnfilledSpan(
                 output_id=owner[1].output_id, start=intent.shows_from, end=intent.interval_end))
 

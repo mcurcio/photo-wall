@@ -716,7 +716,7 @@ class Executor:
                     own_drawing=self.renderer.patterned(binding.output_id),
                     has_plan=has_plan, clock_ok=clock_ok,
                     due=[self._due_layer(a, now) for a in self._assignments.values()
-                         if self._current_authority(a) and a.layer.output_id == binding.output_id
+                         if a.layer.output_id == binding.output_id
                          and self._in_force(a.layer.start, a.layer.end, now)],
                     unfilled=plan is not None and any(
                         span.output_id == binding.output_id and self._in_force(span.start, span.end, now)

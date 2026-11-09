@@ -67,8 +67,10 @@ TIME_CLIENT: Final = "systemd-timesyncd"
 TIME_CLIENT_ENABLED: Final = f"etc/systemd/system/sysinit.target.wants/{TIME_CLIENT}.service"
 TIME_CLIENT_POOL_CONF: Final = "etc/systemd/timesyncd.conf.d/50-photo-wall.conf"
 TIME_CLIENT_DROP_IN: Final = f"etc/systemd/system/{TIME_CLIENT}.service.d/50-photo-wall.conf"
-TIME_CLIENT_SERVICE_SETTINGS: Final = ("Restart=no", "WatchdogSec=0")
 TIME_SERVERS_SCRIPT: Final = "usr/libexec/photo-wall-time-servers"
+# The option-42 servers reach the client only through the ExecStartPre line.
+TIME_CLIENT_SERVICE_SETTINGS: Final = ("Restart=no", "WatchdogSec=0",
+                                       f"ExecStartPre=+/{TIME_SERVERS_SCRIPT}")
 TIME_POOL_HOST: Final = "debian.pool.ntp.org"
 DPKG_STATUS: Final = "var/lib/dpkg/status"
 # The retired V1 Pi lane's units and the bootstrapper's directory (decision 0019): a base carrying

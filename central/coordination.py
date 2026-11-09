@@ -18,7 +18,7 @@ from psycopg.types.json import Jsonb
 from pydantic import Field, ValidationError
 
 from central.actor import Actor
-from central.cue_start import CueMember, grantable, starts_whole
+from central.cue_start import CueReadiness, grantable, starts_whole
 from central.db import Database, DatabaseTransactionClock
 from central.execution_outcomes import ExecutionOutcome, ExecutionOutcomeRouter
 from central.infra.display_store import frame_outputs_in
@@ -1239,7 +1239,7 @@ class Coordinator:
                 )
                 if participant is not None:
                     participants[assignment] = participant
-                members.append(CueMember(
+                members.append(CueReadiness(
                     assignment_id=assignment,
                     ended=group["member_ends"].get(assignment, group["valid_until"]) <= now,
                     ready=participant is not None,

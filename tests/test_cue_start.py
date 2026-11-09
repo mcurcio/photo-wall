@@ -2,11 +2,11 @@
 
 import pytest
 
-from central.cue_start import CueMember, grantable, starts_whole
+from central.cue_start import CueReadiness, grantable, starts_whole
 
 
 def member(name, *, ready=True, ended=False):
-    return CueMember(assignment_id=name, ended=ended, ready=ready)
+    return CueReadiness(assignment_id=name, ended=ended, ready=ready)
 
 
 @pytest.mark.parametrize(

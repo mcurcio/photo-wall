@@ -1,4 +1,7 @@
-"""When a cue's members start: all at once until its deadline, then each on its own.
+"""When a cue's members are granted: all at once until its deadline, then each on its own.
+
+Only the grant is whole: once granted, a member that loses readiness before the start loses its
+grant alone, the others keep theirs and start on time, and it is granted again when ready.
 
 The rule alone, with no I/O and no clock: the coordinator (`central/coordination.py`
 `_commit_due`) works out each member's facts and writes the grants this names.
@@ -14,7 +17,7 @@ CueStatus = Literal["pending", "committed"]
 
 
 @dataclass(frozen=True, slots=True)
-class CueMember:
+class CueReadiness:
     """One member of a cue, as it stands now: `ended` when its own end (or the cue's) has come,
     `ready` when its Player reports it prepared on this cue's plan."""
 
@@ -24,11 +27,11 @@ class CueMember:
 
 
 def starts_whole(status: CueStatus, now: float, deadline: float) -> bool:
-    """True exactly while the cue still starts all at once: pending, and before its deadline."""
+    """True exactly while the cue's next grant is all-or-nothing: pending, before its deadline."""
     return status == "pending" and now < deadline
 
 
-def grantable(members: Sequence[CueMember], *, whole: bool) -> tuple[str, ...]:
+def grantable(members: Sequence[CueReadiness], *, whole: bool) -> tuple[str, ...]:
     """The members to grant now, in order. A whole start grants all of them once every one is
     ready (an ended member is never ready), else none; after that, each ready member on its own."""
     startable = [m.ready and not m.ended for m in members]

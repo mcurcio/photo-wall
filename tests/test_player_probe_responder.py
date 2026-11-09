@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import socket
 import threading
 from queue import Empty, Queue
@@ -511,6 +512,22 @@ def test_no_executor_sends_nothing():
     rig.shut()
 
 
+def test_no_executor_after_a_report_sends_nothing_and_the_report_stands():
+    """Mutation probe: treat a later "cannot tell" as a report to send."""
+    rig = Rig()
+    rig.report = NO_PLAN
+    rig.open()
+    answered(rig)
+    assert reports_of(rig) == [NO_PLAN]
+    rig.report = None
+    answered(rig)
+    assert reports_of(rig) == []
+    rig.report = NO_PLAN                            # unchanged since it last got through
+    answered(rig)
+    assert reports_of(rig) == []
+    rig.shut()
+
+
 def test_a_failed_send_is_retried_at_the_next_answer():
     """The answer goes (EAGAIN is the socket's, the report stays owed)."""
     rig = Rig()
@@ -546,14 +563,29 @@ def test_a_report_that_cannot_be_encoded_is_skipped_and_the_answer_stands():
     rig.shut()
 
 
-def test_a_report_that_raises_is_logged_and_skipped():
+def test_an_unreportable_renderer_does_not_stop_the_frames_black_report():
+    """Mutation probe: report inside the renderer send's try -> an over-long name loses the card."""
+    rig = Rig()
+    rig.responder.gl_renderer = lambda: "x" * 500
+    rig.report = NO_PLAN
+    rig.open()
+    answered(rig)
+    assert reports_of(rig) == [NO_PLAN]
+    rig.shut()
+
+
+@pytest.mark.parametrize("error", [ValueError("a report that cannot be made"), KeyError("picture")])
+def test_a_report_that_raises_is_logged_and_skipped(error, caplog):
+    """Mutation probe: catch only ValueError -> a KeyError escapes unlogged, into the dispatcher."""
     def broken():
-        raise ValueError("a report that cannot be made")
+        raise error
 
     rig = Rig(frames_black=broken)
     rig.open()
     rig.probe(NONCES[2])
     rig.settle()
-    rig.glib.run_idle()
+    with caplog.at_level(logging.WARNING, logger="photo_wall.player.probe"):
+        rig.glib.run_idle()
     assert replies(rig) == [NodeProbeV2(NONCES[2])]
+    assert "frames black report skipped" in caplog.text
     rig.shut()

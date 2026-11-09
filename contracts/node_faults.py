@@ -1,6 +1,6 @@
 """The node fault catalogue: every fault code a node can raise, and how it is judged and worded.
 
-Stdlib only, pure data. On the node only the health judge reads it (Display never does: an
+Stdlib and contracts only, pure data. On the node only the health judge reads it (Display never does: an
 import-linter contract forbids it); Central will serve it to the console (M4). A fault code is
 data here: adding one is one change to this module, deployed Central-first, and the judge
 refuses a code that is not in it. The probe constants T, k and S belong to App lifecycle
@@ -19,11 +19,25 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Final
 
+from contracts.node_app_link import FrameBlackCause
+
 MAX_HOUSEHOLD_LINE = 96  # one overlay card line (Display's bound)
 _CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 # How long a Frame may go without its first photo before the wall says so: a healthy cold start
 # draws within it, untinted.
 FIRST_PHOTO_WINDOW_MS: Final = 120000
+# The card line of each cause a Player can state (player/frame_black.py), and its catalogue code:
+# one row per cause, built here, so a cause without a line fails at import.
+_FRAME_BLACK_LINES: Final[Mapping[FrameBlackCause, str]] = MappingProxyType({
+    FrameBlackCause.NO_PLAN: "Photos paused — no plan from Central",
+    FrameBlackCause.NO_TIME: "Photos paused — no time from Central",
+    FrameBlackCause.NO_PHOTO: "Photos paused — the photo has not arrived",
+    FrameBlackCause.CANNOT_DRAW: "Photos paused — the photo could not be drawn",
+    FrameBlackCause.NOT_STARTED: "Photos paused — waiting for Central to start it",
+    FrameBlackCause.NO_CONTENT: "Photos paused — no photo for this Frame",
+})
+FRAME_BLACK_CODES: Final[Mapping[FrameBlackCause, str]] = MappingProxyType(
+    {cause: f"frame_{cause.value}" for cause in FrameBlackCause})
 
 
 def _duration(value: object) -> bool:
@@ -87,18 +101,9 @@ FAULTS: Mapping[str, Fault] = _catalogue(
           raise_window_ms=0, clear_hold_ms=0),
     # A Frame black while content is wanted, as its Player states it (player/frame_black.py): per
     # Output, and an Output the next report no longer names clears at once.
-    Fault("frame_no_plan", True, "Photos paused — no plan from Central",
-          raise_window_ms=FIRST_PHOTO_WINDOW_MS, clear_hold_ms=0),
-    Fault("frame_no_time", True, "Photos paused — no time from Central",
-          raise_window_ms=FIRST_PHOTO_WINDOW_MS, clear_hold_ms=0),
-    Fault("frame_no_photo", True, "Photos paused — the photo has not arrived",
-          raise_window_ms=FIRST_PHOTO_WINDOW_MS, clear_hold_ms=0),
-    Fault("frame_cannot_draw", True, "Photos paused — the photo could not be drawn",
-          raise_window_ms=FIRST_PHOTO_WINDOW_MS, clear_hold_ms=0),
-    Fault("frame_not_started", True, "Photos paused — waiting for Central to start it",
-          raise_window_ms=FIRST_PHOTO_WINDOW_MS, clear_hold_ms=0),
-    Fault("frame_no_content", True, "Photos paused — no photo for this Frame",
-          raise_window_ms=FIRST_PHOTO_WINDOW_MS, clear_hold_ms=0),
+    *(Fault(code, True, _FRAME_BLACK_LINES[cause],
+            raise_window_ms=FIRST_PHOTO_WINDOW_MS, clear_hold_ms=0)
+      for cause, code in FRAME_BLACK_CODES.items()),
 )
 
 
@@ -115,4 +120,5 @@ def catalogue_digest() -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()
 
 
-__all__ = ["FAULTS", "FIRST_PHOTO_WINDOW_MS", "MAX_HOUSEHOLD_LINE", "Fault", "catalogue_digest"]
+__all__ = ["FAULTS", "FIRST_PHOTO_WINDOW_MS", "FRAME_BLACK_CODES", "MAX_HOUSEHOLD_LINE", "Fault",
+           "catalogue_digest"]

@@ -243,6 +243,7 @@ class Server:
         self.data = b"picture"
         self.media_response = None
         self.time_epoch = None
+        self.time_player = None
         self.time_offset = 0
 
     def __call__(self, request):
@@ -262,7 +263,7 @@ class Server:
                 "authority_epoch": self.epoch, "token": str(self.epoch) * 32})
         if path == "/v1/player/time":
             return httpx.Response(200, json={
-                "player_id": self.player_id,
+                "player_id": self.time_player or self.player_id,
                 "authority_epoch": self.time_epoch or self.epoch,
                 "server_time": self.clock.utc() + self.time_offset,
             })
