@@ -6,8 +6,8 @@ the snapshot it was built from.
 - Watchdog: stage 1's `/run/systemd/system.conf.d` drop-in must be the only watchdog setting; a
   same-named or later-sorting file under `/etc` or `/usr/lib` would override it
   (systemd-system.conf(5)).
-- Time daemon: a package that Provides `time-daemon` would step the clock stage 1 settled
-  (rule 3).
+- Time daemon: a package that Provides `time-daemon`, other than TIME_CLIENT, would fight the
+  base's own time client over the clock.
 - Resolver writer: a package in RESOLVER_WRITERS would replace the resolver stage 1 hands over.
 - Missing package (`--require-installed FILE`): every named package is installed (dpkg's own
   database); a `NAME=VERSION` entry at exactly that version.
@@ -22,7 +22,8 @@ the snapshot it was built from.
   boot), the hosts database resolving the machine's own name (libnss-myhostname), a default
   locale pam_env can read (rpi_image_gen/layer/photo-wall-os.yaml), nothing of the retired
   V1 Pi lane (V1_UNITS, V1_DIRECTORY): every Pi boots the node path (decision 0019), and display
-  power's ddcutil, cec-ctl, DDC/CI driver loaded at boot and i2c group (`display_power`).
+  power's ddcutil, cec-ctl, DDC/CI driver loaded at boot and i2c group (`display_power`), and
+  the time client that recovers the clock with no reboot (`time_client`).
 
 Run over the base squashfs extract (all six) and the Player `.deb` staging tree (watchdog only,
 from the builder).
@@ -59,6 +60,16 @@ RESOLVER_WRITERS: Final = frozenset({"systemd-resolved", "resolvconf", "openreso
                                      "network-manager", "connman", "dhcpcd", "dhcpcd-base",
                                      "isc-dhcp-client", "udhcpc"})
 TIME_DAEMON: Final = "time-daemon"     # the virtual package every Debian NTP client Provides
+# The base's one time client (rpi_image_gen/layer/photo-wall-os.yaml). TIME_POOL_HOST is
+# uplink.clock.POOL_HOST: bound by tests/test_time_client_layer.py rather than imported, so the
+# base build's inputs (scripts/release_plan.py) stay this file alone.
+TIME_CLIENT: Final = "systemd-timesyncd"
+TIME_CLIENT_ENABLED: Final = f"etc/systemd/system/sysinit.target.wants/{TIME_CLIENT}.service"
+TIME_CLIENT_POOL_CONF: Final = "etc/systemd/timesyncd.conf.d/50-photo-wall.conf"
+TIME_CLIENT_DROP_IN: Final = f"etc/systemd/system/{TIME_CLIENT}.service.d/50-photo-wall.conf"
+TIME_CLIENT_SERVICE_SETTINGS: Final = ("Restart=no", "WatchdogSec=0")
+TIME_SERVERS_SCRIPT: Final = "usr/libexec/photo-wall-time-servers"
+TIME_POOL_HOST: Final = "debian.pool.ntp.org"
 DPKG_STATUS: Final = "var/lib/dpkg/status"
 # The retired V1 Pi lane's units and the bootstrapper's directory (decision 0019): a base carrying
 # any of them is refused, wherever systemd would read the unit from.
@@ -192,9 +203,10 @@ def watchdog_overrides(root: Path) -> list[str]:
 
 
 def time_daemons(root: Path) -> list[str]:
-    """Installed packages that Provide time-daemon (rule 3: stage 1 alone sets the clock)."""
+    """Installed packages that Provide time-daemon other than TIME_CLIENT: two would fight over
+    the clock."""
     return [package.name for package in read_dpkg_status(root)
-            if TIME_DAEMON in package.provides]
+            if TIME_DAEMON in package.provides and package.name != TIME_CLIENT]
 
 
 def resolver_writers(root: Path) -> list[str]:
@@ -344,8 +356,8 @@ def base_os(root: Path) -> list[str]:
     BUILD_HOSTNAME (stage 1 writes the Node's own name at boot); `myhostname` in the hosts line of
     etc/nsswitch.conf, so that name resolves with no /etc/hosts line; etc/default/locale,
     followed through its link, setting LANG (pam_env reads it at every login); no V1_UNITS
-    file or link under any UNIT_DIRECTORIES (a `.wants` link included) nor V1_DIRECTORY; and
-    display_power's tools, driver and group."""
+    file or link under any UNIT_DIRECTORIES (a `.wants` link included) nor V1_DIRECTORY;
+    display_power's tools, driver and group; and time_client."""
     found = [f"not masked: {unit}" for unit in MASKED_UNITS if not _masked(root, unit)]
     found += [f"v1 unit: {path.relative_to(root).as_posix()}"
               for directory in UNIT_DIRECTORIES if (root / directory).is_dir()
@@ -363,7 +375,7 @@ def base_os(root: Path) -> list[str]:
     if locale is None or not any(line.strip().startswith("LANG=")
                                  for line in locale.splitlines()):
         found.append("default locale: etc/default/locale sets no LANG")
-    return found + display_power(root)
+    return found + display_power(root) + time_client(root)
 
 
 def display_power(root: Path) -> list[str]:
@@ -380,6 +392,45 @@ def display_power(root: Path) -> list[str]:
     groups = {line.partition(":")[0] for line in (_read(root, root / "etc/group") or "").splitlines()}
     if I2C_GROUP not in groups:
         found.append(f"missing group: {I2C_GROUP} (etc/group)")
+    return found
+
+
+def _config_lines(root: Path, relative: str) -> list[str] | None:
+    """The setting lines of a systemd config file, stripped (`#` and `;` lines are comments).
+    None when the file is not there."""
+    text = _read(root, root / relative)
+    if text is None:
+        return None
+    return [line.strip() for line in text.splitlines()
+            if line.strip() and line.strip()[0] not in "#;"]
+
+
+def time_client(root: Path) -> list[str]:
+    """Violations of the base's time client: TIME_CLIENT installed; enabled (TIME_CLIENT_ENABLED)
+    and not masked; TIME_CLIENT_POOL_CONF naming TIME_POOL_HOST; TIME_CLIENT_DROP_IN with
+    TIME_CLIENT_SERVICE_SETTINGS (nothing on the Node restarts on its own); and the executable
+    TIME_SERVERS_SCRIPT the drop-in runs."""
+    found: list[str] = []
+    if TIME_CLIENT not in {package.name for package in read_dpkg_status(root)}:
+        found.append(f"time client: {TIME_CLIENT} not installed")
+    enabled = root / TIME_CLIENT_ENABLED
+    if not enabled.is_symlink() and not enabled.exists():
+        found.append(f"time client: not enabled: {TIME_CLIENT}.service")
+    if _masked(root, f"{TIME_CLIENT}.service"):
+        found.append(f"time client: masked: {TIME_CLIENT}.service")
+    servers = [word for line in _config_lines(root, TIME_CLIENT_POOL_CONF) or ()
+               if line.startswith("NTP=") for word in line.removeprefix("NTP=").split()]
+    if TIME_POOL_HOST not in servers:
+        found.append(f"time client: {TIME_CLIENT_POOL_CONF} does not name {TIME_POOL_HOST}")
+    service = _config_lines(root, TIME_CLIENT_DROP_IN)
+    if service is None:
+        found.append(f"time client: missing {TIME_CLIENT_DROP_IN}")
+    else:
+        found += [f"time client: {TIME_CLIENT_DROP_IN} without {setting}"
+                  for setting in TIME_CLIENT_SERVICE_SETTINGS if setting not in service]
+    script = root / TIME_SERVERS_SCRIPT
+    if _read(root, script) is None or not script.lstat().st_mode & 0o111:
+        found.append(f"time client: missing executable {TIME_SERVERS_SCRIPT}")
     return found
 
 
@@ -401,7 +452,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--base-os", action="store_true",
                         help="the base's OS configuration: binfmt masked, no build hostname, "
                              "myhostname, a default locale, nothing of the V1 lane, display "
-                             "power's tools, driver and group")
+                             "power's tools, driver and group, the time client")
     args = parser.parse_args(argv)
     root: Path = args.root
     violations = [f"watchdog override: {line}" for line in watchdog_overrides(root)]
