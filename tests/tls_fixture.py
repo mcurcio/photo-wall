@@ -143,10 +143,13 @@ UNDER_LAX_CA = mint_leaf(LAX_CA, dns=("localhost",), ips=("127.0.0.1",))
 @contextlib.contextmanager
 def serve_tls(app, leaf: Leaf) -> Iterator[int]:
     """Run `app` under a real uvicorn server over TLS with `leaf` on an ephemeral 127.0.0.1
-    port; yield the port. The TLS form of the wire tests' `_serve`."""
+    port; yield the port. The TLS form of the wire tests' `_serve`. Its shutdown waits at most
+    1 s for connections still open (a client that refused the certificate may leave one), never
+    the 30 s join below (a 30 s test on CI pushed a unit shard past its time limit)."""
     with leaf.files() as (certfile, keyfile):
         config = uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning",
-                                lifespan="on", ssl_certfile=certfile, ssl_keyfile=keyfile)
+                                lifespan="on", ssl_certfile=certfile, ssl_keyfile=keyfile,
+                                timeout_graceful_shutdown=1)
         server = uvicorn.Server(config)
         thread = threading.Thread(target=server.run, daemon=True)
         thread.start()
