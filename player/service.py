@@ -67,7 +67,7 @@ from contracts.time import Monotonic, SystemClock
 from nodeapi.node import WallReader
 from player.cache import Cache, CacheError
 from player.central_link import CentralLink, Session, read_refusal
-from player.executor import AcquisitionStopped, AuthorityError, Executor
+from player.executor import AcquisitionStopped, AuthorityError, Executor, may_still_play
 from player.geometry import light_lux_on_frame
 from player.identity import Identity, load_identity
 from player.impediment import impeded
@@ -452,10 +452,10 @@ class PlayerService:
         self.last_fault, self.last_fault_detail = code, detail
 
     def _main_loop_late(self) -> None:
-        """The GLib loop missed a dispatch deadline: raise the fault, never touch readiness. Central keeps the last readiness it accepted, so committed groups stand; it
-        commits no new group once that report is older than readiness_seconds, and a long
-        stall reads as player-silent, as before G8 (E-G8-8 decision: a late loop must not
-        withdraw prepared playback)."""
+        """The GLib loop missed a dispatch deadline: raise the fault, never touch readiness. Central keeps the last readiness it accepted, so committed groups stand and
+        later grants still answer it (decision 0032: freshness is the readiness sequence a
+        Commit echoes, not a report's age), and a long stall reads as player-silent, as before
+        G8 (E-G8-8 decision: a late loop must not withdraw prepared playback)."""
         self.fault("main_loop_late")
 
     def room_lights_changed(self, document: RoomLightsDocument) -> None:
@@ -919,10 +919,14 @@ class PlayerService:
                                                   for failure in readiness.failures):
                     self._verify_due.set()
                 secured = self.executor.secured_ids()
+                now = self.show_clock.now()
+                # Decision 0032: a layer is fetched while it may still play, a continuation's
+                # listed photo included (`may_still_play`, the `_authorized` test).
                 self._jobs = tuple(Download(self._plan.authority_epoch, self._plan.plan_id,
                     self._plan.revision, layer) for layer in self._plan.layers
                     if layer.variant is not None and layer.assignment_id not in secured
-                    and layer.assignment_id not in self._cancelled) if self._offered else ()
+                    and layer.assignment_id not in self._cancelled
+                    and may_still_play(self._plan, layer, now)) if self._offered else ()
             observations = tuple({observation.assignment_id: observation for observation in
                 self._observations if self._observation_current(observation)}.values())
             self._observations.clear()
@@ -945,7 +949,7 @@ class PlayerService:
                 and (job.epoch, job.plan_id, job.revision) == (plan.authority_epoch, plan.plan_id, plan.revision)
                 and job.layer in plan.layers and job.layer.assignment_id not in self._cancelled
                 and configuration.authorizes(job.layer)
-                and self.show_clock.now() < min(job.layer.end, plan.valid_until))
+                and may_still_play(plan, job.layer, self.show_clock.now()))
 
     async def download(self, job: Download) -> bool:
         if not self._authorized(job):

@@ -8,10 +8,13 @@ from threading import Event
 
 import pytest
 
+from contracts.continuation import CONTINUATION_PREFIX
 from contracts.frame_lighting import FrameLighting, Paper
 from contracts.models import (
     Calibration,
+    CarriedPhoto,
     Commit,
+    Continuation,
     Layer,
     LostGrant,
     OutputBinding,
@@ -277,9 +280,10 @@ def binding(output: str = "hdmi1", frame: str = "frame1", **kwargs) -> OutputBin
 
 def layer(key: str = "picture", *, output: str = "hdmi1", frame: str = "frame1",
           data: bytes = b"picture", video: bool = False, **kwargs) -> Layer:
+    # A Run's first turn (decision 0032): it awaits Central's grant, as these tests drive it.
     fields = dict(assignment_id=key, run_id="run", output_id=output, frame_id=frame,
                   binding_generation=1, start=100, end=200, media_origin=100,
-                  variant=media(data, video), crop=CENTRED)
+                  variant=media(data, video), crop=CENTRED, awaits_grant=True)
     fields.update(kwargs)
     if fields.get("presentation") == "black":
         fields["crop"] = None
@@ -1220,3 +1224,121 @@ def test_frames_black_with_no_configuration_is_no_report(tmp_path):
     fresh = Executor("other", rig.cache, rig.renderer, rig.clock, rig.show_clock)
     assert fresh.frames_black() == ()
     assert isinstance(rig.executor.frames_black()[0], FrameBlack)
+
+
+# Decision 0032: grants only for a change, continuations past the plan, and a rejoin with no black.
+
+def test_a_later_turn_starts_at_its_instant_with_no_commit_and_a_first_turn_waits(tmp_path):
+    """B9: a layer that awaits no grant starts at its instant once secured and prepared; one that
+    awaits a grant waits for its Commit. Mutation probe: treat `awaits_grant` as always False."""
+    rig = Rig(tmp_path)
+    later = layer("later", awaits_grant=False)
+    first = layer("first", output="hdmi2", frame="frame2", data=b"first")
+    rig.offer(later, first)
+    rig.secure("later")
+    rig.secure("first", b"first")
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi1"].layers] == [
+        "later"]
+    assert not rig.renderer.outputs["hdmi2"].layers
+    rig.commit("first")
+    rig.executor.tick()
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi2"].layers] == [
+        "first"]
+
+
+def _continued_plan(rig, *, valid_until=130.0, until=None):
+    """Two photos at 10 s turns to 120, then the Run's continuation from 120 listing both."""
+    photos = (layer("a", data=b"a", start=100, end=110, awaits_grant=False),
+              layer("b", data=b"b", start=110, end=120, awaits_grant=False))
+    continuation = Continuation(output_id="hdmi1", run_id="run", photos=("a", "b"), start=120,
+                                seconds=10, until=until)
+    rig.offer(*photos, valid_until=valid_until, continuations=(continuation,))
+    return photos
+
+
+def test_past_its_plan_a_frame_cycles_the_continuations_held_photos_with_no_card(tmp_path):
+    """B10: past `valid_until` the executor plays continuation slots of the photos it holds, by
+    their own spans, and states no black Frame. Mutation probe: cut continuation slots at
+    `valid_until`."""
+    rig = Rig(tmp_path)
+    _continued_plan(rig)
+    rig.secure("a", b"a")
+    rig.secure("b", b"b")
+    drawn = []
+    for _ in range(100):
+        rig.executor.prepare_imminent()
+        rig.executor.tick()
+        assert rig.executor.frames_black() == ()
+        top = rig.renderer.outputs["hdmi1"].layers[-1].layer
+        drawn.append((rig.clock.utc(), top.variant.asset_id, top.assignment_id))
+        rig.advance(.5)
+    past = [(at, asset) for at, asset, key in drawn if at >= 130]
+    assert past and all(key.startswith(CONTINUATION_PREFIX) for at, _, key in drawn if at >= 120)
+    turns = {at: asset for at, asset, _ in drawn if at in (120.0, 130.0, 140.0, 145.0)}
+    assert turns == {120.0: media(b"a").asset_id, 130.0: media(b"b").asset_id,
+                     140.0: media(b"a").asset_id, 145.0: media(b"a").asset_id}
+    readiness = rig.executor.readiness()
+    assert not any(key.startswith(CONTINUATION_PREFIX)
+                   for key in (*readiness.secured, *readiness.prepared))
+
+
+def test_a_continuation_skips_a_photo_the_player_does_not_hold(tmp_path):
+    rig = Rig(tmp_path)
+    _continued_plan(rig)
+    rig.secure("a", b"a")
+    rig.advance(25)
+    for _ in range(3):
+        rig.executor.prepare_imminent()
+        rig.executor.tick()
+        assert rig.renderer.outputs["hdmi1"].layers[-1].layer.variant == media(b"a")
+        rig.advance(10)
+
+
+def test_a_new_plan_whose_photo_is_not_secured_leaves_the_old_photo_drawn_and_carried(tmp_path):
+    """B11: rejoining needs no event. The old photo stays drawn while the new plan's current
+    layer cannot start, and is reported carried; once the new layer can start, it is drawn.
+    Mutation probe: omit `carried`."""
+    rig = Rig(tmp_path)
+    old = layer("old", data=b"old", end=150, awaits_grant=False)
+    rig.offer(old)
+    rig.secure("old", b"old")
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    rig.advance(60)                                   # past the old layer's end
+    new = layer("new", data=b"new", start=160, end=200, awaits_grant=False)
+    rig.offer(new, revision=2)
+    for _ in range(3):
+        rig.executor.prepare_imminent()
+        rig.executor.tick()
+        shown = rig.renderer.outputs["hdmi1"]
+        assert [local.layer.assignment_id for local in shown.layers] == ["old"]
+        assert rig.executor.frames_black() == ()
+        rig.advance(.5)
+    assert rig.executor.readiness().carried == (
+        CarriedPhoto(output_id="hdmi1", asset_id=media(b"old").asset_id),)
+    rig.secure("new", b"new")
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi1"].layers] == ["new"]
+    assert rig.executor.readiness().carried == ()
+
+
+def test_a_new_plan_with_nothing_on_the_frame_takes_the_after_state(tmp_path):
+    rig = Rig(tmp_path)
+    rig.play(layer())
+    rig.offer(revision=2)
+    rig.executor.tick()
+    assert rig.renderer.outputs["hdmi1"].fallback
+
+
+def test_re_delivering_the_held_plan_past_its_validity_is_a_no_op(tmp_path):
+    """B13: the Player keeps its plan through an outage; hearing it again is no error. Mutation
+    probe: restore the expiry check first."""
+    rig = Rig(tmp_path)
+    plan = rig.offer(layer(end=150), valid_until=150)
+    rig.advance(100)
+    assert rig.executor.accept_plan(plan) is False
+    with pytest.raises(AuthorityError, match="expired plan"):
+        rig.offer(layer(end=150), revision=2, valid_until=150, issued_at=100, valid_from=100)

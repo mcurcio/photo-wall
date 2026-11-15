@@ -708,11 +708,11 @@ def _grey(composition):
 def test_a_cross_fade_dissolves_the_next_photo_over_the_current_one(registry, tmp_path):
     """The tracer: saved through the operator route and started by Show now, a 10 s Scene with a
     3 s cross-fade. The second photo's layer starts 3 s before the first ends (both fade in over
-    3 s; the first stays at full to its cut), its coordination cue starts with it, and at
-    mid-dissolve the Player's executor draws it on top at half strength over the first at full,
-    which over two equal greys is that grey. Mutation probes: start the next layer at its turn
-    (no overlap); key the cue on the turn's start (the cue starts 3 s late); sort the executor's
-    layers by plan order with the old photo last (the old photo on top)."""
+    3 s; the first stays at full to its cut), it awaits no grant (decision 0032: a later turn of
+    its Run is no change, so no cue), and at mid-dissolve the Player's executor draws it on top at
+    half strength over the first at full, which over two equal greys is that grey. Mutation
+    probes: start the next layer at its turn (no overlap); sort the executor's layers by plan
+    order with the old photo last (the old photo on top)."""
     player, app, coordinator = _rig(registry)
     frame = _Frame(registry, coordinator, player, tmp_path)
     with TestClient(app) as client:
@@ -723,8 +723,8 @@ def test_a_cross_fade_dissolves_the_next_photo_over_the_current_one(registry, tm
         assert (second.start, second.end, second.fade_in, second.fade_out) == (
             start + 7, start + 20, 3, 0)
         assert second.media_origin == second.start
-        cue = _cue(registry, second.assignment_id)
-        assert cue["starts_at"] == start + 7 and cue["deadline"] == start + 7
+        assert first.awaits_grant and not second.awaits_grant
+        assert _cue(registry, second.assignment_id) is None
         frame.sync()
         shown = frame.advance(8.5)
         assert _shown(shown) == (False, [("photo", 1.0), ("photo", 0.5)])

@@ -431,7 +431,44 @@ class Plan(Model):
                 raise ValueError("layer exceeds plan validity")
         if not {span.output_id for span in self.unfilled} <= set(bindings):
             raise ValueError("unfilled span binding authority mismatch")
+        self._coherent_continuations()
         return self
+
+    def _coherent_continuations(self) -> None:
+        """`Continuation`'s invariants, each its own ValueError."""
+        if not self.continuations:
+            return
+        layers = {layer.assignment_id: layer for layer in self.layers}
+        named: set[str] = set()
+        for continuation in self.continuations:
+            for photo in continuation.photos:
+                layer = layers.get(photo)
+                if layer is None or layer.presentation != "media" or (
+                    layer.output_id, layer.run_id
+                ) != (continuation.output_id, continuation.run_id):
+                    raise ValueError("continuation names an unknown layer")
+                if photo in named:
+                    raise ValueError("continuation layer named twice")
+                named.add(photo)
+            if any(layer.output_id == continuation.output_id and layer.end > continuation.start
+                   for layer in self.layers) or any(
+                span.output_id == continuation.output_id and span.end > continuation.start
+                for span in self.unfilled
+            ):
+                raise ValueError("continuation covers the plan")
+            if continuation.lead > continuation.seconds:
+                raise ValueError("continuation lead exceeds its turn")
+            if continuation.fade_in + continuation.fade_out > continuation.seconds + continuation.lead:
+                raise ValueError("continuation fades exceed its slot")
+            if continuation.until is not None and continuation.until <= continuation.start:
+                raise ValueError("continuation ends before it starts")
+        by_output = sorted(self.continuations,
+                           key=lambda c: (c.output_id, c.start - c.lead))
+        for earlier, later in zip(by_output, by_output[1:]):
+            if earlier.output_id == later.output_id and (
+                earlier.until is None or later.start - later.lead < earlier.until
+            ):
+                raise ValueError("continuations overlap")
 
 
 class Failure(Model):
@@ -494,6 +531,9 @@ class Readiness(Model):
             raise ValueError("failed assignment cannot report prepared playback")
         if not set(lost) <= set(self.prepared):
             raise ValueError("a lost grant must be prepared")
+        carried = [(photo.output_id, photo.asset_id) for photo in self.carried]
+        if len(carried) != len(set(carried)):
+            raise ValueError("duplicate carried photo")
         return self
 
 

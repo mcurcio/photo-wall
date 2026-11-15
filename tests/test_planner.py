@@ -412,8 +412,9 @@ def test_a_cut_keeps_offered_locks_and_one_rule_for_every_budget(monkeypatch):
                         lambda **limits: WallLimits(max_slots=1, **limits))
     slots = propose(instance, locks=locks)
     assert [layer.start for layer in layers(slots)] == [0, 10]
+    # Decision 0032: only a layer that awaits a grant (its Run's first turn) is a cue member.
     assert {cue.assignment_id for cue in slots.cues} == {
-        layer.assignment_id for layer in layers(slots)}
+        layer.assignment_id for layer in layers(slots) if layer.awaits_grant}
 
 
 def test_a_runtime_that_cannot_settle_now_fails_the_pass_rather_than_offer_nothing(monkeypatch):
@@ -729,3 +730,58 @@ def test_a_cut_showing_is_not_a_span():
     cut = propose(instance, pools={"holiday:1": pool()}, limits=PlannerLimits(max_assignments=1))
     assert [span.start for span in cut.for_player("player-one").unfilled] == [0]
     assert bindings
+
+
+def test_only_a_runs_first_turn_awaits_a_grant_and_only_it_is_a_cue_member():
+    """Decision 0032 (B3): a grant only for a change. The Run's first turn (`cycle_index` 0)
+    awaits Central's grant; every later turn starts at its instant once ready. Mutation probe:
+    `awaits_grant=True` on every layer."""
+    projection = propose(runtime(), horizon=25)
+    assert [(layer.start, layer.awaits_grant) for layer in layers(projection)] == [
+        (0, True), (10, False), (20, False)]
+    assert {cue.assignment_id for cue in projection.cues} == {layers(projection)[0].assignment_id}
+    later = propose(runtime(), now=40, horizon=25)
+    assert not any(layer.awaits_grant for layer in layers(later)) and later.cues == ()
+
+
+def _continued(instance, *, assets, horizon=25, plan_seconds=200, bindings=None):
+    bindings = bindings or {"player-one": (binding(),)}
+    return project(
+        instance, 0, bindings_by_player=bindings, settings=FitSettings(),
+        frame_outputs=full_screen(bindings),
+        lines=PoolLines({"holiday:1": pool("holiday:1", *assets)}), authored_candidates={},
+        locked_assignments={}, history=WallHistory(), horizon_seconds=horizon,
+        plan_seconds=plan_seconds)
+
+
+def test_a_frame_continues_its_run_past_its_layers_with_its_offered_photos():
+    """B4: the continuation starts at the Run's first turn not offered, at the Scene's pace and
+    Transition, lists the Run's offered photos in start order and knows no change (`until`
+    None) for a Run that repeats past the plan horizon. The Plan holding it is valid."""
+    instance = runtime(transition=Transition(style="cross_fade", seconds=3))
+    projection = _continued(instance, assets=[candidate(f"p{n}", captured=n) for n in range(6)])
+    proposal = projection.for_player("player-one")
+    (continuation,) = proposal.continuations
+    assert (continuation.start, continuation.seconds, continuation.lead, continuation.fade_in,
+            continuation.until) == (30, 10, 3, 3, None)
+    assert continuation.photos == tuple(layer.assignment_id for layer in proposal.layers)
+    Plan(plan_id="plan", revision=1, player_id="player-one", authority_epoch=1, issued_at=0,
+         valid_from=0, valid_until=projection.valid_until, bindings=(binding(),),
+         layers=proposal.layers, continuations=proposal.continuations)
+
+
+def test_a_show_over_the_default_scene_gives_two_continuations_one_after_the_other():
+    """B4: the Show's continuation runs to its end (`until`, the next known change), the
+    Default Scene's from there with no known end."""
+    instance = Runtime(house=UTC_HOUSE)
+    for scene_id, extra in (("calm", {"loop": True}), ("show", {"loop": True, "duration_seconds": 60})):
+        instance.set_scene(Scene(scene_id=scene_id, cycle_seconds=10, selection=SceneSelection(),
+                                 contributions=(Contribution(target="frame:left",
+                                                             source_refs=("holiday:1",)),),
+                                 **extra))
+    instance.set_default_scene("calm", 0)
+    instance.activate("show", "show-now", 0, priority=0)
+    projection = _continued(instance, assets=[candidate(f"p{n}", captured=n) for n in range(12)])
+    show, calm = projection.for_player("player-one").continuations
+    assert (show.start, show.until) == (30, 60) and (calm.start, calm.until) == (60, None)
+    assert show.run_id != calm.run_id

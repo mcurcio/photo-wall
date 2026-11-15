@@ -5,6 +5,7 @@ import random
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from psycopg.types.json import Jsonb
 from support.frame_media import seed_variant
 from support.house_time import UTC_HOUSE, daily, set_house, window_program
 from support.key_content_builders import face
@@ -18,7 +19,7 @@ from central.registry import RegistryError
 from central.runtime import Child, Contribution, Program, ProgramDraft, Scene
 from central.runtime_store import RuntimeStore
 from central.wall_plan.selection import SceneSelection
-from contracts.models import Failure, Readiness
+from contracts.models import CarriedPhoto, Failure, Readiness
 
 
 def setup_players(registry, count=2):
@@ -489,9 +490,11 @@ def assert_outro_plays_after_finish(registry, coordinator, player, start=1000):
                  if layer.start == start + 60)
     assert (outro.end, outro.opacity) == (start + 70, .5)
     codes = skip_codes(registry)
-    old, new = [g for g in cohorts(registry) if g["starts_at"] == start + 60]
-    assert codes[old["id"]] == "superseded" and new["status"] == "pending"
-    assert list(new["members"]) == [outro.assignment_id]
+    # Decision 0032: the next cycle awaits no grant, so it was never a cue; the outro opens a
+    # change and is one. Any earlier cohort at that instant was superseded.
+    *old, new = [g for g in cohorts(registry) if g["starts_at"] == start + 60]
+    assert all(codes[g["id"]] == "superseded" for g in old) and new["status"] == "pending"
+    assert list(new["members"]) == [outro.assignment_id] and outro.awaits_grant
     registry.clock.advance(start + 56 - registry.clock.utc())
     coordinator.advance()
     coordinator.readiness(player["player_id"], report(coordinator, player))
@@ -544,8 +547,8 @@ def test_scene_edit_for_an_upcoming_program_supersedes_each_affected_cue_once(re
         assert cue[0]["id"] == old["id"] and len(cue) == 2
         assert cue[0]["status"] == "skipped" and codes[old["id"]] == "superseded"
         assert cue[1]["status"] == "pending" and len(cue[1]["members"]) == 2
-    assert {layer.start for layer in coordinator.delivery(players[1]["player_id"], 1)["plan"].layers} \
-        == {g["starts_at"] for g in before}
+    assert {layer.start for layer in coordinator.delivery(players[1]["player_id"], 1)["plan"].layers
+            if layer.awaits_grant} == {g["starts_at"] for g in before}
     coordinator.advance()
     assert cohorts(registry) == after  # a steady forecast reuses the new cohorts
     coordinator.runtime.command("set_scene", one.model_copy(update={"revision": 3}), by="console")
@@ -947,3 +950,82 @@ def test_an_unfilled_span_is_offered_and_a_change_to_it_alone_is_a_new_plan(regi
     revised = coordinator.delivery(player["player_id"], 1)["plan"]
     assert revised.revision > delivered.revision
     assert revised.unfilled != delivered.unfilled and revised.layers == ()
+
+
+def test_a_report_old_by_centrals_receipt_with_a_loose_clock_still_gets_its_grant(registry):
+    """Decision 0032 (B7): freshness is the readiness sequence the Commit echoes, which the Player
+    checks; neither the report's age by Central's receipt nor the Player's show-clock bound
+    withholds a grant. Mutation probe: restore the receipt-age test."""
+    player = setup_players(registry, count=1)[0]
+    coordinator = Coordinator(registry.db, registry.clock)
+    # A 10-minute turn, so no new layer (and no new revision) comes into the horizon meanwhile.
+    coordinator.runtime.command("set_scene", Scene(scene_id="slow", loop=True, cycle_seconds=600,
+        contributions=(Contribution(target="frame:frame-0", kind="black"),)), by="console")
+    future_program(coordinator, "slow", "slow", 1010, 2000)   # starts at 1020; the clock is 1010
+    coordinator.advance()
+    plan = coordinator.delivery(player["player_id"], 1)["plan"]
+    every = tuple(layer.assignment_id for layer in plan.layers)
+    assert coordinator.readiness(player["player_id"], Readiness(
+        plan_id=plan.plan_id, revision=plan.revision, authority_epoch=1, sequence=1,
+        secured=every, prepared=every, clock_uncertainty=5.0, capacity_ok=True,
+        observed_at=registry.clock.utc(), lost_grants=()))
+    assert coordinator.delivery(player["player_id"], 1)["commits"] == ()
+    registry.clock.advance(10)                       # 1020: that report is 10 s old
+    coordinator.advance()
+    assert coordinator.delivery(player["player_id"], 1)["plan"].revision == plan.revision
+    [commit] = coordinator.delivery(player["player_id"], 1)["commits"]
+    assert commit.readiness_sequence == 1
+
+
+def test_every_offer_a_player_may_be_cycling_and_its_carried_photo_stay_off_the_other_frame(
+        registry):
+    """Decision 0032 (B8): Player A reported readiness on revision 1 and was offered revision 2;
+    either may be what it cycles if Central goes quiet, so a pass keeps both revisions' listed
+    photos, and the photo A reports carrying, off Frame B. Mutation probe: hold only the newest
+    offer."""
+    players = setup_players(registry, count=2)
+    portraits = tuple(photo(f"portrait-{n:02}", taken_at=900 + n, width=2400, height=3600)
+                      for n in range(20))
+    seed_pool(registry, "library:1", portraits)
+    measure_all(registry, portraits)
+    prepare(registry, portraits)
+    coordinator = Coordinator(registry.db, registry.clock)
+    schedule(coordinator, ["frame-0", "frame-1"], starts=1000, media=True)
+    first = coordinator.delivery(players[0]["player_id"], 1)["plan"]
+    assert first.continuations
+    offered = {layer.variant.asset_id for player in players
+               for layer in coordinator.delivery(player["player_id"], 1)["plan"].layers}
+    carried = next(item.asset_id for item in portraits if item.asset_id not in offered)
+    assert coordinator.readiness(players[0]["player_id"], Readiness(
+        plan_id=first.plan_id, revision=first.revision, authority_epoch=1, sequence=1,
+        clock_uncertainty=.01, capacity_ok=True, observed_at=registry.clock.utc(),
+        lost_grants=(), carried=(CarriedPhoto(output_id="HDMI-A-1", asset_id=carried),)))
+    registry.clock.advance(70)
+    coordinator.advance()
+    second = coordinator.delivery(players[0]["player_id"], 1)["plan"]
+    assert second.revision > first.revision and second.continuations
+    # Revision 2 as stored lists one photo fewer than revision 1 (a list changes as the walk
+    # moves on; here it is forced, so the two holds differ).
+    (continuation,) = second.continuations
+    second = second.model_copy(update={"continuations": (continuation.model_copy(
+        update={"photos": continuation.photos[1:]}),)})
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE plan_offers SET manifest=%s WHERE player_id=%s AND revision=%s",
+                     (Jsonb(second.model_dump(mode="json")), players[0]["player_id"],
+                      second.revision))
+
+    def listed(plan):
+        """Each listed photo and when its hold starts (both Frames' guards before the turn)."""
+        layers = {layer.assignment_id: layer for layer in plan.layers}
+        return {layers[photo].variant.asset_id: c.start - c.lead - 0.4
+                for c in plan.continuations for photo in c.photos}
+
+    only_first = listed(first).keys() - listed(second).keys()
+    assert only_first, "revision 1 lists a photo revision 2 does not"
+    projection = coordinator.advance().projection
+    held = {**listed(second), **listed(first), carried: registry.clock.utc() - 0.4}
+    # B may show a listed photo before its hold starts (A shows it before then), never after.
+    on_b = [entry for entry in projection.plan
+            if entry.frame_id == "frame-1" and entry.asset_id in held
+            and entry.end > held[entry.asset_id]]
+    assert on_b == []

@@ -38,11 +38,18 @@ from central.wall_plan.assignment import (
     WallLimits,
     candidate_shape_fit,
     fits_slot,
+    frame_clock_uncertainty,
     layer_after_end,
     plan_wall,
     shape_bounds,
     useful_for,
     variant_usable,
+)
+from central.wall_plan.continuation import (
+    ContinuationSegment,
+    FrameExtent,
+    ListedPhoto,
+    continuation_lists,
 )
 from central.wall_plan.fit import FitTarget, fit_target
 from central.wall_plan.fit_settings import FitSettings
@@ -179,9 +186,10 @@ class Diagnostic(Model):
 
 class CueMember(Model):
     """One showing inside the preparation horizon that the Planner placed (or left unfilled, or
-    on an unbound Frame), for coordination's cues (`Coordinator._groups`): a cue is the showings
-    of one root starting to show at one instant. A refused or cut showing is never a member, so
-    no cue waits on a layer that will not be offered."""
+    on an unbound Frame) and that opens its Run (its layer awaits a grant, decision 0032), for
+    coordination's cues (`Coordinator._groups`): a cue is the showings of one root starting to
+    show at one instant. A refused or cut showing is never a member, so no cue waits on a layer
+    that will not be offered."""
 
     assignment_id: str
     root_id: str
@@ -348,6 +356,10 @@ class _ProjectionBuilder:
         self.cut: float | None = None
         self.cues: dict[str, CueMember] = {}
         self.wanted: dict[str, tuple[str, UnfilledSpan]] = {}   # media Intents inside the horizon
+        # Decision 0032, set by `plan`: the walk's committed extents and each offered media
+        # layer's photo, for the continuation lists.
+        self.on_screen: tuple = ()
+        self.photo_of: dict[str, str] = {}
         self._validate_inputs(bindings_by_player)
 
     def _validate_inputs(self, bindings: Mapping[str, Sequence[OutputBinding]]) -> None:
@@ -432,13 +444,16 @@ class _ProjectionBuilder:
             admission_order=intent.admission_order,
             opacity=intent.base_opacity,
             fade_in=intent.fade_in_seconds, fade_out=intent.fade_out_seconds,
+            # Decision 0032: a grant only for a change, the Run's first turn on the wall.
+            awaits_grant=intent.cycle_index == 0,
         )
 
     def add(self, intent: Intent, window: PlanWindow) -> None:
         """One Intent of the plan horizon: a lock or a black layer is fixed (a layer when it
         starts inside the preparation horizon); a media Intent becomes a wall-plan slot. Each
         starts when its photo starts to show (`Intent.shows_from`). One placed inside the
-        preparation horizon (or a lock) is a cue member; one that raises adds nothing."""
+        preparation horizon (or a lock) whose layer awaits a grant (its Run's first turn,
+        decision 0032) is a cue member; one that raises adds nothing."""
         if not _in_window(intent, window):
             return
         identity = assignment_id(intent)
@@ -447,7 +462,8 @@ class _ProjectionBuilder:
         self.seen.add(identity)
         self._want(intent, window, identity)
         self._place(intent, window, identity)
-        if intent.shows_from < window.preparation_end or identity in self.locks:
+        if intent.cycle_index == 0 and (
+                intent.shows_from < window.preparation_end or identity in self.locks):
             self.cues[identity] = CueMember(
                 assignment_id=identity, root_id=intent.root_id, target=intent.target,
                 shows_from=intent.shows_from, interval_end=intent.interval_end)
@@ -685,6 +701,8 @@ class _ProjectionBuilder:
         return selected
 
     def plan(self, window: PlanWindow, history: WallHistory, max_clock_uncertainty: float,
+             reserved: Sequence[Reservation] = (),
+             frame_uncertainty: Mapping[str, float] | None = None,
              ) -> tuple[list[PlannedPhoto], list[AcquisitionRequest], list[MeasureRequest]]:
         """The wall assignment over the window; its slots inside the preparation horizon become
         layers and selections."""
@@ -705,7 +723,11 @@ class _ProjectionBuilder:
         wall = plan_wall(tuple(item.slot for item in self.pending), tuple(self.fixed),
                          history.kept, candidates, lines, pools, window=window,
                          max_clock_uncertainty=max_clock_uncertainty, limits=wall_limits,
-                         settings=self.settings)
+                         settings=self.settings, reserved=reserved,
+                         frame_uncertainty=frame_uncertainty)
+        self.on_screen = wall.on_screen
+        self.photo_of = {identity: asset_id for identity, asset_id in selected.items()
+                         if identity in self.used_locks}
         placed = {placement.slot_id: placement for placement in wall.placed}
         unfilled = {gap.slot_id: gap.reason for gap in wall.unfilled}
         planned: list[PlannedPhoto] = []
@@ -721,6 +743,7 @@ class _ProjectionBuilder:
             if layer is not None:
                 self.layers[item.player_id].append(layer)
                 self.selections.append(selection)
+                self.photo_of[layer.assignment_id] = photo.asset_id
         for identity, layer in self.used_locks.items():
             if layer.presentation == "media":
                 planned.append(PlannedPhoto(
@@ -763,10 +786,76 @@ class _ProjectionBuilder:
             pass_number=placement.pass_number or current_pass.get(slot.scene_id, 1))
         return photo, layer, selection
 
+    def _segments(self, intents: Sequence[Intent], known_until: float,
+                  ) -> list[ContinuationSegment]:
+        """Decision 0032, the segments' one home: for each bound Frame and each Run with an
+        offered media layer on it, the Run's first turn on that Frame past every layer and
+        unfilled span its Output holds that no Intent of a Run of greater precedence covers;
+        its pace, lead and fades; and `until`, the first later instant the Run has no Intent on
+        the Frame or a Run of greater precedence starts to show there (None when neither falls
+        before `known_until`, the timeline's end). The Run's offered media layers on the Frame,
+        in start order, are its candidates. On one Output, a segment starting inside an earlier
+        one's span is dropped, and one whose lead would reach into it starts at its end."""
+        by_target: dict[str, list[Intent]] = {}
+        for intent in intents:
+            by_target.setdefault(intent.target, []).append(intent)
+        segments: list[ContinuationSegment] = []
+        for target, (player, binding) in sorted(self.frames.items()):
+            on_frame = sorted(by_target.get(target, ()), key=lambda i: i.interval_start)
+            layers = [layer for layer in self.layers[player]
+                      if layer.output_id == binding.output_id]
+            spans = [span for span in self._unfilled(player, self.layers[player])
+                     if span.output_id == binding.output_id]
+            boundary = max([layer.end for layer in layers] + [span.end for span in spans],
+                           default=-math.inf)
+            found: list[ContinuationSegment] = []
+            for run_id in sorted({layer.run_id for layer in layers
+                                  if layer.presentation == "media"}):
+                candidates = tuple(
+                    ListedPhoto(assignment_id=layer.assignment_id,
+                                asset_id=self.photo_of[layer.assignment_id])
+                    for layer in sorted(layers, key=lambda layer: layer.start)
+                    if layer.run_id == run_id and layer.presentation == "media"
+                    and layer.assignment_id in self.photo_of)
+                segment = _segment(run_id, on_frame, boundary, known_until)
+                if segment is None or not candidates:
+                    continue
+                first, until = segment
+                lead = first.interval_start - first.shows_from
+                seconds = first.interval_end - first.interval_start
+                if lead > seconds:
+                    continue
+                found.append(ContinuationSegment(
+                    player_id=player, frame_id=binding.frame_id, output_id=binding.output_id,
+                    run_id=run_id, start=first.interval_start, seconds=seconds, lead=lead,
+                    fade_in=first.fade_in_seconds, fade_out=first.fade_out_seconds,
+                    until=until, candidates=candidates))
+            segments.extend(_in_turn(found))
+        return segments
+
+    def _continuations(self, intents: Sequence[Intent], known_until: float,
+                       max_clock_uncertainty: float,
+                       frame_uncertainty: Mapping[str, float] | None,
+                       ) -> dict[str, tuple[Continuation, ...]]:
+        """Each Player's continuations (central/wall_plan/continuation.py `continuation_lists`),
+        kept off the walk's extents and every other Frame's list."""
+        extents: dict[str, list[FrameExtent]] = {}
+        for entry in self.on_screen:
+            extents.setdefault(entry.asset_id, []).append(
+                FrameExtent(frame_id=entry.frame_id, extent=entry.extent))
+        guard = {binding.frame_id: 2 * frame_clock_uncertainty(
+            binding.frame_id, max_clock_uncertainty, frame_uncertainty)
+            for _, binding in self.frames.values()}
+        return continuation_lists(self._segments(intents, known_until), extents=extents,
+                                  guard=guard)
+
     def result(self, window: PlanWindow, history: WallHistory,
-               max_clock_uncertainty: float) -> Projection:
+               max_clock_uncertainty: float, *, intents: Sequence[Intent] = (),
+               known_until: float = math.inf, reserved: Sequence[Reservation] = (),
+               frame_uncertainty: Mapping[str, float] | None = None) -> Projection:
         now, horizon_end = window.now, window.preparation_end
-        planned, acquisitions, measurements = self.plan(window, history, max_clock_uncertainty)
+        planned, acquisitions, measurements = self.plan(
+            window, history, max_clock_uncertainty, reserved, frame_uncertainty)
         for identity, lock in self.locks.items():
             if identity not in self.used_locks:
                 # Absence from this horizon alone is not permission to erase a
@@ -775,11 +864,14 @@ class _ProjectionBuilder:
                     "lock_expired" if lock.end <= now else "lock_outside_projection",
                     assignment=identity,
                 )
+        continuations = self._continuations(intents, known_until, max_clock_uncertainty,
+                                            frame_uncertainty)
         players = tuple(PlayerProposal(
             player_id=player,
             layers=tuple(sorted(layers, key=lambda layer: (
                 *stack_order(layer), layer.output_id, layer.assignment_id))),
             unfilled=self._unfilled(player, layers),
+            continuations=continuations.get(player, ()),
         ) for player, layers in sorted(self.layers.items()))
         # A layer is offered whole, so the plan stays valid to the end of its longest layer; a
         # cut plan holds nothing new past its cut, so it is valid no further than the cut.
@@ -843,8 +935,6 @@ def project(
     caller input (`_validate_inputs`, a non-finite time) raises, and a Runtime that cannot settle
     even `now` within its budget (`RuntimeBudgetExceeded`: an empty plan would withdraw every
     offered layer)."""
-    if reserved or frame_uncertainty:
-        raise NotImplementedError("decision 0032 slice B: reservations and per-Frame guards")
     now = _finite(now, "now")
     horizon_seconds = _finite(horizon_seconds, "horizon_seconds")
     if horizon_seconds <= 0:
@@ -889,7 +979,58 @@ def project(
             builder.add(intent, window)
         except Exception as error:   # noqa: BLE001 - the per-Intent bulkhead
             builder.refuse(intent, error, assignment_id(intent))
-    return builder.result(window, history, max_clock_uncertainty)
+    # Each showing once (an Intent recurs in every view it spans), for the continuations.
+    showings = list({assignment_id(intent): intent for intent in reversed(intents)
+                     if intent.kind != "actuator"}.values())
+    known_until = timeline.until if builder.cut is None else min(timeline.until, builder.cut)
+    return builder.result(window, history, max_clock_uncertainty, intents=showings,
+                          known_until=known_until, reserved=reserved,
+                          frame_uncertainty=frame_uncertainty)
+
+
+def _segment(run_id: str, on_frame: Sequence[Intent], boundary: float, known_until: float,
+             ) -> tuple[Intent, float | None] | None:
+    """`_segments` for one Run on one Frame: its first turn at or past `boundary` that no Intent
+    of greater precedence covers, and its `until`; None when it has none. `on_frame` is the
+    Frame's Intents by turn."""
+    mine = [intent for intent in on_frame if intent.run_id == run_id]
+    others = [intent for intent in on_frame if intent.run_id != run_id]
+    first = next((intent for intent in mine if intent.interval_start >= boundary and not any(
+        other.precedence > intent.precedence
+        and other.interval_start <= intent.interval_start < other.interval_end
+        for other in others)), None)
+    if first is None:
+        return None
+    covered = first.interval_end
+    for intent in mine:
+        if intent.interval_start > first.interval_start:
+            if intent.interval_start > covered:
+                break
+            covered = max(covered, intent.interval_end)
+    ends = [covered] if covered < known_until else []
+    ends += [other.shows_from for other in others
+             if other.precedence > first.precedence and other.shows_from > first.interval_start]
+    return first, min(ends) if ends else None
+
+
+def _in_turn(segments: Sequence[ContinuationSegment]) -> list[ContinuationSegment]:
+    """One Output's segments one after the other: a segment starting before an earlier one's
+    `until` (or after one with none) is dropped; one whose lead reaches into the earlier one's
+    span starts at its `until`, its fade-in cut to fit."""
+    kept: list[ContinuationSegment] = []
+    for segment in sorted(segments, key=lambda segment: segment.start):
+        if kept:
+            earlier = kept[-1].until
+            if earlier is None or segment.start < earlier:
+                continue
+            if segment.start - segment.lead < earlier:
+                lead = segment.start - earlier
+                fade_out = min(segment.fade_out, segment.seconds + lead)
+                segment = segment.model_copy(update={
+                    "lead": lead, "fade_out": fade_out,
+                    "fade_in": min(segment.fade_in, segment.seconds + lead - fade_out)})
+        kept.append(segment)
+    return kept
 
 
 def _refusal(error: Exception) -> str:

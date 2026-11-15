@@ -5,6 +5,8 @@ from support.position import LIGHTING
 
 from contracts.models import (
     Calibration,
+    CarriedPhoto,
+    Continuation,
     Layer,
     OutputBinding,
     PhotoCrop,
@@ -248,3 +250,75 @@ def test_an_unfilled_span_ends_after_it_starts_and_names_a_bound_output():
         UnfilledSpan(output_id="hdmi1", start=10, end=10)
     with pytest.raises(ValidationError):
         _plan(unfilled=(UnfilledSpan(output_id="hdmi2", start=0, end=10),))
+
+
+def _still_layer(assignment_id, start, end, *, run_id="run", output_id="hdmi1"):
+    still = Variant(asset_id=f"asset-{assignment_id}", recipe_id="e" * 64, sha256="a" * 64, size=20,
+                    media_type="image/jpeg", width=30, height=20)
+    return Layer(assignment_id=assignment_id, run_id=run_id, output_id=output_id,
+                 frame_id="frame1", binding_generation=1, start=start, end=end,
+                 media_origin=start, variant=still, crop=CENTRED)
+
+
+def _continued(*continuations, unfilled=()):
+    binding = OutputBinding(output_id="hdmi1", frame_id="frame1", generation=1, lighting=LIGHTING,
+                            display_mm=None)
+    return Plan(plan_id="plan", revision=1, player_id="player", authority_epoch=1, issued_at=0,
+                valid_from=0, valid_until=60, bindings=(binding,),
+                layers=(_still_layer("a", 0, 10), _still_layer("b", 10, 20)), unfilled=unfilled,
+                continuations=continuations)
+
+
+def _continuation(**fields):
+    return Continuation(**{"output_id": "hdmi1", "run_id": "run", "photos": ("a", "b"),
+                           "start": 20, "seconds": 10, **fields})
+
+
+def test_a_plan_with_a_continuation_crosses_the_wire_and_one_without_reads_as_before():
+    """Decision 0032: a plan's continuations travel only when set."""
+    plan = _continued(_continuation(lead=1, fade_in=1, fade_out=1, until=50))
+    assert Plan.model_validate(plan.model_dump(mode="json")) == plan
+    assert "continuations" not in _continued().model_dump(mode="json")
+    assert "awaits_grant" not in plan.layers[0].model_dump(mode="json")
+    assert plan.layers[0].model_copy(update={"awaits_grant": True}).model_dump(mode="json")["awaits_grant"]
+
+
+@pytest.mark.parametrize(("continuations", "unfilled", "message"), [
+    ((_continuation(photos=("a", "missing")),), (), "continuation names an unknown layer"),
+    ((_continuation(run_id="other"),), (), "continuation names an unknown layer"),
+    ((_continuation(output_id="hdmi2"),), (), "continuation names an unknown layer"),
+    ((_continuation(photos=("a",), until=30), _continuation(photos=("a",), start=30)), (),
+     "continuation layer named twice"),
+    ((_continuation(start=15),), (), "continuation covers the plan"),
+    ((_continuation(),), (UnfilledSpan(output_id="hdmi1", start=20, end=25),),
+     "continuation covers the plan"),
+    ((_continuation(lead=11),), (), "continuation lead exceeds its turn"),
+    ((_continuation(lead=2, fade_in=7, fade_out=6),), (), "continuation fades exceed its slot"),
+    ((_continuation(until=20),), (), "continuation ends before it starts"),
+    ((_continuation(photos=("a",), until=40), _continuation(photos=("b",), start=45, lead=6)), (),
+     "continuations overlap"),
+    ((_continuation(photos=("a",)), _continuation(photos=("b",), start=90)), (),
+     "continuations overlap"),
+])
+def test_a_plan_refuses_every_broken_continuation(continuations, unfilled, message):
+    """Decision 0032 (B1): each invariant of a continuation is refused with its own words."""
+    with pytest.raises(ValidationError, match=message):
+        _continued(*continuations, unfilled=unfilled)
+
+
+def test_two_continuations_in_turn_on_one_output_are_accepted():
+    """A Show over the Default Scene: one continuation ends where the next begins (its lead
+    included)."""
+    plan = _continued(_continuation(photos=("a",), until=40),
+                      _continuation(photos=("b",), start=41, lead=1))
+    assert len(plan.continuations) == 2
+
+
+def test_a_readiness_refuses_a_repeated_carried_photo():
+    common = dict(plan_id="p", revision=1, authority_epoch=1, sequence=1,
+                  clock_uncertainty=.01, observed_at=100, lost_grants=())
+    carried = CarriedPhoto(output_id="hdmi1", asset_id="asset-a")
+    assert Readiness(**common, carried=(carried,)).carried == (carried,)
+    assert "carried" not in Readiness(**common).model_dump(mode="json")
+    with pytest.raises(ValidationError, match="duplicate carried photo"):
+        Readiness(**common, carried=(carried, carried))

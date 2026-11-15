@@ -48,6 +48,8 @@ from central.runtime import handle_execution_outcome as handle_runtime_outcome
 from central.runtime_store import RuntimeStore
 from central.scheduler import scheduler_failure
 from central.transaction_locks import COORDINATION_LOCK, holds_node_lock_in, holds_runtime_locks_in
+from central.wall_plan.assignment import Reservation, frame_clock_uncertainty
+from central.wall_plan.continuation import held_reservations
 from central.wall_plan.fit import FitTarget, fit_target
 from central.wall_plan.order import PhotoShowing
 from central.wall_plan.ports import FitSettingsStore, ShownHistory
@@ -64,6 +66,7 @@ from contracts.models import (
     Readiness,
     Revocation,
 )
+from contracts.on_screen import Extent
 from contracts.time import Clock
 
 LOG = logging.getLogger(__name__)
@@ -72,7 +75,6 @@ LOG = logging.getLogger(__name__)
 class CoordinationLimits(Model):
     horizon_seconds: float = Field(default=300, gt=0, le=3600)
     renewal_seconds: float = Field(default=30, gt=0, le=60)
-    readiness_seconds: float = Field(default=2, gt=0, le=10)
     max_uncertainty: float = Field(default=0.1, gt=0, le=1)
     max_offers: int = Field(default=64, ge=1, le=256)
     # Roadmap 5a (slice W1): how far ahead the wall plan reaches, every Frame together; layers
@@ -143,6 +145,28 @@ def _withdraws(latest: Plan, proposal, projection: Projection, now: float) -> bo
     proposed = {layer.assignment_id for layer in proposal.layers}
     return any(layer.end > now and layer.start >= projection.cut
                and layer.assignment_id not in proposed for layer in latest.layers)
+
+
+def _may_hold(offer, now: float) -> bool:
+    """Decision 0032: whether an expired offer's Player may still be playing its continuations:
+    its revision is at or past the one the Player's latest readiness names, and one of its
+    continuations has no known end or ends after now. Such an offer is kept (its reservations
+    hold, `Coordinator._held_in`)."""
+    readiness = offer["readiness"]
+    if readiness is not None and offer["revision"] < readiness["revision"]:
+        return False
+    try:
+        plan = Plan.model_validate(offer["manifest"])
+    except ValidationError:
+        return False
+    return any(c.until is None or c.until > now for c in plan.continuations)
+
+
+def _membership(layers, groups: dict[str, str]) -> dict[str, str]:
+    """Each layer's cue group: only a layer that awaits a grant is a cue member (decision 0032),
+    so a layer with no group starts at its instant with no Commit."""
+    return {layer.assignment_id: groups[layer.assignment_id] for layer in layers
+            if layer.assignment_id in groups}
 
 
 def offer_owner(plan: Plan) -> str:
@@ -573,7 +597,7 @@ class Coordinator:
                 plan.revision,
                 plan.plan_id,
                 Jsonb(plan.model_dump(mode="json")),
-                Jsonb({layer.assignment_id: groups[layer.assignment_id] for layer in plan.layers}),
+                Jsonb(_membership(plan.layers, groups)),
                 plan.issued_at,
                 plan.valid_until,
             ),
@@ -626,6 +650,7 @@ class Coordinator:
             # Renewable extent changes only at a renewal boundary, avoiding heartbeat churn.
             quantum = self.limits.renewal_seconds
             horizon_end = (math.floor(now / quantum) + 1) * quantum + self.limits.horizon_seconds
+            reserved, frame_uncertainty = self._held_in(conn, configurations, now)
             selections = runtime.planning_selections()
             history = self.shown.wall_history_in(
                 conn, selections, now=now,
@@ -650,6 +675,8 @@ class Coordinator:
                 max_clock_uncertainty=self.limits.max_uncertainty,
                 limits=PlannerLimits.over(self.limits.plan_seconds,
                                           self.limits.horizon_seconds + quantum),
+                reserved=reserved,
+                frame_uncertainty=frame_uncertainty,
             )
             groups = self._groups(conn, projection, now, horizon_end, configurations)
             for proposal in projection.players:
@@ -659,6 +686,51 @@ class Coordinator:
             self.media.request_preparations_in(conn, projection.acquisitions)
             self.planning.record_in(conn, projection)
             return projection
+
+    def _held_in(self, conn, configurations: dict[str, PlayerConfiguration], now: float,
+                 ) -> tuple[list[Reservation], dict[str, float]]:
+        """Decision 0032: what each Player may still be showing that this pass must keep off every
+        other Frame, and each Frame's reported show-clock bound. From each Player's latest
+        readiness in its current epoch: every stored offer at or past the revision it names
+        (every offer when it has reported none) holds its continuations' photos
+        (`held_reservations`), and each photo it reports carrying is reserved on its Frame from
+        now on, while reported. A Player's Frames take its reported bound."""
+        reserved: list[Reservation] = []
+        frame_uncertainty: dict[str, float] = {}
+        for player, config in sorted(configurations.items()):
+            frames = {binding.output_id: binding.frame_id for binding in config.bindings}
+            row = conn.execute(
+                "SELECT readiness FROM player_feedback WHERE player_id=%s AND authority_epoch=%s",
+                (player, config.authority_epoch),
+            ).fetchone()
+            report = Readiness.model_validate(row["readiness"]) if row else None
+            if report is not None:
+                frame_uncertainty.update(
+                    {frame: report.clock_uncertainty for frame in frames.values()})
+            for offer in conn.execute(
+                "SELECT manifest FROM plan_offers WHERE player_id=%s AND authority_epoch=%s "
+                "AND revision>=%s ORDER BY revision",
+                (player, config.authority_epoch, report.revision if report else 0),
+            ).fetchall():
+                try:
+                    plan = Plan.model_validate(offer["manifest"])
+                except ValidationError:
+                    continue   # `_offers` names it; an offer that no longer reads holds nothing
+                if plan.continuations:
+                    reserved.extend(held_reservations(plan, guard=self._guard(
+                        plan.bindings[0].frame_id, frame_uncertainty)))
+            for carried in report.carried if report else ():
+                frame = frames.get(carried.output_id)
+                if frame is not None:
+                    reserved.append(Reservation(frame_id=frame, asset_id=carried.asset_id,
+                                                extent=Extent(start=now - self._guard(
+                                                    frame, frame_uncertainty))))
+        return reserved, frame_uncertainty
+
+    def _guard(self, frame_id: str, frame_uncertainty: dict[str, float]) -> float:
+        """The hand-over guard on `frame_id` (central/wall_plan/assignment.py's rule)."""
+        return 2 * frame_clock_uncertainty(frame_id, self.limits.max_uncertainty,
+                                           frame_uncertainty)
 
     def _propose(self, conn, proposal, config: PlayerConfiguration, offered: list[Plan],
                  groups: dict[str, str], projection: Projection, now: float) -> None:
@@ -685,11 +757,13 @@ class Coordinator:
                         detail={"code": "plan_shortened"})
             return
         bindings = config.bindings
-        membership = {layer.assignment_id: groups[layer.assignment_id] for layer in proposal.layers}
+        membership = _membership(proposal.layers, groups)
         if (
             latest
-            and (latest.layers, latest.bindings, latest.unfilled, latest.valid_until)
-            == (proposal.layers, bindings, proposal.unfilled, projection.valid_until)
+            and (latest.layers, latest.bindings, latest.unfilled, latest.continuations,
+                 latest.valid_until)
+            == (proposal.layers, bindings, proposal.unfilled, proposal.continuations,
+                projection.valid_until)
             and self._plan_groups(conn, latest) == membership
         ):
             return
@@ -712,6 +786,7 @@ class Coordinator:
             bindings=bindings,
             layers=proposal.layers,
             unfilled=proposal.unfilled,
+            continuations=proposal.continuations,
         )
         self._offer(conn, plan, groups)
         self._record_selected(conn, plan, projection)
@@ -769,7 +844,10 @@ class Coordinator:
             (now,),
         )
         expired = conn.execute(
-            "SELECT player_id,authority_epoch,revision FROM plan_offers WHERE valid_until<=%s",
+            "SELECT o.player_id,o.authority_epoch,o.revision,o.manifest,f.readiness "
+            "FROM plan_offers o LEFT JOIN player_feedback f ON "
+            "(f.player_id,f.authority_epoch)=(o.player_id,o.authority_epoch) "
+            "WHERE o.valid_until<=%s",
             (now,),
         ).fetchall()
         for offer in expired:
@@ -779,7 +857,7 @@ class Coordinator:
                 "AND revision>%s",
                 (*session, offer["revision"]),
             ).fetchone()
-            if session not in active_sessions or newer:
+            if session not in active_sessions or (newer and not _may_hold(offer, now)):
                 conn.execute(
                     "DELETE FROM plan_offers WHERE player_id=%s AND authority_epoch=%s "
                     "AND revision=%s",
@@ -1051,11 +1129,7 @@ class Coordinator:
                 and current.bindings == config.bindings
             ):
                 for layer in current.layers:
-                    if (
-                        layer.assignment_id not in report.prepared
-                        or not report.capacity_ok
-                        or report.clock_uncertainty > self.limits.max_uncertainty
-                    ):
+                    if layer.assignment_id not in report.prepared or not report.capacity_ok:
                         conn.execute(
                             "UPDATE execution_commits SET valid=FALSE WHERE player_id=%s "
                             "AND authority_epoch=%s AND assignment_id=%s AND valid",
@@ -1283,7 +1357,9 @@ class Coordinator:
     def _participant(self, assignment, owner, group_id, plans, plan_groups, feedback,
                      configurations, interrupted, now) -> tuple[Plan, Layer, int] | None:
         """What a grant to this cue member is written from, or None while its Player does not
-        report it prepared on this cue's plan. Freshness is when Central heard the report."""
+        report it prepared on this cue's plan. Freshness is the readiness sequence the Commit
+        echoes, which the Player checks (decision 0032): never the report's age by Central's
+        receipt, nor the Player's clock bound."""
         if owner is None:
             return None
         player, epoch, output, generation = owner
@@ -1300,15 +1376,13 @@ class Coordinator:
             or plan_groups[player].get(assignment) != group_id
         ):
             return None
-        row, report = state
+        _, report = state
         if (
             plan.authority_epoch != epoch
             or plan.revision != report.revision
             or plan.plan_id != report.plan_id
             or assignment not in report.prepared
             or not report.capacity_ok
-            or report.clock_uncertainty > self.limits.max_uncertainty
-            or now - row["received_at"] > self.limits.readiness_seconds
             or layer.output_id != output
             or layer.binding_generation != generation
         ):

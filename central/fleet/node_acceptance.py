@@ -172,10 +172,12 @@ class NodeAcceptance:
                                             (exchange.completed_decision_id,)).fetchone()):
                     raise NodeControlError("node_qualification_handoff_unavailable")
                 # The explicit qualification scenario is a single full-opacity
-                # committed media layer per Output. General overlap/fade semantics
-                # remain renderer-owned and are not reconstructed here.
+                # media layer per Output in force now: committed when it awaits a grant, else
+                # prepared alone (decision 0032: a grant only for a change). General
+                # overlap/fade semantics remain renderer-owned and are not reconstructed here.
                 active = [layer for layer in plan.layers if layer.output_id == output
-                          and layer.assignment_id in commits and layer.start <= now < layer.end]
+                          and (layer.assignment_id in commits or not layer.awaits_grant)
+                          and layer.start <= now < layer.end]
                 if (len(active) != 1 or active[0].presentation != "media"
                         or active[0].assignment_id not in ready.prepared
                         or active[0].opacity != 1 or active[0].fade_in or active[0].fade_out):

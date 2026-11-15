@@ -8,8 +8,10 @@ time"; "this “no repeat” idea is secondary to always ensuring that frames ha
 
 The walk (prior art: rolling-horizon scheduling; greedy on a transversal matroid with Kuhn's
 augmenting paths; Kuhn-Munkres for the placement):
-1. Fixed showings (offered or secured layers, and each Frame's kept still) are inputs; their
-   extents are recorded first. Hand-placed slots take the first of their authored photos that
+1. Fixed showings (offered or secured layers, and each Frame's kept still) and reservations
+   (decision 0032: photos a Player may be cycling or carries, `Reservation`) are inputs; their
+   extents are recorded first. Each Frame's hand-over guard is its own
+   (`frame_clock_uncertainty`). Hand-placed slots take the first of their authored photos that
    fits and is free; their photos are skipped by every Scene line in this plan.
 2. Slots are walked by start instant, earliest first. At one instant, each slot offers the first
    `depth` = (slots at this instant) + `limits.offer_extra` photos of its Scene's line
@@ -176,12 +178,26 @@ class PrepareNeed(Model):
     earliest_start: Instant
 
 
+class OnScreen(Model):
+    """Where the walk left one photo possibly on screen: on `frame_id` over `extent` (its Frame's
+    guard included): every decided showing, kept still and reservation."""
+
+    asset_id: Identifier
+    frame_id: Identifier
+    extent: Extent
+
+
 class WallPlan(Model):
     placed: tuple[Placed, ...] = ()
     unfilled: tuple[Unfilled, ...] = ()
     # The unmeasured in rank order, then the due (module docstring); at most max_measurements.
     measure: tuple[Identifier, ...] = ()
     prepare: tuple[PrepareNeed, ...] = ()       # at most limits.max_preparations
+    # Decision 0032: the extents the walk ended with that are commitments, by photo and Frame:
+    # every reservation, kept still and showing starting before the preparation end (a tentative
+    # placement past it is not one: the next pass walks with this pass's lists reserved). The
+    # Planner's continuation lists keep their photos off the other Frames over them.
+    on_screen: tuple[OnScreen, ...] = ()
 
 
 def plan_wall(slots: Sequence[Slot], fixed: Sequence[FixedShowing], kept: Sequence[KeptStill],
@@ -201,15 +217,24 @@ def plan_wall(slots: Sequence[Slot], fixed: Sequence[FixedShowing], kept: Sequen
     Deterministic for equal inputs. Never changes a fixed showing. ValueError on a Scene-line
     slot whose scene has no line (a hand-placed slot needs none), or more than
     `limits.max_slots` slots."""
-    if reserved or frame_uncertainty:
-        raise NotImplementedError("decision 0032 slice B: reservations and per-Frame guards")
     if len(slots) > limits.max_slots:
         raise ValueError(f"{len(slots)} slots exceed the wall plan's {limits.max_slots}")
     for slot in slots:
         if slot.pool and slot.scene_id not in lines:
             raise ValueError(f"slot {slot.slot_id} names scene {slot.scene_id!r}, which has no line")
     return _Walk(candidates, lines, pools, window=window, uncertainty=max_clock_uncertainty,
-                 limits=limits, settings=settings).run(slots, fixed, kept)
+                 frame_uncertainty=frame_uncertainty or {}, limits=limits,
+                 settings=settings).run(slots, fixed, kept, reserved)
+
+
+def frame_clock_uncertainty(frame_id: str, max_clock_uncertainty: float,
+                            frame_uncertainty: Mapping[str, float] | None) -> float:
+    """The clock uncertainty a showing on `frame_id` is guarded by (its hand-over guard is twice
+    it, contracts/on_screen.py): the larger of `max_clock_uncertainty` and the Frame's reported
+    show-clock bound, capped at `MAX_GUARD_UNCERTAINTY` (decision 0032). The one home of the
+    per-Frame guard; the Planner's continuation lists read it too."""
+    reported = (frame_uncertainty or {}).get(frame_id, 0.0)
+    return min(max(max_clock_uncertainty, reported), MAX_GUARD_UNCERTAINTY)
 
 
 def layer_after_end(after_end: AfterEnd, kind: MediaKind) -> AfterEnd:
@@ -395,6 +420,7 @@ class _Wall:
     only end a kept still sooner, so an extent never grows and a free answer stays true."""
 
     uncertainty: float
+    frame_uncertainty: Mapping[str, float] = field(default_factory=dict)
     on_frame: dict[str, list[_Showing]] = field(default_factory=dict)
     # Each photo's showings that keep it after their end ("keep_this_photo": a later showing on
     # their Frame ends them); the others are in `_spans`.
@@ -412,6 +438,16 @@ class _Wall:
     # long plan on a small pool rechecked every earlier showing of a photo at every slot (a
     # perpetual Default Scene on an 8 s cycle: seconds per pass, holding the coordination lock).
     _spans: dict[str, _Spans] = field(default_factory=dict)
+    # Decision 0032: each photo's reservations (frame id, extent), fixed for the walk; an open
+    # extent is allowed, so they are kept apart from `_spans`.
+    reservations: dict[str, list[tuple[str, Extent]]] = field(default_factory=dict)
+
+    def guard_uncertainty(self, frame_id: str) -> float:
+        return frame_clock_uncertainty(frame_id, self.uncertainty, self.frame_uncertainty)
+
+    def reserve(self, reservation: Reservation) -> None:
+        self.reservations.setdefault(reservation.asset_id, []).append(
+            (reservation.frame_id, reservation.extent))
 
     def add(self, frame_id: str, showing: _Showing) -> None:
         self.on_frame.setdefault(frame_id, []).append(showing)
@@ -429,13 +465,14 @@ class _Wall:
         self.kept_on[still.frame_id] = still
 
     def extent(self, frame_id: str, showing: _Showing) -> Extent:
-        return on_screen_extent(showing, self.on_frame.get(frame_id, ()), self.uncertainty)
+        return on_screen_extent(showing, self.on_frame.get(frame_id, ()),
+                                self.guard_uncertainty(frame_id))
 
     def kept_extent(self, still: KeptStill) -> Extent | None:
         """A kept still from the history holds from `since` until a showing on its Frame
         replaces what the Frame keeps at or after it (`on_screen_extent`'s rule for a kept
         layer, with the guard)."""
-        guard = 2 * self.uncertainty
+        guard = 2 * self.guard_uncertainty(still.frame_id)
         replaced = [at for showing in self.on_frame.get(still.frame_id, ())
                     if (at := replaces_kept_at(showing)) is not None and at >= still.since]
         start = still.since - guard
@@ -453,14 +490,18 @@ class _Wall:
         return found
 
     def free(self, asset_id: str, frame_id: str, extent: Extent) -> bool:
-        """Rule 1: no extent of `asset_id` on another Frame overlaps `extent`."""
-        guard = 2 * self.uncertainty
+        """Rule 1: no extent of `asset_id` on another Frame overlaps `extent`, a reservation's
+        included (decision 0032: a reservation never blocks its own Frame)."""
+        for other, held in self.reservations.get(asset_id, ()):
+            if other != frame_id and held.overlaps(extent):
+                return False
         spans = self._spans.get(asset_id)
         if spans is not None and spans.overlaps_another(frame_id, extent):
             return False
         for other, showing in self.of_asset.get(asset_id, ()):   # kept stills: they may grow
             if other == frame_id:
                 continue
+            guard = 2 * self.guard_uncertainty(other)
             # Every extent starts at its showing's start less the guard: one that starts at or
             # after `extent` ends cannot overlap it (a cheap test before the extent itself).
             if extent.end is not None and showing.start - guard >= extent.end:
@@ -473,6 +514,21 @@ class _Wall:
                 if held is not None and held.overlaps(extent):
                     return False
         return True
+
+    def on_screen(self, before: float) -> tuple[OnScreen, ...]:
+        """`WallPlan.on_screen`: reservations, every decided showing with a photo that starts
+        before `before`, and kept stills still held."""
+        found = [OnScreen(asset_id=asset_id, frame_id=frame_id, extent=extent)
+                 for asset_id, held in self.reservations.items() for frame_id, extent in held]
+        for frame_id, showings in self.on_frame.items():
+            found.extend(OnScreen(asset_id=showing.asset_id, frame_id=frame_id,
+                                  extent=self.decided_extent(frame_id, showing))
+                         for showing in showings
+                         if showing.asset_id is not None and showing.start < before)
+        for stills in self.kept.values():
+            found.extend(OnScreen(asset_id=still.asset_id, frame_id=still.frame_id, extent=held)
+                         for still in stills if (held := self.kept_extent(still)) is not None)
+        return tuple(found)
 
     def previous(self, frame_id: str, before: float) -> str | None:
         """The Frame's latest decided photo starting before `before`, else its kept still."""
@@ -492,10 +548,11 @@ class _Walk:
 
     def __init__(self, candidates: Mapping[str, Candidate], lines: Mapping[str, SceneLine],
                  pools: Mapping[str, frozenset[str]], *, window: PlanWindow, uncertainty: float,
-                 limits: WallLimits, settings: FitSettings) -> None:
+                 frame_uncertainty: Mapping[str, float], limits: WallLimits,
+                 settings: FitSettings) -> None:
         self.candidates, self.lines, self.pools = candidates, lines, pools
         self.window, self.limits, self.settings = window, limits, settings
-        self.wall = _Wall(uncertainty)
+        self.wall = _Wall(uncertainty, frame_uncertainty)
         self.placed: dict[str, Placed] = {}
         self.unfilled: dict[str, Unfilled] = {}
         self.measure: dict[str, None] = {}
@@ -515,7 +572,9 @@ class _Walk:
         self._picks: dict[str, int] = {}
 
     def run(self, slots: Sequence[Slot], fixed: Sequence[FixedShowing],
-            kept: Sequence[KeptStill]) -> WallPlan:
+            kept: Sequence[KeptStill], reserved: Sequence[Reservation] = ()) -> WallPlan:
+        for reservation in reserved:
+            self.wall.reserve(reservation)
         for showing in fixed:
             self.wall.add(showing.frame_id, _Showing(showing.start, showing.end, showing.fade_in,
                                                      showing.after_end, showing.asset_id))
@@ -538,6 +597,7 @@ class _Walk:
             prepare=tuple(PrepareNeed(asset_id=asset_id, slot_ids=tuple(slot_ids),
                                       earliest_start=earliest)
                           for asset_id, (slot_ids, earliest) in self.prepare.items()),
+            on_screen=self.wall.on_screen(self.window.preparation_end),
         )
 
     def _measurements(self) -> tuple[str, ...]:

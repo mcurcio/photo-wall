@@ -9,12 +9,16 @@ Rules this module owns (one home each):
 - **The on-screen extent** (`on_screen_extent`): from the layer's start to its end, or, for a
   layer whose after-state keeps it ("keep_this_photo"), until a later layer on the same Frame
   replaces what the Frame keeps (`replaces_kept_at`); open-ended when none does. Both ends widen
-  by the hand-over guard, 2 x the clock uncertainty bound: two Pis' clocks may each be off by it
-  in opposite directions. Every layer counts, covered or see-through.
+  by the hand-over guard, 2 x the clock uncertainty bound it is given: two Pis' clocks may each be
+  off by it in opposite directions. The guard is per Frame (decision 0032): the caller passes the
+  bound of the Frame the showing is on, its Player's reported show-clock bound (central/wall_plan/
+  assignment.py `plan_wall` owns that rule). Every layer counts, covered or see-through.
 - **Overlap** (`Extent.overlaps`): half-open intervals; an open end is +infinity.
 
-Rules it does NOT own: which photo a layer shows, or which Frame (Central's wall plan); the clock
-uncertainty bound's value (central/coordination.py `CoordinationLimits.max_uncertainty`).
+Rules it does NOT own: which photo a layer shows, or which Frame (Central's wall plan); each
+Frame's clock uncertainty bound (central/wall_plan/assignment.py `plan_wall`: the larger of
+central/coordination.py `CoordinationLimits.max_uncertainty` and that Frame's reported bound,
+capped at `MAX_GUARD_UNCERTAINTY`).
 Still open (design "Costs and deferrals"): a layer that fails to draw leaves the old photo up past
 its extent, and a rebooted Pi shows its local fallback.
 """

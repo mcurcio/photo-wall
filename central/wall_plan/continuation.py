@@ -73,14 +73,62 @@ def continuation_lists(segments: Sequence[ContinuationSegment], *,
     [start - lead - guard, until + guard) (open when `until` is None) and no earlier segment on
     another Frame listed it. A segment left with no photo gives no continuation. Deterministic for
     equal inputs. ValueError for two segments on one Output that overlap."""
-    raise NotImplementedError
+    by_output: dict[tuple[str, str], list[ContinuationSegment]] = {}
+    for segment in segments:
+        by_output.setdefault((segment.player_id, segment.output_id), []).append(segment)
+    for on_output in by_output.values():
+        on_output.sort(key=lambda segment: segment.start)
+        for earlier, later in zip(on_output, on_output[1:]):
+            if earlier.until is None or later.start - later.lead < earlier.until:
+                raise ValueError("segments overlap")
+    listed: dict[str, list[FrameExtent]] = {}
+    found: dict[str, list[Continuation]] = {}
+    for segment in sorted(segments, key=lambda s: (s.start, s.frame_id, s.run_id)):
+        span = _span(segment, guard.get(segment.frame_id, 0.0))
+        photos = tuple(
+            photo.assignment_id for photo in segment.candidates
+            if not _elsewhere(segment.frame_id, span, extents.get(photo.asset_id, ()))
+            and not _elsewhere(segment.frame_id, span, listed.get(photo.asset_id, ())))
+        if not photos:
+            continue
+        for photo in segment.candidates:
+            if photo.assignment_id in photos:
+                listed.setdefault(photo.asset_id, []).append(
+                    FrameExtent(frame_id=segment.frame_id, extent=span))
+        found.setdefault(segment.player_id, []).append(Continuation(
+            output_id=segment.output_id, run_id=segment.run_id, photos=photos,
+            start=segment.start, seconds=segment.seconds, lead=segment.lead,
+            fade_in=segment.fade_in, fade_out=segment.fade_out, until=segment.until))
+    return {player: tuple(sorted(continuations, key=lambda c: (c.output_id, c.start)))
+            for player, continuations in sorted(found.items())}
+
+
+def _span(segment: ContinuationSegment, guard: float) -> Extent:
+    """The segment's span, its guard included: [start - lead - guard, until + guard)."""
+    return Extent(start=segment.start - segment.lead - guard,
+                  end=None if segment.until is None else segment.until + guard)
+
+
+def _elsewhere(frame_id: str, span: Extent, extents: Sequence[FrameExtent]) -> bool:
+    return any(other.frame_id != frame_id and other.extent.overlaps(span) for other in extents)
 
 
 def held_reservations(plan: Plan, *, guard: float) -> tuple[Reservation, ...]:
     """What `plan`'s continuations hold: one Reservation per listed photo, on the Frame its Output
     is bound to, from its continuation's `start - lead - guard` to `until + guard` (open when None).
     Pure; the caller decides which of a Player's offers still hold."""
-    raise NotImplementedError
+    frames = {binding.output_id: binding.frame_id for binding in plan.bindings}
+    layers = {layer.assignment_id: layer for layer in plan.layers}
+    held: list[Reservation] = []
+    for continuation in plan.continuations:
+        extent = Extent(start=continuation.start - continuation.lead - guard,
+                        end=None if continuation.until is None else continuation.until + guard)
+        for photo in continuation.photos:
+            variant = layers[photo].variant
+            if variant is not None:
+                held.append(Reservation(frame_id=frames[continuation.output_id],
+                                        asset_id=variant.asset_id, extent=extent))
+    return tuple(held)
 
 
 __all__ = ["ContinuationSegment", "FrameExtent", "ListedPhoto", "continuation_lists",

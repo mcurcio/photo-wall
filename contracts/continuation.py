@@ -8,7 +8,10 @@ Pure, stdlib and contracts only.
 
 from __future__ import annotations
 
-from collections.abc import Collection
+import hashlib
+import json
+import math
+from collections.abc import Collection, Iterator
 
 from contracts.models import Continuation, Layer, Plan
 
@@ -21,7 +24,52 @@ def continuation_assignment_id(continuation: Continuation, slot: int, source: st
     SHA-256 of the canonical JSON [output_id, run_id, start, slot, source]. Deterministic, so every
     pass of the executor, and Central regenerating an observation, name one slot alike; distinct
     across revisions whose continuation starts differ. ValueError for a negative slot."""
-    raise NotImplementedError
+    if slot < 0:
+        raise ValueError("negative slot")
+    canonical = json.dumps([continuation.output_id, continuation.run_id, continuation.start, slot,
+                            source], separators=(",", ":"))
+    return CONTINUATION_PREFIX + hashlib.sha256(canonical.encode()).hexdigest()[:32]
+
+
+def _slot_span(continuation: Continuation, slot: int) -> tuple[float, float] | None:
+    """Slot `slot`'s [start, end): its turn less the lead, to the next turn or `until`; None when
+    it would start at or past `until`."""
+    turn = continuation.start + slot * continuation.seconds
+    begin = turn - continuation.lead
+    until = continuation.until
+    if until is not None and begin >= until:
+        return None
+    end = turn + continuation.seconds
+    return begin, end if until is None else min(end, until)
+
+
+def _slots(continuation: Continuation, start: float, end: float) -> Iterator[tuple[int, float, float]]:
+    """Every slot whose span overlaps [start, end), in order."""
+    first = max(0, math.floor((start - continuation.start) / continuation.seconds) - 1)
+    slot = first
+    while True:
+        span = _slot_span(continuation, slot)
+        if span is None or span[0] >= end:
+            return
+        if span[1] > start:
+            yield slot, span[0], span[1]
+        slot += 1
+
+
+def _slot_layer(continuation: Continuation, slot: int, begin: float, finish: float,
+                source: Layer) -> Layer:
+    length = finish - begin
+    fade_in = continuation.fade_in if continuation.fade_in <= length else 0.0
+    fade_out = min(continuation.fade_out, length - fade_in)
+    return source.model_copy(update={
+        "assignment_id": continuation_assignment_id(continuation, slot, source.assignment_id),
+        "start": begin, "end": finish, "media_origin": begin, "fade_in": fade_in,
+        "fade_out": fade_out, "awaits_grant": False,
+    })
+
+
+def _sources(plan: Plan) -> dict[str, Layer]:
+    return {layer.assignment_id: layer for layer in plan.layers}
 
 
 def continuation_layers(plan: Plan, continuation: Continuation, *, held: Collection[str],
@@ -37,7 +85,16 @@ def continuation_layers(plan: Plan, continuation: Continuation, *, held: Collect
     (always False: a continuation never waits for a grant). A slot whose start is at or past
     `until` is not generated. ValueError when `continuation` is not one of `plan.continuations` or
     `end` <= `start`."""
-    raise NotImplementedError
+    if continuation not in plan.continuations:
+        raise ValueError("continuation not in plan")
+    if end <= start:
+        raise ValueError("empty window")
+    listed = [photo for photo in continuation.photos if photo in held]
+    if not listed:
+        return ()
+    layers = _sources(plan)
+    return tuple(_slot_layer(continuation, slot, begin, finish, layers[listed[slot % len(listed)]])
+                 for slot, begin, finish in _slots(continuation, start, end))
 
 
 def continuation_source(plan: Plan, assignment_id: str, *,
@@ -47,7 +104,19 @@ def continuation_source(plan: Plan, assignment_id: str, *,
     revision's). Only the slots whose layer spans `at`, give or take one, are tried, each against
     every listed photo as its source (the slot's photo depends on what the Player held, which Central
     does not know). Central records a continuation slot's observation against its source photo."""
-    raise NotImplementedError
+    if not assignment_id.startswith(CONTINUATION_PREFIX):
+        return None
+    layers = _sources(plan)
+    for continuation in plan.continuations:
+        nearest = math.floor((at - continuation.start) / continuation.seconds)
+        for slot in range(max(0, nearest - 1), max(0, nearest + 2)):
+            span = _slot_span(continuation, slot)
+            if span is None:
+                break
+            for source in continuation.photos:
+                if continuation_assignment_id(continuation, slot, source) == assignment_id:
+                    return continuation, slot, layers[source]
+    return None
 
 
 __all__ = ["CONTINUATION_PREFIX", "continuation_assignment_id", "continuation_layers",

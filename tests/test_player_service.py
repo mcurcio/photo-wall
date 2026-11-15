@@ -33,7 +33,7 @@ from websockets.http11 import Response as Http11Response
 
 from central.db import ProcessTransactionClock
 from contracts.enrollment import Enrollment, OutputReport, enrollment_message
-from contracts.models import Commit, Plan, PlayerConfiguration, Revocation
+from contracts.models import Commit, Continuation, Plan, PlayerConfiguration, Revocation
 from contracts.player_control import ControlSelection
 from contracts.time import ManualClock
 from player.executor import AcquisitionStopped
@@ -283,7 +283,7 @@ class Server:
         return httpx.Response(200, json={"accepted": True})
 
     def offer(self, *, revision=1, layers=None, commits=(), revocations=(), absent=False,
-              bindings=None, configuration_revision=1):
+              bindings=None, configuration_revision=1, continuations=()):
         bindings = (binding(),) if bindings is None else bindings
         configuration = PlayerConfiguration(player_id=self.player_id, authority_epoch=self.epoch,
             configuration_revision=configuration_revision, bindings=bindings,
@@ -291,7 +291,8 @@ class Server:
         plan = Plan(plan_id="offered", revision=revision, player_id=self.player_id,
             authority_epoch=self.epoch, issued_at=self.clock.utc(), valid_from=self.clock.utc(),
             valid_until=300, bindings=configuration.bindings,
-            layers=(layer(data=self.data),) if layers is None else layers)
+            layers=(layer(data=self.data),) if layers is None else layers,
+            continuations=continuations)
         self.state = delivered(configuration=configuration, plan=None if absent else plan,
             commits=commits, revocations=revocations)
         return self.state
@@ -2156,3 +2157,23 @@ def test_frames_black_with_no_executor_cannot_tell(tmp_path):
             await close(service)
 
     asyncio.run(scenario())
+
+
+def test_a_photo_a_continuation_lists_is_still_fetched_past_its_layer(tmp_path):
+    """Decision 0032: a layer's bytes are wanted while a continuation of the held plan names it,
+    past the layer's own end; a layer no continuation names is not fetched once it ended."""
+    async def check():
+        service, server = await rig(tmp_path)
+        try:
+            listed = layer("listed", data=server.data, end=150)
+            unlisted = layer("unlisted", data=b"other", end=150)
+            server.offer(revision=2, layers=(listed, unlisted), continuations=(Continuation(
+                output_id="hdmi1", run_id="run", photos=("listed",), start=150, seconds=10),))
+            await service.poll_state()
+            service.clock.advance(100)                 # 200: both layers have ended
+            service._feedback()
+            assert [job.layer.assignment_id for job in service._jobs] == ["listed"]
+            assert service._authorized(service._jobs[0])
+        finally:
+            await close(service)
+    asyncio.run(check())
