@@ -113,6 +113,25 @@ def test_hello_without_a_control_row_negotiates_the_current_epoch(registry):
         assert refused.status_code == 409
 
 
+def test_central_clock_on_the_state_never_makes_a_new_delivery(registry):
+    """Every state answer carries Central's clock (the Player's show-clock sample, decision 0032),
+    read outside the delivery digest: two polls of an unchanged state are one delivery although
+    their clocks differ. Mutation probe: add `server_time` inside `finalize` -> a second record."""
+    player, _, _ = enroll(registry)
+    app = create_app(registry.db, registry.clock, ADMIN)
+    headers = {"Authorization": "Bearer " + player["token"]}
+    offer = {"authority_epoch": player["authority_epoch"], "schemas": [2],
+             "capabilities": ["identify_output"]}
+    with TestClient(app) as client:
+        assert client.post("/v1/player/hello", json=offer, headers=headers).status_code == 200
+        first = client.get("/v1/player/state", headers=headers).json()
+        registry.clock.advance(7)
+        second = client.get("/v1/player/state", headers=headers).json()
+    assert first["server_time"] == pytest.approx(second["server_time"] - 7)
+    assert (second["delivery_id"], second["delivery_sequence"]) == (
+        first["delivery_id"], first["delivery_sequence"])
+
+
 def test_a_refused_state_leaves_hello_open_and_new_epoch_can_negotiate(registry):
     player, key, request = enroll(registry)
     app = create_app(registry.db, registry.clock, ADMIN)
@@ -151,7 +170,7 @@ def test_v2_applied_ack_replays_exact_receipt_until_superseded_and_epoch_fenced(
         state = client.get("/v1/player/state", headers=headers).json()
         assert set(state) == {"configuration", "plan", "commits", "revocations",
                               "identify_output", "identify_expires_at", "delivery_id",
-                              "delivery_sequence"}
+                              "delivery_sequence", "server_time"}
         assert state["delivery_sequence"] == 1
         State.model_validate(state)
         report = {"authority_epoch": player["authority_epoch"],
@@ -183,8 +202,10 @@ def test_v2_applied_ack_replays_exact_receipt_until_superseded_and_epoch_fenced(
                 (player["player_id"],),
             ).fetchone()
         assert repeated == first
-        # Unchanged state is the same delivery again, so its receipt stays current.
-        assert client.get("/v1/player/state", headers=headers).json() == state
+        # Unchanged state is the same delivery again, so its receipt stays current; only
+        # Central's clock, read as it answers, moved.
+        again = client.get("/v1/player/state", headers=headers).json()
+        assert again == {**state, "server_time": state["server_time"] + 10}
         assert client.post("/v1/player/control-acks", json=report,
                            headers=headers).json() == accepted
         # A real change is a new delivery, and the old receipt is no longer current.
@@ -352,5 +373,6 @@ def test_every_session_is_sent_the_after_state_and_this_player_reads_it():
     assert [layer["after_end"] for layer in layers] == [
         "keep_this_photo", "keep_nothing", "leave_as_is"]
     assert not any("retain_on_expiry" in layer for layer in layers)
-    sent = {**state, "delivery_id": "1" * 32, "delivery_sequence": 1}  # as finalize adds them
+    sent = {**state, "delivery_id": "1" * 32, "delivery_sequence": 1,  # as finalize adds them
+            "server_time": 0.0}                                         # as timed_state adds it
     assert PlayerService._state(sent).plan == plan

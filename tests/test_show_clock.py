@@ -3,19 +3,21 @@
 Through the real Executor and PlayerService: the 2026-11-08 first boot (a Pi's wall clock 975,402 s
 behind Central's, every plan refused, the Frame black), and what must hold around it: a wall-clock
 step changes nothing, Central's own step re-anchors, jitter never redraws a still, a session gap
-keeps the picture, and only long silence ends the grants.
+keeps the picture, and no silence, however long, ends a grant (decision 0032: the bound is a
+quality, never a gate).
 """
 
 from __future__ import annotations
 
 import asyncio
 import math
+from dataclasses import replace
 
 import pytest
 from test_executor import Rig, layer
 from test_player_service import Server, close, rig
 
-from contracts.models import Commit, LostGrant
+from contracts.models import Commit
 from contracts.time import ManualClock
 from player.show_clock import DRIFT_RATE, ShowClock
 
@@ -40,18 +42,17 @@ def shown(service) -> list[str]:
 def test_before_the_first_sample_it_knows_nothing_and_claims_nothing():
     clock = ManualClock(100)
     show = ShowClock(clock.monotonic)
-    assert not show.anchored and not show.healthy()
+    assert not show.anchored
     assert show.now() == -math.inf and show.timebase() == -math.inf
     assert show.uncertainty == math.inf
     assert show.diagnostics.status == "no_sample"
     assert show.diagnostics.uncertainty is None     # JSON-safe
 
 
-@pytest.mark.parametrize("bad", [{"max_uncertainty": 0}, {"drift_rate": -1}, {"max_uncertainty": math.inf},
-                                 {"drift_rate": math.nan}])
-def test_thresholds_must_be_finite_and_positive(bad):
+@pytest.mark.parametrize("drift_rate", [0, -1, math.inf, math.nan])
+def test_the_drift_rate_must_be_finite_and_positive(drift_rate):
     with pytest.raises(ValueError):
-        ShowClock(lambda: 0.0, **bad)
+        ShowClock(lambda: 0.0, drift_rate=drift_rate)
 
 
 def test_the_first_sample_anchors_at_the_midpoint():
@@ -76,34 +77,64 @@ def test_an_impossible_reading_is_counted_and_changes_nothing(sample):
     assert show.diagnostics.rejected == 1 and show.diagnostics.accepted == 1
 
 
-def test_a_sample_too_slow_to_measure_keeps_the_anchor_and_dispersion_grows():
+def test_a_six_second_answer_anchors_an_unanchored_clock():
+    """Any answer anchors, however slow (the 2026-11-15 freeze: 3-7 s answers were thrown away
+    and every photo refused). Mutation: restore the `rtt / 2 > threshold` rejection -> refused."""
+    clock = ManualClock(100, 6)
+    show = ShowClock(clock.monotonic)
+    assert show.sample(server_time=200, sent_monotonic=0, received_monotonic=6) == "anchored"
+    assert show.anchored and show.uncertainty == pytest.approx(3.0)
+    assert math.isfinite(show.now()) and show.now() == pytest.approx(203)
+    assert show.diagnostics.status == "anchored" and show.diagnostics.uncertainty == pytest.approx(3.0)
+
+
+def test_a_slow_consistent_answer_never_loosens_a_good_anchor():
+    """Anchored at 0.005 s, a 6 s answer whose interval holds the estimate is kept and the bound
+    stays. Mutation: replace `min(u, far)` by `far` -> the bound becomes about 6 s."""
+    clock, show = clock_at()
+    show._anchor = replace(show._anchor, bound=.005)
+    clock.advance(10)
+    timebase = show.timebase()
+    # Central read at 105, so at receipt (110) its time is in [105, 111]; the estimate is 110.
+    assert show.sample(server_time=105, sent_monotonic=4, received_monotonic=10) == "kept"
+    assert show.timebase() == timebase
+    assert show.uncertainty == pytest.approx(.005 + DRIFT_RATE * 10)
+
+
+def test_an_answer_disjoint_from_the_anchor_re_anchors_at_its_midpoint():
+    """Central's clock moved (or the old anchor was wrong): the answer's own interval wins.
+    Mutation: never re-anchor on a disjoint answer -> the timebase stands."""
     clock, show = clock_at()
     clock.advance(10)
-    timebase, earlier = show.timebase(), show.uncertainty
-    assert show.sample(server_time=999, sent_monotonic=10, received_monotonic=10.21) == "too_slow"
-    assert show.timebase() == timebase
-    clock.advance(1)
-    assert show.uncertainty > earlier
-    assert show.diagnostics.rejected == 1
+    # The estimate is 110 +- 0.001; Central says [150, 151] at receipt.
+    assert show.sample(server_time=150, sent_monotonic=9, received_monotonic=10) == "anchored"
+    assert show.now() == pytest.approx(150.5) and show.uncertainty == pytest.approx(.5)
+
+
+def test_an_overlapping_answer_narrows_the_anchor_to_the_intersection():
+    """The estimate's interval [e - u, e + u] meets the answer's interval but the estimate lies
+    outside it: anchor at the intersection's midpoint, bound half its width. Mutation: treat
+    "outside I" as disjoint -> the anchor jumps to I's midpoint with bound rtt / 2."""
+    clock, show = clock_at()
+    show._anchor = replace(show._anchor, bound=1.0)
+    clock.advance(10)
+    # e = 110, u = 1.001: [108.999, 111.001]; I = [110.5, 112.5]; J = [110.5, 111.001].
+    assert show.sample(server_time=110.5, sent_monotonic=8, received_monotonic=10) == "anchored"
+    u = 1.0 + DRIFT_RATE * 10
+    assert show.now() == pytest.approx((110.5 + 110 + u) / 2)
+    assert show.uncertainty == pytest.approx((110 + u - 110.5) / 2)
 
 
 def test_a_kept_sample_reports_its_far_edge_never_less_than_the_true_bound():
     """The estimate is inside the interval but off its midpoint; the true error can be as much as
     the far edge, so the far edge is what is reported. Mutation: report rtt / 2 -> this fails."""
     clock, show = clock_at()
+    show._anchor = replace(show._anchor, bound=1.0)
     clock.advance(10.05)
     # Central read at 110.01, so at receipt its time is in [110.01, 110.06]; the estimate is 110.05.
     assert show.sample(server_time=110.01, sent_monotonic=10, received_monotonic=10.05) == "kept"
     assert show.uncertainty == pytest.approx(.04)
     assert show.timebase() == 100
-
-
-def test_a_sample_that_cannot_be_kept_within_bounds_re_anchors():
-    """A far edge past max_uncertainty is no longer a usable bound, even inside the interval."""
-    clock, show = clock_at()
-    clock.advance(10.2)
-    assert show.sample(server_time=110, sent_monotonic=10, received_monotonic=10.2) == "anchored"
-    assert show.timebase() == pytest.approx(110.1 - 10.2)
 
 
 def test_uncertainty_grows_with_the_samples_age():
@@ -257,13 +288,12 @@ def test_round_trip_jitter_inside_the_interval_never_moves_the_timebase(tmp_path
 
 
 def test_a_sixty_second_gap_keeps_grants_and_the_started_layer_and_accepts_a_later_commit(tmp_path):
-    """Mutation: healthy() requires age <= 30 -> the grant ends and the Commit is refused."""
+    """Mutation: grants end on the sample's age -> the grant ends and the Commit is refused."""
     wall = Rig(tmp_path)
     wall.play(layer(end=300))
     wall.advance(60, refresh=False)
     wall.executor.tick()
     assert [local.layer.assignment_id for local in wall.renderer.outputs["hdmi1"].layers] == ["picture"]
-    assert wall.show_clock.healthy()
     assert wall.executor.readiness().failures == ()
 
     later = layer("later", start=162, end=300, media_origin=162, data=b"later", priority=5)
@@ -276,36 +306,31 @@ def test_a_sixty_second_gap_keeps_grants_and_the_started_layer_and_accepts_a_lat
     assert "later" in [local.layer.assignment_id for local in wall.renderer.outputs["hdmi1"].layers]
 
 
-def test_sixteen_minutes_without_a_sample_ends_grants_and_one_sample_recovers(tmp_path):
-    """About 16 minutes of drift passes MAX_UNCERTAINTY: grants end, Readiness says `clock`, and
-    what already started keeps showing. Mutation: uncertainty ignores age -> still healthy."""
+def test_a_day_without_a_sample_ends_no_grant_and_the_next_photo_starts(tmp_path):
+    """The 2026-11-15 freeze replayed on the executor: a day of drift (8.6 s of bound) used to
+    end every grant and code Readiness `clock`; now the bound is only reported, the granted next
+    photo starts at its instant and no `clock` failure is ever raised. Mutation: restore the
+    clock gate -> "next" never starts."""
     wall = Rig(tmp_path)
-    picture = layer(end=3000)
-    wall.offer(picture, valid_until=3000)
+    day = 86_400
+    picture = layer(end=100 + day + 100)
+    wall.offer(picture, valid_until=100 + day + 100)
     wall.secure()
     wall.executor.prepare_imminent()
     wall.commit("picture")
     wall.executor.tick()
 
-    wall.advance(999, refresh=False)
-    assert wall.show_clock.healthy()
-    upcoming = layer("next", start=1102, end=3000, media_origin=1102, data=b"next", priority=5)
-    wall.offer(picture, upcoming, revision=2, valid_until=3000)
+    wall.advance(day, refresh=False)
+    assert wall.show_clock.uncertainty == pytest.approx(DRIFT_RATE * day)
+    upcoming = layer("next", start=100 + day + 2, end=100 + day + 100, media_origin=100 + day + 2,
+                     data=b"next", priority=5)
+    wall.offer(picture, upcoming, revision=2, valid_until=100 + day + 100)
     wall.secure("next", b"next")
     wall.executor.prepare_imminent()
-    commit = wall.commit("picture", "next")
-
-    wall.advance(2, refresh=False)      # past MAX_UNCERTAINTY / DRIFT_RATE = 1000 s
-    assert not wall.show_clock.healthy()
-    wall.executor.tick()
-    assert {failure.code for failure in wall.executor.readiness().failures} == {"clock"}
-    wall.advance(2, refresh=False)      # "next"'s instant passes with its grant gone
-    wall.executor.tick()
-    assert [local.layer.assignment_id for local in wall.renderer.outputs["hdmi1"].layers] == ["picture"]
-
-    wall.sync_clock()
-    assert wall.show_clock.healthy()
-    wall.executor.prepare_imminent()
+    wall.commit("picture", "next")
     readiness = wall.executor.readiness()
-    assert readiness.failures == ()
-    assert LostGrant(assignment_id="next", readiness_sequence=commit.readiness_sequence) in readiness.lost_grants
+    assert readiness.failures == () and readiness.lost_grants == ()
+    assert readiness.clock_uncertainty == pytest.approx(DRIFT_RATE * day)
+    wall.advance(2, refresh=False)
+    wall.executor.tick()
+    assert "next" in [local.layer.assignment_id for local in wall.renderer.outputs["hdmi1"].layers]

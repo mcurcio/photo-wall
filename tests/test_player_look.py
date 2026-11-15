@@ -192,14 +192,14 @@ def _anchored_executor(tmp_path, clock: ManualClock) -> tuple[Executor, ShowCloc
     return executor, show_clock
 
 
-def test_a_show_clock_gone_stale_keeps_its_timebase(tmp_path):
-    """Too long without a sample is doubt, not a new timeline: the executor keeps handing over
+def test_a_show_clock_long_without_a_sample_keeps_its_timebase(tmp_path):
+    """Long without a sample is a wider bound, not a new timeline: the executor keeps handing over
     the timebase it has, until a sample says Central has moved."""
     clock = ManualClock(100)
     executor, show_clock = _anchored_executor(tmp_path, clock)
     anchored = executor._timebase()
     clock.advance(1_100)
-    assert not show_clock.healthy()
+    assert show_clock.uncertainty > .1
     clock.step_utc(5)       # the Pi's wall clock is not read
     assert executor._timebase() == anchored
 

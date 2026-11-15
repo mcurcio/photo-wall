@@ -218,8 +218,10 @@ _DELIVERIES = itertools.count(1)
 
 
 def delivered(**fields) -> State:
-    """A State as Central sends it: every delivery carries its id and its sequence."""
+    """A State as Central sends it: every delivery carries its id, its sequence and Central's
+    clock (`Server` stamps the clock again as it answers)."""
     sequence = next(_DELIVERIES)
+    fields.setdefault("server_time", 0.0)
     return State(delivery_id=f"{sequence:032x}", delivery_sequence=sequence, **fields)
 
 
@@ -268,7 +270,9 @@ class Server:
                 "server_time": self.clock.utc() + self.time_offset,
             })
         if path == "/v1/player/state":
-            return httpx.Response(200, json=self.state.model_dump(mode="json"))
+            # Central's clock read as it answers, as central/app.py `timed_state` does.
+            return httpx.Response(200, json={**self.state.model_dump(mode="json"),
+                                             "server_time": self.clock.utc() + self.time_offset})
         if path == "/v1/player/hello":
             offer = json.loads(request.content)
             return httpx.Response(200, json={"authority_epoch": offer["authority_epoch"],
@@ -313,7 +317,11 @@ async def rig(tmp_path, *, server=None, negotiate=False, clock=None, probe=True,
     if probe:
         await service.probe_time()
     server.offer()
-    await service.poll_state()
+    if probe:
+        await service.poll_state()
+    else:
+        # Applied without a round trip, so no Central answer has anchored the ShowClock yet.
+        await service.dispatch(lambda: service._apply_state(server.state))
     return service, server
 
 
@@ -1073,20 +1081,20 @@ def test_central_stepping_its_clock_re_anchors_on_the_next_sample(tmp_path):
             server.time_offset = 10
             assert await service.probe_time()
             assert service.show_clock.timebase() == pytest.approx(before + 10)
-            assert service.show_clock.healthy()
+            assert service.show_clock.uncertainty == pytest.approx(0, abs=.001)
         finally:
             await close(service)
     asyncio.run(check())
 
 
 def test_a_slow_clock_answer_keeps_readiness(tmp_path):
-    """One slow /v1/player/time answer (a 0.3 s round trip, so the probe's uncertainty is past
-    100 ms) is refused but withholds nothing: the last trusted sample keeps the prepared
-    assignment ready. Main pipeline run 38586247137 (upstream-faults): one such probe on one Player
-    reported readiness_lost "clock", Central could not commit the next wall-wide group, and every
-    Frame of both Players fell back.
+    """One slow /v1/player/time answer (a 0.3 s round trip) consistent with the anchor is kept and
+    never loosens it, and withholds nothing: the prepared assignment stays ready. Main pipeline run
+    38586247137 (upstream-faults): one such probe on one Player reported readiness_lost "clock",
+    Central could not commit the next wall-wide group, and every Frame of both Players fell back.
 
-    Mutation: a too_slow sample re-anchors, or ends the grant -> the readiness below changes."""
+    Mutation: a slow sample re-anchors at rtt / 2, or ends the grant -> the readiness or the bound
+    below changes."""
     async def check():
         service, server = await rig(tmp_path)
 
@@ -1113,9 +1121,9 @@ def test_a_slow_clock_answer_keeps_readiness(tmp_path):
             server.offer(commits=(commit,))
             await service.poll_state()
             service.link.time_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
-            assert not await service.probe_time()
-            assert service.show_clock.diagnostics.rejected == 1
-            assert service.show_clock.healthy()
+            assert await service.probe_time()
+            assert service.show_clock.diagnostics.rejected == 0
+            assert service.show_clock.uncertainty == pytest.approx(0, abs=.001)
             service.tick_main()
             readiness, observations = service._feedback()
             assert readiness.prepared == ("picture",)
@@ -1142,7 +1150,7 @@ def test_slow_state_parsing_does_not_change_independent_clock_mapping(
                 return parsed
             monkeypatch.setattr(owner, attribute, delayed)
             await service.poll_state()
-            assert service.show_clock.healthy()
+            assert service.show_clock.anchored
             assert service.show_clock.uncertainty == pytest.approx(0, abs=.001)
         finally:
             await close(service)
@@ -1165,11 +1173,12 @@ def test_clock_transport_sample_includes_delayed_body_receipt(tmp_path):
                                   stream=DelayedBody())
         try:
             service.link.time_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
-            assert not await service.probe_time()
+            assert await service.probe_time()
             assert service.show_clock.diagnostics.rtt == pytest.approx(.3)
-            assert service.show_clock.diagnostics.rejected == 1
-            # The late body made the sample too slow to measure; the rig's anchor stands.
-            assert service.show_clock.healthy()
+            assert service.show_clock.diagnostics.rejected == 0
+            # The late body widened the sample's interval, which holds the rig's anchor: kept,
+            # and a slow consistent answer never loosens it.
+            assert service.show_clock.uncertainty == pytest.approx(0, abs=.001)
         finally:
             await close(service)
     asyncio.run(check())
@@ -1431,7 +1440,7 @@ def test_stale_feedback_on_a_late_loop_keeps_the_session(tmp_path, monkeypatch):
 
 def test_a_late_clock_probe_is_main_loop_late_not_a_clock_fault(tmp_path, monkeypatch):
     """The time loop names a missed dispatch deadline main_loop_late; MainLoopLate is a
-    ServiceError, so without its own branch it would read as a clock_probe failure."""
+    ServiceError, so without its own branch it would read as that ServiceError's code."""
     async def check():
         service, _ = await rig(tmp_path)
 
@@ -1443,6 +1452,71 @@ def test_a_late_clock_probe_is_main_loop_late_not_a_clock_fault(tmp_path, monkey
             await asyncio.wait_for(service._time_loop(), 5)
             assert service.last_fault == "main_loop_late"
         finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def _time_route_down(server):
+    """`server`, with Central's time route answering 503 for the whole session."""
+    def handle(request):
+        if request.url.path == "/v1/player/time":
+            return httpx.Response(503, json={"error": "fixture_outage"})
+        return server(request)
+    return handle
+
+
+def test_one_state_poll_anchors_the_show_clock_while_the_time_route_fails(tmp_path):
+    """The 2026-11-15 freeze: Central's time route failed and the Pi had no show time. Now every
+    state answer carries Central's clock: one poll anchors the ShowClock, the plan is held and
+    its due layer reported prepared. Mutation: drop the sample in `poll_state` -> no readiness."""
+    async def check():
+        service, server = await rig(tmp_path, probe=False)
+        down = httpx.AsyncClient(transport=httpx.MockTransport(_time_route_down(server)))
+        service.link.time_client = down
+        try:
+            with pytest.raises(UplinkError):
+                await service.probe_time()
+            assert not service.show_clock.anchored
+            await service.poll_state()
+            assert service.show_clock.anchored
+            assert service.show_clock.uncertainty == pytest.approx(0, abs=.001)
+            service._feedback()
+            assert await service.download(service._jobs[0])
+            service.tick_main()
+            readiness, _ = service._feedback()
+            assert readiness.prepared == ("picture",) and readiness.failures == ()
+        finally:
+            await down.aclose()
+            await close(service)
+    asyncio.run(check())
+
+
+def test_run_applies_the_plan_while_the_time_route_fails_and_never_faults_clock_probe(
+        tmp_path, monkeypatch):
+    """run()'s first step is the state poll alone; time is asked only in the time loop, whose
+    failures are named like any other. Readiness is posted (so the plan was applied on an
+    anchored clock) although /v1/player/time never answers. Mutation: put `probe_time` back
+    before `poll_state` in run() -> every cycle ends at the probe and no readiness is posted."""
+    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+
+    async def check():
+        service, server = await finder_rig(finding("http://central"))
+        steady = asyncio.Event()
+        faults = []
+        recorded = service.fault
+        monkeypatch.setattr(service, "fault",
+                            lambda code, **kwargs: (faults.append(code), recorded(code, **kwargs)))
+        await service.link.client.aclose()
+        service.link.client = service.link.time_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(_time_route_down(_until_steady(server, steady))))
+        task = asyncio.create_task(service.run())
+        try:
+            await asyncio.wait_for(steady.wait(), 10)
+            assert service.show_clock.anchored
+            assert "clock_probe" not in faults
+        finally:
+            service.stop()
+            await asyncio.wait_for(task, 10)
             await close(service)
     asyncio.run(check())
 
@@ -1532,8 +1606,9 @@ def test_every_player_failure_code_has_console_recovery_wording():
     table = source[source.index("const RECOVERY"):source.index("});")]
     known = set(re.findall(r"^  ([a-z_]+):", table, re.MULTILINE))
     codes = _player_failure_codes()
-    assert {"clock", "capacity", "decode", "download", "integrity"} <= codes
-    assert "main_loop_late" not in codes
+    assert {"capacity", "decode", "download", "integrity"} <= codes
+    # Show time is a quality, never a failure (decision 0032).
+    assert "clock" not in codes and "main_loop_late" not in codes
     assert codes - known == set()
 
 

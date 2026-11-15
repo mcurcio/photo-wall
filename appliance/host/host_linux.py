@@ -7,11 +7,17 @@ import socket
 import struct
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from appliance.host.base_status import STATUS, read_supervisor_status
 from appliance.kernel.capacity import cgroup_path, memory_controller_present
-from appliance.kernel.clock import boot_id, boottime_ms  # noqa: F401
+from appliance.kernel.clock import (  # noqa: F401
+    WallClockState,
+    boot_id,
+    boottime_ms,
+    wall_clock_state,
+)
 from contracts.node_host_facts import MAX_BOOT_FAILED_UNITS, valid_fact
 from contracts.node_protocol import token
 
@@ -71,8 +77,10 @@ class LinuxHostSampler:
     is emitted once. `supervision` and `failed_units` alone run systemctl."""
 
     def __init__(self, proc: Path = Path("/proc"), filesystem: Path = Path("/run"),
-                 sys: Path = Path("/sys")):
+                 sys: Path = Path("/sys"),
+                 wall_clock: Callable[[], WallClockState | None] = wall_clock_state):
         self.proc, self.filesystem, self.sys = proc, filesystem, sys
+        self.wall_clock = wall_clock
         self._cpu: tuple[int, int] | None = None  # (idle, total) jiffies at the previous sample
 
     def _soc_temperature(self) -> tuple:
@@ -171,8 +179,9 @@ class LinuxHostSampler:
 
     def facts(self) -> dict:
         """The host facts record's values (console DDD §63, G13): the kernel release, the
-        default-route interface, its operstate and its address. None for each field that
-        cannot be read or is not well formed by the contract's rule."""
+        default-route interface, its operstate and its address, and the kernel's verdict on the
+        wall clock. None for each field that cannot be read or is not well formed by the
+        contract's rule."""
         def read(path: Path) -> str | None:
             try:
                 return path.read_text().strip()
@@ -180,7 +189,7 @@ class LinuxHostSampler:
                 return None
         interface = self.default_route_interface()
         values = {"kernel_release": read(self.proc / "sys/kernel/osrelease"), "interface": interface,
-                  "link_state": None, "address": None}
+                  "link_state": None, "address": None, "wall_clock": self.wall_clock()}
         if valid_fact("interface", interface) and interface is not None:
             values["link_state"] = read(self.sys / "class/net" / interface / "operstate")
             values["address"] = self._address(interface)

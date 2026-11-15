@@ -225,6 +225,9 @@ class State(Model):
     identify_expires_at: Instant | None = None
     delivery_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     delivery_sequence: int = Field(ge=1, le=2**63 - 1)
+    # Central's clock when it answered: a show-clock sample on every poll (decision 0032), read
+    # after Central's delivery digest, so a new reading never makes a new delivery.
+    server_time: Instant
 
     @model_validator(mode="after")
     def coherent_identify(self):
@@ -1099,10 +1102,37 @@ class PlayerService:
         return State.model_validate(body)
 
     async def poll_state(self):
-        body, _ = await self._request_with_receipt("GET", "/v1/player/state")
+        """One poll of Central's state, which is also a show-clock sample: any answer anchors the
+        clock before its plan is applied, so a plan is never held on an unanchored clock however
+        Central's time route fares (decision 0032)."""
+        sent_monotonic = self.clock.monotonic()
+        # On the main client: the time client's one connection stays the time probe's alone, so
+        # a slow state answer never queues a time request behind it.
+        body, received_monotonic = await self._request_with_receipt("GET", "/v1/player/state")
         state = self._state(body)
-        result = await self.dispatch(lambda: self._apply_state(state))
+
+        def apply():
+            self._main()
+            self._sample_show_clock(state.configuration.player_id,
+                                    state.configuration.authority_epoch, state.server_time,
+                                    sent_monotonic, received_monotonic)
+            return self._apply_state(state)
+
+        result = await self.dispatch(apply)
         await self._ack_control(state, result)
+
+    def _sample_show_clock(self, player_id: str, authority_epoch: int, server_time: float,
+                           sent_monotonic: float, received_monotonic: float) -> bool:
+        """GLib thread: one Central answer as a show-clock sample, only when it names this
+        registration (another's leaves the ShowClock untouched). True when it anchored or kept."""
+        registration = self.registration
+        if (registration is None or player_id != registration.player_id
+                or authority_epoch != registration.authority_epoch):
+            return False
+        return self.show_clock.sample(
+            server_time=server_time, sent_monotonic=sent_monotonic,
+            received_monotonic=received_monotonic,
+        ) in ("anchored", "kept")
 
     async def probe_time(self) -> bool:
         if self.registration is None:
@@ -1115,15 +1145,8 @@ class PlayerService:
 
         def apply() -> bool:
             self._main()
-            registration = self.registration
-            if (registration is None or sample.player_id != registration.player_id
-                    or sample.authority_epoch != registration.authority_epoch):
-                return False                # not this registration's: the ShowClock is untouched
-            return self.show_clock.sample(
-                server_time=sample.server_time,
-                sent_monotonic=sent_monotonic,
-                received_monotonic=received_monotonic,
-            ) in ("anchored", "kept")
+            return self._sample_show_clock(sample.player_id, sample.authority_epoch,
+                                           sample.server_time, sent_monotonic, received_monotonic)
 
         return await self.dispatch(apply)
 
@@ -1139,11 +1162,13 @@ class PlayerService:
                     raise               # ends the cycle: run() locates again (0014)
                 if error.cause is Cause.LOCAL and error.reason == "pool":
                     raise               # ends the cycle: the next one builds fresh clients
-                self._uplink_fault("clock_probe", error)
+                self._fault_for(error)
             except MainLoopLate:
                 self._main_loop_late()
-            except (httpx.HTTPError, ServiceError, TimeoutError, ValueError):
-                self.fault("clock_probe")
+            except Exception as error:
+                # A failed time request is named like any other; it never gates a plan or a
+                # photo, since every state poll also samples the show clock.
+                self._fault_for(error)
             await asyncio.sleep(max(0, 1 - (asyncio.get_running_loop().time() - started)))
 
     async def _poll_after_stale(self) -> None:
@@ -1297,13 +1322,14 @@ class PlayerService:
                     if proof_task is None:
                         proof_task = asyncio.create_task(self._app_link_loop())
                     await self.hello_protocol()
-                    # Reconnection reconciles authority before any download work. A late GLib
-                    # loop does not end the session here: its loops raise main_loop_late.
-                    for step in (self.probe_time, self.poll_state):
-                        try:
-                            await step()
-                        except MainLoopLate:
-                            self._main_loop_late()
+                    # Reconnection reconciles authority before any download work; the poll
+                    # also anchors the show clock, so a failing time route never holds the plan
+                    # back (time is asked only in _time_loop). A late GLib loop does not end the
+                    # session here: its loops raise main_loop_late.
+                    try:
+                        await self.poll_state()
+                    except MainLoopLate:
+                        self._main_loop_late()
                     session_started = self._loop.time()
                     tasks = [asyncio.create_task(self._control_loop()),
                              asyncio.create_task(self._time_loop()),

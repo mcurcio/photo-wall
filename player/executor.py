@@ -545,14 +545,6 @@ class Executor:
                 and now < min(a.layer.end, self._plan.valid_until)
                 and max(a.layer.start, self._plan.valid_from) <= now + self.prepare_lead]
 
-    def _clock_gate(self) -> bool:
-        healthy = self.show_clock.healthy()
-        if not healthy:
-            for assignment in self._assignments.values():
-                self._end_grant(assignment)
-                assignment.readiness_generation += 1
-        return healthy
-
     @staticmethod
     def _end_grant(assignment: _Assignment) -> None:
         """The Commit is lost: neither this revision's nor a carried one starts the content."""
@@ -686,7 +678,6 @@ class Executor:
                 for assignment in imminent:
                     if not assignment.started:
                         self._lose_preparation(assignment)
-            self._clock_gate()
 
     def showing(self, binding: OutputBinding) -> bool:
         """Whether `binding`'s Frame has a picture on screen: the composition its Output last
@@ -706,7 +697,7 @@ class Executor:
                 return ()
             now, plan = self._now(), self._plan
             has_plan = plan is not None and plan.valid_until > now
-            clock_ok = self.show_clock.healthy()
+            clock_ok = self.show_clock.anchored
             found = []
             for binding in self._config.bindings:
                 if binding.output_id not in self._config.enabled_outputs:
@@ -777,17 +768,14 @@ class Executor:
             if not self.show_clock.anchored:
                 return None
             now = self._now()
-            clock_ok = self._clock_gate()
             imminent = self._imminent(now)
             failures = {f.assignment_id: f for f in self.failures}
-            for assignment in imminent:
-                key = assignment.layer.assignment_id
-                if not clock_ok:
-                    failures[key] = Failure(assignment_id=key, code="clock")
-                elif not self._capacity_ok:
+            if not self._capacity_ok:
+                for assignment in imminent:
+                    key = assignment.layer.assignment_id
                     failures[key] = Failure(assignment_id=key, code="capacity")
             self._sequence += 1
-            # Wire values remain finite; an unhealthy ShowClock is also explicitly coded.
+            # Wire values remain finite. The bound is a quality Central reads, never a failure.
             uncertainty = self.show_clock.uncertainty
             if not math.isfinite(uncertainty):
                 uncertainty = 86400.0
@@ -832,8 +820,8 @@ class Executor:
                     for key in commit.assignment_ids):
                 return False
             now = self._now()
-            if not self._clock_gate() or not self._capacity_ok:
-                raise AuthorityError("commit clock or capacity gate failed")
+            if not self._capacity_ok:
+                raise AuthorityError("commit capacity gate failed")
             assignments = []
             reported = self._reported.get(commit.readiness_sequence, {})
             for key in commit.assignment_ids:
@@ -848,7 +836,7 @@ class Executor:
                     raise AuthorityError("commit references revoked or unknown readiness")
                 intended_start = max(assignment.layer.start, self._plan.valid_from)
                 if (assignment.execution_layer is None
-                        and now > intended_start + self.show_clock.max_uncertainty
+                        and now > intended_start + self.show_clock.uncertainty
                         and commit.committed_at < intended_start):
                     raise AuthorityError("missed start requires fresh late-join authorization")
                 assignments.append(assignment)
@@ -1028,7 +1016,6 @@ class Executor:
             # renderer draws, through `timebase` (player/look.py).
             timebase = self._timebase()
             now = timebase + self.clock.monotonic()
-            self._clock_gate()
             if not self._config:
                 return ()
             for output_id, binding in tuple(self._retired_outputs.items()):
@@ -1039,7 +1026,7 @@ class Executor:
                 if (not assignment.secured or not (assignment.prepared or assignment.deferred)
                         or assignment.failure or not self._current_authority(assignment)):
                     continue
-                if self.show_clock.healthy() and self._grant_covers(assignment, now):
+                if self._grant_covers(assignment, now):
                     assignment.execution_layer = assignment.granted_layer
                     assignment.execution_until = assignment.granted_until
                 if self._executing(assignment, now):

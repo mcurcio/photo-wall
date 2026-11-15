@@ -19,7 +19,7 @@ from central.fleet.node_sessions import HOST_FACTS_DAILY_CAP, NodeControlConfig,
 from contracts.node_host_facts import BootReportV2, BootStageV2, HostFactsV2, encode_host_facts
 
 VALUES = {"kernel_release": "6.6.51+rpt-rpi-v8", "interface": "eth0", "link_state": "up",
-          "address": "192.168.1.40", "base_tag": BASE_TAG}
+          "address": "192.168.1.40", "base_tag": BASE_TAG, "wall_clock": "synchronised"}
 
 
 def _facts(producer, sequence, **fields):

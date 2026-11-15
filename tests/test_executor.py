@@ -28,7 +28,7 @@ from contracts.time import ManualClock
 from player.cache import Cache
 from player.executor import AuthorityError, Executor
 from player.rendering import PresentationResult, RecordingRenderer
-from player.show_clock import MAX_UNCERTAINTY, ShowClock
+from player.show_clock import ShowClock
 
 
 def media(data: bytes = b"picture", video: bool = False) -> Variant:
@@ -288,10 +288,9 @@ def layer(key: str = "picture", *, output: str = "hdmi1", frame: str = "frame1",
 
 class Rig:
     def __init__(self, directory: Path, *, capacity=4, cache_bytes=4096,
-                 bindings: tuple[OutputBinding, ...] | None = None, epoch=1,
-                 max_uncertainty: float = MAX_UNCERTAINTY):
+                 bindings: tuple[OutputBinding, ...] | None = None, epoch=1):
         self.clock = ManualClock(100)     # its wall reading stands for Central's time
-        self.show_clock = ShowClock(self.clock.monotonic, max_uncertainty=max_uncertainty)
+        self.show_clock = ShowClock(self.clock.monotonic)
         self.sync_clock()
         self.cache = Cache(directory / "cache", cache_bytes)
         self.renderer = RecordingRenderer(capacity)
@@ -553,38 +552,42 @@ def test_no_successful_still_means_black_beyond_horizon(tmp_path):
     assert rig.renderer.outputs["hdmi1"].layers == ()
 
 
-def test_a_stale_clock_refuses_an_unexecuted_commit_and_keeps_what_is_visible(tmp_path):
-    rig = Rig(tmp_path, max_uncertainty=.001)    # stale after 10 s without a sample
-    rig.play(layer(after_end="keep_this_photo"))
-    future = layer("future", start=103, data=b"future")
-    rig.offer(layer(after_end="keep_this_photo"), future, revision=2)
-    rig.secure("future", b"future")
+def loosen(rig: Rig, bound: float) -> None:
+    """Central answered once, slowly: the ShowClock holds Central's time to within `bound`."""
+    rig.show_clock._anchor = replace(rig.show_clock._anchor, bound=bound)
+
+
+def test_a_loose_clock_starts_a_granted_layer_and_never_reports_clock(tmp_path):
+    """Show time is a quality, never a gate (decision 0032): a ShowClock anchored to within 50 s
+    still starts and presents a granted layer, reports no `clock` failure (its bound reported)
+    and accepts a Commit. Mutation: re-add `uncertainty > 0.1` to the start condition in `tick`
+    -> nothing is drawn."""
+    rig = Rig(tmp_path)
+    rig.offer(layer())
+    rig.secure()
     rig.executor.prepare_imminent()
-    rig.commit("future")
-    rig.advance(10.5, refresh=False)
+    loosen(rig, 50.0)
     readiness = rig.executor.readiness()
-    assert {f.code for f in readiness.failures} == {"clock"}
+    assert readiness.failures == () and readiness.prepared == ("picture",)
+    assert readiness.clock_uncertainty == pytest.approx(50.0)
+    rig.commit("picture")
+    observations = rig.executor.tick()
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi1"].layers] == ["picture"]
+    assert [o.status for o in observations] == ["presented"]
+    rig.advance(30, refresh=False)
     rig.executor.tick()
-    assert rig.renderer.outputs["hdmi1"].layers[0].layer.assignment_id == "picture"
-    with pytest.raises(AuthorityError):
-        rig.commit("future")
-    rig.sync_clock()
-    rig.executor.prepare_imminent()
-    rig.commit("future")
-    rig.advance(10.5, refresh=False)
-    with pytest.raises(AuthorityError):
-        rig.commit("future")
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi1"].layers] == ["picture"]
 
 
-def test_a_commit_arriving_after_the_clock_went_stale_is_refused(tmp_path):
-    """Mutation probe: drop the gate in `accept_commit` -> a grant taken while uncertain stands."""
-    rig = Rig(tmp_path, max_uncertainty=.001)    # stale after 10 s without a sample
+def test_a_commit_is_refused_on_capacity_alone(tmp_path):
+    """Mutation probe: drop the gate in `accept_commit` -> a grant taken without capacity stands."""
+    rig = Rig(tmp_path)
     rig.offer(layer())
     rig.secure()
     rig.executor.prepare_imminent()
     readiness = rig.executor.readiness()
-    rig.advance(10.5, refresh=False)
-    with pytest.raises(AuthorityError, match="clock or capacity"):
+    rig.executor._capacity_ok = False
+    with pytest.raises(AuthorityError, match="^commit capacity gate failed$"):
         rig.executor.accept_commit(Commit(plan_id=rig.plan.plan_id, revision=1, authority_epoch=1,
                                           readiness_sequence=readiness.sequence, assignment_ids=("picture",),
                                           committed_at=rig.clock.utc()))
@@ -883,11 +886,10 @@ def test_a_rolling_revision_before_start_keeps_the_granted_start(tmp_path):
     assert rig.renderer.outputs["hdmi1"].layers[-1].layer.priority == -10
 
 
-@pytest.mark.parametrize("ended_by", ["revocation", "stale_clock"])
-def test_a_carried_grant_ends_as_a_commit_does(tmp_path, ended_by):
-    """The carried grant is the Commit itself, not a new authority: Central's revocation or a
-    clock gone stale ends it exactly as it ends a Commit of the current revision."""
-    rig = Rig(tmp_path, max_uncertainty=.0001)    # stale after 1 s without a sample
+def test_a_carried_grant_ends_as_a_commit_does(tmp_path):
+    """The carried grant is the Commit itself, not a new authority: Central's revocation ends it
+    exactly as it ends a Commit of the current revision."""
+    rig = Rig(tmp_path)
     upcoming = layer("next", start=103, media_origin=103, data=b"next")
     rig.offer(upcoming)
     rig.secure("next", b"next")
@@ -895,12 +897,7 @@ def test_a_carried_grant_ends_as_a_commit_does(tmp_path, ended_by):
     rig.commit("next")
     rig.advance(1)
     rig.offer(upcoming, revision=2)
-    if ended_by == "revocation":
-        rig.executor.invalidate(["next"])
-    else:
-        rig.advance(1.5, refresh=False)
-        rig.executor.readiness()
-        rig.sync_clock()
+    rig.executor.invalidate(["next"])
     rig.advance(2.1)
     rig.executor.prepare_imminent()
     rig.executor.tick()
@@ -1173,10 +1170,13 @@ def test_frames_black_a_failed_download_and_a_failed_decode(tmp_path):
     assert black(rig)["hdmi1"] is FrameBlackCause.CANNOT_DRAW
 
 
-def test_frames_black_an_unhealthy_clock(tmp_path):
+def test_frames_black_is_no_time_only_before_any_answer_never_for_a_loose_anchor(tmp_path):
+    """Mutation: pass `uncertainty <= 0.1` as `clock_ok` -> a loose anchor reads as NO_TIME."""
     rig = Rig(tmp_path)
     rig.offer(layer())
-    rig.show_clock._anchor = replace(rig.show_clock._anchor, bound=MAX_UNCERTAINTY * 2)
+    loosen(rig, 50.0)
+    assert black(rig)["hdmi1"] is FrameBlackCause.NO_PHOTO
+    rig.show_clock._anchor = None
     assert black(rig)["hdmi1"] is FrameBlackCause.NO_TIME
 
 
