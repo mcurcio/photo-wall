@@ -1493,8 +1493,13 @@ def central_player_faults(run):
     recovery_started = time.monotonic()
     phases["central_restart"] = dict(resumed_at=resumed_at, recovery_budget_seconds=recovery_seconds)
     save()
+    # Rejoined: each Output draws a layer of Central's new plan, not a continuation slot it kept
+    # cycling through the outage (decision 0032), so Central holds its locks again.
+    from contracts.continuation import CONTINUATION_PREFIX
     snapshot, reports = await_state(lambda snapshot, reports: all(all(event["utc"] > resumed_at and
-        event["layers"] and not event["fallback"] for event in current_outputs(report))
+        event["layers"] and not event["fallback"] and not any(
+            layer["assignment_id"].startswith(CONTINUATION_PREFIX) for layer in event["layers"])
+        for event in current_outputs(report))
         for report in reports.values()), "central_recovery_timeout", recovery_seconds)
     require({item["run_id"] for item in before["locks"]} == {item["run_id"] for item in snapshot["locks"]},
             "restart_run_changed")
