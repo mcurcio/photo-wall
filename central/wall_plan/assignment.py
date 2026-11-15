@@ -77,6 +77,10 @@ from contracts.models import (
 from contracts.on_screen import Extent, on_screen_extent, replaces_kept_at
 from contracts.photo_crop import CENTRED
 
+MAX_GUARD_UNCERTAINTY = 30.0
+"""Seconds: the most a Player's reported show-clock bound widens its Frame's hand-over guard
+(decision 0032). A Player past it (never anchored, or freewheeling for days) is guarded at it."""
+
 
 class PlanWindow(Model):
     """`now` <= `preparation_end` <= `plan_end`. A slot starting before `preparation_end` is
@@ -133,6 +137,18 @@ class FixedShowing(Model):
     after_end: AfterEnd
 
 
+class Reservation(Model):
+    """A photo held on one Frame over `extent` (decision 0032, slice B): a continuation's listed
+    photo a Player may be playing (central/wall_plan/continuation.py `held_reservations`), or a
+    photo a Player reports it carries (contracts/models.py `CarriedPhoto`). Fixed for the walk like
+    a fixed showing's extent: rule 1 keeps the photo off every other Frame over `extent`; it never
+    fills, blocks or replaces anything on its own Frame."""
+
+    frame_id: Identifier
+    asset_id: Identifier
+    extent: Extent
+
+
 class Placed(Model):
     slot_id: Identifier
     asset_id: Identifier
@@ -172,14 +188,21 @@ def plan_wall(slots: Sequence[Slot], fixed: Sequence[FixedShowing], kept: Sequen
               candidates: Mapping[str, Candidate], lines: Mapping[str, SceneLine],
               pools: Mapping[str, frozenset[str]], *, window: PlanWindow,
               max_clock_uncertainty: float, limits: WallLimits = WallLimits(),
-              settings: FitSettings) -> WallPlan:
+              settings: FitSettings, reserved: Sequence[Reservation] = (),
+              frame_uncertainty: Mapping[str, float] | None = None) -> WallPlan:
     """The wall assignment over `window` (module docstring). `candidates` are hydrated (variant,
     preparation failure, analysis); `lines` are keyed by scene id and mutated through `pick`;
     `pools` maps each slot's pool key to the asset ids its contribution's Sources hold;
     `settings` are the photo fit settings every slot is judged with.
+    `reserved` (decision 0032): extents recorded before step 1, on their own Frame, never moved.
+    `frame_uncertainty` (decision 0032): each Frame's Player's reported show-clock bound by frame
+    id; a showing's hand-over guard on Frame F is 2 x max(`max_clock_uncertainty`, its value),
+    capped at `MAX_GUARD_UNCERTAINTY`; a Frame absent from it takes `max_clock_uncertainty`.
     Deterministic for equal inputs. Never changes a fixed showing. ValueError on a Scene-line
     slot whose scene has no line (a hand-placed slot needs none), or more than
     `limits.max_slots` slots."""
+    if reserved or frame_uncertainty:
+        raise NotImplementedError("decision 0032 slice B: reservations and per-Frame guards")
     if len(slots) > limits.max_slots:
         raise ValueError(f"{len(slots)} slots exceed the wall plan's {limits.max_slots}")
     for slot in slots:

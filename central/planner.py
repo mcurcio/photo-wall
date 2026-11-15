@@ -32,6 +32,7 @@ from central.runtime import Intent, Runtime, RuntimeBudgetExceeded
 from central.wall_plan.assignment import (
     FixedShowing,
     PlanWindow,
+    Reservation,
     Slot,
     UnfilledReason,
     WallLimits,
@@ -61,6 +62,7 @@ from central.wall_plan.order import (
 from central.wall_plan.selection import crop_limit_of
 from contracts.models import (
     AfterEnd,
+    Continuation,
     Identifier,
     Instant,
     Layer,
@@ -193,6 +195,9 @@ class PlayerProposal(Model):
     layers: tuple[Layer, ...]
     # Media Intents inside the preparation horizon that ended the pass with no layer.
     unfilled: tuple[UnfilledSpan, ...] = ()
+    # Decision 0032 (slice B): each Run's continuation on each of this Player's Outputs past its
+    # layers (central/wall_plan/continuation.py `continuation_lists`).
+    continuations: tuple[Continuation, ...] = ()
 
 
 class Projection(Model):
@@ -808,8 +813,15 @@ def project(
     limits: PlannerLimits = PlannerLimits(),
     settings: FitSettings,
     frame_outputs: Mapping[str, FrameOutput],
+    reserved: Sequence[Reservation] = (),
+    frame_uncertainty: Mapping[str, float] | None = None,
 ) -> Projection:
     """Build complete-cycle proposals without changing any supplied state.
+
+    Decision 0032 (slice B): `reserved` and `frame_uncertainty` pass to the wall plan
+    (central/wall_plan/assignment.py `plan_wall`); each layer's `awaits_grant` is its Intent's
+    `cycle_index == 0`, and only such layers are cue members; each Player's proposal carries its
+    continuations (`PlayerProposal.continuations`).
 
     Roadmap 5a (slice W1): the wall plan covers `plan_seconds` (never less than
     `horizon_seconds`) from `now`, every Frame together; layers are proposed only for slots
@@ -831,6 +843,8 @@ def project(
     caller input (`_validate_inputs`, a non-finite time) raises, and a Runtime that cannot settle
     even `now` within its budget (`RuntimeBudgetExceeded`: an empty plan would withdraw every
     offered layer)."""
+    if reserved or frame_uncertainty:
+        raise NotImplementedError("decision 0032 slice B: reservations and per-Frame guards")
     now = _finite(now, "now")
     horizon_seconds = _finite(horizon_seconds, "horizon_seconds")
     if horizon_seconds <= 0:

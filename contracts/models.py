@@ -269,6 +269,19 @@ class Layer(Model):
     # Roadmap 5a: the window this media layer draws (contracts/photo_crop.py); required on a media
     # layer, absent on a black one (run ledger .claude/runs/photo-5a.md).
     crop: PhotoCrop | None = None
+    # Grants only for a change (decision 0032, slice B): True when this layer opens its Run on the
+    # wall (its Intent's `cycle_index` is 0, central/planner.py), so it starts only under Central's
+    # start grant (a Commit); False: it starts at its instant once secured and prepared, with no
+    # grant. Authored by Central's Planner alone; the Player reads it and never re-derives it.
+    # Serialised only when True, so a plan without a change reads as before.
+    awaits_grant: bool = False
+
+    @model_serializer(mode="wrap")
+    def serialize_awaits_grant(self, handler):
+        value = handler(self)
+        if not self.awaits_grant:
+            value.pop("awaits_grant", None)
+        return value
 
     @model_validator(mode="after")
     def interval(self) -> Self:
@@ -338,6 +351,39 @@ class UnfilledSpan(Model):
         return self
 
 
+class Continuation(Model):
+    """Central's "repeat until E" for one Run on one Output (0017 C2; decision 0032, slice B): what
+    the Frame plays past the layers its plan holds for it, until `until`, with no word from Central.
+
+    Slot k (k = 0, 1, ...) is the Run's turn at `start + k * seconds`: a layer from
+    `start + k * seconds - lead` to `start + (k + 1) * seconds`, fading in over `fade_in` and out
+    over `fade_out` (the Run's steady-state Transition, central/runtime.py `_transition_at`), cut at
+    `until`. Slot k shows the k-th of the listed photos the Player holds, cycling, so a photo the
+    Player does not hold is skipped by the rule Central authored here, never by the Player's choice
+    (0017 C1). The one generator is contracts/continuation.py `continuation_layers`; Central's wall
+    plan and the Player both read slots through it.
+
+    `photos` name media layers of this plan with this `output_id` and `run_id`, in list order; each
+    layer's variant, crop, opacity, stacking and after-state are the slot's. Invariants (refused by
+    `Plan.authority`, ValueError): every named layer exists with this Output and Run; no layer is
+    named twice across the plan's continuations; every plan layer and unfilled span on `output_id`
+    ends at or before `start` (a continuation never covers what the plan covers); `lead` <=
+    `seconds`; `fade_in + fade_out <= seconds + lead`; `until`, when set, follows `start`; two
+    continuations on one Output never overlap over [start - lead, until)."""
+
+    output_id: Identifier
+    run_id: Identifier
+    photos: tuple[Identifier, ...] = Field(min_length=1)
+    start: Instant
+    seconds: Positive
+    lead: float = Field(default=0, ge=0, allow_inf_nan=False)
+    fade_in: float = Field(default=0, ge=0, allow_inf_nan=False)
+    fade_out: float = Field(default=0, ge=0, allow_inf_nan=False)
+    # The next change Central knows on this Frame when it authors the plan (this Run's end, or
+    # another Run taking the Frame); None: none known within the plan horizon.
+    until: Instant | None = None
+
+
 class Plan(Model):
     protocol: Literal[1] = 1
     plan_id: Identifier
@@ -351,12 +397,17 @@ class Plan(Model):
     layers: tuple[Layer, ...]
     # Serialised only when non-empty (the Observation precedent): a plan with none reads as before.
     unfilled: tuple[UnfilledSpan, ...] = ()
+    # Decision 0032 (slice B): each Run's continuation on each Output past this plan's layers
+    # (`Continuation`). Serialised only when non-empty.
+    continuations: tuple[Continuation, ...] = ()
 
     @model_serializer(mode="wrap")
     def serialize_unfilled(self, handler):
         value = handler(self)
         if not self.unfilled:
             value.pop("unfilled", None)
+        if not self.continuations:
+            value.pop("continuations", None)
         return value
 
     @model_validator(mode="after")
@@ -396,6 +447,16 @@ class LostGrant(Model):
     readiness_sequence: int = Field(ge=1)
 
 
+class CarriedPhoto(Model):
+    """A photo the Player draws or keeps on `output_id` that the plan its report names does not
+    place there (decision 0032, slice B): a superseded revision's photo still on screen at a rejoin,
+    or a kept still from a layer or continuation slot no longer in the plan. Level state in every
+    Readiness; Central keeps the photo off every other Frame while reported."""
+
+    output_id: Identifier
+    asset_id: Identifier
+
+
 class Readiness(Model):
     plan_id: Identifier
     revision: int = Field(ge=1)
@@ -410,6 +471,15 @@ class Readiness(Model):
     # Level state, repeated in every report while true; required (no default): a Player that
     # cannot say what it lost is refused rather than left without recovery.
     lost_grants: tuple[LostGrant, ...]
+    # Decision 0032 (slice B): level state, serialised only when non-empty (`CarriedPhoto`).
+    carried: tuple[CarriedPhoto, ...] = ()
+
+    @model_serializer(mode="wrap")
+    def serialize_carried(self, handler):
+        value = handler(self)
+        if not self.carried:
+            value.pop("carried", None)
+        return value
 
     @model_validator(mode="after")
     def coherent_readiness(self) -> Self:
