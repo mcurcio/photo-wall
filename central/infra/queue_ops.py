@@ -96,7 +96,9 @@ class QueueAdmin:
 
 # The oldest finished jobs by id (the primary key's index), each judged by its newest event as
 # procrastinate's own `delete_old_jobs` judges it; `procrastinate_events` goes by its ON DELETE
-# CASCADE. A job with no event is never judged old, as in procrastinate's query.
+# CASCADE. A job with no event is never judged old, as in procrastinate's query. No index orders
+# jobs by their newest event, so when nothing is due the walk reads every finished job of the
+# kept window once an hour (central/infra/batched_retention.py's one exception to "bounded").
 _DELETE_FINISHED = (
     "DELETE FROM procrastinate_jobs WHERE id IN ("
     "SELECT j.id FROM procrastinate_jobs j "

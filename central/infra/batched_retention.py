@@ -11,7 +11,11 @@ rules are this module's contract, so no retention can repeat that.
 What a retention statement must be (each caller's statement is held to it by a DB-tier test):
 
 - **Bounded.** It deletes at most `%(batch_rows)s` rows, found from the oldest end of an index,
-  never by reading the whole table.
+  never by reading the whole table. The walk passes the rows its rule keeps that lie at that
+  end (each caller states how many and why they are bounded). One exception, an hourly
+  statement: finished queue jobs are judged by their newest event, which no index orders, so
+  when nothing is due `FinishedJobs` walks the kept week of finished jobs (and every job with
+  no event) once an hour, one event-index probe each, as procrastinate's own purge does.
 - **Idempotent.** Running it again deletes other rows or none; a cancelled run loses nothing.
 - **A whole batch, where it runs every tick.** A statement the scheduler runs each second
   deletes exactly `%(batch_rows)s` rows or none: a delete of one row costs a commit (an fsync),

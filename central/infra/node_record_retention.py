@@ -20,9 +20,21 @@ stamped (`NodeSessions.clock`): a clock is compared only with itself.
 | Result key (the rule's table) | Deleted: rows received before the cut | Never deleted | Index |
 |---|---|---|---|
 | `node_reconciliation_work` | finished work, and with each row its `node_evidence` row | unfinished work; work whose evidence an Output loss names (`node_output_losses`' foreign key); the evidence of an event (the reboot audit reads events at any age) | `received_at` (migration 113) |
-| `node_display_exchanges` | exchanges, and with each its `node_display_handoffs` and `node_display_withdrawals` rows | nothing younger than the cut: `node_display.py` reads the newest 128 per Output and a decision at most `decision_ms` old, `node_acceptance.py` the latest per Output and its handoff | `received_at` (migration 113) |
-| `node_host_observations` | samples | nothing younger than the cut | `received_at` (migration 113) |
-| `node_manager_observations` | samples | nothing younger than the cut | `received_at` (migration 113) |
+| `node_display_exchanges` | exchanges, and with each its `node_display_handoffs` and `node_display_withdrawals` rows | of a producer of its device's current boot, the newest `RECENT_EXCHANGES` (128) per Output by its boot clock, at any age: `node_display.py` reads the newest per Output (`DISPLAY_OUTPUTS_SQL`) and a withdrawal looks through the newest 128, `node_acceptance.py` the latest per Output and its handoff | `received_at` (migration 113) |
+| `node_host_observations` | samples | of a producer of its device's current or most recently superseded boot, the newest sample, at any age: `node_observations.py` reads the newest per producer (G12 shows both boots' "last heard") | `received_at` (migration 113) |
+| `node_manager_observations` | samples | of a producer of its device's current or most recently superseded boot, the newest `PREPARATION_KEYS` (8), at any age: `node_observations.py` reads the newest per producer and coalesces among the newest 8 | `received_at` (migration 113) |
+
+So a Pi dark for over a week (powered off, its current boot silent) still shows its last sample
+and its Outputs; a boot that is neither its device's current nor its previous one keeps nothing
+past the week. Migration 113 kept the same at the deploy.
+
+What the walk pays: every kept row past the cut (the guards above) stays at the head of
+`received_at`'s index, and each pass walks past it before reaching a deletable row. That head is
+bounded by the fleet, not by time: one or 8 samples per producer of two boots per device, 128
+exchanges per current Output, plus unfinished work (the reconciler finishes it) and the work an
+Output loss names. A partial index on finished work would skip the work table's share, but
+completing work changes `completed_at`, so every completion would become a full (non-HOT)
+update; decision 0033 keeps HOT completions (as it does for the reconciler's scan).
 
 Not here: `node_app_links` holds one row per device generation and needs no trim
 (`central/fleet/node_app_links.py`); `node_link_records` is E5's (docs/runbook.md).
@@ -32,12 +44,40 @@ from __future__ import annotations
 
 from typing import Final
 
+from central.fleet.node_display import RECENT_EXCHANGES
+from central.fleet.node_observations import PREPARATION_KEYS
 from central.infra.batched_retention import Begin, drain
 from contracts.time import Clock
 
 KEPT_SECONDS: Final = 7 * 86400
 BATCH_ROWS: Final = 500
 BATCHES: Final = 4
+# `node_observations.py` `_NEWEST_HOST_SQL`: a producer's newest host sample is all it reads.
+HOST_SAMPLES_KEPT: Final = 1
+
+
+def _of_kept_boot(alias: str, *, previous: bool) -> str:
+    """Whether `alias`'s producer belongs to its device's current boot (with `previous`, or to
+    its device generation's most recently superseded one, as `_FLEET_HOSTS_SQL` picks it)."""
+    boots = "b.superseded_at IS NULL"
+    if previous:
+        boots += (" OR b.admission_id = (SELECT s.admission_id FROM node_boot_admissions s "
+                  "WHERE s.device_id = b.device_id AND s.device_generation = b.device_generation "
+                  "AND s.superseded_at IS NOT NULL "
+                  "ORDER BY s.superseded_at DESC, s.admission_id DESC LIMIT 1)")
+    return (f"EXISTS (SELECT 1 FROM node_producers p JOIN node_boot_admissions b "
+            f"USING (admission_id) WHERE p.producer_id = {alias}.producer_id AND ({boots}))")
+
+
+def _past_newest(alias: str, table: str, order: str, kept: int, *, key: str = "producer_id",
+                 previous: bool) -> str:
+    """Whether `alias`'s row may go by age: its producer is of no kept boot, or `kept` newer
+    rows of its `key` (by `order`, on the key's index) stand before it. With fewer than `kept`
+    rows the comparison is NULL and the row stays."""
+    same = " AND ".join(f"n.{column} = {alias}.{column}" for column in key.split(","))
+    return (f"(NOT {_of_kept_boot(alias, previous=previous)} OR {alias}.{order} < ("
+            f"SELECT n.{order} FROM {table} n WHERE {same} "  # noqa: S608
+            f"ORDER BY n.{order} DESC OFFSET {kept - 1} LIMIT 1))")
 
 
 def _whole_batch(due: str) -> str:
@@ -65,8 +105,10 @@ _RULES: Final[tuple[tuple[str, str], ...]] = (
      "DELETE FROM node_reconciliation_work w USING batch b WHERE w.work_id = b.work_id"),
     ("node_display_exchanges",
      _whole_batch(
-         "SELECT producer_id, request_id, decision_id, received_at FROM node_display_exchanges "
-         "WHERE received_at < %(cut)s")
+         "SELECT e.producer_id, e.request_id, e.decision_id, e.received_at "
+         "FROM node_display_exchanges e WHERE e.received_at < %(cut)s AND "
+         + _past_newest("e", "node_display_exchanges", "sampled_boottime_ms", RECENT_EXCHANGES,
+                        key="producer_id,output_id", previous=False))
      + ", handoffs AS (DELETE FROM node_display_handoffs h USING batch b "
      "WHERE h.decision_id = b.decision_id), "
      "withdrawals AS (DELETE FROM node_display_withdrawals d USING batch b "
@@ -75,14 +117,16 @@ _RULES: Final[tuple[tuple[str, str], ...]] = (
      "WHERE e.producer_id = b.producer_id AND e.request_id = b.request_id"),
     ("node_host_observations",
      _whole_batch(
-         "SELECT producer_id, sequence, received_at FROM node_host_observations "
-         "WHERE received_at < %(cut)s")
+         "SELECT o.producer_id, o.sequence, o.received_at FROM node_host_observations o "
+         "WHERE o.received_at < %(cut)s AND "
+         + _past_newest("o", "node_host_observations", "sequence", HOST_SAMPLES_KEPT, previous=True))
      + " DELETE FROM node_host_observations o USING batch b "
      "WHERE o.producer_id = b.producer_id AND o.sequence = b.sequence"),
     ("node_manager_observations",
      _whole_batch(
-         "SELECT producer_id, sequence, received_at FROM node_manager_observations "
-         "WHERE received_at < %(cut)s")
+         "SELECT o.producer_id, o.sequence, o.received_at FROM node_manager_observations o "
+         "WHERE o.received_at < %(cut)s AND "
+         + _past_newest("o", "node_manager_observations", "sequence", PREPARATION_KEYS, previous=True))
      + " DELETE FROM node_manager_observations o USING batch b "
      "WHERE o.producer_id = b.producer_id AND o.sequence = b.sequence"),
 )

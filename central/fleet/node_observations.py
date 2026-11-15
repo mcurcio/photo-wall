@@ -40,10 +40,11 @@ _NEWEST_HOST_SQL = ("SELECT payload,received_at FROM node_host_observations WHER
 # A producer's newest App Manager samples, by sequence through the primary key. Coalescing
 # looks for the same (state, operation, fault) among them; a window holds at most one stored
 # sample per such key, so these rows cover this many distinct keys (more only costs storage,
-# bounded by the cap).
-_PREPARATION_KEYS = 8
+# bounded by the cap). Node records' retention keeps at least these at any age
+# (central/infra/node_record_retention.py).
+PREPARATION_KEYS = 8
 _RECENT_PREPARATION_SQL = ("SELECT payload,received_at FROM node_manager_observations "
-                           f"WHERE producer_id=%s ORDER BY sequence DESC LIMIT {_PREPARATION_KEYS}")
+                           f"WHERE producer_id=%s ORDER BY sequence DESC LIMIT {PREPARATION_KEYS}")
 
 
 def _preparation_key(sample) -> tuple:

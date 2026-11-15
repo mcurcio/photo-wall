@@ -52,6 +52,11 @@ class StubDatabase:
             raise self.reachable
         return self.reachable
 
+    def transaction(self):
+        """`create_app` hands `Database.transaction` to the scheduler's node retention (decision
+        0033) when it builds the app; nothing here opens one."""
+        raise AssertionError("the content routes open no transaction on the app's database")
+
 
 class World:
     def __init__(self, registry, tmp_path) -> None:

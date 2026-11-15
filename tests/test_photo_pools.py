@@ -598,3 +598,60 @@ def test_unseen_rows_and_the_finish_read_25_pages_against_21000_rows_within_a_se
     finish_took = time.perf_counter() - started
     assert len(_rows(store, key)) == 20_500
     assert unseen_took < 1.0 and finish_took < 1.0, (unseen_took, finish_took)
+
+
+def test_a_waiting_photo_read_in_full_later_gets_its_originals_facts_once(pools):
+    """A photo first stored while Waiting has no original's facts; read in full later with the
+    same kind and taken time, its row is rewritten with them, and a pass with the same facts
+    again writes nothing. Mutation probe: leave the original's facts out of the comparison ->
+    the row never gets them."""
+    store, _, ref = pools
+    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None))
+    photo = str(UUID(int=1))
+    _pass(store, key, Waiting(upstream_id=photo, kind="image", taken_at=100.0))
+    waiting = _versions(store)["library_assets"][photo]
+    full = InPool(asset=asset(ref, 1, 100.0).model_copy(update={"original": _ORIGINAL}),
+                  updated_at="2026-10-01T00:00:00.000Z")
+    _pass(store, key, full)
+    read = _versions(store)
+    assert read["library_assets"][photo] != waiting
+    with store.db.transaction() as conn:
+        assert library_assets_in(conn, [full.asset.asset_id])[full.asset.asset_id].original == (
+            _ORIGINAL)
+    _pass(store, key, full)
+    assert _versions(store) == read
+
+
+def _with(entries, index, entry):
+    return tuple(entry if n == index else e for n, e in enumerate(entries))
+
+
+@pytest.mark.parametrize(("fact", "table", "number", "changed"), [
+    ("a left-out photo's reason", "photo_pool_rows", 4,
+     lambda e: e.model_copy(update={"reason": "over_item_limits"})),
+    ("a photo's kind", "library_assets", 3, lambda e: e.model_copy(update={"kind": "video"})),
+    ("a revision's width", "asset_revisions", 2,
+     lambda e: e.model_copy(update={"asset": e.asset.model_copy(update={"width": 3840})})),
+    ("a revision's height", "asset_revisions", 2,
+     lambda e: e.model_copy(update={"asset": e.asset.model_copy(update={"height": 2160})})),
+    ("a revision's duration", "asset_revisions", 2,
+     lambda e: e.model_copy(update={"asset": e.asset.model_copy(update={"duration": 7.5})})),
+])
+def test_each_compared_fact_rewrites_only_its_own_row(pools, fact, table, number, changed):
+    """Each fact a pass compares, changed alone, rewrites its one row and nothing else.
+    Mutation probe: drop that fact from its comparison (`_POOL_ROW_FACTS`, `_asset_differs`,
+    `_REVISION_FACTS`) -> its row keeps the old value."""
+    store, _, ref = pools
+    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None))
+    library = _library(ref)
+    _pass(store, key, *library)
+    before = _versions(store)
+    index = number - 1
+    _pass(store, key, *_with(library, index, changed(library[index])))
+    after = _versions(store)
+    row = (asset(ref, 2, 90.0, "video").asset_id if table == "asset_revisions"
+           else str(UUID(int=number)))
+    assert after[table][row] != before[table][row], fact
+    assert {t: {k: v for k, v in rows.items() if (t, k) != (table, row)}
+            for t, rows in after.items()} == {
+        t: {k: v for k, v in rows.items() if (t, k) != (table, row)} for t, rows in before.items()}

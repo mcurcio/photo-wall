@@ -112,3 +112,44 @@ def test_a_late_older_link_never_replaces_the_newer_one(registry):
     assert late == {"stored": False, "duplicate": False, "current": False, "admitted_at": None,
                     "physical_identity": "unverified"}
     assert _row(registry, device) == (current, intake)
+
+
+def test_a_link_of_the_next_boot_replaces_the_current_one_whatever_its_counters(registry):
+    """After a reboot the app's epoch and its boot-time sample start again, lower than the
+    current link's: a link of another kernel boot is new, so it replaces the row (`changed_at`
+    moves, one intake counted). Within one boot a link equal but for an earlier sample is a
+    late retry: older, not a restatement, so it writes nothing. Mutation probes: drop the same
+    boot test from `link_standing`'s `older` arm (the next boot is refused as older); drop the
+    sample's `>=` from its `restates` arm (the earlier sample restates)."""
+    from test_fleet_attempts import SERIAL
+    from test_node_boot import boot_service, claim_for
+
+    from contracts.node_boot import NodeBootRequestV2
+    from contracts.node_protocol import NodeProcessIdentity
+
+    _, _, key, sessions, claims, _, _, _, proof = rig(registry)
+    broker = claims["app_effect_broker"]
+    links = NodeAppLinks(sessions)
+    device = proof.challenge.producer.device_id
+    current, intake = _row(registry, device)
+    earlier = links.admit(broker.session_id, broker.credential,
+                          _signed(key, proof, nonce=uuid4().hex * 2, sampled_boottime_ms=400))
+    assert earlier == {"stored": False, "duplicate": False, "current": False,
+                       "admitted_at": None, "physical_identity": "unverified"}
+    assert _row(registry, device) == (current, intake)
+
+    registry.clock.advance(60)
+    offer = boot_service(sessions).offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))
+    claim = claim_for(offer, owner="app_effect_broker")
+    grant = sessions.enroll(claim)
+    assert grant.producer.kernel_boot_id != proof.challenge.producer.kernel_boot_id
+    rebooted = _signed(key, proof, producer=grant.producer, command_session_id=grant.session_id,
+                       process=NodeProcessIdentity(77, 1, uuid4()), app_epoch=1,
+                       sampled_boottime_ms=10, nonce=uuid4().hex * 2)
+    assert links.admit(grant.session_id, claim.credential, rebooted) == {
+        "stored": True, "duplicate": False, "current": True,
+        "admitted_at": registry.clock.utc(), "physical_identity": "unverified"}
+    after, counted = _row(registry, device)
+    assert after["xmin"] != current["xmin"] and counted == intake + 1
+    assert (after["created_at"], after["changed_at"]) == (current["created_at"],
+                                                          registry.clock.utc())

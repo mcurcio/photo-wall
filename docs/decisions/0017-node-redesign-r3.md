@@ -82,7 +82,7 @@ The design recommends these, and the owner has not answered them, so they are re
 - **Three NATS mechanisms are unprobed until E3a:** the WebSocket leaf, same-domain isolation, and the wall-wide mirror across accounts and the leaf. Each has a fallback, and each fallback stops for the owner.
 - **Every leaf byte crosses Central's HTTP process** (C3). A Central restart drops every leaf for about a second, and leaf bytes are not compressed. Their volume is Central's own budgeted pulls and WALL deliveries.
 - **Every Central deploy restarts the hub** (C20). It starts empty; leaves relink in about a second, Node mirrors catch up within about 60 s, and a Node whose leaf dialled before its account existed gets its first WALL about 40 s later (E-E3D-S2-3). The join (E3e) and the Player (E8) budget for it.
-- **Central's records grow without bound** until E5 sets their retention (C20). Nothing is recorded until Nodes run the bus.
+- **Central's bus records (`node_link_*`) grow without bound** until E5 sets their retention (C20); a Node's own reported records are kept a week since [0033](0033-central-write-load.md). Nothing is recorded until Nodes run the bus.
 - **Central keeps one adapter per schema major still in the field** (C12).
 - **As-run survives Central's absence only so long.** About 10–19 hours of as-run survive Central's absence; longer gaps are counted holes, and a bus start (a reboot included) while Central is away loses the unread tail, count unknown (F7).
 - **"A Node never invents intent" weakens for desired buckets,** from held by construction to held by library plus test (F4).

@@ -214,8 +214,8 @@ def deliver_app_link(store, session: NodeSession, probes: BrokerFeed, *, current
 
     200 clears the slot. A refusal Central repeats for this link (a permanent 4xx, or a link
     proved under a session other than the current one, which Central refuses as a scope
-    mismatch, central/fleet/node_app_links.py:47-49) turns it into an owed relink for that
-    run. Anything else (transport error, 408, 429, 5xx, 401/403) keeps it for the next
+    mismatch: `node_link_scope_mismatch` in central/fleet/node_app_links.py
+    `NodeAppLinks.admit`) turns it into an owed relink for that run. Anything else (transport error, 408, 429, 5xx, 401/403) keeps it for the next
     turn: the slot is never dropped on a transient failure. An owed relink is never
     POSTed. A slot (link or owed relink) whose run is no longer current is cleared.
     """

@@ -27,13 +27,13 @@ Measured on 2026-11-15 (read-only, on the replica): about 26 commits a second, m
 | Table | Kept | Readers |
 |---|---|---|
 | `node_app_links` | each device generation's current link | the link loaders, the reconciler, a retry of the current nonce |
-| `node_display_exchanges`, handoffs, withdrawals | 7 days; a handoff or withdrawal goes with its exchange | `node_display.py` (retry: the newest 128 per Output), `node_acceptance.py` |
+| `node_display_exchanges`, handoffs, withdrawals | 7 days; at any age, each current boot's newest 128 per Output; a handoff or withdrawal goes with its exchange | `node_display.py` (the newest per Output; a withdrawal looks through the newest 128), `node_acceptance.py` |
 | `node_reconciliation_work`, `node_evidence` | 7 days; at any age: unfinished work, the evidence an Output loss names, every event | the reconciler, the losses' foreign key, the reboot audit |
-| `node_host_observations`, `node_manager_observations` | 7 days | `node_observations.py`: the newest per producer, the newest 8 |
+| `node_host_observations`, `node_manager_observations` | 7 days; at any age, for each producer of a device's current or previous boot, its newest host sample and its newest 8 App Manager samples | `node_observations.py`: the newest per producer, the newest 8 |
 | `procrastinate_jobs`, `procrastinate_events` | finished jobs 7 days, every queue | none |
 | `execution_events` | between 10,000 and 15,000 newest | the Planner's and console's reads |
 
-**Migration 113 truncates in place**: it locks the nine tables it empties (lock timeout 9 s, outlasting a 7 s COMMIT, under the 10 s statement timeout), copies aside what Central reads now (the table above, at any age), truncates, and inserts the copies back. Every index, constraint, foreign key and the `work_id` sequence stays; it drops the six immutability triggers, `node_app_links.superseded_at` and its nonce key, and adds four `received_at` indexes and the link's audit fields.
+**Migration 113 truncates in place**: it locks the nine tables it empties (lock timeout 9 s, outlasting a 7 s COMMIT, under the 10 s statement timeout), raises its own statement timeout to 300 s for the copies (they read whole tables, never timed on the deployment's disk; past 300 s the start rolls back whole and the runbook's deploy steps say how to recover), copies aside what Central reads now (the table above, at any age), truncates, and inserts the copies back. Every index, constraint, foreign key and the `work_id` sequence stays; it drops the six immutability triggers, `node_app_links.superseded_at` and its nonce key, and adds four `received_at` indexes and the link's audit fields.
 
 ## Row writes an hour (estimate, from the 2026-11-15 measurements)
 
@@ -51,7 +51,9 @@ Commits an hour in scope go from about 9,350 to 5,760 (execution events' retenti
 ## What this gives up
 
 - **Node records from before the deploy go at once**, all but what Central reads now. Truncating frees the disk; batch deletes of 3.5 million rows would not.
-- The database stops refusing UPDATE and DELETE on six node tables. A device page shows no last sample for a boot that ended over a week ago.
+- The database stops refusing UPDATE and DELETE on six node tables. A boot that is neither its device's current nor its previous one keeps nothing older than a week: its sessions on the device page show no last sample. A Pi silent for over a week keeps its last sample, its previous boot's, and its Outputs.
+- Kept rows past the week (each kept boot's newest records, unfinished work, work an Output loss names) stay at the head of the `received_at` index and every trim walks past them. Their number is bounded by the fleet, not by time; a partial index on finished work would skip them but make every completion non-HOT.
+- A Re-check that finds a photo still in Immich writes one `seen` page for it alone, not one per step. Such photos are rare (a photo left out of the paging but still matching), and the pages go when the check ends.
 - While old pods run after the migration, their link admissions and check steps fail; the Pi and the queue retry. A resent link whose control receipt has since been replaced is refused as not current (409), where it was answered as a duplicate.
 - An existing library row's `changed_at` is the last pass that saw it; existing pool rows carry the migration's time; a current link's `created_at` is its admission.
 - The reconciler still scans the work table every tick: an index on unfinished work would make every completion a full (non-HOT) update.

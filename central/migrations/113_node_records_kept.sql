@@ -19,6 +19,14 @@ LOCK TABLE node_reconciliation_work, node_evidence, node_output_losses, node_dis
     node_display_handoffs, node_display_withdrawals, node_host_observations,
     node_manager_observations, node_app_links IN ACCESS EXCLUSIVE MODE;
 SET LOCAL lock_timeout = '5s';
+-- The copies read whole tables (unfinished work has no index: one would make every completion a
+-- non-HOT update) under central/db.py's 10 s statement timeout, which applies to each statement
+-- here. On 2026-11-15 the tables held 3.5 million rows, 4.5 GB, behind 3-7 s fsyncs over iSCSI,
+-- and no copy was timed there. A copy past 10 s would roll everything back and the next start
+-- would repeat it: Central down in a loop. 300 s holds a cold read of all 4.5 GB at 15 MB/s; a
+-- copy past even that still rolls back whole, and the runbook's 0033 deploy steps say how to
+-- recover. Reset to central/db.py's value at the end, for the migrations after this one.
+SET LOCAL statement_timeout = '300s';
 
 -- 2. What Central reads now, copied aside.
 -- Unfinished work (the reconciler's scan) and every Output loss, with the evidence each names,
@@ -125,3 +133,5 @@ INSERT INTO node_app_links (nonce, producer_id, device_id, device_generation, pl
         authority_epoch, payload, admitted_at, created_at, created_by, changed_at, changed_by)
     SELECT nonce, producer_id, device_id, device_generation, player_id, authority_epoch, payload,
         admitted_at, admitted_at, 'node', admitted_at, 'node' FROM m113_links;
+
+SET LOCAL statement_timeout = '10s';
