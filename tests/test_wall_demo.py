@@ -465,19 +465,25 @@ def test_mutation_proof_freezes_still_live_locks_but_allows_expired_ones_to_disa
     assert preserved_locks(before, dict(utc=100, locks=[])) == 0
 
 
-def test_outage_checks_current_fallback_even_when_no_new_transition_occurs():
-    report = dict(utc=105, outputs=2, events=[
-        dict(output_id=name, utc=90, layers=[], fallback=True) for name in ("one", "two")])
+def test_outage_checks_every_frame_still_draws_and_has_moved_on_to_its_continuation():
+    """Decision 0032: past every held plan's validity with Central stopped, each Output still draws
+    and has drawn a continuation slot since; a dark Output, or one still on its plan's last layer,
+    fails."""
+    def drawn(name, at, key):
+        return dict(output_id=name, utc=at, fallback=False, layers=[dict(assignment_id=key)])
+
+    report = dict(utc=125, outputs=2, events=[
+        drawn("one", 90, "assignment-1"), drawn("two", 90, "assignment-2"),
+        drawn("one", 110, "cont-" + "a" * 32), drawn("two", 112, "cont-" + "b" * 32)])
     outage_checks({"player": report}, 100)
     with pytest.raises(DemoError, match="outage_report_stale"):
         outage_checks({"player": dict(report, utc=99)}, 100)
-    report["events"].append(dict(output_id="two", utc=99, layers=[{}], fallback=False))
-    with pytest.raises(DemoError, match="outage_fallback_missing"):
-        outage_checks({"player": report}, 100)
-    report["events"][-1]["utc"] = 102
-    report["events"].append(dict(output_id="two", utc=103, layers=[], fallback=True))
-    with pytest.raises(DemoError, match="outage_lease_overrun"):
-        outage_checks({"player": report}, 100)
+    with pytest.raises(DemoError, match="outage_not_continued"):
+        outage_checks({"player": dict(report, events=report["events"][:3])}, 100)
+    dark = dict(report, events=[*report["events"],
+                                dict(output_id="two", utc=120, layers=[], fallback=True)])
+    with pytest.raises(DemoError, match="outage_frame_dark"):
+        outage_checks({"player": dark}, 100)
 
 
 def test_real_http_client_transport_failure_is_coded_for_bounded_recovery(monkeypatch):

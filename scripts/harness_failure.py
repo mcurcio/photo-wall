@@ -51,7 +51,7 @@ _CODES = (
     "operator_http_404", "operator_http_409", "operator_http_422", "operator_http_429",
     "operator_http_500", "operator_http_502", "operator_http_503", "operator_http_504",
     "operator_transport", "original_geometry_mismatch", "original_integrity_mismatch",
-    "outage_fallback_missing", "outage_lease_overrun", "outage_report_stale", "output_not_drawn",
+    "outage_frame_dark", "outage_not_continued", "outage_report_stale", "output_not_drawn",
     "output_state_missing", "pagination_not_exercised", "permission_not_reported",
     "permission_recovery_timeout", "player_boundary", "player_environment_leak",
     "player_image_mismatch", "player_network_leak", "player_rejoin_timeout",

@@ -1125,12 +1125,18 @@ def current_outputs(report):
 
 
 def outage_checks(reports, expiry):
+    """Decision 0032: Central stopped past every held plan's validity, each Frame keeps playing
+    Central's plan: every Output still draws a photo, and each has moved on to its continuation's
+    slots (contracts/continuation.py) since the plan's validity ended."""
+    from contracts.continuation import CONTINUATION_PREFIX
     for report in reports.values():
         require(report["utc"] > expiry, "outage_report_stale")
-        require(all(not event["layers"] and event["fallback"] for event in current_outputs(report)),
-                "outage_fallback_missing")
-        require(not any(event["utc"] > expiry + .5 and event["layers"] for event in report["events"]),
-                "outage_lease_overrun")
+        require(all(event["layers"] and not event["fallback"] for event in current_outputs(report)),
+                "outage_frame_dark")
+        continued = {event["output_id"] for event in report["events"] if event["utc"] > expiry
+                     and any(layer["assignment_id"].startswith(CONTINUATION_PREFIX)
+                             for layer in event["layers"])}
+        require(len(continued) == report["outputs"], "outage_not_continued")
 
 
 def rejoined_player_ready(old, report, rejoined_at):
@@ -1458,19 +1464,21 @@ def upstream_faults(run):
 
 
 def central_player_faults(run):
-    """Central outage past every held lease, Central restart and a Player restart."""
+    """Central outage past every held plan's validity, Central restart and a Player restart."""
     host, phases, save = run.host, run.phases, run.save
     await_state, record = run.await_state, run.record
 
-    # Central is unavailable past every held lease, so the Player must reach fallback.
+    # Central is unavailable past every held plan's validity: each Frame keeps playing Central's
+    # plan through its continuation (decision 0032), over two turns so every Output moves on.
     before, reports = await_state(lambda snapshot, reports: all(all(event["layers"] and not event["fallback"]
         for event in current_outputs(report)) for report in reports.values()), "active_before_outage_timeout", 60)
     expiry = max(offer["plan"]["valid_until"] for offer in before["offers"])
     stopped_at = time.time()
     host.compose("stop", "central", capture=False)
     try:
-        while time.time() <= expiry + 2:
-            time.sleep(min(2, max(.1, expiry + 2 - time.time())))
+        until = expiry + 2 * SCENE_CYCLE_SECONDS + 2
+        while time.time() <= until:
+            time.sleep(min(2, max(.1, until - time.time())))
         reports = {name: host.player_report(name) for name in host.players}
         phases["central_outage"] = dict(stopped_at=stopped_at, held_expiry=expiry, before=before, players=reports)
         save()
