@@ -5,6 +5,7 @@ physical device identity nor qualifies app health, output pixels, or a release.
 """
 from __future__ import annotations
 
+from typing import Literal
 from uuid import UUID
 
 from cryptography.exceptions import InvalidSignature
@@ -14,8 +15,36 @@ from central.fleet.acceptance_evidence import current_control_receipt_matches
 from central.fleet.acceptance_query import load_current_app_control_in
 from central.fleet.node_sessions import NodeControlError, NodeSessions, claim_intake_in
 from central.transaction_locks import acquire_runtime_locks
-from contracts.node_app_link import encode_node_app_link, node_app_link_message, parse_node_app_link
+from contracts.node_app_link import (
+    NodeAppLinkChallengeV2,
+    encode_node_app_link,
+    node_app_link_message,
+    parse_node_app_link,
+)
 from contracts.player_control import ControlAppliedReceipt
+
+LinkStanding = Literal["new", "restates", "older"]
+
+
+def link_standing(current: NodeAppLinkChallengeV2 | None,
+                  new: NodeAppLinkChallengeV2) -> LinkStanding:
+    """How a proved link stands against its device generation's current one: the one judge,
+    pure (decision 0033). Central keeps the current link only, one row per device generation.
+
+    - `"restates"`: every field equals `current`'s except `nonce` and `sampled_boottime_ms`,
+      and the sample is not earlier. The same process says again that it is linked (588 of
+      the last 658 relinks measured on 2026-11-15); an exact retry, nonce included, restates
+      too.
+    - `"older"`: the same kernel boot (`producer.kernel_boot_id`) and a lower
+      `(app_epoch, sampled_boottime_ms)` than `current`'s. A late retry of a link the app has
+      since replaced; it must never replace the newer one. Both values are the Node's own
+      counters within one boot, so a clock is compared only with itself.
+    - `"new"`: anything else, `current is None` and another kernel boot included.
+
+    Never reads a clock of Central's, the database, or the nonce to tell a restating link from
+    a new one.
+    """
+    raise NotImplementedError("decision 0033, slice 2")
 
 
 class NodeAppLinks:
@@ -37,6 +66,26 @@ class NodeAppLinks:
             raise NodeControlError("node_link_signature_invalid", 403) from exc
 
     def admit(self, session_id: UUID, credential: str, raw: bytes) -> dict:
+        """Admit a proved link. Frozen for decision 0033, slice 2 (today's body still keeps
+        every link):
+
+        After the session and scope checks, the stored link sent again (the current row's
+        payload, byte for byte) is answered as `"restates"` below without a new proof check, as
+        a retry is today: its receipt may have been superseded since it was proved. Any other
+        link passes the proof check, then stands by `link_standing` against the current row:
+        - `"new"`: the row of `(device_id, device_generation)` is replaced (inserted for a
+          first link), its `changed_at` and `changed_by = 'node'` stamped, `created_*` kept;
+          one intake count. Answer `stored: True, duplicate: False, current: True`.
+        - `"restates"`: nothing is written, not a row version and not an intake count. Answer
+          `stored: True, duplicate: True, current: True` with the current `admitted_at`.
+        - `"older"`: nothing is written. Answer `stored: False, duplicate: False,
+          current: False, admitted_at: None`.
+        All three answer 200, so the Pi's outbox slot clears (appliance/node/app_link.py).
+
+        Errors, unchanged: `node_link_scope_mismatch` (403), `node_link_control_not_current`
+        (409), `node_link_signature_invalid` (403); the current nonce with another payload is
+        `node_link_identity_conflict`.
+        """
         proof = parse_node_app_link(raw)
         canonical = encode_node_app_link(proof)
         challenge = proof.challenge

@@ -27,6 +27,7 @@ from typing import Any, Final
 import procrastinate
 from procrastinate.jobs import Status
 
+from central.infra.batched_retention import Begin
 from central.infra.job_queue import async_connector, build_app, decode, defer_async, task_name
 from central.infra.outcomes import JobOutcomes
 from central.kernel.handling import TransientFailure
@@ -103,6 +104,40 @@ class QueueAdmin:
             await app.job_manager.delete_old_jobs(
                 nb_hours=hours, queue=queue, include_failed=True, include_cancelled=True,
                 include_aborted=True)
+
+
+class FinishedJobs:
+    """Every queue's finished jobs, deleted in bounded batches (decision 0033): replaces
+    `QueueAdmin.delete_finished`, whose call into procrastinate (`delete_old_jobs`) is one
+    unbounded DELETE per queue and covered the upkeep queues only. The media queue was never
+    purged: 392,000 of the 410,000 job rows on 2026-11-15.
+
+    `begin` opens one transaction per batch (`central.db.Database.transaction`); the loop is
+    `central.infra.batched_retention.drain`. `ValueError` when `batch_rows` or `batches` is
+    under 1.
+    """
+
+    def __init__(self, begin: Begin, *, batch_rows: int = 1000, batches: int = 20) -> None:
+        raise NotImplementedError("decision 0033, slice 2")
+
+    def delete(self, *, older_than: timedelta) -> int:
+        """Delete up to `batches` batches of at most `batch_rows` jobs, oldest first, whose
+        status is succeeded, failed, cancelled or aborted and whose newest event is older than
+        `older_than` on the database's clock (the age procrastinate's own purge judges by);
+        each job's events go with it. Every queue, every task name. Returns the jobs deleted.
+        Blocks: call it from a worker thread.
+
+        One call is one hourly `PurgeFinishedJobs` run, so a short last batch is deleted too.
+        The defaults drain a backlog at 20,000 jobs an hour.
+
+        Never deletes a `todo` or `doing` job, a job younger than `older_than`, or more than
+        `batch_rows` jobs in one statement (each job's delete also removes about three events
+        and runs procrastinate's own per-row bookkeeping, under a 10 s statement timeout).
+
+        Errors: a failed batch raises the driver's error with the earlier batches committed;
+        the handler's run fails and the next hourly run goes on.
+        """
+        raise NotImplementedError("decision 0033, slice 2")
 
 
 class RescueStalledJobsHandler:
