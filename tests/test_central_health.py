@@ -20,6 +20,9 @@ class FakeDatabase:
     def migrate(self):
         pass
 
+    def transaction(self):  # handed to the (faked) retentions, never opened
+        raise AssertionError("the fake database opens no transaction")
+
     def healthy(self):
         if isinstance(self.available, Exception):
             raise self.available
@@ -86,6 +89,7 @@ def app_with(fake_db, fake_coordinator, clock, monkeypatch, *, enabled):
     # A fake database cannot serve the node reconciler's tick: it reconciles nothing here.
     monkeypatch.setattr(central_app, "NodeRuntimeReconciler", lambda *_args, **_kwargs: NoReconciliation())
     monkeypatch.setattr(central_app, "ExecutionEventRetention", lambda *_args, **_kwargs: NoRetention())
+    monkeypatch.setattr(central_app, "NodeRecordRetention", lambda *_args, **_kwargs: NoRetention())
     return central_app.create_app(fake_db, clock, ADMIN, run_scheduler=enabled)
 
 
@@ -186,7 +190,7 @@ def test_measurement_request_failure_is_its_own_facet_and_clears(monkeypatch):
         assert steps["measurement"]["status"] == "failing"
         assert {name: step["status"] for name, step in steps.items() if name != "measurement"} == {
             "planning": "ok", "reconcile": "ok", "runtime": "ok", "settle": "ok",
-            "retention": "ok"}
+            "retention": "ok", "node-retention": "ok"}
         coordinator.media.fail = False
         assert wait_for(client, lambda response: response.json()["status"] == "ok").status_code == 200
 
@@ -259,7 +263,7 @@ def test_a_failing_step_never_skips_a_later_one():
     coordinator = FakeCoordinator()
     measured = []
     scheduler = Scheduler(Raising(), coordinator, measured.append, ManualClock(1000),
-                          retention=lambda: 0)
+                          retentions={"retention": lambda: 0})
     scheduler.tick()
     health = scheduler.health()
     assert coordinator.calls == 1 and measured == [()]
@@ -281,7 +285,7 @@ def test_a_coordinator_that_raises_fails_its_three_steps_and_skips_measurement()
 
     clock = ManualClock(1000)
     scheduler = Scheduler(NoReconciliation(), FakeCoordinator(), lambda _requests: 0, clock,
-                          retention=lambda: 0)
+                          retentions={"retention": lambda: 0})
     scheduler.tick()
     scheduler.coordinator = Broken()
     clock.advance(5)
@@ -303,7 +307,7 @@ def test_a_step_failing_tick_after_tick_keeps_its_first_since():
     coordinator.fail_planning = True
     clock = ManualClock(1000)
     scheduler = Scheduler(NoReconciliation(), coordinator, lambda _requests: 0, clock,
-                          retention=lambda: 0)
+                          retentions={"retention": lambda: 0})
     scheduler.tick()
     clock.advance(30)
     scheduler.tick()

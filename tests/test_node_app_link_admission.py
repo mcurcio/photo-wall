@@ -10,6 +10,7 @@ from test_registry import ADMIN
 from central.app import create_app
 from central.fleet.node_app_links import NodeAppLinks
 from contracts.node_app_link import NodeAppLinkV2, encode_node_app_link, node_app_link_message
+from contracts.player_control import ControlAck
 
 
 def test_a_state_poll_between_acknowledgement_and_link_keeps_the_receipt_current(registry):
@@ -38,3 +39,76 @@ def test_a_state_poll_between_acknowledgement_and_link_keeps_the_receipt_current
     admitted = NodeAppLinks(sessions).admit(broker.session_id, broker.credential,
                                             encode_node_app_link(link))
     assert admitted["stored"] is True and admitted["duplicate"] is False
+
+
+def _signed(key, proof, **changes):
+    challenge = replace(proof.challenge, **changes)
+    return encode_node_app_link(NodeAppLinkV2(challenge, proof.public_key,
+                                              key.sign(node_app_link_message(challenge)).hex()))
+
+
+def _row(registry, device_id):
+    with registry.db.transaction() as conn:
+        link = conn.execute("SELECT ctid::text AS ctid,xmin::text AS xmin,nonce,created_at,"
+                            "created_by,changed_at,changed_by FROM node_app_links "
+                            "WHERE device_id=%s", (device_id,)).fetchall()
+        intake = conn.execute("SELECT coalesce(sum(used),0) AS n FROM node_intake_quotas "
+                              "WHERE device_id=%s AND kind='evidence'", (device_id,)).fetchone()["n"]
+    assert len(link) == 1  # one row per device generation: its current link
+    return dict(link[0]), intake
+
+
+def test_a_relink_that_restates_the_current_link_writes_nothing(registry):
+    """The same process says again that it is linked, with a new nonce and a later sample (588
+    of 658 relinks measured on 2026-11-15): the link row keeps its row version and no intake is
+    counted; the answer is a 200 duplicate, current. A new control receipt is a new link: the
+    row is replaced in place, `changed_*` stamped, `created_*` kept. Mutation probe: make
+    `link_standing` compare the nonce (the relink rewrites the row)."""
+    coordinator, player, key, sessions, claims, _, _, _, proof = rig(registry)
+    broker = claims["app_effect_broker"]
+    links = NodeAppLinks(sessions)
+    device = proof.challenge.producer.device_id
+    before, intake = _row(registry, device)
+    assert (before["created_by"], before["changed_by"]) == ("node", "node")
+    registry.clock.advance(5)
+    again = links.admit(broker.session_id, broker.credential,
+                        _signed(key, proof, nonce=uuid4().hex * 2, sampled_boottime_ms=900))
+    assert again == {"stored": True, "duplicate": True, "current": True,
+                     "admitted_at": before["changed_at"], "physical_identity": "unverified"}
+    assert _row(registry, device) == (before, intake)
+    # The exact retry, nonce included, restates too.
+    assert links.admit(broker.session_id, broker.credential,
+                       encode_node_app_link(proof))["duplicate"] is True
+    assert _row(registry, device) == (before, intake)
+
+    delivery = registry.issue_control_delivery_record(player["player_id"], 1, "f" * 64)
+    receipt = registry.control_ack_response(player["player_id"], ControlAck(
+        authority_epoch=1, delivery_id=delivery["delivery_id"], result="applied")).receipt
+    fresh = json.dumps(receipt.model_dump(mode="json", by_alias=True), sort_keys=True,
+                       separators=(",", ":"))
+    replaced = links.admit(broker.session_id, broker.credential,
+                           _signed(key, proof, nonce=uuid4().hex * 2, control_receipt=fresh))
+    assert replaced["duplicate"] is False and replaced["current"] is True
+    after, counted = _row(registry, device)
+    assert counted == intake + 1
+    assert after["xmin"] != before["xmin"]
+    assert (after["created_at"], after["changed_at"]) == (before["created_at"],
+                                                          registry.clock.utc())
+
+
+def test_a_late_older_link_never_replaces_the_newer_one(registry):
+    """Link A of a boot arrives after the newer link C of the same boot (a later app epoch):
+    C's row stays as it is and A is answered 200, not stored, not current, so the Pi's outbox
+    slot clears. Mutation probe: drop the `older` arm of `link_standing` (A replaces C)."""
+    _, _, key, sessions, claims, _, _, _, proof = rig(registry)
+    broker = claims["app_effect_broker"]
+    links = NodeAppLinks(sessions)
+    device = proof.challenge.producer.device_id
+    newer = _signed(key, proof, nonce=uuid4().hex * 2, app_epoch=43, sampled_boottime_ms=700)
+    assert links.admit(broker.session_id, broker.credential, newer)["duplicate"] is False
+    current, intake = _row(registry, device)
+    late = links.admit(broker.session_id, broker.credential,
+                       _signed(key, proof, nonce=uuid4().hex * 2, sampled_boottime_ms=600))
+    assert late == {"stored": False, "duplicate": False, "current": False, "admitted_at": None,
+                    "physical_identity": "unverified"}
+    assert _row(registry, device) == (current, intake)

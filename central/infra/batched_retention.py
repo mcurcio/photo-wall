@@ -50,4 +50,16 @@ def drain(begin: Begin, statement: str, params: Mapping[str, object], *, batch_r
 
     `ValueError` when `batch_rows` or `batches` is under 1, or `params` names `batch_rows`.
     """
-    raise NotImplementedError("decision 0033, slice 2")
+    if batch_rows < 1 or batches < 1:
+        raise ValueError("batch_rows and batches must be >= 1")
+    if "batch_rows" in params:
+        raise ValueError("params must not name batch_rows: drain supplies it")
+    bound = {**params, "batch_rows": batch_rows}
+    deleted = 0
+    for _ in range(batches):
+        with begin() as conn:
+            rows = conn.execute(statement, bound).rowcount
+        deleted += rows
+        if rows < batch_rows:
+            break
+    return deleted

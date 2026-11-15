@@ -45,7 +45,12 @@ from central.infra.node_releases import PgNodeReleaseRecords
 from central.infra.outcome_feed import OutcomeFeed
 from central.infra.outcomes import JobOutcomes
 from central.infra.publisher import ProcrastinatePublisher
-from central.infra.queue_ops import PurgeFinishedJobsHandler, QueueAdmin, RescueStalledJobsHandler
+from central.infra.queue_ops import (
+    FinishedJobs,
+    PurgeFinishedJobsHandler,
+    QueueAdmin,
+    RescueStalledJobsHandler,
+)
 from central.infra.runtime import JobRuntime
 from central.infra.stored_assets import DiskStoredAssets
 from central.infra.transactions import PgTransactions
@@ -200,8 +205,8 @@ def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path,
         MaintainCacheHandler(catalog=core.catalog, records=core.assets, store=core.store,
                              transactions=core.transactions),
         RescueStalledJobsHandler(admin),
-        PurgeFinishedJobsHandler(admin, transactions=core.transactions, outcomes=core.outcomes,
-                                 clock=clock),
+        PurgeFinishedJobsHandler(FinishedJobs(db.transaction), transactions=core.transactions,
+                                 outcomes=core.outcomes, clock=clock),
     )
     return JobRuntime(db.dsn, handlers, WORKER_CONCURRENCY, transactions=core.transactions,
                       assets=core.assets, clock=clock, owned=(admin,))
