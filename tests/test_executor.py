@@ -1284,6 +1284,33 @@ def test_past_its_plan_a_frame_cycles_the_continuations_held_photos_with_no_card
                    for key in (*readiness.secured, *readiness.prepared))
 
 
+def test_continuing_since_is_set_at_the_first_slot_drawn_and_cleared_by_a_planned_layer(tmp_path):
+    """C4: an Output states since when it plays Central's continuation (the Player line's fact):
+    from the first continuation slot it draws, unchanged across later slots, cleared once a planned
+    layer is drawn again; None on a Frame drawing nothing. Mutation probe: never clear it."""
+    rig = Rig(tmp_path)
+    _continued_plan(rig)
+    rig.secure("a", b"a")
+    rig.secure("b", b"b")
+    frame, other = binding(), binding("hdmi2", "frame2")
+    since = []
+    for _ in range(50):                               # 100 to 125, past the layers' end at 120
+        rig.executor.prepare_imminent()
+        rig.executor.tick()
+        since.append((rig.clock.utc(), rig.executor.continuing_since(frame)))
+        rig.advance(.5)
+    assert all(value is None for at, value in since if at < 120)
+    assert all(value == pytest.approx(120) for at, value in since if at >= 120)
+    assert rig.executor.continuing_since(other) is None
+    planned = layer("c", data=b"c", start=125, end=200, awaits_grant=False)
+    rig.offer(planned, revision=2)
+    rig.secure("c", b"c")
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi1"].layers] == ["c"]
+    assert rig.executor.continuing_since(frame) is None
+
+
 def test_a_continuation_skips_a_photo_the_player_does_not_hold(tmp_path):
     rig = Rig(tmp_path)
     _continued_plan(rig)

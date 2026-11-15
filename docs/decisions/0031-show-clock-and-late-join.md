@@ -2,6 +2,8 @@
 
 **Date:** 2026-11-08 · **Layer:** system (contracts, Central's coordination and Planner, the Player, the health judge, the base image) · **Status:** accepted design, built on the branch `fix/black-frame-after-outage`.
 
+**Amended by:** [0032](0032-the-player-continues-centrals-plan.md) (2026-11-15): the show clock's health threshold is gone (any Central answer anchors it and its bound is a reported quality, never a gate; a slow answer is no longer thrown away), every state answer carries Central's time, the time request no longer comes before the plan, and the `clock_probe` fault is gone. The paragraph on the show's timeline below describes the clock as first built.
+
 **Amends:** [0009](0009-minimal-base-and-app-package.md) and [0014](0014-reaching-central-from-every-boot-stage.md) R6 (stage 1 is no longer the only thing that steps the clock), and [0017](0017-node-redesign-r3.md) C7 (the base's time client is systemd-timesyncd, not chrony; the freewheel is built, the correction curve is not) and C17 (late join is each Frame's own).
 
 ## What happened

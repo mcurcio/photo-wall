@@ -19,7 +19,8 @@ from central.registry import RegistryError
 from central.runtime import Child, Contribution, Program, ProgramDraft, Scene
 from central.runtime_store import RuntimeStore
 from central.wall_plan.selection import SceneSelection
-from contracts.models import CarriedPhoto, Failure, Readiness
+from contracts.continuation import continuation_layers
+from contracts.models import CarriedPhoto, Failure, Observation, Readiness
 
 
 def setup_players(registry, count=2):
@@ -1029,3 +1030,58 @@ def test_every_offer_a_player_may_be_cycling_and_its_carried_photo_stay_off_the_
             if entry.frame_id == "frame-1" and entry.asset_id in held
             and entry.end > held[entry.asset_id]]
     assert on_b == []
+
+
+def test_a_continuation_slot_shown_is_recorded_against_its_source_photo_now_and_after_a_rejoin(
+        registry):
+    """C3, decision 0032 (E6): a Frame playing its continuation reports each slot under its own
+    generated id. Central records the observation under that id naming its source, and the shown
+    history against the source photo; one reported under a revision Central has since replaced
+    (a rejoin after an outage) is still refused as stale and still counts as shown. Mutation
+    probe: leave `continuation_source` out of `_observed_layer`."""
+    player = setup_players(registry, count=1)[0]
+    portraits = tuple(photo(f"portrait-{n:02}", taken_at=900 + n, width=2400, height=3600)
+                      for n in range(20))
+    seed_pool(registry, "library:1", portraits)
+    measure_all(registry, portraits)
+    prepare(registry, portraits)
+    coordinator = Coordinator(registry.db, registry.clock)
+    schedule(coordinator, ["frame-0"], starts=1000, media=True)
+
+    def slot(plan, k):
+        """Slot `k` of the plan's first continuation, the Player holding every listed photo, and
+        the listed photo it shows."""
+        (continuation, *_) = plan.continuations
+        turn = continuation.start + k * continuation.seconds
+        (layer, *_) = continuation_layers(plan, continuation, held=continuation.photos,
+                                          start=turn, end=turn + 0.001)
+        return layer, continuation.photos[k % len(continuation.photos)]
+
+    def presented(plan, layer):
+        return Observation(plan_id=plan.plan_id, revision=plan.revision, authority_epoch=1,
+                           assignment_id=layer.assignment_id, observed_at=layer.start + 1,
+                           status="presented")
+
+    def shown():
+        with registry.db.transaction() as conn:
+            return {row["assignment_id"] for row in conn.execute(
+                "SELECT assignment_id FROM shown_photos").fetchall()}
+
+    first = coordinator.delivery(player["player_id"], 1)["plan"]
+    drawn, source = slot(first, 0)
+    coordinator.observe(player["player_id"], presented(first, drawn))
+    with registry.db.transaction() as conn:
+        event = conn.execute("SELECT assignment_id, detail FROM execution_events "
+                             "WHERE kind='observation' ORDER BY sequence DESC LIMIT 1").fetchone()
+    assert event["assignment_id"] == drawn.assignment_id
+    assert event["detail"]["continuation_source"] == source
+    assert source in shown()
+
+    registry.clock.advance(70)
+    coordinator.advance()
+    assert coordinator.delivery(player["player_id"], 1)["plan"].revision > first.revision
+    drawn, source = slot(first, 1)
+    assert source not in shown()
+    with pytest.raises(CoordinationError, match="stale_observation"):
+        coordinator.observe(player["player_id"], presented(first, drawn))
+    assert source in shown()

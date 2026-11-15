@@ -74,7 +74,8 @@ HOME_ASSISTANT_STATES = (
 BIRTH = node_state.Birth(component="player", version="1.0.0", pipe="show", release_digest="sha256:ab",
                          schema_majors={"player": 1}, slice_digest="0" * 64)
 FRAME_REPORTS = node_state.FrameReports(frames=(
-    node_state.FrameReport(frame_id="frame-1", generation=3, output_id="HDMI-A-1", showing=True, light_lux=41.0),
+    node_state.FrameReport(frame_id="frame-1", generation=3, output_id="HDMI-A-1", showing=True, light_lux=41.0,
+                           continuing_since=1731700000.5),
     node_state.FrameReport(frame_id="frame-2", generation=1, output_id="HDMI-A-2", showing=False, light_lux=None)))
 ANSWERS = (c.InstallStarted(serial="75628d0c", version=_TAG, install="downloading"),
            c.InstallRefused(refusal=c.InstallRefusal.UNKNOWN_VERSION))

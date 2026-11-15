@@ -32,8 +32,16 @@ from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response as Http11Response
 
 from central.db import ProcessTransactionClock
+from contracts.continuation import continuation_assignment_id
 from contracts.enrollment import Enrollment, OutputReport, enrollment_message
-from contracts.models import Commit, Continuation, Plan, PlayerConfiguration, Revocation
+from contracts.models import (
+    Commit,
+    Continuation,
+    Observation,
+    Plan,
+    PlayerConfiguration,
+    Revocation,
+)
 from contracts.player_control import ControlSelection
 from contracts.time import ManualClock
 from player.executor import AcquisitionStopped
@@ -2174,6 +2182,147 @@ def test_a_photo_a_continuation_lists_is_still_fetched_past_its_layer(tmp_path):
             service._feedback()
             assert [job.layer.assignment_id for job in service._jobs] == ["listed"]
             assert service._authorized(service._jobs[0])
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_failed_poll_inside_a_session_keeps_the_session_and_the_next_download_proceeds(
+        tmp_path, monkeypatch):
+    """C1, decision 0032: on 2026-11-15 one Central answer of 503 ended the whole session and its
+    downloads. A failed poll is now a fault and the next turn tries again: the session stands (no
+    second locate) and the held plan's photo is downloaded once Central answers media again.
+    Mutation probe: re-raise the error from `_control_loop`."""
+    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+    monkeypatch.setattr("player.service.MEDIA_RETRY_BACKOFF", (0,) * 4)
+    find = finding("http://central")
+
+    async def check():
+        service, server = await finder_rig(find)
+        steady, downloaded = asyncio.Event(), asyncio.Event()
+        serve = _until_steady(server, steady)
+        failed = []
+
+        def handle(request):
+            path = request.url.path
+            if path == "/v1/player/state" and steady.is_set() and not failed:
+                failed.append(request)
+                return httpx.Response(503, json={"error": "lock_busy"})
+            if path.startswith("/v1/media/"):
+                if not failed:
+                    return httpx.Response(503, json={"error": "lock_busy"})
+                downloaded.set()
+            return serve(request)
+
+        await service.link.client.aclose()
+        service.link.client = service.link.time_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handle))
+        task = asyncio.create_task(service.run())
+        try:
+            await asyncio.wait_for(downloaded.wait(), 10)
+            assert failed
+            assert find.calls == 1 and len(server.proofs) == 1
+        finally:
+            service.stop()
+            await asyncio.wait_for(task, 10)
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_session_that_ends_keeps_the_held_plans_downloads(tmp_path, monkeypatch):
+    """C2, decision 0032: a session's end never empties what the Player still has to fetch for the
+    plan it holds; the next `_feedback` lists the held plan's missing photos again. Mutation probe:
+    leave `_jobs` empty until a new plan."""
+    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+
+    async def check():
+        service, _server = await rig(tmp_path)
+        located = []
+
+        async def unreachable():
+            located.append(True)
+            raise UplinkError(Cause.CONNECT, "refused")
+
+        try:
+            service._feedback()
+            assert [job.layer.assignment_id for job in service._jobs] == ["picture"]
+            service._find_central, service._located = unreachable, False
+            task = asyncio.create_task(service.run())
+            try:
+                async def cycles():
+                    while len(located) < 2:            # the first cycle ended and its cleanup ran
+                        await asyncio.sleep(.01)
+                await asyncio.wait_for(cycles(), 5)
+                service._feedback()
+                assert [job.layer.assignment_id for job in service._jobs] == ["picture"]
+            finally:
+                service.stop()
+                await asyncio.wait_for(task, 5)
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_an_earlier_revisions_continuation_observation_reaches_central_after_an_outage(tmp_path):
+    """C3, decision 0032: a continuation slot's "presented", observed under a revision Central has
+    since replaced, is still sent (Central records it against its source photo), and a failed post
+    is tried again rather than lost. Mutation probe: drop earlier revisions in
+    `_observation_current`."""
+    async def check():
+        service, server = await rig(tmp_path)
+        try:
+            continuation = Continuation(output_id="hdmi1", run_id="run", photos=("listed",),
+                                        start=150, seconds=10)
+            listed = layer("listed", data=server.data, end=150)
+            server.offer(revision=2, layers=(listed,), continuations=(continuation,))
+            await service.poll_state()
+            seen = Observation(plan_id="offered", revision=2,
+                               authority_epoch=service.registration.authority_epoch,
+                               assignment_id=continuation_assignment_id(continuation, 0, "listed"),
+                               observed_at=150, status="presented")
+            server.offer(revision=3, layers=(listed,), continuations=(continuation,))
+            await service.poll_state()
+            service._observations.append(seen)
+            _, observations = service._feedback()
+            assert seen in observations
+
+            posted = []
+
+            def handle(request):
+                if request.url.path == "/v1/player/observations":
+                    posted.append(Observation.model_validate_json(request.content))
+                    if len(posted) == 1:
+                        return httpx.Response(503, json={"error": "lock_busy"})
+                return server(request)
+
+            await service.link.client.aclose()
+            service.link.client = service.link.time_client = httpx.AsyncClient(
+                transport=httpx.MockTransport(handle))
+            service._outgoing.append(seen)
+            sender = asyncio.create_task(service._observation_loop())
+            try:
+                async def sent_twice():
+                    while len(posted) < 2:
+                        await asyncio.sleep(.01)
+                await asyncio.wait_for(sent_twice(), 5)
+            finally:
+                sender.cancel()
+                await asyncio.gather(sender, return_exceptions=True)
+            assert posted == [seen, seen] and not service._outgoing
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_the_frames_report_states_since_when_a_frame_plays_its_continuation(tmp_path):
+    """Decision 0032: the Player line's `frames` carries each Frame's `continuing_since`, the
+    executor's fact (Galleria reads it through the Pi's read-only door)."""
+    async def check():
+        service, _server = await rig(tmp_path)
+        try:
+            assert service.frame_reports().frames[0].continuing_since is None
+            service.executor.continuing_since = lambda bound: 1234.5
+            assert service.frame_reports().frames[0].continuing_since == 1234.5
         finally:
             await close(service)
     asyncio.run(check())

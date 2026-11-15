@@ -183,6 +183,9 @@ class Executor:
         # Decision 0032: assignments a newer plan superseded while on screen; their composition
         # keeps drawing until that Output draws a layer of the new plan (`_rejoin_hold`).
         self._superseded: set[str] = set()
+        # Decision 0032: per Output, the show time it began drawing only continuation slots of the
+        # held plan (`continuing_since`); kept by tick (`_note_continuing`).
+        self._continuing: dict[str, float] = {}
 
     def _timebase(self) -> float:
         """Plan time less this machine's monotonic time, so a renderer reads a composition's
@@ -782,6 +785,34 @@ class Executor:
                     and (current.binding.frame_id, current.binding.generation) == (binding.frame_id, binding.generation)
                     and bool(visible_now(current.layers)))
 
+    def continuing_since(self, binding: OutputBinding) -> float | None:
+        """Show time at which this Output began drawing continuation slots of the held plan without
+        a planned layer between; None while it draws a planned layer, a superseded one, or nothing."""
+        with self._lock:
+            current = self._current.get(binding.output_id)
+            if current is None or _binding_identity(current.binding) != _binding_identity(binding):
+                return None
+            return self._continuing.get(binding.output_id)
+
+    def _note_continuing(self, now: float) -> None:
+        """Tick's one writer of `_continuing`: an Output whose drawn composition shows only
+        continuation slots of the held plan keeps the instant it first did (`now` then); any other
+        visible layer (a planned one, a superseded one, a kept photo) or nothing visible clears it."""
+        def slot(assignment_id: str) -> bool:
+            assignment = self._assignments.get(assignment_id)
+            return (assignment is not None and assignment.source is not None
+                    and assignment_id not in self._superseded)
+
+        for output_id in tuple(self._continuing):
+            if output_id not in self._current:
+                del self._continuing[output_id]
+        for output_id, composition in self._current.items():
+            visible = () if composition.fallback else visible_now(composition.layers)
+            if visible and all(slot(local.layer.assignment_id) for local in visible):
+                self._continuing.setdefault(output_id, now)
+            else:
+                self._continuing.pop(output_id, None)
+
     def frames_black(self) -> tuple[FrameBlack, ...]:
         """Renderer thread: each enabled Output that is black while content is wanted, and why
         (player/frame_black.py), sorted by Output. Nothing here draws or decides what is drawn."""
@@ -1305,6 +1336,7 @@ class Executor:
             self._superseded.intersection_update(
                 local.layer.assignment_id for composition in self._current.values()
                 for local in composition.layers)
+            self._note_continuing(now)
             self._release_unused_renderer(now)
             return tuple(observations)
 

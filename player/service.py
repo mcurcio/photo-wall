@@ -84,6 +84,7 @@ from player.show_clock import ShowClock
 from uplink.causes import Cause, UplinkError
 from uplink.clock import RunClockRecord
 from uplink.diagnosis import failure_text
+from uplink.fetch import Refused
 from uplink.finder import Found, find_central
 from uplink.locate import LocatedCentral
 from uplink.origin import Origin
@@ -149,6 +150,26 @@ class Unauthorized(ServiceError):
 
 class StaleFeedback(ServiceError):
     pass
+
+
+class OriginUnavailable(ServiceError):
+    """This cycle has no located Central (`PlayerService.session`): its cycle is ending, so a loop
+    meeting it ends too (`ends_cycle`); never a request Central answered."""
+
+
+REQUEST_FAILURES = (UplinkError, httpx.HTTPError, ServiceError, ValidationError)
+"""What one failed request to Central raises (decision 0032): a fault the loop that sent it names,
+then tries again at its next turn; only `ends_cycle` ones end the session."""
+
+
+def ends_cycle(error: BaseException) -> bool:
+    """Whether `error` ends run()'s cycle (decision 0032): a refused registration (Unauthorized), a
+    redirect (run() locates again, 0014), or a request that never left its pool (the next cycle
+    builds fresh clients, CentralLink); and a cycle that already lost its Central
+    (OriginUnavailable). Any other failed request leaves the session, its plan and its downloads
+    running."""
+    return isinstance(error, Unauthorized | OriginUnavailable) or (isinstance(error, UplinkError) and (
+        error.cause is Cause.REDIRECT or (error.cause is Cause.LOCAL and error.reason == "pool")))
 
 
 class MainLoopLate(ServiceError):
@@ -494,9 +515,10 @@ class PlayerService:
 
     def frame_reports(self) -> FrameReports:
         """Every Frame the Player draws now (its control State's bindings): the binding generation,
-        its Output, whether its picture is on screen, and the light on it at its centre for the
+        its Output, whether its picture is on screen, the light on it at its centre for the
         room-lights document last drawn (None before the first; `light_lux_on_frame`, capped at
-        LUX_MAX). On the GLib thread."""
+        LUX_MAX), and since when it plays Central's continuation (decision 0032,
+        `Executor.continuing_since`). On the GLib thread."""
         self._main()
         with self._lock:
             executor = self.executor
@@ -506,7 +528,8 @@ class PlayerService:
             try:
                 reports.append(FrameReport(
                     frame_id=binding.frame_id, generation=binding.generation, output_id=binding.output_id,
-                    showing=executor is not None and executor.showing(binding), light_lux=lux))
+                    showing=executor is not None and executor.showing(binding), light_lux=lux,
+                    continuing_since=executor.continuing_since(binding) if executor is not None else None))
             except ValidationError:   # an id the report's contract refuses: left out, never a fault
                 LOG.debug("player: no Frame report for %s", binding.frame_id)
         return FrameReports(frames=tuple(reports))
@@ -570,8 +593,15 @@ class PlayerService:
         """`code` with the console line (plus the clock summary for TIME/TLS) as its detail."""
         self.fault(code, detail=failure_text(error, clock=self.clock_record()))
 
+    def _request_failed(self, error: Exception) -> None:
+        """One failed request of a session's loop (decision 0032): raised again when it ends the
+        cycle (`ends_cycle`), else named (`_fault_for`) and the loop tries again at its next turn."""
+        if ends_cycle(error):
+            raise error
+        self._fault_for(error)
+
     def _fault_for(self, error: Exception) -> None:
-        """Names one session-ending failure of run()'s cycle (R9): a ServiceError is its own
+        """Names one failure of run()'s cycle or of a session's request (R9): a ServiceError is its own
         code; an UplinkError is "<cause>_<reason>" with its console detail; anything else is
         the bounded "player_error". Only the transport (CentralLink, locate) names network
         errors, so a local failure (ENOSPC, a bug) is never reported as a network cause."""
@@ -639,10 +669,10 @@ class PlayerService:
 
     @property
     def session(self) -> Session:
-        """This cycle's Session; ServiceError("central_origin_unavailable") until this cycle
+        """This cycle's Session; OriginUnavailable("central_origin_unavailable") until this cycle
         has located Central. Every Central URL and every bearer comes from it."""
         if self._session is None or not self._located:
-            raise ServiceError("central_origin_unavailable")
+            raise OriginUnavailable("central_origin_unavailable")
         return self._session
 
     @property
@@ -933,12 +963,16 @@ class PlayerService:
             return readiness, observations
 
     def _observation_current(self, observation):
+        """Whether an observation is still Central's to judge (decision 0032): it names the held
+        plan's epoch and plan at its revision or an earlier one (a Frame playing its continuation
+        through an outage observes under the revision it held; Central records it against its
+        source photo). Central judges the rest."""
         with self._lock:
             return (self._plan is not None and self.registration is not None
                 and observation.authority_epoch == self.registration.authority_epoch
-                and (observation.authority_epoch, observation.plan_id, observation.revision) ==
-                    (self._plan.authority_epoch, self._plan.plan_id, self._plan.revision)
-                and any(layer.assignment_id == observation.assignment_id for layer in self._plan.layers))
+                and (observation.authority_epoch, observation.plan_id) ==
+                    (self._plan.authority_epoch, self._plan.plan_id)
+                and observation.revision <= self._plan.revision)
 
     def _authorized(self, job: Download):
         with self._lock:
@@ -1062,8 +1096,8 @@ class PlayerService:
         except AcquisitionStopped:
             success = False
         except UplinkError as error:
-            if error.cause is Cause.REDIRECT:
-                raise           # ends the cycle: run() locates again (0014)
+            if ends_cycle(error):
+                raise           # ends the cycle: run() locates again (0014) or builds fresh clients
             success = False
             self._uplink_fault(fault, error)
         except (httpx.HTTPError, ServiceError, TimeoutError, OSError, AuthorityError):
@@ -1159,20 +1193,12 @@ class PlayerService:
             started = asyncio.get_running_loop().time()
             try:
                 await self.probe_time()
-            except Unauthorized:
-                raise
-            except UplinkError as error:
-                if error.cause is Cause.REDIRECT:
-                    raise               # ends the cycle: run() locates again (0014)
-                if error.cause is Cause.LOCAL and error.reason == "pool":
-                    raise               # ends the cycle: the next one builds fresh clients
-                self._fault_for(error)
             except MainLoopLate:
                 self._main_loop_late()
             except Exception as error:
                 # A failed time request is named like any other; it never gates a plan or a
                 # photo, since every state poll also samples the show clock.
-                self._fault_for(error)
+                self._request_failed(error)
             await asyncio.sleep(max(0, 1 - (asyncio.get_running_loop().time() - started)))
 
     async def _poll_after_stale(self) -> None:
@@ -1182,11 +1208,27 @@ class PlayerService:
         except MainLoopLate:
             self._main_loop_late()
 
+    async def _recover_stale(self) -> None:
+        """`_poll_after_stale` inside a session's loop: a failed poll is `_request_failed`."""
+        try:
+            await self._poll_after_stale()
+        except REQUEST_FAILURES as error:
+            self._request_failed(error)
+
     async def _control_loop(self):
+        """Every REPORT_INTERVAL: poll Central's state, then the held plan's feedback (readiness,
+        observations, and the downloads still wanted) and its readiness post. A failed request is
+        a fault and the next turn tries again (decision 0032, `_request_failed`): the feedback runs
+        whether or not the poll was answered, so downloads follow the held plan through an outage."""
         while not self._stop.is_set():
             started = asyncio.get_running_loop().time()
             try:
-                await self.poll_state()
+                try:
+                    await self.poll_state()
+                except MainLoopLate:
+                    raise
+                except REQUEST_FAILURES as error:
+                    self._request_failed(error)
                 readiness, observations = await self.dispatch(self._feedback)
             except MainLoopLate:
                 # Nothing is posted: the readiness Central holds stays (E-G8-8 decision).
@@ -1197,7 +1239,9 @@ class PlayerService:
                 try:
                     await self.request("POST", "/v1/player/readiness", body=readiness.model_dump(mode="json"))
                 except StaleFeedback:
-                    await self._poll_after_stale()
+                    await self._recover_stale()
+                except REQUEST_FAILURES as error:
+                    self._request_failed(error)
             for observation in observations:
                 if len(self._outgoing) == self._outgoing.maxlen:
                     self.fault("observation_capacity")
@@ -1216,7 +1260,16 @@ class PlayerService:
                     await self.request("POST", "/v1/player/observations",
                                        body=observation.model_dump(mode="json"))
                 except StaleFeedback:
-                    await self._poll_after_stale()
+                    await self._recover_stale()
+                except REQUEST_FAILURES as error:
+                    # Decision 0032: tried again at the next turn, so a Frame's shown history
+                    # survives an outage; a refusal Central judged (4xx) is final.
+                    judged = isinstance(error, Refused) and 400 <= error.status < 500
+                    if not judged:
+                        self._outgoing.appendleft(observation)
+                    self._request_failed(error)
+                    if not judged:
+                        await asyncio.sleep(REPORT_INTERVAL)
 
     async def _websocket_loop(self):
         async with self.link.websocket(self.session, "/v1/player/session",
@@ -1370,10 +1423,9 @@ class PlayerService:
                         task.cancel()
                     if tasks:
                         await asyncio.gather(*tasks, return_exceptions=True)
+                    # Decision 0032: the held plan's downloads outlive the session; the next
+                    # `_feedback` rebuilds them from that plan (`_offered` follows Central's state).
                     await self.link.aclose()
-                    with self._lock:
-                        self._offered = False
-                        self._jobs = ()
                 if not self._stop.is_set():
                     await asyncio.sleep(BACKOFF[min(attempt, 3)])
                     attempt = min(attempt + 1, 3)

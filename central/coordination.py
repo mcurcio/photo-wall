@@ -54,6 +54,7 @@ from central.wall_plan.fit import FitTarget, fit_target
 from central.wall_plan.order import PhotoShowing
 from central.wall_plan.ports import FitSettingsStore, ShownHistory
 from central.wall_plan.selection import crop_limit_of
+from contracts.continuation import continuation_source
 from contracts.models import (
     PREPARE_SECONDS,
     Commit,
@@ -878,11 +879,24 @@ class Coordinator:
                     session,
                 )
 
+    @staticmethod
+    def _observed_layer(plan: Plan, observation: Observation) -> tuple[Layer, bool] | None:
+        """The plan layer an observation is about, and whether it named a continuation slot: the
+        layer with its id, else (decision 0032) the source layer of the continuation slot that
+        generated it (`continuation_source`, at its observed time); None when neither."""
+        layer = next((a for a in plan.layers if a.assignment_id == observation.assignment_id), None)
+        if layer is not None:
+            return layer, False
+        found = continuation_source(plan, observation.assignment_id, at=observation.observed_at)
+        return None if found is None else (found[2], True)
+
     def _presented_from_an_earlier_offer(self, conn, player_id: str, observation: Observation,
                                          config) -> bool:
         """Roadmap 5a: a "presented" report stamped with a revision this Player was offered
         before the latest still counts as shown (a new revision is offered every cycle, so a
-        report often races the next offer; losing it would let the photo come back sooner).
+        report often races the next offer; losing it would let the photo come back sooner); a
+        continuation slot's counts for its source photo (decision 0032: a Frame that played its
+        continuation through an outage reports under the revision it held).
         Only the shown history is written, and the report is still refused as stale."""
         if observation.status != "presented":
             return False
@@ -893,12 +907,12 @@ class Coordinator:
         if row is None:
             return False
         offered = Plan.model_validate(row["manifest"])
-        layer = next((a for a in offered.layers
-                      if a.assignment_id == observation.assignment_id), None)
-        if (offered.plan_id != observation.plan_id or layer is None
-                or not self._authorized(layer, config)):
+        if offered.plan_id != observation.plan_id:
             return False
-        self.shown.record_presented_in(conn, layer.assignment_id, self.clock.utc())
+        observed = self._observed_layer(offered, observation)
+        if observed is None or not self._authorized(observed[0], config):
+            return False
+        self.shown.record_presented_in(conn, observed[0].assignment_id, self.clock.utc())
         return True
 
     def _current_plan(self, conn, player_id, epoch) -> Plan | None:
@@ -1408,19 +1422,17 @@ class Coordinator:
             ):
                 self._presented_from_an_earlier_offer(conn, player_id, observation, config)
                 return False
-            layer = next(
-                (a for a in plan.layers if a.assignment_id == observation.assignment_id), None
-            )
-            if not layer or not self._authorized(layer, config):
+            observed = self._observed_layer(plan, observation)
+            if observed is None or not self._authorized(observed[0], config):
                 raise CoordinationError("stale_binding", 403)
-            self._event(
-                conn,
-                "observation",
-                player_id,
-                layer.assignment_id,
-                observation.model_dump(mode="json"),
-            )
+            layer, continuation_slot = observed
+            detail = observation.model_dump(mode="json")
+            if continuation_slot:
+                # Decision 0032: recorded under the slot's own id, naming the photo it showed.
+                detail["continuation_source"] = layer.assignment_id
+            self._event(conn, "observation", player_id, observation.assignment_id, detail)
             if observation.status == "presented":
-                # Roadmap 5a: "Shown" means it was displayed on a frame (owner, 2026-10-11).
+                # Roadmap 5a: "Shown" means it was displayed on a frame (owner, 2026-10-11); a
+                # continuation slot counts for its source photo (decision 0032).
                 self.shown.record_presented_in(conn, layer.assignment_id, self.clock.utc())
         return True
