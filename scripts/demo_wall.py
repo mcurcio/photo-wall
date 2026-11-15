@@ -1501,8 +1501,11 @@ def central_player_faults(run):
             layer["assignment_id"].startswith(CONTINUATION_PREFIX) for layer in event["layers"])
         for event in current_outputs(report))
         for report in reports.values()), "central_recovery_timeout", recovery_seconds)
-    require({item["run_id"] for item in before["locks"]} == {item["run_id"] for item in snapshot["locks"]},
-            "restart_run_changed")
+    # The Run each Output draws after the restart is the one Central held before it (read from
+    # what is drawn: a Player rejoins before its next report secures, and so locks, the new layers).
+    require({item["run_id"] for item in before["locks"]} == {
+        layer["run_id"] for report in reports.values() for event in current_outputs(report)
+        for layer in event["layers"]}, "restart_run_changed")
     record("central_recovered", snapshot, reports,
            recovery_elapsed_seconds=time.monotonic() - recovery_started)
 
