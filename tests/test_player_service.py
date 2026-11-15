@@ -596,7 +596,8 @@ def _until_steady(server, steady, *, fail_first_state=False, redirect_first_stat
     """Serves `server`, offers a plan the instant enrollment completes, and sets `steady` on
     the first readiness report: only `_control_loop` sends one, i.e. only once run() is blocked
     on its steady-state tasks, the one stable cancellation point every run()-driven test here
-    relies on. `fail_first_state` answers the first state poll 503 (one failed cycle);
+    relies on. `fail_first_state` makes the first state poll wait out its pool (one failed cycle:
+    since decision 0032 a request Central answers, 503 included, no longer ends one);
     `redirect_first_state` answers it 301 (one failed cycle named REDIRECT/unexpected)."""
     failed = []
 
@@ -607,7 +608,7 @@ def _until_steady(server, steady, *, fail_first_state=False, redirect_first_stat
             if redirect_first_state:
                 return httpx.Response(301, headers={
                     "Location": "http://moved.example/v1/player/state"})
-            return httpx.Response(503, json={"error": "fixture_outage"})
+            raise httpx.PoolTimeout("fixture: no slot")
         result = server(request)
         if request.url.path == "/v1/enrollment/register":
             server.offer()
@@ -648,7 +649,8 @@ def test_a_failed_locate_is_retried_on_the_next_cycle_without_restart(tmp_path, 
 
 
 def test_every_failed_cycle_locates_again_and_keeps_the_registration(tmp_path, monkeypatch):
-    """0014: a failed cycle (here Central answering 503) is followed by a new locate; it lands
+    """0014: a failed cycle (here a state poll that never left its pool) is followed by a new
+    locate; it lands
     on the origin that issued the registration, so the registration is kept (U8) and there is
     no second enrollment."""
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
@@ -2323,6 +2325,141 @@ def test_the_frames_report_states_since_when_a_frame_plays_its_continuation(tmp_
             assert service.frame_reports().frames[0].continuing_since is None
             service.executor.continuing_since = lambda bound: 1234.5
             assert service.frame_reports().frames[0].continuing_since == 1234.5
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_first_poll_that_fails_still_starts_the_sessions_loops(tmp_path, monkeypatch):
+    """Decision 0032 (SLICE-C's invariant: the held plan's downloads continue while Central answers
+    any request): the session's first poll answering 503 is a fault like any other request's, not
+    the cycle's end; the loops start, readiness is posted, and no second locate happens. Mutation
+    probe: let the first poll's failure end the cycle."""
+    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+    find = finding("http://central")
+
+    async def check():
+        service, server = await finder_rig(find)
+        steady = asyncio.Event()
+        serve = _until_steady(server, steady)
+        failed = []
+
+        def handle(request):
+            if request.url.path == "/v1/player/state" and not failed:
+                failed.append(request)
+                return httpx.Response(503, json={"error": "lock_busy"})
+            return serve(request)
+
+        await service.link.client.aclose()
+        service.link.client = service.link.time_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handle))
+        task = asyncio.create_task(service.run())
+        try:
+            await asyncio.wait_for(steady.wait(), 10)
+            assert failed and find.calls == 1 and len(server.proofs) == 1
+        finally:
+            service.stop()
+            await asyncio.wait_for(task, 10)
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_failed_readiness_post_keeps_the_session_and_the_next_turn_posts_again(
+        tmp_path, monkeypatch):
+    """C1, decision 0032: a readiness post Central answers 503 is a fault, never the session's end;
+    the next turn posts readiness again. Mutation probe: drop `_request_failed` after the post."""
+    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+    find = finding("http://central")
+
+    async def check():
+        service, server = await finder_rig(find)
+        steady = asyncio.Event()
+        serve = _until_steady(server, steady)
+        posts = []
+
+        def handle(request):
+            if request.url.path == "/v1/player/readiness":
+                posts.append(request)
+                if len(posts) == 1:
+                    return httpx.Response(503, json={"error": "lock_busy"})
+            return serve(request)
+
+        await service.link.client.aclose()
+        service.link.client = service.link.time_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handle))
+        task = asyncio.create_task(service.run())
+        try:
+            await asyncio.wait_for(steady.wait(), 10)      # the second post was answered
+            assert len(posts) >= 2 and find.calls == 1 and len(server.proofs) == 1
+            assert service.last_fault is not None
+        finally:
+            service.stop()
+            await asyncio.wait_for(task, 10)
+            await close(service)
+    asyncio.run(check())
+
+
+def test_an_observation_central_refuses_is_not_sent_again_and_the_next_one_is(tmp_path):
+    """Decision 0032: an observation Central judged and refused (a 4xx) is final: it is not put back
+    at the head of the queue, where it would hold back every later one, and the next is posted.
+    Mutation probe: treat no refusal as judged."""
+    async def check():
+        service, server = await rig(tmp_path)
+        try:
+            epoch = service.registration.authority_epoch
+            plan = service.executor._plan
+            first, second = (Observation(plan_id=plan.plan_id, revision=plan.revision,
+                                         authority_epoch=epoch, assignment_id="picture",
+                                         observed_at=at, status="presented") for at in (101, 102))
+            posted = []
+
+            def handle(request):
+                if request.url.path == "/v1/player/observations":
+                    posted.append(Observation.model_validate_json(request.content))
+                    if len(posted) == 1:
+                        return httpx.Response(422, json={"error": "observation_refused"})
+                return server(request)
+
+            await service.link.client.aclose()
+            service.link.client = service.link.time_client = httpx.AsyncClient(
+                transport=httpx.MockTransport(handle))
+            service._outgoing.extend((first, second))
+            sender = asyncio.create_task(service._observation_loop())
+            try:
+                async def both():
+                    while len(posted) < 2:
+                        await asyncio.sleep(.01)
+                await asyncio.wait_for(both(), 5)
+                await asyncio.sleep(.1)
+            finally:
+                sender.cancel()
+                await asyncio.gather(sender, return_exceptions=True)
+            assert posted == [first, second] and not service._outgoing
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_state_of_another_registration_never_samples_the_show_clock(tmp_path):
+    """Slice A: a Central answer is a show-clock sample only when it names this registration (its
+    Player and authority epoch). Mutation probe: sample whatever registration a State names."""
+    async def check():
+        service, _server = await rig(tmp_path)
+        try:
+            registration = service.registration
+            before = service.show_clock.diagnostics.samples
+
+            def sample(player_id, epoch):
+                return service._sample_show_clock(player_id, epoch, 500.0, 10.0, 10.5)
+
+            assert not await service.dispatch(lambda: sample("p-other", registration.authority_epoch))
+            assert not await service.dispatch(
+                lambda: sample(registration.player_id, registration.authority_epoch + 1))
+            assert service.show_clock.diagnostics.samples == before
+            assert await service.dispatch(
+                lambda: sample(registration.player_id, registration.authority_epoch))
+            assert service.show_clock.diagnostics.samples == before + 1
         finally:
             await close(service)
     asyncio.run(check())

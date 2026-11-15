@@ -26,7 +26,7 @@ _CODES = (
     "absolute_state_required", "active_before_outage_timeout", "already_deleted",
     "already_evolved", "baseline_timeout", "cache_not_rebuilt", "capture_time_mismatch",
     "central_observation_missing", "central_recovery_timeout", "central_startup_timeout",
-    "check_pending", "cleanup_failed", "complete_group_commit_missing", "connection_invalid",
+    "check_pending", "cleanup_failed", "connection_invalid",
     "connection_missing", "connection_not_ok", "core_dirty", "core_image_source_mismatch",
     "core_images_must_be_paired", "core_revision_mismatch", "core_revision_unavailable",
     "deleted_asset_download_succeeded", "deleted_asset_wrong_failure", "deleted_check_timeout",

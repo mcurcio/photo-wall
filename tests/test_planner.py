@@ -785,3 +785,75 @@ def test_a_show_over_the_default_scene_gives_two_continuations_one_after_the_oth
     show, calm = projection.for_player("player-one").continuations
     assert (show.start, show.until) == (30, 60) and (calm.start, calm.until) == (60, None)
     assert show.run_id != calm.run_id
+
+
+def test_a_show_starting_inside_the_default_scenes_continuation_ends_it_there():
+    """B4, `_segment`: a Run of greater precedence that starts to show inside a continuation's
+    span is its `until`, so the Frame never plays on past a Show's start. Mutation probe: ignore
+    later Runs of greater precedence when finding `until`."""
+    instance = Runtime(house=UTC_HOUSE)
+    for scene_id, cycle in (("calm", 7), ("show", 10)):
+        instance.set_scene(Scene(scene_id=scene_id, cycle_seconds=cycle, loop=True,
+                                 selection=SceneSelection(),
+                                 contributions=(Contribution(target="frame:left",
+                                                             source_refs=("holiday:1",)),)))
+    instance.set_default_scene("calm", 0)
+    instance.create_program(window_program("later", "show", 60, 120), 0)
+    projection = _continued(instance, assets=[candidate(f"p{n}", captured=n) for n in range(12)])
+    calm = projection.for_player("player-one").continuations[0]
+    assert calm.until == 60
+
+
+def test_one_outputs_segments_play_one_after_the_other():
+    """B4, `_in_turn`: on one Output a segment starting inside an earlier one's span is dropped,
+    and one whose cross-fade lead reaches into it starts at its `until` with its lead and fades cut
+    to fit. Mutation probes: keep the overlapping segment; keep the full lead."""
+    from central.planner import _in_turn
+    from central.wall_plan.continuation import ContinuationSegment, ListedPhoto
+
+    def segment(run, start, until, lead=0.0, fade=0.0):
+        return ContinuationSegment(
+            player_id="p", frame_id="f", output_id="o", run_id=run, start=start, seconds=10,
+            lead=lead, fade_in=fade, fade_out=0, until=until,
+            candidates=(ListedPhoto(assignment_id=f"{run}-a", asset_id="a"),))
+
+    first = segment("show", 30, 60)
+    inside = segment("other", 50, 90)
+    leading = segment("calm", 61, None, lead=3, fade=3)
+    kept = _in_turn([leading, inside, first])
+    assert [s.run_id for s in kept] == ["show", "calm"]
+    assert (kept[1].start, kept[1].lead) == (61, 1)
+    assert kept[1].fade_in + kept[1].fade_out <= kept[1].seconds + kept[1].lead
+
+
+def test_a_listed_photo_its_layer_keeps_is_listed_as_kept(monkeypatch):
+    """Decision 0032: a candidate whose layer keeps its photo after its end ("keep_this_photo") is
+    listed as kept, so its hold and list span are open-ended (central/wall_plan/continuation.py).
+    Mutation probe: list every candidate as not kept."""
+    seen = []
+    real = planner_module.continuation_lists
+
+    def capture(segments, **kwargs):
+        seen.extend(segments)
+        return real(segments, **kwargs)
+
+    monkeypatch.setattr(planner_module, "continuation_lists", capture)
+    kept = runtime(contributions=(Contribution(target="frame:left", source_refs=("holiday:1",),
+                                               after_end="keep_this_photo"),))
+    _continued(kept, assets=[candidate(f"p{n}", captured=n) for n in range(6)])
+    assert seen and all(photo.kept for s in seen for photo in s.candidates)
+    seen.clear()
+    _continued(runtime(), assets=[candidate(f"p{n}", captured=n) for n in range(6)])
+    assert seen and not any(photo.kept for s in seen for photo in s.candidates)
+
+
+def test_a_lock_offered_before_grants_existed_is_kept_and_takes_the_grant():
+    """Decision 0032: a lock written by the release before `awaits_grant` reads False; it is no
+    stale authority (the field is revisable), and the layer takes today's value. Mutation probe:
+    take `awaits_grant` out of REVISABLE."""
+    offered = layers(propose(runtime(), now=0, horizon=5))[0]
+    assert offered.awaits_grant
+    old = offered.model_copy(update={"awaits_grant": False})
+    revised = propose(runtime(), now=1, horizon=5, locks={offered.assignment_id: old})
+    assert layers(revised)[0] == offered
+    assert not [d for d in revised.diagnostics if d.code == "lock_stale_authority"]

@@ -4,8 +4,6 @@ import { ageAt, formatAge, frameHealth } from "./health.js";
 const RECOVERY = Object.freeze({
   capacity:
     "The Player could not prepare this assignment within its available capacity. Reduce concurrent video or effect work, or use lighter media.",
-  clock:
-    "The Player reported clock uncertainty. Check its time synchronization and refresh Player status.",
   decode:
     "The Player could not decode this assignment. Check that the media is supported, or choose another item.",
   download:

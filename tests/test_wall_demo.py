@@ -424,6 +424,15 @@ def test_baseline_requires_real_byte_types_and_simulated_commit_evidence():
                           players=1, outputs=1, commit_checks=2, actuation="simulated")
 
 
+def test_baseline_needs_no_commit_since_only_a_runs_first_turn_awaits_one():
+    """Decision 0032: a wall whose Default Scene's first turn passed while its photos were prepared
+    plays every later turn with no Commit; the baseline holds without one."""
+    snapshot, players = example()
+    snapshot["groups"] = []
+    players["player-one"].update(commit_checks=0)
+    assert baseline_checks(snapshot, players)["commit_checks"] == 0
+
+
 @pytest.mark.parametrize("mutation,code", [
     (lambda s, p: s["jobs"].pop(), "video_not_prepared"),
     (lambda s, p: p["player-one"].update(outputs=2), "output_not_drawn"),
@@ -431,7 +440,6 @@ def test_baseline_requires_real_byte_types_and_simulated_commit_evidence():
     (lambda s, p: p["player-one"].update(commit_failures=["bad"]), "readiness_commit_proof"),
     (lambda s, p: p["player-one"]["events"][0]["layers"][0].update(sha256="c"*64), "unexpected_player_bytes"),
     (lambda s, p: s.update(observations=[]), "central_observation_missing"),
-    (lambda s, p: s["groups"][0].update(status="skipped"), "complete_group_commit_missing"),
 ])
 def test_baseline_fails_closed_for_missing_or_mismatched_evidence(mutation, code):
     snapshot, players = copy.deepcopy(example())

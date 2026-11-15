@@ -138,7 +138,8 @@ async def written_pi(pi_bus: Server) -> AsyncIterator[Server]:
         "component": "player", "version": "1.0.0", "pipe": "show", "release_digest": "sha256:ab",
         "schema_majors": {"player": contract.PLAYER_SCHEMA_MAJOR}, "slice_digest": "0" * 64}).encode())
     await player.put(contract.FRAMES_KEY, b'{"frames":[{"frame_id":"frame-1","generation":3,'
-                                          b'"output_id":"HDMI-A-1","showing":true,"light_lux":41.0}]}')
+                                          b'"output_id":"HDMI-A-1","showing":true,"light_lux":41.0,'
+                                          b'"continuing_since":1763200000.5}]}')
     await local.close()
     yield pi_bus
 
@@ -149,7 +150,7 @@ async def test_a_pi_reads_through_its_door(written_pi: Server) -> None:
         base_tag="v0.35.0", light_meter={"reading": {"kind": "measured", "lux": 120.0}},
         player_birth=reading.player_birth if isinstance(reading, PiReading) else None,
         frames=({"frame_id": "frame-1", "generation": 3, "output_id": "HDMI-A-1", "showing": True,
-                 "light_lux": 41.0},))
+                 "light_lux": 41.0, "continuing_since": 1763200000.5},))
     assert reading.player_birth["schema_majors"] == {"player": contract.PLAYER_SCHEMA_MAJOR}
 
 

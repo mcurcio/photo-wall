@@ -199,7 +199,9 @@ class AuditedService(PlayerService):
                     readiness_sequence=commit.readiness_sequence, committed_at=commit.committed_at,
                     assignment_ids=list(commit.assignment_ids)))
                 report = self.reports.get(key)
-                if (report is None or not report['capacity_ok'] or report['clock_uncertainty'] > .1
+                # Decision 0032: Central grants on the readiness sequence the Commit echoes, never on
+                # the Pi's clock bound, so a loose bound is no failure here.
+                if (report is None or not report['capacity_ok']
                         or not set(commit.assignment_ids) <= set(report['prepared'])):
                     self.commit_failures.add('commit_without_matching_prepared_report')
                 self.commits_checked.add(identity)
@@ -1083,7 +1085,10 @@ def baseline_checks(snapshot: dict, players: dict) -> dict:
     for report in players.values():
         require(report["persistence"] == "volatile"
                 and report["forbidden_imports_absent"], "player_boundary")
-        require(report["commit_checks"] > 0 and not report["commit_failures"], "readiness_commit_proof")
+        # Decision 0032: only a Run's first turn awaits a Commit, and the demo's Default Scene starts
+        # its first turn while its photos are still being prepared, so the wall may play with no
+        # Commit at all; every Commit Central did send must match a prepared report.
+        require(not report["commit_failures"], "readiness_commit_proof")
         drawn = [event for event in report["events"] if event["layers"]]
         require(len({event["output_id"] for event in drawn}) == report["outputs"], "output_not_drawn")
         for event in drawn:
@@ -1092,10 +1097,6 @@ def baseline_checks(snapshot: dict, players: dict) -> dict:
                 seen_types.add(layer["media_type"])
     require({"video/mp4", "image/jpeg"} <= seen_types, "media_types_not_presented")
     require(bool(snapshot["observations"]), "central_observation_missing")
-    output_count = sum(report["outputs"] for report in players.values())
-    require(any(group["status"] == "committed" and len(group["members"]) == output_count and
-        len({owner[0] for owner in group["members"].values() if owner}) == len(players)
-        for group in snapshot["groups"]), "complete_group_commit_missing")
     return dict(prepared_variants=len(variants), observed_media_types=sorted(seen_types),
                 players=len(players), outputs=sum(report["outputs"] for report in players.values()),
                 commit_checks=sum(report["commit_checks"] for report in players.values()),

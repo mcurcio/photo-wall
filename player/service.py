@@ -1382,11 +1382,15 @@ class PlayerService:
                     # Reconnection reconciles authority before any download work; the poll
                     # also anchors the show clock, so a failing time route never holds the plan
                     # back (time is asked only in _time_loop). A late GLib loop does not end the
-                    # session here: its loops raise main_loop_late.
+                    # session here: its loops raise main_loop_late. A failed poll is like any
+                    # session request's (decision 0032): the held plan's downloads and feedback
+                    # start anyway, and the control loop polls again at its next turn.
                     try:
                         await self.poll_state()
                     except MainLoopLate:
                         self._main_loop_late()
+                    except REQUEST_FAILURES as error:
+                        self._request_failed(error)
                     session_started = self._loop.time()
                     tasks = [asyncio.create_task(self._control_loop()),
                              asyncio.create_task(self._time_loop()),
@@ -1432,26 +1436,32 @@ class PlayerService:
         except asyncio.CancelledError:
             pass
         finally:
-            self._proof_active = False
-            self._proof_generation += 1
-            with self._lock:
-                self._applied_proof_receipt = None
-                self._control_proof_revision += 1
-            if proof_task is not None:
-                proof_task.cancel()
-                # stop() may cancel this parent while it awaits the child.
-                # Shield the child so cleanup waits for it without surfacing
-                # that second cancellation to callers of run().
-                while not proof_task.done():
-                    try:
-                        await asyncio.shield(proof_task)
-                    except asyncio.CancelledError:
-                        pass
-            await self.link.aclose()
-            if self.cache is not None:
-                await asyncio.get_running_loop().run_in_executor(self._worker, self.cache.close)
-            self._worker.shutdown(wait=True, cancel_futures=True)
-            self._session, self._located = None, False
+            # stop() cancels this task, and that cancel may land after run() already saw the stop
+            # and left its loop, inside this cleanup: shielded, so it never surfaces to run()'s
+            # caller nor cuts the cleanup short.
+            closing = asyncio.ensure_future(self._close_run(proof_task))
+            while not closing.done():
+                try:
+                    await asyncio.shield(closing)
+                except asyncio.CancelledError:
+                    pass
+            closing.result()
+
+    async def _close_run(self, proof_task: asyncio.Task | None) -> None:
+        """run()'s end: the app link stopped, the clients and the cache closed."""
+        self._proof_active = False
+        self._proof_generation += 1
+        with self._lock:
+            self._applied_proof_receipt = None
+            self._control_proof_revision += 1
+        if proof_task is not None:
+            proof_task.cancel()
+            await asyncio.gather(proof_task, return_exceptions=True)
+        await self.link.aclose()
+        if self.cache is not None:
+            await asyncio.get_running_loop().run_in_executor(self._worker, self.cache.close)
+        self._worker.shutdown(wait=True, cancel_futures=True)
+        self._session, self._located = None, False
 
     def start(self):
         """The network thread, and the Node's bus (`start_node_bus`)."""

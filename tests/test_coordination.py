@@ -1085,3 +1085,123 @@ def test_a_continuation_slot_shown_is_recorded_against_its_source_photo_now_and_
     with pytest.raises(CoordinationError, match="stale_observation"):
         coordinator.observe(player["player_id"], presented(first, drawn))
     assert source in shown()
+
+
+def test_a_loose_clock_on_a_later_report_never_ends_a_grant_already_given(registry):
+    """Decision 0032 (DESIGN §4, `readiness()`): a Player's show-clock bound is a quality, never a
+    reason for Central to drop a Commit; a later report with a 5 s bound keeps the valid
+    execution_commits row valid. Mutation probe: invalidate Commits on a report whose bound is
+    loose."""
+    player = setup_players(registry, count=1)[0]
+    coordinator = Coordinator(registry.db, registry.clock)
+    coordinator.runtime.command("set_scene", Scene(scene_id="slow", loop=True, cycle_seconds=600,
+        contributions=(Contribution(target="frame:frame-0", kind="black"),)), by="console")
+    future_program(coordinator, "slow", "slow", 1010, 2000)
+    coordinator.advance()
+    plan = coordinator.delivery(player["player_id"], 1)["plan"]
+    every = tuple(layer.assignment_id for layer in plan.layers)
+
+    def ready(sequence, bound):
+        return coordinator.readiness(player["player_id"], Readiness(
+            plan_id=plan.plan_id, revision=plan.revision, authority_epoch=1, sequence=sequence,
+            secured=every, prepared=every, clock_uncertainty=bound, capacity_ok=True,
+            observed_at=registry.clock.utc(), lost_grants=()))
+
+    assert ready(1, .01)
+    registry.clock.advance(10)
+    coordinator.advance()
+    assert len(coordinator.delivery(player["player_id"], 1)["commits"]) == 1
+    ready(2, 5.0)
+
+    def valid():
+        with registry.db.transaction() as conn:
+            return [row["valid"] for row in conn.execute(
+                "SELECT valid FROM execution_commits WHERE player_id=%s",
+                (player["player_id"],)).fetchall()]
+
+    assert valid() and all(valid())
+    coordinator.advance()
+    assert valid() and all(valid())
+    # The grant given on report 1 stands; it was never dropped and granted again on report 2.
+    [commit] = coordinator.delivery(player["player_id"], 1)["commits"]
+    assert commit.readiness_sequence == 1
+
+
+def test_each_players_reported_bound_reaches_its_frames_guard_grown_while_it_is_silent(
+        registry, monkeypatch):
+    """Decision 0032 (§2): a Player's reported show-clock bound widens the hand-over guard of its
+    own Frames in the pass Central plans, grown by the drift rate for as long as no newer report
+    comes (a cut-off Pi free-runs); another Player's Frames keep the limit. Mutation probes: apply
+    no reported bound; do not grow it."""
+    import central.coordination as coordination
+    players = setup_players(registry, count=2)
+    coordinator = Coordinator(registry.db, registry.clock)
+    schedule(coordinator, ["frame-0", "frame-1"])
+    plan = coordinator.delivery(players[0]["player_id"], 1)["plan"]
+    assert coordinator.readiness(players[0]["player_id"], Readiness(
+        plan_id=plan.plan_id, revision=plan.revision, authority_epoch=1, sequence=1,
+        clock_uncertainty=3.0, capacity_ok=True, observed_at=registry.clock.utc(),
+        lost_grants=()))
+    seen = []
+    real = coordination.project
+
+    def project(*args, **kwargs):
+        seen.append(dict(kwargs["frame_uncertainty"]))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(coordination, "project", project)
+    registry.clock.advance(1000)
+    coordinator.advance()
+    assert seen[-1] == {"frame-0": pytest.approx(3.0 + 100e-6 * 1000)}
+
+
+def test_an_expired_offer_a_cut_off_player_may_be_cycling_is_kept_until_it_reports_past_it(
+        registry):
+    """Decision 0032 (§3): Player A reported on revision R and went quiet; Central offered it later
+    revisions, and A's offers expired. Every offer at or past R may be what A cycles, so cleanup
+    keeps them and their listed photos stay off Player B's Frame; once A reports on a newer
+    revision, the older offers no longer hold and go. Mutation probes: delete every expired offer a
+    newer one replaces; keep offers older than A's report."""
+    players = setup_players(registry, count=2)
+    portraits = tuple(photo(f"portrait-{n:02}", taken_at=900 + n, width=2400, height=3600)
+                      for n in range(20))
+    seed_pool(registry, "library:1", portraits)
+    measure_all(registry, portraits)
+    prepare(registry, portraits)
+    coordinator = Coordinator(registry.db, registry.clock,
+                              limits=CoordinationLimits(plan_seconds=600))
+    schedule(coordinator, ["frame-0", "frame-1"], starts=1000, media=True)
+    a = players[0]["player_id"]
+    first = coordinator.delivery(a, 1)["plan"]
+    assert first.continuations
+
+    def reported(plan, sequence):
+        assert coordinator.readiness(a, Readiness(
+            plan_id=plan.plan_id, revision=plan.revision, authority_epoch=1, sequence=sequence,
+            clock_uncertainty=.01, capacity_ok=True, observed_at=registry.clock.utc(),
+            lost_grants=()))
+
+    def revisions():
+        with registry.db.transaction() as conn:
+            return [row["revision"] for row in conn.execute(
+                "SELECT revision FROM plan_offers WHERE player_id=%s ORDER BY revision",
+                (a,)).fetchall()]
+
+    reported(first, 1)
+    registry.clock.advance(70)
+    coordinator.advance()
+    registry.clock.advance(600)                       # past every offer's validity so far
+    projection = coordinator.advance().projection
+    assert first.valid_until <= registry.clock.utc()
+    assert first.revision in revisions()
+    layers = {layer.assignment_id: layer for layer in first.layers}
+    held = {layers[photo].variant.asset_id: c.start - c.lead - 0.4
+            for c in first.continuations for photo in c.photos}
+    assert not [entry for entry in projection.plan if entry.frame_id == "frame-1"
+                and entry.asset_id in held and entry.end > held[entry.asset_id]]
+    newest = coordinator.delivery(a, 1)["plan"]
+    assert newest.revision > first.revision
+    reported(newest, 2)
+    registry.clock.advance(1)
+    coordinator.advance()
+    assert revisions() and min(revisions()) >= newest.revision

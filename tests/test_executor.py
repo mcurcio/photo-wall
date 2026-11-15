@@ -1369,3 +1369,162 @@ def test_re_delivering_the_held_plan_past_its_validity_is_a_no_op(tmp_path):
     assert rig.executor.accept_plan(plan) is False
     with pytest.raises(AuthorityError, match="expired plan"):
         rig.offer(layer(end=150), revision=2, valid_until=150, issued_at=100, valid_from=100)
+
+
+def _slots(rig, output="hdmi1"):
+    return [a for a in rig.executor._assignments.values()
+            if a.source is not None and a.layer.output_id == output]
+
+
+def test_continuation_slots_that_ended_are_dropped_through_a_long_outage(tmp_path):
+    """Decision 0032: through a day-long outage the executor holds the plan's layers and the slots
+    of its prepare lead, never every slot it ever made (each tick and prepare pass scans them).
+    Mutation probe: never drop an ended slot."""
+    rig = Rig(tmp_path)
+    photos = _continued_plan(rig)
+    rig.secure("a", b"a")
+    rig.secure("b", b"b")
+    for _ in range(800):                              # 2000 s: 200 turns past the plan's end
+        rig.executor.prepare_imminent()
+        rig.executor.tick()
+        rig.advance(2.5)
+    # The plan's two layers, the slots over the 5 s prepare lead at 10 s turns, one still drawn.
+    assert len(rig.executor._assignments) <= len(photos) + 3
+    assert rig.renderer.outputs["hdmi1"].layers[-1].layer.assignment_id.startswith(
+        CONTINUATION_PREFIX)
+
+
+def test_a_slot_keeps_its_photo_when_a_download_lands_during_its_turn(tmp_path):
+    """Decision 0032: slot k shows the (k mod n)-th held photo, and n grows as downloads land while
+    Central is slow; a slot already made never gets a second assignment with another photo, so a
+    turn never swaps its photo midway. Mutation probe: dedupe slots on their generated id alone."""
+    rig = Rig(tmp_path)
+    _continued_plan(rig)
+    rig.secure("a", b"a")
+    rig.advance(27)                                   # 127: slot 1 (130 to 140) is within the lead
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    rig.secure("b", b"b")                             # now slot 1 would map to "b"
+    rig.advance(1)
+    rig.executor.prepare_imminent()
+    assert len([a for a in _slots(rig) if a.layer.start == 130]) == 1
+    for _ in range(18):                               # 128 to 137: through slot 1's turn
+        rig.executor.prepare_imminent()
+        rig.executor.tick()
+        if rig.clock.utc() >= 130:
+            shown = rig.renderer.outputs["hdmi1"].layers
+            assert [local.layer.variant for local in shown] == [media(b"a")]
+        rig.advance(.5)
+
+
+def test_a_continuation_with_no_listed_photo_held_states_no_photo(tmp_path):
+    """Decision 0032: the card shows when the Frame goes black while content is wanted; a
+    continuation covering now whose listed photos are not held (a wiped cache, downloads not done)
+    is NO_PHOTO, never a silent black. Once one is held the statement goes. Mutation probe: leave
+    a continuation with no slot out of `frames_black`."""
+    rig = Rig(tmp_path)
+    _continued_plan(rig)
+    rig.advance(25)                                   # 125: past the layers, the continuation's
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    assert rig.executor.frames_black() == (FrameBlack("hdmi1", FrameBlackCause.NO_PHOTO),)
+    rig.secure("a", b"a")
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    assert rig.executor.frames_black() == ()
+
+
+def test_a_cancelled_or_invalidated_source_stops_its_continuation_slots(tmp_path):
+    """Decision 0032: Central cancelling a listed photo removes the slots made from it, and
+    invalidating one stops new slots drawing it; the Frame cycles the photos it still may.
+    Mutation probe: ignore revocations when choosing the held photos."""
+    rig = Rig(tmp_path)
+    _continued_plan(rig)
+    rig.secure("a", b"a")
+    rig.secure("b", b"b")
+    rig.advance(22)
+    rig.executor.prepare_imminent()
+    rig.executor.cancel(["a"])
+    assert not [slot for slot in _slots(rig) if slot.source == "a"]
+    rig.executor.invalidate(["b"])
+    assert not _slots(rig)
+    for _ in range(10):
+        rig.executor.prepare_imminent()
+        rig.executor.tick()
+        assert not _slots(rig)
+        rig.advance(2.5)
+
+
+def test_a_kept_still_no_layer_of_the_held_plan_places_is_reported_carried(tmp_path):
+    """Decision 0032: a photo the Frame keeps (its after-state) that the held plan does not place
+    travels in readiness as carried, also while a later layer draws over it, so Central keeps it
+    off every other Frame. Mutation probe: leave kept photos out of `carried`."""
+    rig = Rig(tmp_path)
+    rig.play(layer(end=101, after_end="keep_this_photo"))
+    rig.advance(2)
+    rig.executor.tick()
+    over = layer("over", data=b"over", start=105, end=300, awaits_grant=False,
+                 after_end="leave_as_is")
+    rig.offer(over, revision=2)
+    rig.secure("over", b"over")
+    rig.advance(3)
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi1"].layers] == ["over"]
+    assert rig.executor.readiness().carried == (
+        CarriedPhoto(output_id="hdmi1", asset_id=media().asset_id),)
+
+
+def test_a_photo_held_for_the_rejoin_keeps_its_decoder(tmp_path):
+    """Decision 0032: the photo a superseded composition still draws while the Frame rejoins (the
+    new plan's layer waits for its grant) stays resident with no layer of the held plan naming it.
+    Mutation probe: leave the held photo out of the prepare pass's pictures."""
+    rig = Rig(tmp_path, capacity=1)
+    old = layer("old", data=b"old", end=300, awaits_grant=False)
+    rig.offer(old)
+    rig.secure("old", b"old")
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    rig.advance(60)                                   # 160: the old layer still drawn
+    rig.executor.tick()
+    new = layer("new", data=b"new", start=155, end=200)          # awaits its grant
+    rig.offer(new, revision=2)
+    rig.secure("new", b"new")
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi1"].layers] == ["old"]
+    assert "old" in rig.executor._wanted
+
+
+def test_a_grant_arriving_late_within_the_clocks_bound_is_no_missed_start(tmp_path):
+    """Slice A: a grant committed before its start and heard after it is a missed start only past
+    the clock's own bound: with Central's time held to within 5 s, one heard 1 s late still starts.
+    Mutation probe: judge the missed start by a fixed 0.1 s."""
+    rig = Rig(tmp_path)
+    rig.offer(layer(start=103, media_origin=103))
+    rig.secure()
+    rig.executor.prepare_imminent()
+    ready = rig.executor.readiness()
+    granted = Commit(plan_id="stable", revision=1, authority_epoch=1, assignment_ids=("picture",),
+                     readiness_sequence=ready.sequence, committed_at=102)
+    rig.advance(4, refresh=False)                    # 104: a second past the start
+    loosen(rig, 5.0)
+    assert rig.executor.accept_commit(granted)
+
+
+def test_a_layer_is_wanted_past_its_end_only_while_a_continuation_naming_it_runs():
+    """Decision 0032, `may_still_play`: a plan layer's bytes are wanted within its span and the
+    plan's validity, or while a continuation of the plan names it and has not reached `until`.
+    Mutation probe: ignore `until`."""
+    from player.executor import may_still_play
+    listed = layer("listed", start=100, end=150)
+    plan = Plan(plan_id="stable", revision=1, player_id="player1", authority_epoch=1,
+                issued_at=100, valid_from=100, valid_until=160, bindings=(binding(),),
+                layers=(listed,), continuations=(Continuation(
+                    output_id="hdmi1", run_id="run", photos=("listed",), start=150, seconds=10,
+                    until=200),))
+    assert may_still_play(plan, listed, 140)
+    assert may_still_play(plan, listed, 190)
+    assert not may_still_play(plan, listed, 200)
+    alone = plan.model_copy(update={"continuations": ()})
+    assert not may_still_play(alone, listed, 150)

@@ -14,6 +14,9 @@ Two rules, one home each:
 - **What an offer holds** (`held_reservations`): every listed photo of a plan's continuations is
   reserved on its Frame from its continuation's first slot to its `until` (open when None), so a
   later pass never gives it to another Frame while the Player may still be cycling it.
+- **A kept photo stays** (contracts/on_screen.py's rule for "keep_this_photo"): a listed photo whose
+  layer keeps it after its end may stay on its Frame past `until`, until something replaces it,
+  which no continuation knows; its span, as listed and as held, is open-ended.
 
 Which offers still hold is coordination's (central/coordination.py: every offer whose revision is
 at or past the one the Player's latest readiness names); what a slot shows is
@@ -31,10 +34,12 @@ from contracts.on_screen import Extent
 
 
 class ListedPhoto(Model):
-    """One offered media layer a segment may list: its assignment id and the photo it shows."""
+    """One offered media layer a segment may list: its assignment id, the photo it shows, and
+    whether its after-state keeps that photo up after its end (`after_end` "keep_this_photo")."""
 
     assignment_id: Identifier
     asset_id: Identifier
+    kept: bool = False
 
 
 class ContinuationSegment(Model):
@@ -70,8 +75,8 @@ def continuation_lists(segments: Sequence[ContinuationSegment], *,
     pass knows it may be on screen (the walk's placed slots and fixed showings, and `reserved`);
     `guard` is each Frame's hand-over guard in seconds by frame id (wall plan rule 1's). A candidate
     is listed when no extent of its photo on another Frame overlaps
-    [start - lead - guard, until + guard) (open when `until` is None) and no earlier segment on
-    another Frame listed it. A segment left with no photo gives no continuation. Deterministic for
+    [start - lead - guard, until + guard) (open when `until` is None, or when the candidate is
+    `kept`) and no earlier segment on another Frame listed it. A segment left with no photo gives no continuation. Deterministic for
     equal inputs. ValueError for two segments on one Output that overlap."""
     by_output: dict[tuple[str, str], list[ContinuationSegment]] = {}
     for segment in segments:
@@ -85,16 +90,20 @@ def continuation_lists(segments: Sequence[ContinuationSegment], *,
     found: dict[str, list[Continuation]] = {}
     for segment in sorted(segments, key=lambda s: (s.start, s.frame_id, s.run_id)):
         span = _span(segment, guard.get(segment.frame_id, 0.0))
+        spans = {photo.assignment_id: _kept(span) if photo.kept else span
+                 for photo in segment.candidates}
         photos = tuple(
             photo.assignment_id for photo in segment.candidates
-            if not _elsewhere(segment.frame_id, span, extents.get(photo.asset_id, ()))
-            and not _elsewhere(segment.frame_id, span, listed.get(photo.asset_id, ())))
+            if not _elsewhere(segment.frame_id, spans[photo.assignment_id],
+                              extents.get(photo.asset_id, ()))
+            and not _elsewhere(segment.frame_id, spans[photo.assignment_id],
+                               listed.get(photo.asset_id, ())))
         if not photos:
             continue
         for photo in segment.candidates:
             if photo.assignment_id in photos:
                 listed.setdefault(photo.asset_id, []).append(
-                    FrameExtent(frame_id=segment.frame_id, extent=span))
+                    FrameExtent(frame_id=segment.frame_id, extent=spans[photo.assignment_id]))
         found.setdefault(segment.player_id, []).append(Continuation(
             output_id=segment.output_id, run_id=segment.run_id, photos=photos,
             start=segment.start, seconds=segment.seconds, lead=segment.lead,
@@ -109,14 +118,20 @@ def _span(segment: ContinuationSegment, guard: float) -> Extent:
                   end=None if segment.until is None else segment.until + guard)
 
 
+def _kept(span: Extent) -> Extent:
+    """A kept photo's span: from the same start, open-ended."""
+    return Extent(start=span.start)
+
+
 def _elsewhere(frame_id: str, span: Extent, extents: Sequence[FrameExtent]) -> bool:
     return any(other.frame_id != frame_id and other.extent.overlaps(span) for other in extents)
 
 
 def held_reservations(plan: Plan, *, guard: float) -> tuple[Reservation, ...]:
     """What `plan`'s continuations hold: one Reservation per listed photo, on the Frame its Output
-    is bound to, from its continuation's `start - lead - guard` to `until + guard` (open when None).
-    Pure; the caller decides which of a Player's offers still hold."""
+    is bound to, from its continuation's `start - lead - guard` to `until + guard` (open when None,
+    or when the photo's layer keeps it after its end). Pure; the caller decides which of a Player's
+    offers still hold."""
     frames = {binding.output_id: binding.frame_id for binding in plan.bindings}
     layers = {layer.assignment_id: layer for layer in plan.layers}
     held: list[Reservation] = []
@@ -126,8 +141,10 @@ def held_reservations(plan: Plan, *, guard: float) -> tuple[Reservation, ...]:
         for photo in continuation.photos:
             variant = layers[photo].variant
             if variant is not None:
-                held.append(Reservation(frame_id=frames[continuation.output_id],
-                                        asset_id=variant.asset_id, extent=extent))
+                held.append(Reservation(
+                    frame_id=frames[continuation.output_id], asset_id=variant.asset_id,
+                    extent=_kept(extent) if layers[photo].after_end == "keep_this_photo"
+                    else extent))
     return tuple(held)
 
 

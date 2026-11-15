@@ -5,7 +5,7 @@ that timeline is now; between round trips the local monotonic clock, which only 
 from itself, carries it. The Pi's wall clock is never read, so its being wrong, or stepping, cannot
 touch what is shown (2026-11-08: a Pi 975,402 s behind Central refused every plan and stayed black).
 
-Stdlib only.
+Stdlib and contracts.time only.
 """
 
 from __future__ import annotations
@@ -13,10 +13,9 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from typing import Final, Literal
+from typing import Literal
 
-DRIFT_RATE: Final = 100e-6
-"""Seconds per second: RFC 5905 dispersion, undisciplined crystals both ends."""
+from contracts.time import DRIFT_RATE
 
 SampleOutcome = Literal["anchored", "kept", "impossible"]
 ShowClockStatus = Literal["no_sample", "anchored"]

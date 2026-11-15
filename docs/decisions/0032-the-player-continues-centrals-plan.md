@@ -34,9 +34,9 @@ Three design rules (design choices, not requirements):
 **Never a photo another Frame uses** has one owner, Central's wall plan ([`central/wall_plan/continuation.py`](../../central/wall_plan/continuation.py)):
 
 - **Lists.** A pass builds every Frame's lists together, so no photo is on two lists and none overlaps another Frame's showing over the list's span.
-- **Reservations.** Every listed photo of every stored offer at or past the revision the Player last reported stays reserved on its Frame until its `until`, so a later pass never gives it to another Frame while that Pi may be cycling it, partial outages included. An expired offer is kept while it may still hold.
+- **Reservations.** Every listed photo of every stored offer at or past the revision the Player last reported stays reserved on its Frame until its `until`, so a later pass never gives it to another Frame while that Pi may be cycling it, partial outages included. An expired offer is kept while it may still hold. A listed photo whose layer keeps it after its end (`keep_this_photo`) may stay on its Frame past `until` until something replaces it, so its reservation and its list span are open-ended.
 - **Carried photos.** A photo a Pi still draws or keeps that its current plan does not place there (a rejoin, a kept still) travels in every readiness report (`Readiness.carried`) and is reserved while reported.
-- **Per-Frame guard.** Each Frame's hand-over guard is twice the larger of the configured bound and the bound its Player reported, capped at 30 s (`MAX_GUARD_UNCERTAINTY`), so a loose clock costs photo moves between Frames, never a start.
+- **Per-Frame guard.** Each Frame's hand-over guard is twice the larger of the configured bound and the bound its Player reported, grown by the drift rate (100 ppm) for the time since Central received that report (a cut-off Pi free-runs, and its last report says nothing of it), capped at 30 s (`MAX_GUARD_UNCERTAINTY`), so a loose clock costs photo moves between Frames, never a start.
 
 **The rest of the class on the Pi.** A failed request never ends the Player's session (only a refused registration, a redirect or a request that never left its pool does), and downloads of the held plan's photos continue while Central answers any request; a session's end never empties them. Observations of an earlier revision are sent, and Central records a continuation slot's `presented` against its source photo in the shown history. **The card** shows only when a Frame goes black while content is wanted (it holds no listed photo); a Frame playing its continuation is no error (G6). The Pi states it on its own Player line, as each Frame's `continuing_since` in the `frames` key (contracts/node_state.py), worded for people "playing Central's continuation since 14:02"; health keeps one writer.
 
@@ -44,7 +44,9 @@ The contract changes (E1 to E6) are in the [execution contract](../execution-con
 
 ## What it gives up, costs and defers
 
-- **Central and the Pis ship together.** Contracts refuse unknown fields: a Pi on the old release refuses a plan that carries continuations, and the Galleria integration's contract copy changes with the `frames` key's new field, so Galleria updates with the release.
+- **Central and the Pis ship together.** Contracts refuse unknown fields: every state answer now carries Central's time (`State.server_time`), so a Pi on the old release refuses every state answer from the new Central (and with it every plan, reboot command and release switch) and keeps showing what it holds until it is rebooted. No second, old-shaped answer is sent (no backward compatibility, as [0022](0022-picture-hardware-and-software-apart.md) R7, 0029 and 0030 deployed). The Galleria integration's contract copy changes with the `frames` key's new field, so Galleria updates with the release.
+- **Shown history after an outage is approximate.** A continuation slot's `presented` is recorded against its source photo's own planned window, once (the history keeps one row per assignment), so later cycles of the same photo during an outage are not recorded and the recently-shown window may not include them: after rejoining, the Planner can repeat a photo the Frame just cycled.
+- **The guard's cap.** A Pi cut off for more than about three and a half days has drifted past what the 30 s cap covers; two Frames on different Pis whose continuations list the same photo at different times could then overlap on screen by the drift beyond it.
 - **Repeats during a long outage.** A list is the plan's photos of that Run on that Frame, about its 5-minute reach (about 100 photos at 3 s, 30 at 10 s), so a long outage repeats every few minutes (`CoordinationLimits.horizon_seconds` sets the reach).
 - **Photos held off other Frames.** Listed photos stay off other Frames while their Pi may cycle them: 5 to 10 minutes of photos per Frame, indefinitely for a Pi switched off but still bound.
 - **A Run's first turn still waits for a Commit.** With Central silent, the Frame keeps its continuation at that change; a change past the reach is not followed while cut off.
@@ -54,7 +56,7 @@ The contract changes (E1 to E6) are in the [execution contract](../execution-con
 
 ## Deploying
 
-- **Deploy Central, then reboot the Pis.** Until a Pi runs the new release it refuses a plan that carries continuations, and a reboot is the only way a Pi changes release. Nothing is rebooted automatically.
+- **Deploy Central, then reboot the Pis.** Until a Pi runs the new release it refuses every state answer from the new Central and keeps what it holds (its last plan, then its kept photo), and a reboot is the only way a Pi changes release; it cannot hear a reboot command from Central meanwhile, so reboot each Pi by power or over SSH. Nothing is rebooted automatically.
 - **No iac bump.** The kernel, initrd and boot files are unchanged.
 - **Galleria:** update the integration with the release, so it reads the `frames` key's `continuing_since`.
 - **Bench, before merge:** the [render bench](../runbook.md#the-render-bench-and-pi-testing-before-merge) on the test Pi (the Player's drawing changed: continuation slots and the rejoin hold), and Central stopped for longer than the plan's reach. Neither has an automated tier beyond the DB-tier tracer (`tests/test_player_standalone_tracer.py`).

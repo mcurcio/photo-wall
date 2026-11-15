@@ -21,7 +21,7 @@ The operator interface lists Players and Outputs, creates persistent Frames, bin
 
 When a calibrated Frame shows a current readiness failure, follow the
 Frame-specific guidance on its Frame page: reduce concurrent video/effect work
-or use lighter media for `capacity`; check time synchronization for `clock`;
+or use lighter media for `capacity`;
 check supported media or choose another item for `decode`; inspect Player
 storage/network and Central delivery for `download`; inspect the Player cache
 and Central delivery path for `integrity`. Unknown codes receive generic
@@ -398,7 +398,7 @@ or on the Pi with `timedatectl` as above. `unsynchronised` for more than a minut
 
 **After an outage with the internet down,** a Pi that booted with no time source keeps its clock at the build's floor until it can reach a time server: photos keep playing, but Night off follows Central's last word and the card's "since" is wrong. Offering the router's time server over DHCP (option 42) closes this. The first power cut with the internet down on a real Pi is a bench check that has not been run ([the render bench and Pi testing](#the-render-bench-and-pi-testing-before-merge)).
 
-**After deploying Central, reboot the Pis.** An old Player refuses a plan that names a Frame with no photo, or one that carries continuations ([0032](decisions/0032-the-player-continues-centrals-plan.md)), until it runs the new release, and a reboot is the only way a Pi changes release. Nothing reboots one on its own.
+**After deploying Central, reboot the Pis.** An old Player refuses a plan that names a Frame with no photo, and, since [0032](decisions/0032-the-player-continues-centrals-plan.md), every state answer (each carries Central's time, `server_time`), so until it runs the new release it hears no plan, reboot command or release switch and keeps showing what it holds. A reboot is the only way a Pi changes release: reboot each Pi by power or over SSH. Nothing reboots one on its own.
 
 ### A Frame playing its continuation (Central slow or down)
 

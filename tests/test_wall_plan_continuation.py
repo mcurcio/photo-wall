@@ -95,3 +95,33 @@ def test_an_offer_holds_each_listed_photo_on_its_frame_to_until_with_the_guard()
         output_id="hdmi1", run_id="run", photos=("a",), start=10, seconds=10, until=40),))
     assert held_reservations(ending, guard=0.5)[0].extent == Extent(start=9.5, end=40.5)
     assert held_reservations(Plan(**common), guard=0.5) == ()
+
+
+def test_a_photo_its_layer_keeps_after_its_end_is_held_and_listed_open_ended():
+    """Decision 0032 with contracts/on_screen.py's kept still: a listed photo whose layer keeps it
+    after its end ("keep_this_photo") may stay on its Frame past `until`, until something replaces
+    it, so its hold and its list span are open-ended; another Frame's later segment never lists it.
+    Mutation probe: end a kept photo's hold at `until`."""
+    still = Variant(asset_id="photo-a", recipe_id="e" * 64, sha256="a" * 64, size=20,
+                    media_type="image/jpeg", width=30, height=20)
+    layer = Layer(assignment_id="a", run_id="run", output_id="hdmi1", frame_id="frame1",
+                  binding_generation=1, start=0, end=10, media_origin=0, variant=still,
+                  crop=CENTRED, after_end="keep_this_photo")
+    binding = OutputBinding(output_id="hdmi1", frame_id="frame1", generation=1,
+                            lighting=LIGHTING, display_mm=None)
+    plan = Plan(plan_id="plan", revision=1, player_id="player", authority_epoch=1, issued_at=0,
+                valid_from=0, valid_until=60, bindings=(binding,), layers=(layer,),
+                continuations=(Continuation(output_id="hdmi1", run_id="run", photos=("a",),
+                                            start=10, seconds=10, until=40),))
+    assert held_reservations(plan, guard=0.5)[0].extent == Extent(start=9.5)
+
+    kept = segment("left", (), until=130)
+    kept = kept.model_copy(update={"candidates": (
+        ListedPhoto(assignment_id="left-a", asset_id="a", kept=True),)})
+    later = segment("right", ("a",), start=200, until=260)
+    assert listed(continuation_lists([kept, later], extents={}, guard={})) == {
+        "out-left": ("left-a",)}
+    # Not kept, the photo is free on the right once the left's segment has ended.
+    plain = segment("left", ("a",), until=130)
+    assert listed(continuation_lists([plain, later], extents={}, guard={})) == {
+        "out-left": ("left-a",), "out-right": ("right-a",)}

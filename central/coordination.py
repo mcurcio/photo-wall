@@ -68,7 +68,7 @@ from contracts.models import (
     Revocation,
 )
 from contracts.on_screen import Extent
-from contracts.time import Clock
+from contracts.time import DRIFT_RATE, Clock
 
 LOG = logging.getLogger(__name__)
 
@@ -695,19 +695,22 @@ class Coordinator:
         readiness in its current epoch: every stored offer at or past the revision it names
         (every offer when it has reported none) holds its continuations' photos
         (`held_reservations`), and each photo it reports carrying is reserved on its Frame from
-        now on, while reported. A Player's Frames take its reported bound."""
+        now on, while reported. A Player's Frames take its reported bound, grown by `DRIFT_RATE`
+        for the time since Central received that report (a cut-off Pi's clock free-runs, and its
+        report says nothing of the drift since; both times are Central's)."""
         reserved: list[Reservation] = []
         frame_uncertainty: dict[str, float] = {}
         for player, config in sorted(configurations.items()):
             frames = {binding.output_id: binding.frame_id for binding in config.bindings}
             row = conn.execute(
-                "SELECT readiness FROM player_feedback WHERE player_id=%s AND authority_epoch=%s",
+                "SELECT readiness, received_at FROM player_feedback "
+                "WHERE player_id=%s AND authority_epoch=%s",
                 (player, config.authority_epoch),
             ).fetchone()
             report = Readiness.model_validate(row["readiness"]) if row else None
             if report is not None:
-                frame_uncertainty.update(
-                    {frame: report.clock_uncertainty for frame in frames.values()})
+                bound = report.clock_uncertainty + DRIFT_RATE * max(0.0, now - row["received_at"])
+                frame_uncertainty.update({frame: bound for frame in frames.values()})
             for offer in conn.execute(
                 "SELECT manifest FROM plan_offers WHERE player_id=%s AND authority_epoch=%s "
                 "AND revision>=%s ORDER BY revision",

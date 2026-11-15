@@ -245,8 +245,10 @@ def eligible(candidate: Candidate, target: FitTarget, crop_limit: float,
 # its content and interval are fixed): the arbitration; the fade-out, which a Finish or a
 # follower revises (`runtime._may_hold_to_the_end`); and the after-state, which is not content
 # (a Run's after-states are fixed by its Scene; migration 071 left in-flight endings'
-# offered layers at "leave_as_is" while their Scene says "keep_nothing").
-REVISABLE = frozenset({"priority", "root_order", "admission_order", "fade_out", "after_end"})
+# offered layers at "leave_as_is" while their Scene says "keep_nothing"); and whether it awaits a
+# grant (decision 0032: a lock offered before that release has none, and reads False).
+REVISABLE = frozenset({"priority", "root_order", "admission_order", "fade_out", "after_end",
+                       "awaits_grant"})
 
 
 def same_execution(first: Layer, second: Layer) -> bool:
@@ -813,7 +815,8 @@ class _ProjectionBuilder:
                                   if layer.presentation == "media"}):
                 candidates = tuple(
                     ListedPhoto(assignment_id=layer.assignment_id,
-                                asset_id=self.photo_of[layer.assignment_id])
+                                asset_id=self.photo_of[layer.assignment_id],
+                                kept=layer.after_end == "keep_this_photo")
                     for layer in sorted(layers, key=lambda layer: layer.start)
                     if layer.run_id == run_id and layer.presentation == "media"
                     and layer.assignment_id in self.photo_of)

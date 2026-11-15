@@ -3,7 +3,13 @@
 import math
 import time
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Final, Protocol
+
+DRIFT_RATE: Final = 100e-6
+"""Seconds per second a Pi's show clock may drift from Central's between samples: RFC 5905
+dispersion, undisciplined crystals both ends. The Player's bound grows by it (player/show_clock.py),
+and Central grows a Player's last reported bound by it while no newer report comes
+(central/coordination.py `_held_in`)."""
 
 
 class Clock(Protocol):

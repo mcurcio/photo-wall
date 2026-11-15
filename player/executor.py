@@ -186,6 +186,9 @@ class Executor:
         # Decision 0032: per Output, the show time it began drawing only continuation slots of the
         # held plan (`continuing_since`); kept by tick (`_note_continuing`).
         self._continuing: dict[str, float] = {}
+        # Decision 0032: plan layers Central invalidated at the held revision (`invalidate`); no
+        # continuation slot draws one until a Commit renews it or a new revision comes.
+        self._revoked: set[str] = set()
 
     def _timebase(self) -> float:
         """Plan time less this machine's monotonic time, so a renderer reads a composition's
@@ -341,6 +344,7 @@ class Executor:
             self._renderer_releases.update(set(self._assignments) - set(next_assignments))
             self._assignments = next_assignments
             self._plan = plan
+            self._revoked.clear()
             self._last_plan_id, self._last_revision = plan.plan_id, plan.revision
             self._last_revocation_sequence = 0
             self._capacity_ok = False
@@ -599,18 +603,23 @@ class Executor:
                 self._renderer_releases.add(key)
         if plan is None:
             return
+        # A slot, once made, keeps the photo it took: the held set grows as downloads land (and
+        # shrinks as one fails), which moves the k mod n mapping, so a slot already made is never
+        # made again with another photo. Within one plan, slots on an Output never share a start.
+        made = {(a.layer.output_id, a.layer.start) for a in self._assignments.values()
+                if a.source is not None}
         for continuation in plan.continuations:
             if continuation.until is not None and continuation.until <= now:
                 continue
             held = {photo for photo in continuation.photos
                     if (source := self._assignments.get(photo)) is not None and source.secured
                     and source.path is not None and source.source is None
-                    and source.failure not in ("download", "integrity")
-                    and self._current_authority(source)}
+                    and photo not in self._revoked and self._current_authority(source)}
             for layer in continuation_layers(plan, continuation, held=held, start=now,
                                              end=now + self.prepare_lead):
                 key = layer.assignment_id
-                if key in self._assignments or key in self._cancelled:
+                if (key in self._assignments or key in self._cancelled
+                        or (layer.output_id, layer.start) in made):
                     continue
                 found = continuation_source(plan, key, at=layer.start)
                 if found is None:
@@ -829,19 +838,32 @@ class Executor:
             for binding in self._config.bindings:
                 if binding.output_id not in self._config.enabled_outputs:
                     continue
+                due = [self._due_layer(a, now) for a in self._assignments.values()
+                       if a.layer.output_id == binding.output_id
+                       and self._assignment_in_force(a, now)]
+                if not due and plan is not None:
+                    due = self._continuation_unheld(plan, binding.output_id, now)
                 cause = frame_black(
                     showing=self.showing(binding),
                     own_drawing=self.renderer.patterned(binding.output_id),
-                    has_plan=has_plan, clock_ok=clock_ok,
-                    due=[self._due_layer(a, now) for a in self._assignments.values()
-                         if a.layer.output_id == binding.output_id
-                         and self._assignment_in_force(a, now)],
+                    has_plan=has_plan, clock_ok=clock_ok, due=due,
                     unfilled=plan is not None and any(
                         span.output_id == binding.output_id and self._in_force(span.start, span.end, now)
                         for span in plan.unfilled))
                 if cause is not None:
                     found.append(FrameBlack(binding.output_id, cause))
             return tuple(sorted(found, key=lambda black: black.output_id))
+
+    @staticmethod
+    def _continuation_unheld(plan: Plan, output_id: str, now: float) -> list[DueLayer]:
+        """Decision 0032: a continuation covering `now` on `output_id` with no slot in force wants a
+        photo it does not hold (none of its listed photos is secured: a wiped cache, downloads not
+        done), stated as one unsecured media layer due (`NO_PHOTO`), never a silent black."""
+        layers = {layer.assignment_id: layer for layer in plan.layers}
+        return [DueLayer("media", stack_order(layers[c.photos[0]]), secured=False, prepared=False,
+                         granted=False, failure=None)
+                for c in plan.continuations if c.output_id == output_id
+                and c.start - c.lead <= now and (c.until is None or now < c.until)]
 
     def _in_force(self, start: float, end: float, now: float) -> bool:
         """Whether something planned over [start, end) is in force at `now`, within the plan. Until
@@ -999,14 +1021,25 @@ class Executor:
                 assignment.granted_from = self._plan.valid_from
                 assignment.granted_until = self._plan.valid_until
                 self._invalidated.discard(assignment.layer.assignment_id)
+                self._revoked.discard(assignment.layer.assignment_id)
             return changed
 
     def cancel(self, assignment_ids: Iterable[str]) -> None:
         with self._lock:
-            for key in assignment_ids:
+            keys = set(assignment_ids)
+            for key in keys:
                 self._cancelled.add(key)
                 self._assignments.pop(key, None)
                 self._inactive.pop(key, None)
+                self._renderer_releases.add(key)
+            self._drop_slots_of(keys)
+
+    def _drop_slots_of(self, sources: set[str]) -> None:
+        """Decision 0032: the continuation slots made from `sources` go with them (a cancelled or
+        invalidated photo is no longer held, so `_continue` makes no new one)."""
+        for key, assignment in tuple(self._assignments.items()):
+            if assignment.source in sources:
+                del self._assignments[key]
                 self._renderer_releases.add(key)
 
     def release(self, assignment_ids: Iterable[str]) -> None:
@@ -1023,6 +1056,8 @@ class Executor:
                     # Revoked by Central, not lost: nothing to re-grant.
                     assignment.granted_sequence = None
                     self._invalidated.add(key)
+                    self._revoked.add(key)
+                    self._drop_slots_of({key})
 
     def accept_revocation(self, revocation: Revocation) -> bool:
         """Authenticated, revision-bound and idempotent external invalidation."""
