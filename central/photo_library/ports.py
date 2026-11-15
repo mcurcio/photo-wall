@@ -301,40 +301,67 @@ class LibraryWorkerStore(Protocol):
 
     def begin_check(self, pool_key: PoolKey) -> CheckLease | None:
         """Resume the pool's running check from its stored progress, or start the next check
-        number; either way the latest step's start (`step_at`) becomes now. None when the pool
-        is gone, unwanted, or its connection has no key."""
+        number; either way the latest step's start (`step_at`) becomes now. Starting a check
+        deletes the pages an earlier check of this pool left (one that never finished). None
+        when the pool is gone, unwanted, or its connection has no key."""
         ...
 
     def known_revisions(self, connection_ref: ConnectionRef,
                         upstream_ids: Sequence[LibraryRef]) -> dict[str, KnownRevision]:
-        """The recorded revisions of these Immich assets, by upstream id."""
+        """The recorded revisions of these Immich assets, by upstream id: of an asset's
+        revisions, the one last written (`changed_at`). Immich's `updated_at` is a compared
+        fact (`record_step`), so the revision Immich last moved is the row last written."""
         ...
 
     def record_step(self, lease: CheckLease, step: CheckStep) -> bool:
         """In one transaction, fenced by `lease.check_number` (False: superseded, nothing
-        written): store the marks, then upsert each entry's row as seen by this check (an InPool's
-        asset also into asset_revisions), except an entry whose upstream id carries a mark of this
-        check (stored now or by an earlier step): the subtraction's one home. Store the progress
-        and queue the next step."""
+        written): store the marks, then record each entry, except an entry whose upstream id
+        carries a mark of this check (stored now or by an earlier step): the subtraction's one
+        home. Store the progress and queue the next step.
+
+        A pass writes what changed, plus one page per step for what it saw (decision 0033):
+        - The step's marks are stored as one page per mark kind, and the upstream ids of the
+          entries it records as one `seen` page (`photo_check_pages`: one row holding the ids),
+          never a row per id.
+        - A row of `library_assets`, `asset_revisions` or `photo_pool_rows` is written only when
+          it is new or a stored fact differs. Compared: an asset's kind, taken time and, when
+          the step read them (an InPool), the original's five facts; a revision's width, height,
+          duration and `updated_at`; a pool row's outcome, reason and revision.
+        - A written row's `changed_at` is now and its `changed_by` is `library-check`; a new
+          row's `created_at` and `created_by` too, and they never change after.
+
+        Never, for a row whose facts are as stored: a write, a row lock (a guarded
+        `ON CONFLICT DO UPDATE ... WHERE` locks and logs the row it leaves alone), or a moved
+        `changed_at`. So the stored facts are read without a lock and only the rows that differ
+        are upserted, in Immich-id order (two pools' steps lock shared rows in one order).
+
+        Errors: a database error propagates with nothing written; the check resumes from its
+        stored progress once its step is stale (`due_pools`)."""
         ...
 
     def unseen_rows(self, lease: CheckLease, limit: int) -> tuple[LibraryRef, ...]:
         """Up to `limit` of the pool's rows this check has neither seen nor marked, by Immich id
         (follow-up S4): the rows its Re-check phase must ask Immich about, one at a time. A row
         marked by this check (excluded, a stacked copy) is not among them: it counts as gone.
-        Empty for a superseded lease."""
+        Empty for a superseded lease.
+
+        Seen or marked means: in a page of this check. The pages are read once a call as one
+        set of ids joined to the pool's rows, never searched once per row (a page holds 1,000
+        ids): 21,000 rows against 25 pages answer within a second."""
         ...
 
     def record_recheck(self, lease: CheckLease, ref: LibraryRef, matches: bool) -> bool:
         """One re-checked row, fenced as `record_step` (False: superseded, nothing written):
-        `matches` keeps the row as seen by this check; otherwise the row is removed, the only
-        removal of a row the check did not see. Queues the next step."""
+        `matches` keeps the row as seen by this check (a `seen` page of that one id; the row
+        itself is not written); otherwise the row is removed, the only removal of a row the
+        check did not see. Queues the next step."""
         ...
 
     def finish_check(self, lease: CheckLease, finish: CheckFinish) -> bool:
         """Complete: remove the rows this check marked (the subtraction) and record the time; a
         row it did not see stays, since only `record_recheck` removes one (follow-up S4).
-        Incomplete or failed: remove nothing (design rule 2). Fenced as `record_step`."""
+        Incomplete or failed: remove nothing (design rule 2). Fenced as `record_step`.
+        However it finishes, the check's pages are deleted: none outlives its check."""
         ...
 
     def frame_outputs(self) -> tuple[FrameOutput, ...]:

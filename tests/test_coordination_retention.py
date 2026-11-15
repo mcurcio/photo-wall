@@ -8,7 +8,9 @@ waiting), rolled the step back and wrote WAL each time until the database's disk
 
 These tests drive the real app's Scheduler on PostgreSQL: retention is its own step, its own
 short bounded transactions, holding no advisory lock, and a prune that cannot finish leaves the
-coordinator's steps ok."""
+coordinator's steps ok. Since decision 0033 a batch is whole (exactly `batch_rows` rows or none),
+through `central/infra/batched_retention.drain`, so a tick with less than a batch due commits
+nothing."""
 
 import threading
 import time
@@ -63,10 +65,10 @@ def runtime_now(db) -> float:
 def test_a_backlog_of_any_size_drains_in_bounded_steps_while_the_cycle_commits(registry, wall):
     """A backlog of more than one step's budget: each tick's coordinator steps are ok and the
     Runtime moves on, each tick deletes at most `BATCH_ROWS x BATCHES_PER_STEP` rows, and the
-    ticks after bring the table to exactly `EVENTS_KEPT`. Mutation probe: drop the `batches`
-    bound in `ExecutionEventRetention.prune` (the first tick deletes the whole backlog)."""
+    ticks after leave less than one batch beyond `EVENTS_KEPT`. Mutation probe: make `drain`
+    ignore `batches` (the first tick deletes the whole backlog)."""
     budget = BATCH_ROWS * BATCHES_PER_STEP
-    backlog = EVENTS_KEPT + budget + BATCH_ROWS // 2
+    backlog = EVENTS_KEPT + budget + BATCH_ROWS + BATCH_ROWS // 2
     seed(registry.db, backlog)
     registry.clock.advance(5)
     wall.state.scheduler.tick()
@@ -75,15 +77,16 @@ def test_a_backlog_of_any_size_drains_in_bounded_steps_while_the_cycle_commits(r
     assert runtime_now(registry.db) == registry.clock.utc()
     assert events(registry.db) == backlog - budget
     wall.state.scheduler.tick()
-    assert events(registry.db) == EVENTS_KEPT
+    assert events(registry.db) == EVENTS_KEPT + BATCH_ROWS // 2
     wall.state.scheduler.tick()
-    assert events(registry.db) == EVENTS_KEPT
+    assert events(registry.db) == EVENTS_KEPT + BATCH_ROWS // 2
 
 
 def test_each_retention_transaction_stays_within_its_row_budget(registry):
-    """One batch is one transaction of at most `batch_rows` of the oldest rows; a step stops at
-    its batch count and the next step goes on where it stopped, never past the newest `kept`.
-    Mutation probe: drop the `LIMIT` (the first batch deletes everything below the cut)."""
+    """One batch is one transaction of exactly `batch_rows` of the oldest rows; a step stops at
+    its batch count and the next step goes on where it stopped, never past the newest `kept`;
+    between `kept` and `kept + batch_rows` rows stay. Mutation probes: drop the `LIMIT` (the
+    first batch deletes everything below the cut); delete whatever is due (10 stay, not 16)."""
     seed(registry.db, 100)
     first = oldest(registry.db)
     retention = ExecutionEventRetention(registry.db, kept=10, batch_rows=7, batches=2)
@@ -91,20 +94,20 @@ def test_each_retention_transaction_stays_within_its_row_budget(registry):
     assert (oldest(registry.db), events(registry.db)) == (first + 14, 86)
     while retention.prune():
         pass
-    assert events(registry.db) == 10
+    assert events(registry.db) == 16
 
 
 def test_retention_keeps_exactly_kept_rows_across_sequence_gaps(registry):
     """Inserts rolled back (a 503, a statement timeout, an outage) use up sequence numbers and
-    leave no rows; the cut counts rows, so exactly `kept` stay. Mutation probe: cut at
-    `max(sequence) - kept` again (35 rows stay, not 40)."""
+    leave no rows; the cut counts rows, so a whole batch leaves exactly `kept`. Mutation probe:
+    cut at `max(sequence) - kept - batch_rows` (no batch is due and 60 rows stay, not 40)."""
     seed(registry.db, 30)
     with pytest.raises(RuntimeError), registry.db.transaction() as conn:
         conn.execute("INSERT INTO execution_events(occurred_at,kind) "
                      "SELECT 1000, 'observation' FROM generate_series(1, 5)")
         raise RuntimeError("rolled back")
     seed(registry.db, 30)
-    ExecutionEventRetention(registry.db, kept=40, batch_rows=100, batches=1).prune()
+    ExecutionEventRetention(registry.db, kept=40, batch_rows=20, batches=1).prune()
     assert events(registry.db) == 40
 
 
@@ -115,7 +118,7 @@ def test_a_prune_that_cannot_finish_holds_no_lock_and_never_fails_the_cycle(regi
     the retention facet fails; once the row is free the next tick drains. Red before the fix:
     settle failed with `LockNotAvailable` while it held the Coordination and Runtime locks.
     Mutation probe: run `ExecutionEventRetention.prune` inside `Coordinator._settle`."""
-    seed(registry.db, EVENTS_KEPT + 50)
+    seed(registry.db, EVENTS_KEPT + BATCH_ROWS)
     with registry.db.transaction() as conn:
         conn.execute("INSERT INTO media_references(owner,variant_key,expires_at) "
                      "VALUES('expired-offer','asset.recipe',1001)")

@@ -45,10 +45,11 @@ def test_087_names_a_secured_locks_variant_and_keeps_serving_its_bytes(empty_dat
         # Shows videos (105), which a new Frame writes; and the Position history and the Frame
         # without their profile or wall size (107, 108), which today's code no longer writes; and
         # each room light's colour source (109), which the Frame's lighting check reads; and the
-        # Runtime's audit fields and change log (111), which saving a Source writes.
+        # Runtime's audit fields and change log (111), which saving a Source writes; and the pool
+        # check's audit fields and pages (112), which seeding a pool writes.
         migrate_before(db, "087", also=("089_", "090_", "091_", "092_", "093_", "094_", "096_",
                                         "097_", "099_", "101_", "102_", "103_", "104_", "105_", "107_",
-                                        "108_", "109_", "111_"))
+                                        "108_", "109_", "111_", "112_"))
         registry = Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
         frame(registry, "portrait")
         picture = photo("photo-1", taken_at=900)

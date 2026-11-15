@@ -5,9 +5,11 @@ It behaves as the store's protocol docstrings say, and I1's conformance suite
 fenced by their number and judged by `policy.contact_health`; a check's steps are fenced by the
 check number; marks subtract (an id marked in a check never becomes a row of that check); a
 complete finish removes the rows the check marked, and a row it did not see leaves only through
-`record_recheck` (follow-up S4); any other finish removes nothing.
+`record_recheck` (follow-up S4); any other finish removes nothing. What a check saw or marked is
+kept as its pages (decision 0033), gone when it finishes or the pool's next check starts.
 Photos are held as PostgreSQL holds them (slice A2): one `assets` record per Immich asset, its
-`revisions` by asset id, and each revision's measured `copies`.
+`revisions` by asset id, and each revision's measured `copies`; a record's `changed_at` moves
+only when a fact it holds differs.
 
 Time is `clock.utc()` (a ManualClock in tests), standing in for the database's clock.
 """
@@ -21,7 +23,6 @@ from pydantic import SecretStr
 
 from central.installation_models import FrameOutput
 from central.photo_library.model import (
-    CheckMark,
     ConnectionSecret,
     ContactAnswer,
     ContactResult,
@@ -76,8 +77,8 @@ class LibraryAssetRecord:
     kind: str
     taken_at: float
     original: OriginalFile | None
-    first_seen: float
-    last_seen: float
+    created_at: float
+    changed_at: float
 
 
 @dataclass
@@ -90,7 +91,7 @@ class RevisionRecord:
     height: int
     duration: float | None
     updated_at: str | None
-    last_seen: float
+    changed_at: float
 
 
 @dataclass
@@ -108,8 +109,9 @@ class _Pool:
     requested: bool = True
     seen_so_far: int = 0
     up_to: int | None = None
-    rows: dict[str, tuple[PoolEntry, int]] = field(default_factory=dict)
-    marks: dict[str, tuple[CheckMark, int]] = field(default_factory=dict)
+    rows: dict[str, PoolEntry] = field(default_factory=dict)
+    pages: list[tuple[str, frozenset[str]]] = field(default_factory=list)   # the check's
+    marked: dict[str, str] = field(default_factory=dict)   # tests only: the latest check's marks
 
 
 class FakeLibraryStore:
@@ -136,10 +138,11 @@ class FakeLibraryStore:
         return key
 
     def rows(self, pool_key: str) -> dict[str, PoolEntry]:
-        return {ref: entry for ref, (entry, _) in self.pools[pool_key].rows.items()}
+        return dict(self.pools[pool_key].rows)
 
     def marks(self, pool_key: str) -> dict[str, str]:
-        return {ref: mark.mark for ref, (mark, _) in self.pools[pool_key].marks.items()}
+        """The marks the pool's latest check stored, by id (kept for tests after its pages go)."""
+        return dict(self.pools[pool_key].marked)
 
     def connection(self, ref: str) -> _Connection:
         return self.connections[ref]
@@ -222,6 +225,7 @@ class FakeLibraryStore:
             pool.check_number += 1
             pool.checking, pool.started_at, pool.progress = True, self._now(), None
             pool.requested, pool.seen_so_far = False, 0
+            pool.pages, pool.marked = [], {}
         pool.step_at = self._now()
         return CheckLease(pool_key=pool_key, query=pool.query, connection=secret,
                           check_number=pool.check_number, started_at=pool.started_at,
@@ -230,11 +234,11 @@ class FakeLibraryStore:
     def known_revisions(self, connection_ref: str,
                         upstream_ids: Sequence[str]) -> dict[str, KnownRevision]:
         known: dict[str, RevisionRecord] = {}
-        for revision in self.revisions.values():   # the latest seen with updatedAt, per id
+        for revision in self.revisions.values():   # the last written with updatedAt, per id
             if (revision.connection_ref == connection_ref and revision.updated_at is not None
                     and revision.upstream_id in upstream_ids):
                 kept = known.get(revision.upstream_id)
-                if kept is None or revision.last_seen >= kept.last_seen:
+                if kept is None or revision.changed_at >= kept.changed_at:
                     known[revision.upstream_id] = revision
         return {ref: KnownRevision(updated_at=r.updated_at, revision=r.revision)
                 for ref, r in known.items()}
@@ -259,9 +263,20 @@ class FakeLibraryStore:
             self.assets[(connection_ref, upstream_id)] = LibraryAssetRecord(
                 kind, taken_at, original if reads_original else None, now, now)
             return
-        parent.kind, parent.taken_at, parent.last_seen = kind, taken_at, now
-        if reads_original:
-            parent.original = original
+        kept = parent.original if not reads_original else original
+        if (parent.kind, parent.taken_at, parent.original) != (kind, taken_at, kept):
+            parent.kind, parent.taken_at, parent.original = kind, taken_at, kept
+            parent.changed_at = now
+
+    def _record_revision(self, entry: InPool) -> None:
+        asset, now = entry.asset, self._now()
+        facts = (asset.width, asset.height, asset.duration, entry.updated_at)
+        stored = self.revisions.get(asset.asset_id)
+        if stored is not None and (stored.width, stored.height, stored.duration,
+                                   stored.updated_at) == facts:
+            return
+        self.revisions[asset.asset_id] = RevisionRecord(
+            asset.connection_ref, asset.upstream_id, asset.revision, *facts, now)
 
     def _fenced(self, lease: CheckLease) -> _Pool | None:
         pool = self.pools.get(lease.pool_key)
@@ -273,24 +288,29 @@ class FakeLibraryStore:
         pool = self._fenced(lease)
         if pool is None:
             return False
+        kinds: dict[str, set[str]] = {}
         for mark in step.marks:
-            pool.marks[mark.upstream_id] = (mark, lease.check_number)
-        marked = {ref for ref, (_, number) in pool.marks.items() if number == lease.check_number}
+            kinds.setdefault(mark.mark, set()).add(mark.upstream_id)
+            pool.marked[mark.upstream_id] = mark.mark
+        pool.pages.extend((kind, frozenset(ids)) for kind, ids in sorted(kinds.items()))
+        marked = self._marked(pool)
+        seen = set()
         for entry in step.entries:
             ref = entry.asset.upstream_id if isinstance(entry, InPool) else entry.upstream_id
             if ref in marked:
                 continue
+            seen.add(ref)
             if isinstance(entry, InPool):
                 asset = entry.asset
                 self._record_asset(asset.connection_ref, ref, asset.kind, asset.taken_at,
                                    asset.original, reads_original=True)
-                self.revisions[asset.asset_id] = RevisionRecord(
-                    asset.connection_ref, ref, asset.revision, asset.width, asset.height,
-                    asset.duration, entry.updated_at, self._now())
+                self._record_revision(entry)
             elif entry.kind is not None and entry.taken_at is not None:
                 self._record_asset(pool.query.connection_ref, ref, entry.kind, entry.taken_at,
                                    None, reads_original=False)
-            pool.rows[ref] = (entry, lease.check_number)
+            pool.rows[ref] = entry
+        if seen:
+            pool.pages.append(("seen", frozenset(seen)))
         pool.progress, pool.seen_so_far = step.progress, step.seen_so_far
         if step.immich_up_to is not None:
             pool.up_to = step.immich_up_to
@@ -298,26 +318,25 @@ class FakeLibraryStore:
         return True
 
     @staticmethod
-    def _marked(pool: _Pool, lease: CheckLease) -> set[str]:
-        return {ref for ref, (_, number) in pool.marks.items() if number == lease.check_number}
+    def _marked(pool: _Pool) -> set[str]:
+        """The ids in the running check's mark pages."""
+        return {ref for kind, ids in pool.pages if kind != "seen" for ref in ids}
 
     def unseen_rows(self, lease: CheckLease, limit: int) -> tuple[str, ...]:
         pool = self._fenced(lease)
         if pool is None:
             return ()
-        marked = self._marked(pool, lease)
-        return tuple(sorted(ref for ref, (_, seen) in pool.rows.items()
-                            if seen < lease.check_number and ref not in marked))[:limit]
+        paged = {ref for _, ids in pool.pages for ref in ids}
+        return tuple(sorted(ref for ref in pool.rows if ref not in paged))[:limit]
 
     def record_recheck(self, lease: CheckLease, ref: str, matches: bool) -> bool:
         pool = self._fenced(lease)
         if pool is None:
             return False
-        if ref in pool.rows:
-            if matches:
-                pool.rows[ref] = (pool.rows[ref][0], lease.check_number)
-            else:
-                del pool.rows[ref]
+        if matches:
+            pool.pages.append(("seen", frozenset({ref})))
+        else:
+            pool.rows.pop(ref, None)
         self.queued.append(lease.pool_key)
         return True
 
@@ -327,11 +346,10 @@ class FakeLibraryStore:
             return False
         now = self._now()
         if isinstance(finish, CheckComplete):
-            marked = self._marked(pool, lease)
+            marked = self._marked(pool)
             pool.rows = {ref: row for ref, row in pool.rows.items() if ref not in marked}
-            pool.marks = {ref: mark for ref, mark in pool.marks.items()
-                          if mark[1] >= lease.check_number}
             pool.last_complete_at = now
+        pool.pages = []
         pool.checking, pool.progress, pool.finished_at, pool.outcome = False, None, now, finish
         return True
 
@@ -359,7 +377,7 @@ class FakeLibraryStore:
         for pool in self.pools.values():
             if not pool.wanted:
                 continue
-            for entry, _ in pool.rows.values():
+            for entry in pool.rows.values():
                 if isinstance(entry, InPool) and entry.asset.asset_id == asset_id:
                     return PoolThumbnail(connection_ref=entry.asset.connection_ref,
                                          upstream_id=entry.asset.upstream_id,
@@ -369,7 +387,7 @@ class FakeLibraryStore:
     def retire_unwanted(self) -> frozenset[str]:
         self.pools = {key: pool for key, pool in self.pools.items() if pool.wanted}
         return frozenset(entry.asset.asset_id for pool in self.pools.values()
-                         for entry, _ in pool.rows.values() if isinstance(entry, InPool))
+                         for entry in pool.rows.values() if isinstance(entry, InPool))
 
 
 async def check_to_end(checks, store: FakeLibraryStore, pool_key: str, *,

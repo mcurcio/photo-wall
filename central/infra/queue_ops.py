@@ -1,8 +1,8 @@
 """Queue hygiene: rescue the jobs of dead workers, purge what has finished (design §4, §10.3).
 
-Only OUR tasks are touched (`TASK_PREFIX` + a type this admin was built with): legacy
-`photo_wall.media.*` rows and procrastinate's builtins are never rescued, and the purge filters
-by our queues.
+The rescue touches only OUR tasks (`TASK_PREFIX` + a type this admin was built with): legacy
+`photo_wall.media.*` rows and procrastinate's builtins are never rescued. The purge
+(`FinishedJobs`) takes every queue's finished jobs, legacy ones included (decision 0033).
 
 **Rescue re-publishes first, then closes** the stalled row. The pending (queueing-lock) index
 covers only `todo`, so the new copy inserts while the stalled row is still `doing`. An asset
@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
@@ -27,6 +26,7 @@ from typing import Any, Final
 import procrastinate
 from procrastinate.jobs import Status
 
+from central.infra.batched_retention import Begin, drain
 from central.infra.job_queue import async_connector, build_app, decode, defer_async, task_name
 from central.infra.outcomes import JobOutcomes
 from central.kernel.handling import TransientFailure
@@ -56,7 +56,6 @@ class QueueAdmin:
     def __init__(self, dsn: str, *, job_types: Sequence[type[Job[Any]]] = CATALOG) -> None:
         self._app = build_app(async_connector(dsn, min_size=0, max_size=2), job_types, None)
         self._names = frozenset(task_name(job_type) for job_type in job_types)
-        self._queues = sorted({job_type.delivery.queue.value for job_type in job_types})
         self._opening = asyncio.Lock()
 
     async def _opened(self) -> procrastinate.App:
@@ -94,15 +93,57 @@ class QueueAdmin:
         await app.job_manager.finish_job_by_id_async(job_id=stalled.id, status=Status.FAILED,
                                                      delete_job=False)
 
-    async def delete_finished(self, *, older_than: timedelta) -> None:
-        """Delete our queues' succeeded, failed, cancelled and aborted rows older than that."""
-        # procrastinate counts whole hours; rounding up never deletes a row that is too young.
-        hours = max(1, math.ceil(older_than.total_seconds() / 3600))
-        app = await self._opened()
-        for queue in self._queues:
-            await app.job_manager.delete_old_jobs(
-                nb_hours=hours, queue=queue, include_failed=True, include_cancelled=True,
-                include_aborted=True)
+
+# The oldest finished jobs by id (the primary key's index), each judged by its newest event as
+# procrastinate's own `delete_old_jobs` judges it; `procrastinate_events` goes by its ON DELETE
+# CASCADE. A job with no event is never judged old, as in procrastinate's query. No index orders
+# jobs by their newest event, so when nothing is due the walk reads every finished job of the
+# kept window once an hour (central/infra/batched_retention.py's one exception to "bounded").
+_DELETE_FINISHED = (
+    "DELETE FROM procrastinate_jobs WHERE id IN ("
+    "SELECT j.id FROM procrastinate_jobs j "
+    "WHERE j.status IN ('succeeded', 'failed', 'cancelled', 'aborted') "
+    "AND (SELECT max(e.at) FROM procrastinate_events e WHERE e.job_id = j.id) "
+    "< now() - %(older_than)s::interval "
+    "ORDER BY j.id LIMIT %(batch_rows)s)"
+)
+
+
+class FinishedJobs:
+    """Every queue's finished jobs, deleted in bounded batches (decision 0033): replaces
+    `QueueAdmin.delete_finished`, whose call into procrastinate (`delete_old_jobs`) is one
+    unbounded DELETE per queue and covered the upkeep queues only. The media queue was never
+    purged: 392,000 of the 410,000 job rows on 2026-11-15.
+
+    `begin` opens one transaction per batch (`central.db.Database.transaction`); the loop is
+    `central.infra.batched_retention.drain`. `ValueError` when `batch_rows` or `batches` is
+    under 1.
+    """
+
+    def __init__(self, begin: Begin, *, batch_rows: int = 1000, batches: int = 20) -> None:
+        if batch_rows < 1 or batches < 1:
+            raise ValueError("batch_rows and batches must be >= 1")
+        self._begin, self._batch_rows, self._batches = begin, batch_rows, batches
+
+    def delete(self, *, older_than: timedelta) -> int:
+        """Delete up to `batches` batches of at most `batch_rows` jobs, oldest first, whose
+        status is succeeded, failed, cancelled or aborted and whose newest event is older than
+        `older_than` on the database's clock (the age procrastinate's own purge judges by);
+        each job's events go with it. Every queue, every task name. Returns the jobs deleted.
+        Blocks: call it from a worker thread.
+
+        One call is one hourly `PurgeFinishedJobs` run, so a short last batch is deleted too.
+        The defaults drain a backlog at 20,000 jobs an hour.
+
+        Never deletes a `todo` or `doing` job, a job younger than `older_than`, or more than
+        `batch_rows` jobs in one statement (each job's delete also removes about three events
+        and runs procrastinate's own per-row bookkeeping, under a 10 s statement timeout).
+
+        Errors: a failed batch raises the driver's error with the earlier batches committed;
+        the handler's run fails and the next hourly run goes on.
+        """
+        return drain(self._begin, _DELETE_FINISHED, {"older_than": older_than},
+                     batch_rows=self._batch_rows, batches=self._batches)
 
 
 class RescueStalledJobsHandler:
@@ -132,10 +173,10 @@ class RescueStalledJobsHandler:
 
 
 class PurgeFinishedJobsHandler:
-    def __init__(self, admin: QueueAdmin, *, transactions: Transactions, outcomes: JobOutcomes,
-                 clock: Clock, keep_jobs: timedelta = timedelta(days=7),
+    def __init__(self, finished: FinishedJobs, *, transactions: Transactions,
+                 outcomes: JobOutcomes, clock: Clock, keep_jobs: timedelta = timedelta(days=7),
                  keep_outcomes: timedelta = timedelta(days=30)) -> None:
-        self._admin = admin
+        self._finished = finished
         self._transactions = transactions
         self._outcomes = outcomes
         self._clock = clock
@@ -143,7 +184,8 @@ class PurgeFinishedJobsHandler:
         self._keep_outcomes = keep_outcomes
 
     async def handle(self, job: PurgeFinishedJobs) -> None:
-        await self._admin.delete_finished(older_than=self._keep_jobs)
+        jobs = await asyncio.to_thread(self._finished.delete, older_than=self._keep_jobs)
+        logger.info("purged %s finished jobs older than %s", jobs, self._keep_jobs)
         older_than = self._clock.utc() - self._keep_outcomes.total_seconds()
 
         def purge() -> int:

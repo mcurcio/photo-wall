@@ -89,8 +89,8 @@ class Parent(NamedTuple):
     kind: str
     taken_at: float
     original: OriginalFile | None
-    first_seen: float
-    last_seen: float
+    created_at: float
+    changed_at: float
 
 
 ORIGINAL = OriginalFile(media_type="image/jpeg", width=4032, height=3024, orientation=6,
@@ -171,8 +171,8 @@ class FakeHarness:
         record = self.store.assets.get((ref, upstream_id))
         if record is None:
             return None
-        return Parent(record.kind, record.taken_at, record.original, record.first_seen,
-                      record.last_seen)
+        return Parent(record.kind, record.taken_at, record.original, record.created_at,
+                      record.changed_at)
 
     def leased(self, asset_id: str) -> LibraryAsset | None:
         return self.store.library_asset(asset_id)
@@ -250,8 +250,8 @@ class PgHarness:
                                "upstream_id=%s", (ref, upstream_id)).fetchone()
         if row is None:
             return None
-        return Parent(row["kind"], row["taken_at"], _original_of(row), row["first_seen"],
-                      row["last_seen"])
+        return Parent(row["kind"], row["taken_at"], _original_of(row), row["created_at"],
+                      row["changed_at"])
 
     def leased(self, asset_id: str) -> LibraryAsset | None:
         with self.db.transaction() as conn:
@@ -589,10 +589,12 @@ def test_maintenance_retires_unwanted_pools_and_keeps_wanted_ones(harness):
 
 
 def test_one_immich_asset_seen_by_two_pools_and_two_checks_is_one_record(harness, clock):
-    """A2 case 1: one parent per Immich asset; its first sighting stays, its last moves, and a
-    taken-time change (a date edit in Immich, revision unchanged) rewrites the one record.
-    Mutation probe: keep taken_at on pool rows -> the second pool reads the old time (the
-    PostgreSQL half, tests/test_asset_tables.py)."""
+    """A2 case 1: one parent per Immich asset; a second sighting with the same facts leaves it
+    as it was (decision 0033), and a taken-time change (a date edit in Immich, revision
+    unchanged) rewrites the one record: its created time stays, its changed time moves.
+    Mutation probes: keep taken_at on pool rows -> the second pool reads the old time (the
+    PostgreSQL half, tests/test_asset_tables.py); move changed_at on every sighting -> the
+    unchanged sighting moves it."""
     store = harness.store
     ref = harness.connect()
     first = harness.want(SourceQuery(connection_ref=ref))
@@ -601,11 +603,14 @@ def test_one_immich_asset_seen_by_two_pools_and_two_checks_is_one_record(harness
     store.record_step(store.begin_check(first), step(InPool(asset=shown)))
     seen_at = clock.utc()
     clock.advance(60)
+    store.record_step(store.begin_check(second), step(InPool(asset=shown)))
+    assert harness.parent(ref, uid(1)) == Parent("image", 100.0, None, seen_at, seen_at)
+    clock.advance(60)
     redated = shown.model_copy(update={"taken_at": 50.0})
     store.record_step(store.begin_check(second), step(InPool(asset=redated)))
     parent = harness.parent(ref, uid(1))
     assert (parent.kind, parent.taken_at) == ("image", 50.0)
-    assert (parent.first_seen, parent.last_seen) == (seen_at, clock.utc())
+    assert (parent.created_at, parent.changed_at) == (seen_at, clock.utc())
     assert harness.leased(shown.asset_id) == redated    # the same revision, the new date
 
 
