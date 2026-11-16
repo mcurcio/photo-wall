@@ -30,7 +30,7 @@ from contracts.on_screen import kept_from
 from contracts.time import Monotonic
 from player.cache import Cache, CacheCapacityError, CacheError
 from player.frame_black import DueLayer, frame_black
-from player.look import alone, look_at
+from player.look import alone, held, look_at
 from player.rendering import (
     LocalLayer,
     OutputComposition,
@@ -541,7 +541,8 @@ class Executor:
     def _apply_after_end(self, binding: OutputBinding, local: LocalLayer, now: float) -> None:
         """A drawn layer, covered or not, sets what its Frame keeps for when nothing plays
         (`Layer.after_end`, planned by Central): nothing, from its first draw; or this photo,
-        at full strength, from its first draw at or after `kept_from` (contracts/on_screen.py)."""
+        from its first draw at or after `kept_from` (contracts/on_screen.py), drawn as the seam
+        rule looks it (`_fallback`)."""
         layer = local.layer
         if layer.after_end == "keep_nothing":
             self._retained.pop(binding.output_id, None)
@@ -553,8 +554,7 @@ class Executor:
         owner = (f"pwretain:{self.player_id}:{self._last_epoch}:"
                  f"{hashlib.sha256(identity.encode()).hexdigest()}")
         self._pin_intents[owner] = layer.variant.key
-        self._retained[binding.output_id] = _Retained(
-            replace(local, alpha=layer.opacity), binding, owner)
+        self._retained[binding.output_id] = _Retained(local, binding, owner)
 
     def _compositions(self, items: Iterable[_Assignment], now: float,
                       timebase: float) -> tuple[OutputComposition, ...]:
@@ -1166,9 +1166,12 @@ class Executor:
         )
 
     def _fallback(self, binding: OutputBinding, now: float) -> OutputComposition:
+        """What `binding`'s Frame shows when nothing plays: the photo it keeps, looked at `now` by
+        the seam rule (player/look.py `look_at`: a kept photo with nothing after it draws itself
+        next, so from `kept_from` on it is at its full strength), or nothing."""
         retained = self._retained.get(binding.output_id)
-        layers = (retained.local,) if retained else ()
-        return OutputComposition(binding, layers, fallback=True)
+        kept = OutputComposition(binding, (retained.local,) if retained else (), fallback=True)
+        return look_at(kept, now) if retained else kept
 
     def _show_fallback(self, composition: OutputComposition) -> bool:
         """Only observed fallback replaces state; unavailable retained media yields black."""
@@ -1390,7 +1393,7 @@ class Executor:
                     if acknowledgment:
                         self._current[binding.output_id] = acknowledgment[0]
                     continue
-                hold = self._rejoin_hold(previous, binding, now)
+                hold = self._rejoin_hold(previous, binding, now, timebase)
                 if hold is not None:
                     acknowledgment = self._acknowledgment(hold, self.renderer.present(hold))
                     if acknowledgment:
@@ -1424,12 +1427,13 @@ class Executor:
                    and now < window[1] for a in self._assignments.values())
 
     def _rejoin_hold(self, previous: OutputComposition | None, binding: OutputBinding,
-                     now: float) -> OutputComposition | None:
+                     now: float, timebase: float) -> OutputComposition | None:
         """Decision 0032, rejoining needs no event: a composition a newer plan superseded keeps
-        drawing, still, at each layer's full strength, while the new plan has a layer or
-        continuation slot on this Output in force now or starting within the prepare lead that
-        is not drawn yet (secured, prepared, due and granted if it awaits one). With nothing
-        of the new plan there, the Frame takes its after-state (None)."""
+        drawing past its layers' ends (player/look.py `held`), looked by the seam rule like every
+        composition (`_group`), so holding it never changes its picture, while the new plan has a
+        layer or continuation slot on this Output in force now or starting within the prepare
+        lead that is not drawn yet (secured, prepared, due and granted if it awaits one). With
+        nothing of the new plan there, the Frame takes its after-state (None)."""
         if (previous is None or previous.fallback or not previous.layers
                 or _binding_identity(binding) != _binding_identity(previous.binding)):
             return None
@@ -1439,6 +1443,7 @@ class Executor:
             return None
         if not self._wants_output(binding.output_id, now):
             return None
-        return OutputComposition(binding, tuple(
-            LocalLayer(local.layer, local.path, local.position, local.layer.opacity)
-            for local in previous.layers))
+        (hold,) = self._group((
+            LocalLayer(local.layer, local.path, local.layer.position(now), local.alpha)
+            for local in held(previous, now).layers), timebase, now)
+        return hold

@@ -40,7 +40,7 @@ import ctypes
 import json
 import logging
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Hashable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Final, Literal
@@ -366,7 +366,7 @@ class PlaneScreens:
             self._pictures.discard(picture.handle)
             self._lib.pw_picture_destroy(picture.handle)
 
-    def present(self, composition: Composition, pictures: Mapping[str, ScreenPicture], grant: FrameGrant,
+    def present(self, composition: Composition, pictures: Mapping[Hashable, ScreenPicture], grant: FrameGrant,
                 tag: str, picture_change: int | None, ground: ScreenPicture | None = None,
                 overlay: OverlayCorners | None = None) -> int | PresentRefused:
         """One commit of `composition`'s screen (module rule): each plane shows

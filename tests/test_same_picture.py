@@ -376,3 +376,65 @@ def test_what_the_executor_reads_as_seen_is_what_the_renderer_draws(tmp_path):
             for composition, at in handed if composition.timebase is not None]
     assert seen and all(executor == renderer for executor, renderer in seen)
     assert (["b"], ["b"]) in seen
+
+
+def test_a_rejoin_hold_caught_mid_dissolve_lets_the_dissolve_run_on(tmp_path):
+    """Central replans while photo b dissolves in over photo a, and a's layer ends during the
+    dissolve (decision 0032, rejoining): the superseded composition is held until the new plan's
+    layer starts, and the hold draws it as the seam rule does (player/look.py; owner, 2026-11-15:
+    "There *should* only be one place where the photo can change"), so the dissolve runs on as
+    planned to b at full, never cut to full when the hold begins."""
+    wall = Wall(tmp_path)
+    wall.plan.offer(layer("a", data=b"a", variant=jpeg(b"a"), start=100, end=112, awaits_grant=False),
+                    layer("b", data=b"b", variant=jpeg(b"b"), start=110, end=130, media_origin=110, fade_in=4,
+                          priority=1, awaits_grant=False), valid_until=200)
+    wall.plan.secure("a", b"a")
+    wall.plan.secure("b", b"b")
+    wall.run(111)
+    wall.plan.offer(layer("c", data=b"c", variant=jpeg(b"c"), start=116, end=200, media_origin=116, fade_in=2,
+                          awaits_grant=False), revision=2, valid_until=200)
+    shown = wall.run(115)
+    # The dissolve's planes: b at full beneath, a above at the rest (player/planes.py, A shown
+    # picture keeps its plane), a's share falling by 1/240 a refresh until b is alone at 114.
+    rest = [commit[2][1] if len(commit) == 3 else 0.0 for commit in shown if 111 <= commit[0] <= 114.5]
+    assert rest and all(earlier - later < 0.01 for earlier, later in zip(rest, rest[1:], strict=False)), rest
+    assert any(0.4 < share < 0.6 for share in rest), rest
+    assert rest[-1] == 0.0
+
+
+def test_a_rejoin_hold_keeps_the_picture_through_its_planned_fade_out(tmp_path):
+    """The hold keeps what the Frame draws until the new plan's layer starts (decision 0032): b,
+    held at full once its dissolve over a is done, does not fade out to black at its planned end
+    while the new plan's layer of another photo is due; the screen keeps b until that layer."""
+    wall = Wall(tmp_path)
+    wall.plan.offer(layer("a", data=b"a", variant=jpeg(b"a"), start=100, end=112, awaits_grant=False),
+                    layer("b", data=b"b", variant=jpeg(b"b"), start=110, end=115, media_origin=110, fade_in=4,
+                          fade_out=1, priority=1, awaits_grant=False), valid_until=200)
+    wall.plan.secure("a", b"a")
+    wall.plan.secure("b", b"b")
+    wall.run(111)
+    wall.plan.offer(layer("c", data=b"c", variant=jpeg(b"c"), start=116, end=200, media_origin=116, fade_in=2,
+                          awaits_grant=False), revision=2, valid_until=200)
+    shown = wall.run(116)
+    *_, last = (commit for commit in shown if commit[0] < 116)
+    assert len(last) == 2 and last[1][1] == 1.0, last
+    assert all(commit[1:] == last[1:] for commit in shown if last[0] <= commit[0] < 116)
+    assert last[0] < 114.1
+
+
+def test_the_kept_photo_is_drawn_as_the_seam_rule_looks_it(tmp_path):
+    """The photo a Frame keeps (contracts/on_screen.py "keep_this_photo") is looked by the seam
+    rule when nothing plays (player/executor.py `_fallback`), never at the alpha it was last drawn
+    with: kept, though it faded out over a layer playing on beneath it, it is at full once that
+    layer ends, for it draws itself next."""
+    wall = Wall(tmp_path)
+    wall.plan.offer(
+        layer("kept", data=b"a", variant=jpeg(b"a"), start=100, end=110, fade_out=2, priority=1,
+              after_end="keep_this_photo", awaits_grant=False),
+        layer("beneath", data=b"b", variant=jpeg(b"b"), start=100, end=115, awaits_grant=False),
+        valid_until=130)
+    wall.plan.secure("kept", b"a")
+    wall.plan.secure("beneath", b"b")
+    shown = wall.run(116)
+    *_, last = shown
+    assert last[0] >= 115 and len(last) == 2 and last[1][1] == 1.0, last

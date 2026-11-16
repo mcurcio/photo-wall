@@ -139,15 +139,40 @@ def target_bytes(size: tuple[int, int], turn: int, fill) -> bytes:
     return bytes(pixels)
 
 
+def harness_plane(name: str, at, strength: float, source: tuple[int, int] | None = None):
+    """The plane the app draws for the harness's picture `name` at Placement `at`: a photo layer
+    whose copy is named by `name` alone, of `source`'s size (finished at player/planes.py
+    `finish_size`) or, with none, of the placement's (finished at it). Each name is its own picture
+    (player/planes.py `drawn_identity`, `Plane.key`), whatever its fill: two names never share a
+    picture, as two black layers would."""
+    from contracts.models import Layer, Variant
+    from contracts.photo_crop import CENTRED
+    from player.planes import Plane
+    from player.rendering import LocalLayer
+
+    width, height = source or (at.width, at.height)
+    variant = Variant(asset_id=f"asset-{name}", recipe_id="e" * 64, sha256="a" * 64, size=1,
+                      media_type="image/jpeg", width=width, height=height)
+    layer = Layer(assignment_id=name, run_id="run", output_id=OUTPUT, frame_id="frame", binding_generation=1,
+                  start=0, end=10**9, media_origin=0, variant=variant, crop=CENTRED)
+    return Plane("frame", LocalLayer(layer, None, 0.0, 1.0), at, strength)
+
+
+def busy_reply(shown, busy) -> dict[str, bool]:
+    """The app's answer of which pictures a commit holds: each shown (name, plane, picture) by the
+    harness's `name`, never by `Plane.key` (a drawn identity, which never leaves the Player's
+    process and is no JSON key), as `busy(picture)` says."""
+    return {name: busy(picture) for name, _plane, picture in shown}
+
+
 def app() -> None:
     from contracts.frame_fit import Placement
-    from contracts.models import Layer, OutputBinding, Variant
-    from contracts.photo_crop import CENTRED
+    from contracts.models import OutputBinding
     from player.fit_pass import target_size
     from player.gpu import Target
     from player.plane_screen import PlaneScreens, overlay_corners
-    from player.planes import Composition, Plane
-    from player.rendering import LocalLayer, OutputComposition
+    from player.planes import Composition
+    from player.rendering import OutputComposition
 
     screens = PlaneScreens()
     binding = OutputComposition(OutputBinding(
@@ -180,17 +205,8 @@ def app() -> None:
             ground = pictures[key]
         shown = []
         for name, fill, x, y, width, height, strength, *source in planes:
-            at = Placement(x, y, width, height)
-            if source:      # a photo of that source size: finished at player/planes.py `finish_size`
-                variant = Variant(asset_id=f"asset-{name}", recipe_id="e" * 64, sha256="a" * 64, size=1,
-                                  media_type="image/jpeg", width=source[0][0], height=source[0][1])
-                layer = Layer(assignment_id=name, run_id="run", output_id=OUTPUT, frame_id="frame",
-                              binding_generation=1, start=0, end=10**9, media_origin=0, variant=variant,
-                              crop=CENTRED)
-            else:
-                layer = Layer(assignment_id=name, run_id="run", output_id=OUTPUT, frame_id="frame",
-                              binding_generation=1, start=0, end=10**9, media_origin=0, presentation="black")
-            plane = Plane("frame", LocalLayer(layer, None, 0.0, 1.0), at, strength)
+            plane = harness_plane(name, Placement(x, y, width, height), strength,
+                                  tuple(source[0]) if source else None)
             size = target_size(plane.size, screen.turn)
             key = (name, size)
             if key not in pictures:
@@ -198,12 +214,11 @@ def app() -> None:
                 pictures[key] = screens.import_picture(
                     target(size, target_bytes(size, screen.turn, fill), size[0] * 4))
                 assert pictures[key] is not None, ("import_refused", name, size)
-            shown.append((plane, pictures[key]))
-        result = screens.present(Composition(screen, tuple(plane for plane, _ in shown)),
-                                 {plane.key: picture for plane, picture in shown},
+            shown.append((name, plane, pictures[key]))
+        result = screens.present(Composition(screen, tuple(plane for _name, plane, _ in shown)),
+                                 {plane.key: picture for _name, plane, picture in shown},
                                  grant, tag, None, ground, overlay)
-        return {"result": result, "busy": {plane.key: screens.busy(picture)
-                                           for plane, picture in shown}}
+        return {"result": result, "busy": busy_reply(shown, screens.busy)}
 
     def trial_present(with_overlay: bool):
         """The trial Display Host holds for the grant (waited on up to 5 s), then one present of red

@@ -206,7 +206,7 @@ class Screens(Protocol):
 
     def forget(self, picture: ScreenPicture) -> None: ...
 
-    def present(self, composition: Composition, pictures: Mapping[str, ScreenPicture], grant: FrameGrant,
+    def present(self, composition: Composition, pictures: Mapping[Hashable, ScreenPicture], grant: FrameGrant,
                 tag: str, picture_change: int | None, ground: ScreenPicture | None = None,
                 overlay: OverlayCorners | None = None) -> int | PresentRefused: ...
 
@@ -680,7 +680,7 @@ class PlaneRenderer:
             composed = Composition(setting.screen, ())
         if not fits(self._budget, tuple({**self._newest, output_id: composed}.values())):
             return PresentationResult("failed", "capacity")
-        pictures: dict[str, ScreenPicture] = {}
+        pictures: dict[Hashable, ScreenPicture] = {}
         if pattern is not None:
             ground = self._pattern(output_id, pattern, setting)
             if ground == "failed":
@@ -904,7 +904,7 @@ class PlaneRenderer:
         return max((until for ends, until in self._fades.values() if until > now and local.layer.start > ends),
                    default=-float("inf"))
 
-    def _shown(self, plane: Plane, pictures: Mapping[str, ScreenPicture]) -> tuple:
+    def _shown(self, plane: Plane, pictures: Mapping[Hashable, ScreenPicture]) -> tuple:
         """What `plane` shows (module rule, Nothing changed): its Frame and layer, its picture and
         that picture's finish, its placement and strength; never the layer's play position."""
         entry = None if plane.layer is None else self._layers.get(plane.key)

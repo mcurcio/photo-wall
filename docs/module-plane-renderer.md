@@ -116,7 +116,11 @@ bottom to top in `stack_order`.
   and does not fade out when what its Frame draws next is the same picture (the next layer that can
   draw, which the composition carries in `following`: secured and granted if it awaits a grant; or, with none, the photo it keeps, "keep_this_photo"). The
   executor makes each composition with these and reads what is seen through the same look
-  (`look_at`), so it and the renderer never disagree on what a Frame shows. So a continuation
+  (`look_at`), so it and the renderer never disagree on what a Frame shows. A composition the
+  executor holds for a rejoin is looked the same way (`held`: each layer whose fade-out has not
+  begun keeps its picture past its end, a dissolve under way runs on), and so is the photo a Frame
+  keeps (`player/executor.py` `_fallback`); neither carries an alpha of its own (owner,
+  2026-11-15: "There *should* only be one place where the photo can change"). So a continuation
   repeating one photo, two planned layers of it, a replan, a rejoin and the fallback's kept photo
   keep the screen as it is. A real change fades as planned. Costs: a PNG always fades (it may show
   what lies beneath); the decoder budget's look ahead (`player/visibility.py` `shown_within`,

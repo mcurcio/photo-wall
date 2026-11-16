@@ -24,7 +24,10 @@ Rule this module owns (one home):
   layer (a slot, a planned layer, a new plan, a rejoin, a fallback's kept photo), this is the one
   place deciding whether the screen changes, and its inputs are the composition's alone: the
   executor (`look_at`: what it reads as seen) and the renderer (`look`: what it draws) look one
-  composition alike.
+  composition alike. A composition the executor holds past its layers' ends (`held`: the rejoin
+  hold, decision 0032) and the photo a Frame keeps (player/executor.py `_fallback`) are looked
+  through it too, never given an alpha of their own (owner, 2026-11-15: "There *should* only be
+  one place where the photo can change").
 """
 
 from __future__ import annotations
@@ -99,6 +102,24 @@ def look_at(composition: OutputComposition, now: float) -> OutputComposition:
     return replace(composition, layers=tuple(
         replace(local, alpha=_alpha(local.layer, fades[local.layer.assignment_id], now))
         for local in composition.layers))
+
+
+def held(composition: OutputComposition, now: float) -> OutputComposition:
+    """`composition` kept on its Frame past its layers' ends (decision 0032, the rejoin hold), for
+    `look_at` and `look` to draw like any other: a layer whose fade-out as the seam rule leaves it
+    (module rule) is empty or has not begun at plan time `now` draws itself next, so its fade-out
+    is left out and it keeps its picture past its end; a fade-in under way runs on and a fade-out
+    under way runs to its end, as drawn. So holding a composition never changes its picture: a
+    dissolve caught by the hold completes as planned. Pure."""
+    fades = _fades(composition)
+
+    def kept(local: LocalLayer) -> LocalLayer:
+        fading, end = fades[local.layer.assignment_id][1]
+        if fading < end and now >= fading:
+            return local
+        return replace(local, layer=local.layer.model_copy(update={"fade_out": 0.0}))
+
+    return replace(composition, layers=tuple(kept(local) for local in composition.layers))
 
 
 def look(composition: OutputComposition, at: float) -> OutputComposition:

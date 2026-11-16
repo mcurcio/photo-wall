@@ -50,7 +50,10 @@ Rules this module owns (one home each):
   from); never its assignment id, its timing or its fades. Two layers of one identity draw the same
   pixels, so the renderer finishes one picture for both (player/plane_renderer.py) and the seam
   rule (player/look.py) never fades between them (owner, 2026-11-15: "The player shouldn't be
-  running any translations if the displayed content isn't going to change").
+  running any translations if the displayed content isn't going to change"). The identity is
+  compared, never sent: it is a key within the Player's process alone (the renderer's pictures,
+  the screens' commit), and anything that leaves it (a log, a test harness's reply) names a plane
+  by its own words, never by `Plane.key`.
 - **What a still's decode hands the GPU** (`still_region`): the crop window of the copy, in whole
   pixels, scaled to the finish size; never the whole copy (player/decode.py, The still pipeline).
 
