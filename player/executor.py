@@ -1313,9 +1313,13 @@ class Executor:
                                 if prepared.status == "failed":
                                     observations.append(self._observation(local, now, "failed", "decode"))
                     if waiting:
-                        candidate = replace(candidate, layers=tuple(
-                            local for local in candidate.layers
-                            if local.layer.assignment_id not in waiting))
+                        layers = tuple(local for local in candidate.layers
+                                       if local.layer.assignment_id not in waiting)
+                        # Held layers alone are no composition of the new plan: with every one of
+                        # its layers waiting, what the Frame holds keeps drawing (`_rejoin_hold`).
+                        if all(local.layer.assignment_id in handing for local in layers):
+                            layers = ()
+                        candidate = replace(candidate, layers=layers)
                         candidates[binding.output_id] = candidate
                     given_up: set[str] = set()
                     if not failed and candidate.layers:

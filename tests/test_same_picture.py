@@ -545,3 +545,43 @@ def test_the_held_picture_is_freed_and_never_reported_after_the_hand_over(tmp_pa
     assert all(local.layer.assignment_id == "c" for local in executor._current["hdmi1"].layers)
     assert "a" not in wall.renderer._holders and "a" not in executor._renderer_residents
     assert held_picture in wall.screens.forgotten                # its buffer, once no commit shows it
+
+
+def test_a_rejoin_whose_new_layer_still_decodes_keeps_the_held_picture(tmp_path):
+    """The new plan's only layer on a Frame is revealed while its decode is in flight (it kept its
+    decoder free while covered, so it is drawn once ready): the hand-over has nothing of the new
+    plan to draw yet, so the Frame keeps the held picture alone, never black and never a
+    composition of held layers reported as the new plan's; once decoded the new layer dissolves in
+    over it, and is presented, never failed."""
+    rig = PlanRig(tmp_path, capacity=1)
+    top = layer("a", data=b"a", variant=jpeg(b"a"), start=100, end=130, priority=1, awaits_grant=False)
+    below = layer("c", data=b"c", variant=jpeg(b"c"), start=116, end=200, media_origin=116, fade_in=2,
+                  awaits_grant=False)
+    rig.offer(top, below)
+    rig.secure("a", b"a")
+    rig.secure("c", b"c")
+    observations = []
+
+    def refresh(until: float) -> None:
+        while rig.clock.utc() < until:
+            rig.executor.prepare_imminent()
+            observations.extend(rig.executor.tick())
+            rig.advance(0.25)
+
+    refresh(112)        # one slot: c, covered by a, gives up its decoder and waits for its reveal
+    assert rig.executor.readiness().prepared == ("a", "c")
+    rig.renderer.limit = 4
+    rig.renderer.pending.add("c")
+    rig.offer(below, revision=2)                                # Central replans: a is superseded
+    refresh(117)
+    drawn = rig.renderer.outputs["hdmi1"]
+    assert not drawn.fallback and [local.layer.assignment_id for local in drawn.layers] == ["a"]
+    assert not any(o.assignment_id == "c" for o in observations)
+    rig.renderer.pending.clear()
+    refresh(117.5)
+    drawn = rig.renderer.outputs["hdmi1"]
+    assert [local.layer.assignment_id for local in drawn.layers] == ["a", "c"]     # the dissolve
+    refresh(119)
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi1"].layers] == ["c"]
+    assert {o.status for o in observations if o.assignment_id == "c"} == {"presented"}
+    assert not any(o.assignment_id == "a" for o in observations if o.observed_at >= 112)
