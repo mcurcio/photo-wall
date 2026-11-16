@@ -291,7 +291,8 @@ def test_the_time_loop_carries_the_cause_and_a_redirect_ends_it(tmp_path):
             service.link.client = service.link.time_client = httpx.AsyncClient(
                 transport=httpx.MockTransport(_central_503))
             task = asyncio.create_task(service._time_loop())
-            while service.last_fault != "clock_probe":
+            # Named like every other failed request (no clock_probe code; decision 0032).
+            while service.last_fault != "central_error":
                 await asyncio.sleep(.01)
             assert "cause=central reason=error" in service.last_fault_detail
             assert not task.done()

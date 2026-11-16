@@ -7,6 +7,7 @@ bounded: preroll/presentation may report pending while native work continues asy
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -35,6 +36,14 @@ class OutputComposition:
     # the frame it draws (player/look.py). None: a still composition, drawn as its layers say
     # (a fallback: black, or a kept photo at full strength).
     timebase: float | None = None
+    # The Frame's layers that start after `layers` and are not drawn yet, as the executor holds
+    # them: what the Frame draws next, which player/look.py's seam rule reads so a layer never
+    # fades out to the picture it already shows. Not part of `request`: it is not drawn.
+    following: tuple[Layer, ...] = ()
+    # The picture the Frame showed alone at full when the executor made this composition (player/
+    # look.py `alone` of the composition its Output last acknowledged drawing); None: none. Read by
+    # the seam rule, so the executor and the renderer look a composition alike. Not part of `request`.
+    shown: Hashable | None = None
 
     @property
     def calibration(self) -> Calibration:
@@ -101,6 +110,11 @@ class Renderer(Protocol):
     # (player/impediment.py), so Display Host counts it only while that grant is admitted.
     def drawn_grant(self, output_id: str) -> str | None: ...
 
+    # Whether `output_id`'s last presented commit drew a pattern ground (a test pattern, a
+    # calibration target or a commissioning grid), the Output's own drawing whatever a Frame's
+    # content is; False when nothing was presented.
+    def patterned(self, output_id: str) -> bool: ...
+
 
 class UnavailableRenderer:
     """No picture can be made (player/renderer_root.py): registration remains possible without
@@ -128,6 +142,9 @@ class UnavailableRenderer:
 
     def drawn_grant(self, output_id: str) -> str | None:
         return None
+
+    def patterned(self, output_id: str) -> bool:
+        return False
 
 
 class RecordingRenderer:
@@ -157,6 +174,7 @@ class RecordingRenderer:
         self.room_lights: list[RoomLightsDocument] = []     # every document drawn with, in order
         # Each Output's grant, given at its first successful present (a test may set another).
         self.grants: dict[str, str] = {}
+        self.patterns: set[str] = set()     # the Outputs showing a pattern ground (a test sets it)
 
     def set_player(self, player_id: str | None) -> None:
         self.player_id = player_id
@@ -201,3 +219,6 @@ class RecordingRenderer:
 
     def drawn_grant(self, output_id: str) -> str | None:
         return self.grants.get(output_id)
+
+    def patterned(self, output_id: str) -> bool:
+        return output_id in self.patterns

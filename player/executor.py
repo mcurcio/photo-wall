@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Iterable
+from collections.abc import Hashable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import RLock
 
+from contracts.continuation import continuation_layers, continuation_source
 from contracts.models import (
     PREPARE_SECONDS,
+    CarriedPhoto,
     Commit,
     Failure,
     Layer,
@@ -23,15 +25,19 @@ from contracts.models import (
     Revocation,
     stack_order,
 )
+from contracts.node_app_link import FrameBlack
 from contracts.on_screen import kept_from
-from contracts.time import Clock, TimeMapping
+from contracts.time import Monotonic
 from player.cache import Cache, CacheCapacityError, CacheError
+from player.frame_black import DueLayer, frame_black
+from player.look import alone, handed_over, held, look_at
 from player.rendering import (
     LocalLayer,
     OutputComposition,
     PresentationResult,
     Renderer,
 )
+from player.show_clock import ShowClock
 from player.visibility import beneath_shown, shed, shown_within, visible_now
 
 DRAW_GRACE = 0.5
@@ -80,6 +86,9 @@ class _Assignment:
     granted_layer: Layer | None = None
     granted_from: float = 0
     granted_until: float = 0
+    # Decision 0032: a continuation slot (contracts/continuation.py) names the plan layer whose
+    # secured bytes it draws; None for a plan layer. A slot is never reported to Central.
+    source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -101,9 +110,21 @@ def _binding_identity(binding: OutputBinding) -> tuple:
     return binding.output_id, binding.frame_id, binding.generation
 
 
+def may_still_play(plan: Plan, layer: Layer, now: float) -> bool:
+    """Whether `layer` of `plan` may still be drawn at or after `now` (decision 0032): within its
+    own span and the plan's validity, or as the source of a continuation of the plan that has not
+    ended. The one test of how long a plan layer's bytes are wanted (the executor's pins, the
+    service's downloads)."""
+    if now < min(layer.end, plan.valid_until):
+        return True
+    return any(layer.assignment_id in continuation.photos
+               and (continuation.until is None or continuation.until > now)
+               for continuation in plan.continuations)
+
+
 TIMEBASE_TOLERANCE = 0.001
-"""Seconds the clock mapping may move before compositions carry the new one (`_timebase`): each
-re-anchor reads two clocks, which moves it by microseconds that no frame can show."""
+"""Seconds the ShowClock's timebase may move before compositions carry the new one (`_timebase`):
+a re-anchor that small is no change any frame can show."""
 
 
 class Executor:
@@ -120,15 +141,15 @@ class Executor:
         player_id: str,
         cache: Cache,
         renderer: Renderer,
-        clock: Clock,
-        mapping: TimeMapping,
+        clock: Monotonic,
+        show_clock: ShowClock,
         prepare_lead: float = PREPARE_SECONDS,
     ):
         if not math.isfinite(prepare_lead) or prepare_lead <= 0:
             raise ValueError("prepare_lead must be finite and positive")
         self.player_id = player_id
         self.cache, self.renderer = cache, renderer
-        self.clock, self.mapping = clock, mapping
+        self.clock, self.show_clock = clock, show_clock
         self.prepare_lead = prepare_lead
         self._lock = RLock()
         self._cache_work = RLock()
@@ -152,7 +173,6 @@ class Executor:
         self._last_revocation_sequence = 0
         self._last_configuration_revision = 0
         self._frame_generations: dict[str, int] = {}
-        self._anchor: float | None = None       # the timebase while the mapping was last healthy
         self._handed: float | None = None       # the timebase compositions carry (`_timebase`)
         self._capacity_ok = False
         self._renderer_releases: set[str] = set()
@@ -161,21 +181,28 @@ class Executor:
         self._wanted: set[str] = set()
         self._unwanted: set[str] = set()
         self._retired_outputs: dict[str, OutputBinding] = {}
+        # Decision 0032: assignments a newer plan superseded while on screen; their composition
+        # keeps drawing until that Output draws a layer of the new plan (`_rejoin_hold`).
+        self._superseded: set[str] = set()
+        # Decision 0032: per Output, the show time it began drawing only continuation slots of the
+        # held plan (`continuing_since`); kept by tick (`_note_continuing`).
+        self._continuing: dict[str, float] = {}
+        # Decision 0032: plan layers Central invalidated at the held revision (`invalidate`); no
+        # continuation slot draws one until a Commit renews it or a new revision comes.
+        self._revoked: set[str] = set()
 
     def _timebase(self) -> float:
         """Plan time less this machine's monotonic time, so a renderer reads a composition's
-        layers at its own frame times (player/look.py): anchored while the mapping is healthy,
-        and handed over unchanged until it moves by more than TIMEBASE_TOLERANCE, so the renderer
-        compares it by equality and two clock readings' jitter never redraws a still picture."""
-        if self.mapping.healthy():
-            self._anchor = self.clock.utc() - self.clock.monotonic()
-        mapped = self._anchor if self._anchor is not None else self.clock.utc() - self.clock.monotonic()
-        if self._handed is None or abs(mapped - self._handed) > TIMEBASE_TOLERANCE:
-            self._handed = mapped
+        layers at its own frame times (player/look.py): the ShowClock's, handed over unchanged
+        until it moves by more than TIMEBASE_TOLERANCE, so the renderer compares it by equality
+        and a re-anchor no frame can show never redraws a still picture."""
+        timebase = self.show_clock.timebase()
+        if self._handed is None or abs(timebase - self._handed) > TIMEBASE_TOLERANCE:
+            self._handed = timebase
         return self._handed
 
     def _now(self) -> float:
-        return self._timebase() + self.clock.monotonic()
+        return self.show_clock.now()
 
     def _binding(self, output_id: str) -> OutputBinding | None:
         if self._config:
@@ -261,13 +288,14 @@ class Executor:
             if (not self._config or plan.player_id != self.player_id
                     or plan.authority_epoch != self._last_epoch):
                 raise AuthorityError("plan authority mismatch")
-            now = self._now()
-            if plan.valid_until <= now or plan.issued_at > now + self.mapping.max_uncertainty:
-                raise AuthorityError("expired or future-issued plan")
-            if self._last_plan_id is not None and plan.plan_id != self._last_plan_id:
-                raise AuthorityError("plan identity must remain stable within its epoch")
+            # Re-delivery of the held plan is a no-op, past its validity too (decision 0032).
             if plan == self._plan:
                 return False
+            now = self._now()
+            if plan.valid_until <= now:
+                raise AuthorityError("expired plan")
+            if self._last_plan_id is not None and plan.plan_id != self._last_plan_id:
+                raise AuthorityError("plan identity must remain stable within its epoch")
             if plan.revision <= self._last_revision:
                 raise AuthorityError("stale plan revision")
             if tuple(plan.bindings) != tuple(self._config.bindings):
@@ -299,17 +327,25 @@ class Executor:
                         secured=layer.presentation == "black",
                         offered_until=plan.valid_until,
                     )
+            drawn = {local.layer.assignment_id for composition in self._current.values()
+                     if not composition.fallback for local in composition.layers}
             for key, assignment in self._assignments.items():
                 if key not in next_assignments:
                     # A complete newer manifest supersedes execution, independently
-                    # of the conservative lease protecting possibly secured bytes.
+                    # of the conservative lease protecting possibly secured bytes. One on screen
+                    # is not invalidated: its composition keeps drawing until its Output draws a
+                    # layer of the new plan (decision 0032, `_rejoin_hold`).
                     self._lose_preparation(assignment)
-                    self._invalidated.add(key)
-                    if assignment.secured or assignment.acquiring:
+                    if key in drawn:
+                        self._superseded.add(key)
+                    else:
+                        self._invalidated.add(key)
+                    if assignment.source is None and (assignment.secured or assignment.acquiring):
                         self._inactive[key] = assignment
             self._renderer_releases.update(set(self._assignments) - set(next_assignments))
             self._assignments = next_assignments
             self._plan = plan
+            self._revoked.clear()
             self._last_plan_id, self._last_revision = plan.plan_id, plan.revision
             self._last_revocation_sequence = 0
             self._capacity_ok = False
@@ -383,7 +419,7 @@ class Executor:
                 self._assignments.get(assignment_id) is not assignment
                 or not self._current_authority(assignment)
                 or not self._plan
-                or self._now() >= min(assignment.layer.end, self._plan.valid_until)
+                or not may_still_play(self._plan, assignment.layer, self._now())
             ):
                 return False
             assignment.failure = None
@@ -473,7 +509,8 @@ class Executor:
         now = self._now()
         desired = {a.owner for a in self._assignments.values() if a.acquiring or (
             a.secured and self._current_authority(a) and self._plan
-            and now < min(a.layer.end, self._plan.valid_until)
+            and (now < a.layer.end if a.source is not None
+                 else may_still_play(self._plan, a.layer, now))
         )} | {item.owner for item in self._retained.values()}
         for key, assignment in tuple(self._inactive.items()):
             if assignment.acquiring or (assignment.secured and now < min(
@@ -491,7 +528,8 @@ class Executor:
                             f"{item.local.layer.assignment_id}")
         for composition in self._current.values():
             for local in composition.layers:
-                if self._valid_current(local, composition, now) and local.layer.variant:
+                if local.layer.variant and (local.layer.assignment_id in self._superseded
+                                            or self._valid_current(local, composition, now)):
                     desired.add(f"pwexec:{self.player_id}:{self._last_epoch}:"
                                 f"{local.layer.assignment_id}")
         return desired
@@ -503,7 +541,8 @@ class Executor:
     def _apply_after_end(self, binding: OutputBinding, local: LocalLayer, now: float) -> None:
         """A drawn layer, covered or not, sets what its Frame keeps for when nothing plays
         (`Layer.after_end`, planned by Central): nothing, from its first draw; or this photo,
-        at full strength, from its first draw at or after `kept_from` (contracts/on_screen.py)."""
+        from its first draw at or after `kept_from` (contracts/on_screen.py), drawn as the seam
+        rule looks it (`_fallback`)."""
         layer = local.layer
         if layer.after_end == "keep_nothing":
             self._retained.pop(binding.output_id, None)
@@ -515,15 +554,19 @@ class Executor:
         owner = (f"pwretain:{self.player_id}:{self._last_epoch}:"
                  f"{hashlib.sha256(identity.encode()).hexdigest()}")
         self._pin_intents[owner] = layer.variant.key
-        self._retained[binding.output_id] = _Retained(
-            replace(local, alpha=layer.opacity), binding, owner)
+        self._retained[binding.output_id] = _Retained(local, binding, owner)
 
     def _compositions(self, items: Iterable[_Assignment], now: float,
                       timebase: float) -> tuple[OutputComposition, ...]:
-        return self._group((self._local(assignment, now) for assignment in items), timebase)
+        return self._group((self._local(assignment, now) for assignment in items), timebase, now)
 
-    def _group(self, pictures: Iterable[LocalLayer],
-               timebase: float | None = None) -> tuple[OutputComposition, ...]:
+    def _group(self, pictures: Iterable[LocalLayer], timebase: float | None = None,
+               now: float | None = None) -> tuple[OutputComposition, ...]:
+        """`pictures` as one composition per bound Output, bottom to top. Drawn over time from
+        `now` on (with `timebase`), each carries what its Frame shows (`_shown`) and draws next
+        (`_following`), and its layers' alphas are its look at `now`
+        (player/look.py `look_at`, the seam rule): what the executor reads as seen is what the
+        renderer draws."""
         grouped: dict[str, list[LocalLayer]] = {}
         for local in pictures:
             grouped.setdefault(local.layer.output_id, []).append(local)
@@ -534,24 +577,107 @@ class Executor:
                 # Bottom to top by the one stacking order: a later photo of a Run is drawn over
                 # the one it dissolves in over.
                 layers.sort(key=lambda local: stack_order(local.layer))
-                result.append(OutputComposition(binding,
-                                                tuple(layers), timebase=timebase))
+                composition = OutputComposition(binding, tuple(layers), timebase=timebase)
+                if now is not None and timebase is not None:
+                    composition = look_at(replace(
+                        composition, following=self._following(output_id, layers, now),
+                        shown=self._shown(binding)), now)
+                result.append(composition)
         return tuple(result)
+
+    def _following(self, output_id: str, drawn: Iterable[LocalLayer], now: float) -> tuple[Layer, ...]:
+        """The layers `output_id`'s Frame holds that are not `drawn`, have not ended at `now` and
+        can be drawn: of the current plan (none failed or superseded; a plan's layers lie within
+        its validity, contracts/models.py `Plan`), secured, and granted when they await a grant
+        (decision 0032). What the Frame draws next, for player/look.py's seam rule; a layer that
+        may never draw is not one, so the picture before it fades out as planned."""
+        drawing = {local.layer.assignment_id for local in drawn}
+        return tuple(assignment.granted_layer or assignment.layer for key, assignment in self._assignments.items()
+                     if assignment.layer.output_id == output_id and key not in drawing
+                     and key not in self._superseded and assignment.failure is None
+                     and self._current_authority(assignment) and now < assignment.layer.end
+                     and assignment.secured
+                     and (not assignment.layer.awaits_grant or assignment.granted_layer is not None))
+
+    def _shown(self, binding: OutputBinding) -> Hashable | None:
+        """The picture `binding`'s Frame shows alone at full: player/look.py `alone` of what its
+        Output last acknowledged drawing for this binding (`_current`); None before one."""
+        current = self._current.get(binding.output_id)
+        if current is None or _binding_identity(current.binding) != _binding_identity(binding):
+            return None
+        return alone(current.layers)
+
+    def _window(self, assignment: _Assignment) -> tuple[float, float]:
+        """When `assignment` may be drawn: a plan layer within the plan's validity; a
+        continuation slot by its own start and end, never cut by the plan's validity."""
+        layer = assignment.layer
+        if assignment.source is not None or self._plan is None:
+            return layer.start, layer.end
+        return max(layer.start, self._plan.valid_from), min(layer.end, self._plan.valid_until)
 
     def _imminent(self, now: float) -> list[_Assignment]:
         if not self._plan:
             return []
         return [a for a in self._assignments.values() if self._current_authority(a)
-                and now < min(a.layer.end, self._plan.valid_until)
-                and max(a.layer.start, self._plan.valid_from) <= now + self.prepare_lead]
+                and now < (window := self._window(a))[1]
+                and window[0] <= now + self.prepare_lead]
 
-    def _clock_gate(self) -> bool:
-        healthy = self.mapping.healthy()
-        if not healthy:
-            for assignment in self._assignments.values():
-                self._end_grant(assignment)
-                assignment.readiness_generation += 1
-        return healthy
+    def _continue(self, now: float) -> None:
+        """Decision 0032: the held plan's continuation slots over [now, now + prepare lead), each
+        drawing its source's secured bytes (never downloaded on its own); slots that ended and
+        are not drawn are dropped. contracts/continuation.py is the one generator."""
+        plan = self._plan
+        drawn = {local.layer.assignment_id for composition in self._current.values()
+                 for local in composition.layers}
+        for key, assignment in tuple(self._assignments.items()):
+            if assignment.source is not None and assignment.layer.end <= now and key not in drawn:
+                del self._assignments[key]
+                self._renderer_releases.add(key)
+        if plan is None:
+            return
+        # A slot, once made, keeps the photo it took: the held set grows as downloads land (and
+        # shrinks as one fails), which moves the k mod n mapping, so a slot already made is never
+        # made again with another photo. Within one plan, slots on an Output never share a start.
+        made = {(a.layer.output_id, a.layer.start) for a in self._assignments.values()
+                if a.source is not None}
+        for continuation in plan.continuations:
+            if continuation.until is not None and continuation.until <= now:
+                continue
+            held = {photo for photo in continuation.photos
+                    if (source := self._assignments.get(photo)) is not None and source.secured
+                    and source.path is not None and source.source is None
+                    and photo not in self._revoked and self._current_authority(source)}
+            for layer in continuation_layers(plan, continuation, held=held, start=now,
+                                             end=self._continued_until(continuation.output_id, now)):
+                key = layer.assignment_id
+                if (key in self._assignments or key in self._cancelled
+                        or (layer.output_id, layer.start) in made):
+                    continue
+                found = continuation_source(plan, key, at=layer.start)
+                if found is None:
+                    continue
+                source = self._assignments[found[2].assignment_id]
+                self._assignments[key] = _Assignment(
+                    layer, f"pwexec:{self.player_id}:{self._last_epoch}:{key}", secured=True,
+                    path=source.path, source=source.layer.assignment_id)
+
+    def _continued_until(self, output_id: str, now: float) -> float:
+        """How far ahead slots are made on `output_id`: the prepare lead, and past the end of every
+        layer playing there whose fade-out starts within it, so what its Frame draws next is held
+        before that fade-out starts (player/look.py's seam rule reads it); a slot made early keeps
+        its photo and is prepared only within the prepare lead (`_imminent`)."""
+        playing = [assignment.layer.end for assignment in self._assignments.values()
+                   if assignment.layer.output_id == output_id and assignment.layer.start <= now
+                   and assignment.layer.end - assignment.layer.fade_out <= now + self.prepare_lead
+                   and self._current_authority(assignment)]
+        return max([now + self.prepare_lead, *(math.nextafter(end, math.inf) for end in playing)])
+
+    def _may_start(self, assignment: _Assignment, now: float) -> bool:
+        """Decision 0032, a grant only for a change: a layer that awaits a grant starts while its
+        grant covers `now`; any other (a continuation slot included) at its own instant."""
+        if assignment.layer.awaits_grant:
+            return self._grant_covers(assignment, now)
+        return assignment.layer.start <= now < assignment.layer.end
 
     @staticmethod
     def _end_grant(assignment: _Assignment) -> None:
@@ -588,7 +714,10 @@ class Executor:
                 if a.secured and a.failure in (None, "capacity")]
 
     def _horizon(self, now: float) -> float:
-        return self._plan.valid_until if self._plan else now
+        if not self._plan:
+            return now
+        return max([self._plan.valid_until, *(a.layer.end for a in self._assignments.values()
+                                              if a.source is not None)])
 
     def prepare_imminent(self) -> None:
         """Renderer-thread preroll. No filesystem or network access occurs here.
@@ -599,8 +728,9 @@ class Executor:
         reveal and is prepared again within the lead before it shows. Only then does a Frame give
         up its bottom-most seen layer (failure `capacity`), never the whole screen."""
         with self._lock:
-            self._drain_renderer_releases()
             now = self._now()
+            self._continue(now)
+            self._drain_renderer_releases()
             imminent = self._imminent(now)
             until, horizon = now + self.prepare_lead, self._horizon(now)
             frames = self._frames(imminent)
@@ -617,7 +747,14 @@ class Executor:
                         for a in imminent}
             for output_id, retained in self._retained.items():
                 pictures.setdefault(retained.local.layer.assignment_id, retained.local)
+            # What a superseded composition still draws stays resident (`_rejoin_hold`).
+            holding = {local.layer.assignment_id: (local, composition.binding)
+                       for composition in self._current.values() for local in composition.layers
+                       if local.layer.assignment_id in self._superseded}
+            for key, (local, _) in holding.items():
+                pictures.setdefault(key, local)
             needed = {a.layer.assignment_id for items in seen.values() for a in items}
+            needed.update(holding)
             needed.update(self._retained[o].local.layer.assignment_id for o in kept_seen)
             spare = [retained.local.layer.assignment_id for output_id, retained
                      in self._retained.items() if output_id not in kept_seen]
@@ -657,6 +794,9 @@ class Executor:
                 if retained.local.layer.assignment_id not in released:
                     self.renderer.prepare(retained.local, self._binding(output_id) or retained.binding)
                     self._renderer_residents.add(retained.local.layer.assignment_id)
+            for key, (local, binding) in holding.items():
+                self.renderer.prepare(local, binding)
+                self._renderer_residents.add(key)
             for assignment in (*(a for items in seen.values() for a in items),
                                *(a for a in covered if a.layer.assignment_id not in released)):
                 if not assignment.secured:
@@ -686,7 +826,6 @@ class Executor:
                 for assignment in imminent:
                     if not assignment.started:
                         self._lose_preparation(assignment)
-            self._clock_gate()
 
     def showing(self, binding: OutputBinding) -> bool:
         """Whether `binding`'s Frame has a picture on screen: the composition its Output last
@@ -698,32 +837,147 @@ class Executor:
                     and (current.binding.frame_id, current.binding.generation) == (binding.frame_id, binding.generation)
                     and bool(visible_now(current.layers)))
 
+    def continuing_since(self, binding: OutputBinding) -> float | None:
+        """Show time at which this Output began drawing continuation slots of the held plan without
+        a planned layer between; None while it draws a planned layer, a superseded one, or nothing."""
+        with self._lock:
+            current = self._current.get(binding.output_id)
+            if current is None or _binding_identity(current.binding) != _binding_identity(binding):
+                return None
+            return self._continuing.get(binding.output_id)
+
+    def _note_continuing(self, now: float) -> None:
+        """Tick's one writer of `_continuing`: an Output whose drawn composition shows only
+        continuation slots of the held plan keeps the instant it first did (`now` then); any other
+        visible layer (a planned one, a superseded one, a kept photo) or nothing visible clears it."""
+        def slot(assignment_id: str) -> bool:
+            assignment = self._assignments.get(assignment_id)
+            return (assignment is not None and assignment.source is not None
+                    and assignment_id not in self._superseded)
+
+        for output_id in tuple(self._continuing):
+            if output_id not in self._current:
+                del self._continuing[output_id]
+        for output_id, composition in self._current.items():
+            visible = () if composition.fallback else visible_now(composition.layers)
+            if visible and all(slot(local.layer.assignment_id) for local in visible):
+                self._continuing.setdefault(output_id, now)
+            else:
+                self._continuing.pop(output_id, None)
+
+    def frames_black(self) -> tuple[FrameBlack, ...]:
+        """Renderer thread: each enabled Output that is black while content is wanted, and why
+        (player/frame_black.py), sorted by Output. Nothing here draws or decides what is drawn."""
+        with self._lock:
+            if not self._config:
+                return ()
+            now, plan = self._now(), self._plan
+            # Decision 0032: a continuation that covers now is plan too.
+            has_plan = plan is not None and (plan.valid_until > now or any(
+                c.start - c.lead <= now and (c.until is None or now < c.until)
+                for c in plan.continuations))
+            clock_ok = self.show_clock.anchored
+            found = []
+            for binding in self._config.bindings:
+                if binding.output_id not in self._config.enabled_outputs:
+                    continue
+                due = [self._due_layer(a, now) for a in self._assignments.values()
+                       if a.layer.output_id == binding.output_id
+                       and self._assignment_in_force(a, now)]
+                if not due and plan is not None:
+                    due = self._continuation_unheld(plan, binding.output_id, now)
+                cause = frame_black(
+                    showing=self.showing(binding),
+                    own_drawing=self.renderer.patterned(binding.output_id),
+                    has_plan=has_plan, clock_ok=clock_ok, due=due,
+                    unfilled=plan is not None and any(
+                        span.output_id == binding.output_id and self._in_force(span.start, span.end, now)
+                        for span in plan.unfilled))
+                if cause is not None:
+                    found.append(FrameBlack(binding.output_id, cause))
+            return tuple(sorted(found, key=lambda black: black.output_id))
+
+    @staticmethod
+    def _continuation_unheld(plan: Plan, output_id: str, now: float) -> list[DueLayer]:
+        """Decision 0032: a continuation covering `now` on `output_id` with no slot in force wants a
+        photo it does not hold (none of its listed photos is secured: a wiped cache, downloads not
+        done), stated as one unsecured media layer due (`NO_PHOTO`), never a silent black."""
+        layers = {layer.assignment_id: layer for layer in plan.layers}
+        return [DueLayer("media", stack_order(layers[c.photos[0]]), secured=False, prepared=False,
+                         granted=False, failure=None)
+                for c in plan.continuations if c.output_id == output_id
+                and c.start - c.lead <= now and (c.until is None or now < c.until)]
+
+    def _in_force(self, start: float, end: float, now: float) -> bool:
+        """Whether something planned over [start, end) is in force at `now`, within the plan. Until
+        the ShowClock is anchored there is no `now` to tell by, so all of it counts."""
+        if not self.show_clock.anchored:
+            return True
+        return (self._plan is not None
+                and max(start, self._plan.valid_from) <= now < min(end, self._plan.valid_until))
+
+    def _assignment_in_force(self, assignment: _Assignment, now: float) -> bool:
+        """`_in_force` for an assignment: a continuation slot by its own span alone."""
+        if not self.show_clock.anchored:
+            return True
+        start, end = self._window(assignment)
+        return self._plan is not None and start <= now < end
+
+    def _due_layer(self, assignment: _Assignment, now: float) -> DueLayer:
+        return DueLayer(assignment.layer.presentation, stack_order(assignment.layer),
+                        secured=assignment.secured,
+                        prepared=assignment.prepared or assignment.deferred,
+                        granted=self._may_start(assignment, now) or self._executing(assignment, now),
+                        failure=assignment.failure)
+
+    @staticmethod
+    def _grant_covers(assignment: _Assignment, now: float) -> bool:
+        """Whether the Commit accepted for `assignment` authorizes it at `now`."""
+        granted = assignment.granted_layer
+        return (granted is not None and max(granted.start, assignment.granted_from) <= now
+                < min(granted.end, assignment.granted_until))
+
+    @staticmethod
+    def _executing(assignment: _Assignment, now: float) -> bool:
+        """Whether `assignment`'s execution lease, the grant it started under, runs at `now`."""
+        executing = assignment.execution_layer
+        return (executing is not None
+                and executing.start <= now < min(executing.end, assignment.execution_until))
+
     @property
     def failures(self) -> tuple[Failure, ...]:
         with self._lock:
             return tuple(Failure(assignment_id=key, code=assignment.failure)
                          for key, assignment in sorted(self._assignments.items())
-                         if assignment.failure is not None)
+                         if assignment.failure is not None and assignment.source is None)
 
-    def readiness(self) -> Readiness:
+    def secured_ids(self) -> frozenset[str]:
+        """The current-authority assignments whose bytes are secured, regardless of the clock:
+        what downloads and Readiness both read, so downloads never wait for Central's time."""
+        with self._lock:
+            return frozenset(key for key, assignment in self._assignments.items()
+                             if assignment.secured and assignment.source is None
+                             and self._current_authority(assignment))
+
+    def readiness(self) -> Readiness | None:
+        """Readiness for the current plan; None while the ShowClock is not anchored, the one
+        decider of "no readiness yet" (a Player without Central's time claims nothing)."""
         with self._lock:
             if not self._plan:
                 raise AuthorityError("no current plan")
+            if not self.show_clock.anchored:
+                return None
             now = self._now()
-            clock_ok = self._clock_gate()
-            imminent = self._imminent(now)
-            current = [a for a in self._assignments.values() if self._current_authority(a)
-                       and now < min(a.layer.end, self._plan.valid_until)]
+            # A continuation slot is the Player's own: never reported (Central knows its source).
+            imminent = [a for a in self._imminent(now) if a.source is None]
             failures = {f.assignment_id: f for f in self.failures}
-            for assignment in imminent:
-                key = assignment.layer.assignment_id
-                if not clock_ok:
-                    failures[key] = Failure(assignment_id=key, code="clock")
-                elif not self._capacity_ok:
+            if not self._capacity_ok:
+                for assignment in imminent:
+                    key = assignment.layer.assignment_id
                     failures[key] = Failure(assignment_id=key, code="capacity")
             self._sequence += 1
-            # Wire values remain finite; unhealthy mapping is also explicitly coded.
-            uncertainty = self.mapping.uncertainty
+            # Wire values remain finite. The bound is a quality Central reads, never a failure.
+            uncertainty = self.show_clock.uncertainty
             if not math.isfinite(uncertainty):
                 uncertainty = 86400.0
             prepared = tuple(sorted(a.layer.assignment_id for a in imminent
@@ -737,10 +991,10 @@ class Executor:
             readiness = Readiness(
                 plan_id=self._plan.plan_id, revision=self._plan.revision,
                 authority_epoch=self._last_epoch, sequence=self._sequence,
-                secured=tuple(sorted(a.layer.assignment_id for a in current if a.secured)),
+                secured=tuple(sorted(self.secured_ids())),
                 prepared=prepared, capacity_ok=self._capacity_ok, clock_uncertainty=uncertainty,
                 observed_at=now, failures=tuple(failures[key] for key in sorted(failures)),
-                lost_grants=lost,
+                lost_grants=lost, carried=self._carried(),
             )
             self._reported[self._sequence] = {
                 key: self._assignments[key].readiness_generation for key in readiness.prepared
@@ -748,6 +1002,22 @@ class Executor:
             for sequence in sorted(self._reported)[:-128]:
                 del self._reported[sequence]
             return readiness
+
+    def _carried(self) -> tuple[CarriedPhoto, ...]:
+        """Decision 0032: each photo drawn (visible in what an Output last acknowledged) or kept
+        whose assignment is neither a layer nor a continuation slot of the held plan."""
+        def placed(assignment_id: str) -> bool:
+            return assignment_id in self._assignments
+        found: dict[tuple[str, str], None] = {}
+        for output_id, composition in self._current.items():
+            for local in visible_now(composition.layers):
+                if local.layer.variant and not placed(local.layer.assignment_id):
+                    found[(output_id, local.layer.variant.asset_id)] = None
+        for output_id, retained in self._retained.items():
+            if retained.local.layer.variant and not placed(retained.local.layer.assignment_id):
+                found[(output_id, retained.local.layer.variant.asset_id)] = None
+        return tuple(CarriedPhoto(output_id=output_id, asset_id=asset_id)
+                     for output_id, asset_id in sorted(found))
 
     def accept_commit(self, commit: Commit) -> bool:
         with self._lock:
@@ -767,10 +1037,8 @@ class Executor:
                     for key in commit.assignment_ids):
                 return False
             now = self._now()
-            if (not self._clock_gate() or not self._capacity_ok
-                    or commit.committed_at > now + self.mapping.max_uncertainty
-                    or commit.committed_at < self._plan.issued_at):
-                raise AuthorityError("commit clock, time or capacity gate failed")
+            if not self._capacity_ok:
+                raise AuthorityError("commit capacity gate failed")
             assignments = []
             reported = self._reported.get(commit.readiness_sequence, {})
             for key in commit.assignment_ids:
@@ -785,7 +1053,7 @@ class Executor:
                     raise AuthorityError("commit references revoked or unknown readiness")
                 intended_start = max(assignment.layer.start, self._plan.valid_from)
                 if (assignment.execution_layer is None
-                        and now > intended_start + self.mapping.max_uncertainty
+                        and now > intended_start + self.show_clock.uncertainty
                         and commit.committed_at < intended_start):
                     raise AuthorityError("missed start requires fresh late-join authorization")
                 assignments.append(assignment)
@@ -796,14 +1064,25 @@ class Executor:
                 assignment.granted_from = self._plan.valid_from
                 assignment.granted_until = self._plan.valid_until
                 self._invalidated.discard(assignment.layer.assignment_id)
+                self._revoked.discard(assignment.layer.assignment_id)
             return changed
 
     def cancel(self, assignment_ids: Iterable[str]) -> None:
         with self._lock:
-            for key in assignment_ids:
+            keys = set(assignment_ids)
+            for key in keys:
                 self._cancelled.add(key)
                 self._assignments.pop(key, None)
                 self._inactive.pop(key, None)
+                self._renderer_releases.add(key)
+            self._drop_slots_of(keys)
+
+    def _drop_slots_of(self, sources: set[str]) -> None:
+        """Decision 0032: the continuation slots made from `sources` go with them (a cancelled or
+        invalidated photo is no longer held, so `_continue` makes no new one)."""
+        for key, assignment in tuple(self._assignments.items()):
+            if assignment.source in sources:
+                del self._assignments[key]
                 self._renderer_releases.add(key)
 
     def release(self, assignment_ids: Iterable[str]) -> None:
@@ -820,6 +1099,8 @@ class Executor:
                     # Revoked by Central, not lost: nothing to re-grant.
                     assignment.granted_sequence = None
                     self._invalidated.add(key)
+                    self._revoked.add(key)
+                    self._drop_slots_of({key})
 
     def accept_revocation(self, revocation: Revocation) -> bool:
         """Authenticated, revision-bound and idempotent external invalidation."""
@@ -885,9 +1166,12 @@ class Executor:
         )
 
     def _fallback(self, binding: OutputBinding, now: float) -> OutputComposition:
+        """What `binding`'s Frame shows when nothing plays: the photo it keeps, looked at `now` by
+        the seam rule (player/look.py `look_at`: a kept photo with nothing after it draws itself
+        next, so from `kept_from` on it is at its full strength), or nothing."""
         retained = self._retained.get(binding.output_id)
-        layers = (retained.local,) if retained else ()
-        return OutputComposition(binding, layers, fallback=True)
+        kept = OutputComposition(binding, (retained.local,) if retained else (), fallback=True)
+        return look_at(kept, now) if retained else kept
 
     def _show_fallback(self, composition: OutputComposition) -> bool:
         """Only observed fallback replaces state; unavailable retained media yields black."""
@@ -965,7 +1249,6 @@ class Executor:
             # renderer draws, through `timebase` (player/look.py).
             timebase = self._timebase()
             now = timebase + self.clock.monotonic()
-            self._clock_gate()
             if not self._config:
                 return ()
             for output_id, binding in tuple(self._retired_outputs.items()):
@@ -976,22 +1259,20 @@ class Executor:
                 if (not assignment.secured or not (assignment.prepared or assignment.deferred)
                         or assignment.failure or not self._current_authority(assignment)):
                     continue
-                granted = assignment.granted_layer
-                if (granted is not None and self.mapping.healthy()
-                        and max(granted.start, assignment.granted_from) <= now
-                        < min(granted.end, assignment.granted_until)):
-                    assignment.execution_layer = granted
-                    assignment.execution_until = assignment.granted_until
-                executing = assignment.execution_layer
-                if (executing is not None and executing.start <= now
-                        < min(executing.end, assignment.execution_until)):
+                # Decision 0032: a layer that awaits a grant starts under it, any other at its own
+                # instant; either runs to its end, never leased to the plan's validity.
+                if self._may_start(assignment, now):
+                    started = assignment.granted_layer or assignment.layer
+                    assignment.execution_layer = started
+                    assignment.execution_until = started.end
+                if self._executing(assignment, now):
                     # Revisions renew offers, not old execution leases. Until a
                     # fresh commit, use the original authorized ordering/effects.
-                    active.append(replace(assignment, layer=executing))
+                    active.append(replace(assignment, layer=assignment.execution_layer))
             # Every playing layer, a covered one included; what is drawn leaves out a deferred one
             # while it is covered (it holds no decoder).
             playing = {c.binding.output_id: c for c in self._compositions(active, now, timebase)}
-            candidates = {output_id: self._drawable(composition)
+            candidates = {output_id: self._hand_over(self._drawable(composition), now, timebase)
                           for output_id, composition in playing.items()}
             observations = []
             for binding in self._config.bindings:
@@ -1008,8 +1289,11 @@ class Executor:
                         local.layer.assignment_id for local in visible_now(previous.layers)
                     } if previous and not previous.fallback else set()
                     waiting: set[str] = set()
+                    # The held layers of a hand-over (`_hand_over`) are drawn, never the held plan's.
+                    handing = {local.layer.assignment_id for local in candidate.layers
+                               if local.layer.assignment_id not in self._assignments}
                     for local in visible_now(candidate.layers):
-                        if local.layer.assignment_id not in formerly_visible:
+                        if local.layer.assignment_id not in formerly_visible | handing:
                             # A covered pipeline may have paused. Seek to logical now
                             # before reveal instead of using its historical preroll.
                             prepared = self.renderer.prepare(local, candidate.binding)
@@ -1029,9 +1313,13 @@ class Executor:
                                 if prepared.status == "failed":
                                     observations.append(self._observation(local, now, "failed", "decode"))
                     if waiting:
-                        candidate = replace(candidate, layers=tuple(
-                            local for local in candidate.layers
-                            if local.layer.assignment_id not in waiting))
+                        layers = tuple(local for local in candidate.layers
+                                       if local.layer.assignment_id not in waiting)
+                        # Held layers alone are no composition of the new plan: with every one of
+                        # its layers waiting, what the Frame holds keeps drawing (`_rejoin_hold`).
+                        if all(local.layer.assignment_id in handing for local in layers):
+                            layers = ()
+                        candidate = replace(candidate, layers=layers)
                         candidates[binding.output_id] = candidate
                     given_up: set[str] = set()
                     if not failed and candidate.layers:
@@ -1048,6 +1336,9 @@ class Executor:
                             given_up.add(victim.assignment_id)
                             self.renderer.release(victim.assignment_id)
                             self._renderer_residents.discard(victim.assignment_id)
+                            if victim.assignment_id in handing:
+                                fits = self.renderer.capacity(tuple(candidates.values())).available
+                                continue                # a held picture is given up first, unreported
                             assignment = self._assignments[victim.assignment_id]
                             self._lose_preparation(assignment)
                             assignment.failure = "capacity"
@@ -1057,6 +1348,8 @@ class Executor:
                             self._capacity_ok = False
                             failed = True
                             for local in candidate.layers:
+                                if local.layer.assignment_id in handing:
+                                    continue
                                 assignment = self._assignments[local.layer.assignment_id]
                                 self._lose_preparation(assignment)
                                 assignment.failure = "capacity"
@@ -1070,9 +1363,11 @@ class Executor:
                                 self._current[binding.output_id] = drawn
                                 self._current_leases[binding.output_id] = min(
                                     self._assignments[local.layer.assignment_id].execution_until
-                                    for local in candidate.layers
+                                    for local in candidate.layers if local.layer.assignment_id not in handing
                                 )
                                 for local in visible_now(drawn.layers):
+                                    if local.layer.assignment_id in handing:
+                                        continue
                                     assignment = self._assignments[local.layer.assignment_id]
                                     assignment.started = True
                                     observations.append(self._observation(local, observed_at, "presented"))
@@ -1091,23 +1386,32 @@ class Executor:
                                     continue
                             failed = True
                             for local in visible_now(candidate.layers):
+                                if local.layer.assignment_id in handing:
+                                    continue
                                 assignment = self._assignments[local.layer.assignment_id]
                                 self._lose_preparation(assignment)
                                 assignment.failure = "decode"
                                 observations.append(self._observation(local, now, "failed", "decode"))
                 # Retain only a still-valid previous composition. Expired overlays or
                 # videos cannot persist because a replacement failed or went missing.
+                # A superseded one only while the new plan wants this Output (`_rejoin_hold`).
                 if previous and not previous.fallback and all(
                     self._valid_current(local, previous, now) for local in previous.layers
-                ):
-                    continuation = OutputComposition(
-                        binding, tuple(
-                            LocalLayer(local.layer, local.path, local.layer.position(now),
-                                       local.layer.alpha(now)) for local in previous.layers
-                        ), timebase=timebase,
-                    )
+                ) and (not any(local.layer.assignment_id in self._superseded
+                               for local in previous.layers)
+                       or self._wants_output(binding.output_id, now)):
+                    (continuation,) = self._group((
+                        LocalLayer(local.layer, local.path, local.layer.position(now),
+                                   local.layer.alpha(now)) for local in previous.layers
+                    ), timebase, now)
                     acknowledgment = self._acknowledgment(
                         continuation, self.renderer.present(continuation))
+                    if acknowledgment:
+                        self._current[binding.output_id] = acknowledgment[0]
+                    continue
+                hold = self._rejoin_hold(previous, binding, now, timebase)
+                if hold is not None:
+                    acknowledgment = self._acknowledgment(hold, self.renderer.present(hold))
                     if acknowledgment:
                         self._current[binding.output_id] = acknowledgment[0]
                     continue
@@ -1124,5 +1428,56 @@ class Executor:
                                 self._local(assignment, now), now, "fallback",
                                 "decode" if failed else "expired",
                             ))
+            self._superseded.intersection_update(
+                local.layer.assignment_id for composition in self._current.values()
+                for local in composition.layers)
+            self._note_continuing(now)
             self._release_unused_renderer(now)
             return tuple(observations)
+
+    def _wants_output(self, output_id: str, now: float) -> bool:
+        """Whether the held plan has a layer or continuation slot on `output_id` in force now or
+        starting within the prepare lead."""
+        return any(a.layer.output_id == output_id and self._current_authority(a)
+                   and (window := self._window(a))[0] <= now + self.prepare_lead
+                   and now < window[1] for a in self._assignments.values())
+
+    def _hand_over(self, incoming: OutputComposition, now: float, timebase: float) -> OutputComposition:
+        """Decision 0032, rejoining shows no black: `incoming`, the held plan's composition on its
+        Output, over what the composition it superseded still draws there (player/look.py `held`,
+        then `handed_over`: one more composition the seam rule looks), until the new layers hide
+        it; `incoming` alone with nothing superseded drawn. A held layer is drawn and kept resident
+        while drawn (`_superseded`), never prepared, started or reported as the held plan's; once
+        the hand-over is over it leaves the composition and its picture is released with it."""
+        previous = self._current.get(incoming.binding.output_id)
+        if (previous is None or previous.fallback
+                or _binding_identity(previous.binding) != _binding_identity(incoming.binding)):
+            return incoming
+        # Only what the held composition still shows at `now` (a layer faded out, or covered, is gone).
+        kept = tuple(LocalLayer(local.layer, local.path, local.layer.position(now), local.alpha)
+                     for local in visible_now(look_at(held(previous, now), now).layers)
+                     if local.layer.assignment_id in self._superseded
+                     and local.layer.assignment_id not in self._cancelled)
+        return handed_over(incoming, kept, now) if kept else incoming
+
+    def _rejoin_hold(self, previous: OutputComposition | None, binding: OutputBinding,
+                     now: float, timebase: float) -> OutputComposition | None:
+        """Decision 0032, rejoining needs no event: a composition a newer plan superseded keeps
+        drawing past its layers' ends (player/look.py `held`), looked by the seam rule like every
+        composition (`_group`), so holding it never changes its picture, while the new plan has a
+        layer or continuation slot on this Output in force now or starting within the prepare
+        lead that is not drawn yet (secured, prepared, due and granted if it awaits one). With
+        nothing of the new plan there, the Frame takes its after-state (None)."""
+        if (previous is None or previous.fallback or not previous.layers
+                or _binding_identity(binding) != _binding_identity(previous.binding)):
+            return None
+        keys = [local.layer.assignment_id for local in previous.layers]
+        if not any(key in self._superseded for key in keys) or any(
+                key in self._cancelled for key in keys):
+            return None
+        if not self._wants_output(binding.output_id, now):
+            return None
+        (hold,) = self._group((
+            LocalLayer(local.layer, local.path, local.layer.position(now), local.alpha)
+            for local in held(previous, now).layers), timebase, now)
+        return hold

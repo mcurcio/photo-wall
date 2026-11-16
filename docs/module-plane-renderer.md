@@ -105,6 +105,34 @@ bottom to top in `stack_order`.
   mix), and a layer over one not opaque likewise; a third layer over a dissolve (a Run beneath
   plus a fade) still moves the planes below it. Moving every picture's overlay never would take a
   Weston patch that keeps each picture on the overlay it had; not done.
+- **No fade when the picture stays the same** (owner, 2026-11-15: "The player shouldn't be running
+  any translations if the displayed content isn't going to change"). A picture is its drawn
+  identity (`player/planes.py` `drawn_identity`: the Frame, the copy, the crop, the opacity, a
+  video's media origin), never its assignment id: one decode and one finished picture serve every
+  layer that draws it, and it is the plane's key, so a new slot, layer or plan of the photo on
+  screen draws the very picture already shown. Whether the screen changes is decided in one place,
+  `player/look.py`'s seam rule, from the composition alone: a layer does not fade in when its
+  Frame shows its picture alone at full (`shown`, from what the Output last acknowledged drawing),
+  and does not fade out when what its Frame draws next is the same picture (the topmost layer
+  that can draw as it ends, of its drawn layers and those the composition carries in `following`: secured and granted if it awaits a grant; or, with none, the photo it keeps, "keep_this_photo"). The
+  executor makes each composition with these and reads what is seen through the same look
+  (`look_at`), so it and the renderer never disagree on what a Frame shows. A composition the
+  executor holds for a rejoin is looked the same way (`held`: each layer whose fade-out has not
+  begun keeps its picture past its end, a dissolve under way runs on), and so is its hand-over to
+  the new plan's layer (`handed_over`: the held layers beneath the new plan's composition until
+  its first opaque layer is faded in, so the new photo dissolves in over the held one, never over
+  black; the executor then leaves them out, never reports them as the new plan's, and releases
+  their picture), and so is the photo a Frame keeps (`player/executor.py` `_fallback`); neither carries an alpha of its own (owner,
+  2026-11-15: "There *should* only be one place where the photo can change"). So a continuation
+  repeating one photo, two planned layers of it, a replan, a rejoin and the fallback's kept photo
+  keep the screen as it is. A real change fades as planned. Costs: a PNG always fades (it may show
+  what lies beneath); the decoder budget's look ahead (`player/visibility.py` `shown_within`,
+  `shed`) still reads the planned fades, which see at least as much as the seam rule does, so it
+  only errs toward keeping a decoder; a layer that becomes able to draw during the fade-out of the
+  same picture before it (a plan arriving mid fade-out) stops that fade-out, so the picture dims and
+  returns to full once (continuation slots are made before a fade-out starts, so never for them);
+  after the candidate's commit (a new grant the shell has not admitted) the playing picture returns
+  at full when the grant is admitted, as it always did; render bench on the test Pi not yet run.
 - **Removed, never transparent.** A plane under `MIN_STRENGTH` (1/255) is left out, never shown
   at alpha 0; a plane's blend mode is always pre-multiplied, never None (bench T3).
 - **A Frame is never shown as nothing** (issue #123: "Dark on purpose (Night off, Resting) is drawn
@@ -112,7 +140,7 @@ bottom to top in `stack_order`.
   whose layers has a plane (an empty fallback, nothing kept and nothing playing; a moment of a dip
   too dark for any plane) gets its **dark plane**: the black picture of its placement, over the
   whole placement at full strength (`compose`; `Plane.layer` None, its picture key `#dark:<frame>`,
-  which no assignment id can take). Over the screen's black ground it changes no pixel, but it is a
+  which no layer's drawn identity can equal). Over the screen's black ground it changes no pixel, but it is a
   picture plane, which Display Host's shell keeps the Output with ([hold](display-host-backend.md#the-hold-what-the-compositor-shows));
   the ground alone never is. It is the Player's drawing, not a layer: the presented composition
   stays the looked one, so no assignment is invented or reported presented. A test pattern, a

@@ -4,7 +4,7 @@ waits on the main loop (which blocks on systemctl and HTTP).
 The main loop hands over admitted channels (`adopt`), publishes the current app run each
 turn (`publish_run`) and restates the relink it owes (`owe_relink`). This thread only measures: it sends a nonce every T on
 the current run's channel, matches answers, and appends probe facts (audience node) to the
-broker feed, with the renderer the Player reports on its channel (`app_renderer`). It never calls systemctl, HTTP, the store or the driver. A channel is judged
+broker feed, with the renderer the Player reports on its channel (`app_renderer`) and the Frames it states black (`app_frames_black`). It never calls systemctl, HTTP, the store or the driver. A channel is judged
 against every publication after its adoption: one whose run is not the published run is
 closed. An owed relink is a level, not a packet: each channel instance for the owed run gets
 it once per owed episode (each Central refusal is a new episode), so a relink owed while no
@@ -29,9 +29,12 @@ from appliance.apps.probe import (
     ProbeTiming,
 )
 from appliance.feed import Feed
+from appliance.kernel.app_facts import APP_FRAMES_BLACK
 from appliance.kernel.clock import boottime_ms
 from contracts.node_app_link import (
     MAX_NODE_LINK_BYTES,
+    NodeFramesBlackMalformed,
+    NodeFramesBlackV2,
     NodeRendererV2,
     encode_node_probe,
     encode_node_relink,
@@ -230,8 +233,15 @@ class ProbeThread:
             return
         try:
             reply = parse_node_probe_reply(raw)
+        except NodeFramesBlackMalformed:
+            LOG.warning("broker: frames black report refused")  # the report, never the channel
+            return
         except ValueError:
-            self._close("protocol")  # anything but `probe_answer` or `renderer` ends the channel
+            self._close("protocol")  # anything but the Player's three packets ends the channel
+            return
+        if isinstance(reply, NodeFramesBlackV2):  # a fact for the judge, never progress
+            self.feed.append(APP_FRAMES_BLACK, {"run": channel.run.document(), "frames": [
+                {"output": frame.output_id, "cause": frame.cause.value} for frame in reply.frames]})
             return
         if isinstance(reply, NodeRendererV2):  # a fact for the judge, never progress
             self.feed.append("app_renderer", {"run": channel.run.document(),

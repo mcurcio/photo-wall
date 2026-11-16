@@ -44,6 +44,16 @@ Rules this module owns (one home each):
   asset size and the frame size"). So the controller only ever enlarges or shows a picture 1:1,
   never shrinks it (bench T2: shrinking large sources glitches), and no picture is shown from a
   buffer larger than it appears. A black layer's picture, and a dark plane's, is the placement's size.
+- **What a Frame draws** (`drawn_identity`, `Plane.key`): a layer's picture is its Output and
+  Frame, its presentation, its copy (contracts/models.py `Variant`: the photo, its recipe and its bytes), its
+  crop window, its opacity and, for a video, its media origin (where its play position is counted
+  from); never its assignment id, its timing or its fades. Two layers of one identity draw the same
+  pixels, so the renderer finishes one picture for both (player/plane_renderer.py) and the seam
+  rule (player/look.py) never fades between them (owner, 2026-11-15: "The player shouldn't be
+  running any translations if the displayed content isn't going to change"). The identity is
+  compared, never sent: it is a key within the Player's process alone (the renderer's pictures,
+  the screens' commit), and anything that leaves it (a log, a test harness's reply) names a plane
+  by its own words, never by `Plane.key`.
 - **What a still's decode hands the GPU** (`still_region`): the crop window of the copy, in whole
   pixels, scaled to the finish size; never the whole copy (player/decode.py, The still pipeline).
 
@@ -54,7 +64,7 @@ placement (contracts/frame_fit.py `place`); the turn (contracts/display_turn.py)
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Hashable, Sequence
 from dataclasses import dataclass
 from typing import Final
 
@@ -70,8 +80,17 @@ from player.visibility import opaque, visible_now
 MIN_STRENGTH: Final = 1 / 255
 """The weakest plane shown: the controller's 8-bit plane alpha rounds anything below to 0."""
 DARK_KEY: Final = "#dark:"
-"""A dark plane's picture key is this and its Frame's id (`Plane.key`): '#' starts no assignment id
-(contracts/identifiers.py IDENTIFIER_PATTERN), so a dark plane never shares a layer's key."""
+"""A dark plane's picture key is this and its Frame's id (`Plane.key`), a string, so it never equals
+a layer's `drawn_identity` (a tuple)."""
+
+
+def drawn_identity(layer: Layer) -> Hashable:
+    """What `layer` draws on its Frame (module rule, What a Frame draws): its Output, Frame, presentation,
+    variant, crop and opacity, and a video's media origin. Two layers draw the same pixels exactly
+    when their identities are equal. Pure; the one answer to "does what is drawn change?"."""
+    video = layer.variant is not None and layer.variant.duration is not None
+    return (layer.output_id, layer.frame_id, layer.presentation, layer.variant, layer.crop, layer.opacity,
+            layer.media_origin if video else None)
 
 
 @dataclass(frozen=True)
@@ -147,9 +166,9 @@ class Plane:
         return self.layer is None
 
     @property
-    def key(self) -> str:
-        """Which picture the plane shows: its layer's assignment id, or DARK_KEY and its Frame's id."""
-        return DARK_KEY + self.frame_id if self.layer is None else self.layer.layer.assignment_id
+    def key(self) -> Hashable:
+        """Which picture the plane shows: its layer's `drawn_identity`, or DARK_KEY and its Frame's id."""
+        return DARK_KEY + self.frame_id if self.layer is None else drawn_identity(self.layer.layer)
 
     @property
     def size(self) -> tuple[int, int]:
@@ -226,5 +245,5 @@ def _stacked(seen: Sequence[LocalLayer]) -> list[tuple[LocalLayer, float]]:
     return stacked
 
 
-__all__ = ["DARK_KEY", "MIN_STRENGTH", "Composition", "FrameLayers", "Plane", "Screen", "compose", "finish_size",
-           "plane_strength", "still_region"]
+__all__ = ["DARK_KEY", "MIN_STRENGTH", "Composition", "FrameLayers", "Plane", "Screen", "compose", "drawn_identity",
+           "finish_size", "plane_strength", "still_region"]

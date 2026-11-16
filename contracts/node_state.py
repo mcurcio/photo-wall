@@ -28,7 +28,7 @@ from typing import Annotated, Final, Literal
 
 from pydantic import Field
 
-from contracts.identifiers import TargetIdentifier
+from contracts.identifiers import Instant, TargetIdentifier
 from contracts.room_light import Lux
 from contracts.wire_codec import encode
 from contracts.wire_model import Model, decoded
@@ -68,13 +68,18 @@ class HostBase(Model):
 
 class FrameReport(Model):
     """One Frame as its Player draws it: the binding `generation` it draws (it counts only while it
-    equals Central's), the HDMI port, whether its picture is on screen, and the light on the Frame at
-    its centre as last drawn (None: no room-lights document drawn since the Player started)."""
+    equals Central's), the HDMI port, whether its picture is on screen, the light on the Frame at
+    its centre as last drawn (None: no room-lights document drawn since the Player started), and
+    since when (show time) it has been playing Central's continuation (decision 0032: the slots
+    past the plan's layers, with no planned layer between; None while it draws a planned layer or
+    nothing). Worded for people as "playing Central's continuation since 14:02": the Player's own
+    fact, never a statement that Central is down."""
     frame_id: TargetIdentifier
     generation: int = Field(ge=1)
     output_id: OutputId
     showing: bool
     light_lux: Lux | None
+    continuing_since: Instant | None = None    # show time; None: not playing a continuation
 
 
 class FrameReports(Model):

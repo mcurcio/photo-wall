@@ -1,4 +1,3 @@
-import math
 
 import pytest
 from pydantic import ValidationError
@@ -6,44 +5,23 @@ from support.position import LIGHTING
 
 from contracts.models import (
     Calibration,
+    CarriedPhoto,
+    Continuation,
     Layer,
     OutputBinding,
     PhotoCrop,
     Plan,
     Readiness,
+    UnfilledSpan,
     Variant,
     fade_share,
 )
 from contracts.photo_crop import CENTRED
-from contracts.time import ManualClock, TimeMapping
+from contracts.time import ManualClock
 
 
-def test_local_monotonic_mapping_invalidates_step_staleness_and_bad_clock():
-    clock = ManualClock(100)
-    mapping = TimeMapping(clock)
-    assert not mapping.healthy()
-    mapping.establish(.01)
-    assert mapping.deadline(110) == 10
-    clock.advance(3)
-    assert mapping.deadline(110) == 10
-    clock.step_utc(1)
-    assert not mapping.healthy()
-    mapping.establish(.01)
-    clock.advance(31)
-    assert not mapping.healthy()
-    mapping.establish(.01)
-    clock.wall = math.nan
-    assert not mapping.healthy()
-    with pytest.raises(ValueError):
-        mapping.establish(.01)
-
-
-def test_clock_uncertainty_is_not_pipeline_position():
+def test_a_layers_position_comes_from_plan_time():
     clock = ManualClock(1_000)
-    mapping = TimeMapping(clock)
-    mapping.establish(.5)
-    assert not mapping.healthy()
-    mapping.establish(.05)
     clock.advance(20)  # A paused pipeline cannot stop this clock.
     layer = Layer(assignment_id="a", run_id="run", output_id="hdmi-1", frame_id="f",
                   binding_generation=1, start=1000, end=1100, media_origin=988,
@@ -245,3 +223,102 @@ def test_overlapping_fades_take_the_lesser_never_the_product():
         assert fade_share(now, start=0, end=2, fade_in=1.5, fade_out=1.5) == pytest.approx(expected)
     assert fade_share(5, start=0, end=10, fade_in=0, fade_out=0) == 1
     assert fade_share(-1, start=0, end=10, fade_in=2, fade_out=2) == 0
+
+
+def _plan(**fields):
+    binding = OutputBinding(output_id="hdmi1", frame_id="frame1", generation=1, lighting=LIGHTING,
+                            display_mm=None)
+    return Plan(plan_id="plan", revision=1, player_id="player", authority_epoch=1, issued_at=0,
+                valid_from=0, valid_until=60, bindings=(binding,), layers=(), **fields)
+
+
+def test_a_plan_with_no_unfilled_span_serialises_without_the_key_and_an_old_plan_validates():
+    plan = _plan()
+    document = plan.model_dump(mode="json")
+    assert "unfilled" not in document and "unfilled" not in plan.model_dump_json()
+    assert Plan.model_validate(document) == plan
+
+
+def test_an_unfilled_span_crosses_the_wire():
+    plan = _plan(unfilled=(UnfilledSpan(output_id="hdmi1", start=0, end=10),))
+    assert plan.model_dump(mode="json")["unfilled"] == [{"output_id": "hdmi1", "start": 0, "end": 10}]
+    assert Plan.model_validate(plan.model_dump(mode="json")) == plan
+
+
+def test_an_unfilled_span_ends_after_it_starts_and_names_a_bound_output():
+    with pytest.raises(ValidationError):
+        UnfilledSpan(output_id="hdmi1", start=10, end=10)
+    with pytest.raises(ValidationError):
+        _plan(unfilled=(UnfilledSpan(output_id="hdmi2", start=0, end=10),))
+
+
+def _still_layer(assignment_id, start, end, *, run_id="run", output_id="hdmi1"):
+    still = Variant(asset_id=f"asset-{assignment_id}", recipe_id="e" * 64, sha256="a" * 64, size=20,
+                    media_type="image/jpeg", width=30, height=20)
+    return Layer(assignment_id=assignment_id, run_id=run_id, output_id=output_id,
+                 frame_id="frame1", binding_generation=1, start=start, end=end,
+                 media_origin=start, variant=still, crop=CENTRED)
+
+
+def _continued(*continuations, unfilled=()):
+    binding = OutputBinding(output_id="hdmi1", frame_id="frame1", generation=1, lighting=LIGHTING,
+                            display_mm=None)
+    return Plan(plan_id="plan", revision=1, player_id="player", authority_epoch=1, issued_at=0,
+                valid_from=0, valid_until=60, bindings=(binding,),
+                layers=(_still_layer("a", 0, 10), _still_layer("b", 10, 20)), unfilled=unfilled,
+                continuations=continuations)
+
+
+def _continuation(**fields):
+    return Continuation(**{"output_id": "hdmi1", "run_id": "run", "photos": ("a", "b"),
+                           "start": 20, "seconds": 10, **fields})
+
+
+def test_a_plan_with_a_continuation_crosses_the_wire_and_one_without_reads_as_before():
+    """Decision 0032: a plan's continuations travel only when set."""
+    plan = _continued(_continuation(lead=1, fade_in=1, fade_out=1, until=50))
+    assert Plan.model_validate(plan.model_dump(mode="json")) == plan
+    assert "continuations" not in _continued().model_dump(mode="json")
+    assert "awaits_grant" not in plan.layers[0].model_dump(mode="json")
+    assert plan.layers[0].model_copy(update={"awaits_grant": True}).model_dump(mode="json")["awaits_grant"]
+
+
+@pytest.mark.parametrize(("continuations", "unfilled", "message"), [
+    ((_continuation(photos=("a", "missing")),), (), "continuation names an unknown layer"),
+    ((_continuation(run_id="other"),), (), "continuation names an unknown layer"),
+    ((_continuation(output_id="hdmi2"),), (), "continuation names an unknown layer"),
+    ((_continuation(photos=("a",), until=30), _continuation(photos=("a",), start=30)), (),
+     "continuation layer named twice"),
+    ((_continuation(start=15),), (), "continuation covers the plan"),
+    ((_continuation(),), (UnfilledSpan(output_id="hdmi1", start=20, end=25),),
+     "continuation covers the plan"),
+    ((_continuation(lead=11),), (), "continuation lead exceeds its turn"),
+    ((_continuation(lead=2, fade_in=7, fade_out=6),), (), "continuation fades exceed its slot"),
+    ((_continuation(until=20),), (), "continuation ends before it starts"),
+    ((_continuation(photos=("a",), until=40), _continuation(photos=("b",), start=45, lead=6)), (),
+     "continuations overlap"),
+    ((_continuation(photos=("a",)), _continuation(photos=("b",), start=90)), (),
+     "continuations overlap"),
+])
+def test_a_plan_refuses_every_broken_continuation(continuations, unfilled, message):
+    """Decision 0032 (B1): each invariant of a continuation is refused with its own words."""
+    with pytest.raises(ValidationError, match=message):
+        _continued(*continuations, unfilled=unfilled)
+
+
+def test_two_continuations_in_turn_on_one_output_are_accepted():
+    """A Show over the Default Scene: one continuation ends where the next begins (its lead
+    included)."""
+    plan = _continued(_continuation(photos=("a",), until=40),
+                      _continuation(photos=("b",), start=41, lead=1))
+    assert len(plan.continuations) == 2
+
+
+def test_a_readiness_refuses_a_repeated_carried_photo():
+    common = dict(plan_id="p", revision=1, authority_epoch=1, sequence=1,
+                  clock_uncertainty=.01, observed_at=100, lost_grants=())
+    carried = CarriedPhoto(output_id="hdmi1", asset_id="asset-a")
+    assert Readiness(**common, carried=(carried,)).carried == (carried,)
+    assert "carried" not in Readiness(**common).model_dump(mode="json")
+    with pytest.raises(ValidationError, match="duplicate carried photo"):
+        Readiness(**common, carried=(carried, carried))

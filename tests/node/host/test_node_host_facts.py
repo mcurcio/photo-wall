@@ -16,6 +16,7 @@ from contracts.node_host_facts import (
     LINK_STATES,
     MAX_HOST_FACTS_BYTES,
     RESET_CAUSES,
+    WALL_CLOCK_STATES,
     BootReportV2,
     BootStageV2,
     HostFactsV2,
@@ -70,7 +71,7 @@ def test_a_stored_row_of_an_older_shape_reads_its_missing_or_refused_facts_as_no
         parse_host_facts(raw)
     assert stored_fact_values(raw) == {"kernel_release": "6.6.51+rpt-rpi-v8", "interface": "eth0",
                                        "link_state": "up", "address": "192.168.1.40", "base_tag": None,
-                                       "reset_cause": None, "boot": None}
+                                       "reset_cause": None, "wall_clock": None, "boot": None}
     assert stored_fact_values(json.dumps(_document(link_state="UP")).encode())["link_state"] is None
     assert stored_fact_values(encode_host_facts(_facts())) == fact_values_document(_facts())
     assert set(stored_fact_values(b"not json").values()) == {None}
@@ -99,6 +100,35 @@ def test_the_reset_cause_round_trips_and_is_one_of_its_causes():
         parse_host_facts(json.dumps(old).encode())
     assert stored_fact_values(json.dumps(old).encode())["reset_cause"] is None
     assert stored_fact_values(json.dumps(_document(reset_cause="panic")).encode())["reset_cause"] is None
+
+
+# The wall clock as the kernel judges it (decision 0032).
+
+def test_the_wall_clock_round_trips_and_is_one_of_its_states():
+    """Mutation probe: drop `wall_clock` from FACT_RULES -> "maybe" is accepted."""
+    assert WALL_CLOCK_STATES == ("synchronised", "unsynchronised")
+    for state in (*WALL_CLOCK_STATES, None):
+        value = _facts(wall_clock=state)
+        raw = encode_host_facts(value)
+        assert parse_host_facts(raw) == value and json.loads(raw)["wall_clock"] == state
+        assert stored_fact_values(raw) == fact_values_document(value)
+    with pytest.raises(ValueError, match="^invalid_host_fact_wall_clock$"):
+        _facts(wall_clock="maybe")
+    for refused in ("maybe", 1):
+        with pytest.raises(ValueError):
+            parse_host_facts(json.dumps(_document(wall_clock=refused)).encode())
+    old = _document()
+    del old["wall_clock"]
+    with pytest.raises(ValueError):
+        parse_host_facts(json.dumps(old).encode())
+    assert stored_fact_values(json.dumps(old).encode())["wall_clock"] is None
+
+
+def test_the_kernels_wall_clock_verdict_reaches_the_facts_record(monkeypatch, tmp_path):
+    clock = [100.0]
+    runner, sent = _runner(monkeypatch, clock, {**VALUES, "wall_clock": "unsynchronised"}, {})
+    _run(runner, clock, 110)
+    assert [parse_host_facts(body).wall_clock for _, body in sent] == ["unsynchronised"]
 
 
 def _watchdog(tmp_path, bootstatus, options="0x8120"):
@@ -319,7 +349,8 @@ Local:
 """
 
 
-def _host(tmp_path, *, routes=ROUTES, trie=FIB_TRIE, release="6.6.51+rpt-rpi-v8\n", operstate="up\n"):
+def _host(tmp_path, *, routes=ROUTES, trie=FIB_TRIE, release="6.6.51+rpt-rpi-v8\n", operstate="up\n",
+          wall_clock="synchronised"):
     proc, sys_root = tmp_path / "proc", tmp_path / "sys"
     (proc / "net").mkdir(parents=True)
     (proc / "sys/kernel").mkdir(parents=True)
@@ -332,12 +363,13 @@ def _host(tmp_path, *, routes=ROUTES, trie=FIB_TRIE, release="6.6.51+rpt-rpi-v8\
     if operstate is not None:
         (sys_root / "class/net/eth0").mkdir(parents=True)
         (sys_root / "class/net/eth0/operstate").write_text(operstate)
-    return LinuxHostSampler(proc, tmp_path, sys_root)
+    return LinuxHostSampler(proc, tmp_path, sys_root, wall_clock=lambda: wall_clock)
 
 
 def test_a_fake_fib_trie_and_route_table_yield_the_interfaces_address(tmp_path):
     assert _host(tmp_path).facts() == {"kernel_release": "6.6.51+rpt-rpi-v8", "interface": "eth0",
-                                       "link_state": "up", "address": "192.168.1.40"}
+                                       "link_state": "up", "address": "192.168.1.40",
+                                       "wall_clock": "synchronised"}
 
 
 def test_two_candidate_addresses_yield_null(tmp_path):
@@ -351,10 +383,12 @@ def test_an_address_outside_the_interfaces_own_routes_is_not_a_candidate(tmp_pat
 
 
 def test_each_unreadable_field_is_null(tmp_path):
-    facts = _host(tmp_path, trie=None, release=None, operstate=None).facts()
-    assert facts == {"kernel_release": None, "interface": "eth0", "link_state": None, "address": None}
+    facts = _host(tmp_path, trie=None, release=None, operstate=None, wall_clock=None).facts()
+    assert facts == {"kernel_release": None, "interface": "eth0", "link_state": None, "address": None,
+                     "wall_clock": None}
     assert _host(tmp_path / "b", routes=None).facts() == {
-        "kernel_release": "6.6.51+rpt-rpi-v8", "interface": None, "link_state": None, "address": None}
+        "kernel_release": "6.6.51+rpt-rpi-v8", "interface": None, "link_state": None, "address": None,
+        "wall_clock": "synchronised"}
 
 
 def test_a_field_the_contract_refuses_is_null_not_a_broken_record(tmp_path):
@@ -419,7 +453,8 @@ def test_facts_are_sent_once_per_process_start_and_unchanged_facts_send_nothing(
     runner, sent = _runner(monkeypatch, clock, facts, {})
     _run(runner, clock, 200)
     assert len(sent) == 1 and sent[0][0] == 100.0
-    assert fact_values_document(parse_host_facts(sent[0][1])) == {**VALUES, "base_tag": None, "reset_cause": None, "boot": None}
+    assert fact_values_document(parse_host_facts(sent[0][1])) == {**VALUES, "base_tag": None, "reset_cause": None,
+                                                                 "wall_clock": None, "boot": None}
     # A process start (a new runner) sends again; Central answers duplicate or keeps
     # first_received_at.
     again, resent = _runner(monkeypatch, clock, facts, {})

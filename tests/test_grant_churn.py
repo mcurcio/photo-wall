@@ -9,7 +9,7 @@ from test_registry import ADMIN, hello
 
 from central.app import create_app
 from central.coordination import CoordinationLimits, Coordinator
-from central.runtime import Contribution, Scene
+from central.runtime import Child, Contribution, Scene
 from contracts.models import LostGrant, Readiness
 
 
@@ -110,13 +110,17 @@ def test_a_lost_grant_is_regranted_once_and_its_cohort_is_never_skipped(registry
 
 def test_a_later_grant_at_the_same_readiness_never_changes_an_accepted_commit(registry):
     player = setup_players(registry, count=1)[0]
-    # Cues every 3 s; a 12 s horizon takes in no new cue between 1006.5 and 1008.4, so the
-    # plan's revision holds while a second cue falls due on the Player's same report.
+    # Two cues: the Run's first turn at 1000 and its child's at 1012 (decision 0032: only a
+    # Run's first turn awaits a grant). A 12 s horizon takes in no new layer between 1006.5 and
+    # 1008.4, so the plan's revision holds while the second cue falls due on the same report.
     coordinator = Coordinator(registry.db, registry.clock, CoordinationLimits(horizon_seconds=12))
-    coordinator.runtime.command("set_scene", Scene(scene_id="quick", loop=True, cycle_seconds=3,
-        contributions=(Contribution(target="frame:frame-0", kind="black"),)), by="console")
+    coordinator.runtime.command("set_scene", Scene(scene_id="quick", loop=True, cycle_seconds=30,
+        contributions=(Contribution(target="frame:frame-0", kind="black"),),
+        children=(Child(delay_seconds=12, scene=Scene(scene_id="later", cycle_seconds=10,
+            contributions=(Contribution(target="frame:frame-0", kind="black"),))),)),
+        by="console")
     coordinator.runtime.command("activate", "quick", "now", 1000, by="console")
-    registry.clock.advance(6.5)                   # 1006.5: cues to 1009 are due, 1012 is not
+    registry.clock.advance(6.5)                   # 1006.5: the 1000 cue is due, 1012 is not
     coordinator.advance()
     plan = coordinator.delivery(player["player_id"], 1)["plan"]
     every = tuple(a.assignment_id for a in plan.layers if a.end > registry.clock.utc())

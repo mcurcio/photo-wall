@@ -33,3 +33,9 @@ def test_only_the_bound_outputs_entry_counts_even_when_another_is_dark():
 def test_a_code_this_centrals_catalogue_lacks_is_shown_as_the_code():
     report = _report(OutputHealth("HDMI-A-1", True, "a_newer_fault", SINCE))
     assert frame_dark(report, "HDMI-A-1") == FrameDark(code="a_newer_fault", line="a_newer_fault", since=SINCE)
+
+
+def test_a_frame_black_cause_is_worded_by_its_own_catalogue_row():
+    report = _report(OutputHealth("HDMI-A-1", True, "frame_no_plan", SINCE))
+    assert frame_dark(report, "HDMI-A-1") == FrameDark(
+        code="frame_no_plan", line="Photos paused — no plan from Central", since=SINCE)

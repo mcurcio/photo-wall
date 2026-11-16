@@ -234,9 +234,11 @@ def test_a_failed_cycle_leaves_no_wedged_connection_for_the_next(monkeypatch, tr
     Through the real run() and the clients CentralLink builds, over a loopback socket: the
     server closes a connection idle for 0.3 s, so a clock probe (one a second) meets an expired
     connection. The window is forced, not raced: httpcore's close of that expired connection
-    is held (the one patched seam) while a clock probe waits on it, and Central answers the
-    next state poll 500, so the failed cycle cancels the probe at that await. The next cycle
-    must reach Central with its own clock probe; with one client per process it never does."""
+    is held (the one patched seam) while a clock probe waits on it, and Central refuses the
+    next state poll's registration (401: since decision 0032 only a cycle-ending failure ends the
+    cycle, and a 500 no longer does), so the failed cycle cancels the probe at that await. The
+    next cycle must reach Central with its own clock probe; with one client per process it never
+    does."""
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
     window = asyncio.Event()
     real_close = httpcore.AsyncConnectionPool._close_connections
@@ -263,7 +265,7 @@ def test_a_failed_cycle_leaves_no_wedged_connection_for_the_next(monkeypatch, tr
             path = request.url.path
             if path == "/v1/player/state" and window.is_set() and not failed:
                 failed.append(request)
-                return httpx.Response(500, json={"error": "fixture_outage"})
+                return httpx.Response(401, json={"error": "not_registered"})
             if path == "/v1/player/time" and failed:
                 probes_after.append(request)
             result = fake(request)

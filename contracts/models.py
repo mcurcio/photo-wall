@@ -269,6 +269,19 @@ class Layer(Model):
     # Roadmap 5a: the window this media layer draws (contracts/photo_crop.py); required on a media
     # layer, absent on a black one (run ledger .claude/runs/photo-5a.md).
     crop: PhotoCrop | None = None
+    # Grants only for a change (decision 0032, slice B): True when this layer opens its Run on the
+    # wall (its Intent's `cycle_index` is 0, central/planner.py), so it starts only under Central's
+    # start grant (a Commit); False: it starts at its instant once secured and prepared, with no
+    # grant. Authored by Central's Planner alone; the Player reads it and never re-derives it.
+    # Serialised only when True, so a plan without a change reads as before.
+    awaits_grant: bool = False
+
+    @model_serializer(mode="wrap")
+    def serialize_awaits_grant(self, handler):
+        value = handler(self)
+        if not self.awaits_grant:
+            value.pop("awaits_grant", None)
+        return value
 
     @model_validator(mode="after")
     def interval(self) -> Self:
@@ -322,6 +335,55 @@ def stack_order(layer: Layer) -> tuple[int, int, int, float]:
     return (layer.priority, layer.root_order, layer.admission_order, layer.start)
 
 
+class UnfilledSpan(Model):
+    """A span of plan time a Frame wanted a photo and Central could place none (no photo fits, no
+    screen known, a Source empty, a Scene line that failed): the Plan's own record, so "nothing
+    due" on a Frame always means nothing was wanted there. Read by the Player's Frame-black rule
+    (player/frame_black.py), never by what it draws."""
+    output_id: Identifier
+    start: Instant
+    end: Instant
+
+    @model_validator(mode="after")
+    def interval(self) -> Self:
+        if self.end <= self.start:
+            raise ValueError("unfilled span end must follow start")
+        return self
+
+
+class Continuation(Model):
+    """Central's "repeat until E" for one Run on one Output (0017 C2; decision 0032, slice B): what
+    the Frame plays past the layers its plan holds for it, until `until`, with no word from Central.
+
+    Slot k (k = 0, 1, ...) is the Run's turn at `start + k * seconds`: a layer from
+    `start + k * seconds - lead` to `start + (k + 1) * seconds`, fading in over `fade_in` and out
+    over `fade_out` (the Run's steady-state Transition, central/runtime.py `_transition_at`), cut at
+    `until`. Slot k shows the k-th of the listed photos the Player holds, cycling, so a photo the
+    Player does not hold is skipped by the rule Central authored here, never by the Player's choice
+    (0017 C1). The one generator is contracts/continuation.py `continuation_layers`; Central's wall
+    plan and the Player both read slots through it.
+
+    `photos` name media layers of this plan with this `output_id` and `run_id`, in list order; each
+    layer's variant, crop, opacity, stacking and after-state are the slot's. Invariants (refused by
+    `Plan.authority`, ValueError): every named layer exists with this Output and Run; no layer is
+    named twice across the plan's continuations; every plan layer and unfilled span on `output_id`
+    ends at or before `start` (a continuation never covers what the plan covers); `lead` <=
+    `seconds`; `fade_in + fade_out <= seconds + lead`; `until`, when set, follows `start`; two
+    continuations on one Output never overlap over [start - lead, until)."""
+
+    output_id: Identifier
+    run_id: Identifier
+    photos: tuple[Identifier, ...] = Field(min_length=1)
+    start: Instant
+    seconds: Positive
+    lead: float = Field(default=0, ge=0, allow_inf_nan=False)
+    fade_in: float = Field(default=0, ge=0, allow_inf_nan=False)
+    fade_out: float = Field(default=0, ge=0, allow_inf_nan=False)
+    # The next change Central knows on this Frame when it authors the plan (this Run's end, or
+    # another Run taking the Frame); None: none known within the plan horizon.
+    until: Instant | None = None
+
+
 class Plan(Model):
     protocol: Literal[1] = 1
     plan_id: Identifier
@@ -333,6 +395,20 @@ class Plan(Model):
     valid_until: Instant
     bindings: tuple[OutputBinding, ...]
     layers: tuple[Layer, ...]
+    # Serialised only when non-empty (the Observation precedent): a plan with none reads as before.
+    unfilled: tuple[UnfilledSpan, ...] = ()
+    # Decision 0032 (slice B): each Run's continuation on each Output past this plan's layers
+    # (`Continuation`). Serialised only when non-empty.
+    continuations: tuple[Continuation, ...] = ()
+
+    @model_serializer(mode="wrap")
+    def serialize_unfilled(self, handler):
+        value = handler(self)
+        if not self.unfilled:
+            value.pop("unfilled", None)
+        if not self.continuations:
+            value.pop("continuations", None)
+        return value
 
     @model_validator(mode="after")
     def authority(self) -> Self:
@@ -353,7 +429,46 @@ class Plan(Model):
                 raise ValueError("layer binding authority mismatch")
             if layer.end <= self.valid_from or layer.start >= self.valid_until or layer.end > self.valid_until:
                 raise ValueError("layer exceeds plan validity")
+        if not {span.output_id for span in self.unfilled} <= set(bindings):
+            raise ValueError("unfilled span binding authority mismatch")
+        self._coherent_continuations()
         return self
+
+    def _coherent_continuations(self) -> None:
+        """`Continuation`'s invariants, each its own ValueError."""
+        if not self.continuations:
+            return
+        layers = {layer.assignment_id: layer for layer in self.layers}
+        named: set[str] = set()
+        for continuation in self.continuations:
+            for photo in continuation.photos:
+                layer = layers.get(photo)
+                if layer is None or layer.presentation != "media" or (
+                    layer.output_id, layer.run_id
+                ) != (continuation.output_id, continuation.run_id):
+                    raise ValueError("continuation names an unknown layer")
+                if photo in named:
+                    raise ValueError("continuation layer named twice")
+                named.add(photo)
+            if any(layer.output_id == continuation.output_id and layer.end > continuation.start
+                   for layer in self.layers) or any(
+                span.output_id == continuation.output_id and span.end > continuation.start
+                for span in self.unfilled
+            ):
+                raise ValueError("continuation covers the plan")
+            if continuation.lead > continuation.seconds:
+                raise ValueError("continuation lead exceeds its turn")
+            if continuation.fade_in + continuation.fade_out > continuation.seconds + continuation.lead:
+                raise ValueError("continuation fades exceed its slot")
+            if continuation.until is not None and continuation.until <= continuation.start:
+                raise ValueError("continuation ends before it starts")
+        by_output = sorted(self.continuations,
+                           key=lambda c: (c.output_id, c.start - c.lead))
+        for earlier, later in zip(by_output, by_output[1:]):
+            if earlier.output_id == later.output_id and (
+                earlier.until is None or later.start - later.lead < earlier.until
+            ):
+                raise ValueError("continuations overlap")
 
 
 class Failure(Model):
@@ -367,6 +482,16 @@ class LostGrant(Model):
     re-grants only the grant it still holds, once."""
     assignment_id: Identifier
     readiness_sequence: int = Field(ge=1)
+
+
+class CarriedPhoto(Model):
+    """A photo the Player draws or keeps on `output_id` that the plan its report names does not
+    place there (decision 0032, slice B): a superseded revision's photo still on screen at a rejoin,
+    or a kept still from a layer or continuation slot no longer in the plan. Level state in every
+    Readiness; Central keeps the photo off every other Frame while reported."""
+
+    output_id: Identifier
+    asset_id: Identifier
 
 
 class Readiness(Model):
@@ -383,6 +508,15 @@ class Readiness(Model):
     # Level state, repeated in every report while true; required (no default): a Player that
     # cannot say what it lost is refused rather than left without recovery.
     lost_grants: tuple[LostGrant, ...]
+    # Decision 0032 (slice B): level state, serialised only when non-empty (`CarriedPhoto`).
+    carried: tuple[CarriedPhoto, ...] = ()
+
+    @model_serializer(mode="wrap")
+    def serialize_carried(self, handler):
+        value = handler(self)
+        if not self.carried:
+            value.pop("carried", None)
+        return value
 
     @model_validator(mode="after")
     def coherent_readiness(self) -> Self:
@@ -397,6 +531,9 @@ class Readiness(Model):
             raise ValueError("failed assignment cannot report prepared playback")
         if not set(lost) <= set(self.prepared):
             raise ValueError("a lost grant must be prepared")
+        carried = [(photo.output_id, photo.asset_id) for photo in self.carried]
+        if len(carried) != len(set(carried)):
+            raise ValueError("duplicate carried photo")
         return self
 
 

@@ -24,7 +24,7 @@ from contracts.frame_lighting import AT_FULL, FarLight, FrameLighting, Paper, Wa
 from contracts.models import Calibration, PositionBox
 from contracts.node_frame import neutral_operations
 from contracts.node_picture import DisplayLight
-from contracts.photo_crop import CENTRED
+from contracts.photo_crop import CENTRED, PhotoCrop
 from contracts.room_light import FixedEntry, KelvinColour, RoomLightsDocument
 from contracts.tuning import TestPattern
 from player import geometry as geometry_module
@@ -37,7 +37,15 @@ from player.gpu import LINEAR, NV12, XR24, DmabufFrame, Target
 from player.pacing import DEFAULT_REFRESH, Word
 from player.plane_renderer import BAND_BYTES, FENCE_POLL, VIDEO_TARGETS, PlaneRenderer
 from player.plane_screen import FrameGrant, ScreenPicture
-from player.planes import DARK_KEY, MIN_STRENGTH, Composition, Screen, plane_strength, still_region
+from player.planes import (
+    DARK_KEY,
+    MIN_STRENGTH,
+    Composition,
+    Screen,
+    drawn_identity,
+    plane_strength,
+    still_region,
+)
 from player.rendering import LocalLayer, OutputComposition
 
 OUTPUT = "hdmi1"
@@ -69,6 +77,12 @@ def corners(monkeypatch):
     """overlay_corners as the renderer calls it: the placement and screen it was given (B3's rule
     is tested with B3; this module owns only which placement it is given)."""
     monkeypatch.setattr(plane_renderer_module, "overlay_corners", lambda placement, screen: (placement, screen))
+
+
+def named(plane) -> str:
+    """The plane's layer's assignment id, or a dark plane's key (player/planes.py `Plane.key` is
+    the picture's drawn identity)."""
+    return plane.key if plane.layer is None else plane.layer.layer.assignment_id
 
 
 class Clock:
@@ -134,7 +148,8 @@ class FakeScreens:
         self.log.append("commit")
         self._sequence += 1
         self._committed_at = self.clock()
-        self.commits.append((composition, dict(pictures), tag, picture_change))
+        self.commits.append((composition, {named(plane): pictures[plane.key] for plane in composition.planes}, tag,
+                             picture_change))
         self.grounds.append(ground)
         self.overlays.append(overlay)
         return self._sequence
@@ -338,7 +353,7 @@ class Rig:
     def strengths(self, commit: int = -1) -> list[tuple[str, float]]:
         """Each committed plane's assignment and strength, to 9 places (full strength over black is
         encode_srgb(1), 1 within a float's last bit)."""
-        return [(plane.key, round(plane.strength, 9))
+        return [(named(plane), round(plane.strength, 9))
                 for plane in self.screens.commits[commit][0].planes]
 
 
@@ -557,6 +572,65 @@ def test_a_released_layer_is_freed_once_no_commit_shows_it():
     rig.present(stays)
     assert rig.screens.forgotten == [shown.handle] and rig.device.freed == [shown.handle - 1000]
     assert rig.screens.grounds[-1] is not None and rig.screens.grounds[-1].handle not in rig.screens.forgotten
+
+
+def test_layers_of_one_photo_share_one_picture_until_the_last_is_released():
+    """player/planes.py `drawn_identity`: two assignments drawing the same photo are one picture,
+    decoded and finished once; releasing one keeps it, releasing the other frees it once no commit
+    shows it."""
+    rig = Rig()
+    jpeg = media(b"same").model_copy(update={"media_type": "image/jpeg"})
+    first = LocalLayer(layer("first", variant=jpeg, start=0, end=100), Path("/media/same.jpg"), 0.0, 1.0)
+    second = LocalLayer(layer("second", variant=jpeg, start=90, media_origin=90), Path("/media/same.jpg"), 0.0, 1.0)
+    rig.ready(first, second)
+    assert len(rig.stills) == 1 and len(rig.fitter.draws) == 1
+    rig.settle(first)
+    shown = rig.screens.commits[-1][1]["first"]
+    rig.renderer.release("first")
+    rig.clock.tick()
+    rig.present(second)
+    assert rig.screens.commits[-1][1]["second"] == shown and rig.screens.forgotten == []
+    rig.renderer.release("second")
+    rig.clock.tick()
+    rig.present(photo("other", start=0))
+    rig.renderer.finish()
+    rig.settle(photo("other", start=0))
+    assert shown.handle in rig.screens.forgotten
+
+
+def test_a_layer_whose_picture_is_finished_is_prepared_during_a_fade():
+    """A still waiting for a fade (module rule, Finishing is off the present path) costs it nothing
+    when another layer already finished its picture (player/planes.py `drawn_identity`): it is
+    prepared at once, not left pending until the fade ends."""
+    rig = Rig()
+    outgoing, incoming = photo("out", start=0, end=200), photo("in", start=100, fade_in=3.0)
+    rig.ready(outgoing, incoming)
+    timebase = 100.1 - rig.clock.now
+    rig.present(outgoing, incoming, timebase=timebase)
+    again = LocalLayer(layer("again", variant=outgoing.layer.variant, start=104, media_origin=104),
+                       outgoing.path, 0.0, 1.0)
+    assert rig.renderer.prepare(photo("later", start=104), framed()).status == "pending"   # it waits
+    assert rig.renderer.prepare(again, framed()).status == "prepared"
+    assert rig.stills.count(outgoing.path) == 1
+
+
+def test_a_layer_drawn_otherwise_in_place_frees_the_picture_it_drew():
+    """One assignment whose drawn identity changes (a new revision's crop for the same layer) draws
+    its new picture; the one it drew before, which no other layer draws, is freed once no commit
+    shows it."""
+    rig = Rig()
+    before = photo("same", start=0)
+    rig.ready(before)
+    rig.settle(before)
+    shown = rig.screens.commits[-1][1]["same"]
+    after = LocalLayer(before.layer.model_copy(update={"crop": PhotoCrop(offset=0.2)}), before.path, 0.0, 1.0)
+    rig.clock.tick()
+    rig.ready(after)
+    rig.settle(after)
+    assert rig.screens.commits[-1][1]["same"].handle != shown.handle
+    rig.clock.tick()
+    rig.present(after)
+    assert shown.handle in rig.screens.forgotten
 
 
 def test_a_video_frame_is_drawn_into_a_released_target():
@@ -1536,7 +1610,7 @@ def test_a_prepared_video_has_all_its_targets_before_its_first_fade_frame():
     rig = Rig()
     clip = video("clip", start=0, fade_in=1.0)
     decode = prepared_video(rig, clip)
-    entry = rig.renderer._layers["clip"]
+    entry = rig.renderer._layers[drawn_identity(clip.layer)]
     assert [picture.target.size for picture in entry.targets] == [(1920, 1080)] * VIDEO_TARGETS
     rig.settle(clip, timebase=0.1)
     rig.log.clear()

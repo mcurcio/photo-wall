@@ -31,11 +31,15 @@ MAX_HOST_FACTS_BYTES: Final[int] = 2048
 LINK_STATES: Final[frozenset[str]] = frozenset(
     {"up", "down", "dormant", "lowerlayerdown", "notpresent", "testing", "unknown"})
 _FIELDS: Final[tuple[str, ...]] = ("producer", "sequence", "sampled_boottime_ms", "kernel_release",
-                                   "interface", "link_state", "address", "base_tag", "reset_cause")
+                                   "interface", "link_state", "address", "base_tag", "reset_cause",
+                                   "wall_clock")
 # Why this boot began, as the hardware watchdog's driver reports it (issue #125; the owner,
 # 2026-10-20, on keeping the watchdog: "keep", each watchdog reboot logged): "watchdog" when the
 # watchdog reset the board, "other" when the driver can tell and it did not.
 RESET_CAUSES: Final[tuple[str, ...]] = ("watchdog", "other")
+# The wall clock as the kernel judges it (appliance/kernel/clock.py `wall_clock_state`, decision
+# 0032): "synchronised" while a time client disciplines it. Reported, never a gate.
+WALL_CLOCK_STATES: Final[tuple[str, ...]] = ("synchronised", "unsynchronised")
 # The base boot stages, in boot order, and each stage's record states.
 BOOT_STAGES: Final[tuple[str, ...]] = ("handoff", "storage", "prepare")
 BOOT_STATES: Final[tuple[str, ...]] = ("running", "done", "refused", "failed")
@@ -84,11 +88,16 @@ def _reset_cause(value: str) -> None:
         raise ValueError("invalid_host_fact_reset_cause")
 
 
+def _wall_clock(value: str) -> None:
+    if not isinstance(value, str) or value not in WALL_CLOCK_STATES:
+        raise ValueError("invalid_host_fact_wall_clock")
+
+
 # Each optional text fact's rule, in the record's value order; the node's reader applies the
 # same rules per field.
 FACT_RULES: Final = {"kernel_release": _kernel_release, "interface": _interface,
                      "link_state": _link_state, "address": _address, "base_tag": _base_tag,
-                     "reset_cause": _reset_cause}
+                     "reset_cause": _reset_cause, "wall_clock": _wall_clock}
 
 
 def valid_fact(name: str, value: object) -> bool:
@@ -199,6 +208,8 @@ class HostFactsV2:
     boot: BootReportV2 | None = None
     # One of RESET_CAUSES; None = not read this boot (no watchdog, or its driver cannot tell).
     reset_cause: str | None = None
+    # One of WALL_CLOCK_STATES; None = not read (not Linux, or adjtimex failed).
+    wall_clock: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.producer) is not NodeProducerV2 or self.producer.owner != "host_core":

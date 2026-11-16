@@ -199,7 +199,9 @@ class AuditedService(PlayerService):
                     readiness_sequence=commit.readiness_sequence, committed_at=commit.committed_at,
                     assignment_ids=list(commit.assignment_ids)))
                 report = self.reports.get(key)
-                if (report is None or not report['capacity_ok'] or report['clock_uncertainty'] > .1
+                # Decision 0032: Central grants on the readiness sequence the Commit echoes, never on
+                # the Pi's clock bound, so a loose bound is no failure here.
+                if (report is None or not report['capacity_ok']
                         or not set(commit.assignment_ids) <= set(report['prepared'])):
                     self.commit_failures.add('commit_without_matching_prepared_report')
                 self.commits_checked.add(identity)
@@ -260,7 +262,7 @@ while not (stopping[0] and service.stopped):
             fault=service.last_fault,
             outputs=count, events=list(renderer.events), recent_readiness=readiness_samples, commit_checks=checks,
             commit_failures=failures, deliveries=deliveries,
-            clock=dataclasses.asdict(service.mapping.diagnostics),
+            clock=dataclasses.asdict(service.show_clock.diagnostics),
             forbidden_imports_absent=all(importlib.util.find_spec(name) is None
                                          for name in ('central', 'media', 'immich')))
         data = json.dumps(report, sort_keys=True, separators=(',', ':')).encode()
@@ -1083,7 +1085,10 @@ def baseline_checks(snapshot: dict, players: dict) -> dict:
     for report in players.values():
         require(report["persistence"] == "volatile"
                 and report["forbidden_imports_absent"], "player_boundary")
-        require(report["commit_checks"] > 0 and not report["commit_failures"], "readiness_commit_proof")
+        # Decision 0032: only a Run's first turn awaits a Commit, and the demo's Default Scene starts
+        # its first turn while its photos are still being prepared, so the wall may play with no
+        # Commit at all; every Commit Central did send must match a prepared report.
+        require(not report["commit_failures"], "readiness_commit_proof")
         drawn = [event for event in report["events"] if event["layers"]]
         require(len({event["output_id"] for event in drawn}) == report["outputs"], "output_not_drawn")
         for event in drawn:
@@ -1092,10 +1097,6 @@ def baseline_checks(snapshot: dict, players: dict) -> dict:
                 seen_types.add(layer["media_type"])
     require({"video/mp4", "image/jpeg"} <= seen_types, "media_types_not_presented")
     require(bool(snapshot["observations"]), "central_observation_missing")
-    output_count = sum(report["outputs"] for report in players.values())
-    require(any(group["status"] == "committed" and len(group["members"]) == output_count and
-        len({owner[0] for owner in group["members"].values() if owner}) == len(players)
-        for group in snapshot["groups"]), "complete_group_commit_missing")
     return dict(prepared_variants=len(variants), observed_media_types=sorted(seen_types),
                 players=len(players), outputs=sum(report["outputs"] for report in players.values()),
                 commit_checks=sum(report["commit_checks"] for report in players.values()),
@@ -1124,12 +1125,18 @@ def current_outputs(report):
 
 
 def outage_checks(reports, expiry):
+    """Decision 0032: Central stopped past every held plan's validity, each Frame keeps playing
+    Central's plan: every Output still draws a photo, and each has moved on to its continuation's
+    slots (contracts/continuation.py) since the plan's validity ended."""
+    from contracts.continuation import CONTINUATION_PREFIX
     for report in reports.values():
         require(report["utc"] > expiry, "outage_report_stale")
-        require(all(not event["layers"] and event["fallback"] for event in current_outputs(report)),
-                "outage_fallback_missing")
-        require(not any(event["utc"] > expiry + .5 and event["layers"] for event in report["events"]),
-                "outage_lease_overrun")
+        require(all(event["layers"] and not event["fallback"] for event in current_outputs(report)),
+                "outage_frame_dark")
+        continued = {event["output_id"] for event in report["events"] if event["utc"] > expiry
+                     and any(layer["assignment_id"].startswith(CONTINUATION_PREFIX)
+                             for layer in event["layers"])}
+        require(len(continued) == report["outputs"], "outage_not_continued")
 
 
 def rejoined_player_ready(old, report, rejoined_at):
@@ -1457,19 +1464,21 @@ def upstream_faults(run):
 
 
 def central_player_faults(run):
-    """Central outage past every held lease, Central restart and a Player restart."""
+    """Central outage past every held plan's validity, Central restart and a Player restart."""
     host, phases, save = run.host, run.phases, run.save
     await_state, record = run.await_state, run.record
 
-    # Central is unavailable past every held lease, so the Player must reach fallback.
+    # Central is unavailable past every held plan's validity: each Frame keeps playing Central's
+    # plan through its continuation (decision 0032), over two turns so every Output moves on.
     before, reports = await_state(lambda snapshot, reports: all(all(event["layers"] and not event["fallback"]
         for event in current_outputs(report)) for report in reports.values()), "active_before_outage_timeout", 60)
     expiry = max(offer["plan"]["valid_until"] for offer in before["offers"])
     stopped_at = time.time()
     host.compose("stop", "central", capture=False)
     try:
-        while time.time() <= expiry + 2:
-            time.sleep(min(2, max(.1, expiry + 2 - time.time())))
+        until = expiry + 2 * SCENE_CYCLE_SECONDS + 2
+        while time.time() <= until:
+            time.sleep(min(2, max(.1, until - time.time())))
         reports = {name: host.player_report(name) for name in host.players}
         phases["central_outage"] = dict(stopped_at=stopped_at, held_expiry=expiry, before=before, players=reports)
         save()
@@ -1484,11 +1493,19 @@ def central_player_faults(run):
     recovery_started = time.monotonic()
     phases["central_restart"] = dict(resumed_at=resumed_at, recovery_budget_seconds=recovery_seconds)
     save()
+    # Rejoined: each Output draws a layer of Central's new plan, not a continuation slot it kept
+    # cycling through the outage (decision 0032), so Central holds its locks again.
+    from contracts.continuation import CONTINUATION_PREFIX
     snapshot, reports = await_state(lambda snapshot, reports: all(all(event["utc"] > resumed_at and
-        event["layers"] and not event["fallback"] for event in current_outputs(report))
+        event["layers"] and not event["fallback"] and not any(
+            layer["assignment_id"].startswith(CONTINUATION_PREFIX) for layer in event["layers"])
+        for event in current_outputs(report))
         for report in reports.values()), "central_recovery_timeout", recovery_seconds)
-    require({item["run_id"] for item in before["locks"]} == {item["run_id"] for item in snapshot["locks"]},
-            "restart_run_changed")
+    # The Run each Output draws after the restart is the one Central held before it (read from
+    # what is drawn: a Player rejoins before its next report secures, and so locks, the new layers).
+    require({item["run_id"] for item in before["locks"]} == {
+        layer["run_id"] for report in reports.values() for event in current_outputs(report)
+        for layer in event["layers"]}, "restart_run_changed")
     record("central_recovered", snapshot, reports,
            recovery_elapsed_seconds=time.monotonic() - recovery_started)
 

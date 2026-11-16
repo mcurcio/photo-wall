@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import socket
 import threading
 from queue import Empty, Queue
@@ -10,6 +11,10 @@ import pytest
 from test_player_service import close, rig
 
 from contracts.node_app_link import (
+    MAX_FRAMES_BLACK,
+    FrameBlack,
+    FrameBlackCause,
+    NodeFramesBlackV2,
     NodeProbeV2,
     NodeRendererV2,
     encode_node_probe,
@@ -82,12 +87,14 @@ def channel_pair():
 
 
 class Rig:
-    def __init__(self, dispatcher=None):
+    def __init__(self, dispatcher=None, frames_black=None):
         self.glib = FakeGLib()
         self.dispatcher = dispatcher or MainLoopDispatcher(self.glib)
         self.relinks = 0
         self.player, self.broker = channel_pair()
+        self.report = None      # no executor unless a test says otherwise: nothing is sent
         self.responder = ProbeResponder(self.dispatcher, on_relink=self.relink,
+                                        frames_black=frames_black or (lambda: self.report),
                                         connector=lambda _path: self.player)
 
     def relink(self):
@@ -313,6 +320,7 @@ def test_todays_broker_refusal_retries_with_slow_capped_backoff():
             raise Stop
 
     responder = ProbeResponder(MainLoopDispatcher(FakeGLib()), on_relink=lambda: None,
+                               frames_black=lambda: None,
                                connector=connector, sleep=sleep)
     with pytest.raises(Stop):
         responder._run()
@@ -349,6 +357,7 @@ def test_unavailable_socket_retries_and_a_probed_channel_resets_the_backoff():
             raise Stop
 
     responder = ProbeResponder(MainLoopDispatcher(FakeGLib()), on_relink=lambda: None,
+                               frames_black=lambda: None,
                                connector=connector, sleep=sleep)
     with pytest.raises(Stop):
         responder._run()
@@ -363,6 +372,7 @@ def test_start_runs_one_daemon_thread_named_player_probe():
         raise OSError("socket_unavailable")
 
     responder = ProbeResponder(MainLoopDispatcher(FakeGLib()), on_relink=lambda: None,
+                               frames_black=lambda: None,
                                connector=connector, sleep=lambda _s: threading.Event().wait(60))
     responder.start()
     assert started.wait(2)
@@ -419,6 +429,7 @@ def test_real_seqpacket_channel_round_trip():
         pytest.skip("SOCK_SEQPACKET is Linux-only")
     glib = FakeGLib()
     responder = ProbeResponder(MainLoopDispatcher(glib), on_relink=lambda: None,
+                               frames_black=lambda: None,
                                connector=lambda _path: player)
     thread = threading.Thread(target=responder._channel, daemon=True)
     thread.start()
@@ -434,3 +445,147 @@ def test_real_seqpacket_channel_round_trip():
         assert parse_node_probe_answer(broker.recv(8193)) == NONCES[0]
     thread.join(timeout=3)
     assert not thread.is_alive()
+
+
+def replies(rig):
+    """Every packet the Player sent since the last call, parsed."""
+    found = []
+    while True:
+        try:
+            raw = rig.broker.incoming.get(timeout=.05)
+        except Empty:
+            return found
+        if raw:
+            found.append(parse_node_probe_reply(raw))
+
+
+def reports_of(rig):
+    return [reply.frames for reply in replies(rig) if isinstance(reply, NodeFramesBlackV2)]
+
+
+def answered(rig):
+    rig.probe(NONCES[0])
+    rig.settle()
+    rig.glib.run_idle()
+
+
+NO_PLAN = (FrameBlack("HDMI-A-1", FrameBlackCause.NO_PLAN),)
+
+
+def test_the_frames_black_report_goes_once_until_it_changes():
+    """Sixty probes with no change send one packet; a change sends another. Mutation probe: send
+    on every answer."""
+    rig = Rig()
+    rig.report = NO_PLAN
+    rig.open()
+    for _ in range(60):
+        answered(rig)
+    assert reports_of(rig) == [NO_PLAN]
+    rig.report = ()
+    answered(rig)
+    assert reports_of(rig) == [()]                  # an empty report: nothing is black
+    rig.shut()
+
+
+def test_a_new_channel_restates_the_report():
+    """Mutation probe: do not reset on channel open."""
+    rig = Rig()
+    rig.report = NO_PLAN
+    rig.open()
+    answered(rig)
+    assert reports_of(rig) == [NO_PLAN]
+    rig.shut()
+    rig.player, rig.broker = channel_pair()
+    rig.responder.connector = lambda _path: rig.player
+    rig.open()
+    answered(rig)
+    assert reports_of(rig) == [NO_PLAN]
+    rig.shut()
+
+
+def test_no_executor_sends_nothing():
+    """"Cannot tell" is not "nothing is black". Mutation probe: no executor reported as ()."""
+    rig = Rig(frames_black=lambda: None)
+    rig.open()
+    answered(rig)
+    assert reports_of(rig) == []
+    rig.shut()
+
+
+def test_no_executor_after_a_report_sends_nothing_and_the_report_stands():
+    """Mutation probe: treat a later "cannot tell" as a report to send."""
+    rig = Rig()
+    rig.report = NO_PLAN
+    rig.open()
+    answered(rig)
+    assert reports_of(rig) == [NO_PLAN]
+    rig.report = None
+    answered(rig)
+    assert reports_of(rig) == []
+    rig.report = NO_PLAN                            # unchanged since it last got through
+    answered(rig)
+    assert reports_of(rig) == []
+    rig.shut()
+
+
+def test_a_failed_send_is_retried_at_the_next_answer():
+    """The answer goes (EAGAIN is the socket's, the report stays owed)."""
+    rig = Rig()
+    rig.report = NO_PLAN
+    rig.open()
+    sent = []
+    send = rig.player.send
+
+    def refuse_a_report(raw, flags=0):
+        if "frames_black" in bytes(raw).decode():
+            if not sent:
+                sent.append(raw)
+                raise BlockingIOError("EAGAIN")
+        return send(raw, flags)
+
+    rig.player.send = refuse_a_report
+    answered(rig)
+    assert reports_of(rig) == []
+    answered(rig)
+    assert reports_of(rig) == [NO_PLAN]
+    rig.shut()
+
+
+def test_a_report_that_cannot_be_encoded_is_skipped_and_the_answer_stands():
+    too_long = tuple(FrameBlack(f"o{i:02}", FrameBlackCause.NO_PLAN) for i in range(MAX_FRAMES_BLACK + 1))
+    rig = Rig()
+    rig.report = too_long
+    rig.open()
+    rig.probe(NONCES[1])
+    rig.settle()
+    rig.glib.run_idle()
+    assert replies(rig) == [NodeProbeV2(NONCES[1])]
+    rig.shut()
+
+
+def test_an_unreportable_renderer_does_not_stop_the_frames_black_report():
+    """Mutation probe: report inside the renderer send's try -> an over-long name loses the card."""
+    rig = Rig()
+    rig.responder.gl_renderer = lambda: "x" * 500
+    rig.report = NO_PLAN
+    rig.open()
+    answered(rig)
+    assert reports_of(rig) == [NO_PLAN]
+    rig.shut()
+
+
+@pytest.mark.parametrize("error", [ValueError("a report that cannot be made"), KeyError("picture")])
+def test_a_report_that_raises_is_logged_and_skipped(error, caplog):
+    """Mutation probe: catch only ValueError -> a KeyError escapes unlogged, into the dispatcher."""
+    def broken():
+        raise error
+
+    rig = Rig(frames_black=broken)
+    rig.open()
+    rig.probe(NONCES[2])
+    rig.settle()
+    with caplog.at_level(logging.WARNING, logger="photo_wall.player.probe"):
+        rig.glib.run_idle()
+    assert replies(rig) == [NodeProbeV2(NONCES[2])]
+    assert "frames black report skipped" in caplog.text
+    rig.shut()

@@ -87,7 +87,7 @@ def test_the_runner_puts_a_report_only_when_what_it_says_changes():
     verdict sequence -> four reports."""
     judge, now = _Judge(), [NOW_MS]
     sink = _Sink()
-    health = runner.HealthRunner(judge, (), clock=lambda: now[0], wall=lambda: WALL_MS, sink=sink)
+    health = runner.HealthRunner(judge, (), clock=lambda: now[0], wall=lambda: WALL_MS + now[0] - NOW_MS, sink=sink)
     lit = OutputVerdict("Virtual-1", "live", (), None, None)
     judge.current = _verdict(0, lit)
     health.turn()

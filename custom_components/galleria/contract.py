@@ -116,6 +116,7 @@ class FrameReport(TypedDict):
     output_id: str
     showing: bool
     light_lux: float | None
+    continuing_since: float | None
 
 
 class FrameReports(TypedDict):
@@ -345,7 +346,8 @@ _SCHEMAS: Final[dict[str, Any]] = {'Birth': {'additionalProperties': False,
                   'required': ['id', 'name', 'driven_by'],
                   'type': 'object'},
  'FrameReport': {'additionalProperties': False,
-                 'properties': {'frame_id': {'pattern': '^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$',
+                 'properties': {'continuing_since': {'anyOf': [{'type': 'number'}, {'type': 'null'}]},
+                                'frame_id': {'pattern': '^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}$',
                                              'type': 'string'},
                                 'generation': {'minimum': 1, 'type': 'integer'},
                                 'light_lux': {'anyOf': [{'maximum': 200000.0, 'minimum': 0, 'type': 'number'},

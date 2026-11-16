@@ -239,3 +239,22 @@ def test_actual_qualification_selects_fallback_but_changed_mode_blocks_new_stage
     with pytest.raises(NodeControlError,match='qualified_fallback_required'):
         lifecycle.stage(DEVICE_ID,OperatorAppStage(uuid4(),uuid4(),claim.session_id,1,selected.deployment_id,
                                                    'operator:after-mode-change'))
+
+
+def test_an_output_whose_layer_awaits_no_grant_qualifies_without_a_commit(registry):
+    """Decision 0032 (B12): a layer that awaits no grant (a later turn of its Run) is in force once
+    prepared; qualification asks a Commit only of a layer that awaits one. Mutation probe:
+    restore the Commit requirement."""
+    witness = Witnesses(registry)
+    witness.advance(interval=300)            # the Scene's second turn: no grant awaited
+    for _ in range(6):
+        result = witness.advance()
+    plan = witness.coordinator.delivery(witness.player['player_id'], 1)['plan']
+    now = registry.clock.utc()
+    active = [layer for layer in plan.layers if layer.start <= now < layer.end]
+    assert active and not any(layer.awaits_grant for layer in active)
+    with registry.db.transaction() as conn:
+        committed = {row['assignment_id'] for row in conn.execute(
+            'SELECT assignment_id FROM execution_commits WHERE valid').fetchall()}
+    assert not committed & {layer.assignment_id for layer in active}
+    assert result['status'] == 'accepted'

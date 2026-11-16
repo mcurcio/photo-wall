@@ -1,5 +1,6 @@
 import hashlib
 from datetime import UTC, datetime
+from functools import partial
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -75,13 +76,20 @@ def full_screen(bindings) -> dict:
             for items in bindings.values() for item in items}
 
 
+class FailingLines(PoolLines):
+    """A Scene line that raises when it is read."""
+
+    def line(self, query):
+        raise RuntimeError("the read failed")
+
+
 def propose(instance, *, now=0, horizon=25, assets=None, pools=None, bindings=None,
-            authored=None, locks=None, limits=None, frame_outputs=None):
+            authored=None, locks=None, limits=None, frame_outputs=None, lines=None):
     bindings = bindings or {"player-one": (binding(),)}
     options = dict(
         bindings_by_player=bindings, settings=FitSettings(),
         frame_outputs=full_screen(bindings) if frame_outputs is None else frame_outputs,
-        lines=PoolLines(pools if pools is not None else {
+        lines=lines or PoolLines(pools if pools is not None else {
             "holiday:1": pool("holiday:1", *(assets or [candidate()])),
         }),
         authored_candidates=authored or {}, locked_assignments=locks or {},
@@ -404,8 +412,9 @@ def test_a_cut_keeps_offered_locks_and_one_rule_for_every_budget(monkeypatch):
                         lambda **limits: WallLimits(max_slots=1, **limits))
     slots = propose(instance, locks=locks)
     assert [layer.start for layer in layers(slots)] == [0, 10]
+    # Decision 0032: only a layer that awaits a grant (its Run's first turn) is a cue member.
     assert {cue.assignment_id for cue in slots.cues} == {
-        layer.assignment_id for layer in layers(slots)}
+        layer.assignment_id for layer in layers(slots) if layer.awaits_grant}
 
 
 def test_a_runtime_that_cannot_settle_now_fails_the_pass_rather_than_offer_nothing(monkeypatch):
@@ -667,3 +676,184 @@ def test_a_cut_plan_never_replaces_an_offer_holding_layers_past_the_cut():
     assert _withdraws(latest, cut.for_player("player-one"), cut, now=0)
     assert not _withdraws(latest, whole.for_player("player-one"), whole, now=0)
     assert not _withdraws(latest, cut.for_player("player-one"), cut, now=30)
+
+
+def test_a_frame_with_no_photo_that_fits_gets_one_span_for_the_showing():
+    """A media showing inside the horizon that ends the pass with no layer: one span each, sorted."""
+    result = propose(runtime(), pools={"holiday:1": pool()})
+    proposal = result.for_player("player-one")
+    assert proposal.layers == ()
+    assert [(s.output_id, s.start, s.end) for s in proposal.unfilled] == [
+        ("hdmi-1", 0, 10), ("hdmi-1", 10, 20), ("hdmi-1", 20, 30)]
+
+
+def test_every_refusal_path_leaves_a_span():
+    """The Scene line raises, a slot refused and a Frame of unknown screen all end with no layer.
+    Mutation probe: record spans only in `_settle_slot`'s unfilled branch -> the raise leaves none."""
+    raised = propose(runtime(), lines=FailingLines({"holiday:1": pool("holiday:1", candidate())}))
+    assert raised.for_player("player-one").layers == ()
+    assert raised.for_player("player-one").unfilled
+    unknown = propose(runtime(), frame_outputs={"left": frame_output_of("left", None)})
+    assert unknown.for_player("player-one").unfilled
+
+
+def test_a_placed_showing_and_a_frame_with_no_run_get_no_span():
+    assert propose(runtime()).for_player("player-one").unfilled == ()
+    assert propose(Runtime(house=UTC_HOUSE)).for_player("player-one").unfilled == ()
+
+
+def test_a_black_showing_is_authored_black_and_no_span():
+    instance = runtime(contributions=(Contribution(target="frame:left", kind="black"),))
+    assert propose(instance).for_player("player-one").unfilled == ()
+
+
+def test_a_showing_past_the_preparation_horizon_is_not_a_span():
+    """Mutation probe: drop the horizon check -> a showing this pass cannot yet place is a span."""
+    bindings = {"player-one": (binding(),)}
+    plan = project(runtime(), 0, bindings_by_player=bindings, settings=FitSettings(),
+                   frame_outputs=full_screen(bindings), lines=PoolLines({"holiday:1": pool()}),
+                   authored_candidates={}, locked_assignments={}, history=WallHistory(),
+                   horizon_seconds=15, plan_seconds=40)
+    assert [(s.start, s.end) for s in plan.for_player("player-one").unfilled] == [(0, 10), (10, 20)]
+
+
+def test_a_showing_the_slot_budget_cuts_is_not_a_span(monkeypatch):
+    """Mutation probe: drop `past_cut` from `_unfilled` -> the showings the budget cut read as black."""
+    monkeypatch.setattr("central.planner.WallLimits", partial(WallLimits, max_slots=1))
+    proposal = propose(runtime()).for_player("player-one")
+    assert len(proposal.layers) == 1 and proposal.unfilled == ()
+
+
+def test_a_cut_showing_is_not_a_span():
+    """Past the cut nothing is planned at all, so nothing is wanted there."""
+    instance, bindings = runtime(), {"player-one": (binding(),)}
+    cut = propose(instance, pools={"holiday:1": pool()}, limits=PlannerLimits(max_assignments=1))
+    assert [span.start for span in cut.for_player("player-one").unfilled] == [0]
+    assert bindings
+
+
+def test_only_a_runs_first_turn_awaits_a_grant_and_only_it_is_a_cue_member():
+    """Decision 0032 (B3): a grant only for a change. The Run's first turn (`cycle_index` 0)
+    awaits Central's grant; every later turn starts at its instant once ready. Mutation probe:
+    `awaits_grant=True` on every layer."""
+    projection = propose(runtime(), horizon=25)
+    assert [(layer.start, layer.awaits_grant) for layer in layers(projection)] == [
+        (0, True), (10, False), (20, False)]
+    assert {cue.assignment_id for cue in projection.cues} == {layers(projection)[0].assignment_id}
+    later = propose(runtime(), now=40, horizon=25)
+    assert not any(layer.awaits_grant for layer in layers(later)) and later.cues == ()
+
+
+def _continued(instance, *, assets, horizon=25, plan_seconds=200, bindings=None):
+    bindings = bindings or {"player-one": (binding(),)}
+    return project(
+        instance, 0, bindings_by_player=bindings, settings=FitSettings(),
+        frame_outputs=full_screen(bindings),
+        lines=PoolLines({"holiday:1": pool("holiday:1", *assets)}), authored_candidates={},
+        locked_assignments={}, history=WallHistory(), horizon_seconds=horizon,
+        plan_seconds=plan_seconds)
+
+
+def test_a_frame_continues_its_run_past_its_layers_with_its_offered_photos():
+    """B4: the continuation starts at the Run's first turn not offered, at the Scene's pace and
+    Transition, lists the Run's offered photos in start order and knows no change (`until`
+    None) for a Run that repeats past the plan horizon. The Plan holding it is valid."""
+    instance = runtime(transition=Transition(style="cross_fade", seconds=3))
+    projection = _continued(instance, assets=[candidate(f"p{n}", captured=n) for n in range(6)])
+    proposal = projection.for_player("player-one")
+    (continuation,) = proposal.continuations
+    assert (continuation.start, continuation.seconds, continuation.lead, continuation.fade_in,
+            continuation.until) == (30, 10, 3, 3, None)
+    assert continuation.photos == tuple(layer.assignment_id for layer in proposal.layers)
+    Plan(plan_id="plan", revision=1, player_id="player-one", authority_epoch=1, issued_at=0,
+         valid_from=0, valid_until=projection.valid_until, bindings=(binding(),),
+         layers=proposal.layers, continuations=proposal.continuations)
+
+
+def test_a_show_over_the_default_scene_gives_two_continuations_one_after_the_other():
+    """B4: the Show's continuation runs to its end (`until`, the next known change), the
+    Default Scene's from there with no known end."""
+    instance = Runtime(house=UTC_HOUSE)
+    for scene_id, extra in (("calm", {"loop": True}), ("show", {"loop": True, "duration_seconds": 60})):
+        instance.set_scene(Scene(scene_id=scene_id, cycle_seconds=10, selection=SceneSelection(),
+                                 contributions=(Contribution(target="frame:left",
+                                                             source_refs=("holiday:1",)),),
+                                 **extra))
+    instance.set_default_scene("calm", 0)
+    instance.activate("show", "show-now", 0, priority=0)
+    projection = _continued(instance, assets=[candidate(f"p{n}", captured=n) for n in range(12)])
+    show, calm = projection.for_player("player-one").continuations
+    assert (show.start, show.until) == (30, 60) and (calm.start, calm.until) == (60, None)
+    assert show.run_id != calm.run_id
+
+
+def test_a_show_starting_inside_the_default_scenes_continuation_ends_it_there():
+    """B4, `_segment`: a Run of greater precedence that starts to show inside a continuation's
+    span is its `until`, so the Frame never plays on past a Show's start. Mutation probe: ignore
+    later Runs of greater precedence when finding `until`."""
+    instance = Runtime(house=UTC_HOUSE)
+    for scene_id, cycle in (("calm", 7), ("show", 10)):
+        instance.set_scene(Scene(scene_id=scene_id, cycle_seconds=cycle, loop=True,
+                                 selection=SceneSelection(),
+                                 contributions=(Contribution(target="frame:left",
+                                                             source_refs=("holiday:1",)),)))
+    instance.set_default_scene("calm", 0)
+    instance.create_program(window_program("later", "show", 60, 120), 0)
+    projection = _continued(instance, assets=[candidate(f"p{n}", captured=n) for n in range(12)])
+    calm = projection.for_player("player-one").continuations[0]
+    assert calm.until == 60
+
+
+def test_one_outputs_segments_play_one_after_the_other():
+    """B4, `_in_turn`: on one Output a segment starting inside an earlier one's span is dropped,
+    and one whose cross-fade lead reaches into it starts at its `until` with its lead and fades cut
+    to fit. Mutation probes: keep the overlapping segment; keep the full lead."""
+    from central.planner import _in_turn
+    from central.wall_plan.continuation import ContinuationSegment, ListedPhoto
+
+    def segment(run, start, until, lead=0.0, fade=0.0):
+        return ContinuationSegment(
+            player_id="p", frame_id="f", output_id="o", run_id=run, start=start, seconds=10,
+            lead=lead, fade_in=fade, fade_out=0, until=until,
+            candidates=(ListedPhoto(assignment_id=f"{run}-a", asset_id="a"),))
+
+    first = segment("show", 30, 60)
+    inside = segment("other", 50, 90)
+    leading = segment("calm", 61, None, lead=3, fade=3)
+    kept = _in_turn([leading, inside, first])
+    assert [s.run_id for s in kept] == ["show", "calm"]
+    assert (kept[1].start, kept[1].lead) == (61, 1)
+    assert kept[1].fade_in + kept[1].fade_out <= kept[1].seconds + kept[1].lead
+
+
+def test_a_listed_photo_its_layer_keeps_is_listed_as_kept(monkeypatch):
+    """Decision 0032: a candidate whose layer keeps its photo after its end ("keep_this_photo") is
+    listed as kept, so its hold and list span are open-ended (central/wall_plan/continuation.py).
+    Mutation probe: list every candidate as not kept."""
+    seen = []
+    real = planner_module.continuation_lists
+
+    def capture(segments, **kwargs):
+        seen.extend(segments)
+        return real(segments, **kwargs)
+
+    monkeypatch.setattr(planner_module, "continuation_lists", capture)
+    kept = runtime(contributions=(Contribution(target="frame:left", source_refs=("holiday:1",),
+                                               after_end="keep_this_photo"),))
+    _continued(kept, assets=[candidate(f"p{n}", captured=n) for n in range(6)])
+    assert seen and all(photo.kept for s in seen for photo in s.candidates)
+    seen.clear()
+    _continued(runtime(), assets=[candidate(f"p{n}", captured=n) for n in range(6)])
+    assert seen and not any(photo.kept for s in seen for photo in s.candidates)
+
+
+def test_a_lock_offered_before_grants_existed_is_kept_and_takes_the_grant():
+    """Decision 0032: a lock written by the release before `awaits_grant` reads False; it is no
+    stale authority (the field is revisable), and the layer takes today's value. Mutation probe:
+    take `awaits_grant` out of REVISABLE."""
+    offered = layers(propose(runtime(), now=0, horizon=5))[0]
+    assert offered.awaits_grant
+    old = offered.model_copy(update={"awaits_grant": False})
+    revised = propose(runtime(), now=1, horizon=5, locks={offered.assignment_id: old})
+    assert layers(revised)[0] == offered
+    assert not [d for d in revised.diagnostics if d.code == "lock_stale_authority"]

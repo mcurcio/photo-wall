@@ -8,10 +8,13 @@ from threading import Event
 
 import pytest
 
+from contracts.continuation import CONTINUATION_PREFIX
 from contracts.frame_lighting import FrameLighting, Paper
 from contracts.models import (
     Calibration,
+    CarriedPhoto,
     Commit,
+    Continuation,
     Layer,
     LostGrant,
     OutputBinding,
@@ -19,13 +22,16 @@ from contracts.models import (
     PlayerConfiguration,
     PositionBox,
     Revocation,
+    UnfilledSpan,
     Variant,
 )
+from contracts.node_app_link import FrameBlack, FrameBlackCause
 from contracts.photo_crop import CENTRED
-from contracts.time import ManualClock, TimeMapping
+from contracts.time import ManualClock
 from player.cache import Cache
 from player.executor import AuthorityError, Executor
 from player.rendering import PresentationResult, RecordingRenderer
+from player.show_clock import ShowClock
 
 
 def media(data: bytes = b"picture", video: bool = False) -> Variant:
@@ -274,9 +280,10 @@ def binding(output: str = "hdmi1", frame: str = "frame1", **kwargs) -> OutputBin
 
 def layer(key: str = "picture", *, output: str = "hdmi1", frame: str = "frame1",
           data: bytes = b"picture", video: bool = False, **kwargs) -> Layer:
+    # A Run's first turn (decision 0032): it awaits Central's grant, as these tests drive it.
     fields = dict(assignment_id=key, run_id="run", output_id=output, frame_id=frame,
                   binding_generation=1, start=100, end=200, media_origin=100,
-                  variant=media(data, video), crop=CENTRED)
+                  variant=media(data, video), crop=CENTRED, awaits_grant=True)
     fields.update(kwargs)
     if fields.get("presentation") == "black":
         fields["crop"] = None
@@ -286,13 +293,13 @@ def layer(key: str = "picture", *, output: str = "hdmi1", frame: str = "frame1",
 class Rig:
     def __init__(self, directory: Path, *, capacity=4, cache_bytes=4096,
                  bindings: tuple[OutputBinding, ...] | None = None, epoch=1):
-        self.clock = ManualClock(100)
-        self.mapping = TimeMapping(self.clock)
-        self.mapping.establish(.01)
+        self.clock = ManualClock(100)     # its wall reading stands for Central's time
+        self.show_clock = ShowClock(self.clock.monotonic)
+        self.sync_clock()
         self.cache = Cache(directory / "cache", cache_bytes)
         self.renderer = RecordingRenderer(capacity)
         self.executor = Executor("player1", self.cache, self.renderer, self.clock,
-                                 self.mapping)
+                                 self.show_clock)
         self.configuration = PlayerConfiguration(
             player_id="player1", authority_epoch=epoch, configuration_revision=1,
             bindings=bindings or (binding(), binding("hdmi2", "frame2")),
@@ -332,10 +339,16 @@ class Rig:
         self.commit(*(item.assignment_id for item in layers))
         return self.executor.tick()
 
+    def sync_clock(self) -> None:
+        """One instant round trip to Central."""
+        monotonic = self.clock.monotonic()
+        self.show_clock.sample(server_time=self.clock.utc(), sent_monotonic=monotonic,
+                               received_monotonic=monotonic)
+
     def advance(self, amount: float, *, refresh=True) -> None:
         self.clock.advance(amount)
         if refresh:
-            self.mapping.establish(.01)
+            self.sync_clock()
 
 
 def test_two_outputs_secured_is_not_prepared_committed_or_observed(tmp_path):
@@ -543,28 +556,45 @@ def test_no_successful_still_means_black_beyond_horizon(tmp_path):
     assert rig.renderer.outputs["hdmi1"].layers == ()
 
 
-def test_clock_step_and_stale_sample_refuse_unexecuted_commit_retain_visible(tmp_path):
+def loosen(rig: Rig, bound: float) -> None:
+    """Central answered once, slowly: the ShowClock holds Central's time to within `bound`."""
+    rig.show_clock._anchor = replace(rig.show_clock._anchor, bound=bound)
+
+
+def test_a_loose_clock_starts_a_granted_layer_and_never_reports_clock(tmp_path):
+    """Show time is a quality, never a gate (decision 0032): a ShowClock anchored to within 50 s
+    still starts and presents a granted layer, reports no `clock` failure (its bound reported)
+    and accepts a Commit. Mutation: re-add `uncertainty > 0.1` to the start condition in `tick`
+    -> nothing is drawn."""
     rig = Rig(tmp_path)
-    rig.play(layer(after_end="keep_this_photo"))
-    future = layer("future", start=103, data=b"future")
-    rig.offer(layer(after_end="keep_this_photo"), future, revision=2)
-    rig.secure("future", b"future")
+    rig.offer(layer())
+    rig.secure()
     rig.executor.prepare_imminent()
-    rig.commit("future")
-    rig.clock.step_utc(20)
+    loosen(rig, 50.0)
     readiness = rig.executor.readiness()
-    assert {f.code for f in readiness.failures} == {"clock"}
-    rig.clock.advance(3)
+    assert readiness.failures == () and readiness.prepared == ("picture",)
+    assert readiness.clock_uncertainty == pytest.approx(50.0)
+    rig.commit("picture")
+    observations = rig.executor.tick()
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi1"].layers] == ["picture"]
+    assert [o.status for o in observations] == ["presented"]
+    rig.advance(30, refresh=False)
     rig.executor.tick()
-    assert rig.renderer.outputs["hdmi1"].layers[0].layer.assignment_id == "picture"
-    with pytest.raises(AuthorityError):
-        rig.commit("future")
-    rig.mapping.establish(.01)
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi1"].layers] == ["picture"]
+
+
+def test_a_commit_is_refused_on_capacity_alone(tmp_path):
+    """Mutation probe: drop the gate in `accept_commit` -> a grant taken without capacity stands."""
+    rig = Rig(tmp_path)
+    rig.offer(layer())
+    rig.secure()
     rig.executor.prepare_imminent()
-    rig.commit("future")
-    rig.clock.advance(31)
-    with pytest.raises(AuthorityError):
-        rig.commit("future")
+    readiness = rig.executor.readiness()
+    rig.executor._capacity_ok = False
+    with pytest.raises(AuthorityError, match="^commit capacity gate failed$"):
+        rig.executor.accept_commit(Commit(plan_id=rig.plan.plan_id, revision=1, authority_epoch=1,
+                                          readiness_sequence=readiness.sequence, assignment_ids=("picture",),
+                                          committed_at=rig.clock.utc()))
 
 
 def test_cache_pressure_and_corruption_revoke_precommit_readiness(tmp_path):
@@ -652,7 +682,7 @@ def test_restart_restores_no_authority_or_pins_and_rejects_old_epoch(tmp_path):
     rig.cache.close()
     cache = Cache(tmp_path / "cache", 4096)
     restarted_renderer = RecordingRenderer()
-    restarted = Executor("player1", cache, restarted_renderer, rig.clock, rig.mapping)
+    restarted = Executor("player1", cache, restarted_renderer, rig.clock, rig.show_clock)
     restarted.maintain_cache()
     assert cache.stats()["pinned_bytes"] == 0
     assert restarted.tick() == ()
@@ -860,10 +890,9 @@ def test_a_rolling_revision_before_start_keeps_the_granted_start(tmp_path):
     assert rig.renderer.outputs["hdmi1"].layers[-1].layer.priority == -10
 
 
-@pytest.mark.parametrize("ended_by", ["revocation", "clock_step"])
-def test_a_carried_grant_ends_as_a_commit_does(tmp_path, ended_by):
-    """The carried grant is the Commit itself, not a new authority: Central's revocation or a
-    clock step ends it exactly as it ends a Commit of the current revision."""
+def test_a_carried_grant_ends_as_a_commit_does(tmp_path):
+    """The carried grant is the Commit itself, not a new authority: Central's revocation ends it
+    exactly as it ends a Commit of the current revision."""
     rig = Rig(tmp_path)
     upcoming = layer("next", start=103, media_origin=103, data=b"next")
     rig.offer(upcoming)
@@ -872,12 +901,7 @@ def test_a_carried_grant_ends_as_a_commit_does(tmp_path, ended_by):
     rig.commit("next")
     rig.advance(1)
     rig.offer(upcoming, revision=2)
-    if ended_by == "revocation":
-        rig.executor.invalidate(["next"])
-    else:
-        rig.clock.step_utc(1)
-        rig.executor.readiness()
-        rig.mapping.establish(.01)
+    rig.executor.invalidate(["next"])
     rig.advance(2.1)
     rig.executor.prepare_imminent()
     rig.executor.tick()
@@ -1070,3 +1094,437 @@ def test_a_photo_dissolving_in_is_drawn_over_the_one_it_replaces_whatever_the_pl
     drawn = rig.renderer.outputs["hdmi1"].layers
     assert [local.layer.assignment_id for local in drawn] == ["current", "following"]
     assert drawn[-1].alpha == pytest.approx(.5)
+
+
+def black(rig):
+    return {report.output_id: report.cause for report in rig.executor.frames_black()}
+
+
+def test_frames_black_no_current_plan(tmp_path):
+    rig = Rig(tmp_path)
+    assert black(rig) == {"hdmi1": FrameBlackCause.NO_PLAN, "hdmi2": FrameBlackCause.NO_PLAN}
+
+
+def test_frames_black_an_expired_plan(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(layer(end=120), valid_until=120)
+    rig.clock.advance(30)
+    rig.sync_clock()
+    assert black(rig)["hdmi1"] is FrameBlackCause.NO_PLAN
+
+
+def test_frames_black_only_for_enabled_bindings_and_sorted(tmp_path):
+    rig = Rig(tmp_path)
+    assert [report.output_id for report in rig.executor.frames_black()] == ["hdmi1", "hdmi2"]
+    rig.executor.accept_configuration(rig.configuration.model_copy(update={
+        "configuration_revision": 2, "enabled_outputs": ("hdmi2",)}))
+    assert [report.output_id for report in rig.executor.frames_black()] == ["hdmi2"]
+
+
+def test_frames_black_a_due_photo_walks_its_causes(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(layer())
+    assert black(rig)["hdmi1"] is FrameBlackCause.NO_PHOTO
+    rig.secure()
+    assert black(rig)["hdmi1"] is FrameBlackCause.CANNOT_DRAW    # secured, not prepared
+    rig.executor.prepare_imminent()
+    assert black(rig)["hdmi1"] is FrameBlackCause.NOT_STARTED
+    rig.commit("picture")
+    assert black(rig)["hdmi1"] is FrameBlackCause.CANNOT_DRAW    # granted, nothing drawn yet
+    rig.executor.tick()
+    assert "hdmi1" not in black(rig)
+
+
+def test_frames_black_a_deferred_layer_is_ready_to_start(tmp_path):
+    """A layer deferred by the decoder budget is prepared as far as a grant goes. Mutation probe:
+    read only `prepared` -> it is called undrawable."""
+    rig = Rig(tmp_path)
+    rig.offer(layer())
+    rig.secure()
+    rig.executor._assignments["picture"].deferred = True
+    assert black(rig)["hdmi1"] is FrameBlackCause.NOT_STARTED
+
+
+def test_frames_black_a_layer_executing_under_its_lease_is_started(tmp_path):
+    """Its grant has gone, its execution lease has not, and nothing is drawn: a draw failure, not
+    a wait for Central. Mutation probe: read only the grant."""
+    rig = Rig(tmp_path)
+    rig.play(layer())
+    executing = rig.executor._assignments["picture"]
+    executing.granted_layer = None
+    rig.executor._current.clear()
+    assert black(rig)["hdmi1"] is FrameBlackCause.CANNOT_DRAW
+
+
+def test_frames_black_a_layer_and_a_span_not_yet_begun_are_silent(tmp_path):
+    """Mutation probe: drop the start of `_in_force` -> a future photo blacks the Frame now."""
+    rig = Rig(tmp_path)
+    rig.offer(layer(start=300, end=350), unfilled=(UnfilledSpan(output_id="hdmi2", start=300, end=350),))
+    assert black(rig) == {}
+
+
+def test_frames_black_a_failed_download_and_a_failed_decode(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(layer())
+    assert not rig.executor.acquire("picture", [b"wrong"], sha256="0" * 64, size=5)
+    assert black(rig)["hdmi1"] is FrameBlackCause.NO_PHOTO
+    rig.secure()
+    rig.renderer.prepare_failures.add("picture")
+    rig.executor.prepare_imminent()
+    assert black(rig)["hdmi1"] is FrameBlackCause.CANNOT_DRAW
+
+
+def test_frames_black_is_no_time_only_before_any_answer_never_for_a_loose_anchor(tmp_path):
+    """Mutation: pass `uncertainty <= 0.1` as `clock_ok` -> a loose anchor reads as NO_TIME."""
+    rig = Rig(tmp_path)
+    rig.offer(layer())
+    loosen(rig, 50.0)
+    assert black(rig)["hdmi1"] is FrameBlackCause.NO_PHOTO
+    rig.show_clock._anchor = None
+    assert black(rig)["hdmi1"] is FrameBlackCause.NO_TIME
+
+
+def test_frames_black_a_clock_never_anchored_counts_every_layer(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(layer(start=300, end=350))
+    rig.offer(layer(start=300, end=350), revision=2, unfilled=(UnfilledSpan(output_id="hdmi2", start=300, end=350),))
+    rig.show_clock._anchor = None
+    assert black(rig) == {"hdmi1": FrameBlackCause.NO_TIME, "hdmi2": FrameBlackCause.NO_CONTENT}
+
+
+def test_frames_black_a_black_layer_kept_photo_and_pattern_draw_no_card(tmp_path):
+    rig = Rig(tmp_path)
+    rig.play(layer("dark", presentation="black", variant=None))
+    assert "hdmi1" not in black(rig)
+
+    rig = Rig(tmp_path / "kept")
+    rig.play(layer(end=140, after_end="keep_this_photo"))
+    rig.clock.advance(50)
+    rig.sync_clock()
+    rig.executor.tick()
+    assert "hdmi1" not in black(rig)
+
+    rig = Rig(tmp_path / "pattern")
+    rig.offer(layer())
+    rig.renderer.patterns.add("hdmi1")
+    assert "hdmi1" not in black(rig)
+
+
+def test_frames_black_an_unfilled_span_is_no_content_only_while_it_lasts(tmp_path):
+    rig = Rig(tmp_path)
+    rig.offer(unfilled=(UnfilledSpan(output_id="hdmi1", start=100, end=150),))
+    assert black(rig)["hdmi1"] is FrameBlackCause.NO_CONTENT and "hdmi2" not in black(rig)
+    rig.clock.advance(60)
+    rig.sync_clock()
+    assert "hdmi1" not in black(rig)
+
+
+def test_frames_black_with_no_configuration_is_no_report(tmp_path):
+    rig = Rig(tmp_path)
+    fresh = Executor("other", rig.cache, rig.renderer, rig.clock, rig.show_clock)
+    assert fresh.frames_black() == ()
+    assert isinstance(rig.executor.frames_black()[0], FrameBlack)
+
+
+# Decision 0032: grants only for a change, continuations past the plan, and a rejoin with no black.
+
+def test_a_later_turn_starts_at_its_instant_with_no_commit_and_a_first_turn_waits(tmp_path):
+    """B9: a layer that awaits no grant starts at its instant once secured and prepared; one that
+    awaits a grant waits for its Commit. Mutation probe: treat `awaits_grant` as always False."""
+    rig = Rig(tmp_path)
+    later = layer("later", awaits_grant=False)
+    first = layer("first", output="hdmi2", frame="frame2", data=b"first")
+    rig.offer(later, first)
+    rig.secure("later")
+    rig.secure("first", b"first")
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi1"].layers] == [
+        "later"]
+    assert not rig.renderer.outputs["hdmi2"].layers
+    rig.commit("first")
+    rig.executor.tick()
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi2"].layers] == [
+        "first"]
+
+
+def _continued_plan(rig, *, valid_until=130.0, until=None):
+    """Two photos at 10 s turns to 120, then the Run's continuation from 120 listing both."""
+    photos = (layer("a", data=b"a", start=100, end=110, awaits_grant=False),
+              layer("b", data=b"b", start=110, end=120, awaits_grant=False))
+    continuation = Continuation(output_id="hdmi1", run_id="run", photos=("a", "b"), start=120,
+                                seconds=10, until=until)
+    rig.offer(*photos, valid_until=valid_until, continuations=(continuation,))
+    return photos
+
+
+def test_past_its_plan_a_frame_cycles_the_continuations_held_photos_with_no_card(tmp_path):
+    """B10: past `valid_until` the executor plays continuation slots of the photos it holds, by
+    their own spans, and states no black Frame. Mutation probe: cut continuation slots at
+    `valid_until`."""
+    rig = Rig(tmp_path)
+    _continued_plan(rig)
+    rig.secure("a", b"a")
+    rig.secure("b", b"b")
+    drawn = []
+    for _ in range(100):
+        rig.executor.prepare_imminent()
+        rig.executor.tick()
+        assert rig.executor.frames_black() == ()
+        top = rig.renderer.outputs["hdmi1"].layers[-1].layer
+        drawn.append((rig.clock.utc(), top.variant.asset_id, top.assignment_id))
+        rig.advance(.5)
+    past = [(at, asset) for at, asset, key in drawn if at >= 130]
+    assert past and all(key.startswith(CONTINUATION_PREFIX) for at, _, key in drawn if at >= 120)
+    turns = {at: asset for at, asset, _ in drawn if at in (120.0, 130.0, 140.0, 145.0)}
+    assert turns == {120.0: media(b"a").asset_id, 130.0: media(b"b").asset_id,
+                     140.0: media(b"a").asset_id, 145.0: media(b"a").asset_id}
+    readiness = rig.executor.readiness()
+    assert not any(key.startswith(CONTINUATION_PREFIX)
+                   for key in (*readiness.secured, *readiness.prepared))
+
+
+def test_continuing_since_is_set_at_the_first_slot_drawn_and_cleared_by_a_planned_layer(tmp_path):
+    """C4: an Output states since when it plays Central's continuation (the Player line's fact):
+    from the first continuation slot it draws, unchanged across later slots, cleared once a planned
+    layer is drawn again; None on a Frame drawing nothing. Mutation probe: never clear it."""
+    rig = Rig(tmp_path)
+    _continued_plan(rig)
+    rig.secure("a", b"a")
+    rig.secure("b", b"b")
+    frame, other = binding(), binding("hdmi2", "frame2")
+    since = []
+    for _ in range(50):                               # 100 to 125, past the layers' end at 120
+        rig.executor.prepare_imminent()
+        rig.executor.tick()
+        since.append((rig.clock.utc(), rig.executor.continuing_since(frame)))
+        rig.advance(.5)
+    assert all(value is None for at, value in since if at < 120)
+    assert all(value == pytest.approx(120) for at, value in since if at >= 120)
+    assert rig.executor.continuing_since(other) is None
+    planned = layer("c", data=b"c", start=125, end=200, awaits_grant=False)
+    rig.offer(planned, revision=2)
+    rig.secure("c", b"c")
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi1"].layers] == ["c"]
+    assert rig.executor.continuing_since(frame) is None
+
+
+def test_a_continuation_skips_a_photo_the_player_does_not_hold(tmp_path):
+    rig = Rig(tmp_path)
+    _continued_plan(rig)
+    rig.secure("a", b"a")
+    rig.advance(25)
+    for _ in range(3):
+        rig.executor.prepare_imminent()
+        rig.executor.tick()
+        assert rig.renderer.outputs["hdmi1"].layers[-1].layer.variant == media(b"a")
+        rig.advance(10)
+
+
+def test_a_new_plan_whose_photo_is_not_secured_leaves_the_old_photo_drawn_and_carried(tmp_path):
+    """B11: rejoining needs no event. The old photo stays drawn while the new plan's current
+    layer cannot start, and is reported carried; once the new layer can start, it is drawn.
+    Mutation probe: omit `carried`."""
+    rig = Rig(tmp_path)
+    old = layer("old", data=b"old", end=150, awaits_grant=False)
+    rig.offer(old)
+    rig.secure("old", b"old")
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    rig.advance(60)                                   # past the old layer's end
+    new = layer("new", data=b"new", start=160, end=200, awaits_grant=False)
+    rig.offer(new, revision=2)
+    for _ in range(3):
+        rig.executor.prepare_imminent()
+        rig.executor.tick()
+        shown = rig.renderer.outputs["hdmi1"]
+        assert [local.layer.assignment_id for local in shown.layers] == ["old"]
+        assert rig.executor.frames_black() == ()
+        rig.advance(.5)
+    assert rig.executor.readiness().carried == (
+        CarriedPhoto(output_id="hdmi1", asset_id=media(b"old").asset_id),)
+    rig.secure("new", b"new")
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi1"].layers] == ["new"]
+    assert rig.executor.readiness().carried == ()
+
+
+def test_a_new_plan_with_nothing_on_the_frame_takes_the_after_state(tmp_path):
+    rig = Rig(tmp_path)
+    rig.play(layer())
+    rig.offer(revision=2)
+    rig.executor.tick()
+    assert rig.renderer.outputs["hdmi1"].fallback
+
+
+def test_re_delivering_the_held_plan_past_its_validity_is_a_no_op(tmp_path):
+    """B13: the Player keeps its plan through an outage; hearing it again is no error. Mutation
+    probe: restore the expiry check first."""
+    rig = Rig(tmp_path)
+    plan = rig.offer(layer(end=150), valid_until=150)
+    rig.advance(100)
+    assert rig.executor.accept_plan(plan) is False
+    with pytest.raises(AuthorityError, match="expired plan"):
+        rig.offer(layer(end=150), revision=2, valid_until=150, issued_at=100, valid_from=100)
+
+
+def _slots(rig, output="hdmi1"):
+    return [a for a in rig.executor._assignments.values()
+            if a.source is not None and a.layer.output_id == output]
+
+
+def test_continuation_slots_that_ended_are_dropped_through_a_long_outage(tmp_path):
+    """Decision 0032: through a day-long outage the executor holds the plan's layers and the slots
+    of its prepare lead, never every slot it ever made (each tick and prepare pass scans them).
+    Mutation probe: never drop an ended slot."""
+    rig = Rig(tmp_path)
+    photos = _continued_plan(rig)
+    rig.secure("a", b"a")
+    rig.secure("b", b"b")
+    for _ in range(800):                              # 2000 s: 200 turns past the plan's end
+        rig.executor.prepare_imminent()
+        rig.executor.tick()
+        rig.advance(2.5)
+    # The plan's two layers, the slots over the 5 s prepare lead at 10 s turns, one still drawn.
+    assert len(rig.executor._assignments) <= len(photos) + 3
+    assert rig.renderer.outputs["hdmi1"].layers[-1].layer.assignment_id.startswith(
+        CONTINUATION_PREFIX)
+
+
+def test_a_slot_keeps_its_photo_when_a_download_lands_during_its_turn(tmp_path):
+    """Decision 0032: slot k shows the (k mod n)-th held photo, and n grows as downloads land while
+    Central is slow; a slot already made never gets a second assignment with another photo, so a
+    turn never swaps its photo midway. Mutation probe: dedupe slots on their generated id alone."""
+    rig = Rig(tmp_path)
+    _continued_plan(rig)
+    rig.secure("a", b"a")
+    rig.advance(27)                                   # 127: slot 1 (130 to 140) is within the lead
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    rig.secure("b", b"b")                             # now slot 1 would map to "b"
+    rig.advance(1)
+    rig.executor.prepare_imminent()
+    assert len([a for a in _slots(rig) if a.layer.start == 130]) == 1
+    for _ in range(18):                               # 128 to 137: through slot 1's turn
+        rig.executor.prepare_imminent()
+        rig.executor.tick()
+        if rig.clock.utc() >= 130:
+            shown = rig.renderer.outputs["hdmi1"].layers
+            assert [local.layer.variant for local in shown] == [media(b"a")]
+        rig.advance(.5)
+
+
+def test_a_continuation_with_no_listed_photo_held_states_no_photo(tmp_path):
+    """Decision 0032: the card shows when the Frame goes black while content is wanted; a
+    continuation covering now whose listed photos are not held (a wiped cache, downloads not done)
+    is NO_PHOTO, never a silent black. Once one is held the statement goes. Mutation probe: leave
+    a continuation with no slot out of `frames_black`."""
+    rig = Rig(tmp_path)
+    _continued_plan(rig)
+    rig.advance(25)                                   # 125: past the layers, the continuation's
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    assert rig.executor.frames_black() == (FrameBlack("hdmi1", FrameBlackCause.NO_PHOTO),)
+    rig.secure("a", b"a")
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    assert rig.executor.frames_black() == ()
+
+
+def test_a_cancelled_or_invalidated_source_stops_its_continuation_slots(tmp_path):
+    """Decision 0032: Central cancelling a listed photo removes the slots made from it, and
+    invalidating one stops new slots drawing it; the Frame cycles the photos it still may.
+    Mutation probe: ignore revocations when choosing the held photos."""
+    rig = Rig(tmp_path)
+    _continued_plan(rig)
+    rig.secure("a", b"a")
+    rig.secure("b", b"b")
+    rig.advance(22)
+    rig.executor.prepare_imminent()
+    rig.executor.cancel(["a"])
+    assert not [slot for slot in _slots(rig) if slot.source == "a"]
+    rig.executor.invalidate(["b"])
+    assert not _slots(rig)
+    for _ in range(10):
+        rig.executor.prepare_imminent()
+        rig.executor.tick()
+        assert not _slots(rig)
+        rig.advance(2.5)
+
+
+def test_a_kept_still_no_layer_of_the_held_plan_places_is_reported_carried(tmp_path):
+    """Decision 0032: a photo the Frame keeps (its after-state) that the held plan does not place
+    travels in readiness as carried, also while a later layer draws over it, so Central keeps it
+    off every other Frame. Mutation probe: leave kept photos out of `carried`."""
+    rig = Rig(tmp_path)
+    rig.play(layer(end=101, after_end="keep_this_photo"))
+    rig.advance(2)
+    rig.executor.tick()
+    over = layer("over", data=b"over", start=105, end=300, awaits_grant=False,
+                 after_end="leave_as_is")
+    rig.offer(over, revision=2)
+    rig.secure("over", b"over")
+    rig.advance(3)
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi1"].layers] == ["over"]
+    assert rig.executor.readiness().carried == (
+        CarriedPhoto(output_id="hdmi1", asset_id=media().asset_id),)
+
+
+def test_a_photo_held_for_the_rejoin_keeps_its_decoder(tmp_path):
+    """Decision 0032: the photo a superseded composition still draws while the Frame rejoins (the
+    new plan's layer waits for its grant) stays resident with no layer of the held plan naming it.
+    Mutation probe: leave the held photo out of the prepare pass's pictures."""
+    rig = Rig(tmp_path, capacity=1)
+    old = layer("old", data=b"old", end=300, awaits_grant=False)
+    rig.offer(old)
+    rig.secure("old", b"old")
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    rig.advance(60)                                   # 160: the old layer still drawn
+    rig.executor.tick()
+    new = layer("new", data=b"new", start=155, end=200)          # awaits its grant
+    rig.offer(new, revision=2)
+    rig.secure("new", b"new")
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    assert [local.layer.assignment_id for local in rig.renderer.outputs["hdmi1"].layers] == ["old"]
+    assert "old" in rig.executor._wanted
+
+
+def test_a_grant_arriving_late_within_the_clocks_bound_is_no_missed_start(tmp_path):
+    """Slice A: a grant committed before its start and heard after it is a missed start only past
+    the clock's own bound: with Central's time held to within 5 s, one heard 1 s late still starts.
+    Mutation probe: judge the missed start by a fixed 0.1 s."""
+    rig = Rig(tmp_path)
+    rig.offer(layer(start=103, media_origin=103))
+    rig.secure()
+    rig.executor.prepare_imminent()
+    ready = rig.executor.readiness()
+    granted = Commit(plan_id="stable", revision=1, authority_epoch=1, assignment_ids=("picture",),
+                     readiness_sequence=ready.sequence, committed_at=102)
+    rig.advance(4, refresh=False)                    # 104: a second past the start
+    loosen(rig, 5.0)
+    assert rig.executor.accept_commit(granted)
+
+
+def test_a_layer_is_wanted_past_its_end_only_while_a_continuation_naming_it_runs():
+    """Decision 0032, `may_still_play`: a plan layer's bytes are wanted within its span and the
+    plan's validity, or while a continuation of the plan names it and has not reached `until`.
+    Mutation probe: ignore `until`."""
+    from player.executor import may_still_play
+    listed = layer("listed", start=100, end=150)
+    plan = Plan(plan_id="stable", revision=1, player_id="player1", authority_epoch=1,
+                issued_at=100, valid_from=100, valid_until=160, bindings=(binding(),),
+                layers=(listed,), continuations=(Continuation(
+                    output_id="hdmi1", run_id="run", photos=("listed",), start=150, seconds=10,
+                    until=200),))
+    assert may_still_play(plan, listed, 140)
+    assert may_still_play(plan, listed, 190)
+    assert not may_still_play(plan, listed, 200)
+    alone = plan.model_copy(update={"continuations": ()})
+    assert not may_still_play(alone, listed, 150)

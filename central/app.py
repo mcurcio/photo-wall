@@ -352,6 +352,12 @@ def create_app(
             identity["id"], identity["authority_epoch"], finalize=finalize
         )
 
+    def timed_state(identity: dict) -> dict:
+        """control_state plus Central's clock, read after the state is built and outside the
+        delivery digest (`finalize`), so it never makes a new delivery record: the Player's show
+        clock samples every state answer (decision 0032)."""
+        return {**control_state(identity), "server_time": clock.utc()}
+
     @app.exception_handler(RegistryError)
     async def registry_error(request, exc):
         detail = {"error": exc.code}
@@ -515,7 +521,7 @@ def create_app(
 
     @app.get("/v1/player/state")
     def player_state(identity: dict = Depends(player)):
-        return control_state(identity)
+        return timed_state(identity)
 
     @app.post("/v1/player/control-acks")
     def control_ack(request: ControlAck, identity: dict = Depends(player)):
@@ -598,7 +604,7 @@ def create_app(
                 current = await asyncio.to_thread(registry.authenticate, token)
                 if current != identity:
                     raise RegistryError("stale_authority", 403)
-                state = await asyncio.to_thread(control_state, identity)
+                state = await asyncio.to_thread(timed_state, identity)
                 # A re-enrollment during projection must not keep this old session alive.
                 if await asyncio.to_thread(registry.authenticate, token) != identity:
                     raise RegistryError("stale_authority", 403)

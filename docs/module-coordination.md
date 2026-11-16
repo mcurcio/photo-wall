@@ -89,7 +89,9 @@ computed by Central for that response. Acceptance means the request was queued;
 it is not a playback observation or proof of visible output.
 
 Offers use a stable per-epoch plan ID and increasing revisions, retaining exact
-manifests until their execution lease expires. At most 64 outstanding offers are
+manifests until their execution lease expires, or longer while the Player may still be cycling
+one: an offer at or past the revision of the Player's latest readiness with a continuation whose
+`until` is open or still ahead is kept (`_cleanup`, [0032](decisions/0032-the-player-continues-centrals-plan.md)). At most 64 outstanding offers are
 allowed per Player epoch; missing acknowledgment produces backpressure and degraded
 health. Horizon renewal is quantized to 30 seconds while retaining at least the
 configured 300-second preparation horizon. A manifest change may produce an
@@ -110,12 +112,41 @@ The coordinator builds required groups from Runtime intents, including intents
 whose media/Frame is unavailable. All Frame contributions sharing a root and exact
 cycle start are required in that cue; omitted targets are absent. A group identity
 also includes its binding/Player epoch cohort so replacement/rejoin is explicit.
-Normal due work commits only within the 5-second preparation lead, with fresh
-(initially 2-second) whole-Player capacity/clock/prepared feedback from every
-required assignment. First reconciliation of an already-active cue receives a
+Only a layer that awaits a grant (a Run's first turn, `Layer.awaits_grant`) belongs to a group
+([0032](decisions/0032-the-player-continues-centrals-plan.md)); every later turn and every continuation slot starts at its
+instant on the Player with no Commit. Normal due work commits only within the 5-second
+preparation lead, on the Player's latest capacity/prepared feedback for every required
+assignment: neither the report's age by Central's receipt nor the Player's clock bound refuses a
+grant (`CoordinationLimits.readiness_seconds` is gone); freshness is the readiness sequence the
+Commit echoes, which the Player checks. First reconciliation of an already-active cue receives a
 5-second late-join preparation deadline and retains its original media origin.
-Failure at a normal intended start skips that cue. Recording Actuator effects
+Recording Actuator effects
 remain current-state operations owned by Runtime and are never projected effects.
+
+### Continuations, reservations and continuation observations
+
+Decision [0032](decisions/0032-the-player-continues-centrals-plan.md) (the Player keeps cycling Central's plan while Central is slow or
+down). Before projecting, `_plan()` reads each Player's latest readiness in its current epoch and
+hands the Planner what that Player may draw without Central: every listed photo of every stored
+offer at or past that readiness's revision (`central/wall_plan/continuation.py`
+`held_reservations`), and each photo the Player reports carrying (`Readiness.carried`), each
+reserved on its Frame so the wall plan never gives it to another Frame meanwhile; and each Frame's
+reported show-clock bound, which sets that Frame's hand-over guard. Each proposal's continuations
+travel on the offered Plan, and a change to them alone is a new revision.
+
+An observation naming no layer of its plan is a continuation slot when
+`contracts.continuation.continuation_source` finds the continuation, slot and source layer that
+generated it at its observed time (`_observed_layer`). `_observe` records the event under the
+slot's own id with `continuation_source` in its detail and the shown history against the source
+assignment; `_presented_from_an_earlier_offer` does the same for a `presented` slot of an earlier
+offer (a Frame rejoining after an outage reports under the revision it held), and the report is
+still answered stale. Neither found: `stale_binding` (403) as for any unknown id.
+
+### Cue start and late join
+
+Each cue has two phases ([`central/cue_start.py`](../central/cue_start.py), pure; [0031](decisions/0031-show-clock-and-late-join.md)). Before its deadline (a normal cue's deadline is its start; a cue first seen late gets the 5-second late-join deadline above) the cue starts whole: `_commit_due` commits it only when every member is ready, so exact multi-Frame starts stand wherever they can be kept. From the deadline to the cue's end each member is committed alone as soon as its own Player reports it ready, with the ordinary Commit (committed at now, media position now minus the media origin, accepted by the Player's gate). Nothing waits for a timer: `readiness()` already runs `_commit_due` on each report. A multi-Frame cue with a laggard starts without it, and the laggard's start is not exact, only its position. Only the grant is whole: a member that loses readiness after the Commit and before the start loses its own grant, the others keep theirs and start on time, and it joins alone when ready again.
+
+A skip means only that the cue was superseded (`superseded`). A cue is no longer skipped for a missed start (`not_ready`), a lost readiness or a membership change (`cue_membership_changed`): a started cue that would grow takes the new member in and what it granted stands, and a Player's lost readiness is that member's own, re-granted when it reports ready again. A skipped cue that comes back on the timeline gets a fresh cohort on every branch, because `_groups` tests a skipped latest cohort first, before any membership comparison, so a skip is never terminal. Central's freshness of a Player's report is the readiness sequence the Player echoes, never its age by Central's receipt nor the Player's own clock ([0032](decisions/0032-the-player-continues-centrals-plan.md)).
 
 Readiness sequence numbers increase across an epoch. A secured receipt checks the
 retained offered manifest and creates an immutable byte lock before commitment.

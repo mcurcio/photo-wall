@@ -10,6 +10,12 @@ the probe lane refuses. The channel carries no command authority.
 Once per channel, after an answer, it also reports the GL renderer the Player
 draws with (`renderer`, as soon as the renderer knows it): the health judge
 raises `software_renderer` when that is not the GPU.
+
+After an answer it also states which Frames are black while content is wanted
+(`frames_black`), only when that differs from the last it got through on this
+channel, so a channel open restates it and a failed send is retried at the next
+answer. "Cannot tell" (no executor) sends nothing: an empty report means nothing
+is black.
 """
 from __future__ import annotations
 
@@ -24,7 +30,9 @@ from typing import Protocol
 
 from contracts.node_app_link import (
     MAX_NODE_LINK_BYTES,
+    FrameBlack,
     NodeProbeV2,
+    encode_node_frames_black,
     encode_node_probe_answer,
     encode_node_probe_open,
     encode_node_renderer,
@@ -49,7 +57,9 @@ class Dispatcher(Protocol):
 
 class ProbeResponder:
     def __init__(self, dispatcher: Dispatcher, *,
-                 on_relink: Callable[[], None], path: Path = DEFAULT_NODE_LINK_SOCKET,
+                 on_relink: Callable[[], None],
+                 frames_black: Callable[[], tuple[FrameBlack, ...] | None],
+                 path: Path = DEFAULT_NODE_LINK_SOCKET,
                  connector: Callable[[Path], socket.socket] = root_socket,
                  sleep: Callable[[float], None] = time.sleep,
                  gl_renderer: Callable[[], str | None] = lambda: None) -> None:
@@ -57,6 +67,8 @@ class ProbeResponder:
         self.dispatcher, self.on_relink = dispatcher.lane(1), on_relink
         self.gl_renderer = gl_renderer  # read on the main thread, where the renderer lives
         self._renderer_sent = False  # this channel already carried the renderer
+        self.frames_black = frames_black  # read on the main thread too
+        self._black_sent: tuple[FrameBlack, ...] | None = None  # the last report this channel got
         self.path, self.connector, self.sleep = path, connector, sleep
         self._lock = threading.Lock()
         self._connection: socket.socket | None = None
@@ -97,7 +109,7 @@ class ProbeResponder:
             if connection.send(opening) != len(opening):
                 raise ValueError("probe_open_short")
             with self._lock:
-                self._connection, self._renderer_sent = connection, False
+                self._connection, self._renderer_sent, self._black_sent = connection, False, None
             while True:
                 raw = connection.recv(MAX_NODE_LINK_BYTES + 1)
                 if not raw:
@@ -157,6 +169,22 @@ class ProbeResponder:
                     self._renderer_sent = True
             except (OSError, ValueError):
                 pass    # EAGAIN, a closing channel or an unreportable name: the next probe tries again
+            self._report_frames_black()
+
+    def _report_frames_black(self) -> None:
+        """The report, on change, whatever became of the answer and the renderer's report. Called
+        holding the lock. A failed send stays owed for the next answer; a report that cannot be
+        made or encoded is logged and skipped, and never reaches the probe path."""
+        try:
+            report = self.frames_black()
+            if report is None or report == self._black_sent:
+                return
+            self._connection.send(encode_node_frames_black(report), socket.MSG_DONTWAIT)
+            self._black_sent = report
+        except OSError:
+            pass    # EAGAIN or a closing channel: the next answer tries again
+        except Exception as error:     # any fault of the report: "cannot tell" until it can
+            LOG.warning("player: frames black report skipped: %s", type(error).__name__)
 
 
 __all__ = ["RETRY_DELAYS", "Dispatcher", "ProbeResponder"]

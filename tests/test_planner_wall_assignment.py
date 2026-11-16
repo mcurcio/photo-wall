@@ -25,7 +25,14 @@ from support.position import LIGHTING
 from central.catalog import Candidate, SourcePool
 from central.planner import PlannerLimits, Projection, project
 from central.runtime import Contribution, Runtime, Scene, Transition
-from central.wall_plan.assignment import _Spans
+from central.wall_plan.assignment import (
+    MAX_GUARD_UNCERTAINTY,
+    FixedShowing,
+    PlanWindow,
+    Reservation,
+    _Spans,
+    plan_wall,
+)
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.key_content import MeasureFailed
 from central.wall_plan.order import KeptStill, PhotoShowing, PoolLines, WallHistory
@@ -90,7 +97,7 @@ def scene(frames: dict[str, FrameSetup], *, cycle: float = 30, order="newest_fir
 def plan(instance: Runtime, frames: dict[str, FrameSetup], photos, *, now: float = 0,
          horizon: float = 300, plan_seconds: float = 3600, locks=(), authored=(),
          history: WallHistory = WallHistory(), limits: PlannerLimits = PlannerLimits(),
-         fit: FitSettings = FitSettings()) -> Projection:
+         fit: FitSettings = FitSettings(), reserved=(), frame_uncertainty=None) -> Projection:
     """Each Frame full screen on a Display of its profile's size (its Frame output)."""
     return project(
         instance, now,
@@ -103,6 +110,7 @@ def plan(instance: Runtime, frames: dict[str, FrameSetup], photos, *, now: float
         locked_assignments={layer.assignment_id: layer for layer in locks},
         history=history, horizon_seconds=horizon, plan_seconds=plan_seconds,
         max_clock_uncertainty=UNCERTAINTY, limits=limits, settings=fit,
+        reserved=reserved, frame_uncertainty=frame_uncertainty,
         frame_outputs=frame_outputs_of({
             frame: (PROFILES[setup.shape].width_px, PROFILES[setup.shape].height_px)
             for frame, setup in frames.items()}, inches=24))
@@ -558,3 +566,34 @@ def test_rule_1s_index_reads_past_a_short_extent_inside_a_long_one():
     assert spans.overlaps_another("c", Extent(start=50, end=60))
     assert not spans.overlaps_another("a", Extent(start=50, end=60))
     assert not spans.overlaps_another("c", Extent(start=100, end=110))
+
+
+def test_a_reservation_keeps_its_photo_off_another_frame_and_never_blocks_its_own():
+    """Decision 0032 (B5): a photo a Player may be cycling past its plan (or carries) is held on
+    its Frame over its extent: no other Frame takes it then, its own Frame still may. Mutation
+    probe: check reservations on every Frame (the left Frame never shows "wide-3" before 200)."""
+    frames = {"left": FrameSetup("wide"), "right": FrameSetup("wide")}
+    photos = [photo(f"wide-{n}", "wide", captured=n) for n in range(4)]
+    held = Reservation(frame_id="left", asset_id="wide-3", extent=Extent(start=0, end=200))
+    planned = by_frame(plan(scene(frames), frames, photos, reserved=(held,)))
+    assert not any(entry.asset_id == "wide-3" and entry.start < 200 + 2 * UNCERTAINTY
+                   for entry in planned["right"])
+    assert any(entry.asset_id == "wide-3" and entry.start < 200 for entry in planned["left"])
+    assert any(entry.asset_id == "wide-3" for entry in planned["right"])     # once it lapses
+
+
+def test_each_frames_hand_over_guard_is_its_own_players_reported_bound():
+    """Decision 0032 (B6): a Frame whose Player reports a 3 s show-clock bound guards each
+    hand-over by 6 s; a Frame with no report by the limit; a bound past the cap by the cap.
+    Mutation probe: use the global guard for every Frame."""
+    showings = [FixedShowing(slot_id=f"s-{frame}", frame_id=frame, asset_id=f"photo-{frame}",
+                             start=100, end=130, fade_in=0, after_end="leave_as_is")
+                for frame in ("reported", "silent", "lost")]
+    wall = plan_wall((), showings, (), {}, {}, {}, window=PlanWindow(
+        now=0, preparation_end=300, plan_end=3600), max_clock_uncertainty=UNCERTAINTY,
+        settings=FitSettings(), frame_uncertainty={"reported": 3.0, "lost": 1000.0})
+    extents = {entry.frame_id: entry.extent for entry in wall.on_screen}
+    assert extents["reported"] == Extent(start=94, end=136)
+    assert extents["silent"] == Extent(start=100 - 2 * UNCERTAINTY, end=130 + 2 * UNCERTAINTY)
+    cap = 2 * MAX_GUARD_UNCERTAINTY
+    assert extents["lost"] == Extent(start=100 - cap, end=130 + cap)

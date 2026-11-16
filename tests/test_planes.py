@@ -15,6 +15,7 @@ from player.planes import (
     DARK_KEY,
     MIN_STRENGTH,
     FrameLayers,
+    Plane,
     Screen,
     compose,
     finish_size,
@@ -41,7 +42,12 @@ def strengths(*layers: LocalLayer, frame: str = "frame1") -> list[tuple[str, flo
     """Each plane's assignment and strength; full strength over black is encode_srgb(1), which is
     1 within a float's last bit."""
     planes = compose(SCREEN, [FrameLayers(frame, FULL, layers)]).planes
-    return [(plane.key, pytest.approx(plane.strength, abs=1e-12)) for plane in planes]
+    return [(named(plane), pytest.approx(plane.strength, abs=1e-12)) for plane in planes]
+
+
+def named(plane: Plane) -> str:
+    """The plane's layer's assignment id, or a dark plane's key."""
+    return plane.key if plane.layer is None else plane.layer.layer.assignment_id
 
 
 def test_a_dissolve_keeps_the_outgoing_on_top_fading_out_over_the_incoming_at_full():
@@ -149,7 +155,7 @@ def test_a_dark_plane_is_only_for_a_frame_with_no_plane_of_its_own():
     left, right = Placement(0, 0, 1920, 1080), Placement(1920, 1080, 1920, 1080)
     composition = compose(SCREEN, [FrameLayers("a", left, (photo("a1", 1.0, frame="a"),)),
                                    FrameLayers("b", right, ())])
-    assert [(p.frame_id, p.key, p.dark) for p in composition.planes] == [
+    assert [(p.frame_id, named(p), p.dark) for p in composition.planes] == [
         ("a", "a1", False), ("b", DARK_KEY + "b", True)]
     assert strengths(black("authored", 1.0)) == [("authored", 1.0)]        # authored black is its own plane
 

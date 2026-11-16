@@ -18,6 +18,7 @@ from psycopg.types.json import Jsonb
 from pydantic import Field, ValidationError
 
 from central.actor import Actor
+from central.cue_start import CueReadiness, grantable, starts_whole
 from central.db import Database, DatabaseTransactionClock
 from central.execution_outcomes import ExecutionOutcome, ExecutionOutcomeRouter
 from central.infra.display_store import frame_outputs_in
@@ -47,10 +48,13 @@ from central.runtime import handle_execution_outcome as handle_runtime_outcome
 from central.runtime_store import RuntimeStore
 from central.scheduler import scheduler_failure
 from central.transaction_locks import COORDINATION_LOCK, holds_node_lock_in, holds_runtime_locks_in
+from central.wall_plan.assignment import Reservation, frame_clock_uncertainty
+from central.wall_plan.continuation import held_reservations
 from central.wall_plan.fit import FitTarget, fit_target
 from central.wall_plan.order import PhotoShowing
 from central.wall_plan.ports import FitSettingsStore, ShownHistory
 from central.wall_plan.selection import crop_limit_of
+from contracts.continuation import continuation_source
 from contracts.models import (
     PREPARE_SECONDS,
     Commit,
@@ -63,7 +67,8 @@ from contracts.models import (
     Readiness,
     Revocation,
 )
-from contracts.time import Clock
+from contracts.on_screen import Extent
+from contracts.time import DRIFT_RATE, Clock
 
 LOG = logging.getLogger(__name__)
 
@@ -71,7 +76,6 @@ LOG = logging.getLogger(__name__)
 class CoordinationLimits(Model):
     horizon_seconds: float = Field(default=300, gt=0, le=3600)
     renewal_seconds: float = Field(default=30, gt=0, le=60)
-    readiness_seconds: float = Field(default=2, gt=0, le=10)
     max_uncertainty: float = Field(default=0.1, gt=0, le=1)
     max_offers: int = Field(default=64, ge=1, le=256)
     # Roadmap 5a (slice W1): how far ahead the wall plan reaches, every Frame together; layers
@@ -142,6 +146,28 @@ def _withdraws(latest: Plan, proposal, projection: Projection, now: float) -> bo
     proposed = {layer.assignment_id for layer in proposal.layers}
     return any(layer.end > now and layer.start >= projection.cut
                and layer.assignment_id not in proposed for layer in latest.layers)
+
+
+def _may_hold(offer, now: float) -> bool:
+    """Decision 0032: whether an expired offer's Player may still be playing its continuations:
+    its revision is at or past the one the Player's latest readiness names, and one of its
+    continuations has no known end or ends after now. Such an offer is kept (its reservations
+    hold, `Coordinator._held_in`)."""
+    readiness = offer["readiness"]
+    if readiness is not None and offer["revision"] < readiness["revision"]:
+        return False
+    try:
+        plan = Plan.model_validate(offer["manifest"])
+    except ValidationError:
+        return False
+    return any(c.until is None or c.until > now for c in plan.continuations)
+
+
+def _membership(layers, groups: dict[str, str]) -> dict[str, str]:
+    """Each layer's cue group: only a layer that awaits a grant is a cue member (decision 0032),
+    so a layer with no group starts at its instant with no Commit."""
+    return {layer.assignment_id: groups[layer.assignment_id] for layer in layers
+            if layer.assignment_id in groups}
 
 
 def offer_owner(plan: Plan) -> str:
@@ -428,7 +454,7 @@ class Coordinator:
         assignments = {}
         cue_keys = {identity("cue-", list(key)) for key in cues}
         # A future cue is a forecast until it starts; one the timeline no longer holds is
-        # withdrawn now rather than surfacing later as a not_ready skip.
+        # withdrawn now.
         for orphan in conn.execute(
             "SELECT id,cue_key FROM coordination_groups WHERE status IN ('pending','committed') "
             "AND starts_at>%s AND starts_at<%s ORDER BY starts_at,id",
@@ -444,30 +470,33 @@ class Coordinator:
                 (cue_key,),
             ).fetchone()
             superseding = False
-            if previous:
+            # A skipped cohort is over: a cue the timeline still holds takes a fresh one.
+            if previous and previous["status"] != "skipped":
                 grows = not cue["members"].keys() <= previous["members"].keys()
                 moved = not grows and any(
                     (tuple(previous["members"][a]) if previous["members"][a] else None) != owner
                     for a, owner in cue["members"].items()
                 )
-                if (
-                    starts > now
-                    and previous["status"] != "skipped"
-                    and (moved or cue["members"].keys() != previous["members"].keys())
-                ):
+                if starts > now and (moved or cue["members"].keys() != previous["members"].keys()):
                     # An edit rewrote a cue that has not started: a fresh cohort replaces it,
                     # and skipping the old one withdraws any commit it had already granted.
                     self._skip_group(conn, previous["id"], "superseded", root=root)
                     superseding = True
                 elif grows:
-                    # A started cue is immutable. Growth invalidates this one cue, never
-                    # the tick that offers every other Frame its plan.
-                    if previous["status"] != "skipped":
-                        self._skip_group(conn, previous["id"], "cue_membership_changed", root=root)
+                    # A started cue that grows takes the new member in; what it granted stands.
+                    conn.execute(
+                        "UPDATE coordination_groups SET members=%s,member_ends=%s,valid_until=%s "
+                        "WHERE id=%s",
+                        (
+                            Jsonb({**previous["members"], **cue["members"]}),
+                            Jsonb({**previous["member_ends"], **cue["ends"]}),
+                            max(previous["valid_until"], cue["end"]),
+                            previous["id"],
+                        ),
+                    )
                     assignments.update({a: previous["id"] for a in cue["members"]})
                     continue
                 elif not moved:
-                    # A child completing cannot shrink a skipped cue into a new successful one.
                     assignments.update({a: previous["id"] for a in cue["members"]})
                     continue
             # The previous cohort names the new one, so a forecast that returns to an
@@ -525,7 +554,9 @@ class Coordinator:
             ),
         ).fetchone()["sequence"]
 
-    def _skip_group(self, conn, group_id, code, *, root=None):
+    def _skip_group(
+        self, conn, group_id: str, code: Literal["superseded"], *, root: str | None = None
+    ) -> None:
         cue_key = conn.execute(
             "SELECT cue_key FROM coordination_groups WHERE id=%s", (group_id,)
         ).fetchone()["cue_key"]
@@ -567,7 +598,7 @@ class Coordinator:
                 plan.revision,
                 plan.plan_id,
                 Jsonb(plan.model_dump(mode="json")),
-                Jsonb({layer.assignment_id: groups[layer.assignment_id] for layer in plan.layers}),
+                Jsonb(_membership(plan.layers, groups)),
                 plan.issued_at,
                 plan.valid_until,
             ),
@@ -620,6 +651,7 @@ class Coordinator:
             # Renewable extent changes only at a renewal boundary, avoiding heartbeat churn.
             quantum = self.limits.renewal_seconds
             horizon_end = (math.floor(now / quantum) + 1) * quantum + self.limits.horizon_seconds
+            reserved, frame_uncertainty = self._held_in(conn, configurations, now)
             selections = runtime.planning_selections()
             history = self.shown.wall_history_in(
                 conn, selections, now=now,
@@ -644,6 +676,8 @@ class Coordinator:
                 max_clock_uncertainty=self.limits.max_uncertainty,
                 limits=PlannerLimits.over(self.limits.plan_seconds,
                                           self.limits.horizon_seconds + quantum),
+                reserved=reserved,
+                frame_uncertainty=frame_uncertainty,
             )
             groups = self._groups(conn, projection, now, horizon_end, configurations)
             for proposal in projection.players:
@@ -653,6 +687,54 @@ class Coordinator:
             self.media.request_preparations_in(conn, projection.acquisitions)
             self.planning.record_in(conn, projection)
             return projection
+
+    def _held_in(self, conn, configurations: dict[str, PlayerConfiguration], now: float,
+                 ) -> tuple[list[Reservation], dict[str, float]]:
+        """Decision 0032: what each Player may still be showing that this pass must keep off every
+        other Frame, and each Frame's reported show-clock bound. From each Player's latest
+        readiness in its current epoch: every stored offer at or past the revision it names
+        (every offer when it has reported none) holds its continuations' photos
+        (`held_reservations`), and each photo it reports carrying is reserved on its Frame from
+        now on, while reported. A Player's Frames take its reported bound, grown by `DRIFT_RATE`
+        for the time since Central received that report (a cut-off Pi's clock free-runs, and its
+        report says nothing of the drift since; both times are Central's)."""
+        reserved: list[Reservation] = []
+        frame_uncertainty: dict[str, float] = {}
+        for player, config in sorted(configurations.items()):
+            frames = {binding.output_id: binding.frame_id for binding in config.bindings}
+            row = conn.execute(
+                "SELECT readiness, received_at FROM player_feedback "
+                "WHERE player_id=%s AND authority_epoch=%s",
+                (player, config.authority_epoch),
+            ).fetchone()
+            report = Readiness.model_validate(row["readiness"]) if row else None
+            if report is not None:
+                bound = report.clock_uncertainty + DRIFT_RATE * max(0.0, now - row["received_at"])
+                frame_uncertainty.update({frame: bound for frame in frames.values()})
+            for offer in conn.execute(
+                "SELECT manifest FROM plan_offers WHERE player_id=%s AND authority_epoch=%s "
+                "AND revision>=%s ORDER BY revision",
+                (player, config.authority_epoch, report.revision if report else 0),
+            ).fetchall():
+                try:
+                    plan = Plan.model_validate(offer["manifest"])
+                except ValidationError:
+                    continue   # `_offers` names it; an offer that no longer reads holds nothing
+                if plan.continuations:
+                    reserved.extend(held_reservations(plan, guard=self._guard(
+                        plan.bindings[0].frame_id, frame_uncertainty)))
+            for carried in report.carried if report else ():
+                frame = frames.get(carried.output_id)
+                if frame is not None:
+                    reserved.append(Reservation(frame_id=frame, asset_id=carried.asset_id,
+                                                extent=Extent(start=now - self._guard(
+                                                    frame, frame_uncertainty))))
+        return reserved, frame_uncertainty
+
+    def _guard(self, frame_id: str, frame_uncertainty: dict[str, float]) -> float:
+        """The hand-over guard on `frame_id` (central/wall_plan/assignment.py's rule)."""
+        return 2 * frame_clock_uncertainty(frame_id, self.limits.max_uncertainty,
+                                           frame_uncertainty)
 
     def _propose(self, conn, proposal, config: PlayerConfiguration, offered: list[Plan],
                  groups: dict[str, str], projection: Projection, now: float) -> None:
@@ -679,11 +761,13 @@ class Coordinator:
                         detail={"code": "plan_shortened"})
             return
         bindings = config.bindings
-        membership = {layer.assignment_id: groups[layer.assignment_id] for layer in proposal.layers}
+        membership = _membership(proposal.layers, groups)
         if (
             latest
-            and (latest.layers, latest.bindings, latest.valid_until)
-            == (proposal.layers, bindings, projection.valid_until)
+            and (latest.layers, latest.bindings, latest.unfilled, latest.continuations,
+                 latest.valid_until)
+            == (proposal.layers, bindings, proposal.unfilled, proposal.continuations,
+                projection.valid_until)
             and self._plan_groups(conn, latest) == membership
         ):
             return
@@ -705,6 +789,8 @@ class Coordinator:
             valid_until=projection.valid_until,
             bindings=bindings,
             layers=proposal.layers,
+            unfilled=proposal.unfilled,
+            continuations=proposal.continuations,
         )
         self._offer(conn, plan, groups)
         self._record_selected(conn, plan, projection)
@@ -762,7 +848,10 @@ class Coordinator:
             (now,),
         )
         expired = conn.execute(
-            "SELECT player_id,authority_epoch,revision FROM plan_offers WHERE valid_until<=%s",
+            "SELECT o.player_id,o.authority_epoch,o.revision,o.manifest,f.readiness "
+            "FROM plan_offers o LEFT JOIN player_feedback f ON "
+            "(f.player_id,f.authority_epoch)=(o.player_id,o.authority_epoch) "
+            "WHERE o.valid_until<=%s",
             (now,),
         ).fetchall()
         for offer in expired:
@@ -772,7 +861,7 @@ class Coordinator:
                 "AND revision>%s",
                 (*session, offer["revision"]),
             ).fetchone()
-            if session not in active_sessions or newer:
+            if session not in active_sessions or (newer and not _may_hold(offer, now)):
                 conn.execute(
                     "DELETE FROM plan_offers WHERE player_id=%s AND authority_epoch=%s "
                     "AND revision=%s",
@@ -793,11 +882,24 @@ class Coordinator:
                     session,
                 )
 
+    @staticmethod
+    def _observed_layer(plan: Plan, observation: Observation) -> tuple[Layer, bool] | None:
+        """The plan layer an observation is about, and whether it named a continuation slot: the
+        layer with its id, else (decision 0032) the source layer of the continuation slot that
+        generated it (`continuation_source`, at its observed time); None when neither."""
+        layer = next((a for a in plan.layers if a.assignment_id == observation.assignment_id), None)
+        if layer is not None:
+            return layer, False
+        found = continuation_source(plan, observation.assignment_id, at=observation.observed_at)
+        return None if found is None else (found[2], True)
+
     def _presented_from_an_earlier_offer(self, conn, player_id: str, observation: Observation,
                                          config) -> bool:
         """Roadmap 5a: a "presented" report stamped with a revision this Player was offered
         before the latest still counts as shown (a new revision is offered every cycle, so a
-        report often races the next offer; losing it would let the photo come back sooner).
+        report often races the next offer; losing it would let the photo come back sooner); a
+        continuation slot's counts for its source photo (decision 0032: a Frame that played its
+        continuation through an outage reports under the revision it held).
         Only the shown history is written, and the report is still refused as stale."""
         if observation.status != "presented":
             return False
@@ -808,12 +910,12 @@ class Coordinator:
         if row is None:
             return False
         offered = Plan.model_validate(row["manifest"])
-        layer = next((a for a in offered.layers
-                      if a.assignment_id == observation.assignment_id), None)
-        if (offered.plan_id != observation.plan_id or layer is None
-                or not self._authorized(layer, config)):
+        if offered.plan_id != observation.plan_id:
             return False
-        self.shown.record_presented_in(conn, layer.assignment_id, self.clock.utc())
+        observed = self._observed_layer(offered, observation)
+        if observed is None or not self._authorized(observed[0], config):
+            return False
+        self.shown.record_presented_in(conn, observed[0].assignment_id, self.clock.utc())
         return True
 
     def _current_plan(self, conn, player_id, epoch) -> Plan | None:
@@ -979,8 +1081,6 @@ class Coordinator:
             ).fetchone()
             if old and report.sequence <= old["sequence"]:
                 return False
-            if report.observed_at > now + self.limits.max_uncertainty:
-                raise CoordinationError("future_readiness")
             plan = Plan.model_validate(row["manifest"])
             layers = {layer.assignment_id: layer for layer in plan.layers}
             reported = (
@@ -1046,20 +1146,7 @@ class Coordinator:
                 and current.bindings == config.bindings
             ):
                 for layer in current.layers:
-                    if (
-                        layer.assignment_id not in report.prepared
-                        or not report.capacity_ok
-                        or report.clock_uncertainty > self.limits.max_uncertainty
-                    ):
-                        groups = conn.execute(
-                            "SELECT DISTINCT g.id FROM execution_commits c "
-                            "JOIN coordination_groups g ON g.id=c.group_id "
-                            "WHERE c.player_id=%s AND c.authority_epoch=%s "
-                            "AND c.assignment_id=%s AND c.valid AND g.starts_at>%s",
-                            (player_id, report.authority_epoch, layer.assignment_id, now),
-                        ).fetchall()
-                        for group in groups:
-                            self._skip_group(conn, group["id"], "readiness_lost")
+                    if layer.assignment_id not in report.prepared or not report.capacity_ok:
                         conn.execute(
                             "UPDATE execution_commits SET valid=FALSE WHERE player_id=%s "
                             "AND authority_epoch=%s AND assignment_id=%s AND valid",
@@ -1235,88 +1322,89 @@ class Coordinator:
             "AND valid_until>%s AND starts_at<=%s ORDER BY starts_at,id",
             (now, now + PREPARE_SECONDS),
         ).fetchall():
-            if group["status"] == "pending" and now > group["deadline"]:
-                self._skip_group(conn, group["id"], "not_ready")
-                continue
-            ready, participants = True, []
+            members, participants = [], {}
             for assignment, owner in group["members"].items():
-                if (
-                    group["status"] == "committed"
-                    and group["member_ends"].get(assignment, group["valid_until"]) <= now
-                ):
-                    continue
-                if owner is None:
-                    ready = False
-                    break
-                player, epoch, output, generation = owner
-                plan, state = plans.get(player), feedback.get(player)
-                layer = (
-                    next((a for a in plan.layers if a.assignment_id == assignment), None)
-                    if plan
-                    else None
+                participant = self._participant(
+                    assignment, owner, group["id"], plans, plan_groups, feedback, configurations,
+                    interrupted, now,
                 )
-                if (
-                    not plan
-                    or not state
-                    or not layer
-                    or (player, epoch, output, layer.frame_id, generation) in interrupted
-                    or not self._authorized(layer, configurations[player])
-                    or plan.bindings != configurations[player].bindings
-                    or plan.valid_until <= now
-                    or plan_groups[player].get(assignment) != group["id"]
-                ):
-                    ready = False
-                    break
-                row, report = state
-                if (
-                    plan.authority_epoch != epoch
-                    or plan.revision != report.revision
-                    or plan.plan_id != report.plan_id
-                    or assignment not in report.prepared
-                    or not report.capacity_ok
-                    or report.clock_uncertainty > self.limits.max_uncertainty
-                    or now - report.observed_at > self.limits.readiness_seconds
-                    or now - row["received_at"] > self.limits.readiness_seconds
-                    or layer.output_id != output
-                    or layer.binding_generation != generation
-                ):
-                    ready = False
-                    break
-                participants.append((plan, layer, report.sequence))
-            if ready and participants:
-                # Only a missing or invalidated grant is written: a grant the Player holds is
-                # never rewritten, so its Commit and the control delivery stay unchanged.
-                held = {(r["player_id"], r["authority_epoch"], r["revision"], r["assignment_id"])
-                        for r in conn.execute(
-                            "SELECT player_id,authority_epoch,revision,assignment_id "
-                            "FROM execution_commits WHERE group_id=%s AND valid", (group["id"],))}
-                for plan, layer, sequence in participants:
-                    if (plan.player_id, plan.authority_epoch, plan.revision,
-                            layer.assignment_id) in held:
-                        continue
-                    conn.execute(
-                        "INSERT INTO execution_commits VALUES(%s,%s,%s,%s,%s,%s,TRUE,%s) "
-                        "ON CONFLICT(player_id,authority_epoch,revision,assignment_id) "
-                        "DO UPDATE SET valid=TRUE,group_id=EXCLUDED.group_id,"
-                        "committed_at=EXCLUDED.committed_at,"
-                        "readiness_sequence=EXCLUDED.readiness_sequence",
-                        (
-                            plan.player_id,
-                            plan.authority_epoch,
-                            plan.revision,
-                            layer.assignment_id,
-                            group["id"],
-                            now,
-                            sequence,
-                        ),
-                    )
-                if group["status"] != "committed":
-                    conn.execute(
-                        "UPDATE coordination_groups SET status='committed' WHERE id=%s",
-                        (group["id"],),
-                    )
-            elif group["status"] == "pending" and now >= group["deadline"]:
-                self._skip_group(conn, group["id"], "not_ready")
+                if participant is not None:
+                    participants[assignment] = participant
+                members.append(CueReadiness(
+                    assignment_id=assignment,
+                    ended=group["member_ends"].get(assignment, group["valid_until"]) <= now,
+                    ready=participant is not None,
+                ))
+            granted = grantable(members, whole=starts_whole(group["status"], now, group["deadline"]))
+            if not granted:
+                continue
+            # Only a missing or invalidated grant is written: a grant the Player holds is
+            # never rewritten, so its Commit and the control delivery stay unchanged.
+            held = {(r["player_id"], r["authority_epoch"], r["revision"], r["assignment_id"])
+                    for r in conn.execute(
+                        "SELECT player_id,authority_epoch,revision,assignment_id "
+                        "FROM execution_commits WHERE group_id=%s AND valid", (group["id"],))}
+            for assignment in granted:
+                plan, layer, sequence = participants[assignment]
+                if (plan.player_id, plan.authority_epoch, plan.revision,
+                        layer.assignment_id) in held:
+                    continue
+                conn.execute(
+                    "INSERT INTO execution_commits VALUES(%s,%s,%s,%s,%s,%s,TRUE,%s) "
+                    "ON CONFLICT(player_id,authority_epoch,revision,assignment_id) "
+                    "DO UPDATE SET valid=TRUE,group_id=EXCLUDED.group_id,"
+                    "committed_at=EXCLUDED.committed_at,"
+                    "readiness_sequence=EXCLUDED.readiness_sequence",
+                    (
+                        plan.player_id,
+                        plan.authority_epoch,
+                        plan.revision,
+                        layer.assignment_id,
+                        group["id"],
+                        now,
+                        sequence,
+                    ),
+                )
+            if group["status"] != "committed":
+                conn.execute(
+                    "UPDATE coordination_groups SET status='committed' WHERE id=%s",
+                    (group["id"],),
+                )
+
+    def _participant(self, assignment, owner, group_id, plans, plan_groups, feedback,
+                     configurations, interrupted, now) -> tuple[Plan, Layer, int] | None:
+        """What a grant to this cue member is written from, or None while its Player does not
+        report it prepared on this cue's plan. Freshness is the readiness sequence the Commit
+        echoes, which the Player checks (decision 0032): never the report's age by Central's
+        receipt, nor the Player's clock bound."""
+        if owner is None:
+            return None
+        player, epoch, output, generation = owner
+        plan, state = plans.get(player), feedback.get(player)
+        layer = next((a for a in plan.layers if a.assignment_id == assignment), None) if plan else None
+        if (
+            not plan
+            or not state
+            or not layer
+            or (player, epoch, output, layer.frame_id, generation) in interrupted
+            or not self._authorized(layer, configurations[player])
+            or plan.bindings != configurations[player].bindings
+            or plan.valid_until <= now
+            or plan_groups[player].get(assignment) != group_id
+        ):
+            return None
+        _, report = state
+        if (
+            plan.authority_epoch != epoch
+            or plan.revision != report.revision
+            or plan.plan_id != report.plan_id
+            or assignment not in report.prepared
+            or not report.capacity_ok
+            or layer.output_id != output
+            or layer.binding_generation != generation
+        ):
+            return None
+        return plan, layer, report.sequence
 
     def observe(self, player_id: str, observation: Observation):
         if not self._observe(player_id, observation):
@@ -1337,19 +1425,17 @@ class Coordinator:
             ):
                 self._presented_from_an_earlier_offer(conn, player_id, observation, config)
                 return False
-            layer = next(
-                (a for a in plan.layers if a.assignment_id == observation.assignment_id), None
-            )
-            if not layer or not self._authorized(layer, config):
+            observed = self._observed_layer(plan, observation)
+            if observed is None or not self._authorized(observed[0], config):
                 raise CoordinationError("stale_binding", 403)
-            self._event(
-                conn,
-                "observation",
-                player_id,
-                layer.assignment_id,
-                observation.model_dump(mode="json"),
-            )
+            layer, continuation_slot = observed
+            detail = observation.model_dump(mode="json")
+            if continuation_slot:
+                # Decision 0032: recorded under the slot's own id, naming the photo it showed.
+                detail["continuation_source"] = layer.assignment_id
+            self._event(conn, "observation", player_id, observation.assignment_id, detail)
             if observation.status == "presented":
-                # Roadmap 5a: "Shown" means it was displayed on a frame (owner, 2026-10-11).
+                # Roadmap 5a: "Shown" means it was displayed on a frame (owner, 2026-10-11); a
+                # continuation slot counts for its source photo (decision 0032).
                 self.shown.record_presented_in(conn, layer.assignment_id, self.clock.utc())
         return True

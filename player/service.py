@@ -45,6 +45,7 @@ from contracts.models import (
     PlayerTime,
     Revocation,
 )
+from contracts.node_app_link import FrameBlack
 from contracts.node_impeded import ImpededFrames
 from contracts.node_link import NODE_BUS_URL
 from contracts.node_state import FrameReport, FrameReports
@@ -62,11 +63,11 @@ from contracts.room_light import (
     RoomLightsDrawn,
     room_lights_digest,
 )
-from contracts.time import Clock, SystemClock, TimeMapping
+from contracts.time import Monotonic, SystemClock
 from nodeapi.node import WallReader
 from player.cache import Cache, CacheError
 from player.central_link import CentralLink, Session, read_refusal
-from player.executor import AcquisitionStopped, AuthorityError, Executor
+from player.executor import AcquisitionStopped, AuthorityError, Executor, may_still_play
 from player.geometry import light_lux_on_frame
 from player.identity import Identity, load_identity
 from player.impediment import impeded
@@ -79,9 +80,11 @@ from player.probe_responder import ProbeResponder
 from player.renderer_root import start_renderer
 from player.rendering import Renderer
 from player.room_lights import start_room_lights
+from player.show_clock import ShowClock
 from uplink.causes import Cause, UplinkError
 from uplink.clock import RunClockRecord
 from uplink.diagnosis import failure_text
+from uplink.fetch import Refused
 from uplink.finder import Found, find_central
 from uplink.locate import LocatedCentral
 from uplink.origin import Origin
@@ -147,6 +150,26 @@ class Unauthorized(ServiceError):
 
 class StaleFeedback(ServiceError):
     pass
+
+
+class OriginUnavailable(ServiceError):
+    """This cycle has no located Central (`PlayerService.session`): its cycle is ending, so a loop
+    meeting it ends too (`ends_cycle`); never a request Central answered."""
+
+
+REQUEST_FAILURES = (UplinkError, httpx.HTTPError, ServiceError, ValidationError)
+"""What one failed request to Central raises (decision 0032): a fault the loop that sent it names,
+then tries again at its next turn; only `ends_cycle` ones end the session."""
+
+
+def ends_cycle(error: BaseException) -> bool:
+    """Whether `error` ends run()'s cycle (decision 0032): a refused registration (Unauthorized), a
+    redirect (run() locates again, 0014), or a request that never left its pool (the next cycle
+    builds fresh clients, CentralLink); and a cycle that already lost its Central
+    (OriginUnavailable). Any other failed request leaves the session, its plan and its downloads
+    running."""
+    return isinstance(error, Unauthorized | OriginUnavailable) or (isinstance(error, UplinkError) and (
+        error.cause is Cause.REDIRECT or (error.cause is Cause.LOCAL and error.reason == "pool")))
 
 
 class MainLoopLate(ServiceError):
@@ -223,6 +246,9 @@ class State(Model):
     identify_expires_at: Instant | None = None
     delivery_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     delivery_sequence: int = Field(ge=1, le=2**63 - 1)
+    # Central's clock when it answered: a show-clock sample on every poll (decision 0032), read
+    # after Central's delivery digest, so a new reading never makes a new delivery.
+    server_time: Instant
 
     @model_validator(mode="after")
     def coherent_identify(self):
@@ -353,7 +379,7 @@ class PlayerService:
     def __init__(self, config: PlayerConfig, identity: Identity,
                  outputs: tuple[OutputReport, ...], renderer: Renderer, dispatcher: Callable,
                  *, find_central: Callable[[], Awaitable[Found]], trust: Trust,
-                 clock: Clock | None = None, client: httpx.AsyncClient | None = None,
+                 clock: Monotonic | None = None, client: httpx.AsyncClient | None = None,
                  time_client: httpx.AsyncClient | None = None,
                  clock_record: Callable[[], ClockRecord | None] = RunClockRecord().read,
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
@@ -388,7 +414,7 @@ class PlayerService:
         self._drawn_reported: RoomLightsDrawn | None = None
         self._drawn_due = -math.inf
         self.clock = clock or SystemClock()
-        self.mapping = TimeMapping(self.clock)
+        self.show_clock = ShowClock(self.clock.monotonic)
         self.link = CentralLink(trust, unauthorized=Unauthorized, client=client,
                                 time_client=time_client, websocket_connect=websocket_connect)
         self.clock_record = clock_record
@@ -447,10 +473,10 @@ class PlayerService:
         self.last_fault, self.last_fault_detail = code, detail
 
     def _main_loop_late(self) -> None:
-        """The GLib loop missed a dispatch deadline: raise the fault, never touch readiness. Central keeps the last readiness it accepted, so committed groups stand; it
-        commits no new group once that report is older than readiness_seconds, and a long
-        stall reads as player-silent, as before G8 (E-G8-8 decision: a late loop must not
-        withdraw prepared playback)."""
+        """The GLib loop missed a dispatch deadline: raise the fault, never touch readiness. Central keeps the last readiness it accepted, so committed groups stand and
+        later grants still answer it (decision 0032: freshness is the readiness sequence a
+        Commit echoes, not a report's age), and a long stall reads as player-silent, as before
+        G8 (E-G8-8 decision: a late loop must not withdraw prepared playback)."""
         self.fault("main_loop_late")
 
     def room_lights_changed(self, document: RoomLightsDocument) -> None:
@@ -489,9 +515,10 @@ class PlayerService:
 
     def frame_reports(self) -> FrameReports:
         """Every Frame the Player draws now (its control State's bindings): the binding generation,
-        its Output, whether its picture is on screen, and the light on it at its centre for the
+        its Output, whether its picture is on screen, the light on it at its centre for the
         room-lights document last drawn (None before the first; `light_lux_on_frame`, capped at
-        LUX_MAX). On the GLib thread."""
+        LUX_MAX), and since when it plays Central's continuation (decision 0032,
+        `Executor.continuing_since`). On the GLib thread."""
         self._main()
         with self._lock:
             executor = self.executor
@@ -501,7 +528,8 @@ class PlayerService:
             try:
                 reports.append(FrameReport(
                     frame_id=binding.frame_id, generation=binding.generation, output_id=binding.output_id,
-                    showing=executor is not None and executor.showing(binding), light_lux=lux))
+                    showing=executor is not None and executor.showing(binding), light_lux=lux,
+                    continuing_since=executor.continuing_since(binding) if executor is not None else None))
             except ValidationError:   # an id the report's contract refuses: left out, never a fault
                 LOG.debug("player: no Frame report for %s", binding.frame_id)
         return FrameReports(frames=tuple(reports))
@@ -565,8 +593,15 @@ class PlayerService:
         """`code` with the console line (plus the clock summary for TIME/TLS) as its detail."""
         self.fault(code, detail=failure_text(error, clock=self.clock_record()))
 
+    def _request_failed(self, error: Exception) -> None:
+        """One failed request of a session's loop (decision 0032): raised again when it ends the
+        cycle (`ends_cycle`), else named (`_fault_for`) and the loop tries again at its next turn."""
+        if ends_cycle(error):
+            raise error
+        self._fault_for(error)
+
     def _fault_for(self, error: Exception) -> None:
-        """Names one session-ending failure of run()'s cycle (R9): a ServiceError is its own
+        """Names one failure of run()'s cycle or of a session's request (R9): a ServiceError is its own
         code; an UplinkError is "<cause>_<reason>" with its console detail; anything else is
         the bounded "player_error". Only the transport (CentralLink, locate) names network
         errors, so a local failure (ENOSPC, a bug) is never reported as a network cause."""
@@ -634,10 +669,10 @@ class PlayerService:
 
     @property
     def session(self) -> Session:
-        """This cycle's Session; ServiceError("central_origin_unavailable") until this cycle
+        """This cycle's Session; OriginUnavailable("central_origin_unavailable") until this cycle
         has located Central. Every Central URL and every bearer comes from it."""
         if self._session is None or not self._located:
-            raise ServiceError("central_origin_unavailable")
+            raise OriginUnavailable("central_origin_unavailable")
         return self._session
 
     @property
@@ -674,7 +709,7 @@ class PlayerService:
         return value
 
     async def _request_with_receipt(self, method: str, path: str, *, body=None,
-                                    authenticated=True, time=False) -> tuple[dict, tuple[float, float]]:
+                                    authenticated=True, time=False) -> tuple[dict, float]:
         async with self.link.stream(self.session, method, path, body=body,
                                     authenticated=authenticated, time=time) as response:
             await self._check_status(response, path)
@@ -688,9 +723,9 @@ class PlayerService:
                 if len(data) + len(chunk) > MAX_JSON:
                     raise ServiceError("body_limit")
                 data.extend(chunk)
-            # Local JSON/schema work is not transport latency. Keep its delay
-            # visible to the later sample-age gate instead of inflating RTT.
-            received = self.clock.utc(), self.clock.monotonic()
+            # Local JSON/schema work is not transport latency: the receipt is read before it,
+            # so a sample's round trip is the wire's alone.
+            received = self.clock.monotonic()
             return _json(bytes(data)), received
 
     async def _check_status(self, response, target: str):
@@ -748,7 +783,7 @@ class PlayerService:
                 def create():
                     self._main()
                     self.executor = self.executor_factory(registered.player_id, self.cache,
-                        self.renderer, self.clock, self.mapping)
+                        self.renderer, self.clock, self.show_clock)
 
                 # A late loop never discards the registration: an abandoned create() never
                 # ran, so it is posted again until the loop runs it (main waited the same way).
@@ -910,24 +945,34 @@ class PlayerService:
             readiness = None
             if self.executor is not None and self._plan is not None:
                 readiness = self.executor.readiness()
-                if any(failure.code in ("decode", "integrity") for failure in readiness.failures):
+                if readiness is not None and any(failure.code in ("decode", "integrity")
+                                                  for failure in readiness.failures):
                     self._verify_due.set()
+                secured = self.executor.secured_ids()
+                now = self.show_clock.now()
+                # Decision 0032: a layer is fetched while it may still play, a continuation's
+                # listed photo included (`may_still_play`, the `_authorized` test).
                 self._jobs = tuple(Download(self._plan.authority_epoch, self._plan.plan_id,
                     self._plan.revision, layer) for layer in self._plan.layers
-                    if layer.variant is not None and layer.assignment_id not in readiness.secured
-                    and layer.assignment_id not in self._cancelled) if self._offered else ()
+                    if layer.variant is not None and layer.assignment_id not in secured
+                    and layer.assignment_id not in self._cancelled
+                    and may_still_play(self._plan, layer, now)) if self._offered else ()
             observations = tuple({observation.assignment_id: observation for observation in
                 self._observations if self._observation_current(observation)}.values())
             self._observations.clear()
             return readiness, observations
 
     def _observation_current(self, observation):
+        """Whether an observation is still Central's to judge (decision 0032): it names the held
+        plan's epoch and plan at its revision or an earlier one (a Frame playing its continuation
+        through an outage observes under the revision it held; Central records it against its
+        source photo). Central judges the rest."""
         with self._lock:
             return (self._plan is not None and self.registration is not None
                 and observation.authority_epoch == self.registration.authority_epoch
-                and (observation.authority_epoch, observation.plan_id, observation.revision) ==
-                    (self._plan.authority_epoch, self._plan.plan_id, self._plan.revision)
-                and any(layer.assignment_id == observation.assignment_id for layer in self._plan.layers))
+                and (observation.authority_epoch, observation.plan_id) ==
+                    (self._plan.authority_epoch, self._plan.plan_id)
+                and observation.revision <= self._plan.revision)
 
     def _authorized(self, job: Download):
         with self._lock:
@@ -938,7 +983,7 @@ class PlayerService:
                 and (job.epoch, job.plan_id, job.revision) == (plan.authority_epoch, plan.plan_id, plan.revision)
                 and job.layer in plan.layers and job.layer.assignment_id not in self._cancelled
                 and configuration.authorizes(job.layer)
-                and self.clock.utc() < min(job.layer.end, plan.valid_until))
+                and may_still_play(plan, job.layer, self.show_clock.now()))
 
     async def download(self, job: Download) -> bool:
         if not self._authorized(job):
@@ -1051,8 +1096,8 @@ class PlayerService:
         except AcquisitionStopped:
             success = False
         except UplinkError as error:
-            if error.cause is Cause.REDIRECT:
-                raise           # ends the cycle: run() locates again (0014)
+            if ends_cycle(error):
+                raise           # ends the cycle: run() locates again (0014) or builds fresh clients
             success = False
             self._uplink_fault(fault, error)
         except (httpx.HTTPError, ServiceError, TimeoutError, OSError, AuthorityError):
@@ -1095,37 +1140,51 @@ class PlayerService:
         return State.model_validate(body)
 
     async def poll_state(self):
-        body, _ = await self._request_with_receipt("GET", "/v1/player/state")
+        """One poll of Central's state, which is also a show-clock sample: any answer anchors the
+        clock before its plan is applied, so a plan is never held on an unanchored clock however
+        Central's time route fares (decision 0032)."""
+        sent_monotonic = self.clock.monotonic()
+        # On the main client: the time client's one connection stays the time probe's alone, so
+        # a slow state answer never queues a time request behind it.
+        body, received_monotonic = await self._request_with_receipt("GET", "/v1/player/state")
         state = self._state(body)
-        result = await self.dispatch(lambda: self._apply_state(state))
+
+        def apply():
+            self._main()
+            self._sample_show_clock(state.configuration.player_id,
+                                    state.configuration.authority_epoch, state.server_time,
+                                    sent_monotonic, received_monotonic)
+            return self._apply_state(state)
+
+        result = await self.dispatch(apply)
         await self._ack_control(state, result)
+
+    def _sample_show_clock(self, player_id: str, authority_epoch: int, server_time: float,
+                           sent_monotonic: float, received_monotonic: float) -> bool:
+        """GLib thread: one Central answer as a show-clock sample, only when it names this
+        registration (another's leaves the ShowClock untouched). True when it anchored or kept."""
+        registration = self.registration
+        if (registration is None or player_id != registration.player_id
+                or authority_epoch != registration.authority_epoch):
+            return False
+        return self.show_clock.sample(
+            server_time=server_time, sent_monotonic=sent_monotonic,
+            received_monotonic=received_monotonic,
+        ) in ("anchored", "kept")
 
     async def probe_time(self) -> bool:
         if self.registration is None:
             raise Unauthorized("not_registered")
-        sent_utc, sent_monotonic = self.clock.utc(), self.clock.monotonic()
-        body, (received_utc, received_monotonic) = await self._request_with_receipt(
+        sent_monotonic = self.clock.monotonic()
+        body, received_monotonic = await self._request_with_receipt(
             "GET", "/v1/player/time", time=True
         )
         sample = PlayerTime.model_validate(body)
 
         def apply() -> bool:
             self._main()
-            if self.registration is None:
-                return False
-            return self.mapping.apply_probe(
-                sample_epoch=sample.authority_epoch,
-                authority_epoch=self.registration.authority_epoch,
-                sample_player_id=sample.player_id,
-                player_id=self.registration.player_id,
-                server_time=sample.server_time,
-                sent_utc=sent_utc,
-                sent_monotonic=sent_monotonic,
-                received_utc=received_utc,
-                received_monotonic=received_monotonic,
-                applied_utc=self.clock.utc(),
-                applied_monotonic=self.clock.monotonic(),
-            )
+            return self._sample_show_clock(sample.player_id, sample.authority_epoch,
+                                           sample.server_time, sent_monotonic, received_monotonic)
 
         return await self.dispatch(apply)
 
@@ -1134,18 +1193,12 @@ class PlayerService:
             started = asyncio.get_running_loop().time()
             try:
                 await self.probe_time()
-            except Unauthorized:
-                raise
-            except UplinkError as error:
-                if error.cause is Cause.REDIRECT:
-                    raise               # ends the cycle: run() locates again (0014)
-                if error.cause is Cause.LOCAL and error.reason == "pool":
-                    raise               # ends the cycle: the next one builds fresh clients
-                self._uplink_fault("clock_probe", error)
             except MainLoopLate:
                 self._main_loop_late()
-            except (httpx.HTTPError, ServiceError, TimeoutError, ValueError):
-                self.fault("clock_probe")
+            except Exception as error:
+                # A failed time request is named like any other; it never gates a plan or a
+                # photo, since every state poll also samples the show clock.
+                self._request_failed(error)
             await asyncio.sleep(max(0, 1 - (asyncio.get_running_loop().time() - started)))
 
     async def _poll_after_stale(self) -> None:
@@ -1155,11 +1208,27 @@ class PlayerService:
         except MainLoopLate:
             self._main_loop_late()
 
+    async def _recover_stale(self) -> None:
+        """`_poll_after_stale` inside a session's loop: a failed poll is `_request_failed`."""
+        try:
+            await self._poll_after_stale()
+        except REQUEST_FAILURES as error:
+            self._request_failed(error)
+
     async def _control_loop(self):
+        """Every REPORT_INTERVAL: poll Central's state, then the held plan's feedback (readiness,
+        observations, and the downloads still wanted) and its readiness post. A failed request is
+        a fault and the next turn tries again (decision 0032, `_request_failed`): the feedback runs
+        whether or not the poll was answered, so downloads follow the held plan through an outage."""
         while not self._stop.is_set():
             started = asyncio.get_running_loop().time()
             try:
-                await self.poll_state()
+                try:
+                    await self.poll_state()
+                except MainLoopLate:
+                    raise
+                except REQUEST_FAILURES as error:
+                    self._request_failed(error)
                 readiness, observations = await self.dispatch(self._feedback)
             except MainLoopLate:
                 # Nothing is posted: the readiness Central holds stays (E-G8-8 decision).
@@ -1170,7 +1239,9 @@ class PlayerService:
                 try:
                     await self.request("POST", "/v1/player/readiness", body=readiness.model_dump(mode="json"))
                 except StaleFeedback:
-                    await self._poll_after_stale()
+                    await self._recover_stale()
+                except REQUEST_FAILURES as error:
+                    self._request_failed(error)
             for observation in observations:
                 if len(self._outgoing) == self._outgoing.maxlen:
                     self.fault("observation_capacity")
@@ -1189,7 +1260,16 @@ class PlayerService:
                     await self.request("POST", "/v1/player/observations",
                                        body=observation.model_dump(mode="json"))
                 except StaleFeedback:
-                    await self._poll_after_stale()
+                    await self._recover_stale()
+                except REQUEST_FAILURES as error:
+                    # Decision 0032: tried again at the next turn, so a Frame's shown history
+                    # survives an outage; a refusal Central judged (4xx) is final.
+                    judged = isinstance(error, Refused) and 400 <= error.status < 500
+                    if not judged:
+                        self._outgoing.appendleft(observation)
+                    self._request_failed(error)
+                    if not judged:
+                        await asyncio.sleep(REPORT_INTERVAL)
 
     async def _websocket_loop(self):
         async with self.link.websocket(self.session, "/v1/player/session",
@@ -1299,13 +1379,18 @@ class PlayerService:
                     if proof_task is None:
                         proof_task = asyncio.create_task(self._app_link_loop())
                     await self.hello_protocol()
-                    # Reconnection reconciles authority before any download work. A late GLib
-                    # loop does not end the session here: its loops raise main_loop_late.
-                    for step in (self.probe_time, self.poll_state):
-                        try:
-                            await step()
-                        except MainLoopLate:
-                            self._main_loop_late()
+                    # Reconnection reconciles authority before any download work; the poll
+                    # also anchors the show clock, so a failing time route never holds the plan
+                    # back (time is asked only in _time_loop). A late GLib loop does not end the
+                    # session here: its loops raise main_loop_late. A failed poll is like any
+                    # session request's (decision 0032): the held plan's downloads and feedback
+                    # start anyway, and the control loop polls again at its next turn.
+                    try:
+                        await self.poll_state()
+                    except MainLoopLate:
+                        self._main_loop_late()
+                    except REQUEST_FAILURES as error:
+                        self._request_failed(error)
                     session_started = self._loop.time()
                     tasks = [asyncio.create_task(self._control_loop()),
                              asyncio.create_task(self._time_loop()),
@@ -1342,36 +1427,41 @@ class PlayerService:
                         task.cancel()
                     if tasks:
                         await asyncio.gather(*tasks, return_exceptions=True)
+                    # Decision 0032: the held plan's downloads outlive the session; the next
+                    # `_feedback` rebuilds them from that plan (`_offered` follows Central's state).
                     await self.link.aclose()
-                    with self._lock:
-                        self._offered = False
-                        self._jobs = ()
                 if not self._stop.is_set():
                     await asyncio.sleep(BACKOFF[min(attempt, 3)])
                     attempt = min(attempt + 1, 3)
         except asyncio.CancelledError:
             pass
         finally:
-            self._proof_active = False
-            self._proof_generation += 1
-            with self._lock:
-                self._applied_proof_receipt = None
-                self._control_proof_revision += 1
-            if proof_task is not None:
-                proof_task.cancel()
-                # stop() may cancel this parent while it awaits the child.
-                # Shield the child so cleanup waits for it without surfacing
-                # that second cancellation to callers of run().
-                while not proof_task.done():
-                    try:
-                        await asyncio.shield(proof_task)
-                    except asyncio.CancelledError:
-                        pass
-            await self.link.aclose()
-            if self.cache is not None:
-                await asyncio.get_running_loop().run_in_executor(self._worker, self.cache.close)
-            self._worker.shutdown(wait=True, cancel_futures=True)
-            self._session, self._located = None, False
+            # stop() cancels this task, and that cancel may land after run() already saw the stop
+            # and left its loop, inside this cleanup: shielded, so it never surfaces to run()'s
+            # caller nor cuts the cleanup short.
+            closing = asyncio.ensure_future(self._close_run(proof_task))
+            while not closing.done():
+                try:
+                    await asyncio.shield(closing)
+                except asyncio.CancelledError:
+                    pass
+            closing.result()
+
+    async def _close_run(self, proof_task: asyncio.Task | None) -> None:
+        """run()'s end: the app link stopped, the clients and the cache closed."""
+        self._proof_active = False
+        self._proof_generation += 1
+        with self._lock:
+            self._applied_proof_receipt = None
+            self._control_proof_revision += 1
+        if proof_task is not None:
+            proof_task.cancel()
+            await asyncio.gather(proof_task, return_exceptions=True)
+        await self.link.aclose()
+        if self.cache is not None:
+            await asyncio.get_running_loop().run_in_executor(self._worker, self.cache.close)
+        self._worker.shutdown(wait=True, cancel_futures=True)
+        self._session, self._located = None, False
 
     def start(self):
         """The network thread, and the Node's bus (`start_node_bus`)."""
@@ -1393,6 +1483,11 @@ class PlayerService:
         self._line_started = True
         self.line.start()
         self._room_lights_reader = start_room_lights(self, self._node_bus_url)
+
+    def frames_black(self) -> tuple[FrameBlack, ...] | None:
+        """Which Frames are black while content is wanted (GLib thread: the probe's answer). None
+        with no executor: this Player cannot tell, which is never the same as nothing black."""
+        return None if self.executor is None else self.executor.frames_black()
 
     def request_relink(self):
         """Thread-safe: the proof loop forgets its recorded app link and proves it again now."""
@@ -1511,7 +1606,7 @@ def main():
     Tick(GLib, PLANNING_TICK_MS, tick)
     service.start()
     # Probes are answered at control dispatch's priority (own one-slot lane), never here.
-    ProbeResponder(dispatcher, on_relink=service.request_relink,
+    ProbeResponder(dispatcher, on_relink=service.request_relink, frames_black=service.frames_black,
                    gl_renderer=lambda: root.renderer.gl_renderer).start()
     try:
         with contextlib.suppress(KeyboardInterrupt):

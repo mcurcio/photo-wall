@@ -190,7 +190,7 @@ def _present_once(monkeypatch, overlay=None, overlay_answer=0):
     plane = _plane(0)
     grant = FrameGrant(uuid4(), 1, 1, "frame", True)
     composition = Composition(Screen("HDMI-A-1", (640, 480), 0), (plane,))
-    pictures = {"black-0": plane_screen.ScreenPicture(9, (64, 48))}
+    pictures = {plane.key: plane_screen.ScreenPicture(9, (64, 48))}
 
     def present():
         return screens.present(composition, pictures, grant, TRIAL_TAG, None, overlay=overlay)
@@ -227,9 +227,9 @@ def test_a_picture_finished_smaller_is_sent_with_its_placement_as_the_destinatio
     plane = Plane("frame", LocalLayer(layer, None, 0.0, 1.0), Placement(8, 4, 64, 48), 1.0)
     composition = Composition(Screen("HDMI-A-1", (640, 480), 0), (plane,))
     grant = FrameGrant(uuid4(), 1, 1, "frame", True)
-    too_large = {"small": plane_screen.ScreenPicture(10, (64, 48))}
+    too_large = {plane.key: plane_screen.ScreenPicture(10, (64, 48))}
     assert screens.present(composition, too_large, grant, "tag", None) == "picture_refused"
-    assert screens.present(composition, {"small": plane_screen.ScreenPicture(9, (32, 24))}, grant, "tag", None) == 7
+    assert screens.present(composition, {plane.key: plane_screen.ScreenPicture(9, (32, 24))}, grant, "tag", None) == 7
     (call,) = library.named("pw_screen_present")
     state = call[2][0]
     assert (state.x, state.y, state.width, state.height) == (8, 4, 64, 48)
