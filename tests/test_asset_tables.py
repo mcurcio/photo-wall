@@ -134,7 +134,8 @@ def test_a_step_locks_its_photos_in_immich_id_order_whatever_their_outcomes(libr
     """Two pools' steps that saw the same two photos, one as InPool and the other as Waiting the
     other way round, lock the shared `library_assets` rows in one order (Immich id), so neither
     waits on the other while holding a row it needs. The probe: hold photo 1's row, run a step
-    with photo 2 InPool and photo 1 Waiting, and while it waits photo 2's row must still be free.
+    with photo 2 InPool and photo 1 Waiting, both redated (a step writes only the rows whose facts
+    differ, decision 0033), and while it waits photo 2's row must still be free.
     Mutation probe: upsert InPool and the other outcomes in two batches and photo 2 is locked."""
     import threading
     import time
@@ -154,8 +155,8 @@ def test_a_step_locks_its_photos_in_immich_id_order_whatever_their_outcomes(libr
         holder.execute("SELECT 1 FROM library_assets WHERE upstream_id=%s FOR UPDATE", (uid(1),))
         done = threading.Event()
         worker = threading.Thread(target=lambda: (store.record_step(lease, step(
-            InPool(asset=photo(ref, 2, 90.0)),
-            Waiting(upstream_id=uid(1), kind="image", taken_at=100.0))), done.set()))
+            InPool(asset=photo(ref, 2, 91.0)),
+            Waiting(upstream_id=uid(1), kind="image", taken_at=101.0))), done.set()))
         worker.start()
         deadline = time.monotonic() + 10
         while not prober.execute(

@@ -2138,7 +2138,7 @@ flowchart LR
   end
   subgraph CENTRAL["Central"]
     ING["observation intake<br/>one stored sample per producer per interval"]
-    OBS[("node_host_observations<br/>(immutable)")]
+    OBS[("node_host_observations<br/>(kept a week, 0033)")]
     HF[("node_host_facts<br/>one row per producer = per boot")]
     PREP[("node_manager_observations")]
     ADM[("current boot admission<br/>→ its boot offer's base tag")]
@@ -2720,7 +2720,7 @@ W1 is also high-tier, for regression.
 - **A To finish link does not select its Frame in Edit layout.** "lobby-left · not on the plan" [Edit layout] opens the mode with the Frame the daily face last showed selected, not the unplaced Frame, because the route names no Frame (§61). The operator then picks it from the tray.
 - **The origin rule.** "Not on the plan" uses the tray's own rule (`isUnplaced`, `projection.js:27-29`), so a Frame drawn exactly at the origin reads unplaced.
 - **One file name lags.** `NowShowingFacet.jsx` keeps its file name under the Status label until batch 5.
-- **No retention.** Host observations stay immutable, about 5,760 rows a day per box at 15 s.
+- **A week of samples.** Host observations, about 5,760 rows a day per box at 15 s, are kept a week, each producer's newest at any age ([0033](decisions/0033-central-write-load.md)).
 - **CPU is a 2 s window.** `cpu_busy` covers the 2 s since the previous sample, and one sample in about eight is posted, so it is a spot reading, not an interval average.
 - **The Players table moves rows when a tier changes.** G3's "nothing reorders on state" binds the sidebar, the landing route and each home's sections; the Players table's worst-first sort (approved in §48 and §50) reorders its rows when a box's tier changes between polls. CPU stays unbanded so a one-sample reading cannot do this on every poll.
 - **The 24-hour coalescing DB test costs about 100 s** of the DB tier (43,199 real ingest transactions; errata T1-7).

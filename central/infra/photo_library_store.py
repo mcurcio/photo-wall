@@ -1,7 +1,7 @@
 """The photo library store over PostgreSQL (roadmap 4; run ledger .claude/runs/photo-4.md).
 
 `PgPhotoLibrary` is the one home of migration 080's tables (library_connections, library_lists,
-library_list_items, photo_pools, photo_pool_rows, photo_check_marks, photo_drafts, library_assets,
+library_list_items, photo_pools, photo_pool_rows, photo_check_pages, photo_drafts, library_assets,
 asset_copies, and asset_revisions' columns) and the only
 code that reads `library_connections.api_key` (for the media worker: `begin_contact`,
 `connection_secret`, `begin_check`). It implements central.photo_library.ports'
@@ -22,6 +22,11 @@ upright size, duration, Immich's `updatedAt`) and each revision's measured Immic
 (`asset_copies`) as children. A pool row names a revision (`asset_id`) and copies none of its
 facts, so every pool read joins the revision and its parent; `library_assets_in` is the one place
 a stored asset becomes a LibraryAsset.
+
+A pool check writes what changed, plus one page per step for what it saw (decision 0033): a row
+of `library_assets`, `asset_revisions` or `photo_pool_rows` is written only when it is new or a
+fact it stores differs (`record_step`), stamped `library-check`, its only writer; what a check
+saw or marked is a `photo_check_pages` row per step and kind holding the ids, never a row per id.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ from typing import Any, Literal, NamedTuple
 from psycopg.types.json import Jsonb
 from pydantic import SecretStr, TypeAdapter, ValidationError
 
+from central.actor import Actor
 from central.db import Database, TransactionClock
 from central.infra.display_store import frame_outputs_in
 from central.infra.house_store import house_time_in
@@ -134,10 +140,17 @@ _ITEM_TYPES: dict[str, type] = {"albums": LibraryAlbum, "people": LibraryPerson,
 # A pool is wanted (module docstring); `p` names the photo_pools row.
 _WANTED = ("(EXISTS (SELECT 1 FROM photo_drafts d WHERE d.pool_key=p.pool_key) OR EXISTS "
            "(SELECT 1 FROM media_sources s WHERE s.pool_key=p.pool_key AND s.refresh_active))")
-# A pool row `r` carries a mark of check `%(n)s` (an excluded id or a stacked copy): the
-# subtraction's one condition, for the finish and for the Re-check phase's unseen rows.
-_MARKED_BY_CHECK = ("EXISTS (SELECT 1 FROM photo_check_marks m WHERE m.pool_key=r.pool_key AND "
-                    "m.check_number=%(n)s AND m.upstream_id=r.upstream_id)")
+# The one writer of the pool check's three tables and its pages (central/actor.py).
+_CHECK_ACTOR: Actor = "library-check"
+# The ids in the pages of pool `%(key)s`'s check `%(n)s`, as one set `upstream_id`: every read of
+# pages joins this set (a hash join), never searches a page once per row (a page holds 1,000 ids).
+_CHECK_IDS = ("(SELECT DISTINCT unnest(upstream_ids) AS upstream_id FROM photo_check_pages "
+              "WHERE pool_key=%(key)s AND check_number=%(n)s{kinds})")
+# Seen or marked by the check: what its Re-check phase need not ask about.
+_SEEN_OR_MARKED = _CHECK_IDS.format(kinds="")
+# Marked by the check (an excluded id or a stacked copy): the subtraction's one set, for the
+# step's entries and for the finish.
+_MARKED = _CHECK_IDS.format(kinds=" AND kind<>'seen'")
 # An in-pool row `r` joined to its revision `a` and the revision's Immich asset `l` (owner item 6:
 # the facts live once, on the revision and its parent), and the columns of a PoolMember.
 _REVISION_JOIN = ("JOIN asset_revisions a USING (asset_id) JOIN library_assets l "
@@ -283,16 +296,30 @@ def _frame_copy(frame: FrameOutput, preview: CopySize | None) -> FrameCopy | Non
                      else covers(preview.width, preview.height, (need,)))
 
 
-# The `original_*` columns, in `_original_values`'s order.
-_ORIGINAL_KEYS = ("media_type", "width", "height", "orientation", "bytes")
-
-
 def _original_values(original: OriginalFile | None) -> tuple:
-    """The five `original_*` column values of `original` (None: five NULLs)."""
+    """The five `original_*` column values of `original`, in `_ORIGINAL_COLUMNS`' order (None:
+    five NULLs)."""
     if original is None:
         return (None,) * 5
     return (original.media_type, original.width, original.height, original.orientation,
             original.size_bytes)
+
+
+# The facts a pool check compares (decision 0033): a revision's, and a pool row's.
+_REVISION_FACTS = ("width", "height", "duration", "updated_at")
+_POOL_ROW_FACTS = ("outcome", "reason", "asset_id")
+
+
+def _differs(stored: dict | None, facts: dict, columns: Sequence[str]) -> bool:
+    """Whether a row read is missing or any compared fact differs from the step's."""
+    return stored is None or any(stored[column] != facts[column] for column in columns)
+
+
+def _asset_differs(stored: dict | None, facts: dict) -> bool:
+    """A `library_assets` row: kind and taken time, and the original's five facts when the step
+    read them (an InPool)."""
+    return _differs(stored, facts, ("kind", "taken_at", *(_ORIGINAL_COLUMNS if facts["read"]
+                                                          else ())))
 
 
 class DraftForSave(NamedTuple):
@@ -970,6 +997,8 @@ class PgPhotoLibrary:
                     (now, now, pool_key)).fetchone() | {
                         key: row[key] for key in ("connection_ref", "url", "api_key",
                                                   "immich_user", "query")}
+                # An earlier check that never finished left its pages: none outlives its check.
+                conn.execute("DELETE FROM photo_check_pages WHERE pool_key=%s", (pool_key,))
             else:
                 conn.execute("UPDATE photo_pools SET step_at=%s WHERE pool_key=%s",
                              (now, pool_key))
@@ -987,7 +1016,7 @@ class PgPhotoLibrary:
                 "SELECT DISTINCT ON (upstream_id) upstream_id::text AS upstream_id,updated_at,"
                 "revision FROM asset_revisions WHERE connection_ref=%s "
                 "AND upstream_id=ANY(%s::uuid[]) AND updated_at IS NOT NULL "
-                "ORDER BY upstream_id,last_seen DESC", (connection_ref, list(upstream_ids))).fetchall()
+                "ORDER BY upstream_id,changed_at DESC,asset_id", (connection_ref, list(upstream_ids))).fetchall()
         return {row["upstream_id"]: KnownRevision(updated_at=row["updated_at"],
                                                   revision=row["revision"]) for row in rows}
 
@@ -1004,26 +1033,18 @@ class PgPhotoLibrary:
             if not self._fenced(conn, lease):
                 return False
             now = self.times.now_in(conn)
-            with conn.cursor() as cursor:
-                if step.marks:
-                    cursor.executemany(
-                        "INSERT INTO photo_check_marks(pool_key,check_number,upstream_id,mark) "
-                        "VALUES(%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                        [(lease.pool_key, lease.check_number, mark.upstream_id, mark.mark)
-                         for mark in step.marks])
-                marked = self._marked_in(conn, lease, (self._upstream(e) for e in step.entries))
-                # Sorted by Immich id, so two pools' steps lock shared parent rows in one order.
-                entries = sorted((e for e in step.entries if self._upstream(e) not in marked),
-                                 key=self._upstream)
-                self._record_assets_in(cursor, lease.query.connection_ref, entries, now)
-                if entries:
-                    cursor.executemany(
-                        "INSERT INTO photo_pool_rows(pool_key,upstream_id,outcome,reason,asset_id,"
-                        "seen_check) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(pool_key,upstream_id) "
-                        "DO UPDATE SET outcome=EXCLUDED.outcome,reason=EXCLUDED.reason,"
-                        "asset_id=EXCLUDED.asset_id,seen_check=EXCLUDED.seen_check",
-                        [(lease.pool_key, *self._row(entry), lease.check_number)
-                         for entry in entries])
+            marks: dict[str, set[str]] = {}
+            for mark in step.marks:
+                marks.setdefault(mark.mark, set()).add(mark.upstream_id)
+            for kind, ids in sorted(marks.items()):
+                self._page_in(conn, lease, kind, ids, now)
+            marked = self._marked_in(conn, lease, (self._upstream(e) for e in step.entries))
+            entries = [e for e in step.entries if self._upstream(e) not in marked]
+            if entries:
+                self._page_in(conn, lease, "seen", {self._upstream(e) for e in entries}, now)
+                with conn.cursor() as cursor:
+                    self._record_assets_in(conn, cursor, lease.query.connection_ref, entries, now)
+                    self._record_rows_in(conn, cursor, lease.pool_key, entries, now)
             conn.execute("UPDATE photo_pools SET progress=%s,seen_so_far=%s,"
                          "immich_up_to=COALESCE(%s,immich_up_to) WHERE pool_key=%s",
                          (Jsonb(step.progress), step.seen_so_far, step.immich_up_to,
@@ -1036,6 +1057,15 @@ class PgPhotoLibrary:
         return entry.asset.upstream_id if isinstance(entry, InPool) else entry.upstream_id
 
     @staticmethod
+    def _page_in(conn: Any, lease: CheckLease, kind: str, upstream_ids: Iterable[str],
+                 now: float) -> None:
+        """One page of this check: the ids it saw (`seen`) or marked with one kind."""
+        conn.execute("INSERT INTO photo_check_pages(pool_key,check_number,kind,upstream_ids,"
+                     "recorded_at,recorded_by) VALUES(%s,%s,%s,%s::uuid[],%s,%s)",
+                     (lease.pool_key, lease.check_number, kind, sorted(set(upstream_ids)), now,
+                      _CHECK_ACTOR))
+
+    @staticmethod
     def _marked_in(conn: Any, lease: CheckLease, upstream_ids: Iterable[str]) -> set[str]:
         """Ids carrying a mark of this check (stored by this step or an earlier one): the
         subtraction's one home."""
@@ -1043,72 +1073,123 @@ class PgPhotoLibrary:
         if not ids:
             return set()
         return {row["upstream_id"] for row in conn.execute(
-            "SELECT DISTINCT upstream_id::text AS upstream_id FROM photo_check_marks WHERE "
-            "pool_key=%s AND check_number=%s AND upstream_id=ANY(%s::uuid[])",
-            (lease.pool_key, lease.check_number, ids)).fetchall()}
+            f"SELECT m.upstream_id::text AS upstream_id FROM {_MARKED} AS m "  # noqa: S608
+            "WHERE m.upstream_id=ANY(%(ids)s::uuid[])",
+            {"key": lease.pool_key, "n": lease.check_number, "ids": ids}).fetchall()}
 
     @staticmethod
-    def _record_assets_in(cursor: Any, connection_ref: str,
+    def _record_assets_in(conn: Any, cursor: Any, connection_ref: str,
                           entries: Sequence[InPool | Waiting | LeftOut], now: float) -> None:
-        """The facts a step read, each in its one home: every entry naming a kind and taken time
-        upserts its Immich asset's `library_assets` row (first_seen kept, last_seen now; kind and
-        taken time rewritten; the original's facts rewritten by an InPool, None writing NULLs,
-        and kept by a Waiting or LeftOut, which did not read them); then each InPool's revision
-        upserts its `asset_revisions` row."""
-        # One statement over the entries in their (Immich id) order, so two steps lock shared
-        # rows in one order: two batches, each sorted, would not be (a deadlock between two
-        # pools whose steps saw the same two photos as InPool and Waiting the other way round).
-        in_pool = [e for e in entries if isinstance(e, InPool)]
-        assets = []
+        """The facts a step read, each in its one home, written only where they differ from
+        what is stored (decision 0033): every entry naming a kind and taken time is its Immich
+        asset's `library_assets` row (kind and taken time; the original's facts too when an
+        InPool read them, None meaning NULLs, while a Waiting or LeftOut keeps them); then each
+        InPool's revision is its `asset_revisions` row (width, height, duration, `updatedAt`).
+        The stored facts are read without a lock and only the rows that differ are upserted, in
+        Immich-id order, so two pools' steps lock shared rows in one order (a deadlock between
+        two pools whose steps saw the same two photos as InPool and Waiting the other way round
+        otherwise). Entries naming one photo twice fold in order, the later winning."""
+        assets: dict[tuple[str, str], dict[str, Any]] = {}
+        revisions: dict[str, dict[str, Any]] = {}
         for entry in entries:
             if isinstance(entry, InPool):
                 asset = entry.asset
-                assets.append(dict(ref=asset.connection_ref, id=asset.upstream_id, kind=asset.kind,
-                                   taken=asset.taken_at, read=True, now=now,
-                                   **dict(zip(_ORIGINAL_KEYS, _original_values(asset.original),
-                                              strict=True))))
+                key = (asset.connection_ref, asset.upstream_id)
+                assets[key] = {**assets.get(key, {}), "kind": asset.kind,
+                               "taken_at": asset.taken_at, "read": True,
+                               **dict(zip(_ORIGINAL_COLUMNS, _original_values(asset.original),
+                                          strict=True))}
+                revisions[asset.asset_id] = dict(
+                    asset_id=asset.asset_id, connection_ref=asset.connection_ref,
+                    upstream_id=asset.upstream_id, revision=asset.revision, width=asset.width,
+                    height=asset.height, duration=asset.duration, updated_at=entry.updated_at)
             elif entry.kind is not None and entry.taken_at is not None:
-                assets.append(dict(ref=connection_ref, id=entry.upstream_id, kind=entry.kind,
-                                   taken=entry.taken_at, read=False, now=now,
-                                   **dict.fromkeys(_ORIGINAL_KEYS)))
+                key = (connection_ref, entry.upstream_id)
+                assets[key] = {"read": False, **assets.get(key, {}), "kind": entry.kind,
+                               "taken_at": entry.taken_at}
         if assets:
-            kept = ",".join(f"original_{key}=CASE WHEN %(read)s THEN EXCLUDED.original_{key} "
-                            f"ELSE library_assets.original_{key} END" for key in _ORIGINAL_KEYS)
+            stored = {(row["connection_ref"], row["upstream_id"]): row for row in conn.execute(
+                "SELECT connection_ref,upstream_id::text AS upstream_id,kind,taken_at,"
+                f"{','.join(_ORIGINAL_COLUMNS)} FROM library_assets WHERE "  # noqa: S608
+                "(connection_ref,upstream_id) IN (SELECT * FROM unnest(%s::text[],%s::uuid[]))",
+                ([ref for ref, _ in assets], [upstream for _, upstream in assets])).fetchall()}
+            changed = [dict(facts, connection_ref=key[0], upstream_id=key[1], now=now,
+                            by=_CHECK_ACTOR, **{column: None for column in _ORIGINAL_COLUMNS
+                                                if not facts["read"]})
+                       for key, facts in sorted(assets.items())
+                       if _asset_differs(stored.get(key), facts)]
+            if changed:
+                kept = ",".join(f"{column}=CASE WHEN %(read)s THEN EXCLUDED.{column} "
+                                f"ELSE library_assets.{column} END" for column in _ORIGINAL_COLUMNS)
+                cursor.executemany(
+                    "INSERT INTO library_assets(connection_ref,upstream_id,kind,taken_at,"
+                    f"{','.join(_ORIGINAL_COLUMNS)},created_at,changed_at,created_by,"
+                    "changed_by) VALUES(%(connection_ref)s,%(upstream_id)s,%(kind)s,"
+                    "%(taken_at)s,%(original_media_type)s,%(original_width)s,"
+                    "%(original_height)s,%(original_orientation)s,%(original_bytes)s,%(now)s,"
+                    "%(now)s,%(by)s,%(by)s) ON CONFLICT(connection_ref,upstream_id) DO UPDATE "
+                    f"SET kind=EXCLUDED.kind,taken_at=EXCLUDED.taken_at,{kept},"  # noqa: S608
+                    "changed_at=EXCLUDED.changed_at,changed_by=EXCLUDED.changed_by", changed)
+        if revisions:
+            stored = {row["asset_id"]: row for row in conn.execute(
+                "SELECT asset_id,width,height,duration,updated_at FROM asset_revisions "
+                "WHERE asset_id=ANY(%s)", (list(revisions),)).fetchall()}
+            changed = [dict(facts, now=now, by=_CHECK_ACTOR) for facts in sorted(
+                revisions.values(), key=lambda facts: (facts["upstream_id"], facts["asset_id"]))
+                if _differs(stored.get(facts["asset_id"]), facts, _REVISION_FACTS)]
+            if changed:
+                cursor.executemany(
+                    "INSERT INTO asset_revisions(asset_id,connection_ref,upstream_id,revision,"
+                    "width,height,duration,updated_at,created_at,changed_at,created_by,"
+                    "changed_by) VALUES(%(asset_id)s,%(connection_ref)s,%(upstream_id)s,"
+                    "%(revision)s,%(width)s,%(height)s,%(duration)s,%(updated_at)s,%(now)s,"
+                    "%(now)s,%(by)s,%(by)s) ON CONFLICT(asset_id) DO UPDATE SET "
+                    "width=EXCLUDED.width,height=EXCLUDED.height,duration=EXCLUDED.duration,"
+                    "updated_at=EXCLUDED.updated_at,changed_at=EXCLUDED.changed_at,"
+                    "changed_by=EXCLUDED.changed_by", changed)
+
+    @classmethod
+    def _record_rows_in(cls, conn: Any, cursor: Any, pool_key: str,
+                        entries: Sequence[InPool | Waiting | LeftOut], now: float) -> None:
+        """Each entry's pool row, written only when new or its outcome, reason or revision
+        differs (decision 0033); read without a lock, upserted in Immich-id order."""
+        rows = {row["upstream_id"]: row for row in map(cls._row, entries)}
+        stored = {row["upstream_id"]: row for row in conn.execute(
+            "SELECT upstream_id::text AS upstream_id,outcome,reason,asset_id FROM photo_pool_rows "
+            "WHERE pool_key=%s AND upstream_id=ANY(%s::uuid[])",
+            (pool_key, list(rows))).fetchall()}
+        changed = [dict(row, pool_key=pool_key, now=now, by=_CHECK_ACTOR)
+                   for upstream, row in sorted(rows.items())
+                   if _differs(stored.get(upstream), row, _POOL_ROW_FACTS)]
+        if changed:
             cursor.executemany(
-                "INSERT INTO library_assets(connection_ref,upstream_id,kind,taken_at,"
-                "original_media_type,original_width,original_height,original_orientation,"
-                "original_bytes,first_seen,last_seen) VALUES(%(ref)s,%(id)s,%(kind)s,%(taken)s,"
-                "%(media_type)s,%(width)s,%(height)s,%(orientation)s,%(bytes)s,%(now)s,%(now)s) "
-                "ON CONFLICT(connection_ref,upstream_id) DO UPDATE SET kind=EXCLUDED.kind,"
-                f"taken_at=EXCLUDED.taken_at,{kept},last_seen=EXCLUDED.last_seen",  # noqa: S608
-                assets)
-        if in_pool:
-            cursor.executemany(
-                "INSERT INTO asset_revisions(asset_id,connection_ref,upstream_id,revision,width,"
-                "height,duration,updated_at,first_seen,last_seen) "
-                "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(asset_id) DO UPDATE SET "
-                "width=EXCLUDED.width,height=EXCLUDED.height,duration=EXCLUDED.duration,"
-                "updated_at=EXCLUDED.updated_at,last_seen=EXCLUDED.last_seen",
-                [(e.asset.asset_id, e.asset.connection_ref, e.asset.upstream_id, e.asset.revision,
-                  e.asset.width, e.asset.height, e.asset.duration, e.updated_at, now, now)
-                 for e in in_pool])
+                "INSERT INTO photo_pool_rows(pool_key,upstream_id,outcome,reason,asset_id,"
+                "created_at,changed_at,created_by,changed_by) VALUES(%(pool_key)s,"
+                "%(upstream_id)s,%(outcome)s,%(reason)s,%(asset_id)s,%(now)s,%(now)s,%(by)s,"
+                "%(by)s) ON CONFLICT(pool_key,upstream_id) DO UPDATE SET "
+                "outcome=EXCLUDED.outcome,reason=EXCLUDED.reason,asset_id=EXCLUDED.asset_id,"
+                "changed_at=EXCLUDED.changed_at,changed_by=EXCLUDED.changed_by", changed)
 
     @staticmethod
-    def _row(entry: InPool | Waiting | LeftOut) -> tuple:
-        """(upstream_id, outcome, reason, asset_id): a pool row copies no fact of its photo."""
+    def _row(entry: InPool | Waiting | LeftOut) -> dict[str, Any]:
+        """A pool row's facts: it copies no fact of its photo."""
         if isinstance(entry, InPool):
-            return (entry.asset.upstream_id, "in_pool", None, entry.asset.asset_id)
+            return dict(upstream_id=entry.asset.upstream_id, outcome="in_pool", reason=None,
+                        asset_id=entry.asset.asset_id)
         if isinstance(entry, Waiting):
-            return (entry.upstream_id, "waiting", None, None)
-        return (entry.upstream_id, "left_out", entry.reason, None)
+            return dict(upstream_id=entry.upstream_id, outcome="waiting", reason=None,
+                        asset_id=None)
+        return dict(upstream_id=entry.upstream_id, outcome="left_out", reason=entry.reason,
+                    asset_id=None)
 
     def unseen_rows(self, lease: CheckLease, limit: int) -> tuple[LibraryRef, ...]:
         with self.db.transaction() as conn:
             if not self._fenced(conn, lease):
                 return ()
             rows = conn.execute(
-                "SELECT r.upstream_id::text AS upstream_id FROM photo_pool_rows r WHERE "
-                f"r.pool_key=%(key)s AND r.seen_check<%(n)s AND NOT {_MARKED_BY_CHECK} "
+                "SELECT r.upstream_id::text AS upstream_id FROM photo_pool_rows r "
+                f"LEFT JOIN {_SEEN_OR_MARKED} AS s USING (upstream_id) "  # noqa: S608
+                "WHERE r.pool_key=%(key)s AND s.upstream_id IS NULL "
                 "ORDER BY r.upstream_id LIMIT %(limit)s",
                 {"key": lease.pool_key, "n": lease.check_number, "limit": limit}).fetchall()
         return tuple(row["upstream_id"] for row in rows)
@@ -1119,8 +1200,7 @@ class PgPhotoLibrary:
             if not self._fenced(conn, lease):
                 return False
             if matches:
-                conn.execute("UPDATE photo_pool_rows SET seen_check=%s WHERE pool_key=%s AND "
-                             "upstream_id=%s", (lease.check_number, lease.pool_key, ref))
+                self._page_in(conn, lease, "seen", (ref,), self.times.now_in(conn))
             else:
                 conn.execute("DELETE FROM photo_pool_rows WHERE pool_key=%s AND upstream_id=%s",
                              (lease.pool_key, ref))
@@ -1137,10 +1217,9 @@ class PgPhotoLibrary:
                 # marked after an earlier step of it added a row). A row it did not see stays:
                 # only `record_recheck` removes one, after asking Immich (follow-up S4).
                 conn.execute(
-                    "DELETE FROM photo_pool_rows r WHERE r.pool_key=%(key)s AND "
-                    f"{_MARKED_BY_CHECK}", {"key": lease.pool_key, "n": lease.check_number})
-                conn.execute("DELETE FROM photo_check_marks WHERE pool_key=%s AND check_number<%s",
-                             (lease.pool_key, lease.check_number))
+                    f"DELETE FROM photo_pool_rows r USING {_MARKED} AS m "  # noqa: S608
+                    "WHERE r.pool_key=%(key)s AND r.upstream_id=m.upstream_id",
+                    {"key": lease.pool_key, "n": lease.check_number})
                 conn.execute("UPDATE photo_pools SET check_state='complete',check_finished_at=%s,"
                              "last_complete_at=%s,progress=NULL WHERE pool_key=%s",
                              (now, now, lease.pool_key))
@@ -1152,6 +1231,8 @@ class PgPhotoLibrary:
                 conn.execute("UPDATE photo_pools SET check_state='failed',problem=%s,"
                              "check_finished_at=%s,progress=NULL WHERE pool_key=%s",
                              (finish.problem, now, lease.pool_key))
+            # However it finishes, no page outlives its check.
+            conn.execute("DELETE FROM photo_check_pages WHERE pool_key=%s", (lease.pool_key,))
             return True
 
     def frame_outputs(self) -> tuple[FrameOutput, ...]:

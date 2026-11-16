@@ -57,6 +57,7 @@ from central.infra.home_assistant.advice import HomeAssistantAdvice
 from central.infra.home_assistant.settings import PgHomeAssistantSettings
 from central.infra.house_store import PgHouse, seed_house
 from central.infra.light_sensor_judge import PI_SOURCE, PiMeterAdvice, is_player
+from central.infra.node_record_retention import NodeRecordRetention
 from central.infra.paper_profile_store import PgPaperProfiles
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.power_store import PgPower
@@ -868,7 +869,10 @@ def create_app(
     app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions, coordinator)
     app.state.scheduler = Scheduler(app.state.node_reconciler, coordinator,
                                     media_application.request_measurements, clock,
-                                    retention=ExecutionEventRetention(db).prune)
+                                    retentions={
+                                        "retention": ExecutionEventRetention(db).prune,
+                                        "node-retention": NodeRecordRetention(db.transaction,
+                                                                              clock).prune})
     # A Node's leaf and Home Assistant's door arrive at Central's origin (erratum E-E3D-CUT-4): relayed to the hub.
     hub_leaf_url = hub_leaf_url or os.environ.get("PHOTO_WALL_HUB_LEAF_URL")
     if hub_leaf_url:

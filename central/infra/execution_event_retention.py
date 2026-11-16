@@ -9,33 +9,37 @@ whole step back, held both locks for the full 10 s and wrote WAL each time until
 disk filled.
 
 Here retention is its own scheduler step (`central/scheduler.py`, "retention"), never inside a
-coordinator transaction: each batch is its own short transaction that takes no advisory lock and
-deletes at most `batch_rows` of the oldest rows at or below the cut, the newest row beyond the
-`kept` newest (so exactly `kept` rows stay, whatever gaps rolled-back inserts left in the
-sequence). A step deletes at most `batches` batches, so a tick stays short, and the next tick
-goes on where it stopped: deleting a row twice is impossible and a cancelled batch loses
-nothing, so the step is idempotent and a backlog of any size drains at `batch_rows x batches` rows a tick.
+coordinator transaction, and its loop is `central/infra/batched_retention.drain` (decision 0033):
+each batch is its own short transaction that takes no advisory lock and deletes exactly
+`batch_rows` of the oldest rows beyond the `kept` newest, or none. A whole batch, because the step
+runs every tick and Players report several times a second: a delete of whatever was due found
+rows every tick, one commit (an fsync) each, 3,600 an hour on 2026-11-15. So the table holds
+between `kept` and `kept + batch_rows` rows, and a step deletes at most `batches` batches: a
+backlog of any size drains at `batch_rows x batches` rows a tick, the next tick going on where
+this one stopped. Deleting a row twice is impossible and a cancelled batch loses nothing.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from central.infra.batched_retention import drain
+
 EVENTS_KEPT = 10_000
 BATCH_ROWS = 5_000
 BATCHES_PER_STEP = 4
 
-# The cut is the (`kept` + 1)-th newest row, counted by rows, not sequence numbers: a rolled-back
-# insert leaves a gap in the BIGSERIAL, so `max(sequence) - kept` would keep fewer. Rows at or below
-# it go, so exactly `kept` stay. Both scans walk the primary key's index (bounded: `kept` + 1 rows
-# from the top, `batch_rows` from the bottom), never the whole table. With `kept` or fewer rows the
-# cut is NULL and nothing is deleted.
+# A batch is due when the (`kept` + `batch_rows`)-th newest row exists, counted by rows, not
+# sequence numbers (a rolled-back insert leaves a gap in the BIGSERIAL): then at least `batch_rows`
+# rows lie beyond the `kept` newest, and the `batch_rows` oldest are all among them. Both scans
+# walk the primary key's index (`kept + batch_rows` rows from the top, `batch_rows` from the
+# bottom), never the whole table. With fewer rows nothing is deleted and no row is locked.
 _PRUNE_BATCH = (
     "DELETE FROM execution_events WHERE sequence IN ("
     "SELECT sequence FROM execution_events "
-    "WHERE sequence <= (SELECT sequence FROM execution_events "
-    "ORDER BY sequence DESC OFFSET %s LIMIT 1) "
-    "ORDER BY sequence LIMIT %s)"
+    "WHERE EXISTS (SELECT 1 FROM execution_events "
+    "ORDER BY sequence DESC OFFSET %(kept)s + %(batch_rows)s - 1 LIMIT 1) "
+    "ORDER BY sequence LIMIT %(batch_rows)s)"
 )
 
 
@@ -49,14 +53,7 @@ class ExecutionEventRetention:
         self.db, self.kept, self.batch_rows, self.batches = db, kept, batch_rows, batches
 
     def prune(self) -> int:
-        """Delete up to `batches` batches of the oldest events beyond `kept`, each in its own
-        transaction; stop early once a batch finds fewer than `batch_rows`. Returns the rows
-        deleted."""
-        deleted = 0
-        for _ in range(self.batches):
-            with self.db.transaction() as conn:
-                rows = conn.execute(_PRUNE_BATCH, (self.kept, self.batch_rows)).rowcount
-            deleted += rows
-            if rows < self.batch_rows:
-                break
-        return deleted
+        """Delete up to `batches` whole batches of the oldest events beyond `kept`, each in its own
+        transaction; stop at the first that is not due. Returns the rows deleted."""
+        return drain(self.db.transaction, _PRUNE_BATCH, {"kept": self.kept},
+                     batch_rows=self.batch_rows, batches=self.batches)

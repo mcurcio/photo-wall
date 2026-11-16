@@ -72,7 +72,7 @@ class NodeRuntimeReconciler:
                                     "JOIN node_boot_admissions b USING(admission_id) "
                                     "JOIN node_sessions ls ON ls.producer_id=p.producer_id AND ls.revoked_at IS NULL "
                                     "WHERE l.device_id=%s AND l.device_generation=%s "
-                                    "AND l.superseded_at IS NULL AND b.superseded_at IS NULL",
+                                    "AND b.superseded_at IS NULL",
                                     (producer.device_id, generation)).fetchone()
             if link_row is None:
                 return self._pending(conn, work_id, "awaiting_process_link")

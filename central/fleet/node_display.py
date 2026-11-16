@@ -29,6 +29,10 @@ from contracts.node_display import (
 )
 
 _MAX_OUTPUTS = 64
+# The newest exchanges per (producer, Output) a withdrawal looks through for the role it removes
+# (`_authorized_previous_in`); node records' retention keeps at least these at any age
+# (central/infra/node_record_retention.py).
+RECENT_EXCHANGES = 128
 # A Display Host restart within one boot creates a new producer, and the node picks how many
 # (one per incarnation, up to the daily session cap), so the producer set is bounded here,
 # never by the node: only the newest few by admission are read.
@@ -296,8 +300,8 @@ class NodeDisplay:
         rows = conn.execute(
             "SELECT request,response FROM node_display_exchanges "
             "WHERE producer_id=%s AND output_id=%s "
-            "ORDER BY sampled_boottime_ms DESC LIMIT 128",
-            (principal.producer_id, request.output.output_id),
+            "ORDER BY sampled_boottime_ms DESC LIMIT %s",
+            (principal.producer_id, request.output.output_id, RECENT_EXCHANGES),
         ).fetchall()
         for row in rows:
             decision = parse_display_decision(bytes(row["response"]))
