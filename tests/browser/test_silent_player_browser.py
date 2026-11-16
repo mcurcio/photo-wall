@@ -29,12 +29,14 @@ NAME = f"Player …{SERIAL[-6:]}"
 
 def test_the_wall_marks_a_silent_players_frame_and_its_pages_show_the_apps_age_and_the_host_current(
         page, registry):
-    Incident(registry)
+    incident = Incident(registry)
+    silent_for = int(incident.read_at - incident.last_report_at)
+    exited_for = int(incident.read_at - incident.exited_at)
     with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         connect(page, origin, "wall")
         label = tile_health(page, FRAME)
         expect(label).to_have_text("Player app silent")
-        expect(label).to_have_accessible_name("Player app silent · last reported 32 s ago")
+        expect(label).to_have_accessible_name(f"Player app silent · last reported {silent_for} s ago")
         expect(label).to_have_class(re.compile(r"\bhealth--alarm\b"))
 
         inspector = open_frame(page, FRAME, "hardware")
@@ -44,9 +46,10 @@ def test_the_wall_marks_a_silent_players_frame_and_its_pages_show_the_apps_age_a
         expect(page.get_by_role("heading", level=2, name=NAME, exact=True)).to_be_visible()
         layers = page.get_by_role("region", name="Layers", exact=True)
         expect(layers.get_by_role("group", name="Player app", exact=True)).to_contain_text(
-            "Last reported: Player app last reported 32 s ago")
+            f"Last reported: Player app last reported {silent_for} s ago")
         expect(layers.get_by_role("group", name="App Effect Broker", exact=True)).to_contain_text(
-            "App process: App Effect Broker reported the app exited · first received 30 s ago")
+            "App process: App Effect Broker reported the app exited · first received "
+            f"{exited_for} s ago")
 
         page.get_by_role("navigation", name=f"Other pages of {NAME}", exact=True).get_by_role(
             "link", name="Hardware", exact=True).click()

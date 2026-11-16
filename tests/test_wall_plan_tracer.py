@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import itertools
 from collections import defaultdict
 
 import pytest
@@ -237,11 +238,14 @@ def prepare(registry, photos):
     return digests
 
 
+_REPORTS = itertools.count(1)
+
+
 def observe_presented(coordinator, player, plan, layer):
     coordinator.observe(player["player_id"], Observation(
         plan_id=plan.plan_id, revision=plan.revision, assignment_id=layer.assignment_id,
-        authority_epoch=plan.authority_epoch, observed_at=coordinator.clock.utc(),
-        status="presented", detail="none"))
+        authority_epoch=plan.authority_epoch, sequence=next(_REPORTS),
+        observed_at=coordinator.clock.utc(), status="presented", detail="none"))
 
 
 def test_the_wall_through_the_real_advance_measures_crops_and_remembers_what_was_shown(

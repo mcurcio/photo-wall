@@ -17,8 +17,8 @@ from support.output_report import report_modes
 from support.position import PORTRAIT_ON_WIDE, save_position
 
 from central.app import create_app
-from central.coordination import Coordinator
 from central.db import Database
+from central.infra.player_contact_store import player_reports_in
 from central.installation_models import InstallationInventory
 from central.registry import (
     Enrollment,
@@ -432,7 +432,8 @@ def test_typed_inventory_preserves_the_complete_operator_json_response(registry)
     identity, _, _ = enroll(registry)
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    reports = Coordinator(registry.db, registry.clock).player_reports_lock_free()
+    with registry.db.transaction() as conn:
+        reports = player_reports_in(conn, registry.clock.utc())
     expected = registry.inventory().with_liveness(reports)
     assert isinstance(expected, InstallationInventory)
     assert expected.frames[0].screen_px == (1920, 1080)
@@ -560,7 +561,7 @@ def test_configuration_comes_from_the_installation_port_registry_is_given():
         def __init__(self):
             self.asked = []
 
-        def configuration_in(self, conn, player_id, epoch):
+        def configuration_in(self, conn, player_id, epoch, *, lock=True):
             self.asked.append((conn, player_id, epoch))
             return held if epoch == 1 else None
 

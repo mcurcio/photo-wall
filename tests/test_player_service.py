@@ -420,6 +420,14 @@ def test_the_player_offers_no_capability_and_an_identify_cue_changes_nothing(tmp
     asyncio.run(check())
 
 
+def pending(service) -> list[Observation]:
+    """The reports waiting in the service's outbox, taken from it in order."""
+    taken = []
+    while (report := service._reports.take()) is not None:
+        taken.append(report)
+    return taken
+
+
 async def close(service):
     if service.link.time_client is not None and service.link.time_client is not service.link.client:
         await service.link.time_client.aclose()
@@ -743,18 +751,18 @@ def test_exact_acquisition_readiness_commit_observation_and_absent_plan(tmp_path
     async def check():
         service, server = await rig(tmp_path)
         try:
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert readiness.secured == readiness.prepared == ()
             job = service._jobs[0]
             assert await service.download(job)
             service.tick_main()
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert readiness.prepared == readiness.secured == ("picture",)
             commit = Commit(plan_id="offered", revision=1, authority_epoch=1,
                 readiness_sequence=readiness.sequence, assignment_ids=("picture",), committed_at=100)
             server.offer(commits=(commit,))
             await service.poll_state()
-            _, observations = service._feedback()
+            observations = pending(service)
             assert [(o.assignment_id, o.status, o.observed_at) for o in observations] == [("picture", "presented", 100)]
             assert service.renderer.outputs["hdmi1"].layers[0].path.read_bytes() == server.data
             server.offer(absent=True)
@@ -789,7 +797,7 @@ def test_valid_surviving_cache_is_verified_before_any_media_request(tmp_path):
             assert await restarted.download(restarted._jobs[0])
             assert all(not request.url.path.startswith("/v1/media/")
                        for request in server.requests)
-            assert restarted._feedback()[0].secured == ("picture",)
+            assert restarted._feedback().secured == ("picture",)
         finally:
             await close(restarted)
     asyncio.run(check())
@@ -814,7 +822,7 @@ def test_media_is_fetched_by_name_and_a_re_made_copy_is_accepted(tmp_path):
             variant = job.layer.variant
             assert request.url.path == f"/v1/media/{variant.asset_id}/{variant.recipe_id}"
             assert service.cache.path_for(variant).read_bytes() == remade
-            assert service._feedback()[0].secured == ("picture",)
+            assert service._feedback().secured == ("picture",)
         finally:
             await close(service)
     asyncio.run(check())
@@ -918,7 +926,7 @@ def test_failed_download_unblocks_worker_and_never_publishes_readiness(tmp_path,
             with context_optional_error():
                 assert not await asyncio.wait_for(service.download(service._jobs[0]), 2)
             service.tick_main()
-            assert service._feedback()[0].secured == ()
+            assert service._feedback().secured == ()
             # Prove the sole media worker is free, rather than just inspecting a flag.
             assert await asyncio.get_running_loop().run_in_executor(service._worker, lambda: 17) == 17
         finally:
@@ -967,7 +975,7 @@ def test_cancel_during_http_response_releases_download_worker(tmp_path):
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(task, 2)
             assert await asyncio.get_running_loop().run_in_executor(service._worker, lambda: "free") == "free"
-            assert not service._feedback()[0].secured
+            assert not service._feedback().secured
         finally:
             await close(service)
     asyncio.run(check())
@@ -1014,7 +1022,7 @@ def test_a_download_the_player_stops_is_not_a_download_failure(tmp_path, stop):
                 await service.poll_state()
                 rest.set()
                 await asyncio.wait_for(attempt, 2)
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert "picture" not in readiness.secured
             assert readiness.failures == (), readiness.failures
             assert "media_download" not in faults, faults
@@ -1052,7 +1060,7 @@ def test_a_download_that_breaks_mid_stream_is_a_download_failure(tmp_path, end):
             service.fault = lambda code, **kw: (faults.append(code), record(code, **kw))
             await asyncio.wait_for(service._attempt(
                 {}, job, functools.partial(service.download, job), "media_download"), 2)
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert "picture" not in readiness.secured
             assert [failure.code for failure in readiness.failures] == ["download"], \
                 readiness.failures
@@ -1124,7 +1132,7 @@ def test_a_slow_clock_answer_keeps_readiness(tmp_path):
             service._feedback()
             assert await service.download(service._jobs[0])
             service.tick_main()
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert readiness.prepared == ("picture",)
             commit = Commit(plan_id="offered", revision=1, authority_epoch=1,
                             readiness_sequence=readiness.sequence, assignment_ids=("picture",),
@@ -1136,10 +1144,11 @@ def test_a_slow_clock_answer_keeps_readiness(tmp_path):
             assert service.show_clock.diagnostics.rejected == 0
             assert service.show_clock.uncertainty == pytest.approx(0, abs=.001)
             service.tick_main()
-            readiness, observations = service._feedback()
+            readiness = service._feedback()
             assert readiness.prepared == ("picture",)
             assert not any(failure.code == "clock" for failure in readiness.failures)
-            assert [(o.assignment_id, o.status) for o in observations] == [("picture", "presented")]
+            assert [(o.assignment_id, o.status) for o in pending(service)] == [
+                ("picture", "presented")]
         finally:
             await close(service)
     asyncio.run(check())
@@ -1251,7 +1260,7 @@ def test_a_late_main_loop_raises_the_health_fault_and_never_withdraws_readiness(
     The Player raises main_loop_late on its health channel and posts nothing on readiness, so
     the readiness Central holds (prepared included) stands; a late report with prepared=()
     would cancel the wall's coordinated groups. The late callbacks never run, and when the loop
-    recovers its next report is the executor's next sequence with nothing withdrawn."""
+    recovers readiness is unchanged, so nothing is posted: Central's holds, nothing withdrawn."""
     monkeypatch.setattr("player.service.DISPATCH_DEADLINE", .05)
     monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
 
@@ -1317,9 +1326,21 @@ def test_a_late_main_loop_raises_the_health_fault_and_never_withdraws_readiness(
             assert ran == []
             service.dispatcher = immediate
             monkeypatch.undo()
-            recovered = (await turn(service, server, 1))[0]
-            assert recovered["sequence"] == live["sequence"] + 1     # no gap, nothing in between
-            assert recovered["failures"] == [] and recovered["secured"] == live["secured"]
+            posted = len(readiness_posts(server))
+            polls = []
+
+            async def counted_poll():
+                polls.append(True)
+                await PlayerService.poll_state(service)
+                if len(polls) >= 3:
+                    service._stop.set()
+            monkeypatch.setattr(service, "poll_state", counted_poll)
+            service._stop.clear()
+            await asyncio.wait_for(service._control_loop(), 5)
+            assert readiness_posts(server)[posted:] == []   # unchanged: Central's report holds
+            recovered = service.executor.readiness()
+            assert recovered.sequence == live["sequence"]    # nothing in between
+            assert recovered.failures == () and list(recovered.secured) == live["secured"]
         finally:
             await close(service)
     asyncio.run(check())
@@ -1418,7 +1439,8 @@ def test_a_blocked_main_loop_keeps_its_session_and_resumes_once_the_loop_runs(
 def test_stale_feedback_on_a_late_loop_keeps_the_session(tmp_path, monkeypatch):
     """Central refuses readiness as stale (409) and the state poll that follows misses the
     dispatch deadline: the Player raises main_loop_late and the control loop carries on (the
-    next turn polls again); a late loop never ends the session here."""
+    next turn polls again); a late loop never ends the session here. A readiness refused 409 is
+    not answered, so it goes again until Central takes it (two refusals, then the third taken)."""
     monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
 
     async def check():
@@ -1494,7 +1516,7 @@ def test_one_state_poll_anchors_the_show_clock_while_the_time_route_fails(tmp_pa
             service._feedback()
             assert await service.download(service._jobs[0])
             service.tick_main()
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert readiness.prepared == ("picture",) and readiness.failures == ()
         finally:
             await down.aclose()
@@ -1657,7 +1679,7 @@ def test_worker_verification_reopens_acquisition_after_cache_damage(tmp_path, da
             job = service._jobs[0]
             assert await service.download(job)
             service.tick_main()
-            assert service._feedback()[0].secured == ("picture",)
+            assert service._feedback().secured == ("picture",)
             path = service.cache.path_for(job.layer.variant)
             if damage == "delete":
                 path.unlink()
@@ -1665,7 +1687,7 @@ def test_worker_verification_reopens_acquisition_after_cache_damage(tmp_path, da
                 path.write_bytes(b"corrupt")
             worker = asyncio.create_task(service._media_loop())
             async def invalidated():
-                while service._feedback()[0].secured:
+                while service._feedback().secured:
                     await asyncio.sleep(.01)
             await asyncio.wait_for(invalidated(), 2)
             # Stop scheduling while checking the now-visible new acquisition job.
@@ -1676,7 +1698,7 @@ def test_worker_verification_reopens_acquisition_after_cache_damage(tmp_path, da
             assert service._jobs == (job,)
             assert await service.download(job)
             service.tick_main()
-            assert service._feedback()[0].secured == ("picture",)
+            assert service._feedback().secured == ("picture",)
             assert service.cache.path_for(job.layer.variant).read_bytes() == server.data
         finally:
             if worker:
@@ -1961,12 +1983,12 @@ def test_observation_renewal_race_fetches_current_state_without_reenrollment(tmp
             service._feedback()
             assert await service.download(service._jobs[0])
             service.tick_main()
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             commit = Commit(plan_id="offered", revision=1, authority_epoch=1,
                 readiness_sequence=readiness.sequence, assignment_ids=("picture",), committed_at=100)
             server.offer(commits=(commit,))
             await service.poll_state()
-            service._outgoing.extend(service._feedback()[1])
+            assert len(service._reports) == 1
             seen = asyncio.Event()
             def handle(request):
                 if request.url.path == "/v1/player/observations":
@@ -1987,6 +2009,60 @@ def test_observation_renewal_race_fetches_current_state_without_reenrollment(tmp
             if task:
                 task.cancel()
                 await asyncio.gather(task, return_exceptions=True)
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_report_central_answers_stale_is_sent_again_under_the_newer_revision(tmp_path):
+    """A report is a change of state, made once (player/executor.py `_report`), so one Central
+    answers stale (409: it offered a newer revision meanwhile) is never made again: it waits for
+    the Player to hold a newer revision and is sent under it with its number unchanged, and not
+    before (a 409 with no newer revision held sends nothing more). Mutation probe: drop the report
+    on StaleFeedback, or re-queue it unchanged."""
+    async def check():
+        service, server = await rig(tmp_path)
+        sender = None
+        try:
+            service._feedback()
+            assert await service.download(service._jobs[0])
+            service.tick_main()
+            readiness = service._feedback()
+            server.offer(commits=(Commit(plan_id="offered", revision=1, authority_epoch=1,
+                readiness_sequence=readiness.sequence, assignment_ids=("picture",),
+                committed_at=100),))
+            await service.poll_state()
+            assert len(service._reports) == 1
+            posted, polled = [], asyncio.Event()
+
+            def handle(request):
+                if request.url.path == "/v1/player/observations":
+                    posted.append(Observation.model_validate_json(request.content))
+                    if len(posted) == 1:
+                        return httpx.Response(409, json={"error": "stale_observation"})
+                if request.url.path == "/v1/player/state":
+                    polled.set()
+                return server(request)
+
+            await service.link.client.aclose()
+            service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+            sender = asyncio.create_task(service._observation_loop())
+            await asyncio.wait_for(polled.wait(), 2)
+            await asyncio.sleep(.2)
+            assert len(posted) == 1 and posted[0].revision == 1 and len(service._reports) == 1
+            server.offer(revision=2, commits=server.state.commits)
+            await service.poll_state()
+
+            async def sent_again():
+                while len(posted) < 2:
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(sent_again(), 2)
+            await asyncio.sleep(.1)
+            assert posted == [posted[0], posted[0].model_copy(update={"revision": 2})]
+            assert not service._reports
+        finally:
+            if sender:
+                sender.cancel()
+                await asyncio.gather(sender, return_exceptions=True)
             await close(service)
     asyncio.run(check())
 
@@ -2080,12 +2156,12 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             offered = service._jobs[0]
             assert await service.download(offered)
             service.tick_main()
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert offered.layer.assignment_id in readiness.prepared
             assert await service.request("POST", "/v1/player/readiness",
                 body=readiness.model_dump(mode="json")) == {"accepted": True}
             await service.poll_state()
-            _, observations = service._feedback()
+            observations = pending(service)
             assert observations and observations[0].status == "presented"
             await service.request("POST", "/v1/player/observations",
                                   body=observations[0].model_dump(mode="json"))
@@ -2113,7 +2189,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             app.state.coordinator.advance()
             latest = app.state.coordinator.delivery(registered.player_id, 1)["plan"]
             assert latest.revision > service._plan.revision
-            service._outgoing.append(observations[0])
+            service._reports.put(observations[0])
             old_revision = service._plan.revision
             sender = asyncio.create_task(service._observation_loop())
             try:
@@ -2281,12 +2357,10 @@ def test_an_earlier_revisions_continuation_observation_reaches_central_after_an_
             seen = Observation(plan_id="offered", revision=2,
                                authority_epoch=service.registration.authority_epoch,
                                assignment_id=continuation_assignment_id(continuation, 0, "listed"),
-                               observed_at=150, status="presented")
+                               sequence=1, observed_at=150, status="presented")
             server.offer(revision=3, layers=(listed,), continuations=(continuation,))
             await service.poll_state()
-            service._observations.append(seen)
-            _, observations = service._feedback()
-            assert seen in observations
+            assert service._observation_current(seen)
 
             posted = []
 
@@ -2300,7 +2374,8 @@ def test_an_earlier_revisions_continuation_observation_reaches_central_after_an_
             await service.link.client.aclose()
             service.link.client = service.link.time_client = httpx.AsyncClient(
                 transport=httpx.MockTransport(handle))
-            service._outgoing.append(seen)
+            pending(service)                 # the ticks' own reports, sent apart
+            service._reports.put(seen)
             sender = asyncio.create_task(service._observation_loop())
             try:
                 async def sent_twice():
@@ -2310,7 +2385,7 @@ def test_an_earlier_revisions_continuation_observation_reaches_central_after_an_
             finally:
                 sender.cancel()
                 await asyncio.gather(sender, return_exceptions=True)
-            assert posted == [seen, seen] and not service._outgoing
+            assert posted == [seen, seen] and not service._reports
         finally:
             await close(service)
     asyncio.run(check())
@@ -2410,8 +2485,9 @@ def test_an_observation_central_refuses_is_not_sent_again_and_the_next_one_is(tm
             epoch = service.registration.authority_epoch
             plan = service.executor._plan
             first, second = (Observation(plan_id=plan.plan_id, revision=plan.revision,
-                                         authority_epoch=epoch, assignment_id="picture",
-                                         observed_at=at, status="presented") for at in (101, 102))
+                                         authority_epoch=epoch, assignment_id=key, sequence=number,
+                                         observed_at=at, status="presented")
+                             for key, number, at in (("picture", 1, 101), ("other", 2, 102)))
             posted = []
 
             def handle(request):
@@ -2424,7 +2500,8 @@ def test_an_observation_central_refuses_is_not_sent_again_and_the_next_one_is(tm
             await service.link.client.aclose()
             service.link.client = service.link.time_client = httpx.AsyncClient(
                 transport=httpx.MockTransport(handle))
-            service._outgoing.extend((first, second))
+            service._reports.put(first)
+            service._reports.put(second)
             sender = asyncio.create_task(service._observation_loop())
             try:
                 async def both():
@@ -2435,7 +2512,7 @@ def test_an_observation_central_refuses_is_not_sent_again_and_the_next_one_is(tm
             finally:
                 sender.cancel()
                 await asyncio.gather(sender, return_exceptions=True)
-            assert posted == [first, second] and not service._outgoing
+            assert posted == [first, second] and not service._reports
         finally:
             await close(service)
     asyncio.run(check())
@@ -2460,6 +2537,222 @@ def test_a_state_of_another_registration_never_samples_the_show_clock(tmp_path):
             assert await service.dispatch(
                 lambda: sample(registration.player_id, registration.authority_epoch))
             assert service.show_clock.diagnostics.samples == before + 1
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+async def _drawn_still(tmp_path):
+    """A rig whose one still photo ("picture") Central granted and the renderer draws."""
+    service, server = await rig(tmp_path)
+    service._feedback()
+    assert await service.download(service._jobs[0])
+    service.tick_main()
+    commit = Commit(plan_id="offered", revision=1, authority_epoch=1,
+                    readiness_sequence=service.executor.readiness().sequence,
+                    assignment_ids=("picture",), committed_at=100)
+    server.offer(commits=(commit,))
+    await service.poll_state()
+    return service, server
+
+
+def test_a_still_photo_reaches_central_once_while_central_commits_then_answers_lock_busy(
+        tmp_path, monkeypatch):
+    """2026-11-16: a still photo, unchanged, was reported presented every half second, and each
+    report Central committed and then answered lock_busy was sent again: 553 rows in six minutes
+    for one photo. A report is a change, sent until Central answers it and never again, with one
+    number on every send (Central writes each number once: test_shown_history's
+    `test_an_observation_sent_again_adds_no_row`). Mutation probe: report presented on every tick
+    (drop the `reported` check in `Executor._report`)."""
+    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+
+    async def check():
+        service, server = await _drawn_still(tmp_path)
+        posted = []
+
+        def handle(request):
+            if request.url.path == "/v1/player/observations":
+                posted.append(Observation.model_validate_json(request.content))
+                if len(posted) <= 3:      # committed, then answered too late
+                    return httpx.Response(503, json={"error": "lock_busy"})
+            return server(request)
+
+        await service.link.client.aclose()
+        service.link.client = service.link.time_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handle))
+        loops = [asyncio.create_task(service._control_loop()),
+                 asyncio.create_task(service._observation_loop())]
+        try:
+            for _ in range(150):                         # five seconds of 33 ms ticks
+                service.clock.advance(.033)
+                service.tick_main()
+                assert service.renderer.outputs["hdmi1"].layers
+                await asyncio.sleep(.002)
+            await asyncio.sleep(.1)
+        finally:
+            for loop in loops:
+                loop.cancel()
+            await asyncio.gather(*loops, return_exceptions=True)
+            await close(service)
+        assert len(posted) == 4 and posted[0].status == "presented"
+        assert all(report == posted[0] for report in posted)
+    asyncio.run(check())
+
+
+def test_a_report_never_holds_the_picture_while_central_is_away(tmp_path):
+    """A Central that answers nothing (its state poll stuck behind a lock) never stops the picture
+    or fills the Player's queue: a still photo drawn for 200 ticks waits as one report, sent once
+    Central answers. The old queue held 128 and raised `observation_capacity`, dropping its oldest
+    entries. Mutation probe: report on every tick and key `ReportOutbox` by report number (the
+    old queue's shape): 200 reports wait, and all are sent."""
+    async def check():
+        service, server = await _drawn_still(tmp_path)
+        faults = []
+        recorded = service.fault
+        service.fault = lambda code, **kwargs: (faults.append(code), recorded(code, **kwargs))
+        posted = []
+
+        def handle(request):
+            if request.url.path == "/v1/player/observations":
+                posted.append(Observation.model_validate_json(request.content))
+            return server(request)
+
+        sender = None
+        try:
+            for _ in range(200):
+                service.clock.advance(.033)
+                service.tick_main()
+                assert service.renderer.outputs["hdmi1"].layers
+            assert "observation_capacity" not in faults
+            await service.link.client.aclose()
+            service.link.client = service.link.time_client = httpx.AsyncClient(
+                transport=httpx.MockTransport(handle))
+            sender = asyncio.create_task(service._observation_loop())
+            await asyncio.sleep(.2)
+        finally:
+            if sender:
+                sender.cancel()
+                await asyncio.gather(sender, return_exceptions=True)
+            await close(service)
+        assert [(report.assignment_id, report.status) for report in posted] == [
+            ("picture", "presented")]
+    asyncio.run(check())
+
+
+def test_an_idle_player_sends_its_readiness_and_its_acknowledgment_once(tmp_path, monkeypatch):
+    """Each turn of the control loop polls Central's state and asks the executor for readiness;
+    while neither changes, the Player sends no further readiness and acknowledges the same delivery
+    no further (2026-11-16: every half second each was a commit under Central's Coordination
+    lock). A change is sent at once: a new delivery is acknowledged, a new readiness posted.
+    Mutation probes: post every turn's readiness, or acknowledge every state -> many posts."""
+    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+
+    async def check():
+        service, server = await rig(tmp_path, negotiate=True)
+        try:
+            def posts(path):
+                return [request for request in server.requests if request.url.path == path]
+
+            before = len(posts("/v1/player/control-acks"))
+            assert before == 1      # the rig's first poll acknowledged its delivery
+            loop = asyncio.create_task(service._control_loop())
+            await asyncio.sleep(.3)         # about thirty turns of an unchanged state
+            assert len(posts("/v1/player/readiness")) == 1
+            assert len(posts("/v1/player/control-acks")) == before
+            server.offer(revision=2)        # a new delivery: acknowledged, and readiness changes
+            await asyncio.sleep(.2)
+            loop.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await loop
+            assert len(posts("/v1/player/control-acks")) == before + 1
+            sent = [json.loads(request.content) for request in posts("/v1/player/readiness")]
+            assert [report["revision"] for report in sent] == [1, 2]
+            assert sent[0]["sequence"] < sent[1]["sequence"]
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def _readiness_posts(server):
+    return [json.loads(request.content) for request in server.requests
+            if request.url.path == "/v1/player/readiness"]
+
+
+async def _control_turns(service, poll_state, count):
+    """`count` turns of the control loop, each polling Central with `poll_state`."""
+    polls = []
+
+    async def poll():
+        polls.append(True)
+        await poll_state()
+        if len(polls) >= count:
+            service._stop.set()
+    service.poll_state = poll
+    service._stop.clear()
+    try:
+        await asyncio.wait_for(service._control_loop(), 5)
+    finally:
+        service.poll_state = poll_state
+
+
+def test_a_reenrolled_idle_player_sends_the_first_readiness_of_its_new_epoch(tmp_path, monkeypatch):
+    """An idle Player answered readiness 1 in its first epoch; a re-enrollment restarts the
+    executor's numbers at 1, so the new epoch's first readiness carries the number Central
+    answered in the old one. It is a change of its own and is posted, else Central holds no
+    readiness for the new epoch and grants nothing. Mutation: key the answered readiness by its
+    sequence alone -> no readiness is posted in epoch 2."""
+    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+
+    async def check():
+        service, server = await rig(tmp_path)
+        poll_state = service.poll_state
+        try:
+            server.offer(revision=2, layers=())
+            await poll_state()
+            await _control_turns(service, poll_state, 4)
+            first = _readiness_posts(server)
+            assert [(post["authority_epoch"], post["sequence"]) for post in first] == [(1, 1)]
+            await service.enroll()
+            await service.probe_time()
+            server.offer(layers=())
+            await poll_state()
+            await _control_turns(service, poll_state, 4)
+            renewed = _readiness_posts(server)[len(first):]
+            assert [(post["authority_epoch"], post["sequence"]) for post in renewed] == [(2, 1)]
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_readiness_refused_409_is_sent_again_until_central_takes_it(tmp_path, monkeypatch):
+    """Central refuses readiness 409 for reasons that clear by themselves (`media_unavailable`
+    while a variant is made again, `content_lock_conflict`) as well as for a newer plan: the
+    Player cannot tell them apart, so an unchanged readiness refused 409 is posted again on the
+    next turn, until Central answers it. Mutation: count a 409 as answered -> one post only, and
+    Central never holds the readiness."""
+    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+
+    async def check():
+        service, server = await rig(tmp_path)
+        poll_state = service.poll_state
+        refusals = []
+        respond = server.__call__
+
+        def refusing(request):
+            if request.url.path == "/v1/player/readiness" and len(refusals) < 2:
+                refusals.append(True)
+                server.requests.append(request)
+                return httpx.Response(409, json={"error": "media_unavailable"})
+            return respond(request)
+        await service.link.client.aclose()
+        service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(refusing))
+        service.link.time_client = service.link.client
+        try:
+            server.offer(revision=2, layers=())
+            await poll_state()
+            await _control_turns(service, poll_state, 6)
+            posts = [(post["authority_epoch"], post["sequence"]) for post in _readiness_posts(server)]
+            assert posts == [(1, 1)] * 3, posts      # refused twice, then taken: never again
         finally:
             await close(service)
     asyncio.run(check())

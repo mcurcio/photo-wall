@@ -179,6 +179,7 @@ def test_the_link_is_tried_as_soon_as_a_receipt_or_relink_arrives(tmp_path):
         receipt = service._applied_proof_receipt
         assert receipt is not None
         service._applied_proof_receipt = None  # as at start, before the first applied ACK
+        service._acknowledged = None
         link = RecordingLink()
         service.node_link_client, service.boot_id, service._proof_active = link, BOOT_ID, True
         task = asyncio.create_task(service._app_link_loop())

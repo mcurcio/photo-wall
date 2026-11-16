@@ -60,6 +60,8 @@ from central.infra.light_sensor_judge import PI_SOURCE, PiMeterAdvice, is_player
 from central.infra.node_record_retention import NodeRecordRetention
 from central.infra.paper_profile_store import PgPaperProfiles
 from central.infra.photo_library_store import PgPhotoLibrary
+from central.infra.player_contact_store import player_reports_in
+from central.infra.player_state_wakes import PlayerStateWakes
 from central.infra.power_store import PgPower
 from central.infra.room_light_store import PgRoomLights
 from central.infra.tuning_history_store import PgTuningHistory
@@ -262,6 +264,9 @@ def create_app(
     # is the Scheduler's (central/scheduler.py), built once the reconciler exists (below).
     scheduler_loop = {"enabled": run_scheduler, "running": False, "stopped": False,
                       "last_tick": None}
+    # When a Player's state may have changed: its session socket pushes it then
+    # (central/infra/player_state_wakes.py), heard on one LISTEN against a real database.
+    player_state_wakes = PlayerStateWakes()
 
     async def run_scheduler_loop():
         scheduler_loop.update(running=True, stopped=False)
@@ -291,17 +296,20 @@ def create_app(
         if feed is not None:
             await feed.start()
         task = asyncio.create_task(run_scheduler_loop()) if run_scheduler else None
+        wakes = (asyncio.create_task(player_state_wakes.listen(db.dsn))
+                 if isinstance(db, Database) else None)
         try:
             yield
         finally:
             if feed is not None:
                 await feed.stop()
-            if task:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+            for running in (task, wakes):
+                if running:
+                    running.cancel()
+                    try:
+                        await running
+                    except asyncio.CancelledError:
+                        pass
             if owns_db:
                 db.close()
 
@@ -314,6 +322,7 @@ def create_app(
         openapi_url=None,
     )
     app.state.registry = registry
+    app.state.player_state_wakes = player_state_wakes
     app.state.coordinator = coordinator
     app.state.operator_snapshot = operator_snapshot
     app.state.media_repository = media_repository
@@ -598,6 +607,35 @@ def create_app(
             await websocket.close(code=1008)
             return
         await websocket.accept()
+
+        async def handle(raw: str) -> None:
+            if len(raw.encode()) > 1024**2:
+                raise ValueError("session message limit")
+            message = json.loads(raw)
+            if not isinstance(message, dict) or set(message) != {"type", "payload"}:
+                raise ValueError("invalid session message")
+            if message["type"] == "readiness":
+                report = Readiness.model_validate(message["payload"])
+                if report.authority_epoch != identity["authority_epoch"]:
+                    raise RegistryError("stale_authority", 403)
+                await asyncio.to_thread(coordinator.readiness, identity["id"], report)
+            elif message["type"] == "observation":
+                observed = Observation.model_validate(message["payload"])
+                if observed.authority_epoch != identity["authority_epoch"]:
+                    raise RegistryError("stale_authority", 403)
+                await asyncio.to_thread(coordinator.observe, identity["id"], observed)
+            else:
+                raise ValueError("invalid session message")
+
+        # The state is pushed when it may have changed, never on a timer (2026-11-16: an unchanged
+        # state re-read under the Coordination lock and re-sent every half second): at the start,
+        # at each wake (a write under the Coordination lock committed, in any process:
+        # central/infra/player_state_wakes.py), and after each message the Player sends; and sent
+        # only when its delivery differs from the last one sent.
+        sent: tuple | None = None
+        seen = player_state_wakes.count()
+        receiving = asyncio.ensure_future(websocket.receive_text())
+        waking: asyncio.Future | None = None
         try:
             while True:
                 # Reauthenticate existing sessions too, including token rotation/retirement.
@@ -608,32 +646,29 @@ def create_app(
                 # A re-enrollment during projection must not keep this old session alive.
                 if await asyncio.to_thread(registry.authenticate, token) != identity:
                     raise RegistryError("stale_authority", 403)
-                await websocket.send_json({"type": "state", **state})
-                try:
-                    raw = await asyncio.wait_for(websocket.receive_text(), timeout=0.5)
-                except asyncio.TimeoutError:
-                    continue
-                if len(raw.encode()) > 1024**2:
-                    raise ValueError("session message limit")
-                message = json.loads(raw)
-                if not isinstance(message, dict) or set(message) != {"type", "payload"}:
-                    raise ValueError("invalid session message")
-                if message["type"] == "readiness":
-                    report = Readiness.model_validate(message["payload"])
-                    if report.authority_epoch != identity["authority_epoch"]:
-                        raise RegistryError("stale_authority", 403)
-                    await asyncio.to_thread(coordinator.readiness, identity["id"], report)
-                elif message["type"] == "observation":
-                    observed = Observation.model_validate(message["payload"])
-                    if observed.authority_epoch != identity["authority_epoch"]:
-                        raise RegistryError("stale_authority", 403)
-                    await asyncio.to_thread(coordinator.observe, identity["id"], observed)
+                delivery = (state["delivery_id"], state["delivery_sequence"])
+                if delivery != sent:
+                    await websocket.send_json({"type": "state", **state})
+                    sent = delivery
+                waking = asyncio.ensure_future(player_state_wakes.after(seen))
+                done, _ = await asyncio.wait((receiving, waking),
+                                             return_when=asyncio.FIRST_COMPLETED)
+                if waking in done:
+                    seen = waking.result()
                 else:
-                    raise ValueError("invalid session message")
+                    waking.cancel()
+                if receiving in done:
+                    raw = receiving.result()
+                    receiving = asyncio.ensure_future(websocket.receive_text())
+                    await handle(raw)
         except WebSocketDisconnect:
             pass
         except (RegistryError, ValueError):
             await websocket.close(code=1008)
+        finally:
+            for pending in (receiving, waking):
+                if pending is not None and not pending.done():
+                    pending.cancel()
 
     @app.get(
         "/v1/operator/inventory",
@@ -641,8 +676,12 @@ def create_app(
         response_model=InstallationInventory,
     )
     def inventory():
-        # The reports are read after the inventory, so read_at bounds every timestamp in it.
-        return registry.inventory().with_liveness(coordinator.player_reports_lock_free())
+        # The reports are read after the inventory, so read_at bounds every timestamp in it; in a
+        # plain transaction of their own, taking no lock.
+        inventory = registry.inventory()
+        with db.transaction() as conn:
+            reports = player_reports_in(conn, clock.utc())
+        return inventory.with_liveness(reports)
 
     @app.get(
         "/v1/operator/snapshot",

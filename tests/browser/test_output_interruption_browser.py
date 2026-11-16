@@ -35,8 +35,10 @@ SHORT = "Output interrupted · the Run continues"
 
 
 def _seed(registry):
-    """rig's two bound Frames, placed on the plan, with Output 0's loss recorded."""
+    """rig's two bound Frames, placed on the plan, with Output 0's loss recorded, and the Player
+    heard (its state poll authenticated: liveness, central/infra/player_contact_store.py)."""
     _, player, _, sessions, claims, grants, surfaces, reconciler, _ = rig(registry)
+    registry.authenticate(player["token"])
     for index, frame_id in enumerate((LOST, KEPT)):
         registry.place_frame(frame_id, FramePlacement(x_mm=100 + 500 * index, y_mm=100))
     _lose_first_output(sessions, claims, grants, surfaces, reconciler)

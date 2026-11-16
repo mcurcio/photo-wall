@@ -4,10 +4,14 @@ The Player's session loop (player.service, player.central_link) binds these valu
 serves SILENT_AFTER_SECONDS to the operator console, so the threshold at which a Player reads as
 silent cannot drift from the loop it models. Stdlib only.
 
-SILENT_AFTER_SECONDS allows one failed control cycle against a Central that answers the retry
-promptly: the failing cycle issues poll_state and then the readiness POST, each allowed
-REQUEST_TIMEOUT; after a session of 30 s or longer the Player sleeps SESSION_BACKOFF[0] before the
-retry; the retry's first accepted report lands about one REPORT_INTERVAL later. A Central that
+A Player is heard on any request it makes (its state poll every REPORT_INTERVAL among them), and
+Central writes when it last heard at most every HEARD_WRITE_SECONDS
+(central/infra/player_contact_store.py): liveness is its own domain, never the readiness report,
+which is sent once per change. SILENT_AFTER_SECONDS allows one failed control cycle against a
+Central that answers the retry promptly: the failing cycle issues poll_state and then a report,
+each allowed REQUEST_TIMEOUT; after a session of 30 s or longer the Player sleeps
+SESSION_BACKOFF[0] before the retry; the retry's first poll lands about one REPORT_INTERVAL later;
+and the heard time written lags the last request by up to HEARD_WRITE_SECONDS. A Central that
 answers near its timeout, or a Player that fails twice within 30 s, can read as silent while alive
 (docs/operator-console-ux-pass2.md section 2).
 """
@@ -17,7 +21,8 @@ from __future__ import annotations
 from typing import Final
 
 REPORT_INTERVAL: Final = 0.5
-"""Seconds between the starts of two readiness reports in one live session."""
+"""Seconds between the starts of two turns of the Player's control loop (a state poll, and its
+readiness when it changed) in one live session."""
 
 SESSION_BACKOFF: Final = (1, 5, 15, 60)
 """Seconds the Player sleeps between session attempts, indexed by consecutive failures."""
@@ -25,5 +30,9 @@ SESSION_BACKOFF: Final = (1, 5, 15, 60)
 REQUEST_TIMEOUT: Final = 15.0
 """Seconds any one request from the Player to Central may take."""
 
-SILENT_AFTER_SECONDS: Final = 2 * REQUEST_TIMEOUT + SESSION_BACKOFF[0] + REPORT_INTERVAL
-"""Seconds after its last accepted report before a Player reads as silent (31.5 s)."""
+HEARD_WRITE_SECONDS: Final = 5.0
+"""Seconds at least between two writes of when Central last heard from a Player."""
+
+SILENT_AFTER_SECONDS: Final = (2 * REQUEST_TIMEOUT + SESSION_BACKOFF[0] + REPORT_INTERVAL
+                               + HEARD_WRITE_SECONDS)
+"""Seconds after Central last heard from a Player before it reads as silent (36.5 s)."""

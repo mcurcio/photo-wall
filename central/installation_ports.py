@@ -17,5 +17,5 @@ class InstallationSessions(Protocol):
     ) -> bool: ...
 
     def configuration_in(
-        self, conn: Any, player_id: str, authority_epoch: int
+        self, conn: Any, player_id: str, authority_epoch: int, *, lock: bool = True
     ) -> dict[str, list[OutputBinding]] | None: ...

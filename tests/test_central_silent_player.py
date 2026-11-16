@@ -5,8 +5,8 @@ The incident on the test Pi: the Player app on HDMI-A-1 died and nothing restart
 Host Management kept reporting. Central's view of that box is rebuilt here through Central's own
 owner services on real PostgreSQL (enrollment, the Player's readiness report, Host Management's
 samples, the App Effect Broker's process facts with no app link) and read through the
-production operator API at T + SILENT_AFTER_SECONDS + 1 on Central's test clock, T being the
-Player's last accepted report. Each case asserts what the console classifies from: the
+production operator API at T + SILENT_AFTER_SECONDS + 1 on Central's test clock, T being when
+Central last heard from the Player. Each case asserts what the console classifies from: the
 snapshot's `last_report_at` against its served `silent_after_seconds`, the fleet host read's
 receipt against its served host-silence limit, and the broker's exit in the node device read the
 Player page's layer evidence reads (central/console/src/nodeRead.js `processFacts`).
@@ -55,7 +55,8 @@ OUTPUT = "HDMI-A-1"
 class Incident:
     """One netbooted box in the incident's state, built through Central's owner services.
 
-    `last_report_at` (T) is the Player app's last accepted readiness report; the App Effect
+    `last_report_at` (T) is when Central last heard from the Player app (its last request after
+    its readiness report; liveness is its own domain, central/infra/player_contact_store.py); the App Effect
     Broker reported the app running before it and exited after it, with no app link admitted on
     the boot (so Central can link the exit to no Output); Host Management reports every
     interval up to `read_at` = T + SILENT_AFTER_SECONDS + 1."""
@@ -85,16 +86,19 @@ class Incident:
         registry.clock.advance(1)
         self.coordinator.advance()
         assert self.coordinator.readiness(self.player_id, report(self.coordinator, identity))
+        registry.authenticate(identity["token"])    # its last request: Central last heard it
         self.last_report_at = registry.clock.utc()
         registry.clock.advance(2)
         self.exit_evidence = self._broker(NodeEventV2, 2, "exited")
         self.exited_at = registry.clock.utc()
         self.read_at = self.last_report_at + SILENT_AFTER_SECONDS + 1
-        while registry.clock.utc() + HOST_OBSERVATION_INTERVAL_SECONDS < self.read_at:
-            registry.clock.advance(HOST_OBSERVATION_INTERVAL_SECONDS)
+        # Samples one interval apart ending on read_at, so the last is stored (Central coalesces
+        # a sample within one interval of its stored one) and Host Management reads 0 s old.
+        steps = int((self.read_at - registry.clock.utc()) // HOST_OBSERVATION_INTERVAL_SECONDS)
+        for k in range(steps, -1, -1):
+            registry.clock.advance(self.read_at - k * HOST_OBSERVATION_INTERVAL_SECONDS
+                                   - registry.clock.utc())
             self.host_sample()
-        registry.clock.advance(self.read_at - registry.clock.utc())
-        self.host_sample()
         NodeRuntimeReconciler(self.sessions, self.coordinator).advance()
 
     def host_sample(self):

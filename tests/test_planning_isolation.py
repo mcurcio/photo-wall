@@ -259,8 +259,9 @@ def test_a_player_gone_stale_is_left_out_alone(registry, wall, monkeypatch):
     installation = app.state.coordinator.installation
     configuration_in = installation.configuration_in
 
-    def stale_two(conn, player_id, epoch):
-        return None if player_id == two["player_id"] else configuration_in(conn, player_id, epoch)
+    def stale_two(conn, player_id, epoch, *, lock=True):
+        return None if player_id == two["player_id"] else configuration_in(
+            conn, player_id, epoch, lock=lock)
 
     monkeypatch.setattr(installation, "configuration_in", stale_two)
     app.state.scheduler.tick()

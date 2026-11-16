@@ -42,6 +42,8 @@ from central.infra.display_store import (
 )
 from central.infra.health_report_store import health_reports_in
 from central.infra.output_wakes import notify_nodes_in
+from central.infra.player_contact_store import heard_in
+from central.infra.player_state_wakes import notify_if_written_in
 from central.infra.position_history_store import record_created_in, write_position_in, write_turn_in
 from central.infra.power_store import forget_frame_in
 from central.infra.transactions import PgTransaction, pg_connection
@@ -193,6 +195,8 @@ class Registry:
         with self.db.transaction() as conn:
             acquire_runtime_locks(conn)
             yield conn
+            # A Player's sockets wake when an equipment change commits (player_state_wakes.py).
+            notify_if_written_in(conn)
 
     def _audit(self, conn, kind: str, subject: str, detail: dict | None = None):
         conn.execute("INSERT INTO audit_events(occurred_at,kind,subject,detail) VALUES(%s,%s,%s,%s)",
@@ -275,9 +279,13 @@ class Registry:
             conn.execute("UPDATE players SET health=health || %s WHERE id=%s",
                          (Jsonb({"boot_id": request.boot_id}), player_id))
             self._audit(conn, "player_enrolled", player_id)
+            # The previous enrollment's socket wakes, to find its authority gone.
+            notify_if_written_in(conn)
         return {"player_id": player_id, "token": token, "authority_epoch": epoch}
 
     def authenticate(self, token: str) -> dict:
+        """The Player `token` names; Central heard from it (its liveness, written at most every
+        HEARD_WRITE_SECONDS: central/infra/player_contact_store.py)."""
         if not 32 <= len(token) <= 256:
             raise RegistryError("unauthorized", 401)
         digest = hashlib.sha256(token.encode()).hexdigest()
@@ -286,12 +294,19 @@ class Registry:
                                "AND retired_at IS NULL", (digest,)).fetchone()
             if not row:
                 raise RegistryError("unauthorized", 401)
+            heard_in(conn, row["id"], row["authority_epoch"], self.clock.utc())
             return row
 
     @staticmethod
-    def _control_player(conn, player_id: str, epoch: int) -> None:
+    def _control_player(conn, player_id: str, epoch: int, *, lock: bool = True) -> None:
+        """Refuse unless `epoch` is `player_id`'s current, unretired enrollment. `lock` row-locks
+        the Player against a concurrent enrollment, for a caller about to write its control
+        session; a read (`lock=False`) takes no row lock and writes nothing, so a poll of an
+        unchanged state or a re-sent acknowledgment never waits on, or for, node admission's
+        `FOR SHARE` (2026-11-16: a write per poll)."""
         row = conn.execute(
-            "SELECT authority_epoch,retired_at FROM players WHERE id=%s FOR UPDATE",
+            "SELECT authority_epoch,retired_at FROM players WHERE id=%s"
+            + (" FOR UPDATE" if lock else ""),
             (player_id,),
         ).fetchone()
         if not row or row["retired_at"] is not None or row["authority_epoch"] != epoch:
@@ -346,8 +361,9 @@ class Registry:
 
     def control_selection_in(self, conn, player_id: str, epoch: int) -> ControlSelection:
         """The epoch's negotiated selection, read under a caller-owned Coordination
-        transaction when issuing state. State is served only after the hello."""
-        self._control_player(conn, player_id, epoch)
+        transaction when issuing state. State is served only after the hello. A read: no row
+        lock."""
+        self._control_player(conn, player_id, epoch, lock=False)
         row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
                            (player_id,)).fetchone()
         if not row or row["authority_epoch"] != epoch or row["status"] != "negotiated":
@@ -363,22 +379,25 @@ class Registry:
 
     def issue_control_delivery_record_in(self, conn, player_id: str, epoch: int,
                                          digest: str) -> dict:
-        """Issue under the caller's Coordinator lock, atomic with its projected state."""
-        self._control_player(conn, player_id, epoch)
-        now = self.clock.utc()
-        row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
-                           (player_id,)).fetchone()
-        if not row or row["authority_epoch"] != epoch or row["status"] != "negotiated":
-            raise RegistryError("control_protocol_mismatch")
-        if (row["pending_id"] and row["pending_digest"] == digest
-                and row["pending_expires"] > now):
-            return ControlDelivery(delivery_id=row["pending_id"],
-                                   delivery_sequence=row["issued_sequence"]).model_dump()
-        if applied_is_latest(row) and row["applied_digest"] == digest:
-            # Unchanged since the Player applied it: the same delivery again, so its receipt
-            # (and an app link proved with it) stays current until the state really changes.
-            return ControlDelivery(delivery_id=row["applied_delivery_id"],
-                                   delivery_sequence=row["applied_sequence"]).model_dump()
+        """Issue under the caller's Coordinator lock, atomic with its projected state. The same
+        state again is the same delivery, read without a row lock or a write; only a new one
+        row-locks the Player and is written."""
+        for lock in (False, True):
+            self._control_player(conn, player_id, epoch, lock=lock)
+            now = self.clock.utc()      # sampled after any wait for the row lock
+            row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
+                               (player_id,)).fetchone()
+            if not row or row["authority_epoch"] != epoch or row["status"] != "negotiated":
+                raise RegistryError("control_protocol_mismatch")
+            if (row["pending_id"] and row["pending_digest"] == digest
+                    and row["pending_expires"] > now):
+                return ControlDelivery(delivery_id=row["pending_id"],
+                                       delivery_sequence=row["issued_sequence"]).model_dump()
+            if applied_is_latest(row) and row["applied_digest"] == digest:
+                # Unchanged since the Player applied it: the same delivery again, so its receipt
+                # (and an app link proved with it) stays current until the state really changes.
+                return ControlDelivery(delivery_id=row["applied_delivery_id"],
+                                       delivery_sequence=row["applied_sequence"]).model_dump()
         delivery_id = secrets.token_hex(16)
         issued = conn.execute(
             "UPDATE player_control_sessions SET issued_sequence=issued_sequence+1,"
@@ -405,7 +424,14 @@ class Registry:
         )
 
     def control_ack_response(self, player_id: str, report: ControlAck) -> ControlAckResponse:
+        """Record the Player's acknowledgment of a delivery. One already handled (the Player sent
+        it again) is answered as before, its receipt replayed, read without a row lock or a write
+        (2026-11-16: a `FOR UPDATE` per state poll); only one that records a result row-locks the
+        Player and writes."""
         with self.db.transaction() as conn:
+            replay = self._handled_ack_in(conn, player_id, report)
+            if replay is not None:
+                return replay
             self._control_player(conn, player_id, report.authority_epoch)
             now = self.clock.utc()
             row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
@@ -458,6 +484,25 @@ class Registry:
                     ack_nonce=nonce,
                 )
             return ControlAckResponse(accepted=True, receipt=receipt)
+
+    def _handled_ack_in(self, conn, player_id: str,
+                        report: ControlAck) -> ControlAckResponse | None:
+        """The answer to an acknowledgment that records nothing, read without a lock: refused
+        (no negotiated session on its epoch) or a delivery no longer pending, whose receipt is
+        replayed; None when it records a result (the pending delivery, or a re-applied one that
+        did not take), which `control_ack_response` writes under the row lock."""
+        self._control_player(conn, player_id, report.authority_epoch, lock=False)
+        row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
+                           (player_id,)).fetchone()
+        if (not row or row["authority_epoch"] != report.authority_epoch
+                or row["status"] != "negotiated"):
+            return ControlAckResponse(accepted=False)
+        if row["pending_id"] == report.delivery_id or (
+                report.result != "applied" and applied_is_latest(row)
+                and row["applied_delivery_id"] == report.delivery_id):
+            return None
+        receipt = self._current_applied_receipt(row, report)
+        return ControlAckResponse(accepted=receipt is not None, receipt=receipt)
 
     def control_fact(self, player_id: str) -> dict | None:
         """Read provenance-labelled app-control history without readiness inference."""

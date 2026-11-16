@@ -7,7 +7,7 @@ caller's Frame snapshot. It deliberately stores no second copy of readiness stat
 from __future__ import annotations
 
 from central.displays.model import Readiness as FrameReadiness
-from central.installation_models import FrameInventory
+from central.installation_models import FrameInventory, PlayerReports
 from contracts.liveness import SILENT_AFTER_SECONDS
 from contracts.models import (
     Identifier,
@@ -68,13 +68,17 @@ def project_readiness_diagnostics(
     *,
     read_at: float,
     frames: tuple[FrameInventory, ...],
+    heard: PlayerReports,
 ) -> tuple[ReadinessDiagnostic, ...]:
     """Project only failures still authoritative at ``read_at``.
 
     ``conn`` belongs to the caller and must already be in the desired database
     snapshot. The highest revision is selected before checking expiry: an expired
     latest offer must not revive an older offer. ``frames`` must come from the same
-    snapshot, allowing binding/profile/calibration changes to stale old feedback.
+    snapshot, allowing binding/profile/calibration changes to stale old feedback. ``heard`` is
+    when Central last heard from each Player (its liveness, central/infra/player_contact_store.py):
+    a silent Player's failures are not current. Readiness is sent once per change, so its own age
+    says nothing of the Player's.
     """
     rows = conn.execute(
         "SELECT p.id AS player_id,p.authority_epoch,f.sequence,f.received_at,f.readiness,"
@@ -94,8 +98,10 @@ def project_readiness_diagnostics(
     binding_cache: dict[str, tuple[tuple[OutputBinding, ...], set[str], dict[str, FrameInventory]]] = {}
     for row in rows:
         received_at = row["received_at"]
+        heard_at = heard.reports.get(row["player_id"])
         # Future-dated feedback and silent Players are not current operator facts.
-        if received_at > read_at or read_at - received_at > SILENT_AFTER_SECONDS:
+        if (received_at > read_at or heard_at is None
+                or read_at - heard_at > SILENT_AFTER_SECONDS):
             continue
         if row["valid_until"] <= read_at:
             continue

@@ -17,7 +17,7 @@ SECRET = "private-content-marker"
 
 
 class Installation:
-    def configuration_in(self, _conn, _player_id, _epoch):
+    def configuration_in(self, _conn, _player_id, _epoch, *, lock=True):
         return {"bindings": [BINDING], "execution_bindings": [BINDING]}
 
 

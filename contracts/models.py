@@ -588,10 +588,15 @@ class AppliedCalibration(Model):
 
 
 class Observation(Model):
+    """A change of an assignment's state on a Frame, reported once (player/executor.py
+    `_report`). `sequence` is its Player's number for it within `authority_epoch`, kept when the
+    report is sent again, so Central writes each (Player, epoch, sequence) once however often it is
+    sent (central/coordination.py `observe`)."""
     plan_id: Identifier
     revision: int = Field(ge=1)
     assignment_id: Identifier
     authority_epoch: int = Field(ge=1)
+    sequence: int = Field(ge=1)
     observed_at: Instant
     status: Literal["presented", "failed", "skipped", "fallback"]
     applied_calibration: AppliedCalibration | None = None

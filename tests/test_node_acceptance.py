@@ -13,6 +13,7 @@ from central.fleet.node_app_links import NodeAppLinks
 from central.fleet.node_display import NodeDisplay
 from central.fleet.node_sessions import NodeControlError
 from central.runtime import Contribution, Scene
+from contracts.liveness import HEARD_WRITE_SECONDS
 from contracts.node_app_link import NodeAppLinkV2, encode_node_app_link, node_app_link_message
 from contracts.node_display import (
     DisplayExchange,
@@ -71,6 +72,7 @@ class Witnesses:
         self.coordinator.advance()
         self.sequence = 2
         self.coordinator.readiness(self.player["player_id"],report(self.coordinator,self.player,sequence=self.sequence))
+        self.registry.authenticate(self.player['token'])   # the Player's poll: Central heard it
         self.acceptance = NodeAcceptance(self.sessions)
         self.qualification = uuid4()
         self.acceptance.begin(DEVICE_ID,self.qualification,self.proof.challenge.environment_sha256,'operator:representative-media')
@@ -79,14 +81,18 @@ class Witnesses:
         return parse_display_decision(self.display.exchange(self.claim.session_id,self.claim.credential,
                                                            encode_display_exchange(request)))
 
-    def advance(self, *, interval=5, tag_override=None, digest=None):
+    def advance(self, *, interval=5, tag_override=None, digest=None, ready=True, heard=True):
+        """`ready`: the Player posts readiness (it does only on a change); `heard`: it polls."""
         self.registry.clock.advance(interval-1)
         self.sequence += 1
         # A changed state issues a new applied receipt; an unchanged one (`digest`) replays it.
         self.proof = fresh_proof(self.registry,self,self.claims['app_effect_broker'],self.proof,self.key,
                                 sampled=int((self.registry.clock.utc()-1000)*1000)+2000, digest=digest)
         self.coordinator.advance()
-        self.coordinator.readiness(self.player['player_id'],report(self.coordinator,self.player,sequence=self.sequence))
+        if ready:
+            self.coordinator.readiness(self.player['player_id'],report(self.coordinator,self.player,sequence=self.sequence))
+        if heard:
+            self.registry.authenticate(self.player['token'])   # the Player's poll: Central heard it
         plan = self.coordinator.delivery(self.player['player_id'],1)['plan']
         now_ms = int((self.registry.clock.utc()-1000)*1000)+1000
         for binding in plan.bindings:
@@ -129,6 +135,7 @@ class Witnesses:
         self.coordinator.advance()
         self.sequence += 1
         self.coordinator.readiness(self.player['player_id'],report(self.coordinator,self.player,sequence=self.sequence))
+        self.registry.authenticate(self.player['token'])   # the Player's poll: Central heard it
 
 
 def assert_qualified_evidence(registry, witness):
@@ -155,13 +162,37 @@ def test_advancing_real_owner_witnesses_qualify_without_cached_repeats(registry)
 
 def test_an_unchanged_control_state_still_qualifies(registry):
     """Central re-sends the applied delivery while the state is unchanged, so the applied
-    receipt keeps its sequence and age; fresh, advancing readiness carries liveness instead.
+    receipt keeps its sequence and age; Central hearing the Player carries liveness instead.
     Mutation probe: restore the applied-age check or the advancing control sequence."""
     witness = Witnesses(registry)
     for _ in range(7):
         result = witness.advance(digest='f'*64)
     assert result['status']=='accepted' and result['fleet_frontier_changed'] is False
     assert_qualified_evidence(registry, witness)
+
+
+def test_readiness_sent_long_ago_qualifies_while_central_hears_the_player(registry):
+    """Readiness is sent once per change, so an unchanged Player's readiness keeps its number and
+    is as old as its last change: liveness is when Central last heard from it (its polls), never
+    the readiness receipt's age nor an advancing readiness number. Mutations: gate on
+    `player_feedback.received_at` -> readiness_stale; ask each sample for a newer readiness
+    number -> awaiting_new_witnesses forever."""
+    witness = Witnesses(registry)
+    for _ in range(7):
+        result = witness.advance(ready=False)
+    assert result['status']=='accepted' and result['fleet_frontier_changed'] is False
+    assert_qualified_evidence(registry, witness)
+
+
+def test_a_player_central_has_not_heard_within_the_gap_is_readiness_stale(registry):
+    """Fresh readiness does not make a Player live: unheard past MAX_GAP_SECONDS plus the
+    heard write's HEARD_WRITE_SECONDS, the sample is refused. Mutation: drop the heard check,
+    or widen it past the gap -> the sample is taken."""
+    witness = Witnesses(registry)
+    witness.advance()
+    gap = NodeAcceptance.MAX_GAP_SECONDS + HEARD_WRITE_SECONDS
+    with pytest.raises(NodeControlError, match='node_qualification_readiness_stale'):
+        witness.advance(interval=int(gap) + 1, heard=False)
 
 
 @pytest.mark.parametrize('tag',['synthetic','trial-not-normal-media'])

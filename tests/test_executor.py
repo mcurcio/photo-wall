@@ -514,11 +514,12 @@ def test_original_fade_interval_survives_rolling_plan_and_black_is_not_transpare
     rig.offer(background, cover, revision=2)
     rig.executor.prepare_imminent()
     rig.commit("picture", "cover")
-    rig.executor.tick()
+    observations = rig.executor.tick()
     assert rig.renderer.outputs["hdmi1"].layers[-1].alpha == .5
     rig.advance(5)
-    observations = rig.executor.tick()
+    observations += rig.executor.tick()
     assert rig.renderer.outputs["hdmi1"].layers[-1].alpha == 1
+    # Seen from its first visible draw, reported once (`Executor._report`).
     assert [o.assignment_id for o in observations if o.status == "presented"] == ["cover"]
 
 
@@ -779,7 +780,8 @@ def test_a_refused_grant_is_reported_lost_with_its_own_sequence(tmp_path):
     rig.secure()
     rig.executor.prepare_imminent()
     ready = rig.executor.readiness()
-    for _ in range(128):              # an outage longer than the Player's report window
+    for _ in range(128):              # more changes than the Player's report window holds
+        rig.executor._readiness_state = None    # (readiness is numbered once per change)
         rig.executor.readiness()
     late = Commit(plan_id="stable", revision=1, authority_epoch=1, assignment_ids=("picture",),
                   readiness_sequence=ready.sequence, committed_at=rig.clock.utc())
@@ -851,12 +853,13 @@ def test_rolling_revision_preserves_original_execution_order_and_lease(tmp_path)
     rig.secure()
     rig.executor.prepare_imminent()
     rig.commit("picture", "black")
-    rig.executor.tick()
+    observations = rig.executor.tick()
+    assert [o.assignment_id for o in observations if o.status == "presented"] == ["black"]
     rig.advance(1)
     changed_black = black.model_copy(update={"priority": -10})
     rig.offer(picture, changed_black, revision=2, valid_until=400)
-    observations = rig.executor.tick()
-    assert [o.assignment_id for o in observations if o.status == "presented"] == ["black"]
+    # A new revision is no change of what the Frame shows: nothing is reported again.
+    assert not [o for o in rig.executor.tick() if o.status == "presented"]
     assert rig.renderer.outputs["hdmi1"].layers[-1].layer.priority == 10
     rig.advance(10)
     rig.executor.tick()
@@ -1528,3 +1531,61 @@ def test_a_layer_is_wanted_past_its_end_only_while_a_continuation_naming_it_runs
     assert not may_still_play(plan, listed, 200)
     alone = plan.model_copy(update={"continuations": ()})
     assert not may_still_play(alone, listed, 150)
+
+
+def test_a_still_photo_is_reported_once_and_each_change_of_its_state_once(tmp_path):
+    """2026-11-16: one still photo, unchanged for an hour, was reported presented on every tick (a
+    row in Central every half second). A report is a change of an assignment's state, numbered
+    once: presented when it starts, then the fallback when it ends, each once however many ticks
+    stand between. Mutation probe: drop the `reported` check in `Executor._report`."""
+    rig = Rig(tmp_path)
+    reports = list(rig.play(layer()))
+    for _ in range(300):                       # ten seconds of 33 ms ticks
+        rig.advance(.033)
+        reports += rig.executor.tick()
+    assert [(report.assignment_id, report.status) for report in reports] == [
+        ("picture", "presented")]
+    rig.advance(200 - rig.clock.utc())         # the photo's end
+    for _ in range(30):
+        rig.advance(.033)
+        reports += rig.executor.tick()
+    assert [(report.status, report.detail) for report in reports] == [
+        ("presented", "none"), ("fallback", "expired")]
+    numbers = [report.sequence for report in reports]
+    assert numbers == sorted(set(numbers))
+
+
+def test_readiness_is_numbered_once_per_change(tmp_path):
+    """Readiness is level state, numbered when it changes: asked again while nothing changed it
+    keeps its number (the Player sends it once, Central writes it once); a change (a photo
+    prepared, the plan's next revision) takes a new number. Mutation probe: number every ask ->
+    the second ask's sequence differs."""
+    rig = Rig(tmp_path)
+    rig.offer(layer())
+    rig.secure()
+    first = rig.executor.readiness()
+    rig.advance(.5)
+    assert rig.executor.readiness().sequence == first.sequence
+    rig.executor.prepare_imminent()
+    prepared = rig.executor.readiness()
+    assert prepared.prepared == ("picture",) and prepared.sequence > first.sequence
+    rig.advance(.5)
+    assert rig.executor.readiness().sequence == prepared.sequence
+    rig.offer(layer(), revision=2)
+    assert rig.executor.readiness().sequence > prepared.sequence
+
+
+def test_readiness_is_numbered_again_when_the_clock_bound_central_holds_drifts_off(tmp_path):
+    """Central grows the reported clock bound by DRIFT_RATE from its receipt (decision 0032); while
+    the Player's own bound stays tight the two part, and once they differ by more than
+    CLOCK_BOUND_SLACK the Player reports again, so a guard never stays wide for want of a report.
+    Mutation probe: leave the bound out of the change -> the same number after an hour."""
+    from contracts.time import DRIFT_RATE
+    from player.executor import CLOCK_BOUND_SLACK
+    rig = Rig(tmp_path)
+    rig.offer(valid_until=10_000)       # nothing else changes: no layer starts or ends
+    first = rig.executor.readiness()
+    rig.advance(CLOCK_BOUND_SLACK / DRIFT_RATE / 2)
+    assert rig.executor.readiness().sequence == first.sequence
+    rig.advance(CLOCK_BOUND_SLACK / DRIFT_RATE)
+    assert rig.executor.readiness().sequence > first.sequence

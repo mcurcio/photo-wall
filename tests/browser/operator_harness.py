@@ -19,6 +19,7 @@ from test_registry import ADMIN
 from central.app import create_app
 from central.coordination import Coordinator
 from central.fleet.node_sessions import NodeControlConfig
+from central.infra.player_contact_store import heard_in
 from central.installation_models import InstallationInventory
 from contracts.models import Readiness
 
@@ -114,7 +115,8 @@ def inventory(page, origin, token=ADMIN):
 def report_readiness(registry, player_id):
     """Have Central accept one readiness report from a Player at the current (controlled)
     clock, as a live Player's control loop does: advance() offers the Player a plan (an empty
-    one when it is unbound or idle) and the Player reports on it. Liveness is exactly this."""
+    one when it is unbound or idle) and the Player reports on it; and Central hears the Player
+    then, as its state poll makes it heard (liveness, central/infra/player_contact_store.py)."""
     coordinator = Coordinator(registry.db, registry.clock)
     coordinator.advance()
     epoch = next(p.authority_epoch for p in registry.inventory().players if p.id == player_id)
@@ -123,6 +125,8 @@ def report_readiness(registry, player_id):
         plan_id=plan.plan_id, revision=plan.revision, authority_epoch=epoch,
         sequence=next(_SEQUENCE), clock_uncertainty=.01, capacity_ok=True,
         observed_at=registry.clock.utc(), lost_grants=()))
+    with registry.db.transaction() as conn:
+        heard_in(conn, player_id, epoch, registry.clock.utc())
 
 
 def tile_status(page, frame_id):

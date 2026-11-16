@@ -24,8 +24,9 @@ from central.execution_outcomes import ExecutionOutcome, ExecutionOutcomeRouter
 from central.infra.display_store import frame_outputs_in
 from central.infra.fit_settings_store import PgFitSettings
 from central.infra.planning_outcome_store import PgPlanningOutcome
+from central.infra.player_state_wakes import notify_if_written_in
 from central.infra.shown_history_store import PgShownHistory
-from central.installation_models import OutputInterruption, PlayerReports
+from central.installation_models import OutputInterruption
 from central.installation_ports import InstallationSessions
 from central.installation_repository import PostgresInstallationRepository
 from central.media_ports import CoordinationMedia, MediaPin
@@ -306,6 +307,9 @@ class Coordinator:
             conn.execute("SET LOCAL statement_timeout='10s'")
             conn.execute("SELECT pg_advisory_xact_lock(%s)", (COORDINATION_LOCK,))
             yield conn
+            # A Player's state can change only here: its sockets are woken when this commits,
+            # if it wrote (central/infra/player_state_wakes.py).
+            notify_if_written_in(conn)
 
     @contextmanager
     def serialized_runtime_read(self):
@@ -333,37 +337,47 @@ class Coordinator:
                                 detail={"code": _refusal_code(exc)})
         return configurations
 
-    def _configuration(self, conn, player_id: str, epoch: int) -> PlayerConfiguration:
-        observed = self.installation.configuration_in(conn, player_id, epoch)
-        if observed is None:
-            raise CoordinationError("stale_authority", 403)
-        content = {
-            "bindings": [b.model_dump(mode="json") for b in observed["bindings"]],
-            "enabled_outputs": [b.output_id for b in observed["execution_bindings"]],
-        }
-        old = conn.execute(
-            "SELECT * FROM player_configurations WHERE player_id=%s", (player_id,)
-        ).fetchone()
-        revision = 1
-        if old and old["authority_epoch"] == epoch:
-            previous = _stored_configuration(player_id, old["configuration"])
-            revision = old["revision"] + int(
-                previous is None
-                or content != previous.model_dump(mode="json", include={"bindings", "enabled_outputs"})
+    def _configuration(self, conn, player_id: str, epoch: int, *,
+                       lock: bool = True) -> PlayerConfiguration:
+        """The Player's configuration, its stored row written only when it changed. `lock=False`
+        (a delivery: a read) reads it without share locks and takes them only when the stored row
+        must change, so a state poll of an unchanged configuration row-locks and writes nothing
+        (2026-11-16: a WAL flush per poll)."""
+        for locking in ((False, True) if not lock else (True,)):
+            observed = self.installation.configuration_in(conn, player_id, epoch, lock=locking)
+            if observed is None:
+                raise CoordinationError("stale_authority", 403)
+            content = {
+                "bindings": [b.model_dump(mode="json") for b in observed["bindings"]],
+                "enabled_outputs": [b.output_id for b in observed["execution_bindings"]],
+            }
+            old = conn.execute(
+                "SELECT * FROM player_configurations WHERE player_id=%s", (player_id,)
+            ).fetchone()
+            revision = 1
+            if old and old["authority_epoch"] == epoch:
+                previous = _stored_configuration(player_id, old["configuration"])
+                revision = old["revision"] + int(
+                    previous is None
+                    or content != previous.model_dump(mode="json",
+                                                      include={"bindings", "enabled_outputs"})
+                )
+            configuration = PlayerConfiguration(
+                player_id=player_id, authority_epoch=epoch, configuration_revision=revision,
+                **content
             )
-        configuration = PlayerConfiguration(
-            player_id=player_id, authority_epoch=epoch, configuration_revision=revision, **content
+            document = configuration.model_dump(mode="json")
+            # Written only when it changed: an unchanged row is never rewritten (design rule 2).
+            changed = old is None or (old["authority_epoch"], old["revision"],
+                                      old["configuration"]) != (epoch, revision, document)
+            if not changed:
+                return configuration
+        conn.execute(
+            "INSERT INTO player_configurations VALUES(%s,%s,%s,%s) "
+            "ON CONFLICT(player_id) DO UPDATE SET authority_epoch=EXCLUDED.authority_epoch,"
+            "revision=EXCLUDED.revision,configuration=EXCLUDED.configuration",
+            (player_id, epoch, revision, Jsonb(document)),
         )
-        document = configuration.model_dump(mode="json")
-        # Written only when it changed: an unchanged row is never rewritten (design rule 2).
-        if old is None or (old["authority_epoch"], old["revision"], old["configuration"]) != (
-                epoch, revision, document):
-            conn.execute(
-                "INSERT INTO player_configurations VALUES(%s,%s,%s,%s) "
-                "ON CONFLICT(player_id) DO UPDATE SET authority_epoch=EXCLUDED.authority_epoch,"
-                "revision=EXCLUDED.revision,configuration=EXCLUDED.configuration",
-                (player_id, epoch, revision, Jsonb(document)),
-            )
         return configuration
 
     def configuration(self, player_id: str, epoch: int) -> PlayerConfiguration:
@@ -528,7 +542,10 @@ class Coordinator:
             assignments.update({a: group_id for a in cue["members"]})
         return assignments
 
-    def _event(self, conn, kind, player=None, assignment=None, detail=None):
+    def _event(self, conn, kind, player=None, assignment=None, detail=None, report=None):
+        """Append one execution event; its sequence, or None when `report` (the Player's authority
+        epoch and its number for the report) names one already written: a report sent again
+        adds no row (migration 114)."""
         outcome = ExecutionOutcome(
             kind=kind,
             occurred_at=self.clock.utc(),
@@ -537,9 +554,11 @@ class Coordinator:
             detail=detail or {},
         )
         handling = self.outcomes.handle(outcome)
-        return conn.execute(
-            "INSERT INTO execution_events(occurred_at,player_id,assignment_id,kind,detail) "
-            "VALUES(%s,%s,%s,%s,%s) RETURNING sequence",
+        epoch, number = report or (None, None)
+        row = conn.execute(
+            "INSERT INTO execution_events(occurred_at,player_id,assignment_id,kind,detail,"
+            "authority_epoch,report_sequence) VALUES(%s,%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT (player_id,authority_epoch,report_sequence) DO NOTHING RETURNING sequence",
             (
                 outcome.occurred_at,
                 player,
@@ -551,8 +570,11 @@ class Coordinator:
                         "handling": handling.model_dump(mode="json"),
                     }
                 ),
+                epoch,
+                number,
             ),
-        ).fetchone()["sequence"]
+        ).fetchone()
+        return None if row is None else row["sequence"]
 
     def _skip_group(
         self, conn, group_id: str, code: Literal["superseded"], *, root: str | None = None
@@ -927,9 +949,11 @@ class Coordinator:
         return Plan.model_validate(row["manifest"]) if row else None
 
     def delivery(self, player_id: str, epoch: int, *, finalize=None) -> dict:
-        """Read delivery and optionally finalize its wire challenge under one lock cut."""
+        """Read delivery and optionally finalize its wire challenge under one lock cut. A read: an
+        unchanged state takes no row lock and writes nothing (`_configuration`'s `lock=False`,
+        Registry's issue of the same delivery), so it notifies no socket."""
         with self._transaction() as conn:
-            config = self._configuration(conn, player_id, epoch)
+            config = self._configuration(conn, player_id, epoch, lock=False)
             now = self.clock.utc()
             identify = conn.execute(
                 "SELECT i.request_id,i.output_id,i.authority_epoch,i.expires_at,p.authority_epoch "
@@ -1021,26 +1045,6 @@ class Coordinator:
             }
             return finalize(conn, delivery) if finalize is not None else delivery
 
-    def player_reports_lock_free(self) -> PlayerReports:
-        """The Players' last accepted reports, read in one statement of a plain transaction.
-
-        This never takes COORDINATION_LOCK, so it answers while advance() or readiness() holds
-        it. A report from an earlier authority epoch, or from a retired Player, is not counted:
-        a Player is only heard once it reports on its current session."""
-        with self.db.transaction() as conn:
-            return self.player_reports_in(conn, self.clock.utc())
-
-    @staticmethod
-    def player_reports_in(conn, read_at: float) -> PlayerReports:
-        """Read accepted reports from a caller-owned transaction and label their read time."""
-        rows = conn.execute(
-            "SELECT f.player_id, f.received_at FROM players p JOIN player_feedback f "
-            "ON f.player_id=p.id AND f.authority_epoch=p.authority_epoch "
-            "WHERE p.retired_at IS NULL"
-        ).fetchall()
-        reports = {row["player_id"]: row["received_at"] for row in rows}
-        return PlayerReports(read_at=max((read_at, *reports.values())), reports=reports)
-
     @staticmethod
     def output_interruptions_in(conn) -> tuple[OutputInterruption, ...]:
         """Unresolved Output losses that fence a current Binding, from a caller-owned transaction.
@@ -1062,8 +1066,16 @@ class Coordinator:
         return tuple(OutputInterruption.model_validate(dict(row)) for row in rows)
 
     def readiness(self, player_id: str, report: Readiness) -> bool:
+        """Accept the Player's readiness; False for one already held (its number at or below the
+        one written: the Player numbers it once per change and sends it again only when an answer
+        was lost), which is answered before anything is read under a lock or written."""
         now = self.clock.utc()
         with self._transaction() as conn:
+            if not self.installation.session_is_current_in(conn, player_id, report.authority_epoch):
+                raise CoordinationError("stale_authority", 403)
+            if (held := self._readiness_sequence_in(conn, player_id, report.authority_epoch)
+                    ) is not None and report.sequence <= held:
+                return False
             configurations = self._configurations(conn, report=False)
             config = configurations.get(player_id)
             if config is None or config.authority_epoch != report.authority_epoch:
@@ -1075,12 +1087,6 @@ class Coordinator:
             ).fetchone()
             if row is None:
                 raise CoordinationError("unknown_offer")
-            old = conn.execute(
-                "SELECT sequence FROM player_feedback WHERE player_id=%s AND authority_epoch=%s",
-                (player_id, report.authority_epoch),
-            ).fetchone()
-            if old and report.sequence <= old["sequence"]:
-                return False
             plan = Plan.model_validate(row["manifest"])
             layers = {layer.assignment_id: layer for layer in plan.layers}
             reported = (
@@ -1167,6 +1173,14 @@ class Coordinator:
                 self._event(conn, "readiness_lost", player_id, assignment, {"code": code})
             self._commit_due(conn, configurations, now)
             return True
+
+    @staticmethod
+    def _readiness_sequence_in(conn, player_id: str, epoch: int) -> int | None:
+        row = conn.execute(
+            "SELECT sequence FROM player_feedback WHERE player_id=%s AND authority_epoch=%s",
+            (player_id, epoch),
+        ).fetchone()
+        return None if row is None else row["sequence"]
 
     def display_admission_in(self, conn, *, device_id: str, player_id: str, authority_epoch: int,
                              output_id: str, frame_id: str, binding_generation: int, config_revision: int,
@@ -1414,8 +1428,9 @@ class Coordinator:
             raise CoordinationError("stale_observation")
 
     def _observe(self, player_id: str, observation: Observation) -> bool:
-        """Record one observation; False when it names a plan revision other than the latest
-        (a stale "presented" one still counts as shown, `_presented_from_an_earlier_offer`)."""
+        """Record one observation, once per (Player, epoch, `sequence`): sent again, it is answered
+        alike and writes nothing; False when it names a plan revision other than the latest (a
+        stale "presented" one still counts as shown, `_presented_from_an_earlier_offer`)."""
         with self._transaction() as conn:
             config = self._configuration(conn, player_id, observation.authority_epoch)
             plan = self._current_plan(conn, player_id, observation.authority_epoch)
@@ -1433,7 +1448,9 @@ class Coordinator:
             if continuation_slot:
                 # Decision 0032: recorded under the slot's own id, naming the photo it showed.
                 detail["continuation_source"] = layer.assignment_id
-            self._event(conn, "observation", player_id, observation.assignment_id, detail)
+            if self._event(conn, "observation", player_id, observation.assignment_id, detail,
+                           report=(observation.authority_epoch, observation.sequence)) is None:
+                return True     # written when it was first sent: Central answered it late
             if observation.status == "presented":
                 # Roadmap 5a: "Shown" means it was displayed on a frame (owner, 2026-10-11); a
                 # continuation slot counts for its source photo (decision 0032).

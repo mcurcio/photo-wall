@@ -181,18 +181,18 @@ def test_a_never_commissioned_frame_is_a_todo_not_an_alarm(page, registry):
 
 
 def test_the_threshold_is_centrals_not_a_constant_in_the_console(page, registry):
-    """25 s sits between the old 21 s threshold and the served 31.5 s."""
+    """33 s sits between the old 31.5 s threshold and the served 36.5 s."""
     older = _bound_frame(registry, "older", x_mm=100)
     newer = _bound_frame(registry, "newer", x_mm=500)
     report_readiness(registry, older)
     registry.clock.advance(7)
     report_readiness(registry, newer)
-    registry.clock.advance(25)
+    registry.clock.advance(33)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        expect(_health(page, "newer")).to_have_accessible_name("Player app last reported 25 s ago")
+        expect(_health(page, "newer")).to_have_accessible_name("Player app last reported 33 s ago")
         expect(_health(page, "older")).to_have_accessible_name(
-            "Player app silent · last reported 32 s ago")
+            "Player app silent · last reported 40 s ago")
 
 
 # --- Polling and the write fence (pass 2 §7). The page clock is paused, so the 5 s poll
