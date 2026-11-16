@@ -35,6 +35,10 @@ class OutputComposition:
     # the frame it draws (player/look.py). None: a still composition, drawn as its layers say
     # (a fallback: black, or a kept photo at full strength).
     timebase: float | None = None
+    # The Frame's layers that start after `layers` and are not drawn yet, as the executor holds
+    # them: what the Frame draws next, which player/look.py's seam rule reads so a layer never
+    # fades out to the picture it already shows. Not part of `request`: it is not drawn.
+    following: tuple[Layer, ...] = ()
 
     @property
     def calibration(self) -> Calibration:

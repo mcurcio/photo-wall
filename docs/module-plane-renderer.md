@@ -105,6 +105,18 @@ bottom to top in `stack_order`.
   mix), and a layer over one not opaque likewise; a third layer over a dissolve (a Run beneath
   plus a fade) still moves the planes below it. Moving every picture's overlay never would take a
   Weston patch that keeps each picture on the overlay it had; not done.
+- **No fade when the picture stays the same** (owner, 2026-11-15: "The player shouldn't be running
+  any translations if the displayed content isn't going to change"). A picture is its drawn
+  identity (`player/planes.py` `drawn_identity`: the Frame, the copy, the crop, the opacity, a
+  video's media origin), never its assignment id: one decode and one finished picture serve every
+  layer that draws it, and it is the plane's key, so a new slot, layer or plan of the photo on
+  screen draws the very picture already shown. Whether the screen changes is decided in one place,
+  `player/look.py`'s seam rule: a layer does not fade in when the screen's last commit shows its
+  picture alone at full, and does not fade out when what its Frame draws next is the same picture
+  (the next layer, which the composition carries in `following`, or, with none, the photo it keeps).
+  So a continuation repeating one photo, two planned layers of it, a replan, a rejoin and the
+  fallback's kept photo keep the screen as it is. A real change fades as planned. Cost: a PNG
+  always fades (it may show what lies beneath); render bench on the test Pi not yet run.
 - **Removed, never transparent.** A plane under `MIN_STRENGTH` (1/255) is left out, never shown
   at alpha 0; a plane's blend mode is always pre-multiplied, never None (bench T3).
 - **A Frame is never shown as nothing** (issue #123: "Dark on purpose (Night off, Resting) is drawn
@@ -112,7 +124,7 @@ bottom to top in `stack_order`.
   whose layers has a plane (an empty fallback, nothing kept and nothing playing; a moment of a dip
   too dark for any plane) gets its **dark plane**: the black picture of its placement, over the
   whole placement at full strength (`compose`; `Plane.layer` None, its picture key `#dark:<frame>`,
-  which no assignment id can take). Over the screen's black ground it changes no pixel, but it is a
+  which no layer's drawn identity can equal). Over the screen's black ground it changes no pixel, but it is a
   picture plane, which Display Host's shell keeps the Output with ([hold](display-host-backend.md#the-hold-what-the-compositor-shows));
   the ground alone never is. It is the Player's drawing, not a layer: the presented composition
   stays the looked one, so no assignment is invented or reported presented. A test pattern, a

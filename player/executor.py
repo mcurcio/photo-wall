@@ -557,10 +557,12 @@ class Executor:
 
     def _compositions(self, items: Iterable[_Assignment], now: float,
                       timebase: float) -> tuple[OutputComposition, ...]:
-        return self._group((self._local(assignment, now) for assignment in items), timebase)
+        return self._group((self._local(assignment, now) for assignment in items), timebase, now)
 
-    def _group(self, pictures: Iterable[LocalLayer],
-               timebase: float | None = None) -> tuple[OutputComposition, ...]:
+    def _group(self, pictures: Iterable[LocalLayer], timebase: float | None = None,
+               now: float | None = None) -> tuple[OutputComposition, ...]:
+        """`pictures` as one composition per bound Output, bottom to top; drawn over time from
+        `now` on (with `timebase`), each carries what its Frame draws next (`_following`)."""
         grouped: dict[str, list[LocalLayer]] = {}
         for local in pictures:
             grouped.setdefault(local.layer.output_id, []).append(local)
@@ -571,9 +573,20 @@ class Executor:
                 # Bottom to top by the one stacking order: a later photo of a Run is drawn over
                 # the one it dissolves in over.
                 layers.sort(key=lambda local: stack_order(local.layer))
-                result.append(OutputComposition(binding,
-                                                tuple(layers), timebase=timebase))
+                following = () if now is None else self._following(output_id, layers, now)
+                result.append(OutputComposition(binding, tuple(layers), timebase=timebase,
+                                                following=following))
         return tuple(result)
+
+    def _following(self, output_id: str, drawn: Iterable[LocalLayer], now: float) -> tuple[Layer, ...]:
+        """The layers `output_id`'s Frame holds that are not `drawn` and have not ended at `now`
+        (planned layers and continuation slots of the current plan, none failed or superseded):
+        what the Frame draws next, for player/look.py's seam rule."""
+        shown = {local.layer.assignment_id for local in drawn}
+        return tuple(assignment.granted_layer or assignment.layer for key, assignment in self._assignments.items()
+                     if assignment.layer.output_id == output_id and key not in shown
+                     and key not in self._superseded and assignment.failure is None
+                     and self._current_authority(assignment) and now < assignment.layer.end)
 
     def _window(self, assignment: _Assignment) -> tuple[float, float]:
         """When `assignment` may be drawn: a plan layer within the plan's validity; a
@@ -616,7 +629,7 @@ class Executor:
                     and source.path is not None and source.source is None
                     and photo not in self._revoked and self._current_authority(source)}
             for layer in continuation_layers(plan, continuation, held=held, start=now,
-                                             end=now + self.prepare_lead):
+                                             end=self._continued_until(continuation.output_id, now)):
                 key = layer.assignment_id
                 if (key in self._assignments or key in self._cancelled
                         or (layer.output_id, layer.start) in made):
@@ -628,6 +641,17 @@ class Executor:
                 self._assignments[key] = _Assignment(
                     layer, f"pwexec:{self.player_id}:{self._last_epoch}:{key}", secured=True,
                     path=source.path, source=source.layer.assignment_id)
+
+    def _continued_until(self, output_id: str, now: float) -> float:
+        """How far ahead slots are made on `output_id`: the prepare lead, and past the end of every
+        layer playing there whose fade-out starts within it, so what its Frame draws next is held
+        before that fade-out starts (player/look.py's seam rule reads it); a slot made early keeps
+        its photo and is prepared only within the prepare lead (`_imminent`)."""
+        playing = [assignment.layer.end for assignment in self._assignments.values()
+                   if assignment.layer.output_id == output_id and assignment.layer.start <= now
+                   and assignment.layer.end - assignment.layer.fade_out <= now + self.prepare_lead
+                   and self._current_authority(assignment)]
+        return max([now + self.prepare_lead, *(math.nextafter(end, math.inf) for end in playing)])
 
     def _may_start(self, assignment: _Assignment, now: float) -> bool:
         """Decision 0032, a grant only for a change: a layer that awaits a grant starts while its
@@ -1338,12 +1362,10 @@ class Executor:
                 ) and (not any(local.layer.assignment_id in self._superseded
                                for local in previous.layers)
                        or self._wants_output(binding.output_id, now)):
-                    continuation = OutputComposition(
-                        binding, tuple(
-                            LocalLayer(local.layer, local.path, local.layer.position(now),
-                                       local.layer.alpha(now)) for local in previous.layers
-                        ), timebase=timebase,
-                    )
+                    (continuation,) = self._group((
+                        LocalLayer(local.layer, local.path, local.layer.position(now),
+                                   local.layer.alpha(now)) for local in previous.layers
+                    ), timebase, now)
                     acknowledgment = self._acknowledgment(
                         continuation, self.renderer.present(continuation))
                     if acknowledgment:

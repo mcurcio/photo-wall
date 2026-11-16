@@ -27,6 +27,14 @@ Rules this module owns (one home each):
   (the screen keeps its last commit) until finished. A calibration target's QR names the Player
   once `set_player` gave an id. The composition reported and tagged stays the looked one: a
   pattern is a tuning overlay, not a change of what plays.
+- **One picture per drawn identity**: a picture is decoded, uploaded and finished once for every
+  layer that draws it (player/planes.py `drawn_identity`), whatever its assignment; `release` of
+  the last layer drawing it frees it. A plane's key is that identity, so a new slot, layer or plan
+  of the same photo draws the very picture already shown and "Nothing changed" commits no new one.
+- **Seams**: each present looks its composition (player/look.py, the seam rule) with the picture the
+  screen's last commit shows alone at full (`_alone`: its one plane, opaque at its alpha), so the
+  next layer of that picture does not fade in over it: the only decision of whether a Frame's
+  picture changes, whichever path of the executor brought the layer.
 - **When a still is decoded**: in `finish`, never in `prepare` or `present`, and at most one still
   decode in flight over every Output (the next starts once it answers, its layer is released, its
   start is refused, or its layer no longer needs it; one answering while its layer waits for a
@@ -107,7 +115,7 @@ Rules this module owns (one home each):
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Hashable, Mapping
 from dataclasses import dataclass, field, replace
 from itertools import product
 from pathlib import Path
@@ -154,6 +162,7 @@ from player.planes import (
     Plane,
     Screen,
     compose,
+    drawn_identity,
     finish_size,
     still_region,
 )
@@ -164,7 +173,7 @@ from player.rendering import (
     PrepareResult,
     PresentationResult,
 )
-from player.visibility import visible_now
+from player.visibility import opaque, visible_now
 
 VIDEO_TARGETS: Final = 3        # a playing video's targets: one shown, one in flight, one drawn
 STEP_GAP: Final = DEFAULT_REFRESH
@@ -273,6 +282,15 @@ def _answers(result: PresentationResult, composition: OutputComposition) -> bool
     """Whether `result` is an answer about `composition`: one made for its request
     (player/rendering.py `OutputComposition.request`; module rule, Outcomes)."""
     return result.composition is not None and result.composition.request == composition.request
+
+
+def _alone(composed: Composition) -> Hashable | None:
+    """The picture a commit of `composed` shows alone at full (module rule, Seams): its one plane,
+    a layer's, opaque at its drawn alpha; None otherwise."""
+    if len(composed.planes) != 1 or composed.planes[0].layer is None:
+        return None
+    (plane,) = composed.planes
+    return plane.key if opaque(plane.layer.layer, plane.layer.alpha) else None
 
 
 def _expiry(trial: AppliedTrial, now: float) -> float:
@@ -394,6 +412,7 @@ class _Output:
     submitted: float = -float("inf")
     expires: float | None = None
     grant: str | None = None                # the admitted grant of its last presented commit
+    alone: Hashable | None = None           # the picture its last commit shows alone at full (Seams)
 
 
 class PlaneRenderer:
@@ -416,7 +435,8 @@ class PlaneRenderer:
         self._qr: tuple[TargetCode, QrModules] | None = None       # the newest QR made, by its code
         # Output -> its pattern ground: the request it was drawn for, its picture (None: refused).
         self._grounds: dict[str, tuple[tuple, _Picture | None]] = {}
-        self._layers: dict[str, _Layer] = {}
+        self._layers: dict[Hashable, _Layer] = {}     # by player/planes.py `drawn_identity`
+        self._holders: dict[str, Hashable] = {}     # assignment id -> the picture it draws
         self._blacks: dict[tuple[str, tuple[int, int]], _Picture] = {}
         self._owed_grounds: dict[str, tuple[tuple, PatternRequest, tuple[int, int]]] = {}  # for `finish`
         self._owed_blacks: set[tuple[str, tuple[int, int]]] = set()                     # for `finish`
@@ -487,8 +507,11 @@ class PlaneRenderer:
                 busiest.append((Composition(screen, ()),))     # a pattern is the ground: no planes
                 continue
             frame_id = composition.binding.frame_id
-            busiest.append(tuple({compose(screen, [FrameLayers(frame_id, placement, look(composition, at).layers)])
-                                  for at in moments(composition, now)}))
+            state = self._outputs.get(composition.binding.output_id)
+            shown = None if state is None else state.alone
+            busiest.append(tuple({compose(screen, [FrameLayers(frame_id, placement,
+                                                               look(composition, at, shown).layers)])
+                                  for at in moments(composition, now, shown)}))
         return CapacityResult(all(fits(self._budget, together) for together in product(*busiest)))
 
     def frame(self) -> None:
@@ -504,11 +527,11 @@ class PlaneRenderer:
         path): each seen started video's newest waiting frame drawn into a released target and
         fenced; every pattern ground and black picture owed, drawn and fenced; at most one still step
         over every Output (STEP_GAP). Never commits and never waits for a fence."""
-        for assignment_id, entry in list(self._layers.items()):
+        for drawn, entry in list(self._layers.items()):
             if entry.failed or entry.want is None:
                 continue
             if entry.video is not None:
-                self._draw_video(assignment_id, entry)
+                self._draw_video(drawn, entry)
             elif entry.drawing is not None:
                 self._still_ready(entry, entry.want)    # a finished draw taken up: nothing more owed
         for output_id, (key, request, size) in list(self._owed_grounds.items()):
@@ -574,8 +597,7 @@ class PlaneRenderer:
         commit is overdue (its word read first: an answer read since the turn frees it now); None
         when nothing changes until an event."""
         now = self._clock()
-        if self._owed() or any(self._video_owed(assignment_id, entry)
-                               for assignment_id, entry in self._layers.items()):
+        if self._owed() or any(self._video_owed(drawn, entry) for drawn, entry in self._layers.items()):
             return now
         times = [max(now, self._stepped + STEP_GAP * (1 - TOLERANCE), self._deferred_until(entry.local))
                  for entry in self._owed_stills()]
@@ -584,7 +606,7 @@ class PlaneRenderer:
         for output_id, composition in self._held.items():
             state = self._outputs.get(output_id)
             expires = None if state is None else state.expires
-            change = next_change(composition, now, expires)
+            change = next_change(composition, now, expires, None if state is None else state.alone)
             if change is None:
                 continue
             if state is not None and state.pacer.in_flight:
@@ -605,8 +627,9 @@ class PlaneRenderer:
         setting = self._binding_setting(binding)
         if setting == "gone":
             return PrepareResult("pending")
-        if self._deferred(local):
-            return PrepareResult("pending")
+        entry = self._layers.get(drawn_identity(local.layer))
+        if self._deferred(local) and (entry is None or entry.picture is None):
+            return PrepareResult("pending")         # a picture already finished costs the fade nothing
         picture = self._ready(local, binding, setting)
         if picture == "failed":
             return PrepareResult("failed", "decode")
@@ -651,8 +674,8 @@ class PlaneRenderer:
         ground = None if ground == "pending" else ground        # the compositor's black meanwhile
         if not grant.admitted or not grant.matches(composition):
             return self._candidate(state, setting.screen, grant, ground, now)
-        looked = look(composition, now)
-        ending = fade_end(composition, now)
+        looked = look(composition, now, state.alone)
+        ending = fade_end(composition, now, state.alone)
         if ending is None:
             self._fades.pop(output_id, None)
         else:
@@ -700,6 +723,7 @@ class PlaneRenderer:
         state.committed = shows
         state.grant = str(grant.grant_id)
         state.patterned = pattern is not None
+        state.alone = _alone(composed)
         state.last = PresentationResult("presented", composition=looked, presented_at=now,
                                         applied_calibration=drawn.applied)
         self._newest[output_id] = composed
@@ -719,8 +743,9 @@ class PlaneRenderer:
         return state is not None and state.patterned
 
     def release(self, assignment_id: str) -> None:
-        """Drop the layer's decode, targets and compositor buffers once no commit shows them, and
-        the layer from the held compositions (one with no layer left is no longer held)."""
+        """Drop the layer from the held compositions (one with no layer left is no longer held), and
+        its picture's decode, targets and compositor buffers once no other layer draws that picture
+        (module rule, One picture per drawn identity) and no commit shows them."""
         for output_id, held in list(self._held.items()):
             kept = tuple(local for local in held.layers if local.layer.assignment_id != assignment_id)
             if len(kept) == len(held.layers):
@@ -729,7 +754,23 @@ class PlaneRenderer:
                 self._held[output_id] = replace(held, layers=kept)
             else:
                 del self._held[output_id]
-        entry = self._layers.pop(assignment_id, None)
+        drawn = self._holders.pop(assignment_id, None)
+        if drawn is not None and drawn not in self._holders.values():
+            self._drop(drawn)
+
+    def _hold(self, local: LocalLayer) -> Hashable:
+        """`local`'s picture (player/planes.py `drawn_identity`), held for its assignment from now
+        on; the picture it held before, when another, dropped once no other layer draws it."""
+        drawn, assignment_id = drawn_identity(local.layer), local.layer.assignment_id
+        before = self._holders.get(assignment_id)
+        self._holders[assignment_id] = drawn
+        if before is not None and before != drawn and before not in self._holders.values():
+            self._drop(before)
+        return drawn
+
+    def _drop(self, drawn: Hashable) -> None:
+        """Drop the picture's decode, targets and compositor buffers once no commit shows them."""
+        entry = self._layers.pop(drawn, None)
         if entry is None:
             return
         if self._decoding is entry:
@@ -752,8 +793,10 @@ class PlaneRenderer:
 
     def close(self) -> None:
         """Release every layer and stop every decode."""
-        for assignment_id in list(self._layers):
+        for assignment_id in list(self._holders):
             self.release(assignment_id)
+        for drawn in list(self._layers):
+            self._drop(drawn)
         for output_id in list(self._grounds):
             self._forget_pattern(output_id)
         for picture in [*self._retired, *self._blacks.values()]:
@@ -889,7 +932,7 @@ class PlaneRenderer:
         state.pacer.submitted(sequence, now)
         state.submitted = now
         state.shown = frozenset(() if ground is None else (ground.handle,))
-        state.seen, state.committed, state.grant = frozenset(), None, None
+        state.seen, state.committed, state.grant, state.alone = frozenset(), None, None, None
         state.patterned = False
         self._sweep()
         state.last = _PENDING
@@ -903,9 +946,10 @@ class PlaneRenderer:
         prepare. No GPU work."""
         if local.layer.presentation == "black":
             return self._black(binding.output_id, setting.size)
-        entry = self._layers.get(local.layer.assignment_id)
+        drawn = self._hold(local)
+        entry = self._layers.get(drawn)
         if entry is None:
-            entry = self._layers[local.layer.assignment_id] = self._decode(local, binding, live)
+            entry = self._layers[drawn] = self._decode(local, binding, live)
         entry.binding = binding
         if entry.failed:
             return "failed"
@@ -931,8 +975,8 @@ class PlaneRenderer:
             if local.path is None or variant is None:
                 raise ValueError("decode_path")
             if variant.duration is not None:
-                assignment_id = local.layer.assignment_id
-                entry.video = self._videos(local.path, lambda: self._video_frame(assignment_id))
+                drawn = drawn_identity(local.layer)
+                entry.video = self._videos(local.path, lambda: self._video_frame(drawn))
                 entry.failed = not entry.video.seek(local.position)
         except (RuntimeError, ValueError):
             entry.failed = True
@@ -977,7 +1021,7 @@ class PlaneRenderer:
         """The stills owed a step for what they were last asked (module rule): seen layers first,
         then by start; none drawing (its fence answers first) and none waiting for a fade."""
         owed = [entry for entry in self._layers.values() if self._still_owed(entry) and not self._deferred(entry.local)]
-        return sorted(owed, key=lambda entry: (not self._seen(entry.local.layer.assignment_id),
+        return sorted(owed, key=lambda entry: (not self._seen(drawn_identity(entry.local.layer)),
                                                entry.local.layer.start))
 
     def _still_owed(self, entry: _Layer) -> bool:
@@ -1085,45 +1129,45 @@ class PlaneRenderer:
             return "pending"
         return entry.picture.shown
 
-    def _seen(self, assignment_id: str) -> bool:
-        """Whether a screen's last commit shows the layer."""
-        return any(assignment_id in state.seen for state in self._outputs.values())
+    def _seen(self, drawn: Hashable) -> bool:
+        """Whether a screen's last commit shows the picture (player/planes.py `drawn_identity`)."""
+        return any(drawn in state.seen for state in self._outputs.values())
 
-    def _may_take(self, assignment_id: str, entry: _Layer) -> bool:
+    def _may_take(self, drawn: Hashable, entry: _Layer) -> bool:
         """Whether the video takes its decoder's newest frame (module rule): its first, or any once
         it is started and seen; later frames otherwise wait in the decoder."""
         taken = any(frame is not None for frame in (entry.held, entry.waiting, entry.drawing_frame))
-        return not taken or (entry.started and self._seen(assignment_id))
+        return not taken or (entry.started and self._seen(drawn))
 
-    def _video_source(self, assignment_id: str, entry: _Layer) -> DmabufFrame | None:
+    def _video_source(self, drawn: Hashable, entry: _Layer) -> DmabufFrame | None:
         """The frame `finish` draws for the video: its waiting frame (a started one's only while it
         is seen), else its frame in `picture` again for a new setting; None when none is owed."""
-        if entry.waiting is not None and (not entry.started or self._seen(assignment_id)):
+        if entry.waiting is not None and (not entry.started or self._seen(drawn)):
             return entry.waiting
         if entry.held is not None and entry.key != self._key(entry, entry.want):
             return entry.held
         return None
 
-    def _video_owed(self, assignment_id: str, entry: _Layer) -> bool:
+    def _video_owed(self, drawn: Hashable, entry: _Layer) -> bool:
         """Whether `finish` would draw a frame of the video now: one owed and a target free."""
         if entry.video is None or entry.failed or entry.want is None or entry.drawing is not None:
             return False
-        if self._video_source(assignment_id, entry) is None:
+        if self._video_source(drawn, entry) is None:
             return False
         return len(entry.targets) < VIDEO_TARGETS or any(
             picture is not entry.picture and not self._showing(picture) for picture in entry.targets)
 
-    def _draw_video(self, assignment_id: str, entry: _Layer) -> None:
+    def _draw_video(self, drawn: Hashable, entry: _Layer) -> None:
         """`finish`'s draw of the video: its newest frame taken (`_may_take`) and the frame owed
         drawn into a released target and fenced, one draw per call (module rule)."""
         setting = entry.want
         try:
             self._video_ready(entry, setting)
-            if self._may_take(assignment_id, entry):
+            if self._may_take(drawn, entry):
                 self._requeue(entry, entry.video.latest())
             if entry.drawing is not None:
                 return
-            source = self._video_source(assignment_id, entry)
+            source = self._video_source(drawn, entry)
             target = None if source is None else self._released(entry, setting.target(entry.local.layer))
             if target is None:
                 return
@@ -1213,13 +1257,13 @@ class PlaneRenderer:
             picture.fence = 0
         return not picture.fence
 
-    def _video_frame(self, assignment_id: str) -> None:
+    def _video_frame(self, drawn: Hashable) -> None:
         """A video's new frame (on the owning thread): recorded as its waiting frame when it takes
         it (`_may_take`); `finish` draws it, never this callback (module rule)."""
-        entry = self._layers.get(assignment_id)
+        entry = self._layers.get(drawn)
         if entry is None or entry.failed or entry.video is None:
             return
-        if self._may_take(assignment_id, entry):
+        if self._may_take(drawn, entry):
             self._requeue(entry, entry.video.latest())
 
     def _showing(self, picture: _Picture) -> bool:
