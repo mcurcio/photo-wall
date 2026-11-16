@@ -38,7 +38,6 @@ from contracts.models import (
     Instant,
     Layer,
     Model,
-    Observation,
     OutputBinding,
     Plan,
     PlayerConfiguration,
@@ -79,6 +78,7 @@ from player.player_line import PlayerLine
 from player.probe_responder import ProbeResponder
 from player.renderer_root import start_renderer
 from player.rendering import Renderer
+from player.report_outbox import ReportOutbox
 from player.room_lights import start_room_lights
 from player.show_clock import ShowClock
 from uplink.causes import Cause, UplinkError
@@ -440,8 +440,8 @@ class PlayerService:
         self._offered = False
         self._cancelled: set[str] = set()
         self._seen_commits: deque[Commit] = deque(maxlen=2048)
-        self._observations: deque[Observation] = deque(maxlen=128)
-        self._outgoing: deque[Observation] = deque(maxlen=128)
+        # Observations for Central, each a state change, until Central answers (never dropped).
+        self._reports = ReportOutbox()
         self._jobs: tuple[Download, ...] = ()
         self._verify_due = threading.Event()
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="player-media")
@@ -771,7 +771,7 @@ class PlayerService:
             self._control_proof_revision += 1
             self._offered = False
             self._jobs = ()
-        self._outgoing.clear()
+        self._reports.clear()
         if self.executor is None:
             try:
                 self.cache = await asyncio.get_running_loop().run_in_executor(self._worker,
@@ -853,7 +853,7 @@ class PlayerService:
                 self._seen_commits.clear()
                 self._cancelled.clear()
                 self._jobs = ()
-                self._observations.clear()
+                self._reports.clear()
             self._configuration = configuration
             self._offered = state.plan is not None
             if state.plan is not None:
@@ -931,12 +931,8 @@ class PlayerService:
         self._main()
         if self.executor is not None:
             self.executor.prepare_imminent()
-            observations = self.executor.tick()
-            with self._lock:
-                for observation in observations:
-                    if len(self._observations) == self._observations.maxlen:
-                        self.fault("observation_capacity")
-                    self._observations.append(observation)
+            for report in self.executor.tick():
+                self._reports.put(report)
         self._report_on_line()
 
     def _feedback(self):
@@ -957,10 +953,7 @@ class PlayerService:
                     if layer.variant is not None and layer.assignment_id not in secured
                     and layer.assignment_id not in self._cancelled
                     and may_still_play(self._plan, layer, now)) if self._offered else ()
-            observations = tuple({observation.assignment_id: observation for observation in
-                self._observations if self._observation_current(observation)}.values())
-            self._observations.clear()
-            return readiness, observations
+            return readiness
 
     def _observation_current(self, observation):
         """Whether an observation is still Central's to judge (decision 0032): it names the held
@@ -1216,8 +1209,9 @@ class PlayerService:
             self._request_failed(error)
 
     async def _control_loop(self):
-        """Every REPORT_INTERVAL: poll Central's state, then the held plan's feedback (readiness,
-        observations, and the downloads still wanted) and its readiness post. A failed request is
+        """Every REPORT_INTERVAL: poll Central's state, then the held plan's feedback (readiness
+        and the downloads still wanted) and its readiness post (observations are
+        `_observation_loop`'s). A failed request is
         a fault and the next turn tries again (decision 0032, `_request_failed`): the feedback runs
         whether or not the poll was answered, so downloads follow the held plan through an outage."""
         while not self._stop.is_set():
@@ -1229,7 +1223,7 @@ class PlayerService:
                     raise
                 except REQUEST_FAILURES as error:
                     self._request_failed(error)
-                readiness, observations = await self.dispatch(self._feedback)
+                readiness = await self.dispatch(self._feedback)
             except MainLoopLate:
                 # Nothing is posted: the readiness Central holds stays (E-G8-8 decision).
                 self._main_loop_late()
@@ -1242,19 +1236,17 @@ class PlayerService:
                     await self._recover_stale()
                 except REQUEST_FAILURES as error:
                     self._request_failed(error)
-            for observation in observations:
-                if len(self._outgoing) == self._outgoing.maxlen:
-                    self.fault("observation_capacity")
-                self._outgoing.append(observation)
             await asyncio.sleep(max(0, REPORT_INTERVAL - (asyncio.get_running_loop().time() - started)))
 
     async def _observation_loop(self):
-        # A slow observation endpoint cannot consume the readiness reporting slot.
+        """Send the outbox's reports, each until Central answers it. A slow observation endpoint
+        cannot consume the readiness reporting slot, and never holds a picture: the main loop only
+        puts into the outbox."""
         while not self._stop.is_set():
-            if not self._outgoing:
+            observation = self._reports.take()
+            if observation is None:
                 await asyncio.sleep(.05)
                 continue
-            observation = self._outgoing.popleft()
             if self._observation_current(observation):
                 try:
                     await self.request("POST", "/v1/player/observations",
@@ -1262,11 +1254,12 @@ class PlayerService:
                 except StaleFeedback:
                     await self._recover_stale()
                 except REQUEST_FAILURES as error:
-                    # Decision 0032: tried again at the next turn, so a Frame's shown history
-                    # survives an outage; a refusal Central judged (4xx) is final.
+                    # Decision 0032: tried again at the next turn, with its number, so a Frame's
+                    # shown history survives an outage and Central writes it once however often
+                    # it is sent; a refusal Central judged (4xx) is final.
                     judged = isinstance(error, Refused) and 400 <= error.status < 500
                     if not judged:
-                        self._outgoing.appendleft(observation)
+                        self._reports.again(observation)
                     self._request_failed(error)
                     if not judged:
                         await asyncio.sleep(REPORT_INTERVAL)

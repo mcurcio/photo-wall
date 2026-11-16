@@ -89,6 +89,9 @@ class _Assignment:
     # Decision 0032: a continuation slot (contracts/continuation.py) names the plan layer whose
     # secured bytes it draws; None for a plan layer. A slot is never reported to Central.
     source: str | None = None
+    # What the latest observation of it said (`_report`): Central hears a change once, never a
+    # level state again on every tick.
+    reported: tuple | None = None
 
 
 @dataclass(frozen=True)
@@ -167,6 +170,9 @@ class Executor:
         self._pin_intents: dict[str, str] = {}
         self._sequence = 0
         self._reported: dict[int, dict[str, int]] = {}
+        # The number of the latest observation (`_report`), never reused while this process runs;
+        # each process enrolls into a new authority epoch, so (epoch, number) names one report.
+        self._report_sequence = 0
         self._last_epoch = 0
         self._last_plan_id: str | None = None
         self._last_revision = 0
@@ -1230,16 +1236,29 @@ class Executor:
         self._applied_output_calibration[drawn.binding.output_id] = result.applied_calibration
         return drawn, self._now() - age
 
-    def _observation(self, local: LocalLayer, now: float, status: str,
-                     detail: str = "none") -> Observation:
+    def _report(self, reports: list[Observation], local: LocalLayer, now: float, status: str,
+                detail: str = "none") -> None:
+        """The one home of what the Player tells Central about an assignment: an observation is a
+        change of its state (status, detail, the calibration drawn), appended to `reports` once and
+        numbered once, so a still photo drawn on every tick is reported presented when it starts,
+        never again, and a report sent again after a slow or failed answer keeps its number
+        (Central writes each (epoch, number) once). Position is no part of the state: it moves on
+        every tick of a video."""
         assert self._plan is not None
-        return Observation(
+        assignment = self._assignments[local.layer.assignment_id]
+        applied = (getattr(self, "_applied_output_calibration", {}).get(local.layer.output_id)
+                   if status in ("presented", "fallback") else None)
+        state = (self._last_epoch, self._plan.plan_id, status, detail, applied)
+        if assignment.reported == state:
+            return
+        assignment.reported = state
+        self._report_sequence += 1
+        reports.append(Observation(
             plan_id=self._plan.plan_id, revision=self._plan.revision,
             authority_epoch=self._last_epoch, assignment_id=local.layer.assignment_id,
-            observed_at=now, status=status, position=local.position, detail=detail,
-            applied_calibration=(getattr(self, "_applied_output_calibration", {}).get(local.layer.output_id)
-                                 if status in ("presented", "fallback") else None),
-        )
+            sequence=self._report_sequence, observed_at=now, status=status,
+            position=local.position, detail=detail, applied_calibration=applied,
+        ))
 
     def tick(self) -> tuple[Observation, ...]:
         """Renderer thread: current-state execution and calibration/fallback updates."""
@@ -1311,7 +1330,7 @@ class Executor:
                                 assignment.failure = "decode" if prepared.status == "failed" else None
                                 failed = True
                                 if prepared.status == "failed":
-                                    observations.append(self._observation(local, now, "failed", "decode"))
+                                    self._report(observations, local, now, "failed", "decode")
                     if waiting:
                         layers = tuple(local for local in candidate.layers
                                        if local.layer.assignment_id not in waiting)
@@ -1342,7 +1361,7 @@ class Executor:
                             assignment = self._assignments[victim.assignment_id]
                             self._lose_preparation(assignment)
                             assignment.failure = "capacity"
-                            observations.append(self._observation(local, now, "failed", "capacity"))
+                            self._report(observations, local, now, "failed", "capacity")
                             fits = self.renderer.capacity(tuple(candidates.values())).available
                         if not fits:
                             self._capacity_ok = False
@@ -1353,7 +1372,7 @@ class Executor:
                                 assignment = self._assignments[local.layer.assignment_id]
                                 self._lose_preparation(assignment)
                                 assignment.failure = "capacity"
-                                observations.append(self._observation(local, now, "failed", "capacity"))
+                                self._report(observations, local, now, "failed", "capacity")
                         else:
                             presented = self.renderer.present(candidate)
                             acknowledged = self._acknowledgment(candidate, presented)
@@ -1370,7 +1389,7 @@ class Executor:
                                         continue
                                     assignment = self._assignments[local.layer.assignment_id]
                                     assignment.started = True
-                                    observations.append(self._observation(local, observed_at, "presented"))
+                                    self._report(observations, local, observed_at, "presented")
                                 # Every playing layer, covered ones included (a Scene beneath keeps
                                 # its photo while a Scene on top shows), bottom to top, so the
                                 # topmost layer's after-state holds.
@@ -1391,7 +1410,7 @@ class Executor:
                                 assignment = self._assignments[local.layer.assignment_id]
                                 self._lose_preparation(assignment)
                                 assignment.failure = "decode"
-                                observations.append(self._observation(local, now, "failed", "decode"))
+                                self._report(observations, local, now, "failed", "decode")
                 # Retain only a still-valid previous composition. Expired overlays or
                 # videos cannot persist because a replacement failed or went missing.
                 # A superseded one only while the new plan wants this Output (`_rejoin_hold`).
@@ -1424,13 +1443,19 @@ class Executor:
                     for assignment in self._assignments.values():
                         if (assignment.layer.output_id == binding.output_id
                                 and now >= assignment.layer.start):
-                            observations.append(self._observation(
-                                self._local(assignment, now), now, "fallback",
-                                "decode" if failed else "expired",
-                            ))
+                            self._report(observations, self._local(assignment, now), now,
+                                         "fallback", "decode" if failed else "expired")
             self._superseded.intersection_update(
                 local.layer.assignment_id for composition in self._current.values()
                 for local in composition.layers)
+            # Presented is the state of being seen on its Frame: one covered or no longer drawn has
+            # left it, so its next draw is a change and reported again (`_report`).
+            seen = {local.layer.assignment_id for composition in self._current.values()
+                    if not composition.fallback for local in visible_now(composition.layers)}
+            for key, assignment in self._assignments.items():
+                if (assignment.reported is not None and assignment.reported[2] == "presented"
+                        and key not in seen):
+                    assignment.reported = None
             self._note_continuing(now)
             self._release_unused_renderer(now)
             return tuple(observations)

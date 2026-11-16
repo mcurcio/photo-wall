@@ -15,7 +15,7 @@ from dataclasses import replace
 
 import pytest
 from test_executor import Rig, layer
-from test_player_service import Server, close, rig
+from test_player_service import Server, close, pending, rig
 
 from contracts.models import Commit
 from contracts.time import ManualClock
@@ -160,7 +160,7 @@ def test_a_pi_clock_975402_seconds_behind_central_shows_the_photo_at_its_planned
             service._feedback()
             assert await service.download(service._jobs[0])
             service.tick_main()
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert readiness.prepared == ("picture",) and readiness.failures == ()
             assert readiness.observed_at == pytest.approx(100)
             commit = Commit(plan_id="offered", revision=2, authority_epoch=1,
@@ -174,8 +174,7 @@ def test_a_pi_clock_975402_seconds_behind_central_shows_the_photo_at_its_planned
             assert await service.probe_time()
             service.tick_main()
             assert shown(service) == ["picture"]    # at its instant
-            _, observations = service._feedback()
-            assert [(o.status, o.observed_at) for o in observations] == [("presented", pytest.approx(102))]
+            assert [(o.status, o.observed_at) for o in pending(service)] == [("presented", pytest.approx(102))]
         finally:
             await close(service)
     asyncio.run(check())
@@ -190,7 +189,7 @@ def test_a_wall_clock_step_while_a_photo_plays_changes_nothing(tmp_path, step):
             service._feedback()
             assert await service.download(service._jobs[0])
             service.tick_main()
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             commit = Commit(plan_id="offered", revision=1, authority_epoch=1,
                             readiness_sequence=readiness.sequence, assignment_ids=("picture",),
                             committed_at=central.utc())
@@ -206,7 +205,7 @@ def test_a_wall_clock_step_while_a_photo_plays_changes_nothing(tmp_path, step):
 
             after = service.renderer.outputs["hdmi1"]
             assert shown(service) == ["picture"] and after.timebase == drawn.timebase
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert readiness.prepared == ("picture",)
             assert readiness.failures == () and readiness.lost_grants == ()
         finally:
@@ -236,16 +235,16 @@ def test_before_the_first_sample_nothing_is_due_or_expired_and_downloads_proceed
     async def check():
         service, server = await rig(tmp_path, probe=False)
         try:
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert readiness is None
             assert await service.download(service._jobs[0])
             assert service.executor.secured_ids() == {"picture"}
             service.tick_main()
             assert shown(service) == []
-            assert service._feedback()[0] is None
+            assert service._feedback() is None
             assert await service.probe_time()
             service.tick_main()
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert readiness is not None and readiness.secured == ("picture",)
         finally:
             await close(service)

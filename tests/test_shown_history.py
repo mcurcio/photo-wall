@@ -3,6 +3,8 @@
 with the Planner's projection scripted (its selections carry a Scene and a pass, as slice W1's
 will)."""
 
+import itertools
+
 import pytest
 from support.frames import frame_create
 from support.house_time import UTC_HOUSE, at, set_house
@@ -182,11 +184,18 @@ def scripted_scene_pass(monkeypatch):
     monkeypatch.setattr(coordination, "project", project)
 
 
-def observe(coordinator, player, plan, layer, status):
-    coordinator.observe(player["player_id"], Observation(
+_REPORTS = itertools.count(1)
+
+
+def observe(coordinator, player, plan, layer, status, *, sequence=None):
+    """A Player's report; each its own number unless `sequence` names one sent before."""
+    report = Observation(
         plan_id=plan.plan_id, revision=plan.revision, assignment_id=layer.assignment_id,
-        authority_epoch=plan.authority_epoch, observed_at=coordinator.clock.utc(),
-        status=status, detail="decode" if status == "failed" else "none"))
+        authority_epoch=plan.authority_epoch, sequence=sequence or next(_REPORTS),
+        observed_at=coordinator.clock.utc(),
+        status=status, detail="decode" if status == "failed" else "none")
+    coordinator.observe(player["player_id"], report)
+    return report
 
 
 def rows(registry, table):
@@ -225,6 +234,35 @@ def test_offers_record_selections_and_only_presented_reports_record_shown(
     again = {row["assignment_id"]: row for row in rows(registry, "photo_selections")}
     for row in selected:
         assert again[row["assignment_id"]] == row
+
+
+def test_an_observation_sent_again_adds_no_row(registry, scripted_scene_pass):
+    """2026-11-16: Central committed a Player's report, then answered lock_busy, and the report
+    sent again was a second row. A report is written once per (Player, epoch, number) however often
+    it is sent, and answered alike; the next change of state, a new number, is written. Mutation
+    probe: drop `ON CONFLICT ... DO NOTHING` from `Coordinator._event`."""
+    player = setup_players(registry, count=1)[0]
+    publish_fixture_catalog(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    schedule(coordinator, ["frame-0"], starts=1000, media=True)
+    plan = coordinator.delivery(player["player_id"], 1)["plan"]
+    layer = next(layer for layer in plan.layers if layer.presentation == "media")
+
+    def events():
+        with registry.db.transaction() as conn:
+            return [(row["assignment_id"], row["detail"]["status"]) for row in conn.execute(
+                "SELECT assignment_id, detail FROM execution_events WHERE kind='observation' "
+                "ORDER BY sequence").fetchall()]
+
+    sent = observe(coordinator, player, plan, layer, "presented")
+    for _ in range(3):
+        registry.clock.advance(.5)
+        coordinator.observe(player["player_id"], sent)       # the same report, sent again
+    assert events() == [(layer.assignment_id, "presented")]
+    assert [row["assignment_id"] for row in rows(registry, "shown_photos")] == [
+        layer.assignment_id]
+    observe(coordinator, player, plan, layer, "failed")
+    assert events() == [(layer.assignment_id, "presented"), (layer.assignment_id, "failed")]
 
 
 def test_the_next_advance_reads_the_shown_history_of_the_plannable_scenes(

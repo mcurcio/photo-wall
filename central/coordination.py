@@ -528,7 +528,10 @@ class Coordinator:
             assignments.update({a: group_id for a in cue["members"]})
         return assignments
 
-    def _event(self, conn, kind, player=None, assignment=None, detail=None):
+    def _event(self, conn, kind, player=None, assignment=None, detail=None, report=None):
+        """Append one execution event; its sequence, or None when `report` (the Player's authority
+        epoch and its number for the report) names one already written: a report sent again
+        adds no row (migration 114)."""
         outcome = ExecutionOutcome(
             kind=kind,
             occurred_at=self.clock.utc(),
@@ -537,9 +540,11 @@ class Coordinator:
             detail=detail or {},
         )
         handling = self.outcomes.handle(outcome)
-        return conn.execute(
-            "INSERT INTO execution_events(occurred_at,player_id,assignment_id,kind,detail) "
-            "VALUES(%s,%s,%s,%s,%s) RETURNING sequence",
+        epoch, number = report or (None, None)
+        row = conn.execute(
+            "INSERT INTO execution_events(occurred_at,player_id,assignment_id,kind,detail,"
+            "authority_epoch,report_sequence) VALUES(%s,%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT (player_id,authority_epoch,report_sequence) DO NOTHING RETURNING sequence",
             (
                 outcome.occurred_at,
                 player,
@@ -551,8 +556,11 @@ class Coordinator:
                         "handling": handling.model_dump(mode="json"),
                     }
                 ),
+                epoch,
+                number,
             ),
-        ).fetchone()["sequence"]
+        ).fetchone()
+        return None if row is None else row["sequence"]
 
     def _skip_group(
         self, conn, group_id: str, code: Literal["superseded"], *, root: str | None = None
@@ -1414,8 +1422,9 @@ class Coordinator:
             raise CoordinationError("stale_observation")
 
     def _observe(self, player_id: str, observation: Observation) -> bool:
-        """Record one observation; False when it names a plan revision other than the latest
-        (a stale "presented" one still counts as shown, `_presented_from_an_earlier_offer`)."""
+        """Record one observation, once per (Player, epoch, `sequence`): sent again, it is answered
+        alike and writes nothing; False when it names a plan revision other than the latest (a
+        stale "presented" one still counts as shown, `_presented_from_an_earlier_offer`)."""
         with self._transaction() as conn:
             config = self._configuration(conn, player_id, observation.authority_epoch)
             plan = self._current_plan(conn, player_id, observation.authority_epoch)
@@ -1433,7 +1442,9 @@ class Coordinator:
             if continuation_slot:
                 # Decision 0032: recorded under the slot's own id, naming the photo it showed.
                 detail["continuation_source"] = layer.assignment_id
-            self._event(conn, "observation", player_id, observation.assignment_id, detail)
+            if self._event(conn, "observation", player_id, observation.assignment_id, detail,
+                           report=(observation.authority_epoch, observation.sequence)) is None:
+                return True     # written when it was first sent: Central answered it late
             if observation.status == "presented":
                 # Roadmap 5a: "Shown" means it was displayed on a frame (owner, 2026-10-11); a
                 # continuation slot counts for its source photo (decision 0032).

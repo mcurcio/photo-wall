@@ -104,10 +104,10 @@ def test_a_frame_reads_showing_once_its_picture_is_drawn(tmp_path):
         service, server, _ = await _recorded(tmp_path)
         try:
             assert service.frame_reports().frames[0].showing is False
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert await service.download(service._jobs[0])
             service.tick_main()
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             server.offer(commits=(Commit(plan_id="offered", revision=1, authority_epoch=1,
                                          readiness_sequence=readiness.sequence, assignment_ids=("picture",),
                                          committed_at=100),))

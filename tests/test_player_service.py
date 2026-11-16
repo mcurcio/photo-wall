@@ -420,6 +420,14 @@ def test_the_player_offers_no_capability_and_an_identify_cue_changes_nothing(tmp
     asyncio.run(check())
 
 
+def pending(service) -> list[Observation]:
+    """The reports waiting in the service's outbox, taken from it in order."""
+    taken = []
+    while (report := service._reports.take()) is not None:
+        taken.append(report)
+    return taken
+
+
 async def close(service):
     if service.link.time_client is not None and service.link.time_client is not service.link.client:
         await service.link.time_client.aclose()
@@ -743,18 +751,18 @@ def test_exact_acquisition_readiness_commit_observation_and_absent_plan(tmp_path
     async def check():
         service, server = await rig(tmp_path)
         try:
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert readiness.secured == readiness.prepared == ()
             job = service._jobs[0]
             assert await service.download(job)
             service.tick_main()
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert readiness.prepared == readiness.secured == ("picture",)
             commit = Commit(plan_id="offered", revision=1, authority_epoch=1,
                 readiness_sequence=readiness.sequence, assignment_ids=("picture",), committed_at=100)
             server.offer(commits=(commit,))
             await service.poll_state()
-            _, observations = service._feedback()
+            observations = pending(service)
             assert [(o.assignment_id, o.status, o.observed_at) for o in observations] == [("picture", "presented", 100)]
             assert service.renderer.outputs["hdmi1"].layers[0].path.read_bytes() == server.data
             server.offer(absent=True)
@@ -789,7 +797,7 @@ def test_valid_surviving_cache_is_verified_before_any_media_request(tmp_path):
             assert await restarted.download(restarted._jobs[0])
             assert all(not request.url.path.startswith("/v1/media/")
                        for request in server.requests)
-            assert restarted._feedback()[0].secured == ("picture",)
+            assert restarted._feedback().secured == ("picture",)
         finally:
             await close(restarted)
     asyncio.run(check())
@@ -814,7 +822,7 @@ def test_media_is_fetched_by_name_and_a_re_made_copy_is_accepted(tmp_path):
             variant = job.layer.variant
             assert request.url.path == f"/v1/media/{variant.asset_id}/{variant.recipe_id}"
             assert service.cache.path_for(variant).read_bytes() == remade
-            assert service._feedback()[0].secured == ("picture",)
+            assert service._feedback().secured == ("picture",)
         finally:
             await close(service)
     asyncio.run(check())
@@ -918,7 +926,7 @@ def test_failed_download_unblocks_worker_and_never_publishes_readiness(tmp_path,
             with context_optional_error():
                 assert not await asyncio.wait_for(service.download(service._jobs[0]), 2)
             service.tick_main()
-            assert service._feedback()[0].secured == ()
+            assert service._feedback().secured == ()
             # Prove the sole media worker is free, rather than just inspecting a flag.
             assert await asyncio.get_running_loop().run_in_executor(service._worker, lambda: 17) == 17
         finally:
@@ -967,7 +975,7 @@ def test_cancel_during_http_response_releases_download_worker(tmp_path):
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(task, 2)
             assert await asyncio.get_running_loop().run_in_executor(service._worker, lambda: "free") == "free"
-            assert not service._feedback()[0].secured
+            assert not service._feedback().secured
         finally:
             await close(service)
     asyncio.run(check())
@@ -1014,7 +1022,7 @@ def test_a_download_the_player_stops_is_not_a_download_failure(tmp_path, stop):
                 await service.poll_state()
                 rest.set()
                 await asyncio.wait_for(attempt, 2)
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert "picture" not in readiness.secured
             assert readiness.failures == (), readiness.failures
             assert "media_download" not in faults, faults
@@ -1052,7 +1060,7 @@ def test_a_download_that_breaks_mid_stream_is_a_download_failure(tmp_path, end):
             service.fault = lambda code, **kw: (faults.append(code), record(code, **kw))
             await asyncio.wait_for(service._attempt(
                 {}, job, functools.partial(service.download, job), "media_download"), 2)
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert "picture" not in readiness.secured
             assert [failure.code for failure in readiness.failures] == ["download"], \
                 readiness.failures
@@ -1124,7 +1132,7 @@ def test_a_slow_clock_answer_keeps_readiness(tmp_path):
             service._feedback()
             assert await service.download(service._jobs[0])
             service.tick_main()
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert readiness.prepared == ("picture",)
             commit = Commit(plan_id="offered", revision=1, authority_epoch=1,
                             readiness_sequence=readiness.sequence, assignment_ids=("picture",),
@@ -1136,10 +1144,11 @@ def test_a_slow_clock_answer_keeps_readiness(tmp_path):
             assert service.show_clock.diagnostics.rejected == 0
             assert service.show_clock.uncertainty == pytest.approx(0, abs=.001)
             service.tick_main()
-            readiness, observations = service._feedback()
+            readiness = service._feedback()
             assert readiness.prepared == ("picture",)
             assert not any(failure.code == "clock" for failure in readiness.failures)
-            assert [(o.assignment_id, o.status) for o in observations] == [("picture", "presented")]
+            assert [(o.assignment_id, o.status) for o in pending(service)] == [
+                ("picture", "presented")]
         finally:
             await close(service)
     asyncio.run(check())
@@ -1494,7 +1503,7 @@ def test_one_state_poll_anchors_the_show_clock_while_the_time_route_fails(tmp_pa
             service._feedback()
             assert await service.download(service._jobs[0])
             service.tick_main()
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert readiness.prepared == ("picture",) and readiness.failures == ()
         finally:
             await down.aclose()
@@ -1657,7 +1666,7 @@ def test_worker_verification_reopens_acquisition_after_cache_damage(tmp_path, da
             job = service._jobs[0]
             assert await service.download(job)
             service.tick_main()
-            assert service._feedback()[0].secured == ("picture",)
+            assert service._feedback().secured == ("picture",)
             path = service.cache.path_for(job.layer.variant)
             if damage == "delete":
                 path.unlink()
@@ -1665,7 +1674,7 @@ def test_worker_verification_reopens_acquisition_after_cache_damage(tmp_path, da
                 path.write_bytes(b"corrupt")
             worker = asyncio.create_task(service._media_loop())
             async def invalidated():
-                while service._feedback()[0].secured:
+                while service._feedback().secured:
                     await asyncio.sleep(.01)
             await asyncio.wait_for(invalidated(), 2)
             # Stop scheduling while checking the now-visible new acquisition job.
@@ -1676,7 +1685,7 @@ def test_worker_verification_reopens_acquisition_after_cache_damage(tmp_path, da
             assert service._jobs == (job,)
             assert await service.download(job)
             service.tick_main()
-            assert service._feedback()[0].secured == ("picture",)
+            assert service._feedback().secured == ("picture",)
             assert service.cache.path_for(job.layer.variant).read_bytes() == server.data
         finally:
             if worker:
@@ -1961,12 +1970,12 @@ def test_observation_renewal_race_fetches_current_state_without_reenrollment(tmp
             service._feedback()
             assert await service.download(service._jobs[0])
             service.tick_main()
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             commit = Commit(plan_id="offered", revision=1, authority_epoch=1,
                 readiness_sequence=readiness.sequence, assignment_ids=("picture",), committed_at=100)
             server.offer(commits=(commit,))
             await service.poll_state()
-            service._outgoing.extend(service._feedback()[1])
+            assert len(service._reports) == 1
             seen = asyncio.Event()
             def handle(request):
                 if request.url.path == "/v1/player/observations":
@@ -2080,12 +2089,12 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             offered = service._jobs[0]
             assert await service.download(offered)
             service.tick_main()
-            readiness, _ = service._feedback()
+            readiness = service._feedback()
             assert offered.layer.assignment_id in readiness.prepared
             assert await service.request("POST", "/v1/player/readiness",
                 body=readiness.model_dump(mode="json")) == {"accepted": True}
             await service.poll_state()
-            _, observations = service._feedback()
+            observations = pending(service)
             assert observations and observations[0].status == "presented"
             await service.request("POST", "/v1/player/observations",
                                   body=observations[0].model_dump(mode="json"))
@@ -2113,7 +2122,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             app.state.coordinator.advance()
             latest = app.state.coordinator.delivery(registered.player_id, 1)["plan"]
             assert latest.revision > service._plan.revision
-            service._outgoing.append(observations[0])
+            service._reports.put(observations[0])
             old_revision = service._plan.revision
             sender = asyncio.create_task(service._observation_loop())
             try:
@@ -2281,12 +2290,10 @@ def test_an_earlier_revisions_continuation_observation_reaches_central_after_an_
             seen = Observation(plan_id="offered", revision=2,
                                authority_epoch=service.registration.authority_epoch,
                                assignment_id=continuation_assignment_id(continuation, 0, "listed"),
-                               observed_at=150, status="presented")
+                               sequence=1, observed_at=150, status="presented")
             server.offer(revision=3, layers=(listed,), continuations=(continuation,))
             await service.poll_state()
-            service._observations.append(seen)
-            _, observations = service._feedback()
-            assert seen in observations
+            assert service._observation_current(seen)
 
             posted = []
 
@@ -2300,7 +2307,8 @@ def test_an_earlier_revisions_continuation_observation_reaches_central_after_an_
             await service.link.client.aclose()
             service.link.client = service.link.time_client = httpx.AsyncClient(
                 transport=httpx.MockTransport(handle))
-            service._outgoing.append(seen)
+            pending(service)                 # the ticks' own reports, sent apart
+            service._reports.put(seen)
             sender = asyncio.create_task(service._observation_loop())
             try:
                 async def sent_twice():
@@ -2310,7 +2318,7 @@ def test_an_earlier_revisions_continuation_observation_reaches_central_after_an_
             finally:
                 sender.cancel()
                 await asyncio.gather(sender, return_exceptions=True)
-            assert posted == [seen, seen] and not service._outgoing
+            assert posted == [seen, seen] and not service._reports
         finally:
             await close(service)
     asyncio.run(check())
@@ -2410,8 +2418,9 @@ def test_an_observation_central_refuses_is_not_sent_again_and_the_next_one_is(tm
             epoch = service.registration.authority_epoch
             plan = service.executor._plan
             first, second = (Observation(plan_id=plan.plan_id, revision=plan.revision,
-                                         authority_epoch=epoch, assignment_id="picture",
-                                         observed_at=at, status="presented") for at in (101, 102))
+                                         authority_epoch=epoch, assignment_id=key, sequence=number,
+                                         observed_at=at, status="presented")
+                             for key, number, at in (("picture", 1, 101), ("other", 2, 102)))
             posted = []
 
             def handle(request):
@@ -2424,7 +2433,8 @@ def test_an_observation_central_refuses_is_not_sent_again_and_the_next_one_is(tm
             await service.link.client.aclose()
             service.link.client = service.link.time_client = httpx.AsyncClient(
                 transport=httpx.MockTransport(handle))
-            service._outgoing.extend((first, second))
+            service._reports.put(first)
+            service._reports.put(second)
             sender = asyncio.create_task(service._observation_loop())
             try:
                 async def both():
@@ -2435,7 +2445,7 @@ def test_an_observation_central_refuses_is_not_sent_again_and_the_next_one_is(tm
             finally:
                 sender.cancel()
                 await asyncio.gather(sender, return_exceptions=True)
-            assert posted == [first, second] and not service._outgoing
+            assert posted == [first, second] and not service._reports
         finally:
             await close(service)
     asyncio.run(check())
@@ -2462,4 +2472,101 @@ def test_a_state_of_another_registration_never_samples_the_show_clock(tmp_path):
             assert service.show_clock.diagnostics.samples == before + 1
         finally:
             await close(service)
+    asyncio.run(check())
+
+
+async def _drawn_still(tmp_path):
+    """A rig whose one still photo ("picture") Central granted and the renderer draws."""
+    service, server = await rig(tmp_path)
+    service._feedback()
+    assert await service.download(service._jobs[0])
+    service.tick_main()
+    commit = Commit(plan_id="offered", revision=1, authority_epoch=1,
+                    readiness_sequence=service.executor.readiness().sequence,
+                    assignment_ids=("picture",), committed_at=100)
+    server.offer(commits=(commit,))
+    await service.poll_state()
+    return service, server
+
+
+def test_a_still_photo_reaches_central_once_while_central_commits_then_answers_lock_busy(
+        tmp_path, monkeypatch):
+    """2026-11-16: a still photo, unchanged, was reported presented every half second, and each
+    report Central committed and then answered lock_busy was sent again: 553 rows in six minutes
+    for one photo. A report is a change, sent until Central answers it and never again, with one
+    number on every send (Central writes each number once: test_shown_history's
+    `test_an_observation_sent_again_adds_no_row`). Mutation probe: report presented on every tick
+    (drop the `reported` check in `Executor._report`)."""
+    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+
+    async def check():
+        service, server = await _drawn_still(tmp_path)
+        posted = []
+
+        def handle(request):
+            if request.url.path == "/v1/player/observations":
+                posted.append(Observation.model_validate_json(request.content))
+                if len(posted) <= 3:      # committed, then answered too late
+                    return httpx.Response(503, json={"error": "lock_busy"})
+            return server(request)
+
+        await service.link.client.aclose()
+        service.link.client = service.link.time_client = httpx.AsyncClient(
+            transport=httpx.MockTransport(handle))
+        loops = [asyncio.create_task(service._control_loop()),
+                 asyncio.create_task(service._observation_loop())]
+        try:
+            for _ in range(150):                         # five seconds of 33 ms ticks
+                service.clock.advance(.033)
+                service.tick_main()
+                assert service.renderer.outputs["hdmi1"].layers
+                await asyncio.sleep(.002)
+            await asyncio.sleep(.1)
+        finally:
+            for loop in loops:
+                loop.cancel()
+            await asyncio.gather(*loops, return_exceptions=True)
+            await close(service)
+        assert len(posted) == 4 and posted[0].status == "presented"
+        assert all(report == posted[0] for report in posted)
+    asyncio.run(check())
+
+
+def test_a_report_never_holds_the_picture_while_central_is_away(tmp_path):
+    """A Central that answers nothing (its state poll stuck behind a lock) never stops the picture
+    or fills the Player's queue: a still photo drawn for 200 ticks waits as one report, sent once
+    Central answers. The old queue held 128 and raised `observation_capacity`, dropping its oldest
+    entries. Mutation probe: report on every tick and key `ReportOutbox` by report number (the
+    old queue's shape): 200 reports wait, and all are sent."""
+    async def check():
+        service, server = await _drawn_still(tmp_path)
+        faults = []
+        recorded = service.fault
+        service.fault = lambda code, **kwargs: (faults.append(code), recorded(code, **kwargs))
+        posted = []
+
+        def handle(request):
+            if request.url.path == "/v1/player/observations":
+                posted.append(Observation.model_validate_json(request.content))
+            return server(request)
+
+        sender = None
+        try:
+            for _ in range(200):
+                service.clock.advance(.033)
+                service.tick_main()
+                assert service.renderer.outputs["hdmi1"].layers
+            assert "observation_capacity" not in faults
+            await service.link.client.aclose()
+            service.link.client = service.link.time_client = httpx.AsyncClient(
+                transport=httpx.MockTransport(handle))
+            sender = asyncio.create_task(service._observation_loop())
+            await asyncio.sleep(.2)
+        finally:
+            if sender:
+                sender.cancel()
+                await asyncio.gather(sender, return_exceptions=True)
+            await close(service)
+        assert [(report.assignment_id, report.status) for report in posted] == [
+            ("picture", "presented")]
     asyncio.run(check())

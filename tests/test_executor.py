@@ -514,11 +514,12 @@ def test_original_fade_interval_survives_rolling_plan_and_black_is_not_transpare
     rig.offer(background, cover, revision=2)
     rig.executor.prepare_imminent()
     rig.commit("picture", "cover")
-    rig.executor.tick()
+    observations = rig.executor.tick()
     assert rig.renderer.outputs["hdmi1"].layers[-1].alpha == .5
     rig.advance(5)
-    observations = rig.executor.tick()
+    observations += rig.executor.tick()
     assert rig.renderer.outputs["hdmi1"].layers[-1].alpha == 1
+    # Seen from its first visible draw, reported once (`Executor._report`).
     assert [o.assignment_id for o in observations if o.status == "presented"] == ["cover"]
 
 
@@ -851,12 +852,13 @@ def test_rolling_revision_preserves_original_execution_order_and_lease(tmp_path)
     rig.secure()
     rig.executor.prepare_imminent()
     rig.commit("picture", "black")
-    rig.executor.tick()
+    observations = rig.executor.tick()
+    assert [o.assignment_id for o in observations if o.status == "presented"] == ["black"]
     rig.advance(1)
     changed_black = black.model_copy(update={"priority": -10})
     rig.offer(picture, changed_black, revision=2, valid_until=400)
-    observations = rig.executor.tick()
-    assert [o.assignment_id for o in observations if o.status == "presented"] == ["black"]
+    # A new revision is no change of what the Frame shows: nothing is reported again.
+    assert not [o for o in rig.executor.tick() if o.status == "presented"]
     assert rig.renderer.outputs["hdmi1"].layers[-1].layer.priority == 10
     rig.advance(10)
     rig.executor.tick()
@@ -1528,3 +1530,25 @@ def test_a_layer_is_wanted_past_its_end_only_while_a_continuation_naming_it_runs
     assert not may_still_play(plan, listed, 200)
     alone = plan.model_copy(update={"continuations": ()})
     assert not may_still_play(alone, listed, 150)
+
+
+def test_a_still_photo_is_reported_once_and_each_change_of_its_state_once(tmp_path):
+    """2026-11-16: one still photo, unchanged for an hour, was reported presented on every tick (a
+    row in Central every half second). A report is a change of an assignment's state, numbered
+    once: presented when it starts, then the fallback when it ends, each once however many ticks
+    stand between. Mutation probe: drop the `reported` check in `Executor._report`."""
+    rig = Rig(tmp_path)
+    reports = list(rig.play(layer()))
+    for _ in range(300):                       # ten seconds of 33 ms ticks
+        rig.advance(.033)
+        reports += rig.executor.tick()
+    assert [(report.assignment_id, report.status) for report in reports] == [
+        ("picture", "presented")]
+    rig.advance(200 - rig.clock.utc())         # the photo's end
+    for _ in range(30):
+        rig.advance(.033)
+        reports += rig.executor.tick()
+    assert [(report.status, report.detail) for report in reports] == [
+        ("presented", "none"), ("fallback", "expired")]
+    numbers = [report.sequence for report in reports]
+    assert numbers == sorted(set(numbers))

@@ -188,9 +188,10 @@ def test_a_covered_photo_is_prepared_within_the_lead_and_shows_when_the_top_run_
     assert readiness.lost_grants == ()
     wall.at(126)
     observations = wall.at(130)
-    # Shown at once, at its logical position: its photo kept playing while covered.
+    # Shown at once, at its logical position: its photo kept playing while covered. "above", seen
+    # since 100, is no change, so not reported again.
     assert [(o.assignment_id, o.position) for o in observations if o.status == "presented"] == [
-        ("scene", 31), ("above", 30)]
+        ("scene", 31)]
     assert wall.drawn() == ["scene"]
 
 

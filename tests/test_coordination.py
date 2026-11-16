@@ -1,5 +1,6 @@
 """Real PostgreSQL coordination with explicit clocks; no physical rendering claim."""
 
+import itertools
 import math
 import random
 from concurrent.futures import ThreadPoolExecutor
@@ -1057,10 +1058,12 @@ def test_a_continuation_slot_shown_is_recorded_against_its_source_photo_now_and_
                                           start=turn, end=turn + 0.001)
         return layer, continuation.photos[k % len(continuation.photos)]
 
+    numbers = itertools.count(1)
+
     def presented(plan, layer):
         return Observation(plan_id=plan.plan_id, revision=plan.revision, authority_epoch=1,
-                           assignment_id=layer.assignment_id, observed_at=layer.start + 1,
-                           status="presented")
+                           sequence=next(numbers), assignment_id=layer.assignment_id,
+                           observed_at=layer.start + 1, status="presented")
 
     def shown():
         with registry.db.transaction() as conn:
