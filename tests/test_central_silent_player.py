@@ -92,11 +92,13 @@ class Incident:
         self.exit_evidence = self._broker(NodeEventV2, 2, "exited")
         self.exited_at = registry.clock.utc()
         self.read_at = self.last_report_at + SILENT_AFTER_SECONDS + 1
-        while registry.clock.utc() + HOST_OBSERVATION_INTERVAL_SECONDS < self.read_at:
-            registry.clock.advance(HOST_OBSERVATION_INTERVAL_SECONDS)
+        # Samples one interval apart ending on read_at, so the last is stored (Central coalesces
+        # a sample within one interval of its stored one) and Host Management reads 0 s old.
+        steps = int((self.read_at - registry.clock.utc()) // HOST_OBSERVATION_INTERVAL_SECONDS)
+        for k in range(steps, -1, -1):
+            registry.clock.advance(self.read_at - k * HOST_OBSERVATION_INTERVAL_SECONDS
+                                   - registry.clock.utc())
             self.host_sample()
-        registry.clock.advance(self.read_at - registry.clock.utc())
-        self.host_sample()
         NodeRuntimeReconciler(self.sessions, self.coordinator).advance()
 
     def host_sample(self):
