@@ -478,3 +478,70 @@ def test_the_kept_photo_is_drawn_as_the_seam_rule_looks_it(tmp_path):
     shown = wall.run(116)
     *_, last = shown
     assert last[0] >= 115 and len(last) == 2 and last[1][1] == 1.0, last
+
+
+def rejoin_to_another_photo(directory: Path) -> Wall:
+    """Photo a plays on hdmi1 to 130 under the first plan; at 111 Central replans to photo c from
+    116, dissolving in over 2 s (decision 0032, rejoining): a's layer is superseded while drawn."""
+    wall = Wall(directory)
+    wall.plan.offer(layer("a", data=b"a", variant=jpeg(b"a"), start=100, end=130, awaits_grant=False),
+                    valid_until=200)
+    wall.plan.secure("a", b"a")
+    wall.run(111)
+    wall.plan.offer(layer("c", data=b"c", variant=jpeg(b"c"), start=116, end=200, media_origin=116, fade_in=2,
+                          awaits_grant=False), revision=2, valid_until=200)
+    wall.plan.secure("c", b"c")
+    return wall
+
+
+def test_a_rejoin_to_another_photo_dissolves_over_the_held_picture(tmp_path):
+    """Decision 0032, rejoining shows no black: the new plan's layer of another photo dissolves in
+    over the picture the Frame holds (the hand-over is one more composition the seam rule looks,
+    player/look.py `handed_over`), never over the Frame's dark plane: no commit shows a dark plane,
+    the held photo stays at full beneath the incoming one until it is at full, then the incoming
+    photo is alone."""
+    wall = rejoin_to_another_photo(tmp_path)
+    commits = len(wall.screens.commits)
+    wall.run(120)
+    drawn = [(at, tuple((named(plane), round(plane.strength, 6)) for plane in composition.planes))
+             for (composition, _pictures, _tag, _change), (at, _) in zip(
+                 wall.screens.commits[commits:], wall.tags[-(len(wall.screens.commits) - commits):], strict=True)]
+    assert drawn and not any(plane.dark for composition, *_ in wall.screens.commits[commits:]
+                             for plane in composition.planes)
+    dissolve = [planes for at, planes in drawn if 116 <= at < 118]
+    assert len(dissolve) > 100
+    # The incoming photo at full beneath, the held one above at the rest (player/planes.py), its
+    # share falling to nothing as the incoming layer fades in; then the incoming photo alone.
+    assert all([name for name, _ in planes] == ["c", "a"] and planes[0][1] == 1.0 for planes in dissolve)
+    rest = [planes[1][1] for planes in dissolve]
+    assert rest == sorted(rest, reverse=True) and rest[0] == 1.0 and rest[-1] < 0.01, rest
+    assert drawn[-1] == (drawn[-1][0], (("c", 1.0),)) and drawn[-1][0] >= 118
+    assert len(wall.stills) == 2
+
+
+def test_the_held_picture_is_freed_and_never_reported_after_the_hand_over(tmp_path):
+    """Once the new plan's layer is at full the held layer leaves the composition: its picture is
+    freed (released by the renderer, no longer pinned in the cache), and Central never hears it
+    presented after the new plan, nor carried once it is gone, while the new layer is presented."""
+    wall = rejoin_to_another_photo(tmp_path)
+    executor = wall.plan.executor
+    observations = []
+    tick = executor.tick
+
+    def recorded():
+        found = tick()
+        observations.extend(found)
+        return found
+
+    executor.tick = recorded
+    held_picture = wall.screens.commits[-1][1]["a"].handle
+    wall.run(117)
+    assert executor.readiness().carried                         # still drawn, so still carried
+    wall.run(120)
+    executor.maintain_cache()
+    presented = {observation.assignment_id for observation in observations if observation.status == "presented"}
+    assert presented == {"c"}, presented
+    assert executor.readiness().carried == ()
+    assert all(local.layer.assignment_id == "c" for local in executor._current["hdmi1"].layers)
+    assert "a" not in wall.renderer._holders and "a" not in executor._renderer_residents
+    assert held_picture in wall.screens.forgotten                # its buffer, once no commit shows it

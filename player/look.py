@@ -26,8 +26,9 @@ Rule this module owns (one home):
   place deciding whether the screen changes, and its inputs are the composition's alone: the
   executor (`look_at`: what it reads as seen) and the renderer (`look`: what it draws) look one
   composition alike. A composition the executor holds past its layers' ends (`held`: the rejoin
-  hold, decision 0032) and the photo a Frame keeps (player/executor.py `_fallback`) are looked
-  through it too, never given an alpha of their own (owner, 2026-11-15: "There *should* only be
+  hold, decision 0032), its hand-over to the new plan's layer (`handed_over`: the held layers
+  beneath the new ones until those hide them, one more composition) and the photo a Frame keeps
+  (player/executor.py `_fallback`) are looked through it too, never given an alpha of their own (owner, 2026-11-15: "There *should* only be
   one place where the photo can change").
 """
 
@@ -122,6 +123,36 @@ def held(composition: OutputComposition, now: float) -> OutputComposition:
         return replace(local, layer=local.layer.model_copy(update={"fade_out": 0.0}))
 
     return replace(composition, layers=tuple(kept(local) for local in composition.layers))
+
+
+def handed_over(incoming: OutputComposition, kept: Sequence[LocalLayer], now: float) -> OutputComposition:
+    """`incoming` (a new plan's composition on a Frame) with `kept` beneath it, the layers of the
+    composition it supersedes as `held` keeps them, until `incoming` hides them (decision 0032,
+    rejoining shows no black): so the new plan's layer fades in over the picture the Frame holds,
+    as any dissolve does, never over black; looked at plan time `now` (`look_at`). `kept` stays
+    until the first of `incoming`'s opaque layers is faded in, as the seam rule leaves its fade (a
+    layer of the picture shown alone at full does not fade in, so the hand-over is over at its
+    start: the picture is kept), and ends then, so the executor leaves it out from that time on.
+    With no opaque layer `incoming` never hides `kept`, so `kept` fades out over its latest fade-in
+    instead, never cut. `incoming` alone once the hand-over is over. Pure."""
+    fades = _fades(incoming)
+    faded_in = [(fades[local.layer.assignment_id][0], opaque(local.layer, local.layer.opacity))
+                for local in incoming.layers]
+    covering = [end for (_, end), hides in faded_in if hides]
+    if covering:
+        begin = until = min(covering)
+    else:
+        begin, until = max((span for span, _ in faded_in), key=lambda span: span[1], default=(now, now))
+    if now >= until:
+        return incoming
+
+    def beneath(local: LocalLayer) -> LocalLayer:
+        layer = local.layer
+        if layer.fade_out and now >= layer.end - layer.fade_out:
+            return local                    # a fade-out under way runs on as drawn (`held`)
+        return replace(local, layer=layer.model_copy(update={"end": until, "fade_out": until - begin}))
+
+    return look_at(replace(incoming, layers=(*map(beneath, kept), *incoming.layers)), now)
 
 
 def look(composition: OutputComposition, at: float) -> OutputComposition:

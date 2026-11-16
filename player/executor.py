@@ -30,7 +30,7 @@ from contracts.on_screen import kept_from
 from contracts.time import Monotonic
 from player.cache import Cache, CacheCapacityError, CacheError
 from player.frame_black import DueLayer, frame_black
-from player.look import alone, held, look_at
+from player.look import alone, handed_over, held, look_at
 from player.rendering import (
     LocalLayer,
     OutputComposition,
@@ -1272,7 +1272,7 @@ class Executor:
             # Every playing layer, a covered one included; what is drawn leaves out a deferred one
             # while it is covered (it holds no decoder).
             playing = {c.binding.output_id: c for c in self._compositions(active, now, timebase)}
-            candidates = {output_id: self._drawable(composition)
+            candidates = {output_id: self._hand_over(self._drawable(composition), now, timebase)
                           for output_id, composition in playing.items()}
             observations = []
             for binding in self._config.bindings:
@@ -1289,8 +1289,11 @@ class Executor:
                         local.layer.assignment_id for local in visible_now(previous.layers)
                     } if previous and not previous.fallback else set()
                     waiting: set[str] = set()
+                    # The held layers of a hand-over (`_hand_over`) are drawn, never the held plan's.
+                    handing = {local.layer.assignment_id for local in candidate.layers
+                               if local.layer.assignment_id not in self._assignments}
                     for local in visible_now(candidate.layers):
-                        if local.layer.assignment_id not in formerly_visible:
+                        if local.layer.assignment_id not in formerly_visible | handing:
                             # A covered pipeline may have paused. Seek to logical now
                             # before reveal instead of using its historical preroll.
                             prepared = self.renderer.prepare(local, candidate.binding)
@@ -1329,6 +1332,9 @@ class Executor:
                             given_up.add(victim.assignment_id)
                             self.renderer.release(victim.assignment_id)
                             self._renderer_residents.discard(victim.assignment_id)
+                            if victim.assignment_id in handing:
+                                fits = self.renderer.capacity(tuple(candidates.values())).available
+                                continue                # a held picture is given up first, unreported
                             assignment = self._assignments[victim.assignment_id]
                             self._lose_preparation(assignment)
                             assignment.failure = "capacity"
@@ -1338,6 +1344,8 @@ class Executor:
                             self._capacity_ok = False
                             failed = True
                             for local in candidate.layers:
+                                if local.layer.assignment_id in handing:
+                                    continue
                                 assignment = self._assignments[local.layer.assignment_id]
                                 self._lose_preparation(assignment)
                                 assignment.failure = "capacity"
@@ -1351,9 +1359,11 @@ class Executor:
                                 self._current[binding.output_id] = drawn
                                 self._current_leases[binding.output_id] = min(
                                     self._assignments[local.layer.assignment_id].execution_until
-                                    for local in candidate.layers
+                                    for local in candidate.layers if local.layer.assignment_id not in handing
                                 )
                                 for local in visible_now(drawn.layers):
+                                    if local.layer.assignment_id in handing:
+                                        continue
                                     assignment = self._assignments[local.layer.assignment_id]
                                     assignment.started = True
                                     observations.append(self._observation(local, observed_at, "presented"))
@@ -1372,6 +1382,8 @@ class Executor:
                                     continue
                             failed = True
                             for local in visible_now(candidate.layers):
+                                if local.layer.assignment_id in handing:
+                                    continue
                                 assignment = self._assignments[local.layer.assignment_id]
                                 self._lose_preparation(assignment)
                                 assignment.failure = "decode"
@@ -1425,6 +1437,24 @@ class Executor:
         return any(a.layer.output_id == output_id and self._current_authority(a)
                    and (window := self._window(a))[0] <= now + self.prepare_lead
                    and now < window[1] for a in self._assignments.values())
+
+    def _hand_over(self, incoming: OutputComposition, now: float, timebase: float) -> OutputComposition:
+        """Decision 0032, rejoining shows no black: `incoming`, the held plan's composition on its
+        Output, over what the composition it superseded still draws there (player/look.py `held`,
+        then `handed_over`: one more composition the seam rule looks), until the new layers hide
+        it; `incoming` alone with nothing superseded drawn. A held layer is drawn and kept resident
+        while drawn (`_superseded`), never prepared, started or reported as the held plan's; once
+        the hand-over is over it leaves the composition and its picture is released with it."""
+        previous = self._current.get(incoming.binding.output_id)
+        if (previous is None or previous.fallback
+                or _binding_identity(previous.binding) != _binding_identity(incoming.binding)):
+            return incoming
+        # Only what the held composition still shows at `now` (a layer faded out, or covered, is gone).
+        kept = tuple(LocalLayer(local.layer, local.path, local.layer.position(now), local.alpha)
+                     for local in visible_now(look_at(held(previous, now), now).layers)
+                     if local.layer.assignment_id in self._superseded
+                     and local.layer.assignment_id not in self._cancelled)
+        return handed_over(incoming, kept, now) if kept else incoming
 
     def _rejoin_hold(self, previous: OutputComposition | None, binding: OutputBinding,
                      now: float, timebase: float) -> OutputComposition | None:
