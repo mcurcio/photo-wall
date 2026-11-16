@@ -208,9 +208,11 @@ class NodeAcceptance:
                                    "ORDER BY observed_at DESC", (qualification_id,)).fetchall()
             if samples:
                 previous = samples[0]["witness"]
-                if (witness["readiness_sequence"] <= previous["readiness_sequence"]
-                        or any(buffers[k] == previous["buffers"].get(k)
-                               or buffer_samples[k] <= previous["buffer_samples"].get(k, -1) for k in buffers)):
+                # A new witness is new buffers on every Output. Readiness is sent once per
+                # change, so a Player steadily showing its media keeps one readiness number: its
+                # liveness is the contact checked above, never an advancing readiness.
+                if any(buffers[k] == previous["buffers"].get(k)
+                       or buffer_samples[k] <= previous["buffer_samples"].get(k, -1) for k in buffers):
                     return {"status": "awaiting_new_witnesses", "accepted": False}
             sample_id = uuid4()
             conn.execute("INSERT INTO node_app_qualification_samples VALUES(%s,%s,%s,%s,%s,%s)",
