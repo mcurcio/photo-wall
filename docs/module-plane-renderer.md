@@ -111,12 +111,21 @@ bottom to top in `stack_order`.
   video's media origin), never its assignment id: one decode and one finished picture serve every
   layer that draws it, and it is the plane's key, so a new slot, layer or plan of the photo on
   screen draws the very picture already shown. Whether the screen changes is decided in one place,
-  `player/look.py`'s seam rule: a layer does not fade in when the screen's last commit shows its
-  picture alone at full, and does not fade out when what its Frame draws next is the same picture
-  (the next layer, which the composition carries in `following`, or, with none, the photo it keeps).
-  So a continuation repeating one photo, two planned layers of it, a replan, a rejoin and the
-  fallback's kept photo keep the screen as it is. A real change fades as planned. Cost: a PNG
-  always fades (it may show what lies beneath); render bench on the test Pi not yet run.
+  `player/look.py`'s seam rule, from the composition alone: a layer does not fade in when its
+  Frame shows its picture alone at full (`shown`, from what the Output last acknowledged drawing),
+  and does not fade out when what its Frame draws next is the same picture (the next layer that can
+  draw, which the composition carries in `following`: secured and granted if it awaits a grant; or, with none, the photo it keeps, "keep_this_photo"). The
+  executor makes each composition with these and reads what is seen through the same look
+  (`look_at`), so it and the renderer never disagree on what a Frame shows. So a continuation
+  repeating one photo, two planned layers of it, a replan, a rejoin and the fallback's kept photo
+  keep the screen as it is. A real change fades as planned. Costs: a PNG always fades (it may show
+  what lies beneath); the decoder budget's look ahead (`player/visibility.py` `shown_within`,
+  `shed`) still reads the planned fades, which see at least as much as the seam rule does, so it
+  only errs toward keeping a decoder; a layer that becomes able to draw during the fade-out of the
+  same picture before it (a plan arriving mid fade-out) stops that fade-out, so the picture dims and
+  returns to full once (continuation slots are made before a fade-out starts, so never for them);
+  after the candidate's commit (a new grant the shell has not admitted) the playing picture returns
+  at full when the grant is admitted, as it always did; render bench on the test Pi not yet run.
 - **Removed, never transparent.** A plane under `MIN_STRENGTH` (1/255) is left out, never shown
   at alpha 0; a plane's blend mode is always pre-multiplied, never None (bench T3).
 - **A Frame is never shown as nothing** (issue #123: "Dark on purpose (Night off, Resting) is drawn

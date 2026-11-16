@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Iterable
+from collections.abc import Hashable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import RLock
@@ -30,6 +30,7 @@ from contracts.on_screen import kept_from
 from contracts.time import Monotonic
 from player.cache import Cache, CacheCapacityError, CacheError
 from player.frame_black import DueLayer, frame_black
+from player.look import alone, look_at
 from player.rendering import (
     LocalLayer,
     OutputComposition,
@@ -561,8 +562,11 @@ class Executor:
 
     def _group(self, pictures: Iterable[LocalLayer], timebase: float | None = None,
                now: float | None = None) -> tuple[OutputComposition, ...]:
-        """`pictures` as one composition per bound Output, bottom to top; drawn over time from
-        `now` on (with `timebase`), each carries what its Frame draws next (`_following`)."""
+        """`pictures` as one composition per bound Output, bottom to top. Drawn over time from
+        `now` on (with `timebase`), each carries what its Frame shows (`_shown`) and draws next
+        (`_following`), and its layers' alphas are its look at `now`
+        (player/look.py `look_at`, the seam rule): what the executor reads as seen is what the
+        renderer draws."""
         grouped: dict[str, list[LocalLayer]] = {}
         for local in pictures:
             grouped.setdefault(local.layer.output_id, []).append(local)
@@ -573,20 +577,35 @@ class Executor:
                 # Bottom to top by the one stacking order: a later photo of a Run is drawn over
                 # the one it dissolves in over.
                 layers.sort(key=lambda local: stack_order(local.layer))
-                following = () if now is None else self._following(output_id, layers, now)
-                result.append(OutputComposition(binding, tuple(layers), timebase=timebase,
-                                                following=following))
+                composition = OutputComposition(binding, tuple(layers), timebase=timebase)
+                if now is not None and timebase is not None:
+                    composition = look_at(replace(
+                        composition, following=self._following(output_id, layers, now),
+                        shown=self._shown(binding)), now)
+                result.append(composition)
         return tuple(result)
 
     def _following(self, output_id: str, drawn: Iterable[LocalLayer], now: float) -> tuple[Layer, ...]:
-        """The layers `output_id`'s Frame holds that are not `drawn` and have not ended at `now`
-        (planned layers and continuation slots of the current plan, none failed or superseded):
-        what the Frame draws next, for player/look.py's seam rule."""
-        shown = {local.layer.assignment_id for local in drawn}
+        """The layers `output_id`'s Frame holds that are not `drawn`, have not ended at `now` and
+        can be drawn: of the current plan (none failed or superseded; a plan's layers lie within
+        its validity, contracts/models.py `Plan`), secured, and granted when they await a grant
+        (decision 0032). What the Frame draws next, for player/look.py's seam rule; a layer that
+        may never draw is not one, so the picture before it fades out as planned."""
+        drawing = {local.layer.assignment_id for local in drawn}
         return tuple(assignment.granted_layer or assignment.layer for key, assignment in self._assignments.items()
-                     if assignment.layer.output_id == output_id and key not in shown
+                     if assignment.layer.output_id == output_id and key not in drawing
                      and key not in self._superseded and assignment.failure is None
-                     and self._current_authority(assignment) and now < assignment.layer.end)
+                     and self._current_authority(assignment) and now < assignment.layer.end
+                     and assignment.secured
+                     and (not assignment.layer.awaits_grant or assignment.granted_layer is not None))
+
+    def _shown(self, binding: OutputBinding) -> Hashable | None:
+        """The picture `binding`'s Frame shows alone at full: player/look.py `alone` of what its
+        Output last acknowledged drawing for this binding (`_current`); None before one."""
+        current = self._current.get(binding.output_id)
+        if current is None or _binding_identity(current.binding) != _binding_identity(binding):
+            return None
+        return alone(current.layers)
 
     def _window(self, assignment: _Assignment) -> tuple[float, float]:
         """When `assignment` may be drawn: a plan layer within the plan's validity; a

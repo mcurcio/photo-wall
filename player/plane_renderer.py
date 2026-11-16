@@ -31,10 +31,14 @@ Rules this module owns (one home each):
   layer that draws it (player/planes.py `drawn_identity`), whatever its assignment; `release` of
   the last layer drawing it frees it. A plane's key is that identity, so a new slot, layer or plan
   of the same photo draws the very picture already shown and "Nothing changed" commits no new one.
-- **Seams**: each present looks its composition (player/look.py, the seam rule) with the picture the
-  screen's last commit shows alone at full (`_alone`: its one plane, opaque at its alpha), so the
-  next layer of that picture does not fade in over it: the only decision of whether a Frame's
-  picture changes, whichever path of the executor brought the layer.
+- **Seams**: each present looks its composition (player/look.py `look`, the seam rule) from the
+  composition alone (what the Frame shows, draws next and keeps, as the executor made it), so the
+  next layer of the picture shown does not fade in over it, nor the picture shown fade out to it:
+  the only decision of whether a Frame's picture changes, whichever path of the executor brought
+  the layer, and the executor reads what is seen through the same look. The one exception is the
+  candidate's commit (`_candidate`, while the shell has not admitted the Frame's grant): the screen
+  is not the Frame's to draw, so it shows its ground, and the picture returns when the grant is
+  admitted, at its look then (a playing layer at full, as before any seam).
 - **When a still is decoded**: in `finish`, never in `prepare` or `present`, and at most one still
   decode in flight over every Output (the next starts once it answers, its layer is released, its
   start is refused, or its layer no longer needs it; one answering while its layer waits for a
@@ -173,7 +177,7 @@ from player.rendering import (
     PrepareResult,
     PresentationResult,
 )
-from player.visibility import opaque, visible_now
+from player.visibility import visible_now
 
 VIDEO_TARGETS: Final = 3        # a playing video's targets: one shown, one in flight, one drawn
 STEP_GAP: Final = DEFAULT_REFRESH
@@ -282,15 +286,6 @@ def _answers(result: PresentationResult, composition: OutputComposition) -> bool
     """Whether `result` is an answer about `composition`: one made for its request
     (player/rendering.py `OutputComposition.request`; module rule, Outcomes)."""
     return result.composition is not None and result.composition.request == composition.request
-
-
-def _alone(composed: Composition) -> Hashable | None:
-    """The picture a commit of `composed` shows alone at full (module rule, Seams): its one plane,
-    a layer's, opaque at its drawn alpha; None otherwise."""
-    if len(composed.planes) != 1 or composed.planes[0].layer is None:
-        return None
-    (plane,) = composed.planes
-    return plane.key if opaque(plane.layer.layer, plane.layer.alpha) else None
 
 
 def _expiry(trial: AppliedTrial, now: float) -> float:
@@ -412,7 +407,6 @@ class _Output:
     submitted: float = -float("inf")
     expires: float | None = None
     grant: str | None = None                # the admitted grant of its last presented commit
-    alone: Hashable | None = None           # the picture its last commit shows alone at full (Seams)
 
 
 class PlaneRenderer:
@@ -507,11 +501,8 @@ class PlaneRenderer:
                 busiest.append((Composition(screen, ()),))     # a pattern is the ground: no planes
                 continue
             frame_id = composition.binding.frame_id
-            state = self._outputs.get(composition.binding.output_id)
-            shown = None if state is None else state.alone
-            busiest.append(tuple({compose(screen, [FrameLayers(frame_id, placement,
-                                                               look(composition, at, shown).layers)])
-                                  for at in moments(composition, now, shown)}))
+            busiest.append(tuple({compose(screen, [FrameLayers(frame_id, placement, look(composition, at).layers)])
+                                  for at in moments(composition, now)}))
         return CapacityResult(all(fits(self._budget, together) for together in product(*busiest)))
 
     def frame(self) -> None:
@@ -606,7 +597,7 @@ class PlaneRenderer:
         for output_id, composition in self._held.items():
             state = self._outputs.get(output_id)
             expires = None if state is None else state.expires
-            change = next_change(composition, now, expires, None if state is None else state.alone)
+            change = next_change(composition, now, expires)
             if change is None:
                 continue
             if state is not None and state.pacer.in_flight:
@@ -674,8 +665,8 @@ class PlaneRenderer:
         ground = None if ground == "pending" else ground        # the compositor's black meanwhile
         if not grant.admitted or not grant.matches(composition):
             return self._candidate(state, setting.screen, grant, ground, now)
-        looked = look(composition, now, state.alone)
-        ending = fade_end(composition, now, state.alone)
+        looked = look(composition, now)
+        ending = fade_end(composition, now)
         if ending is None:
             self._fades.pop(output_id, None)
         else:
@@ -723,7 +714,6 @@ class PlaneRenderer:
         state.committed = shows
         state.grant = str(grant.grant_id)
         state.patterned = pattern is not None
-        state.alone = _alone(composed)
         state.last = PresentationResult("presented", composition=looked, presented_at=now,
                                         applied_calibration=drawn.applied)
         self._newest[output_id] = composed
@@ -932,7 +922,7 @@ class PlaneRenderer:
         state.pacer.submitted(sequence, now)
         state.submitted = now
         state.shown = frozenset(() if ground is None else (ground.handle,))
-        state.seen, state.committed, state.grant, state.alone = frozenset(), None, None, None
+        state.seen, state.committed, state.grant = frozenset(), None, None
         state.patterned = False
         self._sweep()
         state.last = _PENDING

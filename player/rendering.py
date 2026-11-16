@@ -7,6 +7,7 @@ bounded: preroll/presentation may report pending while native work continues asy
 
 from __future__ import annotations
 
+from collections.abc import Hashable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Protocol
@@ -39,6 +40,10 @@ class OutputComposition:
     # them: what the Frame draws next, which player/look.py's seam rule reads so a layer never
     # fades out to the picture it already shows. Not part of `request`: it is not drawn.
     following: tuple[Layer, ...] = ()
+    # The picture the Frame showed alone at full when the executor made this composition (player/
+    # look.py `alone` of the composition its Output last acknowledged drawing); None: none. Read by
+    # the seam rule, so the executor and the renderer look a composition alike. Not part of `request`.
+    shown: Hashable | None = None
 
     @property
     def calibration(self) -> Calibration:

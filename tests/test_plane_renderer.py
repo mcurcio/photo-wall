@@ -24,7 +24,7 @@ from contracts.frame_lighting import AT_FULL, FarLight, FrameLighting, Paper, Wa
 from contracts.models import Calibration, PositionBox
 from contracts.node_frame import neutral_operations
 from contracts.node_picture import DisplayLight
-from contracts.photo_crop import CENTRED
+from contracts.photo_crop import CENTRED, PhotoCrop
 from contracts.room_light import FixedEntry, KelvinColour, RoomLightsDocument
 from contracts.tuning import TestPattern
 from player import geometry as geometry_module
@@ -595,6 +595,41 @@ def test_layers_of_one_photo_share_one_picture_until_the_last_is_released():
     rig.present(photo("other", start=0))
     rig.renderer.finish()
     rig.settle(photo("other", start=0))
+    assert shown.handle in rig.screens.forgotten
+
+
+def test_a_layer_whose_picture_is_finished_is_prepared_during_a_fade():
+    """A still waiting for a fade (module rule, Finishing is off the present path) costs it nothing
+    when another layer already finished its picture (player/planes.py `drawn_identity`): it is
+    prepared at once, not left pending until the fade ends."""
+    rig = Rig()
+    outgoing, incoming = photo("out", start=0, end=200), photo("in", start=100, fade_in=3.0)
+    rig.ready(outgoing, incoming)
+    timebase = 100.1 - rig.clock.now
+    rig.present(outgoing, incoming, timebase=timebase)
+    again = LocalLayer(layer("again", variant=outgoing.layer.variant, start=104, media_origin=104),
+                       outgoing.path, 0.0, 1.0)
+    assert rig.renderer.prepare(photo("later", start=104), framed()).status == "pending"   # it waits
+    assert rig.renderer.prepare(again, framed()).status == "prepared"
+    assert rig.stills.count(outgoing.path) == 1
+
+
+def test_a_layer_drawn_otherwise_in_place_frees_the_picture_it_drew():
+    """One assignment whose drawn identity changes (a new revision's crop for the same layer) draws
+    its new picture; the one it drew before, which no other layer draws, is freed once no commit
+    shows it."""
+    rig = Rig()
+    before = photo("same", start=0)
+    rig.ready(before)
+    rig.settle(before)
+    shown = rig.screens.commits[-1][1]["same"]
+    after = LocalLayer(before.layer.model_copy(update={"crop": PhotoCrop(offset=0.2)}), before.path, 0.0, 1.0)
+    rig.clock.tick()
+    rig.ready(after)
+    rig.settle(after)
+    assert rig.screens.commits[-1][1]["same"].handle != shown.handle
+    rig.clock.tick()
+    rig.present(after)
     assert shown.handle in rig.screens.forgotten
 
 
