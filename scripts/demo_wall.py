@@ -1215,13 +1215,37 @@ def fault_reported(before: dict, outcome: str):
                                 and snapshot["connection"]["health"] != before["health"])
 
 
+def dark_by_plan(event, report, plan) -> bool:
+    """A dark Output is the plan's own answer: when photos are scarce, Central's plan may leave a
+    Frame unfilled and the Frame goes black (E-STANDALONE-10; the owner kept that as built,
+    2026-11-15). `event` is the Output's current, dark one in the Player's `report`; `plan` is the
+    Player's newest offer. The dark is the plan's when the Output went dark outside every layer
+    the plan places on it, no whole layer the plan places on it has come and gone since, and the
+    plan names the Output unfilled somewhere between going dark and the report. Only whole layers
+    and spans are compared, so the Player's draw a few milliseconds after a boundary never
+    decides the judgement."""
+    went, now, output = event["utc"], report["utc"], event["output_id"]
+    for layer in plan["layers"]:
+        if layer["output_id"] == output and (layer["start"] <= went < layer["end"]
+                                             or went <= layer["start"] and layer["end"] <= now):
+            return False
+    return any(span["output_id"] == output and span["start"] <= now and went < span["end"]
+               for span in plan.get("unfilled", ()))
+
+
 def fault_holds(snapshot, reports, pool_ids) -> None:
     """C7: while Immich is down or the key lacks a permission, the last pool plays on: the pool
-    keeps every photo and every Player keeps presenting content on every output."""
+    keeps every photo, and every Player keeps presenting on every output the content Central's
+    plan offers it. An Output the plan leaves unfilled may be dark (`dark_by_plan`); every Output
+    the plan fills must present."""
     require(snapshot["pool"]["asset_ids"] == pool_ids, "fault_pool_changed")
-    require(all(event["layers"] and not event["fallback"]
-                for report in reports.values() for event in current_outputs(report)),
-            "fault_presentation_stopped")
+    plans = {offer["player_id"]: offer["plan"] for offer in snapshot["offers"]}
+    for report in reports.values():
+        plan = plans.get(report["player_id"])
+        require(all((event["layers"] and not event["fallback"])
+                    or (plan is not None and dark_by_plan(event, report, plan))
+                    for event in current_outputs(report)),
+                "fault_presentation_stopped")
 
 
 def journal_upstream_mutation(host, evidence, save, before, reports, action, pre_key, change_key, pre=None):

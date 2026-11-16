@@ -1247,9 +1247,9 @@ def test_expected_pool_ids_are_the_asset_identity_of_each_favourite_not_deleted(
             checksum_revision(value)
 
 
-def _snapshot(check, health, asset_ids=("a", "b")):
+def _snapshot(check, health, asset_ids=("a", "b"), offers=()):
     return {"pool": {"check": check, "asset_ids": list(asset_ids)},
-            "connection": {"connection_ref": CONNECTION, "health": health}}
+            "connection": {"connection_ref": CONNECTION, "health": health}, "offers": list(offers)}
 
 
 OK = {"state": "ok", "checked_at": 5.0}
@@ -1289,8 +1289,33 @@ def test_a_fault_is_reported_by_the_connections_health_and_the_sources_check(
 
 
 def _presenting(fallback=False, layers=({"sha256": "a" * 64},)):
-    return {"player-one": {"outputs": 1, "events": [
-        {"output_id": "HDMI-A-1", "layers": list(layers), "fallback": fallback}]}}
+    return {"player-one": {"player_id": "p-one", "utc": 20.0, "outputs": 1, "events": [
+        {"output_id": "HDMI-A-1", "layers": list(layers), "fallback": fallback, "utc": 17.0}]}}
+
+
+# The shape of CI's upstream-faults evidence (last-central.json, last-players.json): Player one
+# draws HDMI-A-1, and its plan leaves HDMI-A-2 unfilled because the scarce pool's photos are
+# held by other Frames' continuations (E-STANDALONE-10), so HDMI-A-2 has gone black.
+SLOTS = ((17.09, 25.09), (25.09, 33.09), (33.09, 41.09))
+
+
+def _plan(dark=("HDMI-A-2",), slots=SLOTS):
+    outputs = ("HDMI-A-1", "HDMI-A-2")
+    return {"player_id": "p-one", "valid_from": 18.38, "valid_until": 41.09,
+            "layers": [{"output_id": output, "start": start, "end": end}
+                       for output in outputs if output not in dark for start, end in slots],
+            "unfilled": [{"output_id": output, "start": start, "end": end}
+                         for output in dark for start, end in slots]}
+
+
+def _wall(one_dark=False, two_went=17.10, now=20.65):
+    one = dict(layers=[], fallback=True) if one_dark else dict(
+        layers=[{"sha256": "6c" * 32, "assignment_id": "assignment-1"}], fallback=False)
+    return {"player-one": {"player_id": "p-one", "utc": now, "outputs": 2, "events": [
+        dict(output_id="HDMI-A-1", utc=9.11, layers=[{"sha256": "49" * 32}], fallback=False),
+        dict(output_id="HDMI-A-2", utc=9.11, layers=[{"sha256": "3a" * 32}], fallback=False),
+        dict(output_id="HDMI-A-1", utc=17.10, **one),
+        dict(output_id="HDMI-A-2", utc=two_went, layers=[], fallback=True)]}}
 
 
 def test_c7_the_last_pool_plays_on_through_a_fault():
@@ -1300,6 +1325,28 @@ def test_c7_the_last_pool_plays_on_through_a_fault():
         fault_holds(_snapshot(FAILED, DENIED, asset_ids=()), _presenting(), ["a", "b"])
     with pytest.raises(DemoError, match="^fault_presentation_stopped$"):
         fault_holds(_snapshot(FAILED, DENIED), _presenting(fallback=True, layers=()), ["a", "b"])
+
+
+def test_c7_an_output_the_plan_leaves_unfilled_may_be_dark_and_every_filled_one_presents():
+    offers = [{"player_id": "p-one", "plan": _plan()}]
+    # The CI evidence: HDMI-A-2 went black inside its plan's unfilled span; the plan is kept.
+    fault_holds(_snapshot(FAILED, DOWN, offers=offers), _wall(), ["a", "b"])
+    # A reissued plan names only later spans: the Output stays the plan's, dark since before them.
+    later = [{"player_id": "p-one", "plan": _plan(slots=SLOTS[1:])}]
+    fault_holds(_snapshot(FAILED, DOWN, offers=later), _wall(now=26.0), ["a", "b"])
+    # Mutation probes: an Output the plan fills falls back; a plan that fills the dark Output; an
+    # Output dark past a whole layer its plan placed on it; a Player without an offer.
+    for snapshot, reports in (
+            (_snapshot(FAILED, DOWN, offers=offers), _wall(one_dark=True)),
+            (_snapshot(FAILED, DOWN, offers=[{"player_id": "p-one", "plan": _plan(dark=())}]),
+             _wall()),
+            (_snapshot(FAILED, DOWN, offers=[{"player_id": "p-one", "plan": {
+                **_plan(slots=SLOTS[2:]), "layers": [
+                    {"output_id": "HDMI-A-2", "start": 25.09, "end": 33.09}]}}]),
+             _wall(now=34.0)),
+            (_snapshot(FAILED, DOWN), _wall())):
+        with pytest.raises(DemoError, match="^fault_presentation_stopped$"):
+            fault_holds(snapshot, reports, ["a", "b"])
 
 
 def test_setup_waits_for_the_pasted_connection_to_be_healthy(monkeypatch):
