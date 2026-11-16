@@ -466,9 +466,10 @@ class PlayerService:
         # The last acknowledgment Central answered (session, delivery id, result): the same state
         # again (each poll of an unchanged state) is not acknowledged again.
         self._acknowledged: tuple[Session, str, str] | None = None
-        # The number of the last readiness Central answered (the executor numbers it once per
-        # change): an unchanged readiness is not posted again.
-        self._readiness_answered: int | None = None
+        # The last readiness Central answered, as (authority epoch, number): the executor numbers
+        # it once per change and starts again at 1 in each epoch, so an unchanged readiness is not
+        # posted again and a new epoch's first is.
+        self._readiness_answered: tuple[int, int] | None = None
         # Dispatches abandoned at DISPATCH_DEADLINE: while one is unreached the loop is late,
         # every dispatch is MainLoopLate at once.
         self._late_posts = LatePosts()
@@ -1241,21 +1242,24 @@ class PlayerService:
                 self._main_loop_late()
                 await asyncio.sleep(max(0, REPORT_INTERVAL - (asyncio.get_running_loop().time() - started)))
                 continue
-            if readiness is not None and readiness.sequence != self._readiness_answered:
+            numbered = None if readiness is None else (readiness.authority_epoch, readiness.sequence)
+            if numbered is not None and numbered != self._readiness_answered:
                 # Sent once per change (the executor numbers it once), until Central answers it.
                 try:
                     await self.request("POST", "/v1/player/readiness", body=readiness.model_dump(mode="json"))
-                    self._readiness_answered = readiness.sequence
+                    self._readiness_answered = numbered
                 except StaleFeedback:
-                    # Judged against a newer plan: the next readiness, for the plan the poll
-                    # fetches, is a change of its own.
-                    self._readiness_answered = readiness.sequence
+                    # A 409 is not always a newer plan: Central also answers it while a variant
+                    # is made again (`media_unavailable`) or a lock conflicts, and those clear by
+                    # themselves. So it stays unanswered and goes again next turn, after the poll
+                    # (a newer plan's readiness is numbered anew; a refused one writes nothing).
                     await self._recover_stale()
                 except REQUEST_FAILURES as error:
-                    # Central answered and refused it (4xx): judged, so not sent again; else it
-                    # is sent again next turn with its number, which Central writes once.
+                    # Central answered and refused it (any other 4xx: its authority, binding or
+                    # shape): judged, so not sent again; else it is sent again next turn with its
+                    # number, which Central writes once.
                     if isinstance(error, Refused) and 400 <= error.status < 500:
-                        self._readiness_answered = readiness.sequence
+                        self._readiness_answered = numbered
                     self._request_failed(error)
             await asyncio.sleep(max(0, REPORT_INTERVAL - (asyncio.get_running_loop().time() - started)))
 

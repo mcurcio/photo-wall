@@ -1439,8 +1439,8 @@ def test_a_blocked_main_loop_keeps_its_session_and_resumes_once_the_loop_runs(
 def test_stale_feedback_on_a_late_loop_keeps_the_session(tmp_path, monkeypatch):
     """Central refuses readiness as stale (409) and the state poll that follows misses the
     dispatch deadline: the Player raises main_loop_late and the control loop carries on (the
-    next turn polls again); a late loop never ends the session here. A readiness answered stale
-    is judged, so it is not posted again: the next is the one for the plan a poll fetches."""
+    next turn polls again); a late loop never ends the session here. A readiness refused 409 is
+    not answered, so it goes again until Central takes it (two refusals, then the third taken)."""
     monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
 
     async def check():
@@ -1464,7 +1464,7 @@ def test_stale_feedback_on_a_late_loop_keeps_the_session(tmp_path, monkeypatch):
         monkeypatch.setattr(service, "poll_state", poll)
         try:
             await asyncio.wait_for(service._control_loop(), 5)
-            assert len(stale) == 1 and len(polls) >= 5
+            assert len(stale) == 2 and len(polls) >= 5
             assert service.last_fault == "main_loop_late"
         finally:
             await close(service)
@@ -2668,6 +2668,91 @@ def test_an_idle_player_sends_its_readiness_and_its_acknowledgment_once(tmp_path
             sent = [json.loads(request.content) for request in posts("/v1/player/readiness")]
             assert [report["revision"] for report in sent] == [1, 2]
             assert sent[0]["sequence"] < sent[1]["sequence"]
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def _readiness_posts(server):
+    return [json.loads(request.content) for request in server.requests
+            if request.url.path == "/v1/player/readiness"]
+
+
+async def _control_turns(service, poll_state, count):
+    """`count` turns of the control loop, each polling Central with `poll_state`."""
+    polls = []
+
+    async def poll():
+        polls.append(True)
+        await poll_state()
+        if len(polls) >= count:
+            service._stop.set()
+    service.poll_state = poll
+    service._stop.clear()
+    try:
+        await asyncio.wait_for(service._control_loop(), 5)
+    finally:
+        service.poll_state = poll_state
+
+
+def test_a_reenrolled_idle_player_sends_the_first_readiness_of_its_new_epoch(tmp_path, monkeypatch):
+    """An idle Player answered readiness 1 in its first epoch; a re-enrollment restarts the
+    executor's numbers at 1, so the new epoch's first readiness carries the number Central
+    answered in the old one. It is a change of its own and is posted, else Central holds no
+    readiness for the new epoch and grants nothing. Mutation: key the answered readiness by its
+    sequence alone -> no readiness is posted in epoch 2."""
+    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+
+    async def check():
+        service, server = await rig(tmp_path)
+        poll_state = service.poll_state
+        try:
+            server.offer(revision=2, layers=())
+            await poll_state()
+            await _control_turns(service, poll_state, 4)
+            first = _readiness_posts(server)
+            assert [(post["authority_epoch"], post["sequence"]) for post in first] == [(1, 1)]
+            await service.enroll()
+            await service.probe_time()
+            server.offer(layers=())
+            await poll_state()
+            await _control_turns(service, poll_state, 4)
+            renewed = _readiness_posts(server)[len(first):]
+            assert [(post["authority_epoch"], post["sequence"]) for post in renewed] == [(2, 1)]
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_readiness_refused_409_is_sent_again_until_central_takes_it(tmp_path, monkeypatch):
+    """Central refuses readiness 409 for reasons that clear by themselves (`media_unavailable`
+    while a variant is made again, `content_lock_conflict`) as well as for a newer plan: the
+    Player cannot tell them apart, so an unchanged readiness refused 409 is posted again on the
+    next turn, until Central answers it. Mutation: count a 409 as answered -> one post only, and
+    Central never holds the readiness."""
+    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+
+    async def check():
+        service, server = await rig(tmp_path)
+        poll_state = service.poll_state
+        refusals = []
+        respond = server.__call__
+
+        def refusing(request):
+            if request.url.path == "/v1/player/readiness" and len(refusals) < 2:
+                refusals.append(True)
+                server.requests.append(request)
+                return httpx.Response(409, json={"error": "media_unavailable"})
+            return respond(request)
+        await service.link.client.aclose()
+        service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(refusing))
+        service.link.time_client = service.link.client
+        try:
+            server.offer(revision=2, layers=())
+            await poll_state()
+            await _control_turns(service, poll_state, 6)
+            posts = [(post["authority_epoch"], post["sequence"]) for post in _readiness_posts(server)]
+            assert posts == [(1, 1)] * 3, posts      # refused twice, then taken: never again
         finally:
             await close(service)
     asyncio.run(check())
