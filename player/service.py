@@ -463,6 +463,12 @@ class PlayerService:
         self._highest_control_delivery_id: str | None = None
         self._applied_proof_receipt: tuple[Session, ControlAppliedReceipt] | None = None
         self._control_proof_revision = 0
+        # The last acknowledgment Central answered (session, delivery id, result): the same state
+        # again (each poll of an unchanged state) is not acknowledged again.
+        self._acknowledged: tuple[Session, str, str] | None = None
+        # The number of the last readiness Central answered (the executor numbers it once per
+        # change): an unchanged readiness is not posted again.
+        self._readiness_answered: int | None = None
         # Dispatches abandoned at DISPATCH_DEADLINE: while one is unreached the loop is late,
         # every dispatch is MainLoopLate at once.
         self._late_posts = LatePosts()
@@ -768,6 +774,7 @@ class PlayerService:
         self._highest_control_delivery_id = None
         with self._lock:
             self._applied_proof_receipt = None
+            self._acknowledged = None
             self._control_proof_revision += 1
             self._offered = False
             self._jobs = ()
@@ -895,6 +902,9 @@ class PlayerService:
                 or selection.authority_epoch != session.registration.authority_epoch):
             return
         registration = session.registration
+        acknowledgment = (session, state.delivery_id, result)
+        if self._acknowledged == acknowledgment:
+            return      # Central answered this one: the same state again changes nothing
         with self._lock:
             if result != "applied":
                 self._applied_proof_receipt = None
@@ -906,6 +916,7 @@ class PlayerService:
         # fresh challenge. This is not plan readiness or OS management evidence.
         response = await self.request("POST", "/v1/player/control-acks",
                                       body=report.model_dump(mode="json"))
+        self._acknowledged = acknowledgment
         if result != "applied":
             return
         try:
@@ -1211,8 +1222,8 @@ class PlayerService:
 
     async def _control_loop(self):
         """Every REPORT_INTERVAL: poll Central's state, then the held plan's feedback (readiness
-        and the downloads still wanted) and its readiness post (observations are
-        `_observation_loop`'s). A failed request is
+        and the downloads still wanted) and its readiness post, only when readiness changed or
+        its post went unanswered (observations are `_observation_loop`'s). A failed request is
         a fault and the next turn tries again (decision 0032, `_request_failed`): the feedback runs
         whether or not the poll was answered, so downloads follow the held plan through an outage."""
         while not self._stop.is_set():
@@ -1230,12 +1241,21 @@ class PlayerService:
                 self._main_loop_late()
                 await asyncio.sleep(max(0, REPORT_INTERVAL - (asyncio.get_running_loop().time() - started)))
                 continue
-            if readiness is not None:
+            if readiness is not None and readiness.sequence != self._readiness_answered:
+                # Sent once per change (the executor numbers it once), until Central answers it.
                 try:
                     await self.request("POST", "/v1/player/readiness", body=readiness.model_dump(mode="json"))
+                    self._readiness_answered = readiness.sequence
                 except StaleFeedback:
+                    # Judged against a newer plan: the next readiness, for the plan the poll
+                    # fetches, is a change of its own.
+                    self._readiness_answered = readiness.sequence
                     await self._recover_stale()
                 except REQUEST_FAILURES as error:
+                    # Central answered and refused it (4xx): judged, so not sent again; else it
+                    # is sent again next turn with its number, which Central writes once.
+                    if isinstance(error, Refused) and 400 <= error.status < 500:
+                        self._readiness_answered = readiness.sequence
                     self._request_failed(error)
             await asyncio.sleep(max(0, REPORT_INTERVAL - (asyncio.get_running_loop().time() - started)))
 
@@ -1412,6 +1432,7 @@ class PlayerService:
                         self._session = self._session.unregistered()
                     with self._lock:
                         self._applied_proof_receipt = None
+                        self._acknowledged = None
                         self._control_proof_revision += 1
                     self.fault("registration_required")
                     if not self._stop.is_set():
@@ -1454,6 +1475,7 @@ class PlayerService:
         self._proof_generation += 1
         with self._lock:
             self._applied_proof_receipt = None
+            self._acknowledged = None
             self._control_proof_revision += 1
         if proof_task is not None:
             proof_task.cancel()

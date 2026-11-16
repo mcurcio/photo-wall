@@ -71,6 +71,7 @@ class Witnesses:
         self.coordinator.advance()
         self.sequence = 2
         self.coordinator.readiness(self.player["player_id"],report(self.coordinator,self.player,sequence=self.sequence))
+        self.registry.authenticate(self.player['token'])   # the Player's poll: Central heard it
         self.acceptance = NodeAcceptance(self.sessions)
         self.qualification = uuid4()
         self.acceptance.begin(DEVICE_ID,self.qualification,self.proof.challenge.environment_sha256,'operator:representative-media')
@@ -87,6 +88,7 @@ class Witnesses:
                                 sampled=int((self.registry.clock.utc()-1000)*1000)+2000, digest=digest)
         self.coordinator.advance()
         self.coordinator.readiness(self.player['player_id'],report(self.coordinator,self.player,sequence=self.sequence))
+        self.registry.authenticate(self.player['token'])   # the Player's poll: Central heard it
         plan = self.coordinator.delivery(self.player['player_id'],1)['plan']
         now_ms = int((self.registry.clock.utc()-1000)*1000)+1000
         for binding in plan.bindings:
@@ -129,6 +131,7 @@ class Witnesses:
         self.coordinator.advance()
         self.sequence += 1
         self.coordinator.readiness(self.player['player_id'],report(self.coordinator,self.player,sequence=self.sequence))
+        self.registry.authenticate(self.player['token'])   # the Player's poll: Central heard it
 
 
 def assert_qualified_evidence(registry, witness):

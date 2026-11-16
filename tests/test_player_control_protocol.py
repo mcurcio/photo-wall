@@ -315,9 +315,10 @@ def test_control_expiry_is_sampled_after_waiting_for_player_lock(
     waiting = threading.Event()
     original = registry._control_player
 
-    def mark_lock_wait(conn, locked_player_id, locked_epoch):
-        waiting.set()
-        original(conn, locked_player_id, locked_epoch)
+    def mark_lock_wait(conn, locked_player_id, locked_epoch, *, lock=True):
+        if lock:            # a read takes no row lock, so never waits (2026-11-16)
+            waiting.set()
+        original(conn, locked_player_id, locked_epoch, lock=lock)
 
     monkeypatch.setattr(registry, "_control_player", mark_lock_wait)
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -327,11 +328,15 @@ def test_control_expiry_is_sampled_after_waiting_for_player_lock(
                 ack = ControlAck(authority_epoch=epoch,
                                  delivery_id=first["delivery_id"], result="applied")
                 future = executor.submit(registry.control_ack_response, player_id, ack)
+                assert waiting.wait(timeout=2)
+                registry.clock.advance(61)
             else:
+                # The same state, read unlocked, is the same delivery while it is pending; once
+                # expired the reissue writes, so it waits for the row lock first.
+                registry.clock.advance(61)
                 future = executor.submit(registry.issue_control_delivery_record,
                                          player_id, epoch, "a" * 64)
-            assert waiting.wait(timeout=2)
-            registry.clock.advance(61)
+                assert waiting.wait(timeout=2)
         outcome = future.result(timeout=5)
     if operation == "ack":
         assert outcome.model_dump(exclude_none=True) == {"accepted": False}

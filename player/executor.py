@@ -27,7 +27,7 @@ from contracts.models import (
 )
 from contracts.node_app_link import FrameBlack
 from contracts.on_screen import kept_from
-from contracts.time import Monotonic
+from contracts.time import DRIFT_RATE, Monotonic
 from player.cache import Cache, CacheCapacityError, CacheError
 from player.frame_black import DueLayer, frame_black
 from player.look import alone, handed_over, held, look_at
@@ -41,6 +41,11 @@ from player.show_clock import ShowClock
 from player.visibility import beneath_shown, shed, shown_within, visible_now
 
 DRAW_GRACE = 0.5
+# Seconds by which the clock bound Central holds for this Player (its last reported bound grown by
+# DRIFT_RATE since, central/coordination.py `_held_photos`) may part from the Player's own before
+# readiness is numbered again (`Executor.readiness`): under the 0.1 s floor Central's guards take,
+# and at DRIFT_RATE about one report in eight minutes for a Player whose bound stays tight.
+CLOCK_BOUND_SLACK = 0.05
 """Seconds a request the renderer answers "pending" is waited on before its layers fail ("decode").
 It must exceed the longest a renderer holds a commit in flight (player/pacing.py `OVERDUE`) plus
 one planning tick (player/service.py `PLANNING_TICK_MS`), or a held request on a silent Output is
@@ -170,6 +175,11 @@ class Executor:
         self._pin_intents: dict[str, str] = {}
         self._sequence = 0
         self._reported: dict[int, dict[str, int]] = {}
+        # The latest readiness numbered (`readiness`): what it said, and its bound as of when (this
+        # machine's monotonic clock), from which the bound Central holds is grown.
+        self._readiness: Readiness | None = None
+        self._readiness_state: tuple | None = None
+        self._readiness_at = 0.0
         # The number of the latest observation (`_report`), never reused while this process runs;
         # each process enrolls into a new authority epoch, so (epoch, number) names one report.
         self._report_sequence = 0
@@ -967,7 +977,14 @@ class Executor:
 
     def readiness(self) -> Readiness | None:
         """Readiness for the current plan; None while the ShowClock is not anchored, the one
-        decider of "no readiness yet" (a Player without Central's time claims nothing)."""
+        decider of "no readiness yet" (a Player without Central's time claims nothing).
+
+        Level state, numbered once per change (2026-11-16: numbered on every ask, it was posted
+        and written every half second): asked again while what it says is unchanged it is the
+        same report, its number and time kept, so the Player sends it once and Central writes it
+        once. A change is any field but its number, its time and its clock bound, which grows
+        with time; the bound counts as changed when the one Central holds (this report's, grown
+        by DRIFT_RATE) parts from the Player's own by more than CLOCK_BOUND_SLACK."""
         with self._lock:
             if not self._plan:
                 raise AuthorityError("no current plan")
@@ -981,7 +998,6 @@ class Executor:
                 for assignment in imminent:
                     key = assignment.layer.assignment_id
                     failures[key] = Failure(assignment_id=key, code="capacity")
-            self._sequence += 1
             # Wire values remain finite. The bound is a quality Central reads, never a failure.
             uncertainty = self.show_clock.uncertainty
             if not math.isfinite(uncertainty):
@@ -994,17 +1010,29 @@ class Executor:
                                    readiness_sequence=self._assignments[key].granted_sequence)
                          for key in prepared if not self._assignments[key].committed
                          and self._assignments[key].granted_sequence is not None)
+            generations = {key: self._assignments[key].readiness_generation for key in prepared}
+            state = (self._plan.plan_id, self._plan.revision, self._last_epoch,
+                     tuple(sorted(self.secured_ids())), prepared, self._capacity_ok,
+                     tuple(failures[key] for key in sorted(failures)), lost, self._carried(),
+                     tuple(sorted(generations.items())))
+            monotonic = self.clock.monotonic()
+            previous = self._readiness
+            if (previous is not None and state == self._readiness_state
+                    and abs(previous.clock_uncertainty
+                            + DRIFT_RATE * (monotonic - self._readiness_at)
+                            - uncertainty) <= CLOCK_BOUND_SLACK):
+                return previous
+            self._sequence += 1
             readiness = Readiness(
                 plan_id=self._plan.plan_id, revision=self._plan.revision,
                 authority_epoch=self._last_epoch, sequence=self._sequence,
-                secured=tuple(sorted(self.secured_ids())),
-                prepared=prepared, capacity_ok=self._capacity_ok, clock_uncertainty=uncertainty,
-                observed_at=now, failures=tuple(failures[key] for key in sorted(failures)),
-                lost_grants=lost, carried=self._carried(),
+                secured=state[3], prepared=prepared, capacity_ok=self._capacity_ok,
+                clock_uncertainty=uncertainty, observed_at=now, failures=state[6],
+                lost_grants=lost, carried=state[8],
             )
-            self._reported[self._sequence] = {
-                key: self._assignments[key].readiness_generation for key in readiness.prepared
-            }
+            self._readiness, self._readiness_state, self._readiness_at = (
+                readiness, state, monotonic)
+            self._reported[self._sequence] = generations
             for sequence in sorted(self._reported)[:-128]:
                 del self._reported[sequence]
             return readiness

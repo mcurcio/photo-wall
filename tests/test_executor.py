@@ -780,7 +780,8 @@ def test_a_refused_grant_is_reported_lost_with_its_own_sequence(tmp_path):
     rig.secure()
     rig.executor.prepare_imminent()
     ready = rig.executor.readiness()
-    for _ in range(128):              # an outage longer than the Player's report window
+    for _ in range(128):              # more changes than the Player's report window holds
+        rig.executor._readiness_state = None    # (readiness is numbered once per change)
         rig.executor.readiness()
     late = Commit(plan_id="stable", revision=1, authority_epoch=1, assignment_ids=("picture",),
                   readiness_sequence=ready.sequence, committed_at=rig.clock.utc())
@@ -1552,3 +1553,39 @@ def test_a_still_photo_is_reported_once_and_each_change_of_its_state_once(tmp_pa
         ("presented", "none"), ("fallback", "expired")]
     numbers = [report.sequence for report in reports]
     assert numbers == sorted(set(numbers))
+
+
+def test_readiness_is_numbered_once_per_change(tmp_path):
+    """Readiness is level state, numbered when it changes: asked again while nothing changed it
+    keeps its number (the Player sends it once, Central writes it once); a change (a photo
+    prepared, the plan's next revision) takes a new number. Mutation probe: number every ask ->
+    the second ask's sequence differs."""
+    rig = Rig(tmp_path)
+    rig.offer(layer())
+    rig.secure()
+    first = rig.executor.readiness()
+    rig.advance(.5)
+    assert rig.executor.readiness().sequence == first.sequence
+    rig.executor.prepare_imminent()
+    prepared = rig.executor.readiness()
+    assert prepared.prepared == ("picture",) and prepared.sequence > first.sequence
+    rig.advance(.5)
+    assert rig.executor.readiness().sequence == prepared.sequence
+    rig.offer(layer(), revision=2)
+    assert rig.executor.readiness().sequence > prepared.sequence
+
+
+def test_readiness_is_numbered_again_when_the_clock_bound_central_holds_drifts_off(tmp_path):
+    """Central grows the reported clock bound by DRIFT_RATE from its receipt (decision 0032); while
+    the Player's own bound stays tight the two part, and once they differ by more than
+    CLOCK_BOUND_SLACK the Player reports again, so a guard never stays wide for want of a report.
+    Mutation probe: leave the bound out of the change -> the same number after an hour."""
+    from contracts.time import DRIFT_RATE
+    from player.executor import CLOCK_BOUND_SLACK
+    rig = Rig(tmp_path)
+    rig.offer(valid_until=10_000)       # nothing else changes: no layer starts or ends
+    first = rig.executor.readiness()
+    rig.advance(CLOCK_BOUND_SLACK / DRIFT_RATE / 2)
+    assert rig.executor.readiness().sequence == first.sequence
+    rig.advance(CLOCK_BOUND_SLACK / DRIFT_RATE)
+    assert rig.executor.readiness().sequence > first.sequence

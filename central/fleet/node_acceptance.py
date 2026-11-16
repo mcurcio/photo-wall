@@ -14,9 +14,11 @@ from central.fleet.acceptance_query import load_current_app_control_in
 from central.fleet.device_fence import fence_in
 from central.fleet.node_app_links import load_current_node_app_link_for_player_in
 from central.fleet.node_sessions import NodeControlError, NodeSessions
+from central.infra.player_contact_store import heard_at_in
 from central.installation_repository import PostgresInstallationRepository
 from central.transaction_locks import acquire_runtime_locks
 from contracts.app_environment import AppEnvironmentRefV2
+from contracts.liveness import HEARD_WRITE_SECONDS
 from contracts.models import Plan, Readiness
 from contracts.node_boot import parse_node_boot_offer
 from contracts.node_display import parse_display_exchange
@@ -110,7 +112,7 @@ class NodeAcceptance:
             control = load_current_app_control_in(conn, request["device_id"], lock=True)
             # Central re-sends the applied delivery while the state is unchanged, so its age
             # is not liveness: the control witness is that the link's receipt is the current
-            # applied one (below); fresh, advancing readiness carries liveness.
+            # applied one (below); the Player's contact carries liveness (below).
             if control is None or control.last_result != "applied" or control.applied_at is None:
                 raise NodeControlError("node_qualification_control_stale")
             link = load_current_node_app_link_for_player_in(conn, control.player_id, control.authority_epoch, now)
@@ -131,9 +133,14 @@ class NodeAcceptance:
             if (environment.base_abi, environment.graphics_abi, environment.plugin_abi) != (
                     offer.base.base_abi, offer.base.graphics_abi, offer.base.plugin_abi):
                 raise NodeControlError("node_qualification_base_abi_mismatch")
-            feedback = conn.execute("SELECT readiness,received_at FROM player_feedback WHERE player_id=%s "
+            feedback = conn.execute("SELECT readiness FROM player_feedback WHERE player_id=%s "
                                     "AND authority_epoch=%s", (control.player_id, control.authority_epoch)).fetchone()
-            if feedback is None or now-feedback["received_at"] > self.MAX_GAP_SECONDS:
+            # Readiness is sent once per change, so its age says nothing: the Player is live when
+            # Central heard from it within the gap (its contact is written at most every
+            # HEARD_WRITE_SECONDS, central/infra/player_contact_store.py).
+            heard = heard_at_in(conn, control.player_id, control.authority_epoch)
+            if (feedback is None or heard is None
+                    or now - heard > self.MAX_GAP_SECONDS + HEARD_WRITE_SECONDS):
                 raise NodeControlError("node_qualification_readiness_stale")
             ready = Readiness.model_validate(feedback["readiness"])
             plan_row = conn.execute("SELECT manifest FROM plan_offers WHERE player_id=%s AND authority_epoch=%s "

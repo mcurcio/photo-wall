@@ -1260,7 +1260,7 @@ def test_a_late_main_loop_raises_the_health_fault_and_never_withdraws_readiness(
     The Player raises main_loop_late on its health channel and posts nothing on readiness, so
     the readiness Central holds (prepared included) stands; a late report with prepared=()
     would cancel the wall's coordinated groups. The late callbacks never run, and when the loop
-    recovers its next report is the executor's next sequence with nothing withdrawn."""
+    recovers readiness is unchanged, so nothing is posted: Central's holds, nothing withdrawn."""
     monkeypatch.setattr("player.service.DISPATCH_DEADLINE", .05)
     monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
 
@@ -1326,9 +1326,21 @@ def test_a_late_main_loop_raises_the_health_fault_and_never_withdraws_readiness(
             assert ran == []
             service.dispatcher = immediate
             monkeypatch.undo()
-            recovered = (await turn(service, server, 1))[0]
-            assert recovered["sequence"] == live["sequence"] + 1     # no gap, nothing in between
-            assert recovered["failures"] == [] and recovered["secured"] == live["secured"]
+            posted = len(readiness_posts(server))
+            polls = []
+
+            async def counted_poll():
+                polls.append(True)
+                await PlayerService.poll_state(service)
+                if len(polls) >= 3:
+                    service._stop.set()
+            monkeypatch.setattr(service, "poll_state", counted_poll)
+            service._stop.clear()
+            await asyncio.wait_for(service._control_loop(), 5)
+            assert readiness_posts(server)[posted:] == []   # unchanged: Central's report holds
+            recovered = service.executor.readiness()
+            assert recovered.sequence == live["sequence"]    # nothing in between
+            assert recovered.failures == () and list(recovered.secured) == live["secured"]
         finally:
             await close(service)
     asyncio.run(check())
@@ -1427,7 +1439,8 @@ def test_a_blocked_main_loop_keeps_its_session_and_resumes_once_the_loop_runs(
 def test_stale_feedback_on_a_late_loop_keeps_the_session(tmp_path, monkeypatch):
     """Central refuses readiness as stale (409) and the state poll that follows misses the
     dispatch deadline: the Player raises main_loop_late and the control loop carries on (the
-    next turn polls again); a late loop never ends the session here."""
+    next turn polls again); a late loop never ends the session here. A readiness answered stale
+    is judged, so it is not posted again: the next is the one for the plan a poll fetches."""
     monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
 
     async def check():
@@ -1451,7 +1464,7 @@ def test_stale_feedback_on_a_late_loop_keeps_the_session(tmp_path, monkeypatch):
         monkeypatch.setattr(service, "poll_state", poll)
         try:
             await asyncio.wait_for(service._control_loop(), 5)
-            assert len(stale) == 2 and len(polls) >= 5
+            assert len(stale) == 1 and len(polls) >= 5
             assert service.last_fault == "main_loop_late"
         finally:
             await close(service)
@@ -2623,4 +2636,38 @@ def test_a_report_never_holds_the_picture_while_central_is_away(tmp_path):
             await close(service)
         assert [(report.assignment_id, report.status) for report in posted] == [
             ("picture", "presented")]
+    asyncio.run(check())
+
+
+def test_an_idle_player_sends_its_readiness_and_its_acknowledgment_once(tmp_path, monkeypatch):
+    """Each turn of the control loop polls Central's state and asks the executor for readiness;
+    while neither changes, the Player sends no further readiness and acknowledges the same delivery
+    no further (2026-11-16: every half second each was a commit under Central's Coordination
+    lock). A change is sent at once: a new delivery is acknowledged, a new readiness posted.
+    Mutation probes: post every turn's readiness, or acknowledge every state -> many posts."""
+    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+
+    async def check():
+        service, server = await rig(tmp_path, negotiate=True)
+        try:
+            def posts(path):
+                return [request for request in server.requests if request.url.path == path]
+
+            before = len(posts("/v1/player/control-acks"))
+            assert before == 1      # the rig's first poll acknowledged its delivery
+            loop = asyncio.create_task(service._control_loop())
+            await asyncio.sleep(.3)         # about thirty turns of an unchanged state
+            assert len(posts("/v1/player/readiness")) == 1
+            assert len(posts("/v1/player/control-acks")) == before
+            server.offer(revision=2)        # a new delivery: acknowledged, and readiness changes
+            await asyncio.sleep(.2)
+            loop.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await loop
+            assert len(posts("/v1/player/control-acks")) == before + 1
+            sent = [json.loads(request.content) for request in posts("/v1/player/readiness")]
+            assert [report["revision"] for report in sent] == [1, 2]
+            assert sent[0]["sequence"] < sent[1]["sequence"]
+        finally:
+            await close(service)
     asyncio.run(check())

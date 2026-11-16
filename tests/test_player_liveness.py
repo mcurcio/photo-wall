@@ -1,11 +1,13 @@
 """Player liveness facts on the operator inventory (console pass 2, slice 1, bead 1).
 
-Liveness is the Central-clock time of the last readiness report Central accepted on a Player's
-current authority epoch; enrollment is not a report. Real PostgreSQL, explicit clocks."""
+Liveness is the Central-clock time Central last heard from a Player on its current authority
+epoch: any request the Player authenticates, written at most every HEARD_WRITE_SECONDS
+(central/infra/player_contact_store.py). It is its own domain: a readiness report is not liveness
+(readiness is sent once per change), and enrollment is not contact. Real PostgreSQL, explicit
+clocks."""
 
 import time
 
-import pytest
 from fastapi.testclient import TestClient
 from test_coordination import report, schedule, setup_players
 from test_registry import ADMIN, enroll, hello
@@ -14,8 +16,8 @@ import contracts.liveness as liveness
 import player.central_link
 import player.service
 from central.app import create_app
-from central.coordination import COORDINATION_LOCK, CoordinationError, Coordinator
-from contracts.models import Readiness
+from central.coordination import COORDINATION_LOCK, Coordinator
+from central.infra.player_contact_store import player_reports_in
 
 OPERATOR = {"Authorization": "Bearer " + ADMIN}
 
@@ -24,38 +26,48 @@ def players_by_id(inventory):
     return {entry.id: entry for entry in inventory.players}
 
 
+def reports(registry):
+    with registry.db.transaction() as conn:
+        return player_reports_in(conn, registry.clock.utc())
+
+
 def inventory(registry):
-    return registry.inventory().with_liveness(
-        Coordinator(registry.db, registry.clock).player_reports_lock_free())
+    return registry.inventory().with_liveness(reports(registry))
 
 
-def accepted_report(coordinator, identity, *, sequence=1):
-    assert coordinator.readiness(identity["player_id"], report(coordinator, identity,
-                                                               sequence=sequence))
+def heard(registry, identity):
+    """One request the Player authenticates."""
+    assert registry.authenticate(identity["token"])["id"] == identity["player_id"]
 
 
 def test_silence_threshold_is_derived_from_the_players_own_loop_constants():
     assert liveness.SILENT_AFTER_SECONDS == (
         2 * liveness.REQUEST_TIMEOUT + liveness.SESSION_BACKOFF[0] + liveness.REPORT_INTERVAL
-    ) == 31.5
+        + liveness.HEARD_WRITE_SECONDS
+    ) == 36.5
     # The Player binds the same objects, so its loop cannot drift from the threshold.
     assert player.service.BACKOFF is liveness.SESSION_BACKOFF
     assert player.service.REPORT_INTERVAL is liveness.REPORT_INTERVAL
     assert player.central_link.REQUEST_TIMEOUT is liveness.REQUEST_TIMEOUT
 
 
-def test_an_accepted_report_sets_last_report_at_from_centrals_clock(registry):
+def test_a_request_sets_last_report_at_from_centrals_clock_at_most_every_heard_write(registry):
+    """Mutation probe: write the contact on every request -> 1003 after the second."""
     identity, _, _ = enroll(registry)
-    coordinator = Coordinator(registry.db, registry.clock)
-    coordinator.advance()
-    registry.clock.advance(7)   # received_at must differ from last_seen (enrollment time)
-    accepted_report(coordinator, identity)
+    registry.clock.advance(7)   # heard_at must differ from last_seen (enrollment time)
+    heard(registry, identity)
     seen = players_by_id(inventory(registry))[identity["player_id"]]
-    assert seen.last_report_at == 1007
-    assert seen.last_seen == 1000
+    assert (seen.last_report_at, seen.last_seen) == (1007, 1000)
+    registry.clock.advance(liveness.HEARD_WRITE_SECONDS - 1)
+    heard(registry, identity)
+    assert players_by_id(inventory(registry))[identity["player_id"]].last_report_at == 1007
+    registry.clock.advance(1)
+    heard(registry, identity)
+    assert players_by_id(inventory(registry))[identity["player_id"]].last_report_at == (
+        1007 + liveness.HEARD_WRITE_SECONDS)
 
 
-def test_unbound_player_is_offered_an_empty_plan_and_its_report_is_heard_over_http(registry):
+def test_unbound_player_is_heard_over_http(registry):
     identity, _, _ = enroll(registry)
     hello(registry, identity)
     player_headers = {"Authorization": "Bearer " + identity["token"]}
@@ -66,29 +78,31 @@ def test_unbound_player_is_offered_an_empty_plan_and_its_report_is_heard_over_ht
         client.app.state.coordinator.advance()
         plan = client.get("/v1/player/state", headers=player_headers).json()["plan"]
         assert plan is not None and plan["layers"] == [] and plan["bindings"] == []
-        readiness = Readiness(plan_id=plan["plan_id"], revision=plan["revision"],
-                              authority_epoch=plan["authority_epoch"], sequence=1,
-                              clock_uncertainty=.01, capacity_ok=True,
-                              observed_at=registry.clock.utc(), lost_grants=())
-        response = client.post("/v1/player/readiness", headers=player_headers,
-                               json=readiness.model_dump(mode="json"))
-        assert response.json() == {"accepted": True}
         after = client.get("/v1/operator/inventory", headers=OPERATOR).json()
         assert after["players"][0]["last_report_at"] == 1002
 
 
-def test_enrolled_player_without_a_report_has_last_seen_but_no_last_report_at(registry):
+def test_a_readiness_report_is_not_liveness(registry):
+    """One concept, one domain: an accepted readiness report writes no contact. Mutation probe:
+    read liveness from player_feedback again -> 1016."""
+    players = setup_players(registry, count=1)
+    coordinator = Coordinator(registry.db, registry.clock)
+    schedule(coordinator, ["frame-0"])
+    registry.clock.advance(6)
+    assert coordinator.readiness(players[0]["player_id"], report(coordinator, players[0]))
+    assert players_by_id(inventory(registry))[players[0]["player_id"]].last_report_at is None
+
+
+def test_enrolled_player_without_contact_has_last_seen_but_no_last_report_at(registry):
     identity, _, _ = enroll(registry)
     seen = players_by_id(inventory(registry))[identity["player_id"]]
     assert seen.last_report_at is None
     assert seen.last_seen == 1000
 
 
-def test_reenrollment_hides_the_report_from_the_previous_authority_epoch(registry):
+def test_reenrollment_hides_the_contact_from_the_previous_authority_epoch(registry):
     identity, key, _ = enroll(registry)
-    coordinator = Coordinator(registry.db, registry.clock)
-    coordinator.advance()
-    accepted_report(coordinator, identity)
+    heard(registry, identity)
     assert players_by_id(inventory(registry))[identity["player_id"]].last_report_at == 1000
     registry.clock.advance(3)
     fresh, _, _ = enroll(registry, key)
@@ -96,31 +110,16 @@ def test_reenrollment_hides_the_report_from_the_previous_authority_epoch(registr
     seen = players_by_id(inventory(registry))[identity["player_id"]]
     assert seen.last_report_at is None
     assert seen.last_seen == 1003
+    heard(registry, fresh)      # the new epoch is heard at once, however recent the old contact
+    assert players_by_id(inventory(registry))[identity["player_id"]].last_report_at == 1003
 
 
 def test_a_retired_player_has_no_report(registry):
     identity, _, _ = enroll(registry)
-    coordinator = Coordinator(registry.db, registry.clock)
-    coordinator.advance()
-    accepted_report(coordinator, identity)
+    heard(registry, identity)
     registry.retire(identity["player_id"])
-    assert coordinator.player_reports_lock_free().reports == {}
+    assert reports(registry).reports == {}
     assert players_by_id(inventory(registry))[identity["player_id"]].last_report_at is None
-
-
-def test_a_rejected_report_leaves_last_report_at_unchanged(registry):
-    players = setup_players(registry)
-    coordinator = Coordinator(registry.db, registry.clock)
-    schedule(coordinator, ["frame-0"])
-    registry.clock.advance(6)
-    first = report(coordinator, players[0])
-    assert first.secured and coordinator.readiness(players[0]["player_id"], first)
-    registry.bind("frame-0", players[1]["player_id"], "HDMI-A-2", expected_generation=1)
-    registry.clock.advance(1)
-    newer = first.model_copy(update={"sequence": 2, "observed_at": registry.clock.utc()})
-    with pytest.raises(CoordinationError, match="stale_binding"):
-        coordinator.readiness(players[0]["player_id"], newer)
-    assert players_by_id(inventory(registry))[players[0]["player_id"]].last_report_at == 1016   # schedule() moved the clock to 1010
 
 
 def test_ages_are_never_negative_after_the_wall_clock_steps_backward(registry):
@@ -130,10 +129,8 @@ def test_ages_are_never_negative_after_the_wall_clock_steps_backward(registry):
             assert entry.last_report_at is None or entry.last_report_at <= seen.read_at
 
     reporting, _, _ = enroll(registry)
-    coordinator = Coordinator(registry.db, registry.clock)
-    coordinator.advance()
     registry.clock.advance(10)
-    accepted_report(coordinator, reporting)             # received_at 1010, after every last_seen
+    heard(registry, reporting)                          # heard_at 1010, after every last_seen
     registry.clock.step_utc(-500)                       # Central's clock now reads 510
     seen = inventory(registry)
     assert seen.read_at == 1010

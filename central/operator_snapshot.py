@@ -4,6 +4,7 @@ from typing import Any
 
 from central.coordination import Coordinator
 from central.db import Database
+from central.infra.player_contact_store import player_reports_in
 from central.installation_models import InstallationInventory, OutputInterruption
 from central.media_repository import MediaRepository
 from central.planning_outcome import PlanningOutcomeView
@@ -72,9 +73,9 @@ class OperatorSnapshotReader:
         with self.db.read_snapshot() as conn:
             read_at = self.clock.utc()
             inventory = self.registry.inventory_in(conn, read_at)
-            reports = self.coordinator.player_reports_in(conn, read_at)
+            reports = player_reports_in(conn, read_at)
             readiness_diagnostics = project_readiness_diagnostics(
-                conn, read_at=read_at, frames=inventory.frames
+                conn, read_at=read_at, frames=inventory.frames, heard=reports
             )
             runtime = self.runtime_store.read_in(conn)
             media = self.media.media_read_in(conn)

@@ -88,17 +88,19 @@ class PostgresInstallationRepository:
         )
 
     def configuration_in(
-        self, conn, player_id: str, authority_epoch: int
+        self, conn, player_id: str, authority_epoch: int, *, lock: bool = True
     ) -> dict[str, list[OutputBinding]] | None:
         """The Player's bindings (`output_binding` of each), and those whose Frame is ready, under
         a share lock on its session, Frames and bindings; None when the session is not current.
-        The one query of a Player's configuration (Registry.configuration_in delegates here)."""
-        if not self.session_is_current_in(conn, player_id, authority_epoch, lock=True):
+        The one query of a Player's configuration (Registry.configuration_in delegates here).
+        `lock=False` reads the same without the share locks, for a caller that writes nothing
+        from it (a row lock takes a transaction id: a WAL flush at commit)."""
+        if not self.session_is_current_in(conn, player_id, authority_epoch, lock=lock):
             return None
         rows = conn.execute(
             f"SELECT f.*,b.output_id,{POSITION_COLUMNS},{DISPLAY_SIZE_COLUMNS} FROM bindings b "  # noqa: S608
             f"JOIN frames f ON f.id=b.frame_id {SEEN_DISPLAY_JOIN} {DISPLAY_SIZE_JOIN} "
-            "WHERE b.player_id=%s ORDER BY b.output_id FOR SHARE OF f,b",
+            "WHERE b.player_id=%s ORDER BY b.output_id" + (" FOR SHARE OF f,b" if lock else ""),
             (player_id,),
         ).fetchall()
         bindings = [output_binding(row) for row in rows]

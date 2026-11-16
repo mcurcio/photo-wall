@@ -6,6 +6,7 @@ from support.position import PORTRAIT_ON_WIDE, save_position
 from test_registry import enroll
 
 from central.coordination import Coordinator
+from central.infra.player_contact_store import heard_in, player_reports_in
 from central.readiness_diagnostics import project_readiness_diagnostics
 from contracts.models import Failure, Layer, Plan, Readiness
 
@@ -80,12 +81,15 @@ def _report(registry, plan, failures, *, sequence=1):
             (plan.player_id, plan.authority_epoch, sequence, registry.clock.utc(),
              Jsonb(report.model_dump(mode="json"))),
         )
+        heard_in(conn, plan.player_id, plan.authority_epoch, registry.clock.utc())
 
 
 def _project(registry):
     with registry.db.transaction() as conn:
         inventory = registry.inventory_in(conn, registry.clock.utc())
-        return project_readiness_diagnostics(conn, read_at=registry.clock.utc(), frames=inventory.frames)
+        return project_readiness_diagnostics(conn, read_at=registry.clock.utc(),
+                                             frames=inventory.frames,
+                                             heard=player_reports_in(conn, registry.clock.utc()))
 
 
 def test_projection_resolves_only_failed_assignment_across_multiple_outputs(registry):
@@ -134,12 +138,20 @@ def test_projection_suppresses_stale_frame_generation(registry):
     assert _project(registry) == ()
 
 
-def test_projection_suppresses_silent_feedback(registry):
+def test_projection_suppresses_a_silent_players_failures_and_keeps_a_heard_ones(registry):
+    """Silence is the Player's liveness (when Central last heard from it), never its readiness's
+    age: readiness is sent once per change, so a heard Player's report stays current however old.
+    Mutation probe: judge silence by `received_at` again -> the old report of a heard Player is
+    dropped."""
     identity, bindings, layers, _, _ = _seed(registry)
     plan = _offer(registry, identity, bindings, layers)
     _report(registry, plan, [Failure(assignment_id=layers[0].assignment_id, code="decode")])
+    registry.clock.advance(40)
     with registry.db.transaction() as conn:
-        conn.execute("UPDATE player_feedback SET received_at=%s WHERE player_id=%s",
+        heard_in(conn, identity["player_id"], identity["authority_epoch"], registry.clock.utc())
+    assert len(_project(registry)) == 1
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE player_contacts SET heard_at=%s WHERE player_id=%s",
                      (registry.clock.utc() - 40, identity["player_id"]))
     assert _project(registry) == ()
 
