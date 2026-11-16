@@ -113,8 +113,8 @@ bottom to top in `stack_order`.
   screen draws the very picture already shown. Whether the screen changes is decided in one place,
   `player/look.py`'s seam rule, from the composition alone: a layer does not fade in when its
   Frame shows its picture alone at full (`shown`, from what the Output last acknowledged drawing),
-  and does not fade out when what its Frame draws next is the same picture (the next layer that can
-  draw, which the composition carries in `following`: secured and granted if it awaits a grant; or, with none, the photo it keeps, "keep_this_photo"). The
+  and does not fade out when what its Frame draws next is the same picture (the topmost layer
+  that can draw as it ends, of its drawn layers and those the composition carries in `following`: secured and granted if it awaits a grant; or, with none, the photo it keeps, "keep_this_photo"). The
   executor makes each composition with these and reads what is seen through the same look
   (`look_at`), so it and the renderer never disagree on what a Frame shows. A composition the
   executor holds for a rejoin is looked the same way (`held`: each layer whose fade-out has not

@@ -28,7 +28,10 @@ import hashlib
 
 import pytest
 from fastapi.testclient import TestClient
+from support.frame_media import seed_variant
 from support.house_time import EVERY_DAY, UTC_HOUSE, clock_time, set_house
+from support.measured_photos import measure_all
+from support.photo_pools import photo, seed_pool
 from test_coordination import publish_fixture_catalog, setup_players
 from test_registry import ADMIN
 
@@ -52,7 +55,7 @@ def _scene(scene_id, **settings):
     fade = settings.get("fade", 0)
     keep_last = settings.get("keep_last", True)
     contribution = {"target": f"frame:{FRAME}", "role": FRAME, "kind": "media",
-                    "source_refs": ["library:1"]}
+                    "source_refs": [settings.get("source", "library:1")]}
     body = {"scene_id": scene_id, "revision": 1, "cycle_seconds": 20, "loop": True,
             "transition": {"style": settings.get("style", "fade_out_and_in"), "seconds": fade},
             "contributions": [{**contribution,
@@ -70,16 +73,35 @@ def _scene(scene_id, **settings):
     return body
 
 
-# The fixture photo's bytes: the Player checks every byte it shows against its digest.
-PHOTO = b"photo-wall"
+# The fixture photos' bytes by digest (10 bytes each, the size their made copies record,
+# tests/support/frame_media.py `seed_variant`): the Player checks every byte it shows against its digest.
+# Three photos, so the photos a Frame shows one after another, and two Scenes on one Frame, are
+# different pictures: the Player never fades between two layers of one picture (player/look.py, the
+# seam rule), and the fades these tests read are between pictures.
+PHOTOS = {hashlib.sha256(data).hexdigest(): data
+          for data in (b"photo-wa-a", b"photo-wa-b", b"photo-wa-c", b"photo-wa-o")}
+LIBRARY = tuple(PHOTOS)[:3]   # Source library:1's pool
+OTHER = tuple(PHOTOS)[3]      # Source other:1's (`_other_source`)
 
 
 def _rig(registry):
     set_house(registry.db, UTC_HOUSE)     # a Program's windows are on the UTC house clock
     player = setup_players(registry, count=1)[0]
-    publish_fixture_catalog(registry, digest=hashlib.sha256(PHOTO).hexdigest())
+    first, *more = LIBRARY
+    publish_fixture_catalog(registry, digest=first,
+                            also=tuple((f"original-{index}", digest) for index, digest in enumerate(more)))
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     return player, app, app.state.coordinator
+
+
+def _other_source(registry):
+    """Source `other:1`, a pool of one photo of its own (OTHER): a Scene on it (`_scene(...,
+    source="other:1")`) never shows a photo of library:1's, so two Scenes on one Frame, one on each,
+    always show different pictures (the Planner may give two Scenes of one pool the same photo)."""
+    other = photo("other", taken_at=registry.clock.utc(), width=2160, height=3840)
+    seed_pool(registry, "other:1", (other,))
+    measure_all(registry, (other,))
+    seed_variant(registry, other.asset_id, OTHER)
 
 
 def _save_and_start(client, body):
@@ -220,7 +242,7 @@ class _Frame:
         if plan is not None:
             for layer in plan.layers:
                 if layer.variant is not None:
-                    self.executor.acquire(layer.assignment_id, [PHOTO],
+                    self.executor.acquire(layer.assignment_id, [PHOTOS[layer.variant.sha256]],
                                           sha256=layer.variant.sha256, size=layer.variant.size)
             self.executor.prepare_imminent()
             self.coordinator.readiness(self.player["player_id"], self.executor.readiness())
@@ -378,6 +400,24 @@ def test_a_fading_ending_returns_fades_and_ends_black(registry, tmp_path):
         assert _shown(frame.lose_central(60)) == BLACK
 
 
+def test_a_fading_ending_of_the_photo_on_screen_holds_it_then_fades_to_black(registry, tmp_path):
+    """The ending's photo is the one on screen (a Source of one photo): the Player keeps it at full
+    across the seam, with no dip and return (player/look.py, the seam rule; owner, 2026-11-15: "The
+    player shouldn't be running any translations if the displayed content isn't going to change"),
+    and the ending still fades out to black and keeps nothing, an outage included: the kept photo
+    never swallows it. Mutation probe: fade at every seam (0.5 at 20.5 s)."""
+    player, app, coordinator = _rig(registry)
+    _other_source(registry)
+    frame = _Frame(registry, coordinator, player, tmp_path)
+    with TestClient(app) as client:
+        _play_one_cycle(client, frame, _scene("fade-end", ending=("fade", 4), fade=2, keep_last=True,
+                                              source="other:1"))
+        assert _shown(frame.advance(10.5)) == (False, [("photo", 1.0)])  # across the seam
+        assert _shown(frame.advance(2)) == (False, [("photo", 0.5)])  # fading out
+        assert _shown(frame.lose_central(2.5)) == BLACK
+        assert _shown(frame.lose_central(60)) == BLACK
+
+
 def test_a_fading_ending_fades_to_the_scene_beneath(registry, tmp_path):
     """A Scene playing beneath shows through the fading ending and stays after it."""
     player, app, coordinator = _rig(registry)
@@ -508,9 +548,11 @@ def test_back_to_back_programs_keep_their_fade(registry, tmp_path):
     it as authored: the hold is only for a photo nothing follows. Mutation probe: ignore what
     follows (full strength at 19.5 s)."""
     player, app, coordinator = _rig(registry)
+    _other_source(registry)
     frame = _Frame(registry, coordinator, player, tmp_path)
     with TestClient(app) as client:
-        for body in (_scene("first", fade=3, keep_last=True), _scene("second", fade=3, keep_last=True)):
+        for body in (_scene("first", fade=3, keep_last=True),
+                     _scene("second", fade=3, keep_last=True, source="other:1")):
             saved = client.put(f"/v1/operator/scenes/{body['scene_id']}", json=body, headers=AUTH)
             assert saved.status_code == 200, saved.text
         now = registry.clock.utc()
@@ -525,10 +567,11 @@ def test_a_kept_photo_over_a_scene_beneath_fades_to_reveal_it(registry, tmp_path
     """A kept photo on top of a Scene that plays on beneath fades out to reveal it, as
     authored, and the Scene beneath stays."""
     player, app, coordinator = _rig(registry)
+    _other_source(registry)
     frame = _Frame(registry, coordinator, player, tmp_path)
     with TestClient(app) as client:
         _save_and_start(client, _scene("beneath", keep_last=False))
-        _play_one_cycle(client, frame, _scene("top", fade=3, keep_last=True))
+        _play_one_cycle(client, frame, _scene("top", fade=3, keep_last=True, source="other:1"))
         assert _shown(frame.advance(9.5)) == (False, [("photo", 1.0), ("photo", 0.33)])
         assert _shown(frame.advance(1)) == (False, [("photo", 1.0)])
 

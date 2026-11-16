@@ -310,6 +310,46 @@ def test_a_kept_photo_fades_out_while_another_layer_plays_on_beneath(tmp_path):
     assert fading and all(len(commit) == 3 and 0 < commit[2][1] < 1 for commit in fading)
 
 
+def _fades_out(wall: Wall, until: float) -> bool:
+    """Whether, over the top layer's last 2 s (108 to 110), what the screen shows at each tenth of a
+    second (the last commit by then) has the top plane part way down."""
+    shown = wall.run(until)
+    showing = [[commit for commit in shown if commit[0] <= 108.2 + tenth / 10][-1] for tenth in range(16)]
+    return all(0 < commit[-1][1] < 1 for commit in showing)
+
+
+def test_a_layer_of_the_same_photo_that_ends_before_it_does_not_swallow_its_fade_out(tmp_path):
+    """What the Frame draws next is what plays as the layer ends: a layer of the same photo beneath
+    it that starts and ends inside it (102 to 109.5, into its fade-out) is gone by then, so with
+    nothing after it the top layer fades out to black over its last 2 s as planned, never held at
+    full to a snap down."""
+    wall = Wall(tmp_path)
+    wall.plan.offer(
+        layer("top", data=b"a", variant=jpeg(b"a"), start=100, end=110, fade_out=2, priority=1,
+              awaits_grant=False),
+        layer("inside", data=b"a", variant=jpeg(b"a"), start=102, end=109.5, awaits_grant=False),
+        valid_until=130)
+    wall.plan.secure("top", b"a")
+    wall.plan.secure("inside", b"a")
+    assert _fades_out(wall, 111)
+
+
+def test_a_layer_of_the_same_photo_covered_at_the_end_does_not_swallow_the_fade_to_another(tmp_path):
+    """What the Frame draws as the layer ends is the topmost of what plays then: a layer of the same
+    photo starting beneath a Run of another photo (priority 0 under 1) is covered by it, so the top
+    layer fades out over its last 2 s to reveal the other photo, never cut to it."""
+    wall = Wall(tmp_path)
+    wall.plan.offer(
+        layer("top", data=b"a", variant=jpeg(b"a"), start=100, end=110, fade_out=2, priority=2,
+              awaits_grant=False),
+        layer("other", data=b"b", variant=jpeg(b"b"), start=100, end=130, priority=1, awaits_grant=False),
+        layer("covered", data=b"a", variant=jpeg(b"a"), start=105, end=130, awaits_grant=False),
+        valid_until=130)
+    for key, data in (("top", b"a"), ("other", b"b"), ("covered", b"a")):
+        wall.plan.secure(key, data)
+    assert _fades_out(wall, 111)
+
+
 def test_a_rejoin_to_a_new_plans_layer_of_the_same_photo_keeps_the_picture(tmp_path):
     """Central replans to a layer of the photo on screen starting later (decision 0032, rejoining):
     the superseded layer is held, still, until the new one starts and would dissolve in over 2 s;

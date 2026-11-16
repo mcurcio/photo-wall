@@ -16,8 +16,9 @@ Rule this module owns (one home):
   translations if the displayed content isn't going to change"). A layer does not fade in when the
   Frame shows its picture alone at full (`OutputComposition.shown`: `alone` of what its Output last
   acknowledged drawing); it does not fade out when what the Frame draws next is its own picture: the
-  next layer to start during it on its Frame (of its drawn layers and `OutputComposition.following`),
-  or, with none and no other layer playing through its fade-out, itself, kept (contracts/
+  topmost layer playing on its Frame as it ends (of its drawn layers and
+  `OutputComposition.following`; a layer gone by then, or covered then, does not count), or, with
+  none and no other layer playing through its fade-out, itself, kept (contracts/
   on_screen.py "keep_this_photo"; the executor keeps it from each draw of it). Only an opaque picture is
   merged so (player/visibility.py `opaque`): a PNG may carry transparency, so it shows what lies
   beneath and always fades. Every other fade is drawn as planned. Whatever path brings the next
@@ -36,7 +37,7 @@ import math
 from collections.abc import Hashable, Sequence
 from dataclasses import replace
 
-from contracts.models import Layer, fade_share
+from contracts.models import Layer, fade_share, stack_order
 from player.planes import drawn_identity
 from player.rendering import LocalLayer, OutputComposition
 from player.visibility import opaque, visible_now
@@ -69,14 +70,15 @@ def _fades(composition: OutputComposition) -> dict[str, Spans]:
 
 
 def _draws_itself_next(layer: Layer, frame: tuple[Layer, ...]) -> bool:
-    """Whether what `layer`'s Frame draws next is `layer`'s own picture (module rule): the next of
-    `frame` to start during it, opaque, of its identity; or, with none and nothing else in `frame`
-    playing through its fade-out, `layer` kept (an opaque still, contracts/models.py)."""
+    """Whether what `layer`'s Frame draws next is `layer`'s own picture (module rule): the topmost
+    (contracts/models.py `stack_order`) of the rest of `frame` playing as `layer` ends, opaque, of
+    its identity; or, with none and nothing else in `frame` playing through its fade-out, `layer`
+    kept (an opaque still, contracts/models.py). A layer of its picture that is gone by its end, or
+    covered then, is not what follows it."""
     others = [other for other in frame if other.assignment_id != layer.assignment_id]
-    following = [other for other in others if layer.start < other.start <= layer.end]
+    following = [other for other in others if other.start <= layer.end < other.end]
     if following:
-        nearest = min(following, key=lambda other: other.start)
-        return _same(nearest, layer)
+        return _same(max(following, key=stack_order), layer)
     fading = layer.end - layer.fade_out
     return layer.after_end == "keep_this_photo" and not any(
         other.start < layer.end and other.end > fading for other in others)
