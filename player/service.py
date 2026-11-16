@@ -862,6 +862,7 @@ class PlayerService:
                     self._seen_commits.clear()
                     self._cancelled.clear()
                 self._plan = state.plan
+                self._reports.renewed(state.plan.plan_id, state.plan.revision)
             for revoked in state.revocations:
                 self.executor.accept_revocation(revoked)
                 if revoked.mode == "cancel":
@@ -1252,7 +1253,14 @@ class PlayerService:
                     await self.request("POST", "/v1/player/observations",
                                        body=observation.model_dump(mode="json"))
                 except StaleFeedback:
+                    # Central offered a newer revision meanwhile: sent again under it, once the
+                    # Player holds it (the executor reports a change once, never again).
+                    self._reports.stale(observation)
                     await self._recover_stale()
+                    with self._lock:
+                        plan = self._plan
+                    if plan is not None:
+                        self._reports.renewed(plan.plan_id, plan.revision)
                 except REQUEST_FAILURES as error:
                     # Decision 0032: tried again at the next turn, with its number, so a Frame's
                     # shown history survives an outage and Central writes it once however often

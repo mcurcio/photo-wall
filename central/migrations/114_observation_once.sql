@@ -8,6 +8,10 @@
 -- keeps NULLs, which never conflict. The table holds about 10,000 rows (central/infra/
 -- execution_event_retention.py), so the index builds at once. Plain statements only: no trigger,
 -- stored procedure or function. Forward-only (central/db.py).
+--
+-- migrate() runs in central/db.py's transaction, so the ALTER waits at most its 5 s lock_timeout
+-- behind an open transaction on the table (a slow COMMIT), and the queue behind it no longer: past
+-- it the start fails with nothing changed and the pod tries again.
 ALTER TABLE execution_events ADD COLUMN authority_epoch BIGINT,
   ADD COLUMN report_sequence BIGINT;
 CREATE UNIQUE INDEX execution_events_report_once

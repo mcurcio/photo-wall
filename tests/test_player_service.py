@@ -2000,6 +2000,60 @@ def test_observation_renewal_race_fetches_current_state_without_reenrollment(tmp
     asyncio.run(check())
 
 
+def test_a_report_central_answers_stale_is_sent_again_under_the_newer_revision(tmp_path):
+    """A report is a change of state, made once (player/executor.py `_report`), so one Central
+    answers stale (409: it offered a newer revision meanwhile) is never made again: it waits for
+    the Player to hold a newer revision and is sent under it with its number unchanged, and not
+    before (a 409 with no newer revision held sends nothing more). Mutation probe: drop the report
+    on StaleFeedback, or re-queue it unchanged."""
+    async def check():
+        service, server = await rig(tmp_path)
+        sender = None
+        try:
+            service._feedback()
+            assert await service.download(service._jobs[0])
+            service.tick_main()
+            readiness = service._feedback()
+            server.offer(commits=(Commit(plan_id="offered", revision=1, authority_epoch=1,
+                readiness_sequence=readiness.sequence, assignment_ids=("picture",),
+                committed_at=100),))
+            await service.poll_state()
+            assert len(service._reports) == 1
+            posted, polled = [], asyncio.Event()
+
+            def handle(request):
+                if request.url.path == "/v1/player/observations":
+                    posted.append(Observation.model_validate_json(request.content))
+                    if len(posted) == 1:
+                        return httpx.Response(409, json={"error": "stale_observation"})
+                if request.url.path == "/v1/player/state":
+                    polled.set()
+                return server(request)
+
+            await service.link.client.aclose()
+            service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+            sender = asyncio.create_task(service._observation_loop())
+            await asyncio.wait_for(polled.wait(), 2)
+            await asyncio.sleep(.2)
+            assert len(posted) == 1 and posted[0].revision == 1 and len(service._reports) == 1
+            server.offer(revision=2, commits=server.state.commits)
+            await service.poll_state()
+
+            async def sent_again():
+                while len(posted) < 2:
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(sent_again(), 2)
+            await asyncio.sleep(.1)
+            assert posted == [posted[0], posted[0].model_copy(update={"revision": 2})]
+            assert not service._reports
+        finally:
+            if sender:
+                sender.cancel()
+                await asyncio.gather(sender, return_exceptions=True)
+            await close(service)
+    asyncio.run(check())
+
+
 def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_path):
     """Loopback TCP + PostgreSQL + actual Frame media bytes; RecordingRenderer only."""
     import socket
