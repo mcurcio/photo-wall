@@ -108,7 +108,7 @@ async def _born(db: Database) -> bool:
     def read() -> bool:
         with db.transaction() as conn:
             return conn.execute(
-                "SELECT 1 FROM node_link_records WHERE device_id=%s AND stream='KV_state_display' "
+                "SELECT 1 FROM node_states WHERE device_id=%s AND stream='KV_state_display' "
                 "AND subject='$KV.state_display.birth'", (device_id_for_serial(SERIAL),)).fetchone() is not None
     return await asyncio.to_thread(read)
 

@@ -241,7 +241,7 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
                 def read() -> bool:
                     with database.transaction() as conn:
                         return conn.execute(
-                            "SELECT 1 FROM node_link_records WHERE device_id=%s AND stream=%s AND subject=%s",
+                            "SELECT 1 FROM node_states WHERE device_id=%s AND stream=%s AND subject=%s",
                             (device_id, state_stream("host"), state_prefix("host") + LIGHT_SENSOR_KEY),
                         ).fetchone() is not None
                 return await asyncio.to_thread(read)

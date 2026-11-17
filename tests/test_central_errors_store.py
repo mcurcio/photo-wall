@@ -214,7 +214,7 @@ def test_a_pi_s_unreadable_reading_doubts_its_sensor_without_rolling_back_the_ho
     window = lights.current().lights["window"]
     assert window.doubt is not None and window.doubt.line1.startswith("Photo Wall can't read Window")
     with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM node_link_records WHERE stream=%s",
+        assert conn.execute("SELECT count(*) AS n FROM node_states WHERE stream=%s",
                             (HOST_STATE_STREAM,)).fetchone()["n"] == 1
 
 

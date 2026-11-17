@@ -36,8 +36,15 @@ Output loss names. A partial index on finished work would skip the work table's 
 completing work changes `completed_at`, so every completion would become a full (non-HOT)
 update; decision 0033 keeps HOT completions (as it does for the reconciler's scan).
 
+`events` (decision 0034, migration 119; `central/infra/events.py`, the one home of its week,
+`EVENTS_KEPT_SECONDS`) keeps nothing past the week: every row recorded before the cut goes, oldest
+first by `recorded_at`'s index, in whole batches like the rest. Its rows are stamped by the
+database's clock, so its cut is that clock's too (`clock_timestamp()` in the statement), never
+`clock`'s: a clock is compared only with itself. Its walk passes no kept row.
+
 Not here: `node_app_links` holds one row per device generation and needs no trim
-(`central/fleet/node_app_links.py`); `node_link_records` is E5's (docs/runbook.md).
+(`central/fleet/node_app_links.py`); `node_states` holds one row per Pi's state key and needs none
+(`central/infra/node_link_store.py`).
 """
 
 from __future__ import annotations
@@ -47,6 +54,7 @@ from typing import Final
 from central.fleet.node_display import RECENT_EXCHANGES
 from central.fleet.node_observations import PREPARATION_KEYS
 from central.infra.batched_retention import Begin, drain
+from central.infra.events import EVENTS_KEPT_SECONDS
 from contracts.time import Clock
 
 KEPT_SECONDS: Final = 7 * 86400
@@ -129,6 +137,12 @@ _RULES: Final[tuple[tuple[str, str], ...]] = (
          + _past_newest("o", "node_manager_observations", "sequence", PREPARATION_KEYS, previous=True))
      + " DELETE FROM node_manager_observations o USING batch b "
      "WHERE o.producer_id = b.producer_id AND o.sequence = b.sequence"),
+    ("events",
+     "WITH due AS (SELECT id, recorded_at FROM events WHERE recorded_at < "
+     f"EXTRACT(EPOCH FROM clock_timestamp()) - {EVENTS_KEPT_SECONDS} "
+     "ORDER BY recorded_at LIMIT %(batch_rows)s), "
+     "batch AS (SELECT * FROM due WHERE (SELECT count(*) FROM due) = %(batch_rows)s) "
+     "DELETE FROM events e USING batch b WHERE e.id = b.id"),
 )
 
 
@@ -145,13 +159,13 @@ class NodeRecordRetention:
         self.kept_seconds, self.batch_rows, self.batches = kept_seconds, batch_rows, batches
 
     def prune(self) -> dict[str, int]:
-        """One pass: each table's rule drained in the table's order above, at most
+        """One pass: each table's rule drained in the table's order above (`events` last), at most
         `batch_rows * batches` rows a table. Returns the rows deleted per result key (every key
         present, 0 when nothing was due).
 
         A table deletes a whole batch or nothing: with fewer than `batch_rows` rows past its
         rule the pass writes nothing and takes no row lock, so a tick with nothing due costs
-        four index reads and no commit.
+        five index reads and no commit.
 
         Never deletes a row the table above lists as kept; never takes an advisory lock; never
         waits on the Coordination or Runtime lock (a test holds both while it runs).

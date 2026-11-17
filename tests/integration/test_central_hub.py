@@ -91,7 +91,9 @@ async def _rows(db: Database, sql: str, params: tuple = ()) -> list[dict]:
 
 
 async def _records(db: Database, serial: str, stream: str) -> list[dict]:
-    rows = await _rows(db, "SELECT epoch, seq, subject, data FROM node_link_records WHERE device_id=%s AND stream=%s "
+    """An event stream's `events` records, or a state bucket's newest value per key (`node_states`)."""
+    source = "node_states WHERE" if stream.startswith("KV_") else "events WHERE kind='record' AND"
+    rows = await _rows(db, f"SELECT epoch, seq, subject, data FROM {source} device_id=%s AND stream=%s "
                            "ORDER BY epoch, seq", (device_id_for_serial(serial), stream))
     return [{**row, "data": bytes(row["data"])} for row in rows]
 
@@ -198,8 +200,8 @@ def test_fleet_keeps_the_hub_with_the_enrolled_set(database, tmp_path):
 
             # 3. Hub restart, empty: WALL past the recorded mark, Central's current wall documents on
             # both Nodes, and the drains resume in the Nodes' unchanged epochs.
-            [mark] = await _rows(database, "SELECT mark FROM node_bus_wall")
-            assert mark["mark"] >= 1 + WALL_MARGIN
+            mark = await PgWallMarks(database, lambda: None).mark()
+            assert mark >= 1 + WALL_MARGIN
             documents.timing = b"timing-2"   # Central's projection changes while the hub is away
             hub.crash()
             hub.start()
@@ -207,7 +209,7 @@ def test_fleet_keeps_the_hub_with_the_enrolled_set(database, tmp_path):
             left = lambda: RESTART_SECONDS - (time.monotonic() - restarted)  # noqa: E731
 
             async def recreated():
-                return await _wall_first_seq(hub) == mark["mark"] + 1 + WALL_MARGIN
+                return await _wall_first_seq(hub) == mark + 1 + WALL_MARGIN
             await until(recreated, left(), "Fleet re-creates WALL at the recorded mark + 1 + K")
             for serial in (FIRST, SECOND):
                 await until(walled(serial, b"timing-2"), left(), f"{serial}'s wall view holds the re-put timing")
@@ -216,7 +218,7 @@ def test_fleet_keeps_the_hub_with_the_enrolled_set(database, tmp_path):
             async def recorded():
                 return any(row["data"] == b"after-restart" for row in await _records(database, FIRST, RECORDS))
             await until(recorded, left(), "an event emitted after the restart is recorded")
-            assert await _rows(database, "SELECT * FROM node_link_gaps WHERE lost IS NULL") == []
+            assert await _rows(database, "SELECT * FROM events WHERE kind='gap' AND body->>'lost' IS NULL") == []
 
             # 4. Retire: the account leaves the file and the hub; the links stop; the records stay.
             held = await _records(database, SECOND, STATE)

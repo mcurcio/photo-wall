@@ -149,7 +149,7 @@ def test_a_reading_that_fails_never_rolls_back_the_host_lines_record(registry, m
     monkeypatch.setattr(room_light_store, "_reading_in", failing)
     _record_host_line(registry, LightSensorJudge(PgRoomLights(registry.db, PgHouseLock())),
                       encode_light_sensor(LightSensorReading(reading=Measured(lux=5.0))))
-    assert _sql(registry, "SELECT seq FROM node_link_records WHERE stream=%s", (HOST_STATE_STREAM,)) == [{"seq": 1}]
+    assert _sql(registry, "SELECT seq FROM node_states WHERE stream=%s", (HOST_STATE_STREAM,)) == [{"seq": 1}]
     monkeypatch.undo()
     assert _sql(registry, "SELECT reading FROM reading_words WHERE source=%s", (PI_SOURCE,)) == []
     lights = PgRoomLights(registry.db, PgHouseLock())
@@ -173,7 +173,7 @@ def test_a_refusal_that_fails_never_rolls_back_the_host_lines_record(registry, m
 
     monkeypatch.setattr(room_light_store, "_refusal_in", failing)
     _record_host_line(registry, LightSensorJudge(PgRoomLights(registry.db, PgHouseLock())), b"not a reading")
-    assert _sql(registry, "SELECT seq FROM node_link_records WHERE stream=%s", (HOST_STATE_STREAM,)) == [{"seq": 1}]
+    assert _sql(registry, "SELECT seq FROM node_states WHERE stream=%s", (HOST_STATE_STREAM,)) == [{"seq": 1}]
 
 
 def test_the_home_assistant_page_reads_when_each_entity_was_heard_and_its_name(registry):

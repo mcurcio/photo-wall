@@ -261,7 +261,7 @@ def test_an_undecodable_report_is_skipped_and_the_rest_recorded(registry):
     pi = enroll_pi(registry, "pi-a")
     _report(registry, "pi-a", "HDMI-A-1", None, data=b'{"not": "a report"}')
     assert _seen(registry, pi, "HDMI-A-1") is None
-    assert len(_sql(registry, "SELECT 1 FROM node_link_records WHERE stream=%s", (REPORT_STREAM,))) == 1
+    assert len(_sql(registry, "SELECT 1 FROM node_states WHERE stream=%s", (REPORT_STREAM,))) == 1
 
 
 def test_the_hardware_tab_reads_the_display_on_a_frames_output(registry):

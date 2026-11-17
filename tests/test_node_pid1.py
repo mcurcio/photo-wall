@@ -1348,12 +1348,12 @@ def test_node_pid1_dark(node_pid1_inputs, node_host, registry, tmp_path):
 
 
 def verdict_rows(db):
-    """Every value of the health line's verdict key Central recorded from the Node, oldest first,
-    decoded (None for a value that does not decode)."""
+    """The newest value of the health line's verdict key Central recorded from the Node (Central
+    keeps the newest per state key, node_states), decoded (None for a value that does not decode)."""
     with db.transaction() as conn:
         rows = conn.execute(
-            "SELECT epoch,seq,data FROM node_link_records WHERE device_id=%s AND stream=%s AND subject=%s "
-            "ORDER BY recorded_at,seq", (DEVICE_ID, HEALTH_STATE_STREAM, HEALTH_REPORT_SUBJECT)).fetchall()
+            "SELECT epoch,seq,data FROM node_states WHERE device_id=%s AND stream=%s AND subject=%s",
+            (DEVICE_ID, HEALTH_STATE_STREAM, HEALTH_REPORT_SUBJECT)).fetchall()
     decoded = []
     for row in rows:
         try:
@@ -1389,18 +1389,22 @@ def await_verdict(db, work, name, until, seconds):
 
 
 def link_rows(db):
-    """What Central's database holds about the Node's bus: the records, gap rows and cursors its
-    NodeLinks committed, and its presence (whether Fleet's last look saw the hub hold the leaf)."""
+    """What Central's database holds about the Node's bus: the records (each state key's newest
+    value and every event record), gaps and cursors its NodeLinks committed, and its presence
+    (whether Fleet's last look saw the hub hold the leaf)."""
     with db.transaction() as conn:
         records = conn.execute(
-            "SELECT stream,epoch,seq,subject FROM node_link_records WHERE device_id=%s "
-            "ORDER BY recorded_at,stream,seq", (DEVICE_ID,)).fetchall()
+            "SELECT stream,epoch,seq,subject,recorded_at FROM node_states WHERE device_id=%(d)s "
+            "UNION ALL SELECT stream,epoch,seq,subject,recorded_at FROM events "
+            "WHERE kind='record' AND device_id=%(d)s ORDER BY recorded_at,stream,seq",
+            {"d": DEVICE_ID}).fetchall()
         gaps = conn.execute(
-            "SELECT stream,epoch,after_seq,lost FROM node_link_gaps WHERE device_id=%s "
-            "ORDER BY recorded_at,stream", (DEVICE_ID,)).fetchall()
+            "SELECT stream,epoch,seq AS after_seq,(body->>'lost')::bigint AS lost FROM events "
+            "WHERE kind='gap' AND device_id=%s ORDER BY recorded_at,stream", (DEVICE_ID,)).fetchall()
         cursors = conn.execute(
-            "SELECT stream,pipe,epoch,seq FROM node_link_cursors WHERE device_id=%s ORDER BY stream",
-            (DEVICE_ID,)).fetchall()
+            "SELECT c.key AS stream,c.value->>'pipe' AS pipe,c.value->>'epoch' AS epoch,"
+            "(c.value->>'seq')::bigint AS seq FROM node_links l, jsonb_each(l.cursors) c "
+            "WHERE l.device_id=%s ORDER BY c.key", (DEVICE_ID,)).fetchall()
         presence = bus_links_in(conn, [DEVICE_ID])[DEVICE_ID]
     return {"records": [dict(row) for row in records], "gaps": [dict(row) for row in gaps],
             "cursors": [dict(row) for row in cursors], "presence": presence}

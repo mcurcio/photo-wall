@@ -143,7 +143,7 @@ def test_each_table_is_trimmed_in_whole_batches_and_keeps_what_central_reads(reg
 
     # Work: the event and 12 finished are due (13); two batches take 10, then 3 are short.
     assert first == {"node_reconciliation_work": 10, "node_display_exchanges": 5,
-                     "node_host_observations": 5, "node_manager_observations": 0}
+                     "node_host_observations": 5, "node_manager_observations": 0, "events": 0}
     assert second == dict.fromkeys(first, 0)
     with registry.db.transaction() as conn:
         work = {row["evidence_id"] for row in conn.execute(
@@ -208,7 +208,8 @@ def test_a_pi_silent_for_over_a_week_keeps_its_newest_sample_and_its_outputs(reg
                                      ("node_display_exchanges", "sampled_boottime_ms"))}
 
     assert retention.prune() == {"node_reconciliation_work": 0, "node_display_exchanges": 2,
-                                 "node_host_observations": 9, "node_manager_observations": 2}
+                                 "node_host_observations": 9, "node_manager_observations": 2,
+                                 "events": 0}
     assert kept() == {"node_host_observations": [909],
                       "node_manager_observations": list(range(910 - PREPARATION_KEYS, 910)),
                       "node_display_exchanges": list(range(2, RECENT_EXCHANGES + 2))}

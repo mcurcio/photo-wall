@@ -371,7 +371,7 @@ def _recognise(conn: Any, player_id: str, output_id: str, identity: DisplayIdent
     if identity.serial is not None and present:
         rows = conn.execute(
             "SELECT o.player_id, o.output_id, o.identity FROM output_displays o JOIN players p ON p.id=o.player_id "
-            "LEFT JOIN node_bus_presence n ON n.device_id=p.device_id "
+            "LEFT JOIN node_links n ON n.device_id=p.device_id "
             "WHERE p.retired_at IS NULL AND o.connected AND (o.player_id=%s OR n.linked) "
             "AND o.identity->>'maker'=%s AND (o.identity->>'product')::int=%s AND o.identity->>'serial'=%s",
             (player_id, identity.maker, identity.product, identity.serial)).fetchall()

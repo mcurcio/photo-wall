@@ -136,7 +136,7 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
             [seen] = await until(judged, SECONDS, "the report judged into output_displays")
             assert (seen["connected"], seen["frame_id"]) == (True, "kitchen")
             assert (seen["width_mm"], seen["height_mm"]) == (950, 540)   # the Display's size, from the bus
-            recorded = rows("SELECT data FROM node_link_records WHERE device_id=%s AND stream=%s "
+            recorded = rows("SELECT data FROM node_states WHERE device_id=%s AND stream=%s "
                             "AND subject LIKE '%%.output-HDMI-A-1'", (device_id_for_serial(SERIAL), REPORT_STREAM))
             assert [bytes(row["data"]) for row in recorded] == [_report("HDMI-A-1")]
 

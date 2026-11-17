@@ -38,9 +38,10 @@ def _commit(registry, value: bytes, seq: int, key: str = ROOM_LIGHTS_DRAWN_KEY) 
 
 
 def _records(registry) -> list[int]:
+    """The Player line's newest value per key Central keeps (node_states), by sequence."""
     with registry.db.transaction() as conn:
         return [row["seq"] for row in conn.execute(
-            "SELECT seq FROM node_link_records WHERE stream=%s ORDER BY seq", (PLAYER_STATE_STREAM,)).fetchall()]
+            "SELECT seq FROM node_states WHERE stream=%s ORDER BY seq", (PLAYER_STATE_STREAM,)).fetchall()]
 
 
 def test_a_drawn_report_on_the_player_line_is_that_players_on_house_lights(registry, monkeypatch):
@@ -63,11 +64,45 @@ def test_a_drawn_report_on_the_player_line_is_that_players_on_house_lights(regis
         assert (reported["player_id"], reported["state"]) == (player["player_id"], "drawn")
         # The Player's former HTTP route is gone.
         assert client.put(ROOM_LIGHTS_DRAWN_PATH, json={"drawn": None, "following": True}).status_code in (404, 405)
-    assert _records(registry) == [1, 2, 3, 4]
+    assert _records(registry) == [3, 4]   # the newest of each key: the report's, and `frames`
 
     # A report that fails to record rolls back only itself: the line's record still commits.
     def failing(*_args):
         raise RuntimeError("database trouble")
     monkeypatch.setattr(room_light_store.PgRoomLights, "record_drawn_within", failing)
     _commit(registry, b'{"drawn": null, "following": false}', 5)
-    assert _records(registry) == [1, 2, 3, 4, 5]
+    assert _records(registry) == [4, 5]
+
+
+class _Counting:
+    """A RecordJudge that keeps every Read it was handed."""
+
+    def __init__(self) -> None:
+        self.judged: list[int] = []
+
+    def judge_in(self, conn, device_id, stream, items) -> None:
+        self.judged.extend(read.token.seq for read in items)
+
+
+def test_a_state_value_sent_twice_is_judged_once(registry):
+    """S2c #3: the judge sees exactly the Reads its commit stored, never a repeat or an older value
+    of a key. Mutation probe: pass every Read to the judge -> judged twice, fails."""
+    device = device_id_for_serial(SERIAL)
+    with registry.db.transaction() as conn:
+        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
+                     (device, SERIAL))
+    judge = _Counting()
+    store = PgLinkStores(registry.db, {PLAYER_STATE_STREAM: judge}).store(SERIAL, Pipe.SHOW)
+    subject = state_prefix(PLAYER_LINE) + ROOM_LIGHTS_DRAWN_KEY
+
+    def commit(*seqs: int) -> None:
+        reads = tuple(Read(Token("epoch", seq), subject, {}, b"%d" % seq) for seq in seqs)
+        asyncio.run(store.commit(PLAYER_STATE_STREAM, Batch(reads, Token("epoch", max(seqs)), False)))
+
+    commit(1)
+    commit(1)        # the same value again (a redelivery): stored nothing, judged nothing
+    commit(2)
+    commit(1)        # an older value of the key: never replaces the newer, never judged
+    commit(2, 3)     # a batch of a repeat and a new value: only the new one is judged
+    assert judge.judged == [1, 2, 3]
+    assert _records(registry) == [3]

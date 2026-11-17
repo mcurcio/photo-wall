@@ -29,6 +29,7 @@ from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import DatabaseTransactionClock
 from central.displays.model import TEST_SECONDS
+from central.fleet.node_bus_presence import record_presence_in
 from central.infra.display_store import (
     DOCUMENT_STREAM,
     DisplayDocuments,
@@ -256,10 +257,11 @@ def test_last_heard_is_when_centrals_hub_saw_the_pis_link_go(registry):
             return client.get(f"/v1/operator/frames/{frame}/power", headers=AUTH).json()
 
         assert (power()["linked"], power()["last_heard_at"]) == (None, None)
-        _rows(registry, "INSERT INTO node_bus_presence(device_id, linked, changed_at) VALUES (%s, true, 5)", (device,))
+        with registry.db.transaction() as conn:
+            record_presence_in(conn, {device: True}, 5)
         assert (power()["linked"], power()["last_heard_at"]) == (True, None)
-        _rows(registry, "UPDATE node_bus_presence SET linked=false, changed_at=1791000123.5 WHERE device_id=%s",
-              (device,))
+        with registry.db.transaction() as conn:
+            record_presence_in(conn, {device: False}, 1791000123.5)
         assert (power()["linked"], power()["last_heard_at"]) == (False, 1791000123.5)
 
 

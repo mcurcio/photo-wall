@@ -30,6 +30,7 @@ from test_display_identity import (
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
 from central.displays.model import Readiness
+from central.fleet.node_bus_presence import record_presence_in
 from central.transaction_locks import acquire_runtime_locks
 from contracts.node_output import DisplayIdentity
 
@@ -167,9 +168,7 @@ def _shared(registry) -> list:
 def _presence(registry, serial: str, linked: bool) -> None:
     """Central's hub holds (or lost) the Pi's link: its presence row, as the worker's look writes it."""
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO node_bus_presence(device_id, linked, changed_at) VALUES (%s, %s, 1) "
-                     "ON CONFLICT (device_id) DO UPDATE SET linked=EXCLUDED.linked",
-                     (device_id_for_serial(serial), linked))
+        record_presence_in(conn, {device_id_for_serial(serial): linked}, 1)
 
 
 def _unbind(registry, frame_id: str) -> None:

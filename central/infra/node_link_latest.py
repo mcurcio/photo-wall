@@ -1,6 +1,6 @@
 """The newest value a Node's line stated under one state key, read from what Central already records
-(node_link_records, migration 066): the one home of "newest record of (line stream, key subject)
-per enrolled Player's device, by Central's `recorded_at`, then sequence; a KV operation reads as
+(node_states, migration 119: one row per key, the newest the link store stored): the one home of
+"newest value of (line stream, key subject) per enrolled Player's device; a KV operation reads as
 removed; decode it or log it". Its readers: each Pi's health verdict (health_report_store.py),
 a Pi's light reading its word missed (light_sensor_judge.py) and what a Frame's Player said about
 Central's error (central_errors_store.py). Safe in read-only snapshots.
@@ -12,7 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from nodeapi.buffers import KV_OPERATION_HEADER, state_prefix, state_stream
+from nodeapi.buffers import state_prefix, state_stream
 
 log = logging.getLogger(__name__)
 
@@ -41,17 +41,17 @@ class LatestValue:
 
 def latest_values_in(conn: Any, line: str, key: str, *, device_id: str | None = None) -> tuple[LatestValue, ...]:
     """The newest record of `line`'s state `key` for every enrolled (not retired) Player's device, or
-    only `device_id`'s, in the caller's transaction (one DISTINCT ON query)."""
+    only `device_id`'s, in the caller's transaction (node_states holds one row per key)."""
     rows = conn.execute(
-        "SELECT DISTINCT ON (r.device_id) p.id AS player_id, r.device_id, r.seq, r.recorded_at, r.data, r.headers"
-        " FROM node_link_records r JOIN players p ON p.device_id = r.device_id AND p.retired_at IS NULL"
-        " WHERE r.stream=%(stream)s AND r.subject=%(subject)s"
-        " AND (%(device)s::text IS NULL OR r.device_id = %(device)s)"
-        " ORDER BY r.device_id, r.recorded_at DESC, r.seq DESC",
+        "SELECT p.id AS player_id, s.device_id, s.seq, s.recorded_at, s.data, s.removed"
+        " FROM node_states s JOIN players p ON p.device_id = s.device_id AND p.retired_at IS NULL"
+        " WHERE s.stream=%(stream)s AND s.subject=%(subject)s"
+        " AND (%(device)s::text IS NULL OR s.device_id = %(device)s)"
+        " ORDER BY s.device_id",
         {"stream": state_stream(line), "subject": state_prefix(line) + key, "device": device_id}).fetchall()
     return tuple(LatestValue(player_id=row["player_id"], device_id=row["device_id"], seq=int(row["seq"]),
                              recorded_at=float(row["recorded_at"]),
-                             removed=bool((row["headers"] or {}).get(KV_OPERATION_HEADER)),
+                             removed=bool(row["removed"]),
                              data=bytes(row["data"] or b"")) for row in rows)
 
 

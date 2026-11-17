@@ -107,7 +107,8 @@ def _enrol(db: Database, serial: str) -> None:
 async def _records(db: Database, stream: str) -> list[dict]:
     def run() -> list[dict]:
         with db.transaction() as conn:
-            return conn.execute("SELECT subject, data FROM node_link_records WHERE device_id=%s AND stream=%s "
+            source = "node_states WHERE" if stream.startswith("KV_") else "events WHERE kind='record' AND"
+            return conn.execute(f"SELECT subject, data FROM {source} device_id=%s AND stream=%s "
                                 "ORDER BY epoch, seq", (device_id_for_serial(SERIAL), stream)).fetchall()
     return [{**row, "data": bytes(row["data"])} for row in await asyncio.to_thread(run)]
 
