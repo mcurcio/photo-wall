@@ -53,7 +53,8 @@ def test_advance_samples_clock_after_both_serialization_locks(registry, monkeypa
 
     assert advance.failures == ()
     assert advance.projection.now == 1005
-    assert coordinator.runtime.read().export_state()["now"] == 1005
+    # Nothing changed but time, so nothing was saved (decision 0034: saved only on change).
+    assert coordinator.runtime.read().export_state()["now"] is None
 
 
 def test_runtime_read_waits_for_writer_then_returns_committed_state(registry):

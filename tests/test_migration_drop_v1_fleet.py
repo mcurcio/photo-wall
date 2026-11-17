@@ -50,8 +50,8 @@ DROPPED = ("fleet_os_observations", "fleet_app_attempts", "fleet_os_command_sess
            "fleet_generation_current_app_attempts",
            "fleet_generation_current_os_command_sessions", "app_releases", "app_release_policy",
            "app_packages", "app_package_policy")
-KEPT = ("app_release_poll", "devices", "fleet_device_lifecycle",
-        "fleet_t0_daily_quotas", "node_boot_offers", "node_deployments")
+KEPT = ("app_release_poll", "devices", "fleet_device_lifecycle", "node_boot_offers",
+        "node_deployments")
 DELETED_ROUTES = (
     ("GET", "/v1/app/manifest"),
     ("GET", f"/v1/app/package/{DEB_SHA}.deb"),
@@ -61,7 +61,6 @@ DELETED_ROUTES = (
     ("POST", "/v2/appliance/check-ins"),
     ("GET", "/v1/operator/fleet"),
 )
-OFFER_DEVICE_DAILY = 128  # node_boot's per-device offer quota
 
 
 @pytest.fixture
@@ -108,13 +107,7 @@ def _offer(client, serial: str):
     return client.post("/v2/node/boot-offers", content=body)
 
 
-def _quota(registry, scope: str) -> int | None:
-    row = _one(registry, "SELECT used FROM fleet_t0_daily_quotas "
-                         "WHERE scope=%s AND kind='offer' AND day=0", scope)
-    return None if row is None else row["used"]
-
-
-def test_070_drops_the_v1_fleet_and_node_boot_keeps_its_quota(before_070, tmp_path):
+def test_070_drops_the_v1_fleet_and_node_boot_still_answers(before_070, tmp_path):
     registry = before_070
     with registry.db.transaction() as conn:
         _seed_v1(conn)
@@ -137,8 +130,8 @@ def test_070_drops_the_v1_fleet_and_node_boot_keeps_its_quota(before_070, tmp_pa
         for method, path in DELETED_ROUTES:
             assert client.request(method, path, headers=auth, json={}).status_code == 404, path
 
-        # A serial never seen: its offer creates the device and is charged to its daily quota (no
-        # release is ready for a Pi with no version here: the offer is refused, and still counted).
+        # A serial never seen: its offer creates the device (no release is ready for a Pi with
+        # no version here: the offer is refused). No quota counts it (decision 0034).
         fresh = "20000000feed0001"
         fresh_id = device_id_for_serial(fresh)
         assert _one(registry, "SELECT 1 FROM devices WHERE device_id=%s", fresh_id) is None
@@ -146,22 +139,6 @@ def test_070_drops_the_v1_fleet_and_node_boot_keeps_its_quota(before_070, tmp_pa
         assert (first.status_code, first.json()) == (503, {"error": "node_boot_policy_unconfigured"})
         assert _one(registry, "SELECT serial FROM devices WHERE device_id=%s",
                     fresh_id) == {"serial": fresh}
-        assert _quota(registry, fresh_id) == 1
-        assert _one(registry, "SELECT used FROM fleet_t0_daily_quotas WHERE scope='global' "
-                              "AND kind='new_device' AND day=0")["used"] == 1
-
-        # One offer short of the limit: the last one is answered, the next refused until tomorrow.
-        busy = "20000000feed0002"
-        busy_id = device_id_for_serial(busy)
-        with registry.db.transaction() as conn:
-            conn.execute("INSERT INTO fleet_t0_daily_quotas(scope,kind,day,used) "
-                         "VALUES(%s,'offer',0,%s)", (busy_id, OFFER_DEVICE_DAILY - 1))
-        assert _offer(client, busy).status_code == 503   # answered (no release ready), not rate limited
-        assert _quota(registry, busy_id) == OFFER_DEVICE_DAILY
-        refused = _offer(client, busy)
-        assert refused.status_code == 429 and refused.json() == {"error": "t0_rate_limited"}
-        assert refused.headers["Retry-After"] == str(86400 - 1000)  # the day's end
-        assert _quota(registry, busy_id) == OFFER_DEVICE_DAILY
 
 
 def test_the_node_release_sync_ingests_a_packaged_release_with_no_v1_claim(registry, tmp_path):

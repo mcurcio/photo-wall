@@ -52,34 +52,31 @@ def _row(registry, device_id):
         link = conn.execute("SELECT ctid::text AS ctid,xmin::text AS xmin,nonce,created_at,"
                             "created_by,changed_at,changed_by FROM node_app_links "
                             "WHERE device_id=%s", (device_id,)).fetchall()
-        intake = conn.execute("SELECT coalesce(sum(used),0) AS n FROM node_intake_quotas "
-                              "WHERE device_id=%s AND kind='evidence'", (device_id,)).fetchone()["n"]
     assert len(link) == 1  # one row per device generation: its current link
-    return dict(link[0]), intake
+    return dict(link[0])
 
 
 def test_a_relink_that_restates_the_current_link_writes_nothing(registry):
     """The same process says again that it is linked, with a new nonce and a later sample (588
-    of 658 relinks measured on 2026-11-15): the link row keeps its row version and no intake is
-    counted; the answer is a 200 duplicate, current. A new control receipt is a new link: the
-    row is replaced in place, `changed_*` stamped, `created_*` kept. Mutation probe: make
+    of 658 relinks measured on 2026-11-15): the link row keeps its row version; the answer is a
+    200 duplicate, current. A new control receipt is a new link: the row is replaced in place, `changed_*` stamped, `created_*` kept. Mutation probe: make
     `link_standing` compare the nonce (the relink rewrites the row)."""
     coordinator, player, key, sessions, claims, _, _, _, proof = rig(registry)
     broker = claims["app_effect_broker"]
     links = NodeAppLinks(sessions)
     device = proof.challenge.producer.device_id
-    before, intake = _row(registry, device)
+    before = _row(registry, device)
     assert (before["created_by"], before["changed_by"]) == ("node", "node")
     registry.clock.advance(5)
     again = links.admit(broker.session_id, broker.credential,
                         _signed(key, proof, nonce=uuid4().hex * 2, sampled_boottime_ms=900))
     assert again == {"stored": True, "duplicate": True, "current": True,
                      "admitted_at": before["changed_at"], "physical_identity": "unverified"}
-    assert _row(registry, device) == (before, intake)
+    assert _row(registry, device) == before
     # The exact retry, nonce included, restates too.
     assert links.admit(broker.session_id, broker.credential,
                        encode_node_app_link(proof))["duplicate"] is True
-    assert _row(registry, device) == (before, intake)
+    assert _row(registry, device) == before
 
     delivery = registry.issue_control_delivery_record(player["player_id"], 1, "f" * 64)
     receipt = registry.control_ack_response(player["player_id"], ControlAck(
@@ -89,8 +86,7 @@ def test_a_relink_that_restates_the_current_link_writes_nothing(registry):
     replaced = links.admit(broker.session_id, broker.credential,
                            _signed(key, proof, nonce=uuid4().hex * 2, control_receipt=fresh))
     assert replaced["duplicate"] is False and replaced["current"] is True
-    after, counted = _row(registry, device)
-    assert counted == intake + 1
+    after = _row(registry, device)
     assert after["xmin"] != before["xmin"]
     assert (after["created_at"], after["changed_at"]) == (before["created_at"],
                                                           registry.clock.utc())
@@ -106,18 +102,18 @@ def test_a_late_older_link_never_replaces_the_newer_one(registry):
     device = proof.challenge.producer.device_id
     newer = _signed(key, proof, nonce=uuid4().hex * 2, app_epoch=43, sampled_boottime_ms=700)
     assert links.admit(broker.session_id, broker.credential, newer)["duplicate"] is False
-    current, intake = _row(registry, device)
+    current = _row(registry, device)
     late = links.admit(broker.session_id, broker.credential,
                        _signed(key, proof, nonce=uuid4().hex * 2, sampled_boottime_ms=600))
     assert late == {"stored": False, "duplicate": False, "current": False, "admitted_at": None,
                     "physical_identity": "unverified"}
-    assert _row(registry, device) == (current, intake)
+    assert _row(registry, device) == current
 
 
 def test_a_link_of_the_next_boot_replaces_the_current_one_whatever_its_counters(registry):
     """After a reboot the app's epoch and its boot-time sample start again, lower than the
     current link's: a link of another kernel boot is new, so it replaces the row (`changed_at`
-    moves, one intake counted). Within one boot a link equal but for an earlier sample is a
+    moves). Within one boot a link equal but for an earlier sample is a
     late retry: older, not a restatement, so it writes nothing. Mutation probes: drop the same
     boot test from `link_standing`'s `older` arm (the next boot is refused as older); drop the
     sample's `>=` from its `restates` arm (the earlier sample restates)."""
@@ -131,12 +127,12 @@ def test_a_link_of_the_next_boot_replaces_the_current_one_whatever_its_counters(
     broker = claims["app_effect_broker"]
     links = NodeAppLinks(sessions)
     device = proof.challenge.producer.device_id
-    current, intake = _row(registry, device)
+    current = _row(registry, device)
     earlier = links.admit(broker.session_id, broker.credential,
                           _signed(key, proof, nonce=uuid4().hex * 2, sampled_boottime_ms=400))
     assert earlier == {"stored": False, "duplicate": False, "current": False,
                        "admitted_at": None, "physical_identity": "unverified"}
-    assert _row(registry, device) == (current, intake)
+    assert _row(registry, device) == current
 
     registry.clock.advance(60)
     offer = boot_service(sessions).offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))
@@ -149,7 +145,7 @@ def test_a_link_of_the_next_boot_replaces_the_current_one_whatever_its_counters(
     assert links.admit(grant.session_id, claim.credential, rebooted) == {
         "stored": True, "duplicate": False, "current": True,
         "admitted_at": registry.clock.utc(), "physical_identity": "unverified"}
-    after, counted = _row(registry, device)
-    assert after["xmin"] != current["xmin"] and counted == intake + 1
+    after = _row(registry, device)
+    assert after["xmin"] != current["xmin"]
     assert (after["created_at"], after["changed_at"]) == (current["created_at"],
                                                           registry.clock.utc())

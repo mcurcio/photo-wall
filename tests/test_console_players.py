@@ -197,14 +197,15 @@ const link = (busLink, readAt) => {
   return [value.kind, factText(value)];
 };
 out.busLink = [
-  link({ linked: true, changed_at: 100, looked_at: 290 }, 300),
-  link({ linked: false, changed_at: 280, looked_at: 290 }, 300),
-  link({ linked: true, changed_at: 100, looked_at: 290 }, 321),
-  link({ linked: null, changed_at: null, looked_at: null }, 300),
-  link({ linked: null, changed_at: null, looked_at: 290 }, 300),
+  link({ linked: true, changed_at: 100, hub: "reachable" }, 300),
+  link({ linked: false, changed_at: 280, hub: "reachable" }, 300),
+  link({ linked: true, changed_at: 100, hub: "unreachable" }, 300),
+  link({ linked: true, changed_at: 100, hub: "worker_stopped" }, 300),
+  link({ linked: null, changed_at: null, hub: "no_hub" }, 300),
+  link({ linked: null, changed_at: null, hub: "reachable" }, 300),
   link(undefined, 300),
-  link({ linked: true, changed_at: 100, looked_at: 290 }, null),
-  link({ linked: "yes", changed_at: "x", looked_at: {} }, 300),
+  link({ linked: true, changed_at: 100, hub: "reachable" }, null),
+  link({ linked: "yes", changed_at: "x", hub: {} }, 300),
 ];
 console.log(JSON.stringify(out));
 """
@@ -442,15 +443,16 @@ def test_the_panel_at_enrollment_has_one_wording_and_its_true_truth_kind():
 
 
 def test_the_node_api_link_reads_as_centrals_inference_or_unknown():
-    # Linked, not linked, stale (more than 30 s since Central's last look), no hub; then the
-    # unlabelled reads, each unknown naming what is missing.
+    # Linked and not linked on a reachable hub; one wording per other hub state; a reachable hub
+    # that has not seen this Node; then the unlabelled reads, each unknown naming what is missing.
     assert _run()["busLink"] == [
         ["derived", "linked for 3 min (Central's inference: Central's hub holds this Node's leaf)"],
         ["derived", "not linked for 20 s (Central's inference: Central's hub does not hold this Node's leaf)"],
-        ["unknown", "Unknown: Central has not looked at its hub for 31 s"],
+        ["unknown", "Unknown: Central cannot reach its hub"],
+        ["unknown", "Unknown: Central's worker is not running"],
         ["unknown", "Unknown: Central runs no hub"],
         ["unknown", "Unknown: Central's hub has not looked for this Node yet"],
         ["unknown", "Unknown: the Node API link is not served"],
         ["unknown", "Unknown: Central's read time is not served"],
-        ["unknown", "Unknown: when Central last looked at its hub is not served"],
+        ["unknown", "Unknown: the hub's state is not served"],
     ]

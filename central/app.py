@@ -200,7 +200,7 @@ def create_app(
     run_scheduler = clock is None if run_scheduler is None else run_scheduler
     clock_injected = clock
     owns_db = db is None
-    db = db or Database(os.environ["PHOTO_WALL_DATABASE_URL"])
+    db = db or Database(os.environ["PHOTO_WALL_DATABASE_URL"], application_name="photo-wall-web")
     clock = clock or SystemClock()
     admin_token = admin_token or os.environ["PHOTO_WALL_ADMIN_TOKEN"]
     if len(admin_token) < 32:
@@ -887,7 +887,7 @@ def create_app(
     mount_program_routes(app, admin=admin, runtime=runtime_store)
     mount_why_routes(app, admin=admin, queries=PgWhy(db, times=media_times))
     room_lights = PgRoomLights(db, house_lock)
-    house = PgHouse(db, times=media_times, room_lights=room_lights)
+    house = PgHouse(db, times=media_times, room_lights=room_lights, runtime=runtime_store)
     mount_house_routes(app, admin=admin, queries=house, commands=house)
     mount_room_light_routes(app, admin=admin, lights=room_lights, sources=REPORT_SOURCES)
     version = installed_central_version() if central_version is None else central_version

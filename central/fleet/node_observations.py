@@ -9,13 +9,7 @@ from central.fleet.host_thresholds import thresholds_document
 from central.fleet.node_bus_presence import bus_links_in
 from central.fleet.node_commands import OUTSTANDING_REBOOT_SQL
 from central.fleet.node_display import display_outputs_in
-from central.fleet.node_sessions import (
-    OBSERVATION_DAILY_CAP,
-    PREPARATION_DAILY_CAP,
-    NodeControlError,
-    NodeSessions,
-    claim_intake_in,
-)
+from central.fleet.node_sessions import NodeControlError, NodeSessions
 from contracts.node_boot import parse_node_boot_offer
 from contracts.node_commands import parse_session_grant, producer_document
 from contracts.node_host_facts import (
@@ -54,13 +48,13 @@ def _preparation_key(sample) -> tuple:
 # G12 (console DDD §63), one statement per read. Per active device in its current generation:
 # the current admission (at most one, node_current_boot) and the most recently superseded one,
 # each one's newest-admitted host_core producer, that producer's newest sample, the current
-# admission's newest-admitted app_manager producer and its newest preparation sample, and
-# today's observation and preparation quota rows; the current admission's node boot offer (its base tag) and
+# admission's newest-admitted app_manager producer and its newest preparation sample; the current
+# admission's node boot offer (its base tag) and
 # its host_core producer's facts row. Every sample read is producer-scoped on the primary key.
 _FLEET_HOSTS_SQL = (
     "SELECT d.device_id,d.serial,ch.payload,ch.received_at,ph.received_at AS previous_received_at,"
     "cm.payload AS preparation_payload,cm.received_at AS preparation_received_at,"
-    "q.used AS intake_used,pq.used AS preparation_intake_used,cb.admission_id AS current_admission,co.offer_payload,"
+    "cb.admission_id AS current_admission,co.offer_payload,"
     "cf.payload AS facts_payload,cf.first_received_at AS facts_first_received_at FROM devices d "
     "JOIN fleet_device_lifecycle l ON l.device_id=d.device_id "
     "LEFT JOIN node_boot_admissions cb ON cb.device_id=d.device_id "
@@ -80,10 +74,6 @@ _FLEET_HOSTS_SQL = (
     "LEFT JOIN LATERAL (SELECT producer_id FROM node_producers WHERE admission_id=pb.admission_id "
     "AND owner='host_core' ORDER BY admitted_at DESC,producer_id DESC LIMIT 1) pp ON true "
     "LEFT JOIN LATERAL (" + _NEWEST_HOST_SQL.format(p="pp.producer_id") + ") ph ON true "
-    "LEFT JOIN node_intake_quotas q ON q.device_id=d.device_id AND q.day=%(day)s "
-    "AND q.kind='observation' "
-    "LEFT JOIN node_intake_quotas pq ON pq.device_id=d.device_id AND pq.day=%(day)s "
-    "AND pq.kind='preparation' "
     "WHERE d.retired_at IS NULL AND l.revoked_at IS NULL ORDER BY d.device_id")
 
 
@@ -127,15 +117,12 @@ class NodeObservations:
                     raise NodeControlError("node_observation_identity_conflict")
                 return {"stored": True, "disposition": "duplicate",
                         "received_at": prior["received_at"], "authority_granted": False}
-            # Only a new value claims intake: a same-values resend at a higher sequence (every
-            # Host Management process start, so a crash loop) rewrites the row without using
-            # the day's quota, so restarts cannot outrun the derived cap. Both sides are plain
-            # documents (a nested `boot` included); a row stored before `boot` existed reads it
-            # as None, so it equals a post that did not read one.
+            # A same-values resend at a higher sequence (every Host Management process start)
+            # keeps first_received_at. Both sides are plain documents (a nested `boot`
+            # included); a row stored before `boot` existed reads it as None, so it equals a
+            # post that did not read one.
             same = (prior is not None
                     and stored_fact_values(bytes(prior["payload"])) == fact_values_document(facts))
-            if not same:
-                claim_intake_in(conn, facts.producer.device_id, "host_facts", now)
             if prior is None:
                 conn.execute("INSERT INTO node_host_facts(producer_id,sequence,payload,"
                              "first_received_at,received_at) VALUES(%s,%s,%s,%s,%s)",
@@ -170,8 +157,6 @@ class NodeObservations:
             if self._coalesced_in(conn, table, principal.producer_id, observation):
                 return {"stored": False, "disposition": "coalesced", "received_at": now,
                         "authority_granted": False}
-            claim_intake_in(conn, observation.producer.device_id,
-                            "preparation" if table == "node_manager_observations" else "observation", now)
             conn.execute(f"INSERT INTO {table}(producer_id,sequence,payload,"
                          "received_at) VALUES(%s,%s,%s,%s)",
                          (principal.producer_id, observation.sequence, canonical, now))
@@ -188,11 +173,11 @@ class NodeObservations:
         difference (a sample older than the stored one) stores. Host Management: one stored
         sample per producer per interval. App Manager: one per producer per (state, operation,
         fault) per interval, so an alternating stream (`preparing`/`refused` every poll) stores
-        each state at most once an interval and never reaches the derived cap. The cost: a
+        each state at most once an interval. The cost: a
         state that returns within one interval of its last stored sample is not stored again
         until that interval passes, so the newest stored state can lag by up to one interval
         plus the node's next resend. A node that misreports its boot clock defeats coalescing
-        for its own producer only; the derived cap still bounds its intake."""
+        for its own producer only."""
         window_ms = HOST_OBSERVATION_INTERVAL_SECONDS * 1000
 
         def within(stored) -> bool:
@@ -221,7 +206,7 @@ class NodeObservations:
     def fleet_hosts_in(self, conn, read_at: float) -> dict:
         """`fleet_hosts` inside the caller's transaction (a read that needs the hosts beside its
         own rows in one snapshot: the Releases page, Central's state on its hub)."""
-        rows = conn.execute(_FLEET_HOSTS_SQL, {"day": int(read_at) // 86400}).fetchall()
+        rows = conn.execute(_FLEET_HOSTS_SQL).fetchall()
         bus_links = bus_links_in(conn, [row["device_id"] for row in rows])
         devices = []
         for row in rows:
@@ -250,9 +235,6 @@ class NodeObservations:
                          **stored_fact_values(bytes(row["facts_payload"]))}
             devices.append({"device_id": row["device_id"], "serial": row["serial"], "host": host,
                             "previous_boot_received_at": row["previous_received_at"] if host is None else None,
-                            "intake_full": (row["intake_used"] or 0) >= OBSERVATION_DAILY_CAP,
-                            "preparation_intake_full":
-                                (row["preparation_intake_used"] or 0) >= PREPARATION_DAILY_CAP,
                             "boot": boot, "facts": facts, "preparation": preparation,
                             "bus_link": bus_links[row["device_id"]]})
         return {"read_at": read_at, "thresholds": thresholds_document(), "devices": devices}

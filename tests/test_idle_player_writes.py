@@ -37,7 +37,7 @@ class Watched(Database):
     """The real Database; `log` holds (wrote, held Coordination) for each committed transaction."""
 
     def __init__(self, dsn: str) -> None:
-        super().__init__(dsn)
+        super().__init__(dsn, application_name="photo-wall-test")
         self.log: list[tuple[bool, bool]] = []
 
     @contextmanager

@@ -1012,7 +1012,7 @@ def operator_action(action: str):
         expected = 1 if os.environ["DEMO_SCENARIO"] == "baseline" else 3
         require(len(outputs) == expected, "players_not_registered")
         frames = []
-        database = Database(os.environ["PHOTO_WALL_DATABASE_URL"])
+        database = Database(os.environ["PHOTO_WALL_DATABASE_URL"], application_name="photo-wall-demo")
         registry = Registry(database, SystemClock(), lighting=PgFrameLighting(LUT_RECIPE_ID))
         devices = {player["id"]: player["device_id"] for player in inventory["players"]}
         try:
@@ -1043,7 +1043,7 @@ def operator_action(action: str):
         return result
     if action != "snapshot":
         raise DemoError("unknown_operator_action")
-    database = Database(os.environ["PHOTO_WALL_DATABASE_URL"])
+    database = Database(os.environ["PHOTO_WALL_DATABASE_URL"], application_name="photo-wall-demo")
     with database.transaction() as conn:
         # Each made media variant (follow-up to 5a, slice T): `<asset_id>.<recipe_id>`.
         variants = conn.execute(

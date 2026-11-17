@@ -15,7 +15,7 @@ from central.fleet.node_app_links import (
     load_current_node_app_link_for_player_in,
     load_current_node_app_link_in,
 )
-from central.fleet.node_sessions import NodeControlError, NodeSessions, claim_intake_in
+from central.fleet.node_sessions import NodeControlError, NodeSessions
 from central.installation_repository import PostgresInstallationRepository
 from central.transaction_locks import acquire_node_lock, acquire_runtime_locks
 from contracts.node_commands import parse_session_grant
@@ -265,7 +265,6 @@ class NodeDisplay:
                 trial = self.trials.deliver_in(conn, principal, request, link, binding, now)
                 decision = replace(decision, trial=trial)
             response = encode_display_decision(decision)
-            claim_intake_in(conn, request.producer.device_id, "display", now)
             conn.execute(
                 "INSERT INTO node_display_exchanges(producer_id,request_id,session_id,"
                 "output_id,sampled_boottime_ms,request,response,decision_id,received_at) "

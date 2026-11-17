@@ -146,7 +146,7 @@ class TestDatabases:
             self._admin.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(
                 sql.Identifier(building)))
             conninfo = make_conninfo(self.dsn, dbname=building)
-            database = Database(conninfo)
+            database = Database(conninfo, application_name="photo-wall-test")
             try:
                 database.migrate()
             finally:

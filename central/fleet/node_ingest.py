@@ -11,7 +11,7 @@ from uuid import UUID
 from psycopg.types.json import Jsonb
 
 from central.fleet.node_evidence import EvidenceProjection, ProjectedFact, reconcile_evidence
-from central.fleet.node_sessions import NodeControlError, NodeSessions, claim_intake_in
+from central.fleet.node_sessions import NodeControlError, NodeSessions
 from contracts.node_commands import parse_reboot_request
 from contracts.node_protocol import (
     NodeCommandResponseV2,
@@ -76,7 +76,6 @@ class NodeIngest:
             disposition = result.disposition if principal.current else "historical"
             if principal.current and len(result.projection.facts) > MAX_PROJECTED_FACTS:
                 raise NodeControlError("node_projection_capacity", 429)
-            claim_intake_in(conn, message.producer.device_id, "evidence", now)
             conn.execute("INSERT INTO node_evidence(producer_id,evidence_id,kind,sequence,"
                          "payload,received_at,disposition) VALUES(%s,%s,%s,%s,%s,%s,%s)",
                          (principal.producer_id, evidence_id, kind, sequence, canonical, now,

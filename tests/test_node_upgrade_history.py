@@ -49,7 +49,7 @@ def history(empty_database, tmp_path, monkeypatch):
 
     @contextmanager
     def create(number):
-        db = Database(empty_database)
+        db = Database(empty_database, application_name="photo-wall-test")
         try:
             through(db, number)
             yield Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID)), through
@@ -222,24 +222,16 @@ def test_060_refusal_rolls_back_real_schema_and_migration_ledger(history, frames
 
 
 def test_062_applies_forward_on_a_database_at_061(history):
-    # A box's quota rows of every earlier kind survive; host_facts becomes a kind; the facts
-    # table exists, one row per producer, bounded.
+    # The facts table exists, one row per producer, bounded. (062's quota kind went with the
+    # quota table in 116, decision 0034.)
     with history(61) as (registry, _):
         setup(registry)
         with registry.db.transaction() as conn:
-            conn.execute("INSERT INTO node_intake_quotas(device_id,day,kind,used) "
-                         "VALUES(%s,1,'preparation',3)", (DEVICE_ID,))
-            with pytest.raises(psycopg.errors.CheckViolation), conn.transaction():
-                conn.execute("INSERT INTO node_intake_quotas(device_id,day,kind,used) "
-                             "VALUES(%s,1,'host_facts',1)", (DEVICE_ID,))
             assert conn.execute("SELECT to_regclass('node_host_facts') AS name").fetchone()["name"] is None
         registry.db.migrate()
         assert "062_node_host_facts.sql" in [row["name"] for row in ledger(registry.db)]
         with registry.db.transaction() as conn:
-            assert conn.execute("SELECT used FROM node_intake_quotas WHERE kind='preparation'"
-                                ).fetchone()["used"] == 3
-            conn.execute("INSERT INTO node_intake_quotas(device_id,day,kind,used) "
-                         "VALUES(%s,1,'host_facts',1)", (DEVICE_ID,))
+            assert conn.execute("SELECT to_regclass('node_intake_quotas') AS name").fetchone()["name"] is None
             producer = conn.execute("SELECT producer_id FROM node_producers").fetchone()["producer_id"]
             conn.execute("INSERT INTO node_host_facts(producer_id,sequence,payload,first_received_at,"
                          "received_at) VALUES(%s,1,'{}'::bytea,1,1)", (producer,))

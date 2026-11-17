@@ -446,7 +446,7 @@ def test_a_bound_players_switch_follows_the_operator_reboot_rule(registry):
     assert _committed(coordinator, player_id, 2) == both  # rejoined
     # At the Run's current point: Runtime only advanced its clock; no Run restarted or ended.
     rejoined = coordinator.runtime.read().export_state()
-    assert rejoined.pop('now') > runtime['now'] and rejoined == {k: v for k, v in runtime.items() if k != 'now'}
+    assert rejoined == runtime   # only time moved, so nothing was saved (decision 0034)
     after_bindings, after_frames, _ = _bound_state(registry)
     assert after_bindings == bindings and after_frames == frames
     fixture.report(command, 'starting_new', 3)
@@ -494,7 +494,7 @@ def test_a_bound_switch_whose_new_app_enrolls_before_the_exit_is_reconciled_rejo
     coordinator.readiness(player_id, report(coordinator, player))
     assert _committed(coordinator, player_id, 2) == both  # rejoined
     rejoined = coordinator.runtime.read().export_state()
-    assert rejoined.pop('now') > runtime['now'] and rejoined == {k: v for k, v in runtime.items() if k != 'now'}
+    assert rejoined == runtime   # only time moved, so nothing was saved (decision 0034)
     # The new app links (its sample after the exit's), and the reconciler finishes the exit's item.
     _link_new_app(fixture, player, command, sampled_boottime_ms=1400)
     reconciler.advance()

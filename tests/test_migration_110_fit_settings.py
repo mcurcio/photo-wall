@@ -30,7 +30,7 @@ def _at_109(db: Database) -> None:
 def test_110_drops_the_still_limit_and_keeps_the_saved_settings(database_provisioner):
     """Mutation probe AC5 (an empty 110): the row no longer validates and reads as the defaults."""
     with database_provisioner.empty() as conninfo:
-        db = Database(conninfo)
+        db = Database(conninfo, application_name="photo-wall-test")
         try:
             _at_109(db)
             with db.transaction() as conn:

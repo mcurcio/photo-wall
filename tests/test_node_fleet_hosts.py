@@ -1,30 +1,30 @@
 """Host-health tracer, Central side (console DDD §60, §63-§64, bead T1), on real PostgreSQL:
 observation coalescing on the producer's own boot clock (never a Central receipt clock, so a
-stepped or skewed Central replica changes nothing), the derived daily cap, and G12
-(`GET /v1/operator/node/hosts`): the current boot's sample only, the previous boot's receipt,
-`intake_full`, the numbers-only thresholds, its access rules and its lock-free snapshot."""
+stepped or skewed Central replica changes nothing), and G12 (`GET /v1/operator/node/hosts`): the
+current boot's sample only, the previous boot's receipt, the numbers-only thresholds, the Node API
+link with the hub's state, its access rules and its lock-free snapshot. No post is ever refused for
+volume (decision 0034: the daily caps are gone)."""
 import math
 import threading
 import time
 from uuid import uuid4
 
-import pytest
 from fastapi.testclient import TestClient
 from test_fleet_attempts import DEVICE_ID, SERIAL
 from test_node_boot import claim_for, cold_setup
 from test_registry import ADMIN, enroll
 
 from central.app import create_app
+from central.db import ProcessTransactionClock
 from central.fleet.device_fence import fence_in
 from central.fleet.host_thresholds import HOST_SILENT_AFTER_SECONDS, thresholds_document
-from central.fleet.node_bus_presence import record_look_in
-from central.fleet.node_observations import _FLEET_HOSTS_SQL, NodeObservations
-from central.fleet.node_sessions import (
-    OBSERVATION_DAILY_CAP,
-    NodeControlConfig,
-    NodeControlError,
-    NodeSessions,
+from central.fleet.node_bus_presence import (
+    HUB_REACHABILITY,
+    record_hub_reachable_in,
+    record_presence_in,
 )
+from central.fleet.node_observations import _FLEET_HOSTS_SQL, NodeObservations
+from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
 from contracts.node_boot import NodeBootRequestV2
 from contracts.node_observation import (
     HOST_OBSERVATION_INTERVAL_SECONDS,
@@ -73,20 +73,11 @@ def _stored(registry):
         return conn.execute("SELECT count(*) n FROM node_host_observations").fetchone()["n"]
 
 
-def _intake(registry):
-    with registry.db.transaction() as conn:
-        row = conn.execute("SELECT coalesce(sum(used),0) n FROM node_intake_quotas "
-                           "WHERE kind='observation'").fetchone()
-        return row["n"]
-
-
 def _device(read, device_id=DEVICE_ID):
     return next((item for item in read["devices"] if item["device_id"] == device_id), None)
 
 
 def test_a_producer_posting_every_2_s_for_a_day_stores_one_per_interval_and_never_429(registry):
-    # Start at a UTC day boundary so the whole day lands in one quota row.
-    registry.clock.advance(86400 - registry.clock.utc() % 86400)
     boots, sessions = _rig(registry, session_seconds=86400)
     host = Host(registry, sessions, boots)
     dispositions = {}
@@ -99,8 +90,6 @@ def test_a_producer_posting_every_2_s_for_a_day_stores_one_per_interval_and_neve
     stored = _stored(registry)
     assert stored <= math.ceil(86400 / INTERVAL) + 1
     assert stored == dispositions["recorded"] and dispositions["coalesced"] > 0
-    # A coalesced post claims no intake: the day's quota counts stored samples only.
-    assert _intake(registry) == stored < OBSERVATION_DAILY_CAP
 
 
 def test_a_post_inside_the_interval_is_coalesced_and_one_after_it_stores(registry):
@@ -112,7 +101,7 @@ def test_a_post_inside_the_interval_is_coalesced_and_one_after_it_stores(registr
                            "received_at": registry.clock.utc(), "authority_granted": False}
     registry.clock.advance(0.5)
     assert host.post()["disposition"] == "recorded"
-    assert _stored(registry) == 2 and _intake(registry) == 2
+    assert _stored(registry) == 2
 
 
 def test_central_clock_steps_neither_coalesce_nor_store_a_post(registry):
@@ -188,7 +177,7 @@ def test_g12_serves_the_current_boots_sample_and_only_the_previous_boots_receipt
     assert served["host"] == {"received_at": old_receipt, "fault_code": None,
                               "metrics": [{"name": "soc_temperature", "value": 81.2,
                                            "unit": "celsius", "source": "host_sampler"}]}
-    assert served["previous_boot_received_at"] is None and served["intake_full"] is False
+    assert served["previous_boot_received_at"] is None and "intake_full" not in served
     assert read["thresholds"] == thresholds_document()
     assert read["thresholds"]["host_silent_after_seconds"] == HOST_SILENT_AFTER_SECONDS
     assert read["thresholds"]["metrics"][0] == {"name": "soc_temperature", "unit": "celsius",
@@ -208,23 +197,6 @@ def test_g12_serves_the_current_boots_sample_and_only_the_previous_boots_receipt
     assert served["previous_boot_received_at"] is None
 
 
-def test_g12_intake_full_at_the_cap_and_429_after_it(registry):
-    boots, sessions = _rig(registry)
-    host = Host(registry, sessions, boots)
-    host.post()
-    with registry.db.transaction() as conn:
-        conn.execute("UPDATE node_intake_quotas SET used=%s WHERE kind='observation'",
-                     (OBSERVATION_DAILY_CAP - 1,))
-    observations = NodeObservations(sessions)
-    assert _device(observations.fleet_hosts())["intake_full"] is False
-    registry.clock.advance(INTERVAL)
-    assert host.post()["disposition"] == "recorded"
-    assert _device(observations.fleet_hosts())["intake_full"] is True
-    registry.clock.advance(INTERVAL)
-    with pytest.raises(NodeControlError, match="node_intake_capacity"):
-        host.post()
-
-
 def test_g12_omits_retired_boxes_and_lists_active_ones_without_a_boot(registry):
     boots, sessions = _rig(registry)
     Host(registry, sessions, boots).post()
@@ -238,11 +210,10 @@ def test_g12_omits_retired_boxes_and_lists_active_ones_without_a_boot(registry):
     assert _device(read, retired_id) is None
     assert _device(read)["serial"] == SERIAL  # the box's claim at boot, for the console's names
     assert _device(read, spare_id) == {"device_id": spare_id, "serial": None, "host": None,
-                                       "previous_boot_received_at": None, "intake_full": False,
-                                       "preparation_intake_full": False,
+                                       "previous_boot_received_at": None,
                                        "boot": None, "facts": None, "preparation": None,
                                        "bus_link": {"linked": None, "changed_at": None,
-                                                    "looked_at": None}}
+                                                    "hub": "no_hub"}}
 
 
 def test_g12_serves_each_boxs_own_bus_link_linked_unlinked_and_never_seen(registry):
@@ -253,15 +224,42 @@ def test_g12_serves_each_boxs_own_bus_link_linked_unlinked_and_never_seen(regist
         for device_id in (unlinked_id, unseen_id):
             conn.execute("INSERT INTO devices(device_id,first_seen,last_seen) VALUES(%s,1,1)",
                          (device_id,))
-        record_look_in(conn, {DEVICE_ID: True}, 100.0)
-        record_look_in(conn, {unlinked_id: True}, 110.0)
-        record_look_in(conn, {unlinked_id: False}, 120.0)
+        record_presence_in(conn, {DEVICE_ID: True}, 100.0)
+        record_presence_in(conn, {unlinked_id: True}, 110.0)
+        record_presence_in(conn, {unlinked_id: False}, 120.0)
+        record_presence_in(conn, {unlinked_id: False}, 130.0)   # unchanged: not rewritten
+        record_hub_reachable_in(conn, True, times=ProcessTransactionClock(registry.clock))
+        conn.execute("INSERT INTO procrastinate_workers (last_heartbeat) VALUES (now())")
     read = NodeObservations(sessions).fleet_hosts()
-    assert _device(read)["bus_link"] == {"linked": True, "changed_at": 100.0, "looked_at": 120.0}
+    assert _device(read)["bus_link"] == {"linked": True, "changed_at": 100.0, "hub": "reachable"}
     assert _device(read, unlinked_id)["bus_link"] == {"linked": False, "changed_at": 120.0,
-                                                      "looked_at": 120.0}
+                                                      "hub": "reachable"}
     assert _device(read, unseen_id)["bus_link"] == {"linked": None, "changed_at": None,
-                                                    "looked_at": 120.0}
+                                                    "hub": "reachable"}
+
+
+def test_the_hubs_reachability_is_written_only_when_it_changes(registry):
+    """Mutation probe (H1): make `Singleton.write_in` skip its equality check -> revision 2."""
+    times = ProcessTransactionClock(registry.clock)
+    with registry.db.transaction() as conn:
+        record_hub_reachable_in(conn, True, times=times)
+    registry.clock.advance(5)
+    with registry.db.transaction() as conn:
+        record_hub_reachable_in(conn, True, times=times)
+        assert conn.execute("SELECT pg_current_xact_id_if_assigned() AS x").fetchone()["x"] is None
+        stored = HUB_REACHABILITY.read_in(conn)
+    assert (stored.revision, stored.changed_at, stored.changed_by) == (1, 1000.0, "central")
+    with registry.db.transaction() as conn:
+        record_hub_reachable_in(conn, False, times=times)
+        conn.execute("INSERT INTO procrastinate_workers (last_heartbeat) VALUES (now())")
+        assert HUB_REACHABILITY.read_in(conn).revision == 2
+    assert _device_hub(registry) == "unreachable"
+
+
+def _device_hub(registry) -> str:
+    from central.fleet.node_bus_presence import bus_links_in
+    with registry.db.transaction() as conn:
+        return bus_links_in(conn, [DEVICE_ID])[DEVICE_ID]["hub"]
 
 
 def test_a_held_device_fence_does_not_block_g12(registry):
@@ -400,23 +398,19 @@ def _app_manager(registry, sessions, host, observations, monkeypatch):
     return PreparationObservation(_Store(), SimpleNamespace(grant=grant, request=request)), answers
 
 
-def _prep_intake(registry):
+def _prep_stored(registry):
     with registry.db.transaction() as conn:
-        return conn.execute("SELECT coalesce(sum(used),0) n FROM node_intake_quotas "
-                            "WHERE kind='preparation'").fetchone()["n"]
+        return conn.execute("SELECT count(*) n FROM node_manager_observations").fetchone()["n"]
 
 
 def test_a_day_of_preparing_refused_alternation_never_fills_the_cap_and_g12_stays_refused(
         registry, monkeypatch):
     """The sustained storage refusal (§64): App Manager samples `preparing`, then `refused`
     with the drifting room, on every poll. Central coalesces per (state, operation, fault)
-    per interval, so the day stores about two per interval, never reaches the derived cap, and
-    G12's newest sample stays `refused` all day; `verified` after storage frees is stored at
-    once."""
+    per interval, so the day stores about two per interval, and G12's newest sample stays
+    `refused` all day; `verified` after storage frees is stored at once."""
     from uuid import UUID
 
-    from central.fleet.node_sessions import PREPARATION_DAILY_CAP
-    registry.clock.advance(86400 - registry.clock.utc() % 86400)
     boots, sessions = _rig(registry, session_seconds=86400)
     observations = NodeObservations(sessions)
     host = Host(registry, sessions, boots)
@@ -435,34 +429,13 @@ def test_a_day_of_preparing_refused_alternation_never_fills_the_cap_and_g12_stay
         if tick % 150 == 0:
             served = _device(observations.fleet_hosts())
             not_refused += served["preparation"]["state"] != "refused"
-            assert served["preparation_intake_full"] is False
         registry.clock.advance(tick_seconds)
     dispositions = {answer["disposition"] for answer in answers}
-    assert "node_intake_capacity" not in dispositions and "coalesced" in dispositions
-    stored = _prep_intake(registry)
-    assert stored <= 2 * (math.ceil(86400 / INTERVAL) + 1) < PREPARATION_DAILY_CAP
+    assert dispositions <= {"recorded", "coalesced"} and "coalesced" in dispositions
+    stored = _prep_stored(registry)
+    assert stored <= 2 * (math.ceil(86400 / INTERVAL) + 1)
     assert not_refused == 0
     # Storage frees: `verified` is a new (state, operation, fault), stored at once, and G12
     # serves it (the incident clears on this sample).
     node.sample("verified", command=command)
     assert _device(observations.fleet_hosts())["preparation"]["state"] == "verified"
-
-
-def test_g12_preparation_intake_full_at_the_derived_cap(registry, monkeypatch):
-    from central.fleet.node_sessions import PREPARATION_DAILY_CAP
-    boots, sessions = _rig(registry)
-    observations = NodeObservations(sessions)
-    host = Host(registry, sessions, boots)
-    node, answers = _app_manager(registry, sessions, host, observations, monkeypatch)
-    node.sample("idle")
-    with registry.db.transaction() as conn:
-        conn.execute("UPDATE node_intake_quotas SET used=%s WHERE kind='preparation'",
-                     (PREPARATION_DAILY_CAP - 1,))
-    assert _device(observations.fleet_hosts())["preparation_intake_full"] is False
-    registry.clock.advance(1)
-    node.sample("refused", fault="node_storage_capacity", available_bytes=1, required_bytes=2)
-    assert answers[-1]["disposition"] == "recorded"
-    assert _device(observations.fleet_hosts())["preparation_intake_full"] is True
-    registry.clock.advance(INTERVAL)
-    node.sample("idle")
-    assert answers[-1]["disposition"] == "node_intake_capacity"

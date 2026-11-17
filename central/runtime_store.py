@@ -4,7 +4,13 @@ Every write names its actor (`central/actor.py`) and its command, and `edit`, th
 runtime_state, audits it (migration 111): it stamps runtime_state's audit fields, and appends one
 runtime_changes row for each Scene, Program, Run and Default Scene the command changed, found by
 comparing the state before and after it (`_changes`). No caller writes the audit, so none can
-skip it."""
+skip it.
+
+The row is written only when the Runtime changed apart from its processed instant `now` (decision
+0034, class A): a tick that only moved time writes nothing, takes no transaction id and so wakes
+no Player. The stored `now` is therefore the time of the last change, possibly hours old; the one
+reader that depends on its freshness, `Runtime._pending_windows`, is kept right by Settings ›
+House, which saves the processed instant (`save_processed_in`) before it moves the house's time."""
 
 from contextlib import contextmanager
 
@@ -59,6 +65,11 @@ def _changes(before: dict, after: dict) -> list[dict]:
     return rows
 
 
+def _apart_from_now(state: dict) -> dict:
+    """`state` (an `export_state()`) without its `now`: what a save compares."""
+    return {key: value for key, value in state.items() if key != "now"}
+
+
 class RuntimeStore:
     def __init__(self, db: Database, clock: Clock):
         self.db, self.clock = db, clock
@@ -67,7 +78,10 @@ class RuntimeStore:
     def edit(self, conn=None, *, by: Actor, command: str):
         """The one writer of runtime_state: the Runtime as stored, saved on exit with its audit
         fields, and one runtime_changes row per thing `command` changed (`_changes`), all in the
-        caller's transaction."""
+        caller's transaction. The row is written only when the state after differs from the state
+        before apart from `now` (`_apart_from_now`); then the whole state, `now` included, is
+        saved. An edit that moved only `now` writes nothing, takes no transaction id, and so fires
+        no Player wake (central/infra/player_state_wakes.py)."""
         if conn is None:
             with self.db.transaction() as transaction, self.edit(
                     transaction, by=by, command=command) as runtime:
@@ -78,6 +92,24 @@ class RuntimeStore:
         before = runtime.export_state()
         yield runtime
         after = runtime.export_state()
+        if _apart_from_now(after) != _apart_from_now(before):
+            self._save_in(conn, before, after, by=by, command=command)
+
+    def save_processed_in(self, conn, *, by: Actor) -> None:
+        """Advance the stored Runtime to Central's clock (`self.clock.utc()`, read after the
+        locks) and save it with `now` even when nothing else changed: the one write of the
+        processed instant alone, in the caller's transaction (takes the Coordination and Runtime
+        locks, `acquire_runtime_locks`). Settings › House calls it before it stores a new zone or
+        place, under the house still stored, so `Runtime._pending_windows` never admits a window
+        the change moved before the processed instant (R10). command "advance"; it adds no
+        runtime_changes row unless the advance itself changed something."""
+        acquire_runtime_locks(conn)
+        runtime = self.read_in(conn)
+        before = runtime.export_state()
+        runtime.advance(self.clock.utc())
+        self._save_in(conn, before, runtime.export_state(), by=by, command="advance")
+
+    def _save_in(self, conn, before: dict, after: dict, *, by: Actor, command: str) -> None:
         at = self.clock.utc()
         conn.execute(
             "INSERT INTO runtime_state(singleton,revision,snapshot,created_at,created_by,"

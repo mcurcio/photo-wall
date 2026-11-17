@@ -49,7 +49,7 @@ def schema_before(empty_database: str, first_unapplied: str, *,
                          (path.name, hashlib.sha256(sql.encode()).hexdigest()))
     if procrastinate:
         apply_procrastinate_schema(empty_database)
-    db = Database(empty_database)
+    db = Database(empty_database, application_name="photo-wall-test")
     try:
         yield db
     finally:

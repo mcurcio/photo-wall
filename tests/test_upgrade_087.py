@@ -35,7 +35,7 @@ def test_087_names_a_secured_locks_variant_and_keeps_serving_its_bytes(empty_dat
     Player is refused the bytes, and this test fails; skip it for the offered plans (`WHERE
     FALSE AND ...` on the plan_offers UPDATE) -> the offered media layer names no variant and
     this test fails."""
-    db = Database(empty_database)
+    db = Database(empty_database, application_name="photo-wall-test")
     try:
         # Power and the week's tables (089-091), the Frame's lighting (099, over the picture
         # tables 092-097 it rewrites), its Position history (096), its turn (101) and the turn each
@@ -46,10 +46,11 @@ def test_087_names_a_secured_locks_variant_and_keeps_serving_its_bytes(empty_dat
         # without their profile or wall size (107, 108), which today's code no longer writes; and
         # each room light's colour source (109), which the Frame's lighting check reads; and the
         # Runtime's audit fields and change log (111), which saving a Source writes; and the pool
-        # check's audit fields and pages (112), which seeding a pool writes.
+        # check's audit fields and pages (112), which seeding a pool writes; and `singletons`
+        # (116), where today's code reads the house.
         migrate_before(db, "087", also=("089_", "090_", "091_", "092_", "093_", "094_", "096_",
                                         "097_", "099_", "101_", "102_", "103_", "104_", "105_", "107_",
-                                        "108_", "109_", "111_", "112_"))
+                                        "108_", "109_", "111_", "112_", "116_"))
         registry = Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
         frame(registry, "portrait")
         picture = photo("photo-1", taken_at=900)

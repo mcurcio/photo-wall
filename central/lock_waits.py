@@ -30,6 +30,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 
+from central.db import with_application_name
 from central.transaction_locks import COORDINATION_LOCK, NODE_LOCK_CLASS, RUNTIME_LOCK
 
 LOCK_RETRY_AFTER_SECONDS: Final = 1
@@ -88,7 +89,7 @@ def _log_holders(db: Any) -> None:
     """Name the holders in the log, on a connection of its own (the failed transaction's is
     aborted). Reading them is best effort: a failure is logged and never hides the refusal."""
     try:
-        with psycopg.connect(db.dsn, autocommit=True, row_factory=dict_row,
+        with psycopg.connect(with_application_name(db.dsn, "photo-wall-lock-waits"), autocommit=True, row_factory=dict_row,
                              connect_timeout=5) as conn:
             holders = lock_holders_in(conn)
     except Exception:

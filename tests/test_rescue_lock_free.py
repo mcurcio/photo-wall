@@ -59,7 +59,7 @@ class Queue:
 
     def tick(self, job_type, timestamp):
         """Defer one periodic tick exactly as procrastinate's periodic deferrer does."""
-        app = build_app(async_connector(self.dsn), CATALOG, None)
+        app = build_app(async_connector(self.dsn, application_name="photo-wall-test"), CATALOG, None)
         (entry,) = [pt for pt in app.periodic_registry.periodic_tasks.values()
                     if pt.task.name == task_name(job_type)]
 

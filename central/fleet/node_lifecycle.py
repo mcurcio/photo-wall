@@ -27,7 +27,7 @@ from central.fleet.node_app_links import (
     load_current_node_app_link_in,
 )
 from central.fleet.node_boot import parse_node_deployment
-from central.fleet.node_sessions import NodeControlError, NodeSessions, claim_intake_in
+from central.fleet.node_sessions import NodeControlError, NodeSessions
 from central.transaction_locks import acquire_runtime_locks
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_boot import parse_node_boot_offer
@@ -144,7 +144,6 @@ class NodeLifecycle:
                 request.session_id, principal.grant.offer_id, link.process, link.app_epoch, old_environment,
                 deployment.app_environment, fallback)
             command = replace(command, command_sha256=stage_digest(command))
-            claim_intake_in(conn, device_id, "command", now)
             conn.execute("INSERT INTO node_app_operations(operation_id,command_id,device_id,device_generation,"
                 "player_id,authority_epoch,producer_id,session_id,deployment_id,request_sha256,command_sha256,"
                 "command_payload,created_at,operator_audit_ref) "
@@ -231,7 +230,6 @@ class NodeLifecycle:
             if collision:
                 raise NodeControlError("node_app_effect_sequence_conflict")
             now = principal.admission.ensure_current(self.sessions.clock)
-            claim_intake_in(conn, command.producer.device_id, "evidence", now)
             conn.execute("INSERT INTO node_app_effects VALUES(%s,%s,%s,%s,%s,%s,%s)",
                 (event.event_id, event.operation_id, principal.producer_id, event.sequence, event.phase, canonical, now))
             return {"stored": True, "duplicate": False, "received_at": now,

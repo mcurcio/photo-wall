@@ -6,7 +6,6 @@ does not authenticate a physical device.
 """
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from hmac import compare_digest
@@ -30,7 +29,6 @@ from contracts.node_commands import (
     producer_document,
     scope_for_owner,
 )
-from contracts.node_observation import HOST_OBSERVATION_INTERVAL_SECONDS
 from contracts.node_protocol import NodeProducerV2, digest, token
 from contracts.time import Clock
 
@@ -55,33 +53,6 @@ class NodePrincipal:
     producer_id: UUID
     admission: SessionAdmission
     current: bool
-
-
-# Twice one producer's stored samples per UTC day at one per interval (console DDD §60, §63):
-# room for two boxes claiming one serial. Derived, never written as a number.
-OBSERVATION_DAILY_CAP: Final[int] = 2 * math.ceil(86400 / HOST_OBSERVATION_INTERVAL_SECONDS)
-# Host facts are read at most once per observation post (§64), so the same formula bounds them.
-HOST_FACTS_DAILY_CAP: Final[int] = 2 * math.ceil(86400 / HOST_OBSERVATION_INTERVAL_SECONDS)
-# App Manager samples are coalesced per (state, operation, fault) per interval (§64), so a box
-# alternating two states (`preparing`/`refused`, or `preparing`/`fault` on older bases) stores
-# two per interval; twice that leaves room for two boxes claiming one serial.
-PREPARATION_DAILY_CAP: Final[int] = 4 * math.ceil(86400 / HOST_OBSERVATION_INTERVAL_SECONDS)
-
-
-def claim_intake_in(conn, device_id: str, kind: str, now: float) -> None:
-    """Device/day caps are deliberately generous but finite across replicas."""
-    limits = {"session": 1024, "evidence": 100000, "observation": OBSERVATION_DAILY_CAP,
-              "command": 1024, "display": 500000, "preparation": PREPARATION_DAILY_CAP,
-              "host_facts": HOST_FACTS_DAILY_CAP}
-    day = int(now) // 86400
-    row = conn.execute("INSERT INTO node_intake_quotas(device_id,day,kind,used) "
-                       "VALUES(%s,%s,%s,1) ON CONFLICT(device_id,day,kind) DO UPDATE "
-                       "SET used=node_intake_quotas.used+1 WHERE node_intake_quotas.used<%s "
-                       "RETURNING used", (device_id, day, kind, limits[kind])).fetchone()
-    if row is None:
-        raise NodeControlError("node_intake_capacity", 429)
-    conn.execute("DELETE FROM node_intake_quotas WHERE device_id=%s AND day<%s",
-                 (device_id, day - 1))
 
 
 class NodeSessions:
@@ -183,7 +154,6 @@ class NodeSessions:
             if conn.execute("SELECT 1 FROM node_sessions WHERE credential_sha256=%s",
                             (credential_hash,)).fetchone():
                 raise NodeControlError("node_credential_reuse", 409)
-            claim_intake_in(conn, device_id, "session", now)
             self._offer_in(conn, claim, device_id, generation)
             admission_id = self._admit_boot_in(conn, claim, device_id, generation, now)
             # A new owner session supersedes that owner's prior session.

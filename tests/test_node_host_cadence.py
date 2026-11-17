@@ -3,7 +3,6 @@
 on its own monotonic clock, and Central's cap and silence limit derived from the one contract
 constant. No database."""
 import json
-import math
 import subprocess
 import sys
 from pathlib import Path
@@ -13,7 +12,6 @@ from uuid import uuid4
 from appliance.host.host_linux import LinuxHostSampler
 from appliance.host.host_runner import HostRunner
 from central.fleet.host_thresholds import HOST_SILENT_AFTER_SECONDS, thresholds_document
-from central.fleet.node_sessions import OBSERVATION_DAILY_CAP
 from contracts.node_observation import HOST_OBSERVATION_INTERVAL_SECONDS, parse_host_observation
 from contracts.node_protocol import NodeProducerV2
 
@@ -118,20 +116,18 @@ def test_the_runner_posts_at_session_start_then_once_per_interval_while_sampling
     assert [observation.sequence for _, observation in posts] == [1, 3, 4, 5, 6]
 
 
-def test_the_cap_and_the_silence_limit_derive_from_the_one_constant():
+def test_the_silence_limit_derives_from_the_one_constant():
     interval = HOST_OBSERVATION_INTERVAL_SECONDS
-    assert OBSERVATION_DAILY_CAP == 2 * math.ceil(86400 / interval) == 11520
     assert HOST_SILENT_AFTER_SECONDS == 4 * interval == 60
     assert thresholds_document()["host_silent_after_seconds"] == HOST_SILENT_AFTER_SECONDS
-    # Change the constant before anything derives from it: both move with it.
+    # Change the constant before anything derives from it: the limit moves with it.
     probe = ("import json, contracts.node_observation as c\n"
              "c.HOST_OBSERVATION_INTERVAL_SECONDS = 7\n"
-             "from central.fleet.node_sessions import OBSERVATION_DAILY_CAP\n"
              "from central.fleet.host_thresholds import thresholds_document\n"
-             "print(json.dumps([OBSERVATION_DAILY_CAP, thresholds_document()['host_silent_after_seconds']]))\n")
+             "print(json.dumps(thresholds_document()['host_silent_after_seconds']))\n")
     out = subprocess.run([sys.executable, "-c", probe], cwd=ROOT, capture_output=True, text=True,
                          check=True, timeout=60).stdout
-    assert json.loads(out) == [2 * math.ceil(86400 / 7), 28]
+    assert json.loads(out) == 28
 
 
 def test_the_thresholds_document_is_numbers_only():

@@ -157,7 +157,7 @@ def immich_library():
 def database(database_provisioner):
     """A `Database` over a fresh clone of the migrated template, dropped after."""
     with database_provisioner.migrated() as conninfo:
-        db = Database(conninfo)
+        db = Database(conninfo, application_name="photo-wall-test")
         try:
             yield db
         finally:
@@ -174,7 +174,7 @@ def module_registry(database_provisioner):
     """`registry` shared by one module's tests: for a module whose tests run in order against one
     long-lived system (real processes on one database) that is too slow to boot per test."""
     with database_provisioner.migrated() as conninfo:
-        db = Database(conninfo)
+        db = Database(conninfo, application_name="photo-wall-test")
         try:
             yield Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
         finally:

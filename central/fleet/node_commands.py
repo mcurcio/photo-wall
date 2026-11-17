@@ -16,7 +16,6 @@ from central.fleet.device_fence import fence_in
 from central.fleet.node_sessions import (
     NodeControlError,
     NodeSessions,
-    claim_intake_in,
 )
 from central.fleet.principal import SessionAdmission, _clock_sample
 from contracts.node_commands import (
@@ -109,7 +108,6 @@ class NodeCommands:
             command = replace(command, command_sha256=reboot_digest(command))
             payload = encode_reboot_request(command)
             expires_at = min(now + request.valid_for_seconds, row["expires_at"])
-            claim_intake_in(conn, device_id, "command", now)
             conn.execute("INSERT INTO node_reboot_commands(command_id,session_id,request_sha256,"
                          "operator_audit_ref,payload,issued_at,expires_at) VALUES(%s,%s,%s,%s,%s,%s,%s)",
                          (request.command_id, request.session_id, request_hash,

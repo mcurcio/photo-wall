@@ -71,7 +71,7 @@ def _reported(address: str, colour: dict) -> dict:
 
 def test_109_upgrades_lights_and_words_to_colour_sources_and_facts(database_provisioner):
     with database_provisioner.empty() as conninfo:
-        db = Database(conninfo)
+        db = Database(conninfo, application_name="photo-wall-test")
         try:
             _at_108(db)
             with db.transaction() as conn:

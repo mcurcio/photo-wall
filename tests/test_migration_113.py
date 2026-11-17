@@ -126,9 +126,9 @@ def _seed_old_records(conn, player_id, host, display, display_session):
 def test_113_keeps_what_central_reads_and_waits_for_a_nodes_write(empty_database, monkeypatch):
     """Mutation probes: drop the `LOCK` (the open write commits before the truncate and is lost);
     drop the handoff clause (a kept exchange loses its handoff)."""
-    db = Database(empty_database)
+    db = Database(empty_database, application_name="photo-wall-test")
     try:
-        migrate_before(db, "113")
+        migrate_before(db, "113", also=("116_",))   # today's code reads the house in `singletons`
         registry = Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
         monkeypatch.setattr(test_node_runtime_reconciliation, "NodeAppLinks", LinksAt112)
         _, player, _, sessions, _, grants, _, reconciler, proof = \

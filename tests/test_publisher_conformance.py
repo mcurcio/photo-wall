@@ -181,7 +181,7 @@ class ProcrastinateHarness:
         return handle
 
     async def insert_periodic_tick(self, job_type) -> None:
-        app = build_app(async_connector(self.dsn), (job_type,), None)
+        app = build_app(async_connector(self.dsn, application_name="photo-wall-test"), (job_type,), None)
         async with app.open_async():
             (tick,) = app.periodic_registry.periodic_tasks.values()
             await PeriodicDeferrer(registry=app.periodic_registry).defer_jobs([(tick, 1000)])

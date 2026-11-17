@@ -307,3 +307,15 @@ def test_every_pis_version_and_previous_are_desired_and_older_ones_are_not(regis
     jobs = _desired(registry)
     assert {_env(third.app_environment), _env(second.app_environment), _env(fourth.app_environment)} <= jobs
     assert _env(first.app_environment) not in jobs  # no Pi's version nor previous any more
+
+
+def test_a_pi_is_never_refused_for_volume(registry):
+    """Decision 0034 (class C; owner, 2026-10-07: UX over security): 130 boot offers for one
+    serial in one UTC day, past the old per-device cap of 128, each answer an offer. Mutation
+    probe (C1): reinstate a 128-a-day per-device offer cap in `NodeBootService.offer` -> the 129th
+    offer is refused."""
+    boots, _, _ = cold_setup(registry)
+    for _ in range(130):
+        offer = boots.offer(NodeBootRequestV2(SERIAL, uuid4(), uuid4().hex + uuid4().hex))
+        assert offer.serial == SERIAL
+        registry.clock.advance(1)

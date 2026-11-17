@@ -9,10 +9,12 @@ from collections.abc import Callable
 import psycopg
 from psycopg import sql
 
+from central.db import PoolName, with_application_name
+
 log = logging.getLogger(__name__)
 
 
-async def listen(dsn: str, channel: str, *, application: str, connected: Callable[[], None],
+async def listen(dsn: str, channel: str, *, application: PoolName, connected: Callable[[], None],
                  notified: Callable[[str], None], retry_seconds: float) -> None:
     """Until cancelled: LISTEN `channel` on an autocommit connection of its own (named
     `application`); `connected()` after every (re)connect, since notifications sent while none
@@ -20,7 +22,7 @@ async def listen(dsn: str, channel: str, *, application: str, connected: Callabl
     dialled again after `retry_seconds`."""
     while True:
         try:
-            async with await psycopg.AsyncConnection.connect(dsn, autocommit=True, application_name=application) as conn:
+            async with await psycopg.AsyncConnection.connect(with_application_name(dsn, application), autocommit=True) as conn:
                 await conn.execute(sql.SQL("LISTEN {}").format(sql.Identifier(channel)))
                 connected()
                 async for notify in conn.notifies():

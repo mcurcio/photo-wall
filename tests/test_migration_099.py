@@ -61,7 +61,7 @@ def _frame(conn, frame_id: str, depth: float, display) -> None:
 def test_099_upgrades_every_frame_to_the_python_upgrade_rule(database_provisioner):
     """A6. Mutation probe M8: the migration's wash at 999 lx instead of 1000 -> every expectation differs."""
     with database_provisioner.empty() as conninfo:
-        db = Database(conninfo)
+        db = Database(conninfo, application_name="photo-wall-test")
         try:
             _at_098(db)
             with db.transaction() as conn:

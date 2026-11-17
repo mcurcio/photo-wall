@@ -316,7 +316,7 @@ def build_repository(dsn: str, clock: Clock | None = None, *,
     G11: media times on the database's clock in every worker process; `clock` stays for the
     worker's monotonic budgets and process-local decisions.
     """
-    return MediaRepository(Database(dsn), clock or SystemClock(),
+    return MediaRepository(Database(dsn, application_name="photo-wall-worker"), clock or SystemClock(),
                            times=DatabaseTransactionClock(), queue=queue)
 
 

@@ -318,7 +318,7 @@ def ticking_db(registry):
         conn.execute("CREATE SEQUENCE ticking.tick")
         conn.execute("CREATE FUNCTION ticking.clock_timestamp() RETURNS timestamptz VOLATILE LANGUAGE sql AS "
                      "$$ SELECT pg_catalog.clock_timestamp() + nextval('ticking.tick') * interval '1 second' $$")
-    db = Database(make_conninfo(registry.db.dsn, options="-c search_path=ticking,pg_catalog,public"))
+    db = Database(make_conninfo(registry.db.dsn, options="-c search_path=ticking,pg_catalog,public"), application_name="photo-wall-test")
     try:
         yield db
     finally:

@@ -38,7 +38,7 @@ def test_081_keeps_hand_placed_photos_as_library_assets_and_retires_the_rest(emp
     authored = _original(1, orientation=6)          # held by a hand-picked Scene
     pinned = _original(2, kind="video")             # held by a transfer pin through its job
     loose = _original(3)                            # held by nothing
-    db = Database(empty_database)
+    db = Database(empty_database, application_name="photo-wall-test")
     try:
         migrate_before(db, "081")
         with db.transaction() as conn:

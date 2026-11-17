@@ -57,9 +57,12 @@ def steps(app):
     return {name: step.status for name, step in app.state.scheduler.health().steps.items()}
 
 
-def runtime_now(db) -> float:
+def runtime_now(db) -> float | None:
+    """The stored Runtime's processed instant; None with no row. The Runtime is saved only when
+    it changed apart from `now` (decision 0034), so an idle wall's stays where it last changed."""
     with db.transaction() as conn:
-        return conn.execute("SELECT snapshot FROM runtime_state").fetchone()["snapshot"]["now"]
+        row = conn.execute("SELECT snapshot FROM runtime_state").fetchone()
+        return None if row is None else row["snapshot"]["now"]
 
 
 def test_a_backlog_of_any_size_drains_in_bounded_steps_while_the_cycle_commits(registry, wall):
@@ -74,7 +77,7 @@ def test_a_backlog_of_any_size_drains_in_bounded_steps_while_the_cycle_commits(r
     wall.state.scheduler.tick()
     assert {step: steps(wall)[step] for step in ("runtime", "planning", "settle", "retention")} \
         == {"runtime": "ok", "planning": "ok", "settle": "ok", "retention": "ok"}
-    assert runtime_now(registry.db) == registry.clock.utc()
+    assert runtime_now(registry.db) is None    # nothing changed: an idle tick saves no Runtime
     assert events(registry.db) == backlog - budget
     wall.state.scheduler.tick()
     assert events(registry.db) == EVENTS_KEPT + BATCH_ROWS // 2
@@ -157,7 +160,7 @@ def test_a_prune_that_cannot_finish_holds_no_lock_and_never_fails_the_cycle(regi
     assert held_while_waiting == 0
     assert {step: steps(wall)[step] for step in ("runtime", "planning", "settle", "retention")} \
         == {"runtime": "ok", "planning": "ok", "settle": "ok", "retention": "failing"}
-    assert runtime_now(registry.db) == registry.clock.utc()
+    assert runtime_now(registry.db) is None    # nothing changed: an idle tick saves no Runtime
     with registry.db.transaction() as conn:
         assert conn.execute("SELECT count(*) AS n FROM media_references "
                             "WHERE owner='expired-offer'").fetchone()["n"] == 0

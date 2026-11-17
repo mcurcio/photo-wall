@@ -182,8 +182,10 @@ def test_the_runtime_moves_on_and_commits_settle_when_planning_fails(registry, w
 def test_every_runtime_command_records_who_ran_it(registry, wall):
     """Audit: a Scene saved through the console's session cookie is one runtime_changes row by
     "console", through the bearer token by "api-token", each naming its command, Scene, revision
-    and time; the scheduler's tick stamps runtime_state as "scheduler". Mutation probe: hardcode
-    `by="console"` in `OperatorAuth.admin` (the bearer row reads "console")."""
+    and time; a scheduler's tick that changes nothing but time leaves the stamp alone (decision
+    0034: the Runtime is saved only on change; a tick that changes it stamps "scheduler",
+    tests/test_runtime_saved_on_change.py). Mutation probe: hardcode `by="console"` in
+    `OperatorAuth.admin` (the bearer row reads "console")."""
     app, client = wall
     players(registry, 1)
     cookie = signed_in(client)
@@ -201,7 +203,7 @@ def test_every_runtime_command_records_who_ran_it(registry, wall):
     app.state.scheduler.tick()
     with registry.db.transaction() as conn:
         assert conn.execute("SELECT changed_by FROM runtime_state").fetchone()["changed_by"] == \
-            "scheduler"
+            "api-token"
 
 
 PRODUCTION = Path(__file__).parent / "fixtures" / "runtime_state_2026_10_27.json"

@@ -223,7 +223,7 @@ def test_021_backfill_seeds_references_and_produced_facts(pre_021):
         # The column today's repository reads beside the produced facts (087).
         conn.execute("ALTER TABLE assets ADD COLUMN produced_detail JSONB NULL")
 
-    database = Database(pre_021)
+    database = Database(pre_021, application_name="photo-wall-test")
     try:
         repo = Repo(database, ManualClock(1000.0))
         os_old = repo.get(AssetKey(AssetKind.OS_IMAGE, "v1.0.0"))

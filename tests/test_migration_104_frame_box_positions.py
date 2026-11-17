@@ -127,7 +127,7 @@ def _entries(conn, frame_id: str, entries: list[dict]) -> None:
 
 
 def _at_103(conninfo: str) -> Database:
-    db = Database(conninfo)
+    db = Database(conninfo, application_name="photo-wall-test")
     migrate_before(db, "104")
     return db
 

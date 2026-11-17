@@ -297,7 +297,7 @@ def test_022_is_a_no_op_before_procrastinate_is_installed(empty_database):
     # it after migrating, as Central's start does).
     from central.db import Database
 
-    database = Database(empty_database)
+    database = Database(empty_database, application_name="photo-wall-test")
     try:
         database.migrate()
         with database.transaction() as conn:

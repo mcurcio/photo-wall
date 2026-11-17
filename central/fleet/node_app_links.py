@@ -15,7 +15,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from central.actor import Actor
 from central.fleet.acceptance_evidence import current_control_receipt_matches
 from central.fleet.acceptance_query import load_current_app_control_in
-from central.fleet.node_sessions import NodeControlError, NodeSessions, claim_intake_in
+from central.fleet.node_sessions import NodeControlError, NodeSessions
 from central.transaction_locks import acquire_runtime_locks
 from contracts.node_app_link import (
     NodeAppLinkChallengeV2,
@@ -124,7 +124,6 @@ class NodeAppLinks:
                 return _answer(standing, stored["admitted_at"])
             if standing == "older":
                 return _answer(standing, None)
-            claim_intake_in(conn, device_id, "evidence", now)
             conn.execute("INSERT INTO node_app_links(device_id,device_generation,nonce,producer_id,"
                          "player_id,authority_epoch,payload,admitted_at,created_at,created_by,"
                          "changed_at,changed_by) VALUES(%(device)s,%(generation)s,%(nonce)s,"

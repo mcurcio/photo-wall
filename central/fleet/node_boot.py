@@ -11,7 +11,7 @@ mutable manager policy. No offer receipt proves download, boot, or playback.
 """
 from __future__ import annotations
 
-from typing import Final, Literal
+from typing import Final
 from uuid import UUID, uuid4
 
 from central.content_catalog.catalog import device_id_for_serial, sanitize_serial
@@ -26,7 +26,7 @@ from central.content_catalog.deployment import (
 )
 from central.content_catalog.ports import PlayerVersions
 from central.fleet.device_fence import fence_in, standing_in
-from central.fleet.models import FleetError, OfferAsset
+from central.fleet.models import OfferAsset
 from central.fleet.node_sessions import NodeControlError, NodeSessions
 from central.infra.transactions import PgTransaction
 from contracts.node_boot import (
@@ -37,48 +37,16 @@ from contracts.node_boot import (
     parse_node_boot_offer,
 )
 
-_DAY_SECONDS = 86400
-_OFFER_DEVICE_DAILY = 128
-_OFFER_GLOBAL_DAILY = 32768  # 128 Players x 128 offers, plus equivalent spoof headroom
-_NEW_CLAIMS_GLOBAL_DAILY = 1024  # bounds distinct fake serial rows, above 128-Player ceiling
 # The offer's policy revision (contracts/node_boot.py): a wall-wide selection's revision once; with a
 # version per Pi there is no such revision, and the field stays on the wire at 1.
 OFFER_POLICY_REVISION: Final = 1
 
 
-def claim_quota(conn, *, device_id: str, kind: Literal["offer"], now: float) -> None:
-    """Charge one unauthenticated boot offer to the day's global and per-device quotas, or
-    refuse it with `t0_rate_limited` (429) when either is spent."""
-    day = int(now // _DAY_SECONDS)
-    limits = {"offer": (_OFFER_GLOBAL_DAILY, _OFFER_DEVICE_DAILY)}[kind]
-    for scope, limit in zip(("global", device_id), limits, strict=True):
-        row = conn.execute(
-            "INSERT INTO fleet_t0_daily_quotas(scope,kind,day,used) "
-            "VALUES(%s,%s,%s,1) ON CONFLICT(scope,kind,day) DO UPDATE SET "
-            "used=fleet_t0_daily_quotas.used+1 WHERE fleet_t0_daily_quotas.used<%s "
-            "RETURNING used", (scope, kind, day, limit),
-        ).fetchone()
-        if row is None:
-            raise FleetError("t0_rate_limited", 429)
-    # A bounded day index keeps fake-serial quota rows from accumulating forever.
-    conn.execute("DELETE FROM fleet_t0_daily_quotas WHERE day<%s", (day - 30,))
-
-
 def claim_new_device(conn, *, device_id: str, serial: str, now: float) -> None:
-    """Create the device row for a serial seen for the first time, within the day's global
-    new-device quota (`t0_claim_limit`, 429, once it is spent); a known device is a no-op."""
+    """Create the device row for a serial seen for the first time; a known device is a no-op.
+    No quota."""
     if conn.execute("SELECT 1 FROM devices WHERE device_id=%s", (device_id,)).fetchone():
         return
-    day = int(now // _DAY_SECONDS)
-    row = conn.execute(
-        "INSERT INTO fleet_t0_daily_quotas(scope,kind,day,used) "
-        "VALUES('global','new_device',%s,1) ON CONFLICT(scope,kind,day) DO UPDATE SET "
-        "used=fleet_t0_daily_quotas.used+1 "
-        "WHERE fleet_t0_daily_quotas.used<%s RETURNING used",
-        (day, _NEW_CLAIMS_GLOBAL_DAILY),
-    ).fetchone()
-    if row is None:
-        raise FleetError("t0_claim_limit", 429)
     conn.execute("INSERT INTO devices(device_id,serial,first_seen,last_seen) "
                  "VALUES(%s,%s,%s,%s) ON CONFLICT(device_id) DO NOTHING",
                  (device_id, serial, now, now))
@@ -100,10 +68,8 @@ class NodeBootService:
         refusal = None
         result = None
         with self.sessions.db.transaction() as conn:
-            # The fence comes first, so an offer never waits on it holding the global quota row.
             fenced = fence_in(conn, device_id, "change")
             now = self.sessions.clock.utc()
-            claim_quota(conn, device_id=device_id, kind="offer", now=now)
             claim_new_device(conn, device_id=device_id, serial=serial, now=now)
             generation = fenced.generation()
             prior = conn.execute("SELECT * FROM node_boot_offers WHERE device_id=%s AND "

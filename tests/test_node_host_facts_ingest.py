@@ -1,5 +1,5 @@
 """Host facts record (console DDD §64, G13, bead F1), Central side, on real PostgreSQL: every
-row of the facts ingest table, the derived `host_facts` intake cap, the route's 422s, and G12's
+row of the facts ingest table, the route's 422s, and G12's
 `facts` (the current boot's host_core producer only) and `boot` (the current admission's offer
 tag)."""
 import json
@@ -15,7 +15,7 @@ from test_registry import ADMIN
 
 from central.app import create_app
 from central.fleet.node_observations import NodeObservations
-from central.fleet.node_sessions import HOST_FACTS_DAILY_CAP, NodeControlConfig, NodeControlError
+from central.fleet.node_sessions import NodeControlConfig, NodeControlError
 from contracts.node_host_facts import BootReportV2, BootStageV2, HostFactsV2, encode_host_facts
 
 VALUES = {"kernel_release": "6.6.51+rpt-rpi-v8", "interface": "eth0", "link_state": "up",
@@ -35,12 +35,6 @@ def _row(registry):
     with registry.db.transaction() as conn:
         return conn.execute("SELECT sequence,first_received_at,received_at,payload "
                             "FROM node_host_facts").fetchall()
-
-
-def _intake(registry):
-    with registry.db.transaction() as conn:
-        return conn.execute("SELECT coalesce(sum(used),0) n FROM node_intake_quotas "
-                            "WHERE kind='host_facts'").fetchone()["n"]
 
 
 def test_every_ingest_case(registry):
@@ -79,9 +73,6 @@ def test_every_ingest_case(registry):
     [row] = _row(registry)
     assert (row["sequence"], row["first_received_at"], row["received_at"]) == (9, changed, changed)
     assert json.loads(bytes(row["payload"]))["link_state"] == "down"
-    # Only the two posts with new values claimed intake: a same-values resend at a higher
-    # sequence (a Host Management restart) rewrites the row without using the day's quota.
-    assert _intake(registry) == 2
 
 
 RUNNING = BootReportV2((BootStageV2("handoff", "done", None, None, None),
@@ -103,18 +94,17 @@ def test_unchanged_detection_compares_boot_and_reads_an_older_row_without_it(reg
     # A restart resend without boot is unchanged against that row.
     registry.clock.advance(10)
     _send(host, _facts(producer, 2))
-    assert _row(registry)[0]["first_received_at"] == start and _intake(registry) == 1
-    # Boot appears: a change. Then the same nested boot again: unchanged, no intake claimed.
+    assert _row(registry)[0]["first_received_at"] == start
+    # Boot appears: a change. Then the same nested boot again: unchanged.
     registry.clock.advance(10)
     running_at = registry.clock.utc()
     _send(host, _facts(producer, 3, boot=RUNNING))
     registry.clock.advance(10)
     _send(host, _facts(producer, 4, boot=RUNNING))
-    assert _row(registry)[0]["first_received_at"] == running_at and _intake(registry) == 2
+    assert _row(registry)[0]["first_received_at"] == running_at
     # A stage moves: a change, served by G12 as the stored plain document.
     registry.clock.advance(10)
     _send(host, _facts(producer, 5, boot=DONE))
-    assert _intake(registry) == 3
     served = _device(observations.fleet_hosts())["facts"]
     assert served["first_received_at"] == registry.clock.utc()
     assert [stage["state"] for stage in served["boot"]["stages"]] == ["done", "done", "done"]
@@ -129,23 +119,6 @@ def test_a_producer_not_the_sessions_is_refused(registry):
         _send(host, _facts(other, 1))
     assert refused.value.status == 403
     assert _row(registry) == []
-
-
-def test_the_host_facts_intake_cap(registry):
-    boots, sessions = _rig(registry)
-    host = Host(registry, sessions, boots)
-    producer = host.grant.producer
-    _send(host, _facts(producer, 1))
-    with registry.db.transaction() as conn:
-        conn.execute("UPDATE node_intake_quotas SET used=%s WHERE kind='host_facts'",
-                     (HOST_FACTS_DAILY_CAP,))
-    with pytest.raises(NodeControlError, match="node_intake_capacity") as refused:
-        _send(host, _facts(producer, 2, address="192.168.1.41"))
-    assert refused.value.status == 429
-    # A duplicate claims nothing, so it still answers at the cap; so does a same-values resend
-    # at a higher sequence (a restart loop cannot spend the quota a real change needs).
-    assert _send(host, _facts(producer, 1))["disposition"] == "duplicate"
-    assert _send(host, _facts(producer, 3))["disposition"] == "recorded"
 
 
 def test_the_route_records_and_answers_422_for_each_malformed_body(registry):

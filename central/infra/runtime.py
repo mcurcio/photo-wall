@@ -56,6 +56,18 @@ logger = logging.getLogger(__name__)
 
 HEARTBEAT_SECONDS: Final = 10.0
 STALLED_WORKER_SECONDS: Final = 30.0
+
+
+def worker_running_in(conn: Any) -> bool:
+    """Whether any Procrastinate worker beat within STALLED_WORKER_SECONDS by the database's own
+    clock (`last_heartbeat >= now() - STALLED_WORKER_SECONDS`), the rule rescue uses to call a
+    worker dead. Central's bus task runs in the worker process beside the job loops, and that
+    process exits when any of them ends (media/worker.py `_run_workers`), so a beating worker
+    means a running bus task. A plain read; no lock."""
+    return conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM procrastinate_workers WHERE last_heartbeat >= "
+        "now() - make_interval(secs => %s)) AS running", (STALLED_WORKER_SECONDS,)
+    ).fetchone()["running"]
 # Pauses between completion-write attempts: a blip is absorbed well inside one heartbeat.
 COMPLETION_RETRY_DELAYS: Final = (0.5, 1.0, 2.0)
 WORKER_EXITED: Final = "worker_exited"
@@ -139,7 +151,8 @@ class JobRuntime:
         if any(type(n) is not int or n < 1 for n in concurrency.values()):
             raise ValueError("concurrency must be at least 1 per queue")
         self._concurrency = dict(concurrency)
-        self._app = build_app(async_connector(dsn), catalog, self._body)
+        self._app = build_app(async_connector(dsn, application_name="photo-wall-jobs"), catalog,
+                              self._body)
         # The worker reads `app.job_manager` at every call (procrastinate worker.py), so the
         # guard sees every completion write.
         self._app.job_manager = _CompletionGuard(self._app.connector, self._completion_lost)

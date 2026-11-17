@@ -46,7 +46,7 @@ def _stored(conn) -> tuple[dict, dict]:
 def test_106_moves_every_stored_binding_to_the_display_size_form(empty_database):
     """Mutation probe: drop 106's `UPDATE plan_offers` -> the offer keeps its profile and this
     test fails."""
-    db = Database(empty_database)
+    db = Database(empty_database, application_name="photo-wall-test")
     try:
         migrate_before(db, "106")
         with db.transaction() as conn:

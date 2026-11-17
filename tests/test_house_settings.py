@@ -36,7 +36,7 @@ def _house(zone: str, place=None) -> dict:
 
 def test_with_no_row_the_house_is_centrals_own_zone(registry):
     client = TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False))   # no start: no seed
-    assert _rows(registry, "SELECT zone FROM house_settings") == []
+    assert _rows(registry, "SELECT name FROM singletons WHERE name='house'") == []
     response = client.get("/v1/operator/house", headers=AUTH)
     assert response.status_code == 200, response.text
     assert response.json() == {"time": {"zone": server_zone(), "place": None}, "units": "cm", "clock": "24h",
@@ -106,6 +106,9 @@ def test_a_saved_zone_and_place_move_night_off_and_the_programs_windows(registry
                                                         json=_house("America/New_York", PLACE))))
         assert saved.status_code == 200, saved.text
         assert saved.json() == {**_house("America/New_York", PLACE), "updated_at": noon, "zone_confirmed": True}
+        # The save names who made it; the seed at start was Central's own.
+        assert _rows(registry, "SELECT created_by, changed_by FROM singletons WHERE name='house'") == [
+            {"created_by": "central", "changed_by": "api-token"}]
         assert client.get("/v1/operator/house", headers=AUTH).json() == saved.json()
         assert _projected(registry, clock).power.changes[0].at == "2026-10-13T03:00:00Z"   # 23:00 EDT
         assert next_window()["start_at"] == at(NEW_YORK, "2026-10-12T17:00")

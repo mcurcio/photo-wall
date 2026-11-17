@@ -37,7 +37,7 @@ def _doubts(conn, table: str) -> dict[str, Doubt | None]:
 
 def test_111_turns_can_t_tell_into_a_doubt_and_drops_an_old_galleria_birth(database_provisioner):
     with database_provisioner.empty() as conninfo:
-        db = Database(conninfo)
+        db = Database(conninfo, application_name="photo-wall-test")
         try:
             _at_110(db)
             with db.transaction() as conn:

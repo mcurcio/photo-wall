@@ -66,10 +66,12 @@ class PostgresInstallationRepository:
         ).fetchone()["n"]
 
     def active_sessions_in(self, conn) -> tuple[dict, ...]:
+        """Every unretired Player's id and authority_epoch, ordered by id, read without a row lock
+        (it guards no write: each Player's configuration takes its own locks only when it writes,
+        `Coordinator._configuration`)."""
         return tuple(
             conn.execute(
-                "SELECT id,authority_epoch FROM players WHERE retired_at IS NULL "
-                "ORDER BY id FOR SHARE"
+                "SELECT id,authority_epoch FROM players WHERE retired_at IS NULL ORDER BY id"
             ).fetchall()
         )
 

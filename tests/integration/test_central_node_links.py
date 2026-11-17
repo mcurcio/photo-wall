@@ -231,7 +231,7 @@ def test_central_records_every_node_fact_once(database, tmp_path):
             assert None not in ids and len(set(ids)) == len(ids)
 
             # 3. Two workers overlap (rolling deploy): each event is recorded once.
-            second_db = Database(database.dsn)
+            second_db = Database(database.dsn, application_name="photo-wall-test")
             second = _Worker(second_db, hub, projection)
             await second.track([SERIAL])
 

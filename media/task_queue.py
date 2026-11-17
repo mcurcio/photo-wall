@@ -127,7 +127,7 @@ async def rescue_stalled(app: procrastinate.App, *,
 def create_worker_app(dsn: str) -> procrastinate.App:
     """Build the async worker app; runtime collaborators arrive via context."""
     app = procrastinate.App(
-        connector=async_connector(dsn),
+        connector=async_connector(dsn, application_name="photo-wall-media-jobs"),
     )
 
     # Roadmap 5a: one photo's key content. No lock: measurements run beside the

@@ -204,7 +204,7 @@ def test_reads_of_an_unknown_connection_are_refused(store):
 
 def test_migration_080_converts_pre_4_sources_and_makes_cut_over_rows(empty_database):
     """Case 11. Mutation probe: map `favorites: false` to `favourites_only: true`."""
-    db = Database(empty_database)
+    db = Database(empty_database, application_name="photo-wall-test")
     try:
         migrate_before(db, "080")
         tag = str(UUID(int=9))
@@ -254,7 +254,7 @@ def test_migration_112_renames_in_the_catalog_ends_running_checks_and_drops_the_
     sighting become its created and changed times, and a running check ends so the next one
     starts with pages. Mutation probes: leave a default in place -> the unstamped insert
     succeeds; drop step 3 -> the pool stays checking."""
-    db = Database(empty_database)
+    db = Database(empty_database, application_name="photo-wall-test")
     upstream = str(UUID(int=1))
     pools = {name: f"{number:064x}" for number, name in enumerate(
         ("resumed", "first", "done"), start=1)}

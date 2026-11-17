@@ -4,14 +4,43 @@ from contextlib import ExitStack, contextmanager
 from hashlib import sha256
 from pathlib import Path
 from threading import Lock
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
+from psycopg.conninfo import make_conninfo
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool, TooManyRequests
 
 from contracts.time import Clock
 
 MEDIA_LOCK = 734118325
+
+PoolName = Literal[
+    "photo-wall-web",              # central/app.py: Central's API process
+    "photo-wall-bus",              # central/node_bus_wiring.py: the worker's bus task
+    "photo-wall-worker",           # media/worker.py build_repository: the worker's own pool
+    "photo-wall-jobs",             # central/infra/runtime.py JobRuntime
+    "photo-wall-media-jobs",       # media/task_queue.py create_worker_app
+    "photo-wall-queue-ops",        # central/infra/queue_ops.py QueueAdmin
+    "photo-wall-publisher",        # central/infra/publisher.py
+    "photo-wall-media-defer",      # central/media_queue.py ProcrastinateMediaQueue
+    "photo-wall-schema",           # central/media_queue.py: the schema-install lock connection
+    "photo-wall-lock-waits",       # central/lock_waits.py: naming a lock's holders
+    "photo-wall-player-state",     # LISTEN, central/infra/player_state_wakes.py
+    "photo-wall-output-documents", # LISTEN, central/infra/display_store.py
+    "photo-wall-room-lights",      # LISTEN, central/node_bus_wiring.py
+    "photo-wall-outcome-feed",     # LISTEN, central/infra/outcome_feed.py
+    "photo-wall-demo",             # scripts/demo_wall.py
+    "photo-wall-test",             # tests only
+]
+"""Every pool's and connection's `application_name`, so a pg_stat_activity sample or a
+pg_stat_statements row names its source (decision 0034). The one home of the names."""
+
+
+def with_application_name(dsn: str, name: PoolName) -> str:
+    """`dsn` with `application_name` set to `name` (psycopg.conninfo.make_conninfo), every other
+    parameter kept; a name already in `dsn` is replaced. The one way any pool or connection is
+    named."""
+    return make_conninfo(dsn, application_name=name)
 
 
 class TransactionClock(Protocol):
@@ -72,12 +101,16 @@ class Database:
     before it gives up); only tests lower it.
     """
 
-    def __init__(self, dsn: str, *, pool_size: int = 10, reconnect_timeout: float = 300.0):
+    def __init__(self, dsn: str, *, application_name: PoolName, pool_size: int = 10,
+                 reconnect_timeout: float = 300.0):
+        """The pool connects with `with_application_name(dsn, application_name)`. `self.dsn` stays
+        the unnamed `dsn`, so a caller deriving its own connection from it names that connection
+        itself. No default: a pool cannot be built unnamed."""
         if type(pool_size) is not int or not 1 <= pool_size <= 100:
             raise ValueError("pool_size must be between 1 and 100")
         self.dsn = dsn
         self._pool = ConnectionPool(
-            dsn,
+            with_application_name(dsn, application_name),
             kwargs={"row_factory": dict_row, "connect_timeout": 5},
             min_size=0,
             max_size=pool_size,
@@ -85,7 +118,7 @@ class Database:
             max_waiting=pool_size * 2,
             reconnect_timeout=reconnect_timeout,
             open=False,
-            name="photo-wall-central",
+            name=application_name,
         )
         self._pool_lock = Lock()
         self._pool_open = False

@@ -67,7 +67,7 @@ from uuid import UUID
 from psycopg.types.json import Jsonb
 
 from central.content_catalog.catalog import device_id_for_serial
-from central.db import Database, DatabaseTransactionClock, TransactionClock
+from central.db import Database, DatabaseTransactionClock, PoolName, TransactionClock
 from central.displays.hardware import HardwareRow, hardware_rows, kept_report, offered_for
 from central.displays.model import (
     DEFAULT_SETTINGS,
@@ -232,7 +232,7 @@ DOCUMENT_STREAM: Final = desired_stream("display")   # the display line's desire
 _REPORT_SUBJECT: Final = state_prefix("display")
 _CLOCK: Final = DatabaseTransactionClock()
 _LISTEN_RETRY_SECONDS: Final = 1.0
-_LISTEN_APPLICATION: Final = "photo-wall-output-documents"
+_LISTEN_APPLICATION: Final[PoolName] = "photo-wall-output-documents"
 _CONSOLE_TEST: Final = "console-test"            # power_requests.reason of 1b's console test
 
 

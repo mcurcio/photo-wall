@@ -5,9 +5,12 @@ S2's bed with one enrolled Node: `FleetHub` writes the hub's configuration, a re
 starts from it, and the Node is a real bus on the shipped configuration whose leaf dials the hub.
 Central's read is the fleet host read (the Hardware pages' one source, erratum E-CDS-FIX-10) with an
 injected read clock, and its `bus_link` is rendered by the console's own `busLinkFact` (facts.js,
-under Node). 1: the leaf links: linked, the look recent,
-the fact derived "linked". 2: the Node bus crashes: not linked with a later changed_at; it restarts:
-linked again. 3: FleetHub stops: a read 31 s after its last look renders unknown.
+under Node). Presence and the hub's reachability are written only when they change (decision
+0034); how fresh they are comes from the worker's queue heartbeat (a `procrastinate_workers` row,
+inserted here as a running worker's would be). 1: the leaf links: the hub reachable, linked, the
+fact derived "linked". 2: the Node bus crashes: not linked with a later changed_at; it restarts:
+linked again. 3: the hub stops: "Central cannot reach its hub". 4: the worker's heartbeat ages past
+30 s: "Central's worker is not running".
 """
 from __future__ import annotations
 
@@ -23,7 +26,7 @@ from test_console_flow import _require_node
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import Database
 from central.fleet.node_bus_accounts import HubListeners
-from central.fleet.node_bus_hub import HUB_LOOK_SECONDS, PRESENCE_STALE_SECONDS, FleetHub
+from central.fleet.node_bus_hub import FleetHub
 from central.fleet.node_observations import NodeObservations
 from central.fleet.node_sessions import NodeControlConfig, NodeSessions
 from central.infra.node_link_store import PgWallMarks
@@ -54,6 +57,14 @@ class _ReadClock:
         return time.monotonic()
 
 
+def _worker_beat(db: Database, seconds_ago: float) -> None:
+    """The worker's one queue heartbeat, `seconds_ago` by the database's clock."""
+    with db.transaction() as conn:
+        conn.execute("DELETE FROM procrastinate_workers")
+        conn.execute("INSERT INTO procrastinate_workers (last_heartbeat) "
+                     "VALUES (now() - make_interval(secs => %s))", (seconds_ago,))
+
+
 def _enrol(db: Database, serial: str) -> None:
     with db.transaction() as conn:
         conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
@@ -71,6 +82,7 @@ def _rendered(bus_link: dict, read_at: float) -> list[str]:
 def test_the_console_reads_whether_a_node_is_linked(database, tmp_path):
     _require_node()
     _enrol(database, SERIAL)
+    _worker_beat(database, 0)
     config_dir = tmp_path / "hub-config"
     config_dir.mkdir()
     config_path = config_dir / "hub.json"
@@ -114,15 +126,12 @@ def test_the_console_reads_whether_a_node_is_linked(database, tmp_path):
             hub.start()
             node.start()
 
-            # 1. The leaf links: Central reads it linked, its look recent, and the console says so.
+            # 1. The leaf links: Central reads the hub reachable and the Node linked, and the
+            # console says so.
             read_at, bus_link = await until(link_is(True), SETTLE_SECONDS, "Central reads the Node linked")
-            assert bus_link["looked_at"] is not None, "Central records its look at the hub"
-            assert read_at - bus_link["looked_at"] <= 2 * HUB_LOOK_SECONDS + 1
+            assert bus_link["hub"] == "reachable"
             kind, text = _rendered(bus_link, read_at)
             assert kind == "derived" and text.startswith("linked for "), text
-            page = (await asyncio.to_thread(hardware_read))["bus_link"]
-            assert page["looked_at"] >= bus_link["looked_at"]
-            assert (page["linked"], page["changed_at"]) == (True, bus_link["changed_at"])
 
             # 2. The Node bus crashes: not linked, with a later changed_at; it restarts: linked again.
             node.crash()
@@ -134,16 +143,26 @@ def test_the_console_reads_whether_a_node_is_linked(database, tmp_path):
             await until(link_is(True, after=down["changed_at"]), SETTLE_SECONDS,
                         "Central reads the restarted Node linked")
 
-            # 3. FleetHub stops: a read 31 s after its last look renders unknown.
+            # 3. The hub stops: FleetHub's next look records it unreachable.
+            hub.stop()
+
+            async def unreachable():
+                read_at, bus_link = await read()
+                return (read_at, bus_link) if bus_link["hub"] == "unreachable" else None
+
+            read_at, cut = await until(unreachable, SETTLE_SECONDS, "Central reads its hub unreachable")
+            assert _rendered(cut, read_at) == ["unknown", "Unknown: Central cannot reach its hub"]
+
+            # 4. The worker's heartbeat ages past STALLED_WORKER_SECONDS: its bus task is not
+            # running, whatever the hub's last state.
             stop.set()
             await asyncio.wait_for(running, 30)
-            _, last = await read()
-            clock.at = last["looked_at"] + PRESENCE_STALE_SECONDS + 1
-            read_at, stale = await read()
-            assert read_at == clock.at and stale["looked_at"] == last["looked_at"]
-            assert _rendered(stale, read_at) == ["unknown", "Unknown: Central has not looked at its hub for 31 s"]
+            _worker_beat(database, 31)
+            clock.at = time.time()      # one read time for both reads below
+            read_at, stopped = await read()
+            assert _rendered(stopped, read_at) == ["unknown", "Unknown: Central's worker is not running"]
             page = await asyncio.to_thread(hardware_read)
-            assert (page["read_at"], page["bus_link"]) == (read_at, stale)
+            assert (page["read_at"], page["bus_link"]) == (read_at, stopped)
         finally:
             stop.set()
             await asyncio.wait_for(running, 30)

@@ -9,6 +9,8 @@ from typing import Any, Protocol
 import procrastinate
 import psycopg
 
+from central.db import with_application_name
+
 # Roadmap 4 (run ledger .claude/runs/photo-4.md): a connection check, and one bounded step of a
 # pool's check (each step queues the next through the store, in the step's own transaction).
 CHECK_CONNECTION_TASK = "photo_wall.library.check_connection"
@@ -40,7 +42,8 @@ class ProcrastinateMediaQueue:
     """Defer library checks and measurements through the caller's psycopg transaction."""
 
     def __init__(self, dsn: str):
-        connector = procrastinate.SyncPsycopgConnector(conninfo=dsn)
+        connector = procrastinate.SyncPsycopgConnector(
+            conninfo=with_application_name(dsn, "photo-wall-media-defer"))
         self.app = procrastinate.App(connector=connector)
 
     def enqueue_connection_check_in(self, conn: Any, connection_ref: str) -> QueueReceipt:
@@ -86,7 +89,8 @@ class ProcrastinateMediaQueue:
         # Procrastinate 3.9's schema is an atomic, one-time installation, but its
         # CREATE statements are intentionally not idempotent. Central and the media
         # worker can start together, so serialize the existence check and install.
-        with psycopg.connect(dsn, autocommit=True) as lock:
+        with psycopg.connect(with_application_name(dsn, "photo-wall-schema"),
+                             autocommit=True) as lock:
             lock.execute("SELECT pg_advisory_lock(%s)", (_SCHEMA_LOCK,))
             try:
                 installed = lock.execute(

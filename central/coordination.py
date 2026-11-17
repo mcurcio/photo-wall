@@ -324,13 +324,17 @@ class Coordinator:
         """Each active Player's configuration. The Player is the unit of isolation: one whose
         configuration fails (its authority went stale since its session was read, or anything
         else) is left out of this pass alone, its writes rolled back to its own savepoint (an
-        `offer_unavailable` event naming the code when `report`), never the whole wall."""
+        `offer_unavailable` event naming the code when `report`), never the whole wall. Each is
+        read with `lock=False`: it row-locks the session, Frames and bindings only when the stored
+        player_configurations row must change (the rule `delivery` follows), so a pass over an
+        unchanged wall takes no row lock and no transaction id (decision 0034, class D). Callers:
+        `_plan`, `_settle`, `readiness`."""
         configurations = {}
         for player in self._players(conn):
             try:
                 with conn.transaction():
                     configurations[player["id"]] = self._configuration(
-                        conn, player["id"], player["authority_epoch"])
+                        conn, player["id"], player["authority_epoch"], lock=False)
             except Exception as exc:   # noqa: BLE001 - the per-Player bulkhead
                 if report:
                     self._event(conn, "offer_unavailable", player["id"],

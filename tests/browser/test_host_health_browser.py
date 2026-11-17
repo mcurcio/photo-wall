@@ -47,7 +47,7 @@ def _players(registry, *, bound=True):
 
 
 def _row(device_id, received_at, temperature):
-    return {"device_id": device_id, "previous_boot_received_at": None, "intake_full": False,
+    return {"device_id": device_id, "previous_boot_received_at": None,
             "host": {"received_at": received_at, "fault_code": None,
                      "metrics": [{"name": "soc_temperature", "value": temperature,
                                   "unit": "celsius", "source": "host_sampler"}]}}

@@ -29,7 +29,7 @@ from typing import Final, Protocol
 
 from central import cache_layout
 from central.content_wiring import build_release_services
-from central.db import Database, DatabaseTransactionClock
+from central.db import Database, DatabaseTransactionClock, PoolName
 from central.fleet.node_bus_hub import HUB_LISTENERS, FleetHub
 from central.fleet.node_commands import NodeCommands
 from central.fleet.node_release_catalog import NodeReleaseCatalog
@@ -69,7 +69,7 @@ WALL_TABLE: Final = KeyTable({"timing": 4096, ROOM_LIGHTS_KEY: ROOM_LIGHTS_BYTES
 WALL_RECHECK_SECONDS: Final = 5.0     # how often the writer looks again for a wall it could not put to yet
 _LISTEN_RETRY_SECONDS: Final = 1.0
 _HUB_SESSION_RETRY_SECONDS: Final = 2.0   # the hub session's first connect, tried again until it answers
-_LISTEN_APPLICATION: Final = "photo-wall-room-lights"
+_LISTEN_APPLICATION: Final[PoolName] = "photo-wall-room-lights"
 
 
 class WallSource(Protocol):
@@ -214,7 +214,7 @@ def build_node_bus(dsn: str, env: Mapping[str, str]) -> NodeBus | None:
     hub_url = env.get(HUB_URL_ENV)
     if not hub_url:
         return None
-    db = Database(dsn, pool_size=LINK_STORE_CONCURRENCY + 4)
+    db = Database(dsn, application_name="photo-wall-bus", pool_size=LINK_STORE_CONCURRENCY + 4)
     clock = SystemClock()
     wakes = DisplayWakes()
     room_lights = PgRoomLights(db, PgHouseLock())

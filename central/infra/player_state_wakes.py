@@ -21,11 +21,12 @@ import contextlib
 import threading
 from typing import Any, Final
 
+from central.db import PoolName
 from central.infra.listen import listen
 
 PLAYER_STATE_CHANNEL: Final = "photo_wall_player_state"     # payload: empty (every Player)
 _LISTEN_RETRY_SECONDS: Final = 1.0
-_LISTEN_APPLICATION: Final = "photo-wall-player-state"
+_LISTEN_APPLICATION: Final[PoolName] = "photo-wall-player-state"
 
 
 def notify_if_written_in(conn: Any) -> None:

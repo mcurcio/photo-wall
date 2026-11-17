@@ -21,7 +21,7 @@ const read = (devices, thresholds = THRESHOLDS) => ({ read_at: 1000, thresholds,
 const sample = (receivedAt, metrics) => ({ received_at: receivedAt, fault_code: null, metrics });
 const temp = (value) => ({ name: "soc_temperature", value, unit: "celsius", source: "host_sampler" });
 const row = (fields) => ({ device_id: "device-a", host: null, previous_boot_received_at: null,
-  intake_full: false, ...fields });
+  ...fields });
 const view = (r, doc) => {
   const c = classifyHost(r, doc);
   return { state: c.state, severity: c.severity,
@@ -44,7 +44,6 @@ out.silentHot = view(row({ host: sample(880, [temp(95)]) }), read([]));
 out.silentLimit = view(row({ host: sample(880, [temp(95)]) }),
   read([], { ...THRESHOLDS, host_silent_after_seconds: 150 }));
 out.silentPrevious = view(row({ previous_boot_received_at: 880 }), read([]));
-out.refused = view(row({ host: sample(880, [temp(95)]), intake_full: true }), read([]));
 out.notYet = view(row({ previous_boot_received_at: 960 }), read([]));
 out.clockStep = view(row({ host: sample(1010, [temp(50)]) }), read([]));
 
@@ -98,13 +97,6 @@ out.otherFault = named(row({ host: sample(996, [run]),
   preparation: { ...refusal, fault: "manager_preparation_fault" } }), read([], N1), "preparation");
 out.oneNumber = named(row({ host: sample(996, [run]), preparation: { ...refusal, available_bytes: null } }),
   read([], N1), "preparation");
-// Fix 1: a full App Manager intake: the (possibly frozen) newest sample is not judged.
-out.prepFull = named(row({ host: sample(996, [run]), preparation: refusal, preparation_intake_full: true }),
-  read([], N1), "preparation");
-out.prepFullSeverity = view(row({ host: sample(996, [run]), preparation: refusal,
-  preparation_intake_full: true }), read([], N1)).severity;
-out.prepFullIdle = named(row({ host: sample(996, [run]), preparation: { ...refusal, state: "idle", fault: null },
-  preparation_intake_full: true }), read([], N1), "preparation");
 out.silentRefusal = named(row({ host: sample(880, [run]), preparation: refusal }), read([], N1), "preparation");
 
 // A1: each incident kind from its own row, for the Bound device-a, with the Unbound device-b
@@ -114,7 +106,6 @@ const both = (fields, doc = N1) => hostIncidents(snapshot, read([row(fields),
 out.a1 = {
   silent: both({ host: sample(880, [temp(95)]) }),
   silentThrottled: both({ host: sample(880, [temp(95), ...flags(0x4)]) }),
-  refused: both({ host: sample(880, flags(0x4)), intake_full: true }),
   never: both({}),
   notRead: hostIncidents(snapshot, read([], N1)),
   previousSilent: both({ previous_boot_received_at: 880 }),
@@ -153,7 +144,6 @@ out.chips = {
   silent: chip({ host: sample(820, flags(0x4)) }),
   ok: chip({ host: sample(997, [temp(50)]) }),
   warm: chip({ host: sample(997, [temp(76)]) }),
-  refused: chip({ host: sample(880, []), intake_full: true }),
   never: chip({}),
 };
 console.log(JSON.stringify(out));
@@ -220,11 +210,6 @@ def test_silence_refusal_and_previous_boot():
     assert previous["worst"][1].startswith(
         "Host Management silent · the previous boot's Host Management last reported 2 min ago")
     assert previous["items"][1][2] == "Unknown: no Host Management sample from this boot"
-    refused = out["refused"]
-    assert refused["state"] == "refused"
-    assert refused["items"][0][2] == ("Central refused Host Management reports today (Central's "
-                                      "inference: its daily intake cap for this box is full) · "
-                                      "last stored 2 min ago")
     assert out["notYet"]["state"] == "not_yet_this_boot"
     assert out["notYet"]["items"][1][2] == (
         "Unknown: on this boot · the previous boot's Host Management last reported 40 s ago")
@@ -276,7 +261,7 @@ const FACTS = { first_received_at: 1000 - 3 * 86400, kernel_release: "6.6.51+rpt
   interface: "eth0", link_state: "up", address: "192.168.1.40", base_tag: "2026.10.01" };
 const LIMITED = { read_at: 1000, thresholds: { host_silent_after_seconds: 60, metrics: [] } };
 const row = (fields) => ({ device_id: "device-a", host: null, previous_boot_received_at: null,
-  intake_full: false, boot: { base_tag: "2026.10.01" }, facts: FACTS, ...fields });
+  boot: { base_tag: "2026.10.01" }, facts: FACTS, ...fields });
 const view = (r, doc = { read_at: 1000 }) => {
   const { receipt, items } = hostFactItems(r, doc);
   return { receipt: [receipt.kind, receiptText(receipt) ?? factText(receipt)],
@@ -295,8 +280,6 @@ console.log(JSON.stringify({
   notRead: view(null),
   reporting: view(row({ host: { received_at: 990, metrics: [], fault_code: null } }), LIMITED),
   silent: view(row({ host: { received_at: 1000 - 3 * 3600, metrics: [], fault_code: null } }), LIMITED),
-  refused: view(row({ host: { received_at: 880, metrics: [], fault_code: null }, intake_full: true }),
-    LIMITED),
   watchdog: view(row({ facts: { ...FACTS, reset_cause: "watchdog" } })),
   otherStart: view(row({ facts: { ...FACTS, reset_cause: "other" } })),
   watchdogSilent: view(row({ host: { received_at: 1000 - 3 * 3600, metrics: [], fault_code: null },
@@ -349,9 +332,8 @@ def test_host_facts_and_the_base_are_worded_once_per_record():
             "Host Management reported address 192.168.1.40 at last report",
             "Host Management reported kernel 6.6.51+rpt-rpi-v8 at last report",
             "Host Management reported base 2026.10.01 at last report", base[3]]
-    for state in ("silent", "refused"):
-        assert [item[3] for item in out[state]["items"]] == last, state
-        assert out[state]["receipt"] == ["reported", "first received 3 d ago"], state
+    assert [item[3] for item in out["silent"]["items"]] == last
+    assert out["silent"]["receipt"] == ["reported", "first received 3 d ago"]
     # Issue #125: a start after a hardware watchdog reset is shown on the Hardware page; any other
     # start, or one not read (no reset_cause), adds no line.
     assert out["watchdog"]["items"] == [*out["full"]["items"], [
@@ -369,7 +351,7 @@ const THRESHOLDS = { host_silent_after_seconds: 60,
   metrics: [{ name: "soc_temperature", unit: "celsius", notice_at: 75, alarm_at: 80 }] };
 const temp = (value) => ({ name: "soc_temperature", value, unit: "celsius", source: "host_sampler" });
 const host = (id, receivedAt, value) => ({ device_id: id, previous_boot_received_at: null,
-  intake_full: false, host: { received_at: receivedAt, fault_code: null, metrics: [temp(value)] } });
+  host: { received_at: receivedAt, fault_code: null, metrics: [temp(value)] } });
 const box = (id, standing) => ({ deviceId: id, name: `Player ${id}`, standing, frames: [] });
 const hosts = { failed: false, error: null, read: { read_at: 1000, thresholds: THRESHOLDS, devices: [
   host("a-ok", 999, 50), host("b-hot", 999, 81), host("c-spare-silent", 100, 50),
@@ -431,9 +413,6 @@ def test_each_host_incident_kind_comes_from_its_own_row_for_bound_players_only()
     assert out["silent"] == [silence]
     # A host that died throttled: silence only, never a "now" incident from its last sample.
     assert out["silentThrottled"] == [silence]
-    # A full intake replaces silence with the refusal.
-    assert out["refused"] == [["player:device-a:host", "alarm",
-                               f"{who}Central refused Host Management reports today"]]
     assert out["never"] == [["player:device-a:host", "unknown",
                              f"{who}Unknown: no Host Management report from this boot or the one before"]]
     assert out["notRead"] == []
@@ -458,7 +437,6 @@ def test_the_status_chip_names_the_worst_item_else_the_receipt():
     assert out["silent"] == {"text": "pi-07 · Host Management silent 3 min", "severity": "alarm"}
     assert out["ok"] == {"text": "pi-07 · Host Management last reported 3 s ago", "severity": "ok"}
     assert out["warm"] == {"text": "pi-07 · 76 °C · warm", "severity": "notice"}
-    assert out["refused"]["text"] == "pi-07 · Central refused Host Management reports today"
     assert out["never"] == {"text": "pi-07 · Unknown: no Host Management report from this boot or the one before",
                             "severity": "unknown"}
 
@@ -480,17 +458,6 @@ def test_strip_tier_is_the_worst_incident_and_a_failed_read_is_named():
     assert judged["silentFacts"]["facts"][1].startswith("Host Management reported eth0 up at last report ·")
 
 
-def test_a_full_app_manager_intake_is_never_judged_from_its_frozen_sample():
-    out = _run()
-    why = ("Unknown: Central refused App Manager reports today: its daily intake cap for this box "
-           "is full")
-    # Neither the stored refusal (a false alarm once storage frees) nor a stored idle (a false
-    # clear during the shortage) is judged; both read Central's refusal.
-    assert out["prepFull"] == ["preparation", "unknown", why]
-    assert out["prepFullIdle"] == ["preparation", "unknown", why]
-    assert out["prepFullSeverity"] == "ok"
-
-
 BOOT_SCRIPT = r"""
 const { classifyHost, hostIncidents, playersTable } = await import(process.argv[1]);
 const { factText } = await import(process.argv[2]);
@@ -502,7 +469,7 @@ const stage = (name, state, fault = null, required = null, room = null) =>
 const boot = (stages, units = [], more = 0) => ({ stages, failed_units: units, failed_units_more: more });
 const oom = (slice, value) => ({ name: `oom_kill:${slice}`, value, unit: "count", source: "host_core" });
 const row = (fields, metrics = [], receivedAt = 996) => ({ device_id: "device-a", previous_boot_received_at: null,
-  intake_full: false, host: { received_at: receivedAt, fault_code: null, metrics },
+  host: { received_at: receivedAt, fault_code: null, metrics },
   ...fields });
 const withBoot = (report, metrics = [], receivedAt = 996) => row({ facts: { first_received_at: 940,
   kernel_release: null, interface: null, link_state: null, address: null, base_tag: null, boot: report } },

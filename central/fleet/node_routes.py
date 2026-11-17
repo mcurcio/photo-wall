@@ -137,11 +137,8 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
 
     @app.exception_handler(FleetError)
     async def fleet_error(_request: Request, exc: FleetError) -> JSONResponse:
-        """A spent daily quota (429) retries after the day ends; the offer bytes' 503 carries
-        its own Retry-After."""
-        retry_after = (max(1, 86400 - int(clock.utc()) % 86400) if exc.status == 429
-                       else exc.retry_after)
-        return error_response(exc.code, exc.status, retry_after=retry_after)
+        """Each refusal carries its own Retry-After (the device fence's, the offer bytes')."""
+        return error_response(exc.code, exc.status, retry_after=exc.retry_after)
 
     @app.exception_handler(NodeControlError)
     async def node_error(_request: Request, error: NodeControlError):

@@ -16,8 +16,9 @@ Each look also runs the worker's per-look work it was handed (`each_look`: a run
 on, central/infra/player_versions.py `advance_installs`), in a thread after the hub was kept.
 
 Presence (S4): every look whose `HubAdmin.linked()` answered records, in one transaction, which
-enrolled Nodes' leaves the hub holds and when it looked (`central.fleet.node_bus_presence`); a look
-that did not reach the hub writes nothing, so the look's age tells the console how stale it is.
+enrolled Nodes' leaves the hub holds and that the hub was reachable; a look that did not reach the
+hub records it unreachable (`central.fleet.node_bus_presence`). Each is written only when it changes
+(decision 0034): the console judges how fresh they are from the worker's queue heartbeat.
 """
 from __future__ import annotations
 
@@ -30,9 +31,9 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Final
 
-from central.db import Database
+from central.db import Database, DatabaseTransactionClock, TransactionClock
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners, hub_configuration
-from central.fleet.node_bus_presence import record_look_in
+from central.fleet.node_bus_presence import record_hub_reachable_in, record_presence_in
 from central.infra.node_links import NodeLinks
 from contracts.node_link import account_id
 from contracts.time import Clock, SystemClock
@@ -46,7 +47,6 @@ HUB_LISTENERS: Final = HubListeners(            # in-container invariants of the
     websocket_host="0.0.0.0", websocket_port=8080, leaf_host="127.0.0.1", leaf_port=7422,
     monitor_port=8222, max_memory_store_bytes=4 * 1024 * 1024)
 HUB_LOOK_SECONDS: Final = 2.0
-PRESENCE_STALE_SECONDS: Final = 30.0   # a look older than this at a read: presence reads unknown (facts.js)
 
 
 def enrolled_serials_in(conn) -> frozenset[str]:
@@ -81,8 +81,11 @@ class FleetHub:
 
     def __init__(self, db: Database, hub_url: str, config_path: Path, listeners: HubListeners,
                  wall_table: KeyTable, marks: WallMarks, links: Sequence[NodeLinks],
-                 clock: Clock | None = None, each_look: Sequence[Callable[[], None]] = ()) -> None:
+                 clock: Clock | None = None, each_look: Sequence[Callable[[], None]] = (),
+                 times: TransactionClock | None = None) -> None:
+        """`times` (default DatabaseTransactionClock()) stamps the hub's reachability."""
         self._db = db
+        self._times = times or DatabaseTransactionClock()
         self._clock = clock or SystemClock()
         self._hub_url = hub_url
         self._config_path = Path(config_path)
@@ -123,6 +126,7 @@ class FleetHub:
             await self._keep(serials)
         except HubUnavailable as error:
             log.info("hub: %s", error)
+            await asyncio.to_thread(self._record_unreachable)
         for links in self._links:
             await links.track(serials)
         for work in self._each_look:
@@ -154,11 +158,17 @@ class FleetHub:
             return enrolled_serials_in(conn)
 
     def _record_presence(self, linked: frozenset[str]) -> None:
-        """One transaction: whether the hub holds each enrolled device's leaf, and the look's time."""
+        """One transaction: whether the hub holds each enrolled device's leaf, and that the hub
+        was reachable; each written only when it changed."""
         with self._db.transaction() as conn:
-            record_look_in(conn, {device_id: account in linked
-                                  for device_id, account in _enrolled_accounts_in(conn).values()},
-                           self._clock.utc())
+            record_presence_in(conn, {device_id: account in linked
+                                      for device_id, account in _enrolled_accounts_in(conn).values()},
+                               self._clock.utc())
+            record_hub_reachable_in(conn, True, times=self._times)
+
+    def _record_unreachable(self) -> None:
+        with self._db.transaction() as conn:
+            record_hub_reachable_in(conn, False, times=self._times)
 
     def _write(self, text: str) -> bool:
         """Write `text` to the configuration file unless it already holds exactly those bytes: a

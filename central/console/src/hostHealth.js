@@ -14,16 +14,15 @@ import { formatRoute } from "./routes.js";
  *   not_read           the box is absent from the read
  *   never              no Host Management receipt served: none from this boot and none from the
  *                      most recently superseded one (G12 sees no older boot)
- *   refused            the newest receipt is older than the limit and Central's intake is full
  *   silent             the newest receipt (this boot's, else the previous boot's) is older than
  *                      the limit
  *   not_yet_this_boot  no sample from this boot; the previous boot's receipt is within it
  *   reporting          this boot's newest sample was received within the limit
- * Bands are judged only while `reporting`. On `silent` and `refused` this boot's values read
+ * Bands are judged only while `reporting`. On `silent` this boot's values read
  * "at last report", unbanded; the previous boot's values are never shown. Without a served
  * limit no receipt is judged silent.
  *
- * @typedef {"not_read"|"never"|"refused"|"silent"|"not_yet_this_boot"|"reporting"} HostState
+ * @typedef {"not_read"|"never"|"silent"|"not_yet_this_boot"|"reporting"} HostState
  * @typedef {"alarm"|"notice"|"unknown"|"ok"} HostSeverity
  * @typedef {{name: string, group: string, label: string, fact: import("./facts.js").Fact,
  *            band: HostSeverity|null, suffix?: string, words?: string, brief?: string}} HostItem
@@ -371,7 +370,7 @@ function reportedMetric(name, host, facts, readAt, thresholds) {
   return reported(limit === undefined ? null : "ok");
 }
 
-/** One metric as it was at this boot's last report, unbanded (silent, refused). */
+/** One metric as it was at this boot's last report, unbanded (silent). */
 function lastReportedMetric(name, host, facts, readAt) {
   if (host === null) {
     return item(name, { fact: fact({ kind: "unknown", why: `no ${HOST} sample from this boot` }) });
@@ -385,15 +384,9 @@ function lastReportedMetric(name, host, facts, readAt) {
 /**
  * App Manager's storage refusal while reporting (§62-§63): an alarm when the current boot's
  * newest App Manager sample is `refused` for `node_storage_capacity` with both numbers, else
- * no item (a newer sample clears it). While Central's App Manager intake for the box is full
- * today, the newest stored sample may be frozen, so it is not judged: the item is Unknown,
- * naming Central's refusal, neither an alarm nor a clear.
+ * no item (a newer sample clears it).
  */
-function storageShort(preparation, intakeFull, readAt) {
-  if (intakeFull) {
-    return [item(PREPARATION, { band: "unknown", fact: fact({ kind: "unknown",
-      why: `Central refused ${APP_MANAGER} reports today: its daily intake cap for this box is full` }) })];
-  }
+function storageShort(preparation, readAt) {
   if (preparation?.state !== "refused" || preparation.fault !== "node_storage_capacity"
       || !isNumber(preparation.required_bytes) || !isNumber(preparation.available_bytes)) {
     return [];
@@ -441,12 +434,6 @@ function classify(row, read, absent) {
   const whose = host === null ? `the previous boot's ${HOST} last reported` : "last reported";
   const metrics = Object.keys(HOST_CATALOG);
   if (limit !== null && newest.age !== null && newest.age > limit) {
-    if (row.intake_full === true) {
-      const refusal = fact({ kind: "derived", value: `Central refused ${HOST} reports today`,
-        basis: "its daily intake cap for this box is full" });
-      return judged("refused", [item(RECEIPT, { fact: refusal, band: "alarm", suffix: `last stored ${ago}` }),
-        ...metrics.map((name) => lastReportedMetric(name, host, facts, readAt))], "alarm");
-    }
     const silence = fact({ kind: "derived", value: `${HOST} silent · ${whose} ${ago}`,
       basis: `no report for over ${limit} s, Central's limit` });
     return judged("silent", [item(RECEIPT, { fact: silence, band: "alarm",
@@ -461,7 +448,7 @@ function classify(row, read, absent) {
   }
   return judged("reporting", [item(RECEIPT, { fact: newest }),
     ...metrics.map((name) => reportedMetric(name, host, facts, readAt, thresholds)),
-    ...storageShort(row.preparation ?? null, row.preparation_intake_full === true, readAt)]);
+    ...storageShort(row.preparation ?? null, readAt)]);
 }
 
 // The host facts record (G13) and the boot's base (§62): text a box's current boot carries.
@@ -483,7 +470,7 @@ const BASE_SOURCE = "this boot's node session";
  * `base_mismatch` is a `derived` fact naming both; it carries no band (no alarm is defined).
  * Both come only from the current boot: G12 serves no other boot's facts.
  * The facts take the classifier's state, so one gate words a box's values and its facts: on
- * `silent` and `refused` each fact reads "… at last report", as its metrics do (§62, §66), and
+ * `silent` each fact reads "… at last report", as its metrics do (§62, §66), and
  * never in the present tense of a box Central cannot hear.
  *
  * @param {object|null} row `hostRow(read, deviceId)`
@@ -496,7 +483,7 @@ export function hostFactItems(row, read) {
 }
 
 // The states in which this boot's values are only its last report (§62's Silent row).
-const LAST_REPORT_STATES = Object.freeze(new Set(["silent", "refused"]));
+const LAST_REPORT_STATES = Object.freeze(new Set(["silent"]));
 
 /** `health` is `classify(row, read, absent)`: the one gate both words read. */
 function factItems(row, read, absent, health) {
