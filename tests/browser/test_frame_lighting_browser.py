@@ -73,7 +73,8 @@ def room_lights(page, origin, *, daylight_on=None):
 
 
 def record_reading(registry, player_id, lux):
-    """The Pi's wired Sensor reads `lux`, through Central's reporting port."""
+    """The Pi's wired Sensor reads `lux`, through Central's reporting port (kept only while a Sensor
+    names the Pi)."""
     lights = PgRoomLights(registry.db, PgHouseLock())
     _off_thread(lambda: lights.record_reading(SensorRef(source=PI, address=player_id), Measured(lux=lux)))
 
@@ -246,10 +247,10 @@ def test_a_light_a_sensor_measures_is_read_at_the_sensors_reading(page, registry
 
     Mutation: AtFull for every light -> the first reference is at-full."""
     player_id = _seed(registry)
-    record_reading(registry, player_id, READING)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         room_lights(page, origin, daylight_on=player_id)
+        record_reading(registry, player_id, READING)   # kept once its Sensor names the Pi (decision 0034)
         open_frame(page, FRAME, "lighting")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         light = add_close_light(page, "Daylight")

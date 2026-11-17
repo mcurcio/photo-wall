@@ -42,7 +42,6 @@ from central.infra.display_store import (
     DisplayWakes,
     OutputReportJudge,
 )
-from central.infra.drawn_report_judge import PLAYER_STATE_STREAM, DrawnReportJudge
 from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.home_assistant.states import HomeAssistantListener
 from central.infra.light_sensor_judge import HOST_STATE_STREAM, LightSensorJudge
@@ -207,7 +206,7 @@ def build_node_bus(dsn: str, env: Mapping[str, str]) -> NodeBus | None:
     Output documents; the show pipe's are empty), and the display line's Output reports are judged
     as they are recorded (`OutputReportJudge`); a console command in Central's API process wakes the
     documents through `DisplayWakes.listen`. A Pi's light meter on the host line is judged as it is
-    recorded (`LightSensorJudge`), and each Player's drawn report on its own line (`DrawnReportJudge`);
+    recorded (`LightSensorJudge`; each Player's drawn report is read where its line is recorded);
     WALL carries the room-lights document (`RoomLightsWall`). Central's hub session serves its state
     and installPlayer (`PgPlayerVersions`, whose running installs move on at each FleetHub look) and
     hands Home Assistant's states to `HomeAssistantListener`."""
@@ -219,8 +218,7 @@ def build_node_bus(dsn: str, env: Mapping[str, str]) -> NodeBus | None:
     wakes = DisplayWakes()
     room_lights = PgRoomLights(db, PgHouseLock())
     stores = PgLinkStores(db, {REPORT_STREAM: OutputReportJudge(wakes),
-                               HOST_STATE_STREAM: LightSensorJudge(room_lights),
-                               PLAYER_STATE_STREAM: DrawnReportJudge(room_lights)})
+                               HOST_STATE_STREAM: LightSensorJudge(room_lights)})
     documents = DisplayDocuments(stores, wakes, times=DatabaseTransactionClock())
     links = tuple(NodeLinks(pipe, hub_url, stores, documents) for pipe in (Pipe.FLEET, Pipe.SHOW))
     wall = RoomLightsWall(room_lights)

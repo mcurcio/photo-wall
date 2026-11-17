@@ -3,6 +3,7 @@ rig (tests/test_player_service.py) with the line recorded, every main-loop turn 
 line `frames` when a Frame's report changes (its binding generation, its Output, whether its picture is
 on screen, the light on it as last drawn) and `room-lights-drawn` on a change and at least every
 ROOM_LIGHTS_DRAWN_REPEAT_SECONDS. The report never rides the control link: no HTTP request carries it.
+Central judges the newest value on the line on read (the last test).
 The same reports on a real Node's bus, read through its door, are
 tests/integration/test_node_bus_wall_reader.py's."""
 from __future__ import annotations
@@ -19,6 +20,7 @@ from contracts.frame_lighting import AT_FULL, FrameLighting, Paper, WashLight
 from contracts.models import Commit
 from contracts.node_state import FrameReport, FrameReports
 from contracts.room_light import (
+    ROOM_LIGHTS_DRAWN_LEASE_SECONDS,
     ROOM_LIGHTS_DRAWN_PATH,
     ROOM_LIGHTS_DRAWN_REPEAT_SECONDS,
     Dimmer,
@@ -193,3 +195,25 @@ def test_a_running_session_sends_no_drawn_report_over_http(tmp_path, monkeypatch
             await asyncio.wait_for(task, 3)
             await close(service)
     asyncio.run(check())
+
+
+def test_central_judges_the_newest_drawn_value_on_the_line_by_its_age_on_read(registry):
+    """Decision 0034: Central keeps no copy of the drawn report; House › Lights judges the Player's
+    newest `room-lights-drawn` value as its link recorded it (node_states), by when it was recorded
+    on the database's clock. Mutation probe (S2d #5): `drawn` reading a fixed old recorded_at -> the
+    fresh report reads not reported."""
+    from test_room_light_routes import drawn_player, put_drawn
+
+    from central.infra.frame_lighting_store import PgHouseLock
+    from central.infra.room_light_store import PgRoomLights
+
+    player = drawn_player(registry)
+    lights = PgRoomLights(registry.db, PgHouseLock())
+    now = room_lights_digest(lights.current())
+    put_drawn(registry, RoomLightsDrawn(drawn="0" * 64, following=True), 1)
+    put_drawn(registry, RoomLightsDrawn(drawn=now, following=True), 2)          # the newest value wins
+    [drawn] = lights.drawn().players
+    assert (drawn.player_id, drawn.state) == (player["player_id"], "drawn")
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE node_states SET recorded_at = recorded_at - %s", (ROOM_LIGHTS_DRAWN_LEASE_SECONDS + 1,))
+    assert lights.drawn().players[0].state == "not-reported"                    # stale

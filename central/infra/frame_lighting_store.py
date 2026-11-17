@@ -3,8 +3,9 @@
 Frames name it" query; every store that writes the house, central/infra/room_light_store.py and
 paper_profile_store.py, is handed one and reaches both only through it).
 
-The house's lock is the `room_lights_change` row: every Frame-lighting check takes it shared, every
-writer and remover of a room light, a Sensor, a reporter's word or a paper profile takes it exclusive
+The house's lock is the `singletons` row 'room_light_setup' (migration 120): every Frame-lighting
+check takes it shared, every writer and remover of a room light, a Sensor, a colour sensor or a paper
+profile, and every report that changes the room-lights document, takes it exclusive
 (`changing_within`), first. So no removal commits between a check and its write, and two checks never
 wait for each other.
 """
@@ -14,7 +15,7 @@ from typing import Any
 
 from central.frame_lighting.model import FrameLightingRefused, FramesNaming, LightingHouse
 from central.frame_lighting.policy import check, naming, new_frame_lighting, stamped
-from central.infra.room_light_rows import lights_in
+from central.infra.room_light_rows import ROOM_LIGHT_SETUP, lights_in
 from central.infra.transactions import pg_connection
 from central.kernel.transactions import Transaction
 from contracts.frame_lighting import FrameLighting
@@ -25,7 +26,7 @@ _LIGHTINGS = ("SELECT id AS frame_id, lighting FROM frames UNION ALL "
 
 
 def _share_lock(conn: Any) -> None:
-    conn.execute("SELECT change FROM room_lights_change WHERE one FOR SHARE")
+    conn.execute("SELECT 1 FROM singletons WHERE name=%s FOR SHARE", (ROOM_LIGHT_SETUP.name,))
 
 
 def _house_in(conn: Any) -> LightingHouse:
@@ -58,7 +59,7 @@ class PgHouseLock:
     """HouseLock over the caller's transaction."""
 
     def changing_within(self, tx: Transaction) -> None:
-        pg_connection(tx).execute("SELECT change FROM room_lights_change WHERE one FOR UPDATE")
+        pg_connection(tx).execute("SELECT 1 FROM singletons WHERE name=%s FOR UPDATE", (ROOM_LIGHT_SETUP.name,))
 
     def naming_within(self, tx: Transaction) -> FramesNaming:
         conn = pg_connection(tx)

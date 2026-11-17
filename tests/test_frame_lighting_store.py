@@ -68,8 +68,8 @@ def test_a_room_light_removal_waits_for_the_check_then_is_refused(registry):
     remove_room_light without `changing_within` -> it does not wait either."""
     frame(registry, "hall")
     lights = PgRoomLights(registry.db, PgHouseLock())
-    lights.save_room_light("lamp", FixedLight(name="Lamp", colour=TypedColour(kelvin=3000)))
-    refused = _removal_waits_then_sees(registry, _lit("lamp"), lambda: lights.remove_room_light("lamp"))
+    lights.save_room_light("lamp", FixedLight(name="Lamp", colour=TypedColour(kelvin=3000)), by="console")
+    refused = _removal_waits_then_sees(registry, _lit("lamp"), lambda: lights.remove_room_light("lamp", by="console"))
     assert isinstance(refused, RoomLightRefused) and refused.code.value == "named_by_a_frame"
     assert "lamp" in lights.current().lights
 
@@ -78,8 +78,9 @@ def test_a_paper_profile_removal_waits_for_the_check_then_is_refused(registry):
     """A4 for a paper profile."""
     frame(registry, "hall")
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO paper_profiles(profile_sha256, name, profile, added_at) "
-                     "VALUES (%s, 'Paper', %s, 0)", (PROFILE, bytes(128)))
+        conn.execute("INSERT INTO paper_profiles(profile_sha256, name, profile, added_at, created_at, created_by, "
+                     "changed_at, changed_by) VALUES (%s, 'Paper', %s, 0, 0, 'console', 0, 'console')",
+                     (PROFILE, bytes(128)))
     profiles = PgPaperProfiles(registry.db, registry.clock, PgHouseLock())
     refused = _removal_waits_then_sees(registry, _lit(profile=PROFILE), lambda: profiles.remove_paper_profile(PROFILE))
     assert isinstance(refused, PaperProfileRefused) and refused.code.value == "named_by_a_frame"

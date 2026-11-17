@@ -200,7 +200,7 @@ def test_a_new_frame_records_its_creation_so_no_change_reads_as_made_outside(reg
     `unrecorded_record` -> a kept-unrecorded entry appears."""
     from central.infra.frame_lighting_store import PgHouseLock
     from central.infra.room_light_store import PgRoomLights
-    PgRoomLights(registry.db, PgHouseLock()).remove_room_light("room")
+    PgRoomLights(registry.db, PgHouseLock()).remove_room_light("room", by="console")
     frame(registry, "spare")
     assert _history(registry, "spare")["unrecorded_change"] is False
     _turn(registry, "spare", 90)
@@ -432,7 +432,7 @@ def test_restore_refuses_an_entry_whose_lighting_names_a_room_light_gone_since(r
     from contracts.frame_lighting import AT_FULL, WashLight
 
     lights = PgRoomLights(registry.db, PgHouseLock())
-    lights.save_room_light("spot", FixedLight(name="Spot", colour=TypedColour(kelvin=2700)))
+    lights.save_room_light("spot", FixedLight(name="Spot", colour=TypedColour(kelvin=2700)), by="console")
     spotlit = LIGHTING.model_copy(update={"lights": (WashLight(light="spot", lux=500.0, reference=AT_FULL),)})
     node = Node(registry)
     trial = node.edit(node.begin(), SKEWED, spotlit)
@@ -440,7 +440,7 @@ def test_restore_refuses_an_entry_whose_lighting_names_a_room_light_gone_since(r
     tried = _history(registry)["entries"][0]
     assert tried["kind"] == "sent-draft"
     node.end(trial)
-    lights.remove_room_light("spot")
+    lights.remove_room_light("spot", by="console")
     with pytest.raises(FrameLightingRefused) as refused:
         node.restore(node.begin(), tried["entry_id"])
     assert (refused.value.code, refused.value.status) == ("unknown_room_light", 422)

@@ -70,8 +70,8 @@ GRANT = "11111111-2222-4333-8444-555555555555"
 
 def _house(registry) -> PgRoomLights:
     lights = PgRoomLights(registry.db, PgHouseLock())
-    lights.save_room_light("family", ReportedLight(name="Family Room Lights", reporter=FAMILY, colour=WHITE))
-    lights.save_room_light("lamp", ReportedLight(name="Lamp", reporter=LAMP, colour=WHITE))
+    lights.save_room_light("family", ReportedLight(name="Family Room Lights", reporter=FAMILY, colour=WHITE), by="console")
+    lights.save_room_light("lamp", ReportedLight(name="Lamp", reporter=LAMP, colour=WHITE), by="console")
     return lights
 
 
@@ -113,13 +113,15 @@ def test_an_out_of_range_or_unknown_address_refusal_is_log_only(registry):
 def test_each_word_row_says_who_created_and_last_changed_it_and_when(registry):
     """Audit fields: a reference's source for what it stated, Central for a doubt it set itself."""
     lights = _house(registry)
+    lights.save_sensor("window", Sensor(name="Window", at=SensorRef(source=HA, address="sensor.window")), by="console")
     lights.record_light_state(FAMILY, OFF)
     lights.record_reading(SensorRef(source=HA, address="sensor.window"), Measured(lux=3.0))
 
     def audit(table: str, address: str) -> tuple:
+        kind = {"light_words": "light", "reading_words": "reading"}[table]
         with registry.db.transaction() as conn:
-            row = conn.execute(f"SELECT created_by, changed_by, created_at, changed_at FROM {table} "  # noqa: S608
-                               "WHERE address=%s", (address,)).fetchone()
+            row = conn.execute("SELECT created_by, changed_by, created_at, changed_at FROM room_light_facts "
+                               "WHERE kind=%s AND address=%s", (kind, address)).fetchone()
         return row["created_by"], row["changed_by"], row["created_at"], row["changed_at"]
 
     created_by, changed_by, created_at, changed_at = audit("light_words", FAMILY.address)
@@ -167,14 +169,14 @@ def test_an_unreadable_report_of_a_named_reference_never_heard_and_of_one_nothin
     assert lamp.doubt.line2.startswith("Its last word: none yet")
     lights.record_refused(HA, "light.garbage", ReportRefusal.UNREADABLE)  # nothing names it, no facts: no row
     with registry.db.transaction() as conn:
-        assert conn.execute("SELECT 1 FROM light_words WHERE address='light.garbage'").fetchone() is None
+        assert conn.execute("SELECT 1 FROM room_light_facts WHERE address='light.garbage'").fetchone() is None
 
 
 def test_a_closed_link_doubts_every_reference_of_its_source_with_facts(registry):
     """Mutation probe: record_link_closed marking another source -> the Pi's reading is doubted."""
     lights = _house(registry)
-    lights.save_sensor("meter", Sensor(name="Meter", at=SensorRef(source=PI_SOURCE, address="p-hall")))
-    lights.save_room_light("window", MeasuredLight(name="Window", sensor="meter", colour=WHITE))
+    lights.save_sensor("meter", Sensor(name="Meter", at=SensorRef(source=PI_SOURCE, address="p-hall")), by="console")
+    lights.save_room_light("window", MeasuredLight(name="Window", sensor="meter", colour=WHITE), by="console")
     lights.record_light_state(FAMILY, OFF)
     lights.record_reading(SensorRef(source=PI_SOURCE, address="p-hall"), Measured(lux=12.0))
     assert lights.record_link_closed(HA) == "recorded"
@@ -207,8 +209,8 @@ def _record(registry, stream: str, subject: str, value: bytes, seq: int, judges=
 def test_a_pi_s_unreadable_reading_doubts_its_sensor_without_rolling_back_the_host_line(registry):
     player = _pi(registry)
     lights = PgRoomLights(registry.db, PgHouseLock())
-    lights.save_sensor("meter", Sensor(name="Meter", at=SensorRef(source=PI_SOURCE, address=player["player_id"])))
-    lights.save_room_light("window", MeasuredLight(name="Window", sensor="meter", colour=WHITE))
+    lights.save_sensor("meter", Sensor(name="Meter", at=SensorRef(source=PI_SOURCE, address=player["player_id"])), by="console")
+    lights.save_room_light("window", MeasuredLight(name="Window", sensor="meter", colour=WHITE), by="console")
     _record(registry, HOST_STATE_STREAM, state_prefix("host") + LIGHT_SENSOR_KEY, b"not a reading", 1,
             {HOST_STATE_STREAM: LightSensorJudge(lights)})
     window = lights.current().lights["window"]
@@ -222,8 +224,8 @@ def test_needs_attention_and_the_frame_page_read_what_central_keeps(registry):
     """Needs attention: every named reference in doubt with the Frames it reaches and what to do;
     the Frame page: what its bound Player last said on its line, through the routes."""
     lights = _house(registry)
-    lights.save_colour_sensor("sky", ColourSensor(name="Sky", at=SKY))
-    lights.save_room_light("room", FixedLight(name="Room", colour=SensedColour(sensor="sky", typed_kelvin=5500)))
+    lights.save_colour_sensor("sky", ColourSensor(name="Sky", at=SKY), by="console")
+    lights.save_room_light("room", FixedLight(name="Room", colour=SensedColour(sensor="sky", typed_kelvin=5500)), by="console")
     frame(registry, "hall")                                      # a new Frame names the house's first fixed light
     lights.record_colour_reading(SKY, KelvinColour(kelvin=5000.0))
     lights.record_refused(HA, FAMILY.address, ReportRefusal.UNREADABLE)

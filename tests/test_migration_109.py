@@ -4,8 +4,9 @@ measured or fixed light's kelvin becomes typed), each light word and reading wor
 reference's facts (a stated state and when, no colour carried over: an old colour dimmer's rgb may be
 one Home Assistant worked out from color_temp, so the bulb's colour stays typed until it states one;
 "unavailable" keeping nothing and can't tell since it was heard), and the document the store builds from them is
-the one the new rules give. Migration 111 runs after it here: "can't tell since" is read as its
-"cant-tell" doubt (tests/test_migration_111.py proves that step alone).
+the one the new rules give. Migrations 111 and 120 run after it here: "can't tell since" is read as its
+"cant-tell" doubt (tests/test_migration_111.py proves that step alone), and the named references'
+facts move into room_light_facts (tests/test_migration_120.py).
 """
 from __future__ import annotations
 
@@ -44,11 +45,18 @@ HA = "home-assistant"
 
 def _at_108(db: Database) -> None:
     """Every migration up to 108, as Database.migrate applies them."""
+    _applied(db, "", "109")
+
+
+def _applied(db: Database, start: str, stop: str) -> None:
+    """Every migration from `start` up to `stop`, as Database.migrate applies them."""
     with db.transaction() as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, sha256 TEXT NOT NULL, "
                      "applied_at TIMESTAMPTZ NOT NULL DEFAULT now())")
         for path in sorted(MIGRATIONS.glob("*.sql")):
-            if path.name >= "109":
+            if path.name < start:
+                continue
+            if path.name >= stop:
                 break
             conn.execute(path.read_text())
             conn.execute("INSERT INTO schema_migrations(name, sha256) VALUES (%s, %s)",
@@ -91,7 +99,7 @@ def test_109_upgrades_lights_and_words_to_colour_sources_and_facts(database_prov
                 _word(conn, "reading_words", "sensor.lux", {"kind": "measured", "lux": 80.0}, 400)
                 _word(conn, "reading_words", "sensor.gone", {"kind": "unavailable"}, 500)
                 change = conn.execute("SELECT change FROM room_lights_change WHERE one").fetchone()["change"]
-            db.migrate()
+            _applied(db, "109", "120")   # 120 moves these rows; it runs below
             with db.transaction() as conn:
                 lights = {row["id"]: TypeAdapter(RoomLight).validate_python(row["light"])
                           for row in conn.execute("SELECT id, light FROM room_lights").fetchall()}
@@ -118,6 +126,8 @@ def test_109_upgrades_lights_and_words_to_colour_sources_and_facts(database_prov
                 assert (readings["sensor.lux"]["reading"], readings["sensor.lux"]["cant_tell"]) == (
                     {"kind": "measured", "lux": 80.0}, None)
                 assert (readings["sensor.gone"]["reading"], readings["sensor.gone"]["cant_tell"]) == (None, 500)
+            db.migrate()
+            with db.transaction() as conn:
                 document = document_in(conn)
             assert document.change == change + 1
             assert document.lights["white"] == ReportedEntry(colour=KelvinColour(kelvin=5000),

@@ -10,16 +10,15 @@ import json
 from hashlib import sha256
 from pathlib import Path
 
-from pydantic import TypeAdapter
-
 from central.db import Database
 from central.frame_lighting.policy import (
     UPGRADE_ROOM_LIGHT_ID,
     UPGRADE_ROOM_LIGHT_NAME,
     upgrade_lighting,
 )
+from central.infra.room_light_rows import lights_in
 from central.infra.room_light_store import document_in
-from central.room_light.model import FixedLight, RoomLight, TypedColour
+from central.room_light.model import FixedLight, TypedColour
 from contracts.frame_lighting import FrameLighting
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.room_light import FixedEntry, KelvinColour
@@ -105,8 +104,8 @@ def test_099_upgrades_every_frame_to_the_python_upgrade_rule(database_provisione
                 assert [FrameLighting.model_validate(each["lighting"]) for each in offered] == [
                     expected["hall"], upgrade_lighting(UPGRADE_DISPLAY_LIGHT, 2.5, 1.0)]
                 document = document_in(conn)
-                room = conn.execute("SELECT id, light FROM room_lights").fetchall()
-                assert [(row["id"], TypeAdapter(RoomLight).validate_python(row["light"])) for row in room] == [
+                # Migration 120 moves the room lights into `singletons` 'room_light_setup'.
+                assert list(lights_in(conn).items()) == [
                     (UPGRADE_ROOM_LIGHT_ID, FixedLight(name=UPGRADE_ROOM_LIGHT_NAME, colour=TypedColour(kelvin=6500)))]
                 assert document.change == 2   # 099 seeds 1; 109 raises it for the new document shape
                 assert document.lights == {UPGRADE_ROOM_LIGHT_ID: FixedEntry(colour=KelvinColour(kelvin=6500))}

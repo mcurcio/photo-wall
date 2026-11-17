@@ -1,9 +1,10 @@
 """House › Lights, the refused reports, each Player's drawn report and the Home Assistant settings
 page through the real app (create_app on the test database): one refusal vocabulary at its status,
-references whose address form the source's adapter judges, and the Player's report (from its bus
-line, tests/test_drawn_report_judge.py) judged against the document now."""
+references whose address form the source's adapter judges, and the Player's report (its newest value
+on its bus line, as Central's link records it) judged on read against the document now."""
 from __future__ import annotations
 
+import asyncio
 from importlib.metadata import PackageNotFoundError
 
 import pytest
@@ -11,8 +12,10 @@ from fastapi.testclient import TestClient
 from test_registry import ADMIN, enroll
 
 from central.app import create_app
+from central.content_catalog.catalog import device_id_for_serial
 from central.fleet.node_sessions import NodeControlConfig
 from central.infra.frame_lighting_store import PgHouseLock
+from central.infra.node_link_store import PgLinkStores
 from central.infra.room_light_store import PgRoomLights
 from central.room_light.model import (
     ColourSensorRef,
@@ -21,7 +24,10 @@ from central.room_light.model import (
     ReportRefusal,
     SensorRef,
 )
+from contracts.node_link import Pipe
+from contracts.node_state import PLAYER_LINE, ROOM_LIGHTS_DRAWN_KEY
 from contracts.room_light import (
+    ROOM_LIGHTS_DRAWN_BYTES,
     ROOM_LIGHTS_DRAWN_PATH,
     Dimmer,
     KelvinColour,
@@ -29,6 +35,10 @@ from contracts.room_light import (
     RoomLightsDrawn,
     room_lights_digest,
 )
+from contracts.wire_codec import encode
+from nodeapi.buffers import state_prefix, state_stream
+from nodeapi.epoch import Token
+from nodeapi.pull import Batch, Read
 
 AUTH = {"Authorization": "Bearer " + ADMIN}
 LIGHTS = "/v1/operator/house/lights"
@@ -129,13 +139,33 @@ def test_the_app_builds_without_the_distribution_and_states_the_version_it_was_g
         create_app(registry.db, registry.clock, ADMIN, run_scheduler=False, node_control=NodeControlConfig("node-test"))
 
 
+SERIAL = "10000000c0ffee03"
+
+
+def put_drawn(registry, report: RoomLightsDrawn, seq: int) -> None:
+    """The Player's `room-lights-drawn` value on its line, recorded by Central's real link store."""
+    stream = state_stream(PLAYER_LINE)
+    read = Read(Token("epoch", seq), state_prefix(PLAYER_LINE) + ROOM_LIGHTS_DRAWN_KEY, {},
+                encode(report.model_dump(mode="json"), ROOM_LIGHTS_DRAWN_BYTES, "room_lights_drawn_too_large"))
+    asyncio.run(PgLinkStores(registry.db, {}).store(SERIAL, Pipe.SHOW).commit(
+        stream, Batch((read,), Token("epoch", seq), False)))
+
+
+def drawn_player(registry) -> dict:
+    device = device_id_for_serial(SERIAL)
+    with registry.db.transaction() as conn:
+        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
+                     (device, SERIAL))
+    return enroll(registry, device_id=device)[0]
+
+
 def test_a_players_drawn_report_is_judged_against_the_document_now(registry):
-    player, _, _ = enroll(registry)
+    player = drawn_player(registry)
     lights = PgRoomLights(registry.db, PgHouseLock())
     now = room_lights_digest(lights.current())
     with _client(registry) as client:
         assert client.get(f"{LIGHTS}/drawn", headers=AUTH).json() == {"players": []}
-        lights.record_drawn(player["player_id"], RoomLightsDrawn(drawn=now, following=True))   # as its line's judge
+        put_drawn(registry, RoomLightsDrawn(drawn=now, following=True), 1)     # as its line records it
         [drawn] = client.get(f"{LIGHTS}/drawn", headers=AUTH).json()["players"]
         assert (drawn["player_id"], drawn["state"]) == (player["player_id"], "drawn")
         assert client.put(f"{LIGHTS}/x", headers=AUTH, json={"kind": "fixed", "name": "X", "colour": WHITE}
@@ -150,8 +180,6 @@ def test_colour_sensors_and_the_lights_that_follow_them(registry):
     """A colour sensor is a Home Assistant entity, never a Pi's light meter; a light follows it; it
     stays while a light follows it; the light's line and entry carry its last stated kelvin as is."""
     lights = PgRoomLights(registry.db, PgHouseLock())
-    lights.record_colour_reading(ColourSensorRef(source="home-assistant", address="sensor.sun_sky_color_temperature"),
-                                 KelvinColour(kelvin=3456.5))
     follows = {"kind": "fixed", "name": "Daylight", "colour": {"kind": "colour-sensor", "sensor": "sky",
                                                                 "typed_kelvin": 5500}}
     with _client(registry) as client:
@@ -164,7 +192,10 @@ def test_colour_sensors_and_the_lights_that_follow_them(registry):
             assert (refused.status_code, refused.json()) == (422, {"error": "unknown_address"}), body
         saved = client.put(f"{COLOUR_SENSORS}/sky", headers=AUTH, json=SKY)
         assert saved.status_code == 200, saved.text
-        assert (saved.json()["colour"], saved.json()["followed_by"]) == ({"kind": "kelvin", "kelvin": 3456.5}, [])
+        assert (saved.json()["colour"], saved.json()["followed_by"]) == (None, [])   # never heard yet
+        lights.record_colour_reading(ColourSensorRef(source="home-assistant",
+                                                     address="sensor.sun_sky_color_temperature"),
+                                     KelvinColour(kelvin=3456.5))
         taken = client.put(f"{COLOUR_SENSORS}/sun", headers=AUTH, json=SKY)
         assert (taken.status_code, taken.json()) == (409, {"error": "reference_taken"})
         light = client.put(f"{LIGHTS}/daylight", headers=AUTH, json=follows)

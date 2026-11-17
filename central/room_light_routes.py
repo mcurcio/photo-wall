@@ -14,8 +14,9 @@
 
 The operator routes take the `admin` dependency. A refusal answers {"error": <code>} at the one
 status `REFUSAL_STATUS` gives its code (one exception handler); an id or body outside its shape
-answers 422. What each Player drew with arrives on its own bus line (central/infra/drawn_report_judge.py),
-never through a route.
+answers 422. Each save and remove records the request's principal (`by`) on the setup. What each
+Player drew with is read from its own bus line (the Player line's `room-lights-drawn` key), never
+through a route.
 """
 from __future__ import annotations
 
@@ -24,6 +25,7 @@ from typing import Annotated, Any, Final
 from fastapi import Depends, FastAPI, Path, Request
 from fastapi.responses import JSONResponse, Response
 
+from central.actor import Actor
 from central.operator_auth import OPERATOR_PREFIX
 from central.room_light.model import (
     ColourSensor,
@@ -88,40 +90,40 @@ def mount_room_light_routes(app: FastAPI, *, admin: Any, lights: RoomLightSetup,
     def refused_reports() -> RefusedReportsView:
         return lights.refused()
 
-    @app.put(HOUSE_LIGHTS + "/{light_id}", dependencies=[Depends(admin)], response_model=RoomLightView)
-    def save_room_light(light_id: LightId, light: RoomLight) -> RoomLightView:
+    @app.put(HOUSE_LIGHTS + "/{light_id}", response_model=RoomLightView)
+    def save_room_light(light_id: LightId, light: RoomLight, by: Actor = Depends(admin)) -> RoomLightView:
         if isinstance(light, ReportedLight):
             known(light.reporter.source, light.reporter.address)
-        return lights.save_room_light(light_id, light)
+        return lights.save_room_light(light_id, light, by=by)
 
-    @app.delete(HOUSE_LIGHTS + "/{light_id}", dependencies=[Depends(admin)], status_code=204,
+    @app.delete(HOUSE_LIGHTS + "/{light_id}", status_code=204,
                 response_class=Response)
-    def remove_room_light(light_id: LightId) -> Response:
-        lights.remove_room_light(light_id)
+    def remove_room_light(light_id: LightId, by: Actor = Depends(admin)) -> Response:
+        lights.remove_room_light(light_id, by=by)
         return Response(status_code=204)
 
-    @app.put(HOUSE_SENSORS + "/{sensor_id}", dependencies=[Depends(admin)], response_model=SensorView)
-    def save_sensor(sensor_id: SensorIdPath, sensor: Sensor) -> SensorView:
+    @app.put(HOUSE_SENSORS + "/{sensor_id}", response_model=SensorView)
+    def save_sensor(sensor_id: SensorIdPath, sensor: Sensor, by: Actor = Depends(admin)) -> SensorView:
         known(sensor.at.source, sensor.at.address)
-        return lights.save_sensor(sensor_id, sensor)
+        return lights.save_sensor(sensor_id, sensor, by=by)
 
-    @app.delete(HOUSE_SENSORS + "/{sensor_id}", dependencies=[Depends(admin)], status_code=204,
+    @app.delete(HOUSE_SENSORS + "/{sensor_id}", status_code=204,
                 response_class=Response)
-    def remove_sensor(sensor_id: SensorIdPath) -> Response:
-        lights.remove_sensor(sensor_id)
+    def remove_sensor(sensor_id: SensorIdPath, by: Actor = Depends(admin)) -> Response:
+        lights.remove_sensor(sensor_id, by=by)
         return Response(status_code=204)
 
-    @app.put(HOUSE_COLOUR_SENSORS + "/{sensor_id}", dependencies=[Depends(admin)], response_model=ColourSensorView)
-    def save_colour_sensor(sensor_id: SensorIdPath, sensor: ColourSensor) -> ColourSensorView:
+    @app.put(HOUSE_COLOUR_SENSORS + "/{sensor_id}", response_model=ColourSensorView)
+    def save_colour_sensor(sensor_id: SensorIdPath, sensor: ColourSensor, by: Actor = Depends(admin)) -> ColourSensorView:
         refusal = sources.colour_address_refusal(sensor.at.source, sensor.at.address)
         if refusal is not None:
             raise RoomLightRefused(refusal)
-        return lights.save_colour_sensor(sensor_id, sensor)
+        return lights.save_colour_sensor(sensor_id, sensor, by=by)
 
-    @app.delete(HOUSE_COLOUR_SENSORS + "/{sensor_id}", dependencies=[Depends(admin)], status_code=204,
+    @app.delete(HOUSE_COLOUR_SENSORS + "/{sensor_id}", status_code=204,
                 response_class=Response)
-    def remove_colour_sensor(sensor_id: SensorIdPath) -> Response:
-        lights.remove_colour_sensor(sensor_id)
+    def remove_colour_sensor(sensor_id: SensorIdPath, by: Actor = Depends(admin)) -> Response:
+        lights.remove_colour_sensor(sensor_id, by=by)
         return Response(status_code=204)
 
 

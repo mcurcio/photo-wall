@@ -2,7 +2,8 @@
 the one source of the LUT baked from it (central/frame_lighting/paper_profiles.py).
 
 - **Add** checks and bakes the profile once (`checked_profile`), so a listed profile always bakes;
-  the same bytes twice are one row.
+  the same bytes twice are one row. Each row keeps its audit fields (decision 0034, migration 120):
+  created and changed at when it was added, by the request's principal.
 - **In use**: a Frame whose paper names the profile, saved or drafted in its active Position trial
   (`HouseLock.naming_within`, the one query). The list shows them by name; Remove refuses
   while there are any, under the house's lock (`changing_within`), so a Frame-lighting check never
@@ -13,6 +14,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from central.actor import Actor
 from central.db import Database
 from central.frame_lighting.paper_profiles import (
     LUT_RECIPE_ID,
@@ -43,20 +45,22 @@ class PgPaperProfiles:
             users = self._users_in(conn)
         return PaperProfilesView(paper_profiles=tuple(_view(row, users) for row in rows))
 
-    def add_paper_profile(self, profile: bytes) -> tuple[PaperProfileView, bool]:
+    def add_paper_profile(self, profile: bytes, *, by: Actor) -> tuple[PaperProfileView, bool]:
         """(the listed profile, whether this added it): the same bytes twice are one row.
         PaperProfileRefused (too_large, not_a_colour_profile, not_a_printer_profile); nothing is stored."""
         checked = checked_profile(profile)
         if isinstance(checked, PaperProfileRefusal):
             raise PaperProfileRefused(checked)
-        return self._listed(checked, profile)
+        return self._listed(checked, profile, by)
 
-    def _listed(self, paper: PaperProfile, profile: bytes) -> tuple[PaperProfileView, bool]:
+    def _listed(self, paper: PaperProfile, profile: bytes, by: Actor) -> tuple[PaperProfileView, bool]:
         with self._db.transaction() as conn:
             created = conn.execute(
-                "INSERT INTO paper_profiles(profile_sha256, name, profile, added_at) VALUES (%s, %s, %s, %s) "
-                "ON CONFLICT (profile_sha256) DO NOTHING RETURNING profile_sha256",
-                (paper.sha256, paper.name, profile, self._clock.utc())).fetchone() is not None
+                "INSERT INTO paper_profiles(profile_sha256, name, profile, added_at, created_at, created_by, "
+                "changed_at, changed_by) VALUES (%(sha)s, %(name)s, %(profile)s, %(at)s, %(at)s, %(by)s, %(at)s, "
+                "%(by)s) ON CONFLICT (profile_sha256) DO NOTHING RETURNING profile_sha256",
+                {"sha": paper.sha256, "name": paper.name, "profile": profile, "at": self._clock.utc(),
+                 "by": by}).fetchone() is not None
             row = conn.execute("SELECT profile_sha256, name, added_at FROM paper_profiles WHERE profile_sha256=%s",
                                (paper.sha256,)).fetchone()
             return _view(row, self._users_in(conn)), created

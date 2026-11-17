@@ -61,9 +61,9 @@ def test_a_frames_lighting_through_positions_trial(registry):
     _, request, exchange = setup_trial(registry)
     lights = PgRoomLights(registry.db, PgHouseLock())
     lights.save_room_light("bookshelf-spot", ReportedLight(
-        name="Spot", colour=TypedColour(kelvin=4000), reporter=ReporterRef(source="home-assistant", address="light.spot")))
-    lights.save_sensor("meter", Sensor(name="Meter", at=SensorRef(source="home-assistant", address="sensor.lux")))
-    lights.save_room_light("window", MeasuredLight(name="Window", colour=TypedColour(kelvin=6500), sensor="meter"))
+        name="Spot", colour=TypedColour(kelvin=4000), reporter=ReporterRef(source="home-assistant", address="light.spot")), by="console")
+    lights.save_sensor("meter", Sensor(name="Meter", at=SensorRef(source="home-assistant", address="sensor.lux")), by="console")
+    lights.save_room_light("window", MeasuredLight(name="Window", colour=TypedColour(kelvin=6500), sensor="meter"), by="console")
     with _client(registry) as client:
         for body, code in (({"lighting": _lighting({**SPOT, "light": "cellar"})}, "unknown_room_light"),
                            ({"lighting": _lighting({**SPOT, "light": "window"})}, "reference_mismatch"),
@@ -112,9 +112,9 @@ def test_a_new_frame_names_a_fixed_room_light_that_is_there(registry):
     order, or none. Mutation probe: insert the upgrade's lighting (naming "room") -> the bare Frame
     names a light the house no longer has."""
     lights = PgRoomLights(registry.db, PgHouseLock())
-    lights.remove_room_light("room")
+    lights.remove_room_light("room", by="console")
     frame(registry, "bare")
-    lights.save_room_light("lamp", FixedLight(name="Lamp", colour=TypedColour(kelvin=3000)))
+    lights.save_room_light("lamp", FixedLight(name="Lamp", colour=TypedColour(kelvin=3000)), by="console")
     frame(registry, "lit")
     frames = {each.id: each for each in registry.inventory().frames}
     assert frames["bare"].lighting.lights == ()
