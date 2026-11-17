@@ -1,9 +1,7 @@
 import asyncio
-import re
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
 from datetime import datetime, timezone
-from pathlib import Path
 from types import SimpleNamespace
 
 import procrastinate
@@ -21,12 +19,9 @@ from central.media_queue import (
     ProcrastinateMediaQueue,
 )
 from media.task_queue import (
-    MAINTENANCE_CRON,
     REFRESH_CRON,
     RESCUE_CRON,
     RESCUE_TASK,
-    WORKER_CHECK_IN_SECONDS,
-    WORKER_FRESH_SECONDS,
     MediaRetryStrategy,
     RetryableMediaTask,
     create_worker_app,
@@ -191,37 +186,6 @@ def test_periodic_schedules_use_croniter_seconds_last_semantics():
     assert maintenance - base == 101
     assert rescue - base == 11
     assert RESCUE_CRON == REFRESH_CRON
-
-
-def _every_seconds(cron):
-    """The period of a Procrastinate periodic schedule written as `*/N` in one field
-    (minute, hour, day, month, weekday, second)."""
-    fields = cron.split()
-    steps = [(index, int(field[2:])) for index, field in enumerate(fields) if field.startswith("*/")]
-    assert len(steps) == 1, cron
-    index, step = steps[0]
-    assert index in (0, 5), cron
-    return step * 60 if index == 0 else step
-
-
-def test_the_console_media_thresholds_follow_the_worker_schedule():
-    # Slice 3 §14: "quiet" and "overdue" are console constants derived from these.
-    source = (Path(__file__).parents[1] / "central/console/src/mediaHealth.js").read_text()
-    pinned = dict(re.findall(r"^export const ([A-Z_]+_SECONDS) = (\d+);$", source, re.MULTILINE))
-    assert int(pinned["WORKER_CHECK_IN_SECONDS"]) == _every_seconds(MAINTENANCE_CRON)
-
-
-def test_the_worker_healthcheck_window_is_the_console_worker_quiet_window():
-    # HC-2: one cadence (boot + maintenance), one window; Python and the console cannot disagree.
-    source = (Path(__file__).parents[1] / "central/console/src/mediaHealth.js").read_text()
-    pinned = dict(re.findall(r"^export const ([A-Z_]+_SECONDS) = (\d+);$", source, re.MULTILINE))
-    assert WORKER_CHECK_IN_SECONDS == _every_seconds(MAINTENANCE_CRON)
-    assert int(pinned["WORKER_CHECK_IN_SECONDS"]) == WORKER_CHECK_IN_SECONDS
-    quiet = re.search(r"^export const WORKER_QUIET_AFTER = (\d+) \* WORKER_CHECK_IN_SECONDS \+ (\d+);$",
-                      source, re.MULTILINE)
-    assert quiet, "WORKER_QUIET_AFTER is no longer `a * WORKER_CHECK_IN_SECONDS + b`"
-    assert int(quiet[1]) * int(pinned["WORKER_CHECK_IN_SECONDS"]) + int(quiet[2]) == WORKER_FRESH_SECONDS
-    assert WORKER_FRESH_SECONDS == 660
 
 
 class StalledQueue:

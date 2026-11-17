@@ -739,8 +739,8 @@ def create_app(
         # what the Planner may put on the Frame, never its picture, so no generation is asked.
         return registry.set_frame_video(frame_id, request.video)
 
-    @app.delete("/v1/operator/frames/{frame_id}", dependencies=[Depends(admin)])
-    def remove_frame(frame_id: Identifier) -> dict:
+    @app.delete("/v1/operator/frames/{frame_id}")
+    def remove_frame(frame_id: Identifier, by: Actor = Depends(admin)) -> dict:
         # Serialize with all Runtime/Scene mutations, then take the Frame row lock,
         # matching authored configuration's COORDINATION -> RUNTIME -> Frame order.
         # Registry checks existence and binding before applying reference data so those
@@ -752,7 +752,7 @@ def create_app(
                     "run_ids": list(references["run_ids"]),
                 })
 
-            return registry.delete_frame(frame_id, conn=conn, references=references)
+            return registry.delete_frame(frame_id, conn=conn, references=references, by=by)
 
     @app.put("/v1/operator/frames/{frame_id}/binding", dependencies=[Depends(admin)])
     def bind(frame_id: Identifier, binding: BindingRequest):

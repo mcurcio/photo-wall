@@ -16,6 +16,7 @@ from psycopg.errors import UniqueViolation
 from psycopg.types.json import Jsonb
 from pydantic import Field, StrictBool
 
+from central.actor import Actor
 from central.central_errors.ports import BoundOutput
 from central.db import Database
 from central.fleet.acceptance_evidence import applied_is_latest
@@ -710,7 +711,8 @@ class Registry:
                 _wake_nodes_of(conn, bound["player_id"])
             return {"frame_id": frame_id, "turn": turn, **row, "changed": True}
 
-    def delete_frame(self, frame_id: str, *, conn, references: Mapping[str, tuple[str, ...]]) -> dict:
+    def delete_frame(self, frame_id: str, *, conn, references: Mapping[str, tuple[str, ...]],
+                     by: Actor) -> dict:
         """Remove a clear Frame within the caller's serialized reference snapshot.
 
         Callers must obtain `references` from the current Runtime while holding the
@@ -740,7 +742,7 @@ class Registry:
                 "queued_activation_ids": list(references.get("queued_activation_ids", ())),
             })
         conn.execute("DELETE FROM frames WHERE id=%s", (frame_id,))
-        forget_frame_in(conn, frame_id)
+        forget_frame_in(conn, frame_id, by=by)
         return {"status": "deleted"}
 
     def retire(self, player_id: str) -> None:

@@ -80,8 +80,9 @@ def test_081_keeps_hand_placed_photos_as_library_assets_and_retires_the_rest(emp
                 "WHERE table_schema='public'").fetchall()}
             columns = {table: {row["name"] for row in conn.execute(
                 "SELECT column_name AS name FROM information_schema.columns WHERE table_name=%s",
-                (table,)).fetchall()} for table in ("media_sources", "media_settings",
-                                                     "asset_revisions")}
+                (table,)).fetchall()} for table in ("media_sources", "asset_revisions")}
+            # Migration 118 moved the media settings into `singletons` 'media'.
+            media = conn.execute("SELECT document FROM singletons WHERE name='media'").fetchone()
     finally:
         db.close()
 
@@ -100,4 +101,4 @@ def test_081_keeps_hand_placed_photos_as_library_assets_and_retires_the_rest(emp
     assert jobs == 0
     assert not {"catalog_snapshots", "source_members", "source_previews", "library_tags"} & tables
     assert columns["media_sources"] == {"source_ref", "query", "pool_key", "refresh_active"}
-    assert "connection_ids" not in columns["media_settings"]
+    assert media["document"] == {"recipe_id": None, "max_bytes": 1000, "worker_error": None}

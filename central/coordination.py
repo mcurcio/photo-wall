@@ -199,7 +199,7 @@ class Coordinator:
         # Follow-ups B1: the photo fit settings, read once per planning pass and authoring check.
         self.fit: FitSettingsStore = fit or PgFitSettings(db, times=DatabaseTransactionClock())
         # What the last planning pass could not do, for the operator (central/planning_outcome.py).
-        self.planning: PlanningOutcomes = planning or PgPlanningOutcome(clock)
+        self.planning: PlanningOutcomes = planning or PgPlanningOutcome(DatabaseTransactionClock())
         self.outcomes = outcomes or ExecutionOutcomeRouter(
             handle_runtime_outcome,
             handle_planning_outcome,

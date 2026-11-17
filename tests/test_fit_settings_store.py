@@ -1,8 +1,11 @@
 """The photo fit settings, stored and served (follow-ups 2026-10-11, slice B1, case 8; run ledger
 .claude/runs/photo-5a.md). Owner, 2026-10-11: "Agreed that these should be configurable, and not
-hardcoded." One row (migration 086), validated by FitSettings alone; the Planner reads it on its
-next pass, and a Scene without its own crop limit follows the house's."""
+hardcoded." One `singletons` document 'photo_fit' (migration 118), validated by FitSettings alone;
+the Planner reads it on its next pass, and a Scene without its own crop limit follows the house's.
+"""
 from __future__ import annotations
+
+from contextlib import contextmanager
 
 import pytest
 from fastapi.testclient import TestClient
@@ -18,7 +21,7 @@ from test_wall_plan_tracer import prepare
 from central.app import create_app
 from central.coordination import Coordinator
 from central.db import ProcessTransactionClock
-from central.infra.fit_settings_store import PgFitSettings
+from central.infra.fit_settings_store import PHOTO_FIT, PgFitSettings
 from central.photo_fit_routes import SETTINGS_PATH
 from central.runtime import Contribution, Scene
 from central.wall_plan.fit_settings import FIT_SETTING_RANGES, FitSettings
@@ -59,11 +62,48 @@ def test_a_value_outside_its_range_or_an_incomplete_body_is_refused(registry):
     assert _store(registry).fit_settings().face_padding == 0.1
 
 
-def test_a_row_that_no_longer_validates_reads_as_the_defaults(registry):
+def _stored_document(registry, document: dict) -> None:
+    """A document stored by hand (as a migration or an edit leaves it), past its model."""
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO photo_fit_settings VALUES(TRUE,%s,0)",
-                     (Jsonb(FitSettings().model_dump(mode="json") | {"crop_limit": 0.9}),))
+        conn.execute("INSERT INTO singletons (name, document, revision, created_at, created_by, "
+                     "changed_at, changed_by) VALUES ('photo_fit', %s, 1, 0, 'unknown', 0, 'unknown')",
+                     (Jsonb(document),))
+
+
+def test_a_row_that_no_longer_validates_reads_as_the_defaults(registry):
+    _stored_document(registry, FitSettings().model_dump(mode="json") | {"crop_limit": 0.9})
     assert _store(registry).fit_settings() == FitSettings()
+
+
+class _InTransaction:
+    """A Database whose every transaction is `conn`'s, so a store's save runs inside the test's."""
+
+    def __init__(self, conn) -> None:
+        self.conn = conn
+
+    @contextmanager
+    def transaction(self):
+        yield self.conn
+
+
+def test_a_save_records_who_and_an_equal_save_writes_nothing(registry):
+    """Decision 0034: the document is written only when it changes. An equal save takes no
+    transaction id, so it neither flushes the WAL nor moves the audit fields.
+    Mutation probe (S2b #2): an unconditional upsert in `Singleton.write_in` -> an id is assigned."""
+    times = ProcessTransactionClock(registry.clock)
+    _store(registry).save_fit_settings(FitSettings(face_padding=0.1), by="api-token")
+    with registry.db.transaction() as conn:
+        first = PHOTO_FIT.read_in(conn)
+    assert (first.value.face_padding, first.revision, first.created_by, first.changed_by) == (
+        0.1, 1, "api-token", "api-token")
+    registry.clock.advance(60)
+    with registry.db.transaction() as conn:
+        PgFitSettings(_InTransaction(conn), times=times).save_fit_settings(
+            FitSettings(face_padding=0.1), by="console")
+        assigned = conn.execute("SELECT pg_current_xact_id_if_assigned() AS x").fetchone()["x"]
+        again = PHOTO_FIT.read_in(conn)
+    assert assigned is None
+    assert (again.revision, again.changed_at, again.changed_by) == (1, first.changed_at, "api-token")
 
 
 def test_a_row_saved_before_the_skew_existed_keeps_its_values_and_takes_the_skews_default(
@@ -74,8 +114,7 @@ def test_a_row_saved_before_the_skew_existed_keeps_its_values_and_takes_the_skew
     Mutation probe: make the field required -> the whole row reads as the defaults."""
     saved = FitSettings().model_dump(mode="json") | {"crop_limit": 0.5}
     del saved["interest_skew"]
-    with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO photo_fit_settings VALUES(TRUE,%s,0)", (Jsonb(saved),))
+    _stored_document(registry, saved)
     read = _store(registry).fit_settings()
     assert (read.crop_limit, read.interest_skew) == (0.5, 0.33)
     body = _client(registry).get(SETTINGS_PATH, headers=AUTH).json()

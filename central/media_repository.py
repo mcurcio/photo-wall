@@ -27,10 +27,10 @@ import re
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import get_args
+from typing import Final, get_args
 
 from psycopg.types.json import Jsonb
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from central.assets.frame_media import VARIANT_REFERENCE, variant_asset_key
 from central.catalog import Candidate, SourcePool
@@ -43,6 +43,8 @@ from central.infra.key_content_store import PgKeyContent
 from central.infra.outcomes import JobOutcomes
 from central.infra.photo_library_store import PgPhotoLibrary, library_assets_in
 from central.infra.publisher import ProcrastinatePublisher
+from central.infra.runtime import worker_running_in
+from central.infra.singletons import Singleton
 from central.infra.transactions import PgTransaction, PgTransactions
 from central.installation_models import FrameOutput
 from central.kernel.assets import AssetKind
@@ -69,6 +71,19 @@ from media.prepare import (
     recipe_id,
     stored_recipe,
 )
+
+
+class _MediaDocument(BaseModel):
+    """`singletons` 'media' (decision 0034's migration 118): the recipe and cache budget it was
+    seeded with and the worker's last error code. Whether the worker runs is its queue heartbeat
+    (`worker_running_in`), never a stamp here."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    recipe_id: str | None
+    max_bytes: int
+    worker_error: str | None
+
+
+MEDIA_SETTINGS: Final[Singleton[_MediaDocument]] = Singleton("media", _MediaDocument)
 
 
 class StoreLimits(Model):
@@ -228,8 +243,6 @@ class MediaRepository:
             conn.execute("SET LOCAL lock_timeout='5s'")
             conn.execute("SET LOCAL statement_timeout='10s'")
             conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
-            conn.execute("INSERT INTO media_settings(singleton,max_bytes) VALUES(TRUE,%s) "
-                         "ON CONFLICT(singleton) DO NOTHING", (self.limits.max_bytes,))
             yield conn
 
     def sources(self) -> list[dict]:
@@ -464,12 +477,22 @@ class MediaRepository:
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
         conn.execute("DELETE FROM media_references WHERE expires_at<=%s", (now,))
 
-    def worker_status(self, code: str | None = None):
+    def worker_status(self, code: str | None = None) -> None:
+        """The worker's last error code, written only when it differs (`MEDIA_SETTINGS.write_in`,
+        by "central"). No time stamp: whether the worker runs is `worker_running_in`."""
         if code is not None and (not isinstance(code, str) or not re.fullmatch(r"[a-z_]{1,64}", code)):
             raise ValueError("invalid worker status code")
-        with self.transaction() as conn:
-            conn.execute("UPDATE media_settings SET worker_seen=%s,worker_error=%s WHERE singleton",
-                         (self.times.now_in(conn), code))
+        with self.db.transaction() as conn:
+            stored = self._media_document_in(conn)
+            MEDIA_SETTINGS.write_in(conn, stored.model_copy(update={"worker_error": code}),
+                                    by="central", times=self.times)
+
+    def _media_document_in(self, conn) -> _MediaDocument:
+        """The stored media settings; with none, no recipe, this store's `max_bytes`, no error."""
+        stored = MEDIA_SETTINGS.read_in(conn)
+        if stored is None:
+            return _MediaDocument(recipe_id=None, max_bytes=self.limits.max_bytes, worker_error=None)
+        return stored.value
 
     def request_preparations_in(self, conn, requests: Sequence[AcquisitionRequest]) -> int:
         """Name and publish the `PrepareMedia` of each planned photo's one copy for the wall
@@ -573,22 +596,11 @@ class MediaRepository:
         with self.transaction() as conn:
             return self.health_in(conn)
 
-    def worker_age(self) -> float | None:
-        """Seconds since the last worker check-in, or None before the first (the healthcheck).
-
-        A plain read: no settings-row insert and no media lock, so a probe never queues
-        behind the writer.
-        """
+    def worker_running(self) -> bool:
+        """Whether the media worker runs (`worker_running_in`, its queue heartbeat on the
+        database's clock): the container healthcheck. A plain read; no lock."""
         with self.db.transaction() as conn:
-            return self.worker_age_in(conn)
-
-    def worker_age_in(self, conn) -> float | None:
-        """The check-in's age on `times` (G11): `worker_seen` and the read time come from
-        one clock in one transaction, never from the probing process's clock."""
-        row = conn.execute("SELECT worker_seen FROM media_settings WHERE singleton").fetchone()
-        if row is None or row["worker_seen"] is None:
-            return None
-        return self.times.now_in(conn) - row["worker_seen"]
+            return worker_running_in(conn)
 
     def media_read(self) -> dict:
         """`GET /v1/operator/media`: Sources, health and their `read_at` in one transaction."""
@@ -606,18 +618,7 @@ class MediaRepository:
 
     def health_in(self, conn) -> dict:
         """Read worker/cache health through a caller-owned transaction."""
-        state = conn.execute(
-            "SELECT recipe_id,max_bytes,worker_seen,worker_error FROM media_settings WHERE singleton"
-        ).fetchone()
-        if state is None:
-            # The operator read endpoint is strictly read-only, so it cannot use
-            # transaction()'s lazy settings-row initialization.
-            state = {
-                "recipe_id": None,
-                "max_bytes": self.limits.max_bytes,
-                "worker_seen": None,
-                "worker_error": None,
-            }
+        state = {**self._media_document_in(conn).model_dump(), "worker_running": worker_running_in(conn)}
         # A preparation's state is its latest outcome: ok is ready, terminal failed, transient
         # retrying (a queued one has no outcome yet).
         return {**state, "accounted_bytes": self.accounted_bytes(conn), "jobs": conn.execute(

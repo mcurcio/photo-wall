@@ -8,16 +8,19 @@ The DB tests skew each process's clock by an hour and compose `DatabaseTransacti
 import ast
 import inspect
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 from media_queue import RecordingMediaQueue
+from support.workers import heartbeat
 from test_operator_frames import ADMIN, AUTH
 
 from central.app import create_app
 from central.db import DatabaseTransactionClock, ProcessTransactionClock
-from central.media_repository import MediaRepository
+from central.infra.runtime import STALLED_WORKER_SECONDS
+from central.media_repository import MEDIA_SETTINGS, MediaRepository
 from contracts.time import ManualClock
 from media import healthcheck
 
@@ -32,6 +35,17 @@ MEDIA_MODULES = ("central/media_repository.py", "central/app.py",
 def _db_now(registry) -> float:
     with registry.db.transaction() as conn:
         return DatabaseTransactionClock().now_in(conn)
+
+
+class _InTransaction:
+    """A Database whose every transaction is `conn`'s, so a call runs inside the test's."""
+
+    def __init__(self, conn) -> None:
+        self.conn = conn
+
+    @contextmanager
+    def transaction(self):
+        yield self.conn
 
 
 def _processes(registry):
@@ -77,14 +91,34 @@ def test_no_media_module_reads_a_database_clock_outside_the_held_connection_port
 
 # DB: each process's clock skewed by an hour; one database clock.
 
-def test_worker_check_in_ages_against_the_media_read_on_one_clock(registry):
+def test_the_worker_check_in_writes_only_a_changed_error_code(registry):
+    """Decision 0034 (S2b #4): the check-in is no longer a stamp. An unchanged code writes nothing
+    (no transaction id); a new code is written once, by "central".
+    Mutation probe: write the document on every call -> the equal call assigns an id."""
     central, worker = _processes(registry)
     worker.worker_status(None)
-    read = central.media_read()
-    assert 0 <= read["read_at"] - read["health"]["worker_seen"] < 5
+    with registry.db.transaction() as conn:
+        first = MEDIA_SETTINGS.read_in(conn)
+    assert (first.value.worker_error, first.revision, first.created_by) == (None, 1, "central")
+    with registry.db.transaction() as conn:
+        MediaRepository(_InTransaction(conn), ManualClock(0), queue=RecordingMediaQueue(),
+                        times=DatabaseTransactionClock()).worker_status(None)
+        assert conn.execute("SELECT pg_current_xact_id_if_assigned() AS x").fetchone()["x"] is None
     worker.worker_status("worker_io")
-    read = central.media_read()
-    assert 0 <= read["read_at"] - read["health"]["worker_seen"] < 5
+    worker.worker_status("worker_io")
+    with registry.db.transaction() as conn:
+        stored = MEDIA_SETTINGS.read_in(conn)
+    assert (stored.value.worker_error, stored.revision) == ("worker_io", 2)
+    assert central.media_read()["health"]["worker_error"] == "worker_io"
+
+
+def test_media_health_reads_running_from_the_queue_heartbeat(registry):
+    central, _worker = _processes(registry)
+    heartbeat(registry.db, age=1)
+    health = central.media_read()["health"]
+    assert health["worker_running"] is True and "worker_seen" not in health
+    heartbeat(registry.db, age=STALLED_WORKER_SECONDS + 5)
+    assert central.media_read()["health"]["worker_running"] is False
 
 
 def test_operator_reads_serve_media_read_at_on_the_database_clock(registry):
@@ -103,11 +137,12 @@ def test_operator_reads_serve_media_read_at_on_the_database_clock(registry):
 
 # The worker container's healthcheck (`python -m media.healthcheck`, compose.yaml).
 
-def test_the_worker_healthcheck_ages_the_check_in_on_the_database_clock(registry, monkeypatch):
+def test_the_worker_healthcheck_reads_the_queue_heartbeat_on_the_database_clock(registry, monkeypatch):
     monkeypatch.setenv("PHOTO_WALL_DATABASE_URL", registry.db.dsn)
-    assert healthcheck.main() == 1  # no check-in yet
-    _central, worker = _processes(registry)
-    worker.worker_status(None)
+    with registry.db.transaction() as conn:
+        conn.execute("DELETE FROM procrastinate_workers")
+    assert healthcheck.main() == 1  # no worker yet
+    heartbeat(registry.db, age=1)
     assert healthcheck.main() == 0
     # The probing process's clock is never read: an hour (or decades) of skew changes nothing.
     for skew in (-HOUR, HOUR, -10**9):
@@ -115,10 +150,8 @@ def test_the_worker_healthcheck_ages_the_check_in_on_the_database_clock(registry
         assert healthcheck.main() == 0, skew
     monkeypatch.undo()
     monkeypatch.setenv("PHOTO_WALL_DATABASE_URL", registry.db.dsn)
-    # A check-in older than WORKER_FRESH_SECONDS by the database's clock is unhealthy.
-    with registry.db.transaction() as conn:
-        conn.execute("UPDATE media_settings SET worker_seen=worker_seen-%s WHERE singleton",
-                     (healthcheck.WORKER_FRESH_SECONDS + 1,))
+    # A heartbeat older than the stalled-worker window by the database's clock is unhealthy.
+    heartbeat(registry.db, age=STALLED_WORKER_SECONDS + 5)
     assert healthcheck.main() == 1
 
 

@@ -18,6 +18,7 @@ from typing import Any, Final
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from central.actor import Actor
 from central.wall_plan.fit_analysis import AnalysisRefused, FitAnalysis, FitAnalysisRequest
 from central.wall_plan.fit_settings import FIT_SETTING_RANGES, FitSettings, FitSettingsView
 from central.wall_plan.ports import FitSettingsStore
@@ -44,12 +45,12 @@ def mount_photo_fit_routes(app: FastAPI, *, admin: Any, settings: FitSettingsSto
     def read_settings() -> FitSettingsView:
         return view(settings.fit_settings())
 
-    @app.put(SETTINGS_PATH, dependencies=[Depends(admin)], response_model=FitSettingsView)
-    def save_settings(body: FitSettings) -> FitSettingsView | JSONResponse:
+    @app.put(SETTINGS_PATH, response_model=FitSettingsView)
+    def save_settings(body: FitSettings, by: Actor = Depends(admin)) -> FitSettingsView | JSONResponse:
         if body.model_fields_set != set(FitSettings.model_fields):
             # A PUT replaces the whole row: a missing field would silently become its default.
             return JSONResponse({"error": "invalid_request"}, status_code=422)
-        settings.save_fit_settings(body)
+        settings.save_fit_settings(body, by=by)
         return view(settings.fit_settings())
 
     @app.post(ANALYSIS_PATH, dependencies=[Depends(admin)], response_model=FitAnalysis)

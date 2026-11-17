@@ -104,7 +104,7 @@ def test_a_video_is_named_once_whatever_the_wall_and_the_copy_ladder(registry):
     add_frame(registry, "hall", P4K)
     assert prepared(repository, clip.asset_id, "hall") == {key}
     PgFitSettings(registry.db, times=ProcessTransactionClock(registry.clock)).save_fit_settings(
-        FitSettings(copy_ladder_px=(2560, 3840)))
+        FitSettings(copy_ladder_px=(2560, 3840)), by="console")
     assert prepared(repository, clip.asset_id, "living", "hall") == {key}
     _, recipe_name = split_media_variant_key(key)
     with repository.db.transaction() as conn:
@@ -191,7 +191,7 @@ def test_a_photo_only_slightly_larger_than_needed_gets_no_smaller_copy(registry)
     seed_pool(registry, "family:1", (near,))
     (key,) = prepared(repository, near.asset_id, "fireplace")
     assert step_of(repository, key) == 4950
-    store.save_fit_settings(FitSettings(scaled_copy_ratio=1.0))
+    store.save_fit_settings(FitSettings(scaled_copy_ratio=1.0), by="console")
     (key,) = prepared(repository, near.asset_id, "fireplace") - {key}
     assert step_of(repository, key) == 4506
 

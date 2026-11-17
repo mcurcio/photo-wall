@@ -215,8 +215,9 @@ class MediaWorker:
                           preparer=self.preparer, job_seconds=self.limits.job_seconds)
 
     async def maintain(self) -> None:
-        """The thumbnail sweep, the guaranteed check-in, then the media cache's budget
-        (`MediaCacheBudget`: pinned variants kept, the others least recently served first)."""
+        """The thumbnail sweep, the worker's error code (written only when it changes), then the
+        media cache's budget (`MediaCacheBudget`: pinned variants kept, the others least recently
+        served first)."""
         # Listed BEFORE the purge: a file written after it is never discarded by this pass.
         files = await _blocking(self._thumbnail_files)
         recorded = await _blocking(self.library.retire_unwanted)
@@ -266,8 +267,7 @@ async def _media_queue(app, additional_context: dict) -> None:
 
 async def _media_loop(worker: MediaWorker, run_queue: Callable[[], Awaitable[None]]) -> None:
     """The library checks' and measurements' queue, after one boot pass of maintenance (the
-    thumbnail sweep, the guaranteed check-in, `WORKER_CHECK_IN_SECONDS`, and the media cache's
-    budget). Media variants are
+    thumbnail sweep, the worker's error code, and the media cache's budget). Media variants are
     the job runtime's (`PrepareMedia`), so no process waits for a media writer lock."""
     await worker.maintain()
     await run_queue()

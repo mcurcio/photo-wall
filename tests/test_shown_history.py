@@ -75,8 +75,8 @@ def test_a_layer_planned_into_night_off_is_not_shown_and_one_outside_it_is(regis
     Mutation probe (P-filter-gone): remove the filter -> the in-Night-off layer is recorded."""
     set_house(registry.db, UTC_HOUSE)
     with registry.db.transaction() as conn:
-        conn.execute("""UPDATE night_off SET settings = jsonb_set(settings, '{frames}',
-                        '{"kind": "frames", "frame_ids": ["frame-1"]}')""")
+        conn.execute("""UPDATE singletons SET document = jsonb_set(document, '{night_off,frames}',
+                        '{"kind": "frames", "frame_ids": ["frame-1"]}') WHERE name = 'power_policy'""")
     night = at(UTC_HOUSE, "2001-09-09T23:30")
     dark = showing("dark", "photo-1", start=night)
     day = showing("day", "photo-2", start=at(UTC_HOUSE, "2001-09-09T15:00"))

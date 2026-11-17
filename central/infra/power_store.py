@@ -1,5 +1,6 @@
 """Display power policy over PostgreSQL (Power and the week: slice T for Night off, slice S2 for
-holds; migrations 089 `night_off` and 090 `power_holds` and `hold_settings`).
+holds; migration 090 `power_holds`, and since decision 0034's migration 118 the `singletons`
+document 'power_policy': Night off and how long a hold lasts, its revision Night off's).
 
 `power_policy_in` is the one read of the policy: the Output document source
 (central/infra/display_store.py), Why and the shown-history filter all call it in their own
@@ -12,57 +13,96 @@ rolls forward with no other write. Night off's chosen Frames never name a delete
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
-from psycopg.types.json import Jsonb
+from pydantic import BaseModel, ConfigDict
 
-from central.db import Database, TransactionClock
+from central.actor import Actor
+from central.db import Database, DatabaseTransactionClock, TransactionClock
 from central.house_time.calculator import local_date_time, next_window, when_problems, window_at
 from central.house_time.model import HouseTime
 from central.infra.house_store import house_settings_in, house_time_in
 from central.infra.output_wakes import wake_every_node_in
+from central.infra.singletons import Singleton
 from central.power.model import (
+    EVERY_DAY,
+    NIGHT_OFF_OFF,
+    NIGHT_OFF_ON,
     AllFrames,
     ChosenFrames,
     Hold,
     HoldLasts,
     HoldSource,
     NightOff,
+    NightOffDraft,
     PowerPolicy,
 )
 from central.power.ports import PowerRefused
 from central.power.timetable import hold_end, spans
 from central.power.views import HoldLastsView, HoldView, NightOffSave, NightOffView
-from contracts.node_output import Power
+from contracts.node_output import Darkness, Power
 
 _HOLD_COLUMNS = "hold_id, power, source, started_at, ends_at"
+# Serializes the power policy's read-modify-writes (a Night off save's revision check, a hold
+# lasts change, a Frame delete) without a row lock, so an equal save takes no transaction id.
+POWER_POLICY_LOCK: Final = 734118331
+
+
+class _PowerPolicyDocument(BaseModel):
+    """`singletons` 'power_policy': Night off without its revision (the row's revision is Night
+    off's) and how long a hold lasts."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    night_off: NightOffDraft
+    hold_lasts: HoldLasts
+
+
+POWER_POLICY: Final[Singleton[_PowerPolicyDocument]] = Singleton("power_policy", _PowerPolicyDocument)
+# The policy migration 089 and 090 seeded, read when the document is missing or no longer
+# validates (a hand edit), so a read never crashes; its first save stores it.
+_SEED: Final = _PowerPolicyDocument(
+    night_off=NightOffDraft(off=NIGHT_OFF_OFF, on=NIGHT_OFF_ON, days=EVERY_DAY,
+                            frames=ChosenFrames(frame_ids=()), darkness=Darkness.DISPLAY_OFF),
+    hold_lasts="next-scheduled-change")
+_TIMES: Final = DatabaseTransactionClock()
+
+
+def _document_in(conn: Any) -> tuple[_PowerPolicyDocument, int]:
+    """The stored document and its revision, or the seed at revision 1."""
+    stored = POWER_POLICY.read_in(conn)
+    return (_SEED, 1) if stored is None else (stored.value, stored.revision)
+
+
+def _lock_in(conn: Any) -> None:
+    conn.execute("SELECT pg_advisory_xact_lock(%s)", (POWER_POLICY_LOCK,))
 
 
 def night_off_in(conn: Any) -> NightOff:
-    """The stored Night off (migration 089 writes the row; it always exists)."""
-    row = conn.execute("SELECT settings, revision FROM night_off").fetchone()
-    return NightOff.model_validate({**row["settings"], "revision": row["revision"]})
+    """The stored Night off, its revision the document's (migration 118 copies 089's row)."""
+    document, revision = _document_in(conn)
+    return NightOff(**document.night_off.model_dump(), revision=revision)
 
 
-def forget_frame_in(conn: Any, frame_id: str) -> None:
+def forget_frame_in(conn: Any, frame_id: str, *, by: Actor) -> None:
     """Drop `frame_id` from Night off's chosen Frames, in the caller's transaction (the Registry's
     Frame delete): the one owner of which Frames follow Night off keeps naming only Frames that
     exist, so a later save is not refused "unknown-frame". The revision rises, so an editor open on
     the old list is told to reload."""
-    night_off = night_off_in(conn)
-    frames = night_off.frames
+    _lock_in(conn)
+    document, _ = _document_in(conn)
+    frames = document.night_off.frames
     if not isinstance(frames, ChosenFrames) or frame_id not in frames.frame_ids:
         return
     kept = ChosenFrames(frame_ids=tuple(chosen for chosen in frames.frame_ids if chosen != frame_id))
-    draft = night_off.model_copy(update={"frames": kept}).model_dump(mode="json", exclude={"revision"})
-    conn.execute("UPDATE night_off SET settings=%s, revision=revision + 1", (Jsonb(draft),))
+    night_off = document.night_off.model_copy(update={"frames": kept})
+    POWER_POLICY.write_in(conn, document.model_copy(update={"night_off": night_off}), by=by,
+                          times=_TIMES)
     wake_every_node_in(conn)
 
 
 def hold_lasts_in(conn: Any) -> HoldLasts:
-    """The stored "a hold lasts" setting (migration 090 writes the row; it always exists)."""
-    return conn.execute("SELECT hold_lasts FROM hold_settings").fetchone()["hold_lasts"]
+    """The stored "a hold lasts" setting."""
+    return _document_in(conn)[0].hold_lasts
 
 
 def power_policy_in(conn: Any, now: float) -> PowerPolicy:
@@ -146,18 +186,21 @@ class PgPower:
         with self._db.transaction() as conn:
             return HoldLastsView(hold_lasts=hold_lasts_in(conn))
 
-    def set_hold_lasts(self, hold_lasts: HoldLasts) -> HoldLastsView:
+    def set_hold_lasts(self, hold_lasts: HoldLasts, *, by: Actor) -> HoldLastsView:
         # A hold in force keeps its end: no timetable changes, so no Node is woken.
         with self._db.transaction() as conn:
-            conn.execute("UPDATE hold_settings SET hold_lasts=%s, updated_at=%s",
-                         (hold_lasts, self._times.now_in(conn)))
+            _lock_in(conn)
+            document, _ = _document_in(conn)
+            POWER_POLICY.write_in(conn, document.model_copy(update={"hold_lasts": hold_lasts}),
+                                  by=by, times=self._times)
         return self.hold_lasts()
 
-    def save_night_off(self, save: NightOffSave) -> NightOffView:
+    def save_night_off(self, save: NightOffSave, *, by: Actor) -> NightOffView:
         draft = save.night_off
         with self._db.transaction() as conn:
-            row = conn.execute("SELECT revision FROM night_off FOR UPDATE").fetchone()
-            if row["revision"] != save.expected_revision:
+            _lock_in(conn)
+            document, revision = _document_in(conn)
+            if revision != save.expected_revision:
                 raise PowerRefused("changed", 409)
             problems = when_problems(draft.when, house_time_in(conn))
             if problems:
@@ -167,16 +210,17 @@ class PgPower:
                                      (list(draft.frames.frame_ids),)).fetchone()["n"]
                 if known != len(draft.frames.frame_ids):
                     raise PowerRefused("unknown-frame", 422)
-            conn.execute("UPDATE night_off SET settings=%s, revision=revision + 1, updated_at=%s",
-                         (Jsonb(draft.model_dump(mode="json")), self._times.now_in(conn)))
-            wake_every_node_in(conn)
+            written = POWER_POLICY.write_in(conn, document.model_copy(update={"night_off": draft}),
+                                            by=by, times=self._times)
+            if written.revision != revision:      # an equal save changes nothing a Node reads
+                wake_every_node_in(conn)
         return self.night_off()
 
-    def all_off(self, request_id: UUID) -> tuple[HoldView, ...]:
-        return self._hold(request_id, Power.OFF)
+    def all_off(self, request_id: UUID, *, by: Actor) -> tuple[HoldView, ...]:
+        return self._hold(request_id, Power.OFF, by)
 
-    def all_on(self, request_id: UUID) -> tuple[HoldView, ...]:
-        return self._hold(request_id, Power.ON)
+    def all_on(self, request_id: UUID, *, by: Actor) -> tuple[HoldView, ...]:
+        return self._hold(request_id, Power.ON, by)
 
     def resume_schedule(self, frame_ids: tuple[str, ...]) -> None:
         with self._db.transaction() as conn:
@@ -184,7 +228,7 @@ class PgPower:
             conn.execute("DELETE FROM power_holds WHERE frame_id = ANY(%s)", (list(frame_ids),))
             wake_every_node_in(conn)
 
-    def _hold(self, request_id: UUID, power: Power) -> tuple[HoldView, ...]:
+    def _hold(self, request_id: UUID, power: Power, by: Actor) -> tuple[HoldView, ...]:
         """Hold every current Frame at `power`, each until its own `hold_end`. The newest hold on a
         Frame replaces an older one; a Frame already held by this request keeps its row (start and
         end included)."""
@@ -195,18 +239,23 @@ class PgPower:
             frame_ids = [row["id"] for row in conn.execute("SELECT id FROM frames ORDER BY id").fetchall()]
             ends = [hold_end(frame_id, policy, house, now) for frame_id in frame_ids]
             conn.execute(
-                "INSERT INTO power_holds (frame_id, hold_id, power, source, started_at, ends_at) "
-                "SELECT frame_id, %s, %s, 'console', %s, ends_at "
-                "FROM unnest(%s::text[], %s::double precision[]) AS held(frame_id, ends_at) "
+                "INSERT INTO power_holds (frame_id, hold_id, power, source, started_at, ends_at, "
+                "created_at, created_by, changed_at, changed_by) "
+                "SELECT frame_id, %(hold)s, %(power)s, 'console', %(now)s, ends_at, "
+                "%(now)s, %(by)s, %(now)s, %(by)s "
+                "FROM unnest(%(frames)s::text[], %(ends)s::double precision[]) AS held(frame_id, ends_at) "
                 "ON CONFLICT (frame_id) DO UPDATE SET "
                 "hold_id=EXCLUDED.hold_id, power=EXCLUDED.power, source=EXCLUDED.source, "
-                "started_at=EXCLUDED.started_at, ends_at=EXCLUDED.ends_at "
+                "started_at=EXCLUDED.started_at, ends_at=EXCLUDED.ends_at, "
+                "changed_at=EXCLUDED.changed_at, changed_by=EXCLUDED.changed_by "
                 "WHERE power_holds.hold_id <> EXCLUDED.hold_id",
-                (request_id, power.value, now, frame_ids, ends))
+                {"hold": request_id, "power": power.value, "now": now, "by": by,
+                 "frames": frame_ids, "ends": ends})
             rows = conn.execute(f"SELECT frame_id, {_HOLD_COLUMNS} FROM power_holds WHERE hold_id=%s",  # noqa: S608
                                 (request_id,)).fetchall()
             wake_every_node_in(conn)
         return tuple(_hold_view(hold, house) for hold in _holds(rows))
 
 
-__all__ = ["PgPower", "hold_lasts_in", "night_off_in", "power_policy_in", "wanted_off_in"]
+__all__ = ["POWER_POLICY", "POWER_POLICY_LOCK", "PgPower", "forget_frame_in", "hold_lasts_in",
+           "night_off_in", "power_policy_in", "wanted_off_in"]

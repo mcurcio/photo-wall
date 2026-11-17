@@ -1,6 +1,6 @@
 """The catalog's seams: the release listing's records and the node half of a release sync.
 
-`ReleaseRecords` covers the release listing's ETag (`app_release_poll`) and the wanted node
+`ReleaseRecords` covers the release listing's ETag (`singletons` 'release_sync') and the wanted node
 deployments' files. It takes the kernel's opaque `Transaction`, so the domain never sees psycopg
 (`central/infra/catalog_records.py` implements it).
 `NodeReleaseRecords` is the node half of a release sync (`central/infra/node_releases.py`).

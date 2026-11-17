@@ -39,7 +39,9 @@ def test_110_drops_the_still_limit_and_keeps_the_saved_settings(database_provisi
             db.migrate()
             with db.transaction() as conn:
                 settings = PgFitSettings.fit_settings_in(conn)
-                stored = conn.execute("SELECT settings FROM photo_fit_settings").fetchone()["settings"]
+                # Migration 118 moves the row into `singletons` as is.
+                stored = conn.execute("SELECT document FROM singletons WHERE name='photo_fit'"
+                                      ).fetchone()["document"]
             assert settings.crop_limit == 0.5
             assert settings.scaled_copy_ratio == 1.5
             assert "max_still_edge" not in stored

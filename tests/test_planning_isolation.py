@@ -19,7 +19,8 @@ from test_registry import ADMIN, enroll, frame
 
 import central.coordination as coordination_module
 from central.app import create_app
-from central.infra.planning_outcome_store import PgPlanningOutcome
+from central.db import ProcessTransactionClock
+from central.infra.planning_outcome_store import PLANNING_OUTCOME, PgPlanningOutcome
 from central.planner import Diagnostic, PlanningError, Projection, _ProjectionBuilder
 from central.registry import RegistryError
 from central.runtime import Contribution, Runtime, Scene
@@ -338,10 +339,10 @@ def test_a_wall_of_129_players_is_coordinated(registry, wall):
 
 
 def test_the_planning_outcome_keeps_since_while_its_issues_stand(registry):
-    """`since` is when the current set of issues began: an unchanged pass keeps it, a changed
-    set starts it again. Mutation probe: drop the unchanged-issues early return in
-    `PgPlanningOutcome.record_in` (the second pass moves `since`)."""
-    store = PgPlanningOutcome(registry.clock)
+    """`since` is when the current set of issues began (the `singletons` row's `changed_at`): an
+    unchanged pass writes nothing and keeps it, a changed set starts it again. Mutation probe
+    (S2b #5): stamp `changed_at` on every pass -> the second pass moves `since`."""
+    store = PgPlanningOutcome(ProcessTransactionClock(registry.clock))
 
     def projection(*codes):
         return Projection(now=0, horizon_end=1, valid_until=1, players=(), acquisitions=(),
@@ -355,9 +356,15 @@ def test_the_planning_outcome_keeps_since_while_its_issues_stand(registry):
 
     first = record("intent_refused")
     registry.clock.advance(60)
+    with registry.db.transaction() as conn:
+        store.record_in(conn, projection("intent_refused"))
+        assert conn.execute("SELECT pg_current_xact_id_if_assigned() AS x").fetchone()["x"] is None
     assert record("intent_refused").since == first.since == 1000
     changed = record("intent_refused", "plan_shortened")
     assert changed.since == 1060 and len(changed.issues) == 2
+    with registry.db.transaction() as conn:
+        stored = PLANNING_OUTCOME.read_in(conn)
+    assert (stored.created_by, stored.changed_by, stored.revision) == ("scheduler", "scheduler", 2)
 
 
 def test_each_operator_command_stamps_who_ran_it(registry, wall):

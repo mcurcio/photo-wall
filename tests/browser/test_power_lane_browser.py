@@ -48,7 +48,7 @@ def seed_house(registry, frame="bedroom"):
     set_house(registry.db, LONDON)
     registry.create_frame(frame_create(frame))
     with registry.db.transaction() as conn:   # the seed chose the Frames there were at deploy: none
-        conn.execute("""UPDATE night_off SET settings = jsonb_set(settings, '{frames}', '{"kind": "all-frames"}')""")
+        conn.execute("""UPDATE singletons SET document = jsonb_set(document, '{night_off,frames}', '{"kind": "all-frames"}') WHERE name = 'power_policy'""")
 
 
 @pytest.mark.browser_context_args(timezone_id="Pacific/Auckland")
@@ -101,8 +101,8 @@ def test_each_frames_hold_ends_at_its_own_next_change_and_the_setting_sits_besid
     seed_house(registry)
     registry.create_frame(frame_create("study"))
     with registry.db.transaction() as conn:   # Night off on the bedroom only
-        conn.execute("""UPDATE night_off SET settings = jsonb_set(settings, '{frames}',
-                        '{"kind": "frames", "frame_ids": ["bedroom"]}')""")
+        conn.execute("""UPDATE singletons SET document = jsonb_set(document, '{night_off,frames}',
+                        '{"kind": "frames", "frame_ids": ["bedroom"]}') WHERE name = 'power_policy'""")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "schedule")
         expect(hold_lasts_choice(page, "holdLastsNext")).to_be_checked()

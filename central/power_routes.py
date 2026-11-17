@@ -22,6 +22,7 @@ from typing import Any, Final
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
+from central.actor import Actor
 from central.operator_auth import OPERATOR_PREFIX
 from central.power.ports import PowerCommands, PowerQueries, PowerRefused
 from central.power.views import (
@@ -47,9 +48,9 @@ def mount_power_routes(app: FastAPI, *, admin: Any, queries: PowerQueries, comma
     def night_off() -> NightOffView:
         return queries.night_off()
 
-    @app.put(POWER + "night-off", dependencies=[Depends(admin)], response_model=NightOffView)
-    def save_night_off(save: NightOffSave) -> NightOffView:
-        return commands.save_night_off(save)
+    @app.put(POWER + "night-off", response_model=NightOffView)
+    def save_night_off(save: NightOffSave, by: Actor = Depends(admin)) -> NightOffView:
+        return commands.save_night_off(save, by=by)
 
     @app.get(POWER + "holds", dependencies=[Depends(admin)], response_model=tuple[HoldView, ...])
     def holds() -> tuple[HoldView, ...]:
@@ -59,17 +60,17 @@ def mount_power_routes(app: FastAPI, *, admin: Any, queries: PowerQueries, comma
     def hold_lasts() -> HoldLastsView:
         return queries.hold_lasts()
 
-    @app.put(POWER + "hold-lasts", dependencies=[Depends(admin)], response_model=HoldLastsView)
-    def set_hold_lasts(setting: HoldLastsView) -> HoldLastsView:
-        return commands.set_hold_lasts(setting.hold_lasts)
+    @app.put(POWER + "hold-lasts", response_model=HoldLastsView)
+    def set_hold_lasts(setting: HoldLastsView, by: Actor = Depends(admin)) -> HoldLastsView:
+        return commands.set_hold_lasts(setting.hold_lasts, by=by)
 
-    @app.post(POWER + "all-off", dependencies=[Depends(admin)], status_code=201, response_model=tuple[HoldView, ...])
-    def all_off(request: HoldRequest) -> tuple[HoldView, ...]:
-        return commands.all_off(request.request_id)
+    @app.post(POWER + "all-off", status_code=201, response_model=tuple[HoldView, ...])
+    def all_off(request: HoldRequest, by: Actor = Depends(admin)) -> tuple[HoldView, ...]:
+        return commands.all_off(request.request_id, by=by)
 
-    @app.post(POWER + "all-on", dependencies=[Depends(admin)], status_code=201, response_model=tuple[HoldView, ...])
-    def all_on(request: HoldRequest) -> tuple[HoldView, ...]:
-        return commands.all_on(request.request_id)
+    @app.post(POWER + "all-on", status_code=201, response_model=tuple[HoldView, ...])
+    def all_on(request: HoldRequest, by: Actor = Depends(admin)) -> tuple[HoldView, ...]:
+        return commands.all_on(request.request_id, by=by)
 
     @app.post(POWER + "resume", dependencies=[Depends(admin)], status_code=204, response_class=Response)
     def resume(request: ResumeRequest) -> Response:

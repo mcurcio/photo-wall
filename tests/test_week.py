@@ -81,8 +81,8 @@ def test_get_week_serves_the_stored_programs_and_night_off(registry):
     for frame in ("hall", "study"):
         _frame(registry, frame)
     with registry.db.transaction() as conn:
-        conn.execute("UPDATE night_off SET settings = jsonb_set(settings, '{frames}', "
-                     "jsonb_build_object('kind', 'frames', 'frame_ids', jsonb_build_array('hall')))")
+        conn.execute("UPDATE singletons SET document = jsonb_set(document, '{night_off,frames}', "
+                     "jsonb_build_object('kind', 'frames', 'frame_ids', jsonb_build_array('hall'))) WHERE name = 'power_policy'")
     registry.clock.advance(at(LONDON, "2026-10-12T12:00") - registry.clock.utc())
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     app.state.coordinator.runtime.command("set_scene", Scene(scene_id="evening", cycle_seconds=600, loop=True,

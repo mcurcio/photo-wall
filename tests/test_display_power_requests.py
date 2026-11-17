@@ -319,8 +319,8 @@ def test_the_document_carries_the_frames_timetable_and_its_change_moves_only_at_
     Pi says is in force on the house clock."""
     frame, _ = _bound_frame(registry)
     set_house(registry.db, LONDON)
-    _rows(registry, "UPDATE night_off SET settings = jsonb_set(settings, '{frames}', "
-                    "jsonb_build_object('kind', 'frames', 'frame_ids', jsonb_build_array(%s::text)))", (frame,))
+    _rows(registry, "UPDATE singletons SET document = jsonb_set(document, '{night_off,frames}', "
+                    "jsonb_build_object('kind', 'frames', 'frame_ids', jsonb_build_array(%s::text))) WHERE name = 'power_policy'", (frame,))
     clock = FixedClock(_london("2026-10-12T16:00"))
     first = _projected(registry, clock)
     assert first.power.now is Power.ON and first.power.test is None
@@ -361,11 +361,13 @@ def test_the_document_source_wakes_at_the_next_set_time_and_at_a_hold_end_that_c
     frame, _ = _bound_frame(registry)
     set_house(registry.db, LONDON)
     now = _london("2026-10-12T22:00")
-    _rows(registry, "UPDATE night_off SET settings = jsonb_set(settings, '{frames}', "
-                    "jsonb_build_object('kind', 'frames', 'frame_ids', jsonb_build_array(%s::text)))", (frame,))
+    _rows(registry, "UPDATE singletons SET document = jsonb_set(document, '{night_off,frames}', "
+                    "jsonb_build_object('kind', 'frames', 'frame_ids', jsonb_build_array(%s::text))) WHERE name = 'power_policy'", (frame,))
     device = device_id_for_serial(SERIAL)
     with registry.db.transaction() as conn:
         assert _until_next_deadline(conn, device, now) == 3600          # Night off at 23:00
-        conn.execute("INSERT INTO power_holds (frame_id, hold_id, power, source, started_at, ends_at) "
-                     "VALUES (%s, %s, 'off', 'console', %s, %s)", (frame, str(uuid.uuid4()), now, now + 1800))
+        conn.execute("INSERT INTO power_holds (frame_id, hold_id, power, source, started_at, ends_at, "
+                     "created_at, created_by, changed_at, changed_by) "
+                     "VALUES (%s, %s, 'off', 'console', %s, %s, %s, 'console', %s, 'console')",
+                     (frame, str(uuid.uuid4()), now, now + 1800, now, now))
         assert _until_next_deadline(conn, device, now) == 1800          # the hold's end: on again

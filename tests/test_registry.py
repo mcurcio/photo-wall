@@ -535,7 +535,7 @@ def test_delete_frame_requires_a_complete_runtime_reference_snapshot(registry, m
     monkeypatch.undo()
     with registry.db.transaction() as conn:
         with pytest.raises(RegistryError) as excinfo:
-            registry.delete_frame("portrait", conn=conn, references={})
+            registry.delete_frame("portrait", conn=conn, references={}, by="console")
     assert (excinfo.value.code, excinfo.value.status) == (
         "frame_reference_snapshot_required", 500)
     with registry.db.transaction() as conn:
@@ -543,7 +543,7 @@ def test_delete_frame_requires_a_complete_runtime_reference_snapshot(registry, m
             registry.delete_frame("portrait", conn=conn, references={
                 "scene_ids": (), "program_ids": (),
                 "queued_activation_ids": (), "run_ids": (),
-            })
+            }, by="console")
     assert (excinfo.value.code, excinfo.value.status) == (
         "frame_reference_snapshot_required", 500)
     assert [f.id for f in registry.inventory().frames] == ["portrait"]

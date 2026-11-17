@@ -1288,7 +1288,7 @@ def test_a_scene_following_the_house_shows_the_saved_house_crop_limit_and_no_gue
     _seed(registry)
     queue = _seed_source(registry)
     PgFitSettings(registry.db, times=ProcessTransactionClock(registry.clock)).save_fit_settings(
-        FitSettings(crop_limit=0.25))
+        FitSettings(crop_limit=0.25), by="console")
     held = []
     with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
         page.route(re.compile(r".*/v1/operator/settings/photo-fit$"), lambda route: held.append(route))

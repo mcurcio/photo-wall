@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
+from central.actor import Actor
 from central.installation_models import FrameOutput
 from central.photo_library.model import LibraryAsset
 from central.wall_plan.fit import MediaKind
@@ -89,9 +90,9 @@ class FitSettingsStore(Protocol):
         """The saved settings, in its own transaction (the routes and the analysis)."""
         ...
 
-    def save_fit_settings(self, settings: FitSettings) -> None:
-        """Replace the row (a complete, validated FitSettings; last write wins). The next
-        planning pass reads it; nothing is measured again."""
+    def save_fit_settings(self, settings: FitSettings, *, by: Actor) -> None:
+        """Replace the stored settings (a complete, validated FitSettings; last write wins; an
+        equal save writes nothing). The next planning pass reads it; nothing is measured again."""
         ...
 
 

@@ -28,7 +28,7 @@ from central.kernel.assets import MediaReady
 from central.kernel.handling import TerminalFailure, TransientFailure
 from central.kernel.job_types import PrepareMedia
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
-from central.media_repository import MediaRepository, StoreLimits
+from central.media_repository import MEDIA_SETTINGS, MediaRepository, StoreLimits
 from central.photo_library.model import LibraryAsset, MeasuredCopy, Unreachable
 from central.wall_plan.key_content import ANALYSIS_VERSION, InterestGrid, KeyContent, UnitBox
 from contracts.time import Clock
@@ -304,10 +304,11 @@ def test_the_boot_path_runs_maintenance_and_checks_the_worker_in_then_runs_the_q
     ran = []
 
     async def queue():
-        ran.append(worker_storage.repository.health()["worker_seen"])
+        with worker_storage.repository.db.transaction() as conn:
+            ran.append(MEDIA_SETTINGS.read_in(conn) is not None)
 
     asyncio.run(_media_loop(instance, queue))
-    assert ran == [1000.0]
+    assert ran == [True]
     for gone in ("refresh_once", "refresh_source", "preview_source", "list_tags"):
         assert not hasattr(instance, gone)
 

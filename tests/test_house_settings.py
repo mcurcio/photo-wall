@@ -58,8 +58,8 @@ def test_an_unknown_zone_is_refused(registry):
 def test_a_saved_zone_and_place_move_night_off_and_the_programs_windows(registry):
     frame, _ = _bound_frame(registry)
     _report(registry, SERIAL, "HDMI-A-1", NO_SERIAL)
-    _rows(registry, "UPDATE night_off SET settings = jsonb_set(settings, '{frames}', "
-                    "jsonb_build_object('kind', 'frames', 'frame_ids', jsonb_build_array(%s::text)))", (frame,))
+    _rows(registry, "UPDATE singletons SET document = jsonb_set(document, '{night_off,frames}', "
+                    "jsonb_build_object('kind', 'frames', 'frame_ids', jsonb_build_array(%s::text))) WHERE name = 'power_policy'", (frame,))
     noon = at(LONDON, "2026-10-12T12:00")
     registry.clock.advance(noon - registry.clock.utc())
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
@@ -128,8 +128,8 @@ def test_a_saved_zone_and_place_move_night_off_and_the_programs_windows(registry
 def test_the_location_cannot_go_while_night_off_uses_sunset(registry):
     """Mutation probe: skip the place-in-use check -> the location is cleared and Night off
     stops turning displays off without a word."""
-    _rows(registry, "UPDATE night_off SET settings = jsonb_set(settings, '{off}', "
-                    "'{\"at\": \"sunset\", \"offset_minutes\": 0}'::jsonb)")
+    _rows(registry, "UPDATE singletons SET document = jsonb_set(document, '{night_off,off}', "
+                    "'{\"at\": \"sunset\", \"offset_minutes\": 0}'::jsonb) WHERE name = 'power_policy'")
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         assert client.put("/v1/operator/house", headers=AUTH,
                           json=_house("America/New_York", PLACE)).status_code == 200

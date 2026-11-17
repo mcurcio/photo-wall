@@ -16,18 +16,18 @@ def test_operator_snapshot_is_admin_authenticated(registry):
         assert client.get("/v1/operator/snapshot").status_code == 401
 
 
-def test_read_only_media_health_uses_the_same_defaults_without_initializing_row(registry):
+def test_read_only_media_health_uses_the_same_defaults_without_initializing_a_document(registry):
     media = MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock))
     with registry.db.transaction() as conn:
         conn.execute("SET TRANSACTION READ ONLY")
         health = media.health_in(conn)
-        count = conn.execute("SELECT count(*) AS n FROM media_settings").fetchone()["n"]
+        count = conn.execute("SELECT count(*) AS n FROM singletons WHERE name='media'").fetchone()["n"]
     assert count == 0
     assert health == {
         "recipe_id": None,
         "max_bytes": StoreLimits().max_bytes,
-        "worker_seen": None,
         "worker_error": None,
+        "worker_running": False,
         "accounted_bytes": 0,
         "jobs": [],
     }
@@ -37,8 +37,7 @@ def test_read_only_media_health_uses_the_same_defaults_without_initializing_row(
 def test_operator_snapshot_keeps_one_database_view_across_domain_reads(registry):
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     media = app.state.media_repository
-    with media.transaction() as conn:
-        conn.execute("UPDATE media_settings SET worker_error='before' WHERE singleton")
+    media.worker_status("before")
 
     sources_in = media.sources_in
 
@@ -46,8 +45,7 @@ def test_operator_snapshot_keeps_one_database_view_across_domain_reads(registry)
         sources = sources_in(conn)
         # Interleave a committed worker-health change after the snapshot's first
         # DB read but before its later health query.
-        with registry.db.transaction() as writer:
-            writer.execute("UPDATE media_settings SET worker_error='after' WHERE singleton")
+        media.worker_status("after")
         return sources
 
     media.sources_in = sources_then_commit

@@ -61,6 +61,15 @@ def live_worker_ids(db) -> set[int]:
     return {row["id"] for row in rows}
 
 
+def heartbeat(db, *, age: float = 0.0) -> None:
+    """One Procrastinate worker that last beat `age` seconds ago by the database's clock, and no
+    other: whether the media worker runs (central/infra/runtime.py `worker_running_in`)."""
+    with db.transaction() as conn:
+        conn.execute("DELETE FROM procrastinate_workers")
+        conn.execute("INSERT INTO procrastinate_workers (last_heartbeat) "
+                     "VALUES (now() - make_interval(secs => %s))", (age,))
+
+
 def live_workers(db) -> int:
     return len(live_worker_ids(db))
 

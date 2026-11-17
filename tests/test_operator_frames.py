@@ -238,7 +238,8 @@ def test_scene_save_serializes_after_locked_frame_delete(registry):
 
         with coordinator.serialized_runtime_read() as (conn, runtime):
             references = runtime.frame_references("portrait", registry.clock.utc())
-            deleted = registry.delete_frame("portrait", conn=conn, references=references)
+            deleted = registry.delete_frame("portrait", conn=conn, references=references,
+                                            by="console")
             saving = pool.submit(save_scene)
             assert save_started.wait(3)
             assert not saving.done()  # blocked behind the delete's Runtime lock
