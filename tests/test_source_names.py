@@ -182,11 +182,10 @@ def test_migration_preserves_legacy_collisions_and_large_numeric_suffix(registry
         assert len({(row["name"], row["revision"]) for row in versions}) == len(refs)
 
 
-def test_a_source_save_that_rewrites_scenes_is_audited_per_scene(names, registry):
-    """A Photo source save moves every Scene using its name to the new revision; each Scene it
-    rewrote is one runtime_changes row by its actor ("save_source"), as any other Runtime write
-    (`RuntimeStore.edit` audits every write, no caller can skip it). Mutation probe: drop the
-    runtime_changes insert from `edit` (no row)."""
+def test_a_source_save_that_rewrites_scenes_stamps_its_actor(names, registry):
+    """A Photo source save moves every Scene using its name to the new revision and stamps
+    runtime_state's `changed_by` with its actor, as any other Runtime write (`RuntimeStore.edit`
+    stamps every write, no caller can skip it)."""
     runtime = names.runtime
     names.save("old")
     for scene_id in ("one", "two"):
@@ -194,8 +193,7 @@ def test_a_source_save_that_rewrites_scenes_is_audited_per_scene(names, registry
             Contribution(target="frame:main", source_refs=("old:1",)),)), by="console")
     names.save("old", editing="old:1", favourites=True)
     with registry.db.transaction() as conn:
-        rows = conn.execute("SELECT by, command, scene_id, scene_revision FROM runtime_changes "
-                            "WHERE command='save_source' ORDER BY id").fetchall()
-    assert [dict(row) for row in rows] == [
-        {"by": "console", "command": "save_source", "scene_id": "one", "scene_revision": 2},
-        {"by": "console", "command": "save_source", "scene_id": "two", "scene_revision": 2}]
+        row = conn.execute("SELECT snapshot, changed_by FROM runtime_state").fetchone()
+    assert row["changed_by"] == "console"
+    assert {scene_id: scene["revision"] for scene_id, scene in row["snapshot"]["scenes"].items()} == {
+        "one": 2, "two": 2}

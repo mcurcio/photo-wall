@@ -14,6 +14,8 @@ from uuid import uuid4
 import psycopg
 import pytest
 from content_db import schema_before
+from support.migrations import migrate_before
+from support.offer_contexts import write_contexts
 from test_fleet_attempts import SERIAL
 from test_node_boot import claim_for, cold_setup
 
@@ -32,7 +34,8 @@ BY_PRODUCER = ("node_sessions", "node_evidence", "node_host_observations",
 
 
 @pytest.fixture
-def before_077(empty_database):
+def before_077(empty_database, monkeypatch):
+    write_contexts(monkeypatch)
     with schema_before(empty_database, "077") as db:
         yield Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
 
@@ -71,7 +74,7 @@ def test_077_deletes_adopted_history_and_keeps_node_boots(before_077):
         assert _counts(conn, adopted_producer)["node_evidence"] >= 1
         assert kept_before["node_evidence"] >= 1
 
-    registry.db.migrate()
+    migrate_before(registry.db, "117")  # 117 drops the contexts (decision 0034)
 
     with registry.db.transaction() as conn:
         assert _counts(conn, adopted_producer) == dict.fromkeys(BY_PRODUCER, 0)
@@ -90,5 +93,6 @@ def test_077_deletes_adopted_history_and_keeps_node_boots(before_077):
     with pytest.raises(psycopg.errors.NotNullViolation), registry.db.transaction() as conn:
         conn.execute("INSERT INTO node_offer_contexts(offer_id,basis) "
                      "VALUES(%s,'node_v2')", (uuid4(),))
-    # The kept boot still enrolls and carries commands.
+    # At head the kept boot still enrolls and carries commands.
+    registry.db.migrate()
     assert sessions.enroll(claim_for(kept_offer)).command_eligible

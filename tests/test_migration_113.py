@@ -20,6 +20,7 @@ import test_node_runtime_reconciliation
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from support.migrations import migrate_before
+from support.offer_contexts import write_contexts
 
 from central.db import Database
 from central.fleet.node_app_links import load_current_node_app_link_for_player_in
@@ -131,6 +132,7 @@ def test_113_keeps_what_central_reads_and_waits_for_a_nodes_write(empty_database
         migrate_before(db, "113", also=("116_",))   # today's code reads the house in `singletons`
         registry = Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
         monkeypatch.setattr(test_node_runtime_reconciliation, "NodeAppLinks", LinksAt112)
+        write_contexts(monkeypatch)   # an admission names its offer's context until 117
         _, player, _, sessions, _, grants, _, reconciler, proof = \
             test_node_runtime_reconciliation.rig(registry)
         device_id = proof.challenge.producer.device_id

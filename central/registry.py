@@ -198,10 +198,6 @@ class Registry:
             # A Player's sockets wake when an equipment change commits (player_state_wakes.py).
             notify_if_written_in(conn)
 
-    def _audit(self, conn, kind: str, subject: str, detail: dict | None = None):
-        conn.execute("INSERT INTO audit_events(occurred_at,kind,subject,detail) VALUES(%s,%s,%s,%s)",
-                     (self.clock.utc(), kind, subject, Jsonb(detail or {})))
-
     def challenge(self, public_key: str) -> dict:
         # Endpoint schema also validates; keep this boundary safe for non-HTTP callers.
         try:
@@ -278,7 +274,6 @@ class Registry:
             # Every Player enrolls unbound (pending) by serial alone; its boot is recorded.
             conn.execute("UPDATE players SET health=health || %s WHERE id=%s",
                          (Jsonb({"boot_id": request.boot_id}), player_id))
-            self._audit(conn, "player_enrolled", player_id)
             # The previous enrollment's socket wakes, to find its authority gone.
             notify_if_written_in(conn)
         return {"player_id": player_id, "token": token, "authority_epoch": epoch}
@@ -558,9 +553,6 @@ class Registry:
                 "created_at=EXCLUDED.created_at,expires_at=EXCLUDED.expires_at",
                 (player_id, request_id, output_id, player["authority_epoch"], now, expires_at),
             )
-            self._audit(conn, "output_identification_requested", player_id,
-                        {"request_id": str(request_id), "output_id": output_id,
-                         "authority_epoch": player["authority_epoch"]})
         return {"request_id": str(request_id), "output_id": output_id,
                 "expires_at": expires_at}
 
@@ -580,7 +572,6 @@ class Registry:
                               Jsonb(calibration.model_dump(mode="json")), Jsonb(lighting.model_dump(mode="json"))))
                 record_created_in(conn, frame.id, created_record(position_values(calibration, lighting)))
                 _ensure_wall(conn, frame.surface_id)
-                self._audit(conn, "frame_created", frame.id)
         except UniqueViolation as exc:
             raise RegistryError(_name_or(exc, "frame_exists")) from exc
         return {**frame.model_dump(), "name": name}
@@ -593,7 +584,6 @@ class Registry:
                                    (name, frame_id)).fetchone()
                 if row is None:
                     raise RegistryError("unknown_frame", 404)
-                self._audit(conn, "frame_renamed", frame_id, {"name": name})
         except UniqueViolation as exc:
             raise RegistryError(_name_or(exc, "frame_exists")) from exc
         return {"frame_id": frame_id, "name": name}
@@ -601,8 +591,7 @@ class Registry:
     def set_frame_video(self, frame_id: str, video: bool) -> dict:
         """Whether the Frame shows videos (frames.video): {"frame_id", "video", "changed"}.
         RegistryError unknown_frame 404. Last write wins: no generation, configuration revision or
-        Position check (it changes planning, not the picture), so a ready Frame stays ready; audits
-        "frame_video_changed" {"video"} when it changes. The Planner reads it at its next plan, as
+        Position check (it changes planning, not the picture), so a ready Frame stays ready. The Planner reads it at its next plan, as
         it reads a saved photo-fit setting (nothing to wake)."""
         with self.db.transaction() as conn:
             row = conn.execute("SELECT video FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
@@ -611,7 +600,6 @@ class Registry:
             if row["video"] == video:
                 return {"frame_id": frame_id, "video": video, "changed": False}
             conn.execute("UPDATE frames SET video=%s WHERE id=%s", (video, frame_id))
-            self._audit(conn, "frame_video_changed", frame_id, {"video": video})
         return {"frame_id": frame_id, "video": video, "changed": True}
 
     def name_wall(self, surface_id: str, naming: WallNaming) -> WallInventory:
@@ -622,7 +610,6 @@ class Registry:
                                (naming.name, naming.room, surface_id)).fetchone()
             if row is None:
                 raise RegistryError("unknown_wall", 404)
-            self._audit(conn, "wall_named", surface_id, naming.model_dump())
         return WallInventory.model_validate(row)
 
     def bind(self, frame_id: str, player_id: str, output_id: str, *, expected_generation: int) -> dict:
@@ -655,8 +642,6 @@ class Registry:
                                    "configuration_revision=configuration_revision+1 "
                                    "WHERE id=%s RETURNING generation",
                                    (frame_id,)).fetchone()
-                self._audit(conn, "frame_bound", frame_id,
-                            {"player_id": player_id, "output_id": output_id, **row})
                 return {**row, "changed": True}
         except UniqueViolation as exc:
             raise RegistryError("output_already_bound") from exc
@@ -679,8 +664,6 @@ class Registry:
                                "configuration_revision=configuration_revision+1 "
                                "WHERE id=%s RETURNING generation",
                                (frame_id,)).fetchone()
-            self._audit(conn, "frame_unbound", frame_id,
-                        {"player_id": existing["player_id"], "output_id": existing["output_id"], **row})
             return {**row, "changed": True}
 
     def place_frame(self, frame_id: str, placement: FramePlacement) -> dict:
@@ -698,7 +681,6 @@ class Registry:
             conn.execute("UPDATE frames SET surface_id=%s,x_mm=%s,y_mm=%s WHERE id=%s",
                          (merged["surface_id"], merged["x_mm"], merged["y_mm"], frame_id))
             _ensure_wall(conn, merged["surface_id"])
-            self._audit(conn, "frame_repositioned", frame_id)
             return {"id": frame_id, **merged}
 
     def turn_frame(self, frame_id: str, turn: DisplayTurn, *, expected_generation: int) -> dict:
@@ -709,8 +691,7 @@ class Registry:
         generation and configuration_revision (a Position made for the other hanging needs checking:
         readiness POSITION_NEEDED until the next Save) and appends the kept-turn-changed Position history
         entry (`write_turn_in`: the Position as it is, made for the new turn, so Restore refuses the
-        entries made for the old one), audits "frame_turned" {"turn", "generation"}
-        and wakes the bound Player's Node's document source (`notify_nodes_in`), so its Output
+        entries made for the old one) and wakes the bound Player's Node's document source (`notify_nodes_in`), so its Output
         document carries the turn without waiting for a deadline; answers {..., "changed": True}.
         Never touches the Position, the binding or the lighting."""
         with self._equipment_write() as conn:
@@ -724,7 +705,6 @@ class Registry:
                 return {"frame_id": frame_id, "turn": turn, "generation": frame["generation"],
                         "changed": False}
             row = {"generation": write_turn_in(conn, frame_id, turn)}
-            self._audit(conn, "frame_turned", frame_id, {"turn": turn, **row})
             bound = conn.execute("SELECT player_id FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone()
             if bound is not None:
                 _wake_nodes_of(conn, bound["player_id"])
@@ -761,7 +741,6 @@ class Registry:
             })
         conn.execute("DELETE FROM frames WHERE id=%s", (frame_id,))
         forget_frame_in(conn, frame_id)
-        self._audit(conn, "frame_deleted", frame_id)
         return {"status": "deleted"}
 
     def retire(self, player_id: str) -> None:
@@ -791,7 +770,6 @@ class Registry:
             retire_in(fenced, now)
             conn.execute("UPDATE players SET retired_at=%s,authority_epoch=authority_epoch+1 "
                          "WHERE id=%s", (now, player_id))
-            self._audit(conn, "player_retired", player_id)
 
     @staticmethod
     def calibration_mode_in(conn, frame_id: str) -> str:
@@ -863,7 +841,6 @@ class Registry:
                                                        restored_from=restored_from), calibration=committed)
         commit_position(conn, frame_id)
         _wake_nodes_of(conn, player_id)
-        self._audit(conn, "calibration_trial_commit", frame_id)
         return committed
 
     def bindings_for(self, player_id: str, epoch: int, *, include_unvalidated=False) -> list[OutputBinding]:

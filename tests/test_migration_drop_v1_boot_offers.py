@@ -21,6 +21,7 @@ import psycopg
 import pytest
 from content_db import schema_before
 from fastapi.testclient import TestClient
+from support.offer_contexts import write_contexts
 from support.release_build import EPOCH, IMAGE_REFERENCES, REVISION, node_components
 from support.release_build import base_bundle as synthetic_base_bundle
 from test_content_catalog_sync import make_world
@@ -50,7 +51,7 @@ DROPPED_COLUMNS = {
     "devices": ("attached_tag", "known_good_tag", "known_good_at", "last_served_tag",
                 "last_served_at", "boot_outcome", "failed_tag"),
     # app_releases' payload_* and base_abi_* columns went too; 070 drops the table itself.
-    "node_offer_contexts": ("legacy_offer_id",),
+    # node_offer_contexts' legacy_offer_id went too; 117 drops the table itself.
 }
 DELETED_ROUTES = (
     ("POST", "/v1/netboot/offers"),
@@ -72,7 +73,8 @@ DELETED_ROUTES = (
 
 
 @pytest.fixture
-def before_069(empty_database):
+def before_069(empty_database, monkeypatch):
+    write_contexts(monkeypatch)
     with schema_before(empty_database, "069") as db:
         yield Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
 
@@ -167,10 +169,9 @@ def test_069_drops_the_v1_lane_and_keeps_every_node_record(before_069, tmp_path)
                       f"WHERE table_schema=current_schema() AND table_name='{table}'")}
         assert present and not present & set(columns), (table, present & set(columns))
     assert _node_state(registry) == nodes  # every node record intact
-    contexts = {row["offer_id"]: row for row in _rows(registry, "SELECT * FROM node_offer_contexts")}
-    # 069 kept the adopted context as history; 077 then deleted it.
-    assert contexts == {offer.offer_id: {"offer_id": offer.offer_id, "basis": "node_v2",
-                                         "node_offer_id": offer.offer_id}}
+    # 069 kept the adopted context as history; 077 then deleted it; 117 drops the contexts and
+    # points the admission at its boot offer (decision 0034).
+    assert _rows(registry, "SELECT to_regclass('node_offer_contexts') AS name")[0]["name"] is None
     assert _rows(registry, "SELECT * FROM assets WHERE kind='player-payload'") == []
     assert _rows(registry, "SELECT * FROM asset_references WHERE kind='player-payload'") == []
     with pytest.raises(psycopg.errors.CheckViolation), registry.db.transaction() as conn:

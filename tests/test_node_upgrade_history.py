@@ -8,6 +8,7 @@ from uuid import uuid4
 import psycopg
 import pytest
 from psycopg.types.json import Jsonb
+from support.offer_contexts import write_contexts
 from test_fleet_attempts import (
     BASE_SHA,
     BASE_TARBALL_SHA,
@@ -35,6 +36,7 @@ MIGRATIONS = Path(database_module.__file__).with_name("migrations")
 @pytest.fixture
 def history(empty_database, tmp_path, monkeypatch):
     """Use the real runner/ledger for both a historical prefix and its upgrade."""
+    write_contexts(monkeypatch)
 
     def through(db, number):
         root = tmp_path / str(number)
@@ -157,9 +159,11 @@ def test_053_admission_offer_fk_backfill_preserves_legacy_identity(history):
                     conn.execute("UPDATE node_boot_admissions SET offer_id=%s", (uuid4(),))
         registry.db.migrate()
         with registry.db.transaction() as conn:
-            # 077: the adopted context and its admission are V1 history, deleted.
+            # 077: the adopted context and its admission are V1 history, deleted; 117 drops the
+            # contexts (decision 0034).
             assert conn.execute("SELECT * FROM node_boot_admissions").fetchall() == []
-            assert conn.execute("SELECT * FROM node_offer_contexts").fetchall() == []
+            assert conn.execute("SELECT to_regclass('node_offer_contexts') AS name").fetchone()[
+                "name"] is None
             assert conn.execute("SELECT count(*) AS n FROM node_sessions").fetchone()["n"] == 0
 
 

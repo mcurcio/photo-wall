@@ -180,12 +180,13 @@ def test_the_runtime_moves_on_and_commits_settle_when_planning_fails(registry, w
 
 
 def test_every_runtime_command_records_who_ran_it(registry, wall):
-    """Audit: a Scene saved through the console's session cookie is one runtime_changes row by
-    "console", through the bearer token by "api-token", each naming its command, Scene, revision
-    and time; a scheduler's tick that changes nothing but time leaves the stamp alone (decision
+    """Audit: a Scene saved through the console's session cookie stamps runtime_state's
+    `created_by` "console" at its time, a second through the bearer token `changed_by`
+    "api-token" at its own (decision 0034 dropped runtime_changes); a scheduler's tick that changes nothing but time leaves the stamp alone (decision
     0034: the Runtime is saved only on change; a tick that changes it stamps "scheduler",
-    tests/test_runtime_saved_on_change.py). Mutation probe: hardcode `by="console"` in
-    `OperatorAuth.admin` (the bearer row reads "console")."""
+    tests/test_runtime_saved_on_change.py). Mutation probes: hardcode `by="console"` in
+    `OperatorAuth.admin`, or `changed_by` "console" in `RuntimeStore._save_in` (the bearer's write
+    reads "console")."""
     app, client = wall
     players(registry, 1)
     cookie = signed_in(client)
@@ -193,13 +194,10 @@ def test_every_runtime_command_records_who_ran_it(registry, wall):
     registry.clock.advance(2)
     put_scene(client, scene("s", "frame-0", 60, revision=2))
     with registry.db.transaction() as conn:
-        rows = conn.execute("SELECT EXTRACT(EPOCH FROM at)::float8 AS at, by, command, scene_id, "
-                            "scene_revision FROM runtime_changes ORDER BY id").fetchall()
-        created = conn.execute("SELECT created_by, changed_by FROM runtime_state").fetchone()
-    assert [dict(row) for row in rows] == [
-        {"at": 1000, "by": "console", "command": "save_scene", "scene_id": "s", "scene_revision": 1},
-        {"at": 1002, "by": "api-token", "command": "save_scene", "scene_id": "s", "scene_revision": 2}]
-    assert dict(created) == {"created_by": "console", "changed_by": "api-token"}
+        created = conn.execute("SELECT created_at, created_by, changed_at, changed_by "
+                               "FROM runtime_state").fetchone()
+    assert dict(created) == {"created_at": 1000, "created_by": "console",
+                             "changed_at": 1002, "changed_by": "api-token"}
     app.state.scheduler.tick()
     with registry.db.transaction() as conn:
         assert conn.execute("SELECT changed_by FROM runtime_state").fetchone()["changed_by"] == \
@@ -362,13 +360,14 @@ def test_the_planning_outcome_keeps_since_while_its_issues_stand(registry):
     assert changed.since == 1060 and len(changed.issues) == 2
 
 
-def test_each_operator_command_names_what_it_changed(registry, wall):
-    """Every Runtime write is audited by what it changed (`RuntimeStore.edit`): cancelling a Run
-    names the Run and its Scene, deleting a Scene names the Scene. Mutation probe: drop the
-    runtime_changes insert from `edit` (no rows)."""
+def test_each_operator_command_stamps_who_ran_it(registry, wall):
+    """Every Runtime write stamps its actor (`RuntimeStore.edit`): a Scene saved through the
+    console's session cookie, then a Run cancelled and the Scene deleted through the bearer
+    token, leave `changed_by` "api-token"."""
     app, client = wall
     players(registry, 1)
-    put_scene(client, scene("s", "frame-0", 30))
+    cookie = signed_in(client)
+    put_scene(client, scene("s", "frame-0", 30), headers={**cookie, **MARK, "Origin": ORIGIN})
     run = activate(client, "s")
     registry.clock.advance(1)
     response = client.post(f"/v1/operator/runs/{run}/cancel", headers=BEARER)
@@ -376,8 +375,5 @@ def test_each_operator_command_names_what_it_changed(registry, wall):
     response = client.delete("/v1/operator/scenes/s", headers=BEARER, params={"expected_revision": 1})
     assert response.status_code in (200, 204), response.text
     with registry.db.transaction() as conn:
-        rows = [dict(row) for row in conn.execute(
-            "SELECT by, command, scene_id, run_id FROM runtime_changes ORDER BY id").fetchall()]
-    assert {"by": "api-token", "command": "activate", "scene_id": "s", "run_id": run} in rows
-    assert {"by": "api-token", "command": "cancel", "scene_id": "s", "run_id": run} in rows
-    assert {"by": "api-token", "command": "delete_scene", "scene_id": "s", "run_id": None} in rows
+        stamp = conn.execute("SELECT created_by, changed_by FROM runtime_state").fetchone()
+    assert dict(stamp) == {"created_by": "console", "changed_by": "api-token"}

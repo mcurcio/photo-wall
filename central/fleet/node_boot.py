@@ -101,9 +101,6 @@ class NodeBootService:
                              "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                              (offer_id, device_id, generation, request.kernel_boot_id, request.boot_nonce,
                               canonical, encode_node_boot_offer(result) if result else None, refusal, now))
-                if result:
-                    conn.execute("INSERT INTO node_offer_contexts(offer_id,basis,node_offer_id) VALUES(%s,'node_v2',%s)",
-                                 (offer_id, offer_id))
         if refusal:
             raise NodeControlError(refusal, 503)
         assert result is not None

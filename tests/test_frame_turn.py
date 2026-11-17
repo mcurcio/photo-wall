@@ -4,7 +4,7 @@ Q3, 2026-10-17: the turn belongs to the spot on the wall).
 Pure: the turn's pydantic form (`FrameTurnChange`, `ExactTurn`) takes only the four ints, and the
 Output document's digest covers the turn. Through the Registry, the operator route and the
 document source on a test database: the turn command's refusals, its idempotency, the generation
-it raises (a ready Frame needs its Position checked again), its audit row and the inventory; and
+it raises (a ready Frame needs its Position checked again) and the inventory; and
 the Output document of the Output the Frame is bound to carries the turn, 0 when unbound.
 """
 from __future__ import annotations
@@ -79,12 +79,6 @@ def _revision(registry, frame_id: str = "kitchen") -> int:
                             (frame_id,)).fetchone()["configuration_revision"]
 
 
-def _audits(registry, kind: str) -> list[dict]:
-    with registry.db.transaction() as conn:
-        return [row["detail"] for row in conn.execute(
-            "SELECT detail FROM audit_events WHERE kind=%s ORDER BY sequence", (kind,)).fetchall()]
-
-
 def _documents(registry) -> dict:
     """The document source's Output documents for the Pi, decoded, at Central's time now."""
     with registry.db.transaction() as conn:
@@ -113,7 +107,6 @@ def test_the_same_turn_writes_nothing(registry):
     assert registry.turn_frame("kitchen", 0, expected_generation=0) == {
         "frame_id": "kitchen", "turn": 0, "generation": 0, "changed": False}
     assert (_inventory_frame(registry).generation, _revision(registry)) == (0, revision)
-    assert _audits(registry, "frame_turned") == []
 
 
 def test_a_turn_raises_the_generation_and_needs_the_position_checked(registry):
@@ -131,7 +124,6 @@ def test_a_turn_raises_the_generation_and_needs_the_position_checked(registry):
     frame = _inventory_frame(registry)
     assert (frame.turn, frame.generation, frame.readiness) == (90, ready.generation + 1, Readiness.POSITION_NEEDED)
     assert _revision(registry) == revision + 1
-    assert _audits(registry, "frame_turned") == [{"turn": 90, "generation": ready.generation + 1}]
     assert frame.calibration == ready.calibration and frame.player_id == player   # never the Position or binding
     # The Position history: the turn is a kept entry made for the new turn, and the Save before it,
     # made for the screen hung the other way, can no longer be restored.
