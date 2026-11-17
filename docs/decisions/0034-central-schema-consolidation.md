@@ -86,8 +86,8 @@ One pull request; the slices are build order within it. Migrations are forward-o
 |---|---|---|
 | S1 (tracer) | The Runtime saved on change only; both quota tables and `node_bus_hub_looks` dropped; the planning and settle row locks gone; `application_name` per pool; `singletons` created with its audit fields and Settings › House moved into it | no |
 | S2 | Central's consolidation: every merge and drop below marked S2; the bus link store becomes `node_links`, `node_states` and `events`; one release table; Central's 18 triggers and 2 functions dropped; audit fields on every kept table | no |
-| S3 | The queue and the timers (classes E and F); one Central worker | no |
-| S4 | The old Pi path: reboot becomes a bus method and Install reads its completion from the `host` line; the Display Host decides its handoff from the Output document; Output losses judged from the `display` line; the `/v2/node/*` routes other than boot offers removed, with 16 tables | yes |
+| S3 | The queue and the timers (classes E and F); one Central worker; the Player pushed over its socket, never polling | yes (the Player) |
+| S4 | The old Pi path: reboot becomes a bus method and Install reads its completion from the `host` line, where the host's facts and metrics move too; the Display Host decides its handoff from the Output document, and a Frame's Position trial travels on its Output's own document key; Output losses judged from the `display` line; the `/v2/node/*` routes other than boot offers removed, with 16 tables | yes |
 
 ## Deploying it
 
@@ -149,7 +149,7 @@ S1 to S4 are the slices; "child" means written by its aggregate's repository. Ro
 | 26 | node_host_facts | 74 | 0 | drop | node_states (`host` line) | Install reads the base tag there | S4 |
 | 27 | node_host_observations | 7,765 | 4 | drop | node_states (`host` line) | Duplicate | S4 |
 | 28 | node_intake_quotas | 14 | 46.5 | drop | — | Durable rate limit (C) | S1 |
-| 29 | node_link_actions | 8 | 0 | drop | — | No reader | S2 |
+| 29 | node_link_actions | 8 | 0 | merge | events (link-action kind) | nodeapi's action log (`LinkStore.action`); kept a week | S2 |
 | 30 | node_link_cursors | 8 | 2.5 | merge | node_links | Resume point | S2 |
 | 31 | node_link_documents | 6 | 0 | merge | node_links | Adopted digests | S2 |
 | 32 | node_link_gaps | 662 | 0 | drop | events (gap kind) | Tests only | S2 |
@@ -180,7 +180,7 @@ S1 to S4 are the slices; "child" means written by its aggregate's repository. Ro
 | 57 | displays | 4 | 0 | keep | displays | Takes the session and the shared serial | — |
 | 58 | enrollment_nonces | 0 | 0 | memory | the enrolment handshake | One-time, short-lived; retried | S2 |
 | 59 | execution_commits | 0 | 0 | keep (child) | execution_commits | Queried by cue | — |
-| 60 | execution_events | 14,292 | 0 | drop | — | No reader | S2 |
+| 60 | execution_events | 14,292 | 0 | drop | player_show_state (observation numbers) + a skip-number sequence | Its uses get their own homes: a repeated observation is known by its number, a skipped group's revocation number comes from a sequence | S2 |
 | 61 | fleet_device_lifecycle | 1 | 0 | merge | devices | 1:1; trigger dropped | S2 |
 | 62 | fleet_t0_daily_quotas | 26 | 0 | drop | — | Durable rate limit | S1 |
 | 63 | frames | 1 | 0 | keep | frames | Takes the binding | — |
@@ -196,7 +196,7 @@ S1 to S4 are the slices; "child" means written by its aggregate's repository. Ro
 | 73 | light_words | 120 | 4.5 | merge | room_light_facts (named references only) | 117 lights no Frame names | S2 |
 | 74 | media_orphans | 0 | 0 | drop | — | No code | S2 |
 | 75 | media_recipes | 9 | 0 | keep | media_recipes | In variant keys | — |
-| 76 | media_references | 2 | 0.5 | drop | derived from plan_offers + assignment_locks | One row set per offer revision | S2 |
+| 76 | media_references | 2 | 0.5 | drop | derived from plan_offers + assignment_locks; a download protected by assets.last_served_at | One row set per offer revision | S2 |
 | 77 | media_settings | 1 | 0 | merge | singletons | One row | S2 |
 | 78 | media_source_name_versions | 5 | 0 | merge | media_sources | One Source | S2 |
 | 79 | media_source_names | 4 | 0 | merge | media_sources | Same | S2 |
