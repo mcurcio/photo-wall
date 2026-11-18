@@ -2,8 +2,7 @@
 a version per Pi"): `PgPlayerVersions` implements central/content_catalog/ports.py PlayerVersions,
 the one writer and reader of each Pi's version (its `devices` row's version columns, migration 121).
 
-A Pi's version is a release tag naming one deployment (the tag's last good manifest, through
-node_release_observations). A Pi with no version yet is offered the newest ready stable release
+A Pi's version is a release tag naming one deployment (its `node_releases` row's). A Pi with no version yet is offered the newest ready stable release
 (`boot_policy.newest_ready_stable`) at its first boot, and that offer records it as the Pi's version
 (decided once, where the first offer is made): after that a Pi's version changes only through Install
 or Update the wall, never because a newer release became ready (0010: no auto-advance), and the keep
@@ -116,14 +115,12 @@ def _enrolled_in(conn: Any, device_id: str) -> bool:
 def _deployment_of(conn: Any, version: str) -> UUID:
     """The deployment `version` names: VersionRefused(UNKNOWN_VERSION) for a tag Central never
     observed, VersionRefused(NOT_DEPLOYABLE) for one with no good manifest."""
-    row = conn.execute("SELECT manifest_sha256 FROM node_release_observations WHERE tag=%s", (version,)).fetchone()
+    row = conn.execute("SELECT deployment_id FROM node_releases WHERE tag=%s", (version,)).fetchone()
     if row is None:
         raise VersionRefused(InstallRefusal.UNKNOWN_VERSION)
-    deployment = tag_deployments_in(conn).get(version)
-    if deployment is None or conn.execute("SELECT 1 FROM node_deployments WHERE deployment_id=%s",
-                                          (deployment,)).fetchone() is None:
+    if row["deployment_id"] is None:
         raise VersionRefused(InstallRefusal.NOT_DEPLOYABLE)
-    return deployment
+    return row["deployment_id"]
 
 
 class PgPlayerVersions:
@@ -185,8 +182,8 @@ class PgPlayerVersions:
     def advance_installs(self) -> None:
         restart: list[tuple[str, str | None]] = []
         with self._db.transaction() as conn:
-            rows = conn.execute("SELECT v.device_id, v.deployment_id, v.install, d.document FROM devices v "
-                                "JOIN node_deployments d USING(deployment_id) WHERE v.install IS NOT NULL "
+            rows = conn.execute("SELECT v.device_id, v.deployment_id, v.install, r.deployment_document FROM devices v "
+                                "JOIN node_releases r USING(deployment_id) WHERE v.install IS NOT NULL "
                                 "FOR UPDATE OF v").fetchall()
             if not rows:
                 return
@@ -199,7 +196,7 @@ class PgPlayerVersions:
                                  "WHERE device_id=%s", (now, row["device_id"]))
                     restart.append((row["device_id"], tags.get(row["deployment_id"])))
                 elif (row["install"] == "restarting"
-                      and running.get(row["device_id"]) == parse_node_deployment(bytes(row["document"])).base.tag):
+                      and running.get(row["device_id"]) == parse_node_deployment(bytes(row["deployment_document"])).base.tag):
                     conn.execute("UPDATE devices SET install=NULL, changed_at=%s, changed_by='central' "
                                  "WHERE device_id=%s", (now, row["device_id"]))
         for device_id, version in restart:

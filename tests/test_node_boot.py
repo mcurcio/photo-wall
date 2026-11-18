@@ -6,7 +6,8 @@ row, as its first boot offer claims it), `keep_version` (a Pi's kept version, as
 `player_versions` and `boot_service` (Central's PgPlayerVersions and the boot offer over it),
 `NOTHING_READY` / `ALL_READY` (a cache with no release, or every release, ready; with releases
 ingested by the real sync pass its `world.stored`: tests/test_node_release_ingest.py
-`make_sync_world`, `Upstream`, `node_upload`), `cold_setup` and `publish_deployment`."""
+`make_sync_world`, `Upstream`, `node_upload`), `cold_setup`, `released` and `publish_deployment` (a hand-built deployment as a
+catalogued release's)."""
 from collections.abc import Collection
 from dataclasses import replace
 from uuid import UUID, uuid4
@@ -46,13 +47,71 @@ def environment(digest="d", name="photo-wall-player"):
                               "1" * 64, "/usr/bin/app", BASE_ABI, "graphics-v1", "plugin-v1")
 
 
-def publish_deployment(db, deployment, clock) -> bool:
-    """Write `deployment` through the one deployment writer (`write_deployment`, which the
-    release sync's ingest calls; the ingest has its own tests). True when it already existed."""
+def _release_of(deployment) -> tuple[bytes, dict]:
+    """The release manifest whose deployment carries `deployment`'s base and environments, and
+    its asset locators (each environment's url from `environment_sources`)."""
+    from hashlib import sha256
+
+    from contracts.node_release import NodeReleaseAssetV2, NodeReleaseV2, encode_node_release
+    base = deployment.base
+    files = {"base": (base.content_key, base.size_bytes)}
+    for role in ("boot", "node-base-deb", "node-display-deb", "build-provenance"):
+        files[role] = (sha256(f"{role}:{base.content_key}".encode()).hexdigest(), 1)
+    for role, ref in (("manager-primary", deployment.manager_primary), ("app", deployment.app_environment),
+                      ("manager-fallback", deployment.manager_fallback)):
+        if ref is not None:
+            files[role] = (ref.environment_sha256, ref.size_bytes)
+            files[role + "-deb"] = (ref.deb_sha256, 1)
+    release = NodeReleaseV2("a" * 40, base, deployment.app_environment, deployment.manager_primary,
+                            deployment.manager_fallback,
+                            tuple(NodeReleaseAssetV2(role, f"{role}.bin", sha, size)
+                                  for role, (sha, size) in files.items()))
+    locators = {role: {"url": deployment.environment_sources.get(sha, f"https://example.invalid/{role}.bin"),
+                       "sha256": sha, "size": size} for role, (sha, size) in files.items()}
+    return encode_node_release(release), locators
+
+
+def released(deployment):
+    """`deployment` as the release that carries it builds it: the same contents under the id its
+    manifest derives (`deployment_id_for`). Every stored deployment is a release's
+    (`write_deployment` refuses any other), so tests build theirs with this."""
+    from hashlib import sha256
+
+    from central.content_catalog.deployment import deployment_for_release
+    from contracts.node_release import parse_node_release
+    manifest, locators = _release_of(deployment)
+    return deployment_for_release(sha256(manifest).hexdigest(), parse_node_release(manifest), locators)
+
+
+def publish_deployment(db, deployment, clock, *, tag: str | None = None, source=None) -> bool:
+    """Catalogue the release that builds `deployment` (a `released` one) under `tag` (default:
+    its base's tag, or `<base tag>-r<digest>` once another release holds that) and write the deployment through the one deployment writer
+    (`write_deployment`, which the release sync's ingest calls; the ingest has its own tests).
+    `source` is where the base tarball downloads (default: an invalid address). True when it
+    already existed. The release is a pre-release, so it is no Pi's default and
+    outside the window: only a Pi's version (`keep_version`) makes it wanted."""
+    from hashlib import sha256
+
+    from psycopg.types.json import Jsonb
+
     from central.infra.node_releases import write_deployment
     from central.kernel.assets import OriginLocator
-    source = OriginLocator("https://example.invalid/base.tar", deployment.base.content_key, 256)
+    assert released(deployment) == deployment, "publish a released() deployment"
+    manifest, locators = _release_of(deployment)
+    now = clock.utc()
+    source = source or OriginLocator("https://example.invalid/base.tar", deployment.base.content_key, 256)
+    digest = sha256(manifest).hexdigest()
     with db.transaction() as conn:
+        if tag is None:
+            taken = conn.execute("SELECT 1 FROM node_releases WHERE tag=%s AND manifest_sha256<>%s",
+                                 (deployment.base.tag, digest)).fetchone()
+            tag = f"{deployment.base.tag}-r{digest[:12]}" if taken else deployment.base.tag
+        conn.execute("INSERT INTO node_releases(tag,is_prerelease,observed_at,manifest_sha256,revision,document,"
+                     "asset_locators,discovered_at,created_at,created_by,changed_at,changed_by) "
+                     "VALUES(%s,true,%s,%s,%s,%s,%s,%s,%s,'central',%s,'central') "
+                     "ON CONFLICT(manifest_sha256) DO NOTHING",
+                     (tag, now, digest, "a" * 40, manifest,
+                      Jsonb(locators), now, now, now))
         return write_deployment(conn, deployment, source, clock=clock)
 
 
@@ -110,9 +169,9 @@ def cold_setup(registry, *, app=True):
     manager = environment("2", "photo-wall-app-manager")
     selected = environment() if app else None
     refs = [manager] + ([selected] if selected else [])
-    deployment = NodeDeployment(uuid4(), NodeBaseRefV2(BASE_TAG, BASE_TARBALL_SHA, BASE_SHA, 1024,
+    deployment = released(NodeDeployment(uuid4(), NodeBaseRefV2(BASE_TAG, BASE_TARBALL_SHA, BASE_SHA, 1024,
         BASE_ABI, "graphics-v1", "plugin-v1"), selected, manager, None,
-        {ref.environment_sha256: "https://example.invalid/" + ref.environment_sha256 for ref in refs})
+        {ref.environment_sha256: "https://example.invalid/" + ref.environment_sha256 for ref in refs}))
     publish_deployment(registry.db, deployment, registry.clock)
     keep_version(registry.db, SERIAL, deployment.deployment_id, registry.clock.utc())   # as Install keeps it
     return boot_service(sessions), sessions, deployment
@@ -160,8 +219,8 @@ def test_manager_pins_and_environment_identity_are_immutable(registry):
     sources = {**deployment.environment_sources, changed.environment_sha256: "https://example.invalid/new"}
     del sources[deployment.manager_primary.environment_sha256]
     with pytest.raises(NodeReleaseRefused, match="manager_pins_immutable"):
-        publish_deployment(registry.db, replace(deployment, deployment_id=uuid4(),
-                           manager_primary=changed, environment_sources=sources), registry.clock)
+        publish_deployment(registry.db, released(replace(deployment, manager_primary=changed,
+                           environment_sources=sources)), registry.clock, tag="v1.0.1")
     with pytest.raises(ValueError, match="role_invalid"):  # a fallback must be another root
         replace(deployment, manager_fallback=deployment.manager_primary).offer(offer_id=uuid4(), audience="a",
             request=NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64), device_id=DEVICE_ID,
@@ -272,10 +331,10 @@ def _desired(registry):
 
 def _other(selected, digest):
     app = environment(digest)
-    return replace(selected, deployment_id=uuid4(), app_environment=app,
+    return released(replace(selected, app_environment=app,
         environment_sources={**{ref: url for ref, url in selected.environment_sources.items()
                                 if ref != selected.app_environment.environment_sha256},
-                             app.environment_sha256: "https://example.invalid/" + digest})
+                             app.environment_sha256: "https://example.invalid/" + digest}))
 
 
 def _env(ref):

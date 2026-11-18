@@ -1,7 +1,7 @@
 """Central reads the node documents an earlier Central stored (decision 0019, E-0019-FIX-16).
 
 Before 0019 the manager root's package was `photo-wall-node-manager`; it is now
-`photo-wall-app-manager`. Rows in `node_release_catalog`, `node_deployments` and
+`photo-wall-app-manager`. Rows in `node_releases` (its manifest and deployment documents) and
 `node_boot_offers` are re-parsed on every read, and no migration rewrites them, so a package
 naming rule judged when Central parses a stored document would refuse every release, deployment
 and boot offer the earlier Central wrote. The rows here are written the way that Central wrote

@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 from test_coordination import report
 from test_fleet_attempts import DEVICE_ID, SERIAL
-from test_node_boot import boot_service, claim_for, environment, publish_deployment
+from test_node_boot import boot_service, claim_for, environment, publish_deployment, released
 from test_node_runtime_reconciliation import rig
 from test_registry import ADMIN, enroll
 
@@ -56,14 +56,14 @@ class Rig:
             # Explicit pre-existing qualified record fixture, never an executable shortcut.
             _accept(self, proof.challenge.environment_sha256, accepted_at=1000)
         with registry.db.transaction() as conn:
-            deployment = parse_node_deployment(bytes(conn.execute('SELECT document FROM node_deployments').fetchone()['document']))
+            deployment = parse_node_deployment(bytes(conn.execute('SELECT deployment_document FROM node_releases').fetchone()['deployment_document']))
         self.deployments = []
         for digest in ('b', 'c'):
             target = environment(digest)
             sources = {deployment.manager_primary.environment_sha256:
                        deployment.environment_sources[deployment.manager_primary.environment_sha256],
                        target.environment_sha256: 'https://example.invalid/' + digest}
-            selected = replace(deployment, deployment_id=uuid4(), app_environment=target, environment_sources=sources)
+            selected = released(replace(deployment, app_environment=target, environment_sources=sources))
             publish_deployment(registry.db, selected, registry.clock)
             self.deployments.append(selected)
         if unbound:
@@ -107,7 +107,8 @@ class Rig:
 def _first_deployment(conn):
     """The first published deployment: the cold boot's, whose base every Rig deployment shares."""
     return parse_node_deployment(bytes(conn.execute(
-        'SELECT document FROM node_deployments ORDER BY published_at LIMIT 1').fetchone()['document']))
+        'SELECT deployment_document FROM node_releases WHERE deployment_id IS NOT NULL ORDER BY published_at '
+        'LIMIT 1').fetchone()['deployment_document']))
 
 
 def _first_base_key(conn):

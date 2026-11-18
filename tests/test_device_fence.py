@@ -139,7 +139,7 @@ def test_the_release_writer_never_waits_on_a_device(registry):
     sessions, claim, _ = _enrolled(registry)
     with registry.db.transaction() as conn:
         deployment = parse_node_deployment(bytes(conn.execute(
-            "SELECT document FROM node_deployments").fetchone()["document"]))
+            "SELECT deployment_document FROM node_releases").fetchone()["deployment_document"]))
     with _Held(registry, sessions, claim):
         started = time.monotonic()
         assert publish_deployment(registry.db, deployment, registry.clock) is True

@@ -211,13 +211,17 @@ def sync(world) -> None:
 
 def observations(registry) -> dict[str, dict]:
     with registry.db.transaction() as conn:
-        rows = conn.execute("SELECT * FROM node_release_observations").fetchall()
+        rows = conn.execute("SELECT * FROM node_releases").fetchall()
     return {row["tag"]: row for row in rows}
 
 
 def count(registry, table: str) -> int:
     with registry.db.transaction() as conn:
         return conn.execute(f"SELECT count(*) AS n FROM {table}").fetchone()["n"]
+
+
+DEPLOYED = "node_releases WHERE deployment_id IS NOT NULL"
+CATALOGUED = "node_releases WHERE manifest_sha256 IS NOT NULL"
 
 
 def sessions_for(registry):
@@ -265,7 +269,7 @@ def test_tracer_one_valid_one_malformed_one_conflicting_release_in_one_run(regis
     # The re-cut is refused; the tag keeps its last good upload (and its deployment).
     assert seen["v2.0.0"]["manifest_sha256"] == first.sha
     assert seen["v2.0.0"]["problem"] == "node_release_identity_conflict"
-    assert count(registry, "node_deployments") == 2
+    assert count(registry, DEPLOYED) == 2
     rows = read(registry)["releases"]
     assert [(row["version"], row["base_tag"], row["problem"]) for row in rows] == [
         ("v2.2.0", None, "node_release_invalid"),
@@ -284,8 +288,8 @@ def test_ingest_writes_references_with_the_derived_id_and_never_selects(registry
     world = sync_world(upstream)
     sync(world)
     with registry.db.transaction() as conn:
-        assets = conn.execute("SELECT kind, identity FROM node_deployment_assets "
-                              "WHERE deployment_id=%s ORDER BY kind", (upload.deployment_id,)).fetchall()
+        assets = conn.execute("SELECT kind, identity FROM asset_references WHERE owner=%s ORDER BY kind",
+                              ("node-deployment:" + upload.deployment_id.hex,)).fetchall()
         assert conn.execute("SELECT 1 FROM devices WHERE deployment_id IS NOT NULL").fetchone() is None
     assert [(row["kind"], row["identity"]) for row in assets] == [
         ("os-image", upload.release.base.content_key),
@@ -293,7 +297,7 @@ def test_ingest_writes_references_with_the_derived_id_and_never_selects(registry
     assert upload.deployment_id.hex[12] == "8"  # UUIDv8; no app: variant bit clear
     # A second tick of the same bytes is a no-op (deterministic id: the writer's duplicate path).
     sync(world)
-    assert count(registry, "node_deployments") == 1
+    assert count(registry, DEPLOYED) == 1
 
 
 def test_an_older_observation_writes_nothing(registry, sync_world):
@@ -306,8 +310,9 @@ def test_an_older_observation_writes_nothing(registry, sync_world):
     upstream.put(older, at="2026-09-30T01:00:00Z")  # a stale listing lands after the fresh one
     sync(world)
     assert observations(registry)["v2.0.0"]["manifest_sha256"] == newer.sha
-    assert count(registry, "node_release_catalog") == 1  # the older catalog row rolled back too
-    assert count(registry, "node_deployments") == 1
+    assert count(registry, CATALOGUED) == 1  # the older manifest rolled back too
+    assert observations(registry)["v2.0.0"]["revision"] == "b" * 40
+    assert count(registry, DEPLOYED) == 1
 
 
 def test_a_later_valid_upload_clears_the_problem_and_moves_the_pointer(registry, sync_world):
@@ -322,24 +327,26 @@ def test_a_later_valid_upload_clears_the_problem_and_moves_the_pointer(registry,
     assert (seen["manifest_sha256"], seen["problem"]) == (good.sha, None)
 
 
-def test_a_console_published_deployment_converges_as_a_duplicate(registry, sync_world):
-    from test_node_boot import publish_deployment
+def test_a_deployment_already_written_converges_as_a_duplicate(registry, sync_world):
+    from central.infra.node_releases import write_deployment
+    from central.kernel.assets import OriginLocator
     upstream, upload = Upstream(), node_upload("v2.0.0")
     upstream.put(upload)
     world = sync_world(upstream)
-    with registry.db.transaction() as conn:  # the console's former publish: same row, same id
-        locators = {role: {"url": f"https://assets.test/v2.0.0/{role}.bin", "sha256": a.sha256,
-                           "size": a.size_bytes}
-                    for role, a in ((a.role, a) for a in upload.release.artifacts)}
-        conn.execute("INSERT INTO node_release_catalog VALUES(%s,%s,%s,%s,%s,1000)",
-                     (upload.sha, "v2.0.0", upload.release.revision, upload.manifest,
-                      json.dumps(locators)))
-    publish_deployment(registry.db, deployment_for_release(upload.sha, upload.release, locators),
-                       registry.clock)
+    locators = {a.role: {"url": f"https://assets.test/v2.0.0/{a.role}.bin", "sha256": a.sha256,
+                         "size": a.size_bytes} for a in upload.release.artifacts}
+    with registry.db.transaction() as conn:  # the tag's row and deployment, written before
+        conn.execute("INSERT INTO node_releases(tag,is_prerelease,observed_at,manifest_sha256,revision,document,"
+                     "asset_locators,discovered_at,created_at,created_by,changed_at,changed_by) "
+                     "VALUES('v2.0.0',false,1000,%s,%s,%s,%s,1000,1000,'central',1000,'central')",
+                     (upload.sha, upload.release.revision, upload.manifest, json.dumps(locators)))
+        assert write_deployment(conn, deployment_for_release(upload.sha, upload.release, locators),
+                                OriginLocator(locators["base"]["url"], upload.release.base.content_key,
+                                              locators["base"]["size"]), clock=registry.clock) is False
     sync(world)
     seen = observations(registry)["v2.0.0"]
     assert (seen["manifest_sha256"], seen["problem"]) == (upload.sha, None)
-    assert count(registry, "node_deployments") == 1
+    assert count(registry, DEPLOYED) == 1
 
 
 def test_a_hand_deployment_holding_the_derived_id_with_other_contents_is_that_tag_problem(
@@ -351,12 +358,42 @@ def test_a_hand_deployment_holding_the_derived_id_with_other_contents_is_that_ta
     squatter = replace(deployment_for_release(other.sha, other.release, {
         role: {"url": "https://example.invalid/" + role} for role in ("app", "manager-primary")}),
         deployment_id=upload.deployment_id)
-    with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO node_deployments VALUES(%s,%s,1)",
-                     (upload.deployment_id, encode_node_deployment(squatter)))
+    with registry.db.transaction() as conn:  # another tag's row holding the derived id
+        conn.execute("INSERT INTO node_releases(tag,is_prerelease,observed_at,manifest_sha256,revision,document,"
+                     "asset_locators,discovered_at,deployment_id,deployment_document,published_at,created_at,"
+                     "created_by,changed_at,changed_by) VALUES('v2.5.0',false,1,%s,%s,%s,'{}',1,%s,%s,1,1,"
+                     "'central',1,'central')",
+                     (other.sha, other.release.revision, other.manifest, upload.deployment_id,
+                      encode_node_deployment(squatter)))
     sync(world)
     assert observations(registry)["v2.0.0"]["problem"] == "node_deployment_identity_conflict"
     assert observations(registry)["v2.0.0"]["manifest_sha256"] is None
+
+
+@pytest.mark.parametrize("change", ["manager_pin", "environment_reference"])
+def test_another_pin_for_a_known_base_or_reference_for_a_known_digest_is_refused(registry, change):
+    """A base's manager pins and an environment digest's reference are read from the other
+    releases' stored deployments (no table of their own, 121b): a second release that changes
+    either is refused, and nothing of it is written. Mutation probe: skip the other releases'
+    documents in `write_deployment`'s check -> the conflicting deployment is accepted."""
+    from test_node_boot import cold_setup, environment, publish_deployment, released
+
+    from central.content_catalog.ports import NodeReleaseRefused
+    _, _, first = cold_setup(registry)
+    if change == "manager_pin":  # the same base, another manager
+        manager = environment("3", "photo-wall-app-manager")
+        sources = {**first.environment_sources, manager.environment_sha256: "https://example.invalid/3"}
+        del sources[first.manager_primary.environment_sha256]
+        second = released(replace(first, manager_primary=manager, environment_sources=sources))
+        refusal = "node_base_manager_pins_immutable"
+    else:  # another base, the same app digest under another reference
+        base = replace(first.base, tag="v1.1.0", content_key="7" * 64, squashfs_sha256="8" * 64)
+        second = released(replace(first, base=base,
+                                  app_environment=replace(first.app_environment, deb_version="9.9.9")))
+        refusal = "node_environment_identity_conflict"
+    with pytest.raises(NodeReleaseRefused, match=refusal):
+        publish_deployment(registry.db, second, registry.clock, tag="v1.1.0")
+    assert count(registry, DEPLOYED) == 1
 
 
 # -- B6: a Pi with no version boots the newest ready stable release (Q2 A, 2026-10-16) -------------
@@ -446,8 +483,8 @@ def test_an_unforeseen_ingest_failure_is_that_release_problem_and_the_tick_conti
     assert (seen["v2.1.0"]["problem"], seen["v2.1.0"]["manifest_sha256"]) == (
         "node_release_invalid", None)
     assert (seen["v2.0.0"]["problem"], seen["v2.0.0"]["manifest_sha256"]) == (None, good.sha)
-    assert count(registry, "node_deployments") == 1
-    assert count(registry, "node_release_catalog") == 1  # the failed release's tx rolled back
+    assert count(registry, DEPLOYED) == 1
+    assert count(registry, CATALOGUED) == 1  # the failed release's manifest rolled back
 
 
 def test_a_database_error_while_ingesting_fails_the_tick_and_blames_no_release(
@@ -470,7 +507,7 @@ def test_a_database_error_while_ingesting_fails_the_tick_and_blames_no_release(
         sync(world)
     assert world.reads.etag() is None
     assert observations(registry) == {}
-    assert count(registry, "node_deployments") == 0
+    assert count(registry, DEPLOYED) == 0
     monkeypatch.setattr(node_releases, "write_deployment", real)
     sync(world)  # the next tick ingests the release
     assert observations(registry)["v2.0.0"]["manifest_sha256"] == release.sha

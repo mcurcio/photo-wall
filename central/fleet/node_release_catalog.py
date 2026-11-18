@@ -13,7 +13,6 @@ from typing import Any
 from uuid import UUID
 
 from central.content_catalog.boot_policy import newest_first
-from central.content_catalog.deployment import deployment_id_for
 from central.content_catalog.views import PlayerVersionView, ReleasesView, ReleaseView
 from central.fleet.node_observations import NodeObservations, host_facts_of
 from central.infra.node_releases import deployment_jobs, wanted_deployments
@@ -39,13 +38,13 @@ class NodeReleaseCatalog:
         with self.sessions.db.read_snapshot() as conn:
             read_at = self.sessions.clock.utc()
             observed = conn.execute(
-                "SELECT o.tag,o.is_prerelease,o.problem,o.manifest_sha256,c.document,c.discovered_at "
-                "FROM node_release_observations o LEFT JOIN node_release_catalog c USING(manifest_sha256)").fetchall()
+                "SELECT tag,is_prerelease,problem,manifest_sha256,document,discovered_at,deployment_id "
+                "FROM node_releases").fetchall()
             # Every observed tag is semver (the origin skips any other).
             observed = newest_first(observed, lambda row: row["tag"])[:MAX_RELEASES]
             wanted = wanted_deployments(conn)
             window = {deployment for _, deployment in wanted.window}
-            rows = [(row, _deployment(row)) for row in observed]
+            rows = [(row, row["deployment_id"]) for row in observed]
             jobs = deployment_jobs(conn, [deployment for _, deployment in rows if deployment is not None])
             tx = PgTransaction(conn)
             releases = []
@@ -65,14 +64,6 @@ class NodeReleaseCatalog:
                 chosen=pi.chosen, previous=pi.previous, install=pi.install, running=running.get(pi.device_id))
                 for pi in versions.pis),
             default=None if versions.default is None else versions.default.tag)
-
-
-def _deployment(row: Any):
-    """The deployment an observed tag's last good manifest became (None: none)."""
-    if row["manifest_sha256"] is None:
-        return None
-    release = parse_node_release(bytes(row["document"]))
-    return deployment_id_for(row["manifest_sha256"], release.app_environment is not None)
 
 
 def _release(row: Any, deployment: UUID | None, in_window: bool, readiness) -> ReleaseView:

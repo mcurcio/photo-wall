@@ -45,7 +45,14 @@ from playwright.sync_api import expect
 from support.frames import frame_create
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_node_acceptance import Witnesses
-from test_node_boot import boot_service, claim_for, cold_setup, environment, publish_deployment
+from test_node_boot import (
+    boot_service,
+    claim_for,
+    cold_setup,
+    environment,
+    publish_deployment,
+    released,
+)
 from test_node_lifecycle import Rig
 from test_registry import enroll
 
@@ -725,7 +732,8 @@ def _rig_releases(page, registry):
         body = response.json()
         listed = {row["deployment_id"] for row in body["releases"]}
         with registry.db.transaction() as conn:
-            documents = conn.execute("SELECT document FROM node_deployments ORDER BY published_at").fetchall()
+            documents = conn.execute("SELECT deployment_document AS document FROM node_releases "
+                                     "WHERE deployment_id IS NOT NULL ORDER BY published_at").fetchall()
         for index, row in enumerate(documents):
             deployment = parse_node_deployment(bytes(row["document"]))
             if str(deployment.deployment_id) in listed:
@@ -1043,11 +1051,12 @@ def test_an_accepted_qualification_is_listed_and_a_following_stage_is_admitted_a
     witness = Witnesses(registry)
     linked = witness.proof.challenge.environment_sha256
     with registry.db.transaction() as conn:
-        base = parse_node_deployment(bytes(conn.execute("SELECT document FROM node_deployments").fetchone()["document"]))
+        base = parse_node_deployment(bytes(conn.execute("SELECT deployment_document FROM node_releases "
+                                                       "WHERE deployment_id IS NOT NULL").fetchone()["deployment_document"]))
     target = environment("b")
-    selected = replace(base, deployment_id=uuid4(), app_environment=target, environment_sources={
+    selected = released(replace(base, app_environment=target, environment_sources={
         base.manager_primary.environment_sha256: base.environment_sources[base.manager_primary.environment_sha256],
-        target.environment_sha256: "https://example.invalid/target"})
+        target.environment_sha256: "https://example.invalid/target"}))
     publish_deployment(registry.db, selected, registry.clock)
     with _node_server(registry) as origin:
         samples = _Samples(page)

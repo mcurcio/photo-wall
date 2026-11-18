@@ -57,10 +57,9 @@ from support.workers import (
     wait_for,
     worker_env,
 )
-from test_node_boot import keep_version
+from test_node_boot import keep_version, publish_deployment, released
 
 from central.fleet.node_boot import NodeDeployment
-from central.infra.node_releases import write_deployment
 from central.kernel.assets import OriginLocator
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_boot import (
@@ -249,12 +248,10 @@ class TwoPods:
                                       "plugin-v1")
         base = NodeBaseRefV2(release.tag, release.tarball_sha, release.squashfs_sha,
                              SQUASHFS_BYTES, BASE_ABI, "graphics-v1", "plugin-v1")
-        deployment = NodeDeployment(uuid4(), base, None, manager, None, {
-            manager.environment_sha256: f"{url}/{ENVIRONMENT_NAME}"})
-        with self.db.transaction() as conn:
-            write_deployment(conn, deployment, OriginLocator(
-                f"{url}/{TARBALL_NAME}", release.tarball_sha, len(release.tarball)),
-                clock=SystemClock())
+        deployment = released(NodeDeployment(uuid4(), base, None, manager, None, {
+            manager.environment_sha256: f"{url}/{ENVIRONMENT_NAME}"}))
+        publish_deployment(self.db, deployment, SystemClock(), source=OriginLocator(
+            f"{url}/{TARBALL_NAME}", release.tarball_sha, len(release.tarball)))
         keep_version(self.db, SERIAL, deployment.deployment_id, time.time())
         response = httpx.post(self.procs["central-a"].url + "/v2/node/boot-offers", timeout=30,
                               content=encode_node_boot_request(

@@ -1,12 +1,11 @@
-"""`PgAssetRecords` and the 021 backfill against real PostgreSQL.
+"""`PgAssetRecords` against real PostgreSQL. The 021 backfill's history test is retired with
+every test that ran today's code on a schema older than production's (decision 0034).
 
 The DB tests skip without `PHOTO_WALL_TEST_DATABASE_URL` (the `registry` fixture convention in
 `tests/conftest.py`) and run in CI.
 """
 
 from __future__ import annotations
-
-from pathlib import Path
 
 import psycopg
 import pytest
@@ -22,12 +21,7 @@ from contracts.time import ManualClock
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
-SHA_C = "c" * 64
-SHA_T1 = "1" * 64
-SHA_T2 = "2" * 64
-SHA_S1 = "5" * 64
 KEY = AssetKey(AssetKind.SEALED_ENVIRONMENT, SHA_A)
-MIGRATIONS = Path(__file__).resolve().parents[1] / "central" / "migrations"
 
 
 def ref(owner: str, url: str = "https://example.test/a.deb", size: int = 10) -> AssetReference:
@@ -79,9 +73,9 @@ def test_get_orders_references_newest_first_then_owner_desc(repo):
     repo.reference(KEY, ref("v1.0.0"))
     repo.clock.advance(1)
     repo.reference(KEY, ref("v0.9.0"))
-    repo.reference(KEY, ref("v0.9.1"))  # same added_at as v0.9.0: owner DESC breaks the tie
+    repo.reference(KEY, ref("v0.9.1"))  # same created_at as v0.9.0: owner DESC breaks the tie
     repo.clock.advance(1)
-    repo.reference(KEY, ref("v1.0.0", url="https://mirror.test/a.deb"))  # a change keeps added_at
+    repo.reference(KEY, ref("v1.0.0", url="https://mirror.test/a.deb"))  # a change keeps created_at
     assert [r.owner for r in repo.get(KEY).references] == ["v0.9.1", "v0.9.0", "v1.0.0"]
 
 
@@ -175,67 +169,3 @@ def test_touch_served_stamps_the_database_clock_and_only_it_is_compared(repo):
     with repo.database.transaction() as conn:
         conn.execute("UPDATE assets SET last_served_at=last_served_at-7200")
     assert repo.served_within(KEY, 3600.0) is False
-
-
-# -- the 021 backfill -----------------------------------------------------------------------------
-
-
-@pytest.fixture
-def pre_021(empty_database):
-    """A fresh database migrated up to (not including) 021; yields its DSN."""
-    with psycopg.connect(empty_database) as conn:
-        for path in sorted(MIGRATIONS.glob("*.sql")):
-            if path.name < "021":
-                conn.execute(path.read_text())
-    return empty_database
-
-
-def _release(conn, tag, *, asset=None, base=None):
-    major, minor, patch = (int(part) for part in tag[1:].split("."))
-    asset_sha, asset_size, asset_url = asset or (None, None, None)
-    base_sha, base_size, base_url = base or (None, None, None)
-    conn.execute(
-        "INSERT INTO app_releases (tag, major, minor, patch, is_prerelease, asset_sha256, "
-        "asset_size, asset_url, base_tarball_sha256, base_tarball_size, base_tarball_url, "
-        "discovered_at, updated_at) VALUES (%s,%s,%s,%s,FALSE,%s,%s,%s,%s,%s,%s,1,1)",
-        (tag, major, minor, patch, asset_sha, asset_size, asset_url, base_sha, base_size, base_url),
-    )
-
-
-def test_021_backfill_seeds_references_and_produced_facts(pre_021):
-    with psycopg.connect(pre_021) as conn:
-        _release(conn, "v1.0.0", asset=(SHA_A, 10, "https://gh.test/v1.0.0/a.deb"),
-                 base=(SHA_T1, 100, "https://gh.test/v1.0.0/base.tar.gz"))
-        _release(conn, "v1.1.0", asset=(SHA_A, 10, "https://gh.test/v1.1.0/a.deb"),
-                 base=(SHA_T2, 200, "https://gh.test/v1.1.0/base.tar.gz"))
-        _release(conn, "v2.0.0", asset=(SHA_B, 20, "https://gh.test/v2.0.0/b.deb"))
-        _release(conn, "v3.0.0")  # undeployable: nothing to seed
-        _release(conn, "v4.0.0", asset=(SHA_C, 30, "ftp://gh.test/c.deb"))  # not http(s)
-        conn.execute("INSERT INTO app_packages (sha256, version, size, registered_at) "
-                     "VALUES (%s,'v1.0.0',10,1), (%s,'v9.0.0',30,1)", (SHA_A, SHA_C))
-        conn.execute(
-            "INSERT INTO base_cache (tag, squashfs_sha256, size, state, updated_at) VALUES "
-            "('v1.0.0', %s, 50, 'evicted', 1), ('v1.1.0', NULL, NULL, 'caching', 1), "
-            "('v2.0.0', %s, 60, 'cached', 1)",
-            (SHA_S1, SHA_S1),
-        )
-        conn.execute((MIGRATIONS / "021_assets.sql").read_text())
-        # The column today's repository reads beside the produced facts (087).
-        conn.execute("ALTER TABLE assets ADD COLUMN produced_detail JSONB NULL")
-
-    database = Database(pre_021, application_name="photo-wall-test")
-    try:
-        repo = Repo(database, ManualClock(1000.0))
-        os_old = repo.get(AssetKey(AssetKind.OS_IMAGE, "v1.0.0"))
-        assert os_old.references == (AssetReference(
-            "v1.0.0", OriginLocator("https://gh.test/v1.0.0/base.tar.gz", SHA_T1, 100),
-            expected_size=None, expected_sha256=None),)
-        assert os_old.produced == AssetReady(size=50, sha256=SHA_S1)
-        assert repo.get(AssetKey(AssetKind.OS_IMAGE, "v1.1.0")).produced is None
-        assert repo.get(AssetKey(AssetKind.OS_IMAGE, "v2.0.0")) is None  # no reference, no facts
-
-        # The `.deb` half (two player-deb assets, three references) has no kind to read today.
-        assert repo.count("assets") == 4
-        assert repo.count("asset_references") == 5
-    finally:
-        database.close()

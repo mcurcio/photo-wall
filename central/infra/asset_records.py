@@ -1,4 +1,5 @@
-"""The PostgreSQL `AssetRecords` (tables `assets` and `asset_references`, migration 021).
+"""The PostgreSQL `AssetRecords` (tables `assets` and `asset_references`, migration 021; audit
+fields 121b, every write here by "central").
 
 Every method runs inside the caller's transaction (`pg_connection(tx)`), so it blocks: call it
 from a worker thread.
@@ -79,7 +80,7 @@ class PgAssetRecords:
         refs = conn.execute(
             "SELECT owner, locator_url, locator_sha256, locator_size, expected_size, "
             "expected_sha256 FROM asset_references WHERE kind=%s AND identity=%s "
-            "ORDER BY added_at DESC, owner DESC",
+            "ORDER BY created_at DESC, owner DESC",
             (key.kind.value, key.identity),
         ).fetchall()
         if not refs:  # a row whose references were all retired is not an asset
@@ -91,20 +92,21 @@ class PgAssetRecords:
         conn = pg_connection(tx)
         now = self._clock.utc()
         conn.execute(
-            "INSERT INTO assets (kind, identity, created_at) VALUES (%s, %s, %s) "
-            "ON CONFLICT (kind, identity) DO NOTHING",
-            (key.kind.value, key.identity, now),
+            "INSERT INTO assets (kind, identity, created_at, created_by, changed_at, changed_by) "
+            "VALUES (%s, %s, %s, 'central', %s, 'central') ON CONFLICT (kind, identity) DO NOTHING",
+            (key.kind.value, key.identity, now, now),
         )
-        changed = ", ".join(f"{column} = EXCLUDED.{column}" for column in _REFERENCE_COLUMNS)
+        changed = ", ".join(f"{column} = EXCLUDED.{column}"
+                            for column in (*_REFERENCE_COLUMNS, "changed_at", "changed_by"))
         differs = " OR ".join(f"asset_references.{column} IS DISTINCT FROM EXCLUDED.{column}"
                               for column in _REFERENCE_COLUMNS)
         cursor = conn.execute(
             "INSERT INTO asset_references (kind, identity, owner, locator_url, locator_sha256, "
-            "locator_size, expected_size, expected_sha256, added_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
+            "locator_size, expected_size, expected_sha256, created_at, created_by, changed_at, changed_by) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'central', %s, 'central') "
             f"ON CONFLICT (kind, identity, owner) DO UPDATE SET {changed} WHERE {differs}",
             (key.kind.value, key.identity, ref.owner, ref.locator.url, ref.locator.sha256,
-             ref.locator.size, ref.expected_size, ref.expected_sha256, now),
+             ref.locator.size, ref.expected_size, ref.expected_sha256, now, now),
         )
         return cursor.rowcount == 1
 
@@ -119,9 +121,9 @@ class PgAssetRecords:
         # Write-once only where the key fixes the bytes; an identity-keyed kind takes the new
         # facts, so a regenerated file after a purge never wedges its record.
         written = conn.execute(
-            "UPDATE assets SET produced_size=%s, produced_sha256=%s, produced_detail=%s "
-            "WHERE kind=%s AND identity=%s AND (produced_sha256 IS NULL OR NOT %s)",
-            (facts.size, facts.sha256, _detail(facts), key.kind.value, key.identity,
+            "UPDATE assets SET produced_size=%s, produced_sha256=%s, produced_detail=%s, changed_at=%s, "
+            "changed_by='central' WHERE kind=%s AND identity=%s AND (produced_sha256 IS NULL OR NOT %s)",
+            (facts.size, facts.sha256, _detail(facts), self._clock.utc(), key.kind.value, key.identity,
              key.kind.keyed_by_content),
         ).rowcount
         if written:
@@ -139,6 +141,7 @@ class PgAssetRecords:
 
     # `last_served_at` is the database server's clock, written and compared by the database
     # alone: a reader on one host and the cache cleaner on another never compare their clocks.
+    # A read is no change of the record: its audit fields stay.
     def touch_served(self, tx: Transaction, key: AssetKey) -> None:
         pg_connection(tx).execute(
             "UPDATE assets SET last_served_at=EXTRACT(EPOCH FROM clock_timestamp()) "

@@ -67,9 +67,8 @@ def test_a_release_still_carrying_v1_files_lands_its_node_release_and_no_v1_asse
         ReleaseListing((), None, unchanged=False), origin=upstream.origin())
     asyncio.run(world.handler.handle(SyncReleases()))
 
-    observed = _rows(registry, "SELECT tag, manifest_sha256, problem FROM node_release_observations")
-    assert observed == [{"tag": tag, "manifest_sha256": upload.sha, "problem": None}]
-    assert _rows(registry, "SELECT deployment_id FROM node_deployments") == [
-        {"deployment_id": upload.deployment_id}]
+    observed = _rows(registry, "SELECT tag, manifest_sha256, problem, deployment_id FROM node_releases")
+    assert observed == [{"tag": tag, "manifest_sha256": upload.sha, "problem": None,
+                         "deployment_id": upload.deployment_id}]
     kinds = {row["kind"] for row in _rows(registry, "SELECT DISTINCT kind FROM assets")}
     assert kinds == {"os-image", "sealed-environment"}  # no 'player-deb', no 'player-payload'

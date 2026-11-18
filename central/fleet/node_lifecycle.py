@@ -28,6 +28,7 @@ from central.fleet.node_app_links import (
 )
 from central.fleet.node_boot import parse_node_deployment
 from central.fleet.node_sessions import NodeControlError, NodeSessions
+from central.infra.node_releases import environment_reference_in
 from central.transaction_locks import acquire_runtime_locks
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_boot import parse_node_boot_offer
@@ -69,11 +70,10 @@ class NodeLifecycle:
 
     @staticmethod
     def _reference_in(conn, digest: str) -> AppEnvironmentRefV2:
-        row = conn.execute("SELECT reference FROM node_environment_catalog WHERE environment_sha256=%s",
-                           (digest,)).fetchone()
-        if row is None:
+        reference = environment_reference_in(conn, digest)
+        if reference is None:
             raise NodeControlError("node_environment_unknown", 404)
-        return AppEnvironmentRefV2(**row["reference"])
+        return reference
 
     @staticmethod
     def _boot_in(conn, principal):
@@ -129,11 +129,11 @@ class NodeLifecycle:
             if link is None:
                 raise NodeControlError("node_app_current_process_unlinked")
             boot = self._boot_in(conn, principal)
-            publication = conn.execute("SELECT document FROM node_deployments WHERE deployment_id=%s",
+            publication = conn.execute("SELECT deployment_document FROM node_releases WHERE deployment_id=%s",
                                        (request.deployment_id,)).fetchone()
             if publication is None:
                 raise NodeControlError("node_deployment_unknown", 404)
-            deployment = parse_node_deployment(bytes(publication["document"]))
+            deployment = parse_node_deployment(bytes(publication["deployment_document"]))
             if deployment.base != boot.base or deployment.app_environment is None:
                 raise NodeControlError("node_app_target_base_mismatch")
             old_environment = self._reference_in(conn, link.environment_sha256)

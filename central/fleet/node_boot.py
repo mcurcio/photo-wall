@@ -87,10 +87,10 @@ class NodeBootService:
             else:
                 chosen = self.versions.boot_deployment_in(PgTransaction(conn), serial)
                 row = None if chosen is None else conn.execute(
-                    "SELECT document FROM node_deployments WHERE deployment_id=%s", (chosen,)).fetchone()
+                    "SELECT deployment_document FROM node_releases WHERE deployment_id=%s", (chosen,)).fetchone()
                 offer_id = uuid4()
                 if row:
-                    deployment = parse_node_deployment(bytes(row["document"]))
+                    deployment = parse_node_deployment(bytes(row["deployment_document"]))
                     result = deployment.offer(offer_id=offer_id, audience=config.installation_audience,
                         request=request, device_id=device_id, generation=generation,
                         revision=OFFER_POLICY_REVISION, now=now)

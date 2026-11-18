@@ -26,7 +26,7 @@ from fastapi.responses import JSONResponse
 from integration.bus_servers import BusServer
 from psycopg.types.json import Jsonb
 from test_fleet_attempts import DEVICE_ID, SERIAL
-from test_node_boot import boot_service, keep_version, publish_deployment
+from test_node_boot import boot_service, keep_version, publish_deployment, released
 
 from central.app import create_app
 from central.assets.layout import CacheLayout
@@ -237,7 +237,7 @@ def _central_fixture(
     )
     deployments = {}
     for phase, ref in refs.items():
-        selected = NodeDeployment(
+        selected = released(NodeDeployment(
             uuid4(),
             base,
             ref,
@@ -247,7 +247,7 @@ def _central_fixture(
                 r.environment_sha256: origin + "/fixture/origin/" + r.environment_sha256
                 for r in [manager, ref]
             },
-        )
+        ))
         publish_deployment(registry.db, selected, sessions.clock)
         deployments[phase] = selected
     keep_version(registry.db, SERIAL, deployments["cold"].deployment_id, sessions.clock.utc())

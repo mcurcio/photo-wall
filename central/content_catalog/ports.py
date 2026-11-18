@@ -51,12 +51,12 @@ class StableDeployment:
 
 
 class NodeReleaseRecords(Protocol):
-    """The node half of a release sync (`node_release_observations`, the release catalog and the
-    deployment writer). Every method runs in the caller's transaction."""
+    """The node half of a release sync (each tag's `node_releases` row and the deployment
+    writer). Every method runs in the caller's transaction."""
 
     def ingest(self, tx: Transaction, release: PublishedRelease, *, now: float) -> bool:
-        """Turn `release.node_publication` into its catalog row, deployment and asset references,
-        and point the tag's observation at it, unless the observation is older than the stored
+        """Turn `release.node_publication` into its release row's manifest, deployment and asset
+        references, with the tag's observation, unless the observation is older than the stored
         one (False: nothing written). Raises `NodeReleaseRefused`
         for the release's own refusals (identity, pins, environment conflicts); the caller then
         rolls the transaction back and records the problem in another."""

@@ -129,8 +129,8 @@ def test_a_made_variant_and_a_failure_cooldown_hydrate_authored_refs(registry):
     with repo.db.transaction() as conn:
         key = repo.variant_key_in(conn, failing.asset_id)
         conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,reason,retry_not_before,"
-                     "seq,updated_at) VALUES(%s,%s,'transient','asset_missing',1010,"
-                     "nextval('job_outcome_seq'),1000)", (prepare_lock(key), PrepareMedia.job_name))
+                     "seq,changed_at,created_at,created_by,changed_by) VALUES(%s,%s,'transient','asset_missing',1010,"
+                     "nextval('job_outcome_seq'),1000,1000,'central','central')", (prepare_lock(key), PrepareMedia.job_name))
     registry.clock.wall = 1000  # the repository's media times follow this clock
     with repo.db.transaction() as conn:
         authored = repo.authored_in(conn)

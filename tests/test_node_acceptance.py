@@ -238,7 +238,7 @@ def test_binding_change_cannot_keep_old_qualification_witness(registry):
 def test_actual_qualification_selects_fallback_but_changed_mode_blocks_new_stage(registry):
     import json
 
-    from test_node_boot import environment, publish_deployment
+    from test_node_boot import environment, publish_deployment, released
 
     from central.fleet.node_boot import parse_node_deployment
     from central.fleet.node_lifecycle import NodeLifecycle, OperatorAppStage
@@ -248,11 +248,11 @@ def test_actual_qualification_selects_fallback_but_changed_mode_blocks_new_stage
         result=witness.advance()
     assert result['status']=='accepted'
     with registry.db.transaction() as conn:
-        deployment=parse_node_deployment(bytes(conn.execute('SELECT document FROM node_deployments').fetchone()['document']))
+        deployment=parse_node_deployment(bytes(conn.execute('SELECT deployment_document FROM node_releases').fetchone()['deployment_document']))
     target=environment('b')
-    selected=replace(deployment,deployment_id=uuid4(),app_environment=target,environment_sources={
+    selected=released(replace(deployment,app_environment=target,environment_sources={
         deployment.manager_primary.environment_sha256:deployment.environment_sources[deployment.manager_primary.environment_sha256],
-        target.environment_sha256:'https://example.invalid/target'})
+        target.environment_sha256:'https://example.invalid/target'}))
     publish_deployment(registry.db,selected,registry.clock)
     registry.unbind('node-f0',expected_generation=1)
     registry.unbind('node-f1',expected_generation=1)

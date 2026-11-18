@@ -39,10 +39,9 @@ def test_the_node_release_sync_ingests_a_packaged_release_with_no_v1_claim(regis
 
     asyncio.run(world.handler.handle(SyncReleases()))
 
-    observed = _rows(registry, "SELECT tag, problem, manifest_sha256 FROM node_release_observations")
-    assert [(row["tag"], row["problem"]) for row in observed] == [(tag, None)]
-    assert observed[0]["manifest_sha256"] is not None
-    [deployment] = _rows(registry, "SELECT deployment_id FROM node_deployments")
+    [deployment] = _rows(registry, "SELECT tag, problem, manifest_sha256, deployment_id FROM node_releases")
+    assert (deployment["tag"], deployment["problem"]) == (tag, None)
+    assert deployment["manifest_sha256"] is not None and deployment["deployment_id"] is not None
     assert _one(registry, "SELECT to_regclass('app_releases') AS name")["name"] is None
     owners = {row["owner"] for row in _rows(registry, "SELECT owner FROM asset_references")}
     assert owners == {"node-deployment:" + deployment["deployment_id"].hex}  # no release-tag claim

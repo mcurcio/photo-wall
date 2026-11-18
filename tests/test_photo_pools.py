@@ -325,8 +325,9 @@ def test_retirement_keeps_wanted_pools_and_their_thumbnails_only(pools):
         store.record_step(lease, step(InPool(asset=asset(ref, number, 1.0))))
     with store.db.transaction() as conn:
         for number in (1, 2, 3):
-            conn.execute("INSERT INTO assets(kind,identity,created_at) "
-                         "VALUES('library-thumbnail',%s,0)", (asset(ref, number, 1.0).asset_id,))
+            conn.execute("INSERT INTO assets(kind,identity,created_at,created_by,changed_at,changed_by) "
+                         "VALUES('library-thumbnail',%s,0,'central',0,'central')",
+                         (asset(ref, number, 1.0).asset_id,))
     kept = store.retire_unwanted()
     assert kept == frozenset({asset(ref, 1, 1.0).asset_id})
     with store.db.transaction() as conn:

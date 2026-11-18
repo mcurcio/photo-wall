@@ -241,10 +241,11 @@ def test_a_pool_photos_facts_name_its_original_and_immichs_copies(client):
         # Two made media variants of the revision: an earlier recipe's and the newest one.
         for recipe, made_from, created in (("a" * 64, "preview", 1), ("b" * 64, "original", 2)):
             conn.execute("INSERT INTO assets(kind,identity,produced_size,produced_sha256,"
-                         "produced_detail,created_at) VALUES('media-variant',%s,10,%s,%s,%s)",
+                         "produced_detail,created_at,created_by,changed_at,changed_by) "
+                         "VALUES('media-variant',%s,10,%s,%s,%s,'central',%s,'central')",
                          (shown.asset_id + "." + recipe, recipe,
                           Jsonb({"media_type": "image/jpeg", "width": 10, "height": 10,
-                                 "duration": None, "made_from": made_from}), created))
+                                 "duration": None, "made_from": made_from}), created, created))
 
     answer = test_client.get(PHOTOS + shown.asset_id, headers=AUTH)
     assert answer.status_code == 200

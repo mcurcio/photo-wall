@@ -1755,9 +1755,9 @@ def test_check_this_frame_counts_as_the_planner_does(page, registry, tmp_path):
         failed = request_photo(cache, portrait_b.asset.asset_id)
         with registry.db.transaction() as conn:   # its preparation failed for good
             conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,reason,"
-                         "retry_not_before,seq,updated_at) VALUES(%s,%s,'terminal',"
-                         "'asset_missing',NULL,nextval('job_outcome_seq'),%s)",
-                         (prepare_lock(failed), PrepareMedia.job_name, now))
+                         "retry_not_before,seq,changed_at,created_at,created_by,changed_by) VALUES(%s,%s,'terminal',"
+                         "'asset_missing',NULL,nextval('job_outcome_seq'),%s,%s,'central','central')",
+                         (prepare_lock(failed), PrepareMedia.job_name, now, now))
         response = page.request.get(
             origin + f"/v1/operator/sources/{quote(SOURCE, safe='')}/candidates"
             f"?frame_id={VALID_FRAME}", headers={"Authorization": "Bearer " + ADMIN})

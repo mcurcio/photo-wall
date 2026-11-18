@@ -72,7 +72,7 @@ def _prepared(registry, asset_id, *, variant=None, failure=None, retry_not_befor
     with registry.db.transaction() as conn:
         key = repository.variant_key_in(conn, asset_id)
         conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,reason,retry_not_before,"
-                     "seq,updated_at) VALUES(%s,%s,%s,%s,%s,nextval('job_outcome_seq'),0)",
+                     "seq,changed_at,created_at,created_by,changed_by) VALUES(%s,%s,%s,%s,%s,nextval('job_outcome_seq'),0,0,'central','central')",
                      (prepare_lock(key), PrepareMedia.job_name,
                       "terminal" if retry_not_before is None else "transient", failure,
                       retry_not_before))

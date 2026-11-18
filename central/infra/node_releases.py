@@ -1,14 +1,18 @@
-"""PostgreSQL node release records: the ONE deployment writer, the per-tag observations and the
+"""PostgreSQL node release records: the ONE deployment writer, each tag's release row and the
 wanted deployments (auto-ingest design §6; a version per Pi, Q2 A, 2026-10-16).
 
-Tables: `node_release_catalog` (058, immutable), `node_release_observations` (065),
-`node_deployments` / `node_deployment_assets` / `node_base_managers` / `node_environment_catalog`
-(054, 065); each Pi's version is on its `devices` row (121, central/infra/player_versions.py).
+Table: `node_releases` (121b), one row per tag: its upstream observation, its catalogue entry (the
+manifest, NULL until a good one arrives) and its deployment (NULL until written); each Pi's
+version is on its `devices` row (121, central/infra/player_versions.py). A deployment's files are
+its `asset_references` rows, owner `node-deployment:<hex>`.
 
 * **Deployment writer** (`write_deployment`): used by the release sync's ingest. An existing id
-  with the same canonical bytes is a `duplicate`, with other bytes a refusal.
-* **Observations** (`_observe`, from `ingest` and `record_problem`): a tag's stable flag and
-  manifest decide whether it is in the window.
+  with the same canonical bytes is a `duplicate`, with other bytes a refusal. A base's manager pins
+  and an environment's reference are read from the other stored deployment documents: never a
+  second copy.
+* **Observations** (`_OBSERVED`, from `ingest` and `record_problem`): a tag's stable flag and
+  deployment decide whether it is in the window. A tag once catalogued keeps its manifest: any
+  other one is `node_release_identity_conflict`.
 * **Wanted deployments** (`wanted_deployments`): the window (newest 3 stable tags with a
   deployment), every Pi's version and every Pi's previous one (`boot_policy.kept`). The ONE
   definition of "wanted"; `fleet_desired_assets` turns it into keys.
@@ -36,6 +40,7 @@ from central.content_catalog.deployment import (
     deployment_for_release,
     deployment_id_for,
     encode_node_deployment,
+    parse_node_deployment,
 )
 from central.content_catalog.ports import NodeReleaseRefused, StableDeployment
 from central.infra.asset_records import PgAssetRecords
@@ -45,6 +50,7 @@ from central.kernel.assets import AssetKey, AssetKind, AssetReference, OriginLoc
 from central.kernel.job_types import AssetJob, FetchOsImage, FetchSealedEnvironment
 from central.kernel.ports import NODE_RELEASE_INVALID, PublishedRelease
 from central.kernel.transactions import Transaction
+from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_release import NodeReleaseV2, parse_node_release
 from contracts.time import Clock
 
@@ -52,6 +58,7 @@ IDENTITY_CONFLICT: Final = "node_release_identity_conflict"
 # Serializes deployment writers with each other only: taken alone, so a release sync never waits on
 # a device's requests (the device fence, `central/fleet/device_fence.py`) and none waits on it.
 RELEASE_WRITER_LOCK: Final = 734118330
+_OWNER: Final = "node-deployment:"
 
 
 class _Older(Exception):
@@ -82,7 +89,7 @@ def _built_deployment(identity: str, manifest: NodeReleaseV2,
 
 
 def deployment_job(kind: str, identity: str) -> AssetJob:
-    """The fetch job of one `node_deployment_assets` row."""
+    """The fetch job of one of a deployment's asset references."""
     if kind == AssetKind.OS_IMAGE:
         return FetchOsImage(tarball_sha256=identity)
     if kind == AssetKind.SEALED_ENVIRONMENT:
@@ -90,60 +97,90 @@ def deployment_job(kind: str, identity: str) -> AssetJob:
     raise ValueError(f"not a node deployment asset kind: {kind!r}")
 
 
+def _owner(deployment_id: UUID) -> str:
+    """The `asset_references` owner of a deployment's files."""
+    return _OWNER + deployment_id.hex
+
+
+def _manager_pins(deployment: NodeDeployment) -> dict[str, Any]:
+    """What a base's managers are pinned to: the same for every deployment of that base."""
+    base = deployment.base
+    return {"base_abi": base.base_abi, "graphics_abi": base.graphics_abi,
+            "plugin_abi": base.plugin_abi,
+            "primary": asdict(deployment.manager_primary),
+            "fallback": asdict(deployment.manager_fallback) if deployment.manager_fallback else None}
+
+
+def _stored_deployments(conn: Any) -> list[NodeDeployment]:
+    """Every stored deployment, parsed from its release row's document."""
+    return [parse_node_deployment(bytes(row["deployment_document"])) for row in conn.execute(
+        "SELECT deployment_document FROM node_releases WHERE deployment_document IS NOT NULL").fetchall()]
+
+
+def environment_reference_in(conn: Any, environment_sha256: str) -> AppEnvironmentRefV2 | None:
+    """The reference any stored deployment names for this digest (`write_deployment` holds every
+    deployment to one reference per digest); None when none names it."""
+    for deployment in _stored_deployments(conn):
+        for item in deployment.environments():
+            if item.environment_sha256 == environment_sha256:
+                return item
+    return None
+
+
+def _release_of(conn: Any, deployment: NodeDeployment) -> str | None:
+    """The tag whose catalogued manifest builds `deployment` (`deployment_id_for`), None: none."""
+    with_app = deployment.app_environment is not None
+    for row in conn.execute("SELECT tag, manifest_sha256 FROM node_releases WHERE left(manifest_sha256, 12)=%s",
+                            (deployment.deployment_id.hex[:12],)).fetchall():
+        if deployment_id_for(row["manifest_sha256"], with_app) == deployment.deployment_id:
+            return row["tag"]
+    return None
+
+
 def write_deployment(conn: Any, deployment: NodeDeployment, base_source: OriginLocator, *,
                      clock: Clock) -> bool:
-    """Write one deployment and its asset references; True when it already existed (duplicate).
+    """Write one deployment onto the release row whose manifest built it, and its asset
+    references; True when it already existed (duplicate, nothing written).
 
     Refuses (`NodeReleaseRefused`) an existing id with other bytes, a base whose manager pins
-    differ from the ones it was first published with, and an environment digest already
-    catalogued with another reference. `base_source` names where the base tarball is
-    downloaded. Holds the release writer's lock (`RELEASE_WRITER_LOCK`) before its first read, so
-    two writers of one release serialize and the second sees the first's rows."""
+    differ from another stored deployment of the same base, an environment digest another stored
+    deployment names with another reference, and a deployment no catalogued release builds.
+    `base_source` names where the base tarball is downloaded. Holds the release writer's lock
+    (`RELEASE_WRITER_LOCK`) before its first read, so two writers serialize and the second sees
+    the first's deployment."""
     canonical = encode_node_deployment(deployment)
     conn.execute("SELECT pg_advisory_xact_lock(%s)", (RELEASE_WRITER_LOCK,))
-    prior = conn.execute("SELECT document FROM node_deployments WHERE deployment_id=%s",
+    prior = conn.execute("SELECT deployment_document FROM node_releases WHERE deployment_id=%s",
                          (deployment.deployment_id,)).fetchone()
     if prior:
-        if bytes(prior["document"]) != canonical:
+        if bytes(prior["deployment_document"]) != canonical:
             raise NodeReleaseRefused("node_deployment_identity_conflict")
         return True
-    base = deployment.base
-    manager_pins = {"base_abi": base.base_abi, "graphics_abi": base.graphics_abi,
-                    "plugin_abi": base.plugin_abi,
-                    "primary": asdict(deployment.manager_primary),
-                    "fallback": asdict(deployment.manager_fallback) if deployment.manager_fallback else None}
-    pins = conn.execute("SELECT document FROM node_base_managers WHERE base_content_key=%s",
-                        (base.content_key,)).fetchone()
-    if pins and pins["document"] != manager_pins:
+    base, others = deployment.base, _stored_deployments(conn)
+    pins = _manager_pins(deployment)
+    if any(other.base.content_key == base.content_key and _manager_pins(other) != pins for other in others):
         raise NodeReleaseRefused("node_base_manager_pins_immutable")
+    known = {item.environment_sha256: item for other in others for item in other.environments()}
     environments = deployment.environments()
-    catalogued = {}
-    for item in environments:
-        old = conn.execute("SELECT reference FROM node_environment_catalog WHERE environment_sha256=%s",
-                           (item.environment_sha256,)).fetchone()
-        if old and old["reference"] != asdict(item):
-            raise NodeReleaseRefused("node_environment_identity_conflict")
-        catalogued[item.environment_sha256] = old is not None
-    if not pins:
-        conn.execute("INSERT INTO node_base_managers(base_content_key,document) VALUES(%s,%s)",
-                     (base.content_key, Jsonb(manager_pins)))
-    conn.execute("INSERT INTO node_deployments(deployment_id,document,published_at) VALUES(%s,%s,%s)",
-                 (deployment.deployment_id, canonical, clock.utc()))
-    owner = "node-deployment:" + deployment.deployment_id.hex
+    if any(known.get(item.environment_sha256, item) != item for item in environments):
+        raise NodeReleaseRefused("node_environment_identity_conflict")
+    tag = _release_of(conn, deployment)
+    if tag is None:
+        raise NodeReleaseRefused("node_deployment_unreleased")
+    now = clock.utc()
+    conn.execute("UPDATE node_releases SET deployment_id=%s, deployment_document=%s, published_at=%s, "
+                 "changed_at=%s, changed_by='central' WHERE tag=%s",
+                 (deployment.deployment_id, canonical, now, now, tag))
+    owner = _owner(deployment.deployment_id)
     references = [(AssetKey(AssetKind.OS_IMAGE, base.content_key),
                    AssetReference(owner, base_source, base.size_bytes, base.squashfs_sha256))]
     for item in environments:
-        if not catalogued[item.environment_sha256]:
-            conn.execute("INSERT INTO node_environment_catalog(environment_sha256,reference) VALUES(%s,%s)",
-                         (item.environment_sha256, Jsonb(asdict(item))))
         references.append((AssetKey(AssetKind.SEALED_ENVIRONMENT, item.environment_sha256),
             AssetReference(owner, OriginLocator(deployment.environment_sources[item.environment_sha256],
                 item.environment_sha256, item.size_bytes), item.size_bytes, item.environment_sha256)))
     records, tx = PgAssetRecords(clock), PgTransaction(conn)
     for key, reference in references:
         records.reference(tx, key, reference)
-        conn.execute("INSERT INTO node_deployment_assets(deployment_id,kind,identity,owner) VALUES(%s,%s,%s,%s)",
-                     (deployment.deployment_id, key.kind.value, key.identity, owner))
     return False
 
 
@@ -163,22 +200,11 @@ class WantedDeployments:
                                                       map(str, self.versions), map(str, self.previous)))
 
 
-def _stable_observed(conn: Any) -> dict[str, str]:
-    """tag -> its last good manifest digest, for every stable observed tag that has one."""
-    rows = conn.execute("SELECT tag, manifest_sha256 FROM node_release_observations "
-                        "WHERE NOT is_prerelease AND manifest_sha256 IS NOT NULL").fetchall()
-    return {row["tag"]: row["manifest_sha256"] for row in rows}
-
-
-def _deployment_ids(conn: Any, manifests: dict[str, str]) -> dict[str, UUID]:
-    """tag -> the deployment its manifest became (`deployment_id_for`)."""
-    if not manifests:
-        return {}
-    rows = conn.execute("SELECT manifest_sha256, document FROM node_release_catalog "
-                        "WHERE manifest_sha256 = ANY(%s)", (sorted(set(manifests.values())),)).fetchall()
-    with_app = {row["manifest_sha256"]: parse_node_release(bytes(row["document"])).app_environment
-                is not None for row in rows}
-    return {tag: deployment_id_for(sha, with_app[sha]) for tag, sha in manifests.items()}
+def _stable_deployments(conn: Any) -> dict[str, UUID]:
+    """tag -> its deployment, for every stable tag that has one."""
+    return {row["tag"]: row["deployment_id"] for row in conn.execute(
+        "SELECT tag, deployment_id FROM node_releases "
+        "WHERE NOT is_prerelease AND deployment_id IS NOT NULL").fetchall()}
 
 
 def wanted_deployments(conn: Any) -> WantedDeployments:
@@ -187,56 +213,65 @@ def wanted_deployments(conn: Any) -> WantedDeployments:
     covered by `SERVE_GRACE` while it reads and by read-through after: nothing else roots it."""
     rows = conn.execute("SELECT deployment_id, previous_deployment_id FROM devices "
                         "WHERE deployment_id IS NOT NULL").fetchall()
-    observed = _stable_observed(conn)
-    tags = window(observed)
-    ids = _deployment_ids(conn, {tag: observed[tag] for tag in tags})
-    return WantedDeployments(tuple((tag, ids[tag]) for tag in tags),
+    stable = _stable_deployments(conn)
+    return WantedDeployments(tuple((tag, stable[tag]) for tag in window(stable)),
                              frozenset(row["deployment_id"] for row in rows),
                              frozenset(row["previous_deployment_id"] for row in rows
                                        if row["previous_deployment_id"] is not None))
 
 
 def tag_deployments_in(conn: Any) -> dict[str, UUID]:
-    """tag -> the deployment its last good manifest became, for every observed tag that has one
-    (stable and pre-release)."""
-    rows = conn.execute("SELECT tag, manifest_sha256 FROM node_release_observations "
-                        "WHERE manifest_sha256 IS NOT NULL").fetchall()
-    return _deployment_ids(conn, {row["tag"]: row["manifest_sha256"] for row in rows})
+    """tag -> its deployment, for every tag that has one (stable and pre-release)."""
+    return {row["tag"]: row["deployment_id"] for row in conn.execute(
+        "SELECT tag, deployment_id FROM node_releases WHERE deployment_id IS NOT NULL").fetchall()}
 
 
 def deployment_jobs(conn: Any, deployments) -> dict[UUID, frozenset[AssetJob]]:
-    """Each deployment's asset jobs (`node_deployment_assets`)."""
+    """Each deployment's asset jobs (its `asset_references`, owner `node-deployment:<hex>`)."""
     ids = sorted(set(deployments), key=str)
     if not ids:
         return {}
+    owners = {_owner(deployment): deployment for deployment in ids}
     found: dict[UUID, set[AssetJob]] = {deployment: set() for deployment in ids}
-    for row in conn.execute("SELECT deployment_id, kind, identity FROM node_deployment_assets "
-                            "WHERE deployment_id = ANY(%s)", (ids,)).fetchall():
-        found[row["deployment_id"]].add(deployment_job(row["kind"], row["identity"]))
+    for row in conn.execute("SELECT owner, kind, identity FROM asset_references WHERE owner = ANY(%s)",
+                            (sorted(owners),)).fetchall():
+        found[owners[row["owner"]]].add(deployment_job(row["kind"], row["identity"]))
     return {deployment: frozenset(jobs) for deployment, jobs in found.items()}
 
 
-_OBSERVE = ("INSERT INTO node_release_observations(tag,is_prerelease,manifest_sha256,problem,"
-            "upstream_changed_at,upstream_asset_id,observed_at) "
-            "VALUES(%(tag)s,%(is_prerelease)s,%(manifest)s,%(problem)s,%(changed_at)s,%(asset_id)s,%(now)s) "
-            "ON CONFLICT(tag) DO UPDATE SET is_prerelease=EXCLUDED.is_prerelease,"
-            "manifest_sha256=COALESCE(EXCLUDED.manifest_sha256, node_release_observations.manifest_sha256),"
-            "problem=EXCLUDED.problem,upstream_changed_at=EXCLUDED.upstream_changed_at,"
-            "upstream_asset_id=EXCLUDED.upstream_asset_id,observed_at=EXCLUDED.observed_at "
-            f"WHERE {not_older('node_release_observations')} RETURNING tag")
+# A tag's observation: inserted with its catalogue entry (ingest) or its problem (record_problem);
+# on a known tag only the observation moves, under the not-older guard, and a manifest once
+# catalogued is kept (`coalesce`): the caller compares the returned manifest with its own.
+_OBSERVED = ("INSERT INTO node_releases(tag,is_prerelease,problem,upstream_changed_at,upstream_asset_id,"
+             "observed_at,manifest_sha256,revision,document,asset_locators,discovered_at,"
+             "created_at,created_by,changed_at,changed_by) "
+             "VALUES(%(tag)s,%(is_prerelease)s,%(problem)s,%(changed_at)s,%(asset_id)s,%(now)s,"
+             "%(manifest)s,%(revision)s,%(document)s,%(locators)s,%(discovered)s,%(now)s,'central',%(now)s,"
+             "'central') "
+             "ON CONFLICT(tag) DO UPDATE SET is_prerelease=EXCLUDED.is_prerelease,problem=EXCLUDED.problem,"
+             "upstream_changed_at=EXCLUDED.upstream_changed_at,upstream_asset_id=EXCLUDED.upstream_asset_id,"
+             "observed_at=EXCLUDED.observed_at,"
+             + ",".join(f"{column}=COALESCE(node_releases.{column},EXCLUDED.{column})"
+                        for column in ("manifest_sha256", "revision", "document", "asset_locators",
+                                       "discovered_at"))
+             + ",changed_at=EXCLUDED.changed_at,changed_by=EXCLUDED.changed_by "
+             f"WHERE {not_older('node_releases')} RETURNING manifest_sha256, asset_locators")
 
 
-def _observe(conn: Any, release: PublishedRelease, *, manifest: str | None, problem: str | None,
-             now: float) -> bool:
-    """Upsert the tag's observation: `is_prerelease` and `manifest_sha256` decide window
-    membership (`_stable_observed`)."""
+def _observe(conn: Any, release: PublishedRelease, *, problem: str | None, now: float,
+             catalogued: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Upsert the tag's observation (and, on a new tag, `catalogued`'s entry); the row's manifest
+    and locators after it, None when the observation is older than the stored one."""
     version = release.node_version
-    return conn.execute(_OBSERVE, {
-        "tag": release.tag, "is_prerelease": release.is_prerelease, "manifest": manifest,
-        "problem": problem, "now": now,
+    entry = catalogued or {}
+    return conn.execute(_OBSERVED, {
+        "tag": release.tag, "is_prerelease": release.is_prerelease, "problem": problem, "now": now,
         "changed_at": None if version is None else version.changed_at,
         "asset_id": None if version is None else version.asset_id,
-    }).fetchone() is not None
+        "manifest": entry.get("manifest"), "revision": entry.get("revision"),
+        "document": entry.get("document"), "locators": entry.get("locators"),
+        "discovered": None if catalogued is None else now,
+    }).fetchone()
 
 
 class PgNodeReleaseRecords:
@@ -253,19 +288,16 @@ class PgNodeReleaseRecords:
         with _release_data():
             manifest = parse_node_release(publication.manifest)
         identity = sha256(publication.manifest).hexdigest()
+        entry = {"manifest": identity, "revision": manifest.revision, "document": publication.manifest,
+                 "locators": Jsonb({role: asdict(locator) for role, locator in publication.assets})}
         try:
-            with conn.transaction():  # an older observation rolls back the catalog row too
-                conn.execute("INSERT INTO node_release_catalog VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                             (identity, release.tag, manifest.revision, publication.manifest,
-                              Jsonb({role: asdict(locator) for role, locator in publication.assets}), now))
-                prior = conn.execute("SELECT manifest_sha256, asset_locators FROM node_release_catalog "
-                                     "WHERE tag=%s AND revision=%s", (release.tag, manifest.revision)).fetchone()
-                if prior is None or prior["manifest_sha256"] != identity:
-                    raise NodeReleaseRefused(IDENTITY_CONFLICT)
-                if not _observe(conn, release, manifest=identity, problem=None, now=now):
+            with conn.transaction():  # an older observation or a refusal writes nothing
+                stored = _observe(conn, release, problem=None, now=now, catalogued=entry)
+                if stored is None:
                     raise _Older
-                deployment, source = _built_deployment(identity, manifest,
-                                                       prior["asset_locators"])
+                if stored["manifest_sha256"] != identity:
+                    raise NodeReleaseRefused(IDENTITY_CONFLICT)
+                deployment, source = _built_deployment(identity, manifest, stored["asset_locators"])
                 write_deployment(conn, deployment, source, clock=self._clock)
         except _Older:
             return False
@@ -273,11 +305,11 @@ class PgNodeReleaseRecords:
 
     def record_problem(self, tx: Transaction, release: PublishedRelease, problem: str, *,
                        now: float) -> bool:
-        return _observe(pg_connection(tx), release, manifest=None, problem=problem, now=now)
+        return _observe(pg_connection(tx), release, problem=problem, now=now) is not None
 
     def stable_deployments(self, tx: Transaction) -> tuple[StableDeployment, ...]:
         conn = pg_connection(tx)
-        ids = _deployment_ids(conn, _stable_observed(conn))
+        ids = _stable_deployments(conn)
         jobs = deployment_jobs(conn, ids.values())
         return tuple(StableDeployment(tag, str(ids[tag]), jobs[ids[tag]])
                      for tag in newest_first(ids))

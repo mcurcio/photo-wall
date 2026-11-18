@@ -14,10 +14,10 @@ from central.fleet.acceptance_query import load_current_app_control_in
 from central.fleet.device_fence import fence_in
 from central.fleet.node_app_links import load_current_node_app_link_for_player_in
 from central.fleet.node_sessions import NodeControlError, NodeSessions
+from central.infra.node_releases import environment_reference_in
 from central.infra.player_contact_store import heard_at_in
 from central.installation_repository import PostgresInstallationRepository
 from central.transaction_locks import acquire_runtime_locks
-from contracts.app_environment import AppEnvironmentRefV2
 from contracts.liveness import HEARD_WRITE_SECONDS
 from contracts.models import Plan, Readiness
 from contracts.node_boot import parse_node_boot_offer
@@ -85,8 +85,7 @@ class NodeAcceptance:
                     old["operator_audit_ref"]) != (device_id, generation, environment_sha256, operator_audit_ref):
                     raise NodeControlError("node_qualification_identity_conflict")
             else:
-                if not conn.execute("SELECT 1 FROM node_environment_catalog WHERE environment_sha256=%s",
-                                    (environment_sha256,)).fetchone():
+                if environment_reference_in(conn, environment_sha256) is None:
                     raise NodeControlError("node_environment_unknown", 404)
                 conn.execute("INSERT INTO node_app_qualifications VALUES(%s,%s,%s,%s,%s,%s)",
                              (qualification_id, device_id, generation, environment_sha256,
@@ -127,9 +126,7 @@ class NodeAcceptance:
             if boot is None:
                 raise NodeControlError("node_qualification_base_unavailable")
             offer = parse_node_boot_offer(bytes(boot["offer_payload"]))
-            reference = conn.execute("SELECT reference FROM node_environment_catalog WHERE environment_sha256=%s",
-                                     (link.environment_sha256,)).fetchone()
-            environment = AppEnvironmentRefV2(**reference["reference"])
+            environment = environment_reference_in(conn, link.environment_sha256)
             if (environment.base_abi, environment.graphics_abi, environment.plugin_abi) != (
                     offer.base.base_abi, offer.base.graphics_abi, offer.base.plugin_abi):
                 raise NodeControlError("node_qualification_base_abi_mismatch")

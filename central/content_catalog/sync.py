@@ -8,10 +8,10 @@ One sync is: read the ETag and list releases, sending the ETag only if it was st
 transaction per release, then store the ETag; then a tail transaction (`Prefetch`). Withdrawal of tags gone upstream is not in the MVP.
 
 Jobs may run in any order (docs/central-idempotent-jobs.md rule 2, §6). A release that attaches
-a node manifest (auto-ingest design §6.1) gets one transaction of its own. It writes the release
-catalog row, the deployment (`NodeReleaseRecords.ingest`, deployment id derived from the
-manifest digest, with its base tarball and sealed environments referenced) and the tag's
-observation, under the not-older guard on the node manifest asset's `(updated_at, id)`. An equal
+a node manifest (auto-ingest design §6.1) gets one transaction of its own. It writes the tag's
+release row (`node_releases`): its observation, its manifest and its deployment
+(`NodeReleaseRecords.ingest`, deployment id derived from the manifest digest, with its base
+tarball and sealed environments referenced), under the not-older guard on the node manifest asset's `(updated_at, id)`. An equal
 version re-applies, so a stale equal-version observation can land after a fresh one: the hourly
 full listing repairs it. A refusal of that release (a malformed manifest the origin already
 turned into `node_problem`, or an identity / pin / environment conflict the ingest raises) rolls
