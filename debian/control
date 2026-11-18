@@ -118,7 +118,6 @@ Depends: weston (= ${weston:Version}),
  python3-cairo,
  photo-wall-common (= ${pw-version:photo-wall-common}),
  photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
- photo-wall-node-central-session (= ${pw-version:photo-wall-node-central-session}),
  ${shlibs:Depends},
  ${misc:Depends}
 Description: Photo Wall display host

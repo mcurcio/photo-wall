@@ -78,7 +78,6 @@ FROZEN_EXEMPTIONS: Final[Mapping[str, frozenset[str]]] = {
     SESSION_CONTRACT: frozenset({
         "appliance.host.host_runner -> appliance.central_session.*",
         "appliance.node.manager_desired -> appliance.central_session.*",
-        "appliance.display_host.service -> appliance.central_session.*",
         "appliance.apps.broker_runner -> appliance.central_session.*",
         "appliance.node.app_link -> appliance.central_session.*",
         "appliance.apps.online_broker -> appliance.central_session.*",

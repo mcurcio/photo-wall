@@ -127,7 +127,7 @@ def test_the_handoffs_hold_each_outputs_newest_binding():
     )
     from nodeapi.documents import Document
 
-    handoffs = Handoffs()
+    handoffs = Handoffs(SimpleNamespace(withdrawals={}, grants={}))
     ignored = SimpleNamespace(document=lambda output_id, document: None)
     feed = document_feed(ignored, ignored, ignored, ignored, ignored, handoffs)
     power = OutputPower(Power.ON, (), "2099-01-01T00:00:00Z", Darkness.DISPLAY_OFF, None)

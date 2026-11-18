@@ -1,8 +1,10 @@
 """Linux base DisplayHost controller with a root-only broker ingress.
 
 This entry point does not accept app self-reported authority or expose a network
-listener. Central transport and calibration Save remain separate owners. The
-bounded local event feed is observation only and acknowledges no Runtime commit.
+listener. It hands each Output to the Player on the Pi alone (`handoff.Handoffs`: the Output
+document's Frame binding and the app broker's current run; decision 0034, S4b part 4), never by a
+request to Central. The bounded local event feed is observation only and acknowledges no Runtime
+commit.
 """
 
 from __future__ import annotations
@@ -86,14 +88,13 @@ from .weston import (
     SurfaceGrant,
     WestonBackend,
     _pairs,
-    _surface,
 )
 
 log = logging.getLogger(__name__)
 
 # The display feed for node readers (root, pw-health): the `events` op only, over the kernel
 # feed socket. The root-only ingress (`<runtime>/ingress.sock`, display_paths.INGRESS_SOCKET) keeps
-# every operation; its mode is INGRESS_MODE (group pw-display, so the app broker, root without
+# its operations (`app_run`, `outputs`, `events`); its mode is INGRESS_MODE (group pw-display, so the app broker, root without
 # CAP_DAC_OVERRIDE, can connect through its supplementary group), and any peer not uid 0 is refused.
 FEED_SOCKET = Path("/run/photo-wall-display-feed/feed.sock")
 INGRESS_MODE: Final = 0o660
@@ -457,14 +458,13 @@ class CentralCardWiring:
 
 
 def settle(controller: Controller, backend: WestonBackend, wiring: CentralCardWiring) -> None:
-    """The main loop's pass before it waits: every pending shell event observed, the retiring
-    service ticked, each Output's Position trial settled (`Trials.settle`: its leases on this Pi's
-    clock), then Central's cards told what this pass changed (`tell_cards`; no change: nothing
-    sent)."""
+    """The main loop's pass before it waits: every pending shell event observed, each Output's
+    handoff decided (`Handoffs.settle`: the Output document's binding and the broker's run), each
+    Output's Position trial settled (`Trials.settle`: its leases on this Pi's clock), then
+    Central's cards told what this pass changed (`tell_cards`; no change: nothing sent)."""
     while backend.pending:
         controller.observe()
-    if controller.service is not None:
-        controller.service.tick()
+    controller.handoffs.settle(controller.host)
     if controller.trials is not None:
         controller.trials.settle(controller.host)
     tell_cards(wiring.cards, backend)
@@ -574,14 +574,13 @@ def picture_controller(backend: WestonBackend, sink: PictureReports, ddc: DdcCha
 
 class Controller:
     def __init__(self, backend: WestonBackend, *, reports: OutputReporter | None = None,
-                 power: OutputPowerController | None = None):
+                 power: OutputPowerController | None = None, handoffs: Handoffs | None = None):
         self.backend = backend
         self._power = power   # each Output's power in force, for the feed snapshot
         self.host = backend.initialize()
         self.feed = Feed(256)
-        self.service = None
         self.trials: Trials | None = None
-        self.handoffs = Handoffs()   # main shares its own with the document feed
+        self.handoffs = Handoffs(backend) if handoffs is None else handoffs   # shared with the document feed
         self.reports = reports
         if reports is not None:
             reports.observe(self.host.states())
@@ -594,15 +593,8 @@ class Controller:
             return
         if self.trials is not None and isinstance(observed, CompositorPresentation):
             self.trials.presented(observed, self.host)
-        if self.service is not None:
-            self.service.observe(observed)
         self.feed.append(
             type(observed).__name__, asdict(observed) if is_dataclass(observed) else observed
-        )
-
-    def revise(self, decision) -> None:
-        self.backend.revise(
-            decision.surface, decision.decision_id, expires_boottime_ms=decision.expires_boottime_ms
         )
 
     def outputs_snapshot(self) -> list[dict]:
@@ -633,25 +625,6 @@ class Controller:
                 raise ValueError("app_run")
             self.handoffs.run(None if value["run"] is None else AppRun.of(value["run"]))
             return {}
-        if operation == "candidate":
-            surface = _surface(value["surface"])
-            grant = SurfaceGrant(surface, value["uid"], value.get("starting_new"))
-            grant_id = self.backend.allow(grant)
-            try:
-                self.host.offer(surface)
-            except Exception:
-                self.backend.grants.pop(surface.output.output_id, None)
-                raise
-            return {"grant_id": grant_id}
-        if operation == "withdraw":
-            output = value["output_id"]
-            return {"state": asdict(self.host.authorized_withdrawal(output))}
-        if operation == "handoff":
-            import time
-
-            surface = _surface(value["surface"])
-            state = self.host.authorize_handoff(surface, now_ms=time.monotonic_ns() // 1_000_000)
-            return {"handoff_id": state.handoff_id}
         raise ValueError("display_operation_unsupported")
 
 
@@ -712,6 +685,8 @@ def main() -> None:
     config = {}
     if args.config is not None:
         config = json.loads(args.config.read_bytes(), object_pairs_hook=_pairs)
+        # `central`, `serial` and `offer_id` stay accepted and unused until S4c removes them from
+        # the handoff writer: no request to Central decides a handoff (decision 0034, S4b part 4).
         if type(config) is not dict or set(config) - {"runtime", "central", "serial", "offer_id"}:
             raise ValueError("display_config_fields")
         if "runtime" in config:
@@ -749,7 +724,7 @@ def main() -> None:
         regions.start()
         cards.start()
         trials = Trials(backend, BusTrialSink(session))    # the Position trial (WestonBackend.trial)
-        handoffs = Handoffs()                              # each Output's binding and the broker's run
+        handoffs = Handoffs(backend)                       # the handoff: each Output's binding and the broker's run
         feed = document_feed(power, picture, turns, regions, trials, handoffs)
         session.desired.on_change(feed)
         for output_id in OUTPUT_IDS:     # what arrived before the callback, once more (idempotent)
@@ -759,19 +734,8 @@ def main() -> None:
                     feed(key, present)
         controller = Controller(backend, reports=OutputReporter(PowerObservations(power, picture, turns),
                                                                 mode=backend.current_mode),
-                                power=power)
+                                power=power, handoffs=handoffs)
         controller.trials = trials
-        controller.handoffs = handoffs
-        if config:
-            from .service import DisplayService
-
-            controller.service = DisplayService(
-                controller,
-                central=config["central"],
-                serial=config["serial"],
-                offer_id=UUID(config["offer_id"]),
-                runtime=args.runtime,
-            )
         with (
             _stopping(power, picture, turns, regions, cards, cec),
             feed_listener(controller) as feeds,

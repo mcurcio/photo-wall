@@ -310,25 +310,31 @@ credentials; replies carry `accepted`. Current operations are:
   turn when the run changed or the socket is a new one (a new controller holds no run);
   otherwise its turn costs a `stat`. The controller holds it in its `Handoffs`
   ([`appliance/display_host/handoff.py`](../appliance/display_host/handoff.py)) beside each
-  Output's Frame binding from its Output document (`OutputBinding`), the inputs of the Pi's own
-  handoff; answers `{}`.
+  Output's Frame binding from its Output document (`OutputBinding`); answers `{}`.
 - `outputs`: observed domain state and current OutputKeys.
-- `candidate`: exact `surface` identity, Player `uid`, and `starting_new: true`;
-  returns a fresh `grant_id`. The caller must already own stop/start/configuration
-  authority. This transport does not grant it.
-- `handoff`: exact `surface`; returns a new `handoff_id` after local authorization.
-  The response is not a diagnostic-removal acknowledgment.
-- `withdraw`: one explicit `output_id`; no other Output receives a command.
 - `events`: bounded observation records after a local sequence, including separate
   app presentation, diagnostic presentation, and handoff records. Overflow marks
   `stream_gap`; receipt does not settle a Run or create Central command authority.
 
+### The handoff from the Output document
+
+The handoff is the Pi's decision (decision 0034, S4b part 4). At each pass of its main loop the
+controller works out, per Output, the Surface wanted (`handoff.wanted_surface`: the Output's key,
+the broker's current run and the bound Frame's id, generation and configuration revision; none
+while the Output is disconnected, unbound or no run is current) and takes the one step the rule
+gives (`handoff.next_step`, first match wins): it **offers** the Output to the wanted run (a
+grant for the Player's uid, `starting_new`, after the process check), **hands off** once the
+compositor presented the candidate's buffer, **revises** an admitted surface whose Frame only
+gained a configuration revision (a Position Save, within `REVISION_TTL_MS`, the shell's window),
+and **withdraws** any held surface that is no longer wanted (an unbinding document, a rebind, a
+new run), then offers the new one. A step the backend refuses (a stale identity) is logged once
+and tried again no sooner than `RETRY_MS`. No ingress op grants, hands off or withdraws: only the
+rule does. No request to Central decides any of it; Central's part is the Output document.
+
 The shell delivers candidate/admitted/revoked grant events over the custom
 Wayland protocol only to clients matching the exact kernel process identity.
 An admitted event follows the matching post-removal presentation, not the handoff
-request. It permits surface use, not authored execution without Runtime authority. Central upload wraps local records with the admitted DisplayHost
-producer/session and validates identity at ingress; the local sequence alone does
-not authenticate a Central evidence stream.
+request. It permits surface use, not authored execution without Runtime authority.
 
 ## The Player's screens
 

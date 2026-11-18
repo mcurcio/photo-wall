@@ -37,7 +37,6 @@ CI_SKIP_ALLOWLIST = (
     "actual in.tftpd integration requires root",  # no CI test job runs as root
     "Linux root credential socket fixture",  # likewise root
     "set PHOTO_WALL_PROVENANCE_BASE_IMAGE",  # a locally built core image only
-    "set PHOTO_WALL_NATIVE_DISPLAY_IMAGE",  # a built Linux display image only
     "interactive local fixture only",  # a developer's interactive fixture
     "set PHOTO_WALL_RELEASE_TOKEN",  # a fork pull request gets no token
     "set PHOTO_WALL_NODE_PID1_FIXTURE",  # node-pid1.yml builds it and requires every scenario
