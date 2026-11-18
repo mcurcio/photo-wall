@@ -10,9 +10,12 @@ service the console's route for it calls, and none writes.
 | releases | the Releases page's read (GET /v1/operator/releases), its newest RELEASES_LISTED deployable releases |
 | versions | `PlayerVersions.versions` |
 
-The wakes: the room-lights document's NOTIFY (handed in by the worker's one LISTEN, `wake`), else a
-look every CENTRAL_STATE_LOOK_SECONDS, which covers every other change (a bind, an enrolment, a
-download, an install) within that time, in any Central process.
+The wakes (`wake`, from the worker's LISTENs, central/node_bus_wiring.py): the room-lights
+document's NOTIFY, a Player state commit's (PLAYER_STATE_CHANNEL: a bind, an enrolment, a
+retirement, every Coordination and Registry write) and a release's (RELEASES_CHANNEL: a release, a
+deployment, an Install), from any Central process; else a look every CENTRAL_STATE_LOOK_SECONDS,
+which bounds a missed wake and covers what sends none (a download finishing, an address HostCore
+reports).
 """
 from __future__ import annotations
 
@@ -49,7 +52,7 @@ from contracts.central_api import (
 )
 from contracts.time import Clock
 
-CENTRAL_STATE_LOOK_SECONDS: Final = 2.0   # how often Central's hub session looks again with no wake
+CENTRAL_STATE_LOOK_SECONDS: Final = 60.0   # how long Central's hub session waits for a wake before it looks again
 
 
 class PgCentralStateReads:
@@ -109,8 +112,8 @@ class PgCentralStateReads:
 
 
 class PgStateWakes:
-    """hub_api.StateWakes: `changed` returns at a `wake` (the room-lights document changed, from any
-    thread) or after CENTRAL_STATE_LOOK_SECONDS, whichever is first."""
+    """hub_api.StateWakes: `changed` returns at a `wake` (something Central's state is read from
+    changed, from any thread) or after CENTRAL_STATE_LOOK_SECONDS, whichever is first."""
 
     def __init__(self, look_seconds: float = CENTRAL_STATE_LOOK_SECONDS) -> None:
         self._look = look_seconds

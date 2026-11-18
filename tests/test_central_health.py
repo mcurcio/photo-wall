@@ -52,6 +52,7 @@ class FakeCoordinator:
         self.block_first = False
         self.block_after_first = False
         self.release = threading.Event()
+        self.wake_at = None   # the Advance's own: None rests the loop SCHEDULER_IDLE_SECONDS
 
     def advance(self):
         self.calls += 1
@@ -66,7 +67,7 @@ class FakeCoordinator:
                 failure = StepFailure(step="planning", reason=scheduler_failure(exc))
             return Advance(projection=None, failures=(failure,))
         projection = type("Projection", (), {"acquisitions": (), "measurements": ()})()
-        return Advance(projection=projection, failures=())
+        return Advance(projection=projection, failures=(), wake_at=self.wake_at)
 
 
 class NoReconciliation:
@@ -198,6 +199,7 @@ def test_scheduler_staleness_uses_monotonic_time_not_utc_steps(monkeypatch):
     clock = ManualClock(1000)
     coordinator = FakeCoordinator()
     coordinator.block_after_first = True
+    coordinator.wake_at = 0   # the next tick is due at once: the second one blocks
     app = app_with(FakeDatabase(), coordinator, clock, monkeypatch, enabled=True)
     with TestClient(app) as client:
         try:
@@ -205,7 +207,7 @@ def test_scheduler_staleness_uses_monotonic_time_not_utc_steps(monkeypatch):
             assert client.get("/healthz").status_code == 200
             clock.step_utc(10_000)
             assert client.get("/healthz").status_code == 200
-            clock.advance(11)
+            clock.advance(central_app.SCHEDULER_MAX_AGE + 2)   # past its due tick's allowance
             stale = client.get("/healthz")
             assert stale.status_code == 503
             assert stale.json()["scheduler"]["status"] == "stale"
@@ -264,6 +266,7 @@ def test_a_failing_step_never_skips_a_later_one():
     scheduler = Scheduler(Raising(), coordinator, measured.append, ManualClock(1000),
                           retentions={"node-retention": lambda: 0})
     scheduler.tick()
+    scheduler.retain()
     health = scheduler.health()
     assert coordinator.calls == 1 and measured == [()]
     assert {name: step.status for name, step in health.steps.items()} == {
@@ -286,6 +289,7 @@ def test_a_coordinator_that_raises_fails_its_three_steps_and_skips_measurement()
     scheduler = Scheduler(NoReconciliation(), FakeCoordinator(), lambda _requests: 0, clock,
                           retentions={"node-retention": lambda: 0})
     scheduler.tick()
+    scheduler.retain()
     scheduler.coordinator = Broken()
     clock.advance(5)
     scheduler.tick()

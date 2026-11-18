@@ -1062,6 +1062,15 @@ class Runtime:
     def project(self, now: float, *, max_events: int = 10000) -> RuntimeView:
         return self._copy().advance(now, max_events=max_events)
 
+    def next_event_at(self, now: float, *, max_events: int = 10000) -> float | None:
+        """The earliest instant after `now` at which the Runtime's state changes by itself (a window
+        opens, a Run's cycle or child starts, an outro ends, a queued activation expires), on a
+        detached copy advanced to `now`; None when nothing is scheduled. The scheduler's wake
+        (central/scheduler.py)."""
+        projected = self._copy()
+        projected.advance(now, max_events=max_events)
+        return projected._next_event()
+
     def operator_projection(self, now: float, *, max_events: int = 10000) -> OperatorProjection:
         """One restore and advance, as `project`, read for the operator console."""
         projected = self._copy()

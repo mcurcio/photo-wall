@@ -11,8 +11,11 @@ The room-lights document rides WALL (`ROOM_LIGHTS_KEY`), the same for every Pi a
 desired bucket or the control State: `RoomLightsWall` is that key's one writer, woken by
 `NOTIFY room_lights` (every recorded change, from any process: Home Assistant's states, a House ›
 Lights edit, a Pi's sensor), when WALL is ensured, and every WALL_RECHECK_SECONDS, which heals a
-put that failed; WallWriter itself never writes it. The same NOTIFY wakes Central's hub session, which
-otherwise looks again every CENTRAL_STATE_LOOK_SECONDS.
+put that failed; WallWriter itself never writes it. The same NOTIFY wakes Central's hub session. A
+second LISTEN hears a Player state commit (PLAYER_STATE_CHANNEL: every Coordination and Registry
+write, a bind, an enrolment, a retirement) and a release write (RELEASES_CHANNEL: a release, a
+deployment, an Install) and wakes both Central's hub session and FleetHub's look; with no wake they
+look again only every CENTRAL_STATE_LOOK_SECONDS and HUB_LOOK_SECONDS.
 
 Stop order: FleetHub and Central's hub session first, then the supervisors. Every look points the supervisors at the enrolled
 set and starts any link not running, so a look still in flight after the supervisors stopped would
@@ -48,6 +51,8 @@ from central.infra.light_sensor_judge import HOST_STATE_STREAM, LightSensorJudge
 from central.infra.listen import listen
 from central.infra.node_link_store import LINK_STORE_CONCURRENCY, PgLinkStores, PgWallMarks
 from central.infra.node_links import NodeLinks
+from central.infra.node_releases import RELEASES_CHANNEL
+from central.infra.player_state_wakes import PLAYER_STATE_CHANNEL
 from central.infra.player_versions import PgPlayerVersions
 from central.infra.room_light_store import ROOM_LIGHTS_CHANNEL, PgRoomLights
 from central.room_light.ports import RoomLightsDocuments
@@ -69,6 +74,7 @@ WALL_RECHECK_SECONDS: Final = 5.0     # how often the writer looks again for a w
 _LISTEN_RETRY_SECONDS: Final = 1.0
 _HUB_SESSION_RETRY_SECONDS: Final = 2.0   # the hub session's first connect, tried again until it answers
 _LISTEN_APPLICATION: Final[PoolName] = "photo-wall-room-lights"
+_FLEET_LISTEN_APPLICATION: Final[PoolName] = "photo-wall-fleet-wakes"
 
 
 class WallSource(Protocol):
@@ -144,6 +150,11 @@ class NodeBus:
         self.room_lights.wake()
         self._state_wakes.wake()
 
+    def _fleet_changed(self) -> None:
+        """A Player state or release commit: Central's state and FleetHub look again."""
+        self._state_wakes.wake()
+        self._fleet.wake()
+
     async def run(self, stop: asyncio.Event) -> None:
         """Until `stop` or the first failure; then FleetHub stops, then both supervisors, then the
         bus's database closes. Raises the first failure."""
@@ -167,12 +178,17 @@ class NodeBus:
             self._db.dsn, ROOM_LIGHTS_CHANNEL, application=_LISTEN_APPLICATION, connected=self._room_lights_changed,
             notified=lambda _payload: self._room_lights_changed(), retry_seconds=_LISTEN_RETRY_SECONDS),
             name="node-bus room light wakes")
+        fleet_listening = asyncio.create_task(listen(
+            self._db.dsn, (PLAYER_STATE_CHANNEL, RELEASES_CHANNEL), application=_FLEET_LISTEN_APPLICATION,
+            connected=self._fleet_changed, notified=lambda _payload: self._fleet_changed(),
+            retry_seconds=_LISTEN_RETRY_SECONDS), name="node-bus fleet wakes")
         try:
             await asyncio.wait((stopping, fleet, *supervisors, walling, serving), return_when=asyncio.FIRST_COMPLETED)
         finally:
             stopping.cancel()
             listening.cancel()
             room_listening.cancel()
+            fleet_listening.cancel()
             fleet_stop.set()
             await asyncio.wait((walling, serving))
             await asyncio.wait((fleet,))
@@ -181,7 +197,7 @@ class NodeBus:
             for links in self._links:   # a supervisor that failed no longer stops what a last look started
                 with contextlib.suppress(Exception):
                     await links.track(())
-            await asyncio.wait((listening, room_listening))
+            await asyncio.wait((listening, room_listening, fleet_listening))
             await asyncio.to_thread(self._db.close)
         if failures:
             raise failures[0]

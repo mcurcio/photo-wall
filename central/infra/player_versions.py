@@ -33,7 +33,12 @@ from central.fleet.node_bus_hub import enrolled_devices_in
 from central.fleet.node_commands import NodeCommands
 from central.fleet.node_observations import NodeObservations, host_facts_of
 from central.fleet.node_sessions import NodeControlError
-from central.infra.node_releases import PgNodeReleaseRecords, deployment_jobs, tag_deployments_in
+from central.infra.node_releases import (
+    PgNodeReleaseRecords,
+    deployment_jobs,
+    notify_releases_in,
+    tag_deployments_in,
+)
 from central.infra.transactions import PgTransaction, pg_connection
 from central.kernel.job_types import Prefetch
 from central.kernel.ports import AssetReadiness
@@ -177,6 +182,7 @@ class PgPlayerVersions:
         now = self._clock.utc()
         conn.execute("UPDATE devices SET deployment_id=%s, version_changed_at=%s, changed_at=%s, changed_by='node' "
                      "WHERE device_id=%s", (UUID(default.deployment_id), now, now, device_id))
+        notify_releases_in(conn)
         return default.deployment_id
 
     def advance_installs(self) -> None:
@@ -199,6 +205,9 @@ class PgPlayerVersions:
                       and running.get(row["device_id"]) == parse_node_deployment(bytes(row["deployment_document"])).base.tag):
                     conn.execute("UPDATE devices SET install=NULL, changed_at=%s, changed_by='central' "
                                  "WHERE device_id=%s", (now, row["device_id"]))
+                else:
+                    continue
+                notify_releases_in(conn)
         for device_id, version in restart:
             self._restart(device_id, version)
 
@@ -214,6 +223,7 @@ class PgPlayerVersions:
             "WHERE device_id=%(device)s",
             {"device": device_id, "deployment": deployment, "install": install, "now": self._clock.utc(),
              "by": by})
+        notify_releases_in(conn)
         if self._publisher is not None:
             self._publisher.publish(Prefetch(), within=PgTransaction(conn))
 

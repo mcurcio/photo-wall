@@ -8,7 +8,11 @@ The row is written only when the Runtime changed apart from its processed instan
 0034, class A): a tick that only moved time writes nothing, takes no transaction id and so wakes
 no Player. The stored `now` is therefore the time of the last change, possibly hours old; the one
 reader that depends on its freshness, `Runtime._pending_windows`, is kept right by Settings ›
-House, which saves the processed instant (`save_processed_in`) before it moves the house's time."""
+House, which saves the processed instant (`save_processed_in`) before it moves the house's time.
+
+A save wakes the scheduler and every Player socket when it commits (`notify_if_written_in`,
+central/infra/player_state_wakes.py), whoever wrote it: an operator's Scene, Program or activation
+is planned at once, not at the scheduler's next rest (central/scheduler.py)."""
 
 from contextlib import contextmanager
 
@@ -17,6 +21,7 @@ from psycopg.types.json import Jsonb
 from central.actor import Actor
 from central.db import Database
 from central.infra.house_store import house_time_in
+from central.infra.player_state_wakes import notify_if_written_in
 from central.runtime import Runtime
 from central.transaction_locks import RUNTIME_LOCK as RUNTIME_LOCK
 from central.transaction_locks import acquire_runtime_locks
@@ -84,6 +89,7 @@ class RuntimeStore:
             "changed_by=EXCLUDED.changed_by",
             {"snapshot": Jsonb(after), "at": at, "by": by},
         )
+        notify_if_written_in(conn)
 
     def read(self) -> Runtime:
         with self.db.transaction() as conn:

@@ -1112,7 +1112,7 @@ Each V2 Node runs its own NATS server, the **bus**, and dials one leaf link to C
 | Leaf | the bus's one remote | dials the origin the Node booted from, `ws://` for http or `wss://` for https, host and explicit port, path `/photo-wall/bus/leafnode` |
 | Leaf bridge | Central's HTTP app, when `PHOTO_WALL_HUB_LEAF_URL` is set | relays that WebSocket, unchanged, to the hub's leaf listener; without the variable the route refuses |
 | Hub | Compose service `hub` (production: a pod sidecar) | nats-server from the file the worker writes, memory store only; no LAN port |
-| Bus side | one task in the media worker, when `PHOTO_WALL_HUB_URL` is set | every 2 s: writes the hub configuration for the enrolled Players, reloads the hub when the file or the hub's server id changed, re-creates WALL after a hub restart, closes leaves of Players no longer enrolled, and runs one fleet and one show link per enrolled Player |
+| Bus side | one task in the media worker, when `PHOTO_WALL_HUB_URL` is set | at each Player state or release commit (its NOTIFY), whenever the hub's server id or its leaves change (asked of the hub every 2 s) and at least every 60 s: writes the hub configuration for the enrolled Players, reloads the hub when the file or the hub's server id changed, re-creates WALL after a hub restart, closes leaves of Players no longer enrolled, and runs one fleet and one show link per enrolled Player |
 
 **Configuration.**
 

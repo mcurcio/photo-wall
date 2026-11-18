@@ -28,6 +28,7 @@ PoolName = Literal[
     "photo-wall-player-state",     # LISTEN, central/infra/player_state_wakes.py
     "photo-wall-output-documents", # LISTEN, central/infra/display_store.py
     "photo-wall-room-lights",      # LISTEN, central/node_bus_wiring.py
+    "photo-wall-fleet-wakes",      # LISTEN, central/node_bus_wiring.py: Player state and releases
     "photo-wall-outcome-feed",     # LISTEN, central/infra/outcome_feed.py
     "photo-wall-demo",             # scripts/demo_wall.py
     "photo-wall-test",             # tests only

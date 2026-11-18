@@ -101,11 +101,35 @@ class StepFailure:
 
 @dataclass(frozen=True)
 class Advance:
-    """One tick of the coordinator: the projection planning offered (None when planning failed)
-    and every step that failed."""
+    """One tick of the coordinator: the projection planning offered (None when planning failed),
+    every step that failed, and `wake_at`: the earliest instant its state changes by itself (the
+    Runtime's next event, the planner's next renewal boundary while a Player has layers, the next
+    due cue; None when nothing is due). The scheduler sleeps until then (central/scheduler.py)."""
 
     projection: Projection | None
     failures: tuple[StepFailure, ...]
+    wake_at: float | None = None
+
+
+def next_due_cue_in(conn, now: float) -> float | None:
+    """The next instant after `now` at which settle may grant a cue by itself: a cue entering its
+    preparation window (`starts_at - PREPARE_SECONDS`, `_commit_due`) or a pending cue's deadline
+    (its grant stops being all-or-nothing, central/cue_start.py `starts_whole`); None when none is
+    due. A Player's readiness grants earlier, and its commit wakes the scheduler itself."""
+    row = conn.execute(
+        "SELECT min(at) AS at FROM (SELECT starts_at-%(prepare)s AS at FROM coordination_groups "
+        "WHERE status!='skipped' AND valid_until>%(now)s UNION ALL SELECT deadline FROM "
+        "coordination_groups WHERE status='pending' AND valid_until>%(now)s) due WHERE at>%(now)s",
+        {"prepare": PREPARE_SECONDS, "now": now}).fetchone()
+    return row["at"]
+
+
+def _renewal_at(projection: Projection, quantum: float) -> float | None:
+    """The planner's next renewal boundary (its horizon moves on there, `Coordinator._plan`), while
+    some Player is offered layers; None when none is: an empty plan has nothing to renew early."""
+    if not any(proposal.layers for proposal in projection.players):
+        return None
+    return (math.floor(projection.now / quantum) + 1) * quantum
 
 
 def identity(prefix: str, parts) -> str:
@@ -604,26 +628,31 @@ class Coordinator:
         failure: planning that fails leaves the Runtime moved on and the commits settled."""
         failures: list[StepFailure] = []
         projection: Projection | None = None
+        wakes: list[float | None] = []
         for step in ("runtime", "planning", "settle"):
             try:
                 if step == "runtime":
-                    self._advance_runtime()
+                    wakes.append(self._advance_runtime())
                 elif step == "planning":
                     projection = self._plan()
+                    wakes.append(_renewal_at(projection, self.limits.renewal_seconds))
                 else:
-                    self._settle()
+                    wakes.append(self._settle())
             except Exception as exc:
                 failures.append(StepFailure(step=step, reason=scheduler_failure(exc)))
-        return Advance(projection=projection, failures=tuple(failures))
+        return Advance(projection=projection, failures=tuple(failures),
+                       wake_at=min((at for at in wakes if at is not None), default=None))
 
-    def _advance_runtime(self) -> None:
+    def _advance_runtime(self) -> float | None:
         """The Runtime's current state moves to now (Program windows open and close, Runs end),
-        saved alone, so no later step can hold it back."""
+        saved alone, so no later step can hold it back. Answers the Runtime's next event."""
         with self._transaction() as conn, self.runtime.edit(
                 conn, by="scheduler", command="advance") as runtime:
             # A scheduler waiting on either lock must advance at the committed
             # serialization cut, not at the time it first requested the cut.
-            runtime.advance(self.clock.utc())
+            now = self.clock.utc()
+            runtime.advance(now)
+            return runtime.next_event_at(now)
 
     def _plan(self) -> Projection:
         """Pure future planning over the saved Runtime (read, never written here) and atomic
@@ -787,8 +816,9 @@ class Coordinator:
         self._offer(conn, plan, groups)
         self._record_selected(conn, plan, projection)
 
-    def _settle(self) -> None:
-        """Commit the cues that are due and clean up expired offers and locks (their pins go with them)."""
+    def _settle(self) -> float | None:
+        """Commit the cues that are due and clean up expired offers and locks (their pins go with
+        them). Answers the next due cue (`next_due_cue_in`)."""
         with self._transaction() as conn:
             now = self.clock.utc()
             configurations = self._configurations(conn, report=False, by="scheduler")
@@ -801,6 +831,7 @@ class Coordinator:
                     for configuration in configurations.values()
                 },
             )
+            return next_due_cue_in(conn, now)
 
     def _record_selected(self, conn, plan: Plan, projection: Projection) -> None:
         """Roadmap 5a: record what each layer of an offered plan shows, for the layers whose

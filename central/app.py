@@ -96,6 +96,7 @@ from central.room_light_routes import mount_room_light_routes
 from central.runtime import RuntimeConflict, Scene, SceneInUse, SceneOnWall, SceneWriteRefused
 from central.runtime_store import RuntimeStore
 from central.scheduler import Scheduler
+from central.scheduler import run_scheduler as run_scheduler_until_cancelled
 from central.source_names import SourceInUse, SourceNameService
 from central.tuning_history_routes import mount_tuning_history_routes
 from central.version import central_version as installed_central_version
@@ -270,11 +271,11 @@ def create_app(
     async def run_scheduler_loop():
         scheduler_loop.update(running=True, stopped=False)
         try:
-            while True:
-                # Every step runs and reports on its own; a tick itself never fails.
-                await asyncio.to_thread(app.state.scheduler.tick)
-                scheduler_loop["last_tick"] = clock.utc()
-                await asyncio.sleep(1)
+            # Every step runs and reports on its own; a tick itself never fails. It ticks at the
+            # tick's own answer or at a commit's wake (central/scheduler.py `run_scheduler`).
+            await run_scheduler_until_cancelled(
+                app.state.scheduler, player_state_wakes,
+                ticked=lambda: scheduler_loop.update(last_tick=clock.utc()))
         finally:
             scheduler_loop.update(running=False, stopped=True)
 
@@ -413,8 +414,8 @@ def create_app(
     @app.get("/healthz")
     def health():
         """503 only when Central cannot serve: the database is down, or the scheduler loop has
-        not completed a tick yet ("starting"), has not completed one within SCHEDULER_MAX_AGE
-        ("stale") or has stopped. A completed tick with a failing step is 200 "degraded", each
+        not completed a tick yet ("starting"), has not completed one within SCHEDULER_MAX_AGE of
+        when it was due ("stale") or has stopped. A completed tick with a failing step is 200 "degraded", each
         step's facet beside it (its reason sanitized: type and where, never a message)."""
         try:
             database = db.healthy()
@@ -438,11 +439,16 @@ def create_app(
             elif not scheduler_loop["running"]:
                 status = "stopped"
             else:
+                # The loop rests until its next tick is due: it is stale once that tick is late
+                # by more than SCHEDULER_MAX_AGE, never merely for resting.
+                due = ticks.due_monotonic
+                resting = 0.0 if due is None else max(0.0, due - ticks.last_tick_monotonic)
+                allowance = SCHEDULER_MAX_AGE + resting
                 try:
                     age = clock.monotonic() - ticks.last_tick_monotonic
                 except Exception:
-                    age = SCHEDULER_MAX_AGE + 1
-                status = ("stale" if not 0 <= age <= SCHEDULER_MAX_AGE
+                    age = allowance + 1
+                status = ("stale" if not 0 <= age <= allowance
                           else "degraded" if degraded else "ok")
             scheduler["status"] = status
             serving = database and status in ("ok", "degraded")

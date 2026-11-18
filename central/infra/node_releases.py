@@ -17,6 +17,10 @@ its `asset_references` rows, owner `node-deployment:<hex>`.
   deployment), every Pi's version and every Pi's previous one (`boot_policy.kept`). The ONE
   definition of "wanted"; `fleet_desired_assets` turns it into keys.
 
+Every release and deployment write here, and every Pi's version write (an Install,
+central/infra/player_versions.py), sends `notify_releases_in` in its transaction: Central's hub
+state and FleetHub's look wake on it (central/node_bus_wiring.py), never a timer of their own.
+
 No writer here takes a lock for the cache cleaner: the cleaner re-reads the desired set right
 before each unlink (mark and sweep, `central/assets/maintenance.py`), and a file removed anyway
 is restored by read-through. Every writer raises `NodeReleaseRefused` before its first write (or
@@ -59,6 +63,13 @@ IDENTITY_CONFLICT: Final = "node_release_identity_conflict"
 # a device's requests (the device fence, `central/fleet/device_fence.py`) and none waits on it.
 RELEASE_WRITER_LOCK: Final = 734118330
 _OWNER: Final = "node-deployment:"
+RELEASES_CHANNEL: Final = "photo_wall_releases"   # payload: empty; every release, deployment and Install write
+
+
+def notify_releases_in(conn: Any) -> None:
+    """Wake whoever LISTENs RELEASES_CHANNEL when the caller's transaction commits (nothing when it
+    rolls back, a savepoint's included)."""
+    conn.execute("SELECT pg_notify(%s, '')", (RELEASES_CHANNEL,))
 
 
 class _Older(Exception):
@@ -181,6 +192,7 @@ def write_deployment(conn: Any, deployment: NodeDeployment, base_source: OriginL
     records, tx = PgAssetRecords(clock), PgTransaction(conn)
     for key, reference in references:
         records.reference(tx, key, reference)
+    notify_releases_in(conn)
     return False
 
 
@@ -264,7 +276,7 @@ def _observe(conn: Any, release: PublishedRelease, *, problem: str | None, now: 
     and locators after it, None when the observation is older than the stored one."""
     version = release.node_version
     entry = catalogued or {}
-    return conn.execute(_OBSERVED, {
+    stored = conn.execute(_OBSERVED, {
         "tag": release.tag, "is_prerelease": release.is_prerelease, "problem": problem, "now": now,
         "changed_at": None if version is None else version.changed_at,
         "asset_id": None if version is None else version.asset_id,
@@ -272,6 +284,9 @@ def _observe(conn: Any, release: PublishedRelease, *, problem: str | None, now: 
         "document": entry.get("document"), "locators": entry.get("locators"),
         "discovered": None if catalogued is None else now,
     }).fetchone()
+    if stored is not None:
+        notify_releases_in(conn)
+    return stored
 
 
 class PgNodeReleaseRecords:

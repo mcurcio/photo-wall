@@ -2,18 +2,24 @@
 design §7.2 rows "Hub runner and Fleet generator", "NodeLink supervisors", §9.6, §9.7, §11; errata
 E-E3D-CUT-6, -7).
 
-Every look (HUB_LOOK_SECONDS) reads the enrolled serials, writes the hub's configuration file for
+A look runs at a wake (`wake`: a Player state commit, which every enrolment and retirement is, or a
+release, deployment or Install write, heard on the worker's LISTEN, central/node_bus_wiring.py), when
+the hub moved (every HUB_PING_SECONDS Fleet asks the hub, not the database, for its server id and the
+leaves it holds: a hub that restarted, stopped answering, or links or drops a leaf), and at most
+HUB_LOOK_SECONDS after the last one, which bounds a missed wake. A look reads the enrolled serials, writes the hub's configuration file for
 them when its bytes differ (atomically, on the volume the hub starts from), and points both NodeLink
 supervisors at them. Whenever the hub has not loaded what Fleet last wrote (the file changed, or the
 hub's server id is one Fleet has not reloaded: worker start, the hub came back), Fleet reloads it
 twice (X6) and lets WallWriter re-create WALL past every mirror with Central's wall documents. A
 leaf the hub still holds for an account no longer enrolled is closed (a reload keeps it). So
-enrolment and retirement need no hook at their write sites: the next look sees them. A hub that does
-not answer is retried at the next look; the file and the links are kept meanwhile. A database error
+enrolment and retirement need no hook of their own at their write sites: the look their commit wakes
+sees them. A hub that does not answer is retried at the next look; the file and the links are kept meanwhile. A database error
 is Central's own failure and ends the loop.
 
 Each look also runs the worker's per-look work it was handed (`each_look`: a running install moves
-on, central/infra/player_versions.py `advance_installs`), in a thread after the hub was kept.
+on, central/infra/player_versions.py `advance_installs`), in a thread after the hub was kept. A
+download finishing sends no wake of its own (its ready write is the asset cache's): the look
+HUB_LOOK_SECONDS bounds moves that install on.
 
 Presence (S4): every look whose `HubAdmin.linked()` answered records, in one transaction, which
 enrolled Nodes' leaves the hub holds and that the hub was reachable; a look that did not reach the
@@ -46,7 +52,8 @@ HUB_LISTENERS: Final = HubListeners(            # in-container invariants of the
     server_name="photo-wall-hub", client_host="0.0.0.0", client_port=4222,
     websocket_host="0.0.0.0", websocket_port=8080, leaf_host="127.0.0.1", leaf_port=7422,
     monitor_port=8222, max_memory_store_bytes=4 * 1024 * 1024)
-HUB_LOOK_SECONDS: Final = 2.0
+HUB_LOOK_SECONDS: Final = 60.0   # the longest between looks with no wake and no move of the hub
+HUB_PING_SECONDS: Final = 2.0    # how often Fleet asks the hub (never the database) whether it moved
 
 
 def enrolled_serials_in(conn) -> frozenset[str]:
@@ -95,25 +102,68 @@ class FleetHub:
         self._writer: WallWriter | None = None
         self._loaded: str | None = None   # the hub's server id Fleet last reloaded and ensured WALL in
         self._wall_ensured = False
+        self._seen: tuple[str, frozenset[str]] | None = None   # the hub as the last look left it
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._woken: asyncio.Event | None = None
 
     @property
     def wall(self) -> WallWriter | None:
         """For E5/E8's wall writes: None until connected and WALL ensured once."""
         return self._writer if self._wall_ensured else None
 
+    def wake(self) -> None:
+        """Something a look reads may have changed: look now. Safe from any thread."""
+        loop, woken = self._loop, self._woken
+        if loop is not None and woken is not None:
+            with contextlib.suppress(RuntimeError):   # that loop is closed: nobody waits there any more
+                loop.call_soon_threadsafe(woken.set)
+
     async def run(self, stop: asyncio.Event) -> None:
-        """Look every HUB_LOOK_SECONDS until `stop`, then close both hub clients. A database error
-        propagates."""
+        """Look at once, then at each wake, each move of the hub and at most HUB_LOOK_SECONDS
+        apart, until `stop`; then close both hub clients. A database error propagates."""
+        loop = asyncio.get_running_loop()
+        self._loop, self._woken = loop, asyncio.Event()
         try:
             while not stop.is_set():
+                self._woken.clear()
                 await self._look()
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(stop.wait(), HUB_LOOK_SECONDS)
+                ceiling = loop.time() + HUB_LOOK_SECONDS
+                while not stop.is_set() and not self._woken.is_set():
+                    left = ceiling - loop.time()
+                    if left <= 0:
+                        break
+                    waking = asyncio.ensure_future(self._woken.wait())
+                    stopping = asyncio.ensure_future(stop.wait())
+                    try:
+                        await asyncio.wait((waking, stopping), timeout=min(HUB_PING_SECONDS, left),
+                                           return_when=asyncio.FIRST_COMPLETED)
+                    finally:
+                        waking.cancel()
+                        stopping.cancel()
+                    if not stop.is_set() and not self._woken.is_set() and await self._moved():
+                        break
         finally:
+            self._loop = self._woken = None
             for client in (self._admin, self._writer):
                 if client is not None:
                     await client.close()
             self._admin = self._writer = None
+
+    async def _moved(self) -> bool:
+        """Whether the hub differs from how the last look left it (another server id, other leaves,
+        or it answers again), asked of the hub alone. A hub that stops answering is recorded
+        unreachable here, at once (a look would only ask it again)."""
+        try:
+            if self._admin is None:
+                self._admin = await HubAdmin.connect(self._hub_url, FLEET_SYSTEM_USER)
+            seen = (await self._admin.identity(), await self._admin.linked())
+        except HubUnavailable as error:
+            if self._seen is not None:
+                log.info("hub: %s", error)
+                self._seen = None
+                await asyncio.to_thread(self._record_unreachable)
+            return False
+        return seen != self._seen
 
     async def _look(self) -> None:
         serials = await asyncio.to_thread(self._enrolled)
@@ -123,6 +173,7 @@ class FleetHub:
             await self._keep(serials)
         except HubUnavailable as error:
             log.info("hub: %s", error)
+            self._seen = None
             await asyncio.to_thread(self._record_unreachable)
         for links in self._links:
             await links.track(serials)
@@ -146,6 +197,7 @@ class FleetHub:
             self._loaded = identity
         linked = await self._admin.linked()
         await asyncio.to_thread(self._record_presence, linked)
+        self._seen = (identity, linked)
         stray = linked - {account_id(serial) for serial in serials}
         if stray:   # retired: a reload keeps a removed account's leaf (erratum E-E3D-S2-2)
             await self._admin.unlink(stray)

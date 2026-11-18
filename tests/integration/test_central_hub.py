@@ -10,8 +10,10 @@ reads WALL. 1: worker start: the file lists the enrolled Node, its leaf links, i
 WALL starts at mark 0 + 1 + K and the Node's wall view holds Central's `timing`. 2: a device enrolled
 while running is in the file, linked, recorded and receives WALL (the second reload wires its
 account's WALL consumer API, X6). 3: the hub is killed and starts empty from the same file: WALL is
-re-created at the recorded mark + 1 + K with Central's current `timing` on both Nodes, and the drains
-resume in the Nodes' unchanged epochs. 4: a retired device leaves the file and the hub (its leaf is closed:
+re-created at the recorded mark + 1 + K with Central's current `timing` on both Nodes (Fleet sees the
+hub's new server id when it next asks the hub, no wake), and the drains resume in the Nodes' unchanged
+epochs. An enrolment and a retirement are looked at when their commit wakes Fleet (`wake`, here
+called as the worker's LISTEN would). 4: a retired device leaves the file and the hub (its leaf is closed:
 a reload keeps it), its links stop, and its records stay.
 """
 from __future__ import annotations
@@ -38,7 +40,7 @@ from support.devices import seed_device
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import Database
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners
-from central.fleet.node_bus_hub import HUB_LOOK_SECONDS, FleetHub
+from central.fleet.node_bus_hub import HUB_PING_SECONDS, FleetHub
 from central.infra.node_link_store import PgLinkStores, PgWallMarks
 from central.infra.node_links import NodeLinks
 from contracts.node_link import WALL_STREAM, Pipe, account_id, central_user
@@ -182,6 +184,7 @@ def test_fleet_keeps_the_hub_with_the_enrolled_set(database, tmp_path):
             # Node starts once the hub holds its account (Central's links are in): a leaf that dials
             # before then delays the Node's first WALL by about 40 s (nats-server; erratum E-E3D-S2-3).
             _enrol(database, SECOND)
+            fleet.wake()   # the enrolment's commit wakes the look (the worker's LISTEN, central/node_bus_wiring.py)
             enrolled = time.monotonic()
             left = lambda: ENROL_SECONDS - (time.monotonic() - enrolled)  # noqa: E731
 
@@ -224,6 +227,7 @@ def test_fleet_keeps_the_hub_with_the_enrolled_set(database, tmp_path):
             held = await _records(database, SECOND, STATE)
             with database.transaction() as conn:
                 conn.execute("UPDATE devices SET retired_at=2 WHERE device_id=%s", (device_id_for_serial(SECOND),))
+            fleet.wake()   # the retirement's commit wakes the look
             admin = await HubAdmin.connect(hub.client_url, FLEET_SYSTEM_USER)
             try:
                 async def retired():
@@ -233,7 +237,7 @@ def test_fleet_keeps_the_hub_with_the_enrolled_set(database, tmp_path):
             finally:
                 await admin.close()
             sessions[SECOND].events.emit("record.shown", b"after-retirement", schema_major=1)
-            await asyncio.sleep(3 * HUB_LOOK_SECONDS)   # three looks and a drain's worth
+            await asyncio.sleep(3 * HUB_PING_SECONDS)   # three of Fleet's asks of the hub and a drain's worth
             assert not any(row["data"] == b"after-retirement" for row in await _records(database, SECOND, RECORDS))
             assert await _records(database, SECOND, STATE) == held
             assert not any(task.done() for task in running)
