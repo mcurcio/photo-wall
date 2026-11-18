@@ -151,7 +151,7 @@ class DisplayPicture:
 
 @dataclass(frozen=True)
 class PictureSession:
-    """One open picture session on one Display (picture_sessions row). `began_at_change`: the
+    """One open picture session on one Display (its displays.picture_session). `began_at_change`: the
     Output's picture change at begin (0: none), so the befores come from later results;
     `hardware_before`: the first `before` the Pi reported per code in this session (slice S4);
     `test_pattern`: the session's test pattern ask, never in the draft (None: off); `restored_from`:

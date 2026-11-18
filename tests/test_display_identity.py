@@ -225,7 +225,7 @@ def test_one_serial_reported_by_two_outputs_at_once_is_shared(registry):
     _bind(registry, right, pi, "HDMI-A-2")
     _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
     _report(registry, "pi-a", "HDMI-A-2", SERIAL_DISPLAY)
-    assert _sql(registry, "SELECT maker, product, serial FROM shared_serials") == [
+    assert _sql(registry, "SELECT maker, product, serial FROM displays WHERE shared_serial") == [
         {"maker": "DEL", "product": 41200, "serial": "CN0F1X7K"}]
     second = _seen(registry, pi, "HDMI-A-2")
     assert (second["serial"], second["frame_id"]) == (None, right)

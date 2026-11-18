@@ -220,7 +220,7 @@ def test_hardware_46_and_software_114_are_set_apart_end_to_end_and_never_cost_po
         assert _done(client, session).status_code == 204
     stored = _display(registry, player)
     assert (stored["hardware_picture"], stored["software_contrast_percent"]) == ({"10": 46}, 114)
-    assert _sql(registry, "SELECT id FROM picture_sessions") == []
+    assert _sql(registry, "SELECT id FROM displays WHERE picture_session IS NOT NULL") == []
 
 
 def test_done_against_the_previous_document_is_refused(registry):
@@ -312,7 +312,8 @@ def test_an_abandoned_session_reverts_with_no_request(registry):
         session = _begin(client)
         _software(client, session, "contrast", 90, 1)
         assert _picture(registry).software.contrast_percent == 90
-        _sql(registry, "UPDATE picture_sessions SET idle_until = EXTRACT(EPOCH FROM clock_timestamp()) - 1")
+        _sql(registry, "UPDATE displays SET picture_session = jsonb_set(picture_session, '{idle_until}', to_jsonb(EXTRACT(EPOCH FROM clock_timestamp()) - 1)) "
+             "WHERE picture_session IS NOT NULL")
         assert _picture(registry).software.contrast_percent == 100
         ended = client.post(f"/v1/operator/picture-sessions/{session['session_id']}/keepalive", headers=AUTH)
         assert (ended.status_code, ended.json()) == (410, {"error": "session_ended"})
@@ -325,7 +326,8 @@ def test_the_sources_wait_ends_at_a_sessions_idle_deadline(registry):
     _bound(registry)
     with _client(registry) as client:
         _begin(client)
-    _sql(registry, "UPDATE picture_sessions SET idle_until = EXTRACT(EPOCH FROM clock_timestamp()) + 1")
+    _sql(registry, "UPDATE displays SET picture_session = jsonb_set(picture_session, '{idle_until}', to_jsonb(EXTRACT(EPOCH FROM clock_timestamp()) + 1)) "
+         "WHERE picture_session IS NOT NULL")
     source = DisplayDocuments(PgLinkStores(registry.db), DisplayWakes(),
                               times=DatabaseTransactionClock()).source(SERIAL, Pipe.FLEET)
 
@@ -638,3 +640,17 @@ def test_done_never_counts_a_report_for_a_document_whose_light_differs():
     assert not presented(draft, PictureDocument("HDMI-A-1", 3, {}, NEUTRAL_SOFTWARE, light=UPGRADE_DISPLAY_LIGHT),
                          report)
     assert presented(draft, PictureDocument("HDMI-A-1", 3, {}, NEUTRAL_SOFTWARE, light=draft.light), report)
+
+
+def test_a_display_holds_one_open_session(registry):
+    """One open picture session per Display (decision 0034: the session is on the Display's row): a
+    second begin on it, from the same Frame or through another, is refused while the first is live,
+    and the first stays. Mutation probe: let a second begin overwrite the first -> the second is
+    taken and this fails."""
+    _bound(registry)
+    with _client(registry) as client:
+        first = _begin(client)
+        again = client.post("/v1/operator/frames/kitchen/picture-sessions", headers=AUTH)
+        assert (again.status_code, again.json()["error"]) == (409, "session_open")
+    [held] = _sql(registry, "SELECT picture_session->>'id' AS id FROM displays WHERE picture_session IS NOT NULL")
+    assert held["id"] == first["session_id"]

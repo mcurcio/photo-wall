@@ -162,7 +162,7 @@ def _display_of(registry, player_id: str, output_id: str):
 
 def _shared(registry) -> list:
     with registry.db.transaction() as conn:
-        return conn.execute("SELECT serial FROM shared_serials").fetchall()
+        return conn.execute("SELECT serial FROM displays WHERE shared_serial").fetchall()
 
 
 def _presence(registry, serial: str, linked: bool) -> None:

@@ -107,8 +107,10 @@ def _sql(registry, sql: str, params=()) -> list[dict]:
 def _see_display(registry, frame_id: str = "node-f0") -> UUID:
     """A Display seen on the Frame's port and named by its Position, so the Frame stays ready."""
     display = uuid4()
-    _sql(registry, "INSERT INTO displays(id, maker, product, name, serial, first_seen_at, matched_lux, panel_black) "
-                   "VALUES (%s, 'SAM', 1, 'Samsung QN43Q8F', %s, 0, 1000.0, 0.0003)", (display, display.hex))
+    _sql(registry, "INSERT INTO displays(id, maker, product, name, serial, matched_lux, panel_black, created_at, "
+                   "created_by, changed_at, changed_by) "
+                   "VALUES (%s, 'SAM', 1, 'Samsung QN43Q8F', %s, 1000.0, 0.0003, 0, 'node', 0, 'node')",
+         (display, display.hex))
     _sql(registry, "UPDATE outputs o SET connected=true, display_id=%s, display_report='{}', display_reported_at=0 "
                    "FROM bindings b WHERE b.frame_id=%s AND o.player_id=b.player_id AND o.output_id=b.output_id",
          (display, frame_id))
@@ -335,8 +337,9 @@ def test_restore_refusals_in_order(registry):
     trial = node.begin()
     own = _history(registry)["entries"][0]["entry_id"]
     other_frame = _history(registry, "node-f1")["entries"][0]["entry_id"]
-    _sql(registry, "INSERT INTO displays(id, maker, product, name, serial, first_seen_at, matched_lux, panel_black) "
-                   "VALUES (%s, 'DEL', 2, 'Dell', 'other', 0, 1000.0, 0.0003)", (dell := uuid4(),))
+    _sql(registry, "INSERT INTO displays(id, maker, product, name, serial, matched_lux, panel_black, created_at, "
+                   "created_by, changed_at, changed_by) "
+                   "VALUES (%s, 'DEL', 2, 'Dell', 'other', 1000.0, 0.0003, 0, 'node', 0, 'node')", (dell := uuid4(),))
     other_turn = _entry(registry, turn=180)               # made for the screen hung upside down
     other_display = _entry(registry, display=dell)
     with pytest.raises(NodeControlError) as invalid:

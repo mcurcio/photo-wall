@@ -33,7 +33,7 @@ class TuningHistoryQueries(Protocol):
         ...
 
     def sent_picture_entry(self, player_id: str, output_id: str, picture_change: int) -> PictureEntryView:
-        """The sent picture entry of one port's picture change (picture_sent_entries' key; the
+        """The sent picture entry of one port's picture change (picture_history's sent key; the
         calibration target's QR names it, decision 0026): what Central sent that port then, in the
         picture history's entry shape. HistoryRefused("unknown_entry", 404) when the port has no
         such entry (never sent, trimmed, an unknown player or port, or a change below 1)."""

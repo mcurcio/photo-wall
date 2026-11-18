@@ -35,7 +35,7 @@ writer writes the row only when a column it holds changes, and stamps its audit 
   (`picture_history.sent_record`: a draft, the wall put back, or the kept values), so what Central
   sent at any time stays readable. Display tuning (decision 0024; migration 094): the Display's
   signal range is stored beside its picture and a session's draft carries it; the session's test
-  pattern (`picture_sessions.test_pattern`, `test_pattern_ask`) rides the picture document only
+  pattern (the session's `test_pattern`, `test_pattern_ask`) rides the picture document only
   while the session is live (`picture.session_test_pattern`). The source also wakes at the earliest idle deadline of a
   picture session on its Node's Displays, so an abandoned session's revert reaches the Pi with no
   reaper.
@@ -384,11 +384,12 @@ def _recognise(conn: Any, player_id: str, output_id: str, identity: DisplayIdent
         others = tuple(Sighting(row["player_id"], row["output_id"], _identity(row["display_identity"]))
                        for row in rows)
         if not serial_usable(sighting, others, ()):   # reported elsewhere at once: never usable again
-            conn.execute("INSERT INTO shared_serials(maker, product, serial, found_at) VALUES (%s, %s, %s, %s) "
-                         "ON CONFLICT DO NOTHING", (identity.maker, identity.product, identity.serial, now))
+            conn.execute("UPDATE displays SET shared_serial=TRUE, changed_at=%s, changed_by=%s WHERE maker=%s "
+                         "AND product=%s AND serial=%s AND NOT shared_serial",
+                         (now, by, identity.maker, identity.product, identity.serial))
             _rekey_shared(conn, identity, now, by=by)
     shared = {(row["maker"], row["product"], row["serial"]) for row in conn.execute(
-        "SELECT maker, product, serial FROM shared_serials WHERE maker=%s AND product=%s",
+        "SELECT maker, product, serial FROM displays WHERE maker=%s AND product=%s AND shared_serial",
         (identity.maker, identity.product)).fetchall()}
     bound = conn.execute("SELECT frame_id FROM bindings WHERE player_id=%s AND output_id=%s",
                          (player_id, output_id)).fetchone()
@@ -396,7 +397,7 @@ def _recognise(conn: Any, player_id: str, output_id: str, identity: DisplayIdent
                       bound_frame_id=None if bound is None else bound["frame_id"])
     if key is None:
         return recorded if identity == before else None
-    return _display_for(conn, key, identity, modes, size_mm, now)
+    return _display_for(conn, key, identity, modes, size_mm, now, by=by)
 
 
 def _rekey_shared(conn: Any, identity: DisplayIdentity, now: float, *, by: Actor) -> None:
@@ -413,7 +414,7 @@ def _rekey_shared(conn: Any, identity: DisplayIdentity, now: float, *, by: Actor
         held = _identity(row["display_identity"]) or identity
         key = display_key(held, serial_counts=False, bound_frame_id=row["frame_id"])
         modes, size_mm = _sighted(row["display_report"])
-        display_id = None if key is None else _display_for(conn, key, held, modes, size_mm, now)
+        display_id = None if key is None else _display_for(conn, key, held, modes, size_mm, now, by=by)
         _set_seen_display(conn, row["player_id"], row["output_id"], display_id, now, by=by)
         if display_id is not None:
             conn.execute("UPDATE frames SET position_display_id=%s WHERE id=%s AND position_display_id=%s",
@@ -428,7 +429,7 @@ def _sighted(report: Mapping[str, Any] | None) -> tuple[tuple[DisplayMode, ...],
 
 
 def _display_for(conn: Any, key: DisplayKey, identity: DisplayIdentity, modes: tuple[DisplayMode, ...],
-                 size_mm: tuple[int, int] | None, now: float) -> UUID:
+                 size_mm: tuple[int, int] | None, now: float, *, by: Actor) -> UUID:
     """The Display keyed `key`, made on its first sighting; its modes follow the latest sighting
     that states any, its size (width_mm, height_mm) the latest that states one."""
     where, value = ("serial", key.serial) if key.serial is not None else ("frame_id", key.frame_id)
@@ -438,18 +439,18 @@ def _display_for(conn: Any, key: DisplayKey, identity: DisplayIdentity, modes: t
         light = default_picture().light   # a new Display's light: the placeholder until the paper match
         width, height = size_mm or (None, None)
         conn.execute("INSERT INTO displays(id, maker, product, name, serial, frame_id, modes, width_mm, height_mm, "
-                     "first_seen_at, matched_lux, panel_black) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
-                     "ON CONFLICT DO NOTHING",
+                     "matched_lux, panel_black, created_at, created_by, changed_at, changed_by) "
+                     "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
                      (uuid.uuid4(), key.maker, key.product, identity.name, key.serial, key.frame_id,
-                      _modes_json(modes), width, height, now, light.matched_lux, light.black))
+                      _modes_json(modes), width, height, light.matched_lux, light.black, now, by, now, by))
         row = conn.execute(select, (key.maker, key.product, value)).fetchone()
     else:
         if modes:
-            conn.execute("UPDATE displays SET modes=%s WHERE id=%s AND modes IS DISTINCT FROM %s",
-                         (_modes_json(modes), row["id"], _modes_json(modes)))
+            conn.execute("UPDATE displays SET modes=%s, changed_at=%s, changed_by=%s WHERE id=%s "
+                         "AND modes IS DISTINCT FROM %s", (_modes_json(modes), now, by, row["id"], _modes_json(modes)))
         if size_mm is not None:
-            conn.execute("UPDATE displays SET width_mm=%s, height_mm=%s WHERE id=%s "
-                         "AND (width_mm, height_mm) IS DISTINCT FROM (%s, %s)", (*size_mm, row["id"], *size_mm))
+            conn.execute("UPDATE displays SET width_mm=%s, height_mm=%s, changed_at=%s, changed_by=%s WHERE id=%s "
+                         "AND (width_mm, height_mm) IS DISTINCT FROM (%s, %s)", (*size_mm, now, by, row["id"], *size_mm))
     return row["id"]
 
 
@@ -559,52 +560,67 @@ def _player_of(conn: Any, device_id: str, lock: str) -> str | None:
 
 # --- The Display's picture (decision 0022, the picture split, slice S2; migration 092) -----------
 
-def write_picture(conn: Any, display_id: UUID, record: PictureRecord) -> None:
+def write_picture(conn: Any, display_id: UUID, record: PictureRecord, *, by: Actor) -> None:
     """Store `record.picture` on the Display and append `record` as its next kept picture history
     entry, in the caller's transaction (a failed append fails the Done or Copy): the one kept picture
     write. First, when the stored values differ from the Display's newest kept entry, the change
-    made outside Photo Wall is recorded (`picture_history.unrecorded_record`).
-    ValueError("picture_history_kind") unless `record` is KEPT_DONE or KEPT_COPIED."""
+    made outside Photo Wall is recorded (`picture_history.unrecorded_record`). `by` stamps the
+    Display and both entries. ValueError("picture_history_kind") unless `record` is KEPT_DONE or
+    KEPT_COPIED."""
     if record.kind not in (PictureEntryKind.KEPT_DONE, PictureEntryKind.KEPT_COPIED):
         raise ValueError("picture_history_kind")
     row = conn.execute(f"SELECT {PICTURE_COLUMNS} FROM displays d WHERE d.id=%s FOR NO KEY UPDATE",  # noqa: S608
                        (display_id,)).fetchone()
     unrecorded = unrecorded_record(latest_kept_in(conn, display_id), stored_picture(row))
     if unrecorded is not None:
-        append_kept_in(conn, display_id, unrecorded)
+        append_kept_in(conn, display_id, unrecorded, by=by)
     fields = {**picture_fields(record.picture), "hardware_picture": Jsonb(dict(record.picture.hardware))}
-    conn.execute(f"UPDATE displays SET {', '.join(f + '=%s' for f in PICTURE_FIELDS)} WHERE id=%s",  # noqa: S608
-                 (*(fields[f] for f in PICTURE_FIELDS), display_id))
-    append_kept_in(conn, display_id, record)
+    conn.execute(f"UPDATE displays SET {', '.join(f + '=%s' for f in PICTURE_FIELDS)}, "  # noqa: S608
+                 "changed_at=%s, changed_by=%s WHERE id=%s",
+                 (*(fields[f] for f in PICTURE_FIELDS), _CLOCK.now_in(conn), by, display_id))
+    append_kept_in(conn, display_id, record, by=by)
 
 
-# A picture_sessions row `ps` gives these; `picture_session` reads them.
-_SESSION_COLUMNS: Final = (
-    "ps.id AS session_id, ps.display_id AS session_display_id, ps.frame_id AS session_frame_id, "
-    "ps.sequence AS session_sequence, ps.draft AS session_draft, ps.began_at_change, ps.hardware_before, "
-    "ps.touched_hardware, ps.touched_software, ps.idle_until AS session_idle_until, "
-    "ps.test_pattern AS session_test_pattern, ps.test_pattern_ask AS session_test_pattern_ask, "
-    "ps.restored_from AS session_restored_from")
+# A displays row `d` gives these: the Display's open picture session (`displays.picture_session`, a
+# JSON object: id, frame_id, sequence, draft, began_at_change, hardware_before, touched_hardware,
+# touched_software, idle_until, created_at, test_pattern, test_pattern_ask, restored_from; one per
+# Display by construction); `picture_session` reads them.
+_SESSION_COLUMNS: Final = "d.id AS session_display_id, d.picture_session"
 
 
 def picture_session(row: Mapping[str, Any]) -> PictureSession | None:
     """The picture session of a row selected with `_SESSION_COLUMNS` (None when it has none). It has
     no hard deadline: the console's keepalive holds it, and its idle deadline ends it."""
-    if row["session_id"] is None:
+    stored = row["picture_session"]
+    if stored is None:
         return None
-    return PictureSession(row["session_id"], row["session_display_id"], row["session_sequence"],
-                          stored_picture(row["session_draft"]), row["began_at_change"],
-                          {code: int(value) for code, value in row["hardware_before"].items()},
-                          frozenset(row["touched_hardware"]),
-                          frozenset(software_touch(name) for name in row["touched_software"]),
-                          Lease(row["session_idle_until"], None), _test_pattern_ask(row),
-                          row["session_restored_from"])
+    pattern = stored["test_pattern"]
+    return PictureSession(UUID(stored["id"]), row["session_display_id"], stored["sequence"],
+                          stored_picture(stored["draft"]), stored["began_at_change"],
+                          {code: int(value) for code, value in stored["hardware_before"].items()},
+                          frozenset(stored["touched_hardware"]),
+                          frozenset(software_touch(name) for name in stored["touched_software"]),
+                          Lease(stored["idle_until"], None),
+                          None if pattern is None else TestPatternAsk(TestPattern(pattern), stored["test_pattern_ask"]),
+                          None if stored["restored_from"] is None else UUID(stored["restored_from"]))
 
 
-def _test_pattern_ask(row: Mapping[str, Any]) -> TestPatternAsk | None:
-    """The session's test pattern ask of a row selected with `_SESSION_COLUMNS` (None: off)."""
-    pattern = row["session_test_pattern"]
-    return None if pattern is None else TestPatternAsk(TestPattern(pattern), row["session_test_pattern_ask"])
+def _session_json(session: PictureSession) -> dict[str, Any]:
+    """The fields of `picture_session` an edit changes, as stored (merged into the stored object)."""
+    pattern = session.test_pattern
+    return {"sequence": session.sequence, "draft": picture_fields(session.draft),
+            "touched_hardware": sorted(session.touched_hardware),
+            "touched_software": sorted(setting.value for setting in session.touched_software),
+            "idle_until": session.lease.idle_until, "hardware_before": dict(session.hardware_before),
+            "test_pattern": None if pattern is None else pattern.pattern.value,
+            "test_pattern_ask": None if pattern is None else pattern.ask,
+            "restored_from": None if session.restored_from is None else str(session.restored_from)}
+
+
+def _write_session(conn: Any, session: PictureSession, now: float, *, by: Actor) -> None:
+    """Merge `session`'s changing fields into its Display's stored session, stamped `by`."""
+    conn.execute("UPDATE displays SET picture_session = picture_session || %s, changed_at=%s, changed_by=%s "
+                 "WHERE id=%s", (Jsonb(_session_json(session)), now, by, session.display_id))
 
 
 def record_picture_report(conn: Any, player_id: str, report: PictureReport, now: float) -> None:
@@ -628,16 +644,14 @@ def record_picture_report(conn: Any, player_id: str, report: PictureReport, now:
             "changed_at=EXCLUDED.changed_at, changed_by=EXCLUDED.changed_by",
             (player_id, report.output_id, Jsonb(stored), now, now, now))
     row = conn.execute(f"SELECT {_SESSION_COLUMNS}, {PICTURE_COLUMNS}, o.picture_document "  # noqa: S608
-                       "FROM outputs o JOIN picture_sessions ps ON ps.display_id=o.display_id "
-                       "JOIN displays d ON d.id=ps.display_id "
-                       "WHERE o.player_id=%s AND o.output_id=%s FOR UPDATE OF ps, d",
+                       "FROM outputs o JOIN displays d ON d.id=o.display_id "
+                       "WHERE o.player_id=%s AND o.output_id=%s AND d.picture_session IS NOT NULL FOR UPDATE OF d",
                        (player_id, report.output_id)).fetchone()
     session = None if row is None else picture_session(row)
     if session is not None:
         kept = with_befores(session, report)
         if kept.hardware_before != session.hardware_before:
-            conn.execute("UPDATE picture_sessions SET hardware_before=%s WHERE id=%s",
-                         (Jsonb(dict(kept.hardware_before)), session.session_id))
+            _write_session(conn, kept, now, by="node")
         session = kept
     display = conn.execute(f"SELECT d.id AS d_id, {PICTURE_COLUMNS}, d.hardware_restore, "  # noqa: S608
                            "o.picture_document FROM outputs o JOIN displays d ON d.id=o.display_id "
@@ -647,11 +661,12 @@ def record_picture_report(conn: Any, player_id: str, report: PictureReport, now:
         return
     stored, restore = stored_picture(display), dict(display["hardware_restore"])
     if session is not None and not session.lease.live(now):
-        restore = {**restore, **_fold_session_in(conn, stored, session)}   # ended unseen: fold it now
+        restore = {**restore, **_fold_session_in(conn, stored, session, now, by="node")}   # ended unseen: fold it now
         session = None
     in_force = stored if session is None else session.draft
     if restore and restore_answered(restore, in_force, _stored_picture_document(display), report):
-        conn.execute("UPDATE displays SET hardware_restore='{}'::jsonb WHERE id=%s", (display["d_id"],))
+        conn.execute("UPDATE displays SET hardware_restore='{}'::jsonb, changed_at=%s, changed_by='node' WHERE id=%s",
+                     (now, display["d_id"]))
         notify_nodes_in(conn, _NODES_SEEING, (display["d_id"],))
 
 
@@ -838,9 +853,9 @@ def _until_next_deadline(conn: Any, device_id: str, now: float) -> float:
         "SELECT least((SELECT min(r.ends_at) FROM players p JOIN bindings b ON b.player_id=p.id "
         "JOIN power_requests r ON r.frame_id=b.frame_id WHERE p.device_id=%(device)s "
         "AND p.retired_at IS NULL AND r.ends_at > %(now)s), "
-        "(SELECT min(ps.idle_until) FROM players p JOIN outputs o ON o.player_id=p.id "
-        "JOIN picture_sessions ps ON ps.display_id=o.display_id WHERE p.device_id=%(device)s "
-        "AND p.retired_at IS NULL AND ps.idle_until > %(now)s)) AS deadline",
+        "(SELECT min((d.picture_session->>'idle_until')::float8) FROM players p JOIN outputs o "
+        "ON o.player_id=p.id JOIN displays d ON d.id=o.display_id WHERE p.device_id=%(device)s "
+        "AND p.retired_at IS NULL AND (d.picture_session->>'idle_until')::float8 > %(now)s)) AS deadline",
         {"device": device_id, "now": now}).fetchone()
     deadlines = [] if row["deadline"] is None else [row["deadline"]]
     house = house_time_in(conn)
@@ -896,7 +911,6 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
         "seen.region_change, seen.region_digest, seen.picture_change, f.calibration, "
         f"seen.picture_digest, COALESCE(f.turn, 0) AS turn, {_TEST_COLUMNS}, {SCREEN_COLUMNS} "
         "FROM outputs seen LEFT JOIN displays d ON d.id=seen.display_id "
-        "LEFT JOIN picture_sessions ps ON ps.display_id=d.id "
         f"LEFT JOIN bindings b ON b.player_id=seen.player_id AND b.output_id=seen.output_id {_TEST_JOIN} "
         "LEFT JOIN frames f ON f.id=b.frame_id WHERE seen.player_id=%(player)s ORDER BY seen.output_id",
         {"player": player_id}).fetchall()
@@ -942,7 +956,7 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
                  output_id))
             if not _no_display(row):
                 port = Port(player_id, output_id)
-                append_sent_in(conn, port, picture_change, display_id=row["d_id"], frame_id=row["frame_id"],
+                append_sent_in(conn, port, picture_change, display_id=row["d_id"], frame_id=row["frame_id"], by="central",
                                record=sent_record(session=picture_session(row), now=now,
                                                   previous=latest_sent_in(conn, port), picture=picture,
                                                   test_pattern=pattern, display_id=row["d_id"]))
@@ -1088,7 +1102,7 @@ class PgDisplayCommands:
     def __init__(self, db: Database) -> None:
         self._db = db
 
-    def request_power_test(self, frame_id: str) -> PowerTestAccepted:
+    def request_power_test(self, frame_id: str, *, by: Actor) -> PowerTestAccepted:
         request_id = uuid.uuid4()
         with self._db.transaction() as conn:
             frame = conn.execute("SELECT b.player_id FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "
@@ -1099,12 +1113,13 @@ class PgDisplayCommands:
                 raise DisplayRefused("frame_unbound", 409)
             now = _CLOCK.now_in(conn)
             conn.execute(
-                "INSERT INTO power_requests(id, frame_id, power, reason, for_seconds, created_at, ends_at) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (frame_id, reason) DO UPDATE SET "
-                "id=EXCLUDED.id, power=EXCLUDED.power, for_seconds=EXCLUDED.for_seconds, "
-                "created_at=EXCLUDED.created_at, ends_at=EXCLUDED.ends_at",
+                "INSERT INTO power_requests(id, frame_id, power, reason, for_seconds, created_at, ends_at, created_by, "
+                "changed_at, changed_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (frame_id, reason) DO UPDATE SET id=EXCLUDED.id, power=EXCLUDED.power, "
+                "for_seconds=EXCLUDED.for_seconds, created_at=EXCLUDED.created_at, ends_at=EXCLUDED.ends_at, "
+                "created_by=EXCLUDED.created_by, changed_at=EXCLUDED.changed_at, changed_by=EXCLUDED.changed_by",
                 (request_id, frame_id, Power.OFF.value, _CONSOLE_TEST, TEST_SECONDS, now,
-                 now + TEST_SECONDS))
+                 now + TEST_SECONDS, by, now, by))
             notify_nodes_in(conn, "SELECT device_id FROM players WHERE id=%s", (frame["player_id"],))
         return PowerTestAccepted(request_id=request_id, for_seconds=TEST_SECONDS)
 
@@ -1119,13 +1134,16 @@ class PgDisplayCommands:
             if ended is not None and frame["player_id"] is not None:
                 notify_nodes_in(conn, "SELECT device_id FROM players WHERE id=%s", (frame["player_id"],))
 
-    def set_power_settings(self, display_id: UUID, settings: DisplayPowerSettings) -> DisplayPowerSettings:
+    def set_power_settings(self, display_id: UUID, settings: DisplayPowerSettings, *,
+                           by: Actor) -> DisplayPowerSettings:
         with self._db.transaction() as conn:
             row = conn.execute(
-                "UPDATE displays SET power_method=%s, switch_input_on_power_on=%s, never_off_on_other_input=%s "
+                "UPDATE displays SET power_method=%s, switch_input_on_power_on=%s, never_off_on_other_input=%s, "
+                "changed_at=%s, changed_by=%s "
                 "WHERE id=%s RETURNING power_method, switch_input_on_power_on, never_off_on_other_input",
                 (None if settings.power_method is None else PowerMethod(settings.power_method).value,
-                 settings.switch_input_on_power_on, settings.never_off_on_other_input, display_id)).fetchone()
+                 settings.switch_input_on_power_on, settings.never_off_on_other_input, _CLOCK.now_in(conn), by,
+                 display_id)).fetchone()
             if row is None:
                 raise DisplayRefused("unknown_display", 404)
             notify_nodes_in(conn, _NODES_SEEING, (display_id,))
@@ -1145,14 +1163,14 @@ _PICTURE_FACTS: Final = (
 _PICTURE_FRAME: Final = (
     f"SELECT f.id AS frame_id, b.player_id, seen.display_id, seen.connected, {_PICTURE_FACTS}, "  # noqa: S608
     f"d.id AS d_id, {PICTURE_COLUMNS}, {_SESSION_COLUMNS} FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "
-    f"{SEEN_DISPLAY_JOIN} LEFT JOIN displays d ON d.id=seen.display_id "
-    "LEFT JOIN picture_sessions ps ON ps.display_id=d.id")
+    f"{SEEN_DISPLAY_JOIN} LEFT JOIN displays d ON d.id=seen.display_id")
 
-# A session `ps` with its Display and the picture facts of the Output of the Frame it was opened on.
+# A session (by its id, as text) with its Display and the picture facts of the Output of the Frame it
+# was opened on.
 _PICTURE_SESSION: Final = (
-    f"SELECT {_SESSION_COLUMNS}, {PICTURE_COLUMNS}, {_PICTURE_FACTS} FROM picture_sessions ps "  # noqa: S608
-    "JOIN displays d ON d.id=ps.display_id LEFT JOIN bindings b ON b.frame_id=ps.frame_id "
-    f"{SEEN_DISPLAY_JOIN} WHERE ps.id=%s FOR UPDATE OF ps, d")
+    f"SELECT {_SESSION_COLUMNS}, {PICTURE_COLUMNS}, {_PICTURE_FACTS} FROM displays d "  # noqa: S608
+    "LEFT JOIN bindings b ON b.frame_id=d.picture_session->>'frame_id' "
+    f"{SEEN_DISPLAY_JOIN} WHERE d.picture_session->>'id'=%s FOR UPDATE OF d")
 
 _NODES_SEEING: Final = ("SELECT DISTINCT p.device_id FROM outputs o JOIN players p ON p.id=o.player_id "
                         "WHERE o.display_id=%s")
@@ -1214,8 +1232,9 @@ def _hardware_view(row: HardwareRow) -> HardwareSettingView:
 
 
 class PgPictureSessions:
-    """`PictureQueries` and `PictureCommands` over PostgreSQL (displays, picture_sessions, and the
-    picture document and report on each Output row). The rules are central/displays/picture.py's and
+    """`PictureQueries` and `PictureCommands` over PostgreSQL (displays with their open session, and
+    the picture document and report on each Output row). Each write is stamped with the operator's
+    `by`. The rules are central/displays/picture.py's and
     hardware.py's; every write locks the Display row and wakes the document source of every Node
     that last saw that Display, in its own transaction (`notify_nodes_in`)."""
 
@@ -1253,7 +1272,7 @@ class PgPictureSessions:
             test_pattern_seconds=TEST_PATTERN_SECONDS,
             session=_session_view(session) if live and session is not None else None)
 
-    def begin_picture(self, frame_id: str) -> PictureSessionView:
+    def begin_picture(self, frame_id: str, *, by: Actor) -> PictureSessionView:
         with self._db.transaction() as conn:
             frame = conn.execute(_PICTURE_FRAME + " WHERE f.id=%s FOR NO KEY UPDATE OF f", (frame_id,)).fetchone()
             if frame is None:
@@ -1264,87 +1283,85 @@ class PgPictureSessions:
             if display_id is None:
                 raise DisplayRefused("no_display", 409)
             now = _CLOCK.now_in(conn)
-            stored = _fold_in(conn, display_id, now)
+            stored = _fold_in(conn, display_id, now, by=by)
             if stored is None:
                 raise DisplayRefused("session_open", 409)
             lease = begin_lease(now, idle_seconds=PICTURE_IDLE_SECONDS, hard_seconds=None)
             session = PictureSession(uuid.uuid4(), display_id, 1, stored, frame["output_picture_change"] or 0, {},
                                      frozenset(), frozenset(), lease, None, None)
-            conn.execute(
-                "INSERT INTO picture_sessions(id, display_id, frame_id, sequence, draft, began_at_change, "
-                "idle_until, created_at) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                (session.session_id, display_id, frame_id, session.sequence, Jsonb(picture_fields(stored)),
-                 session.began_at_change, lease.idle_until, now))
+            conn.execute("UPDATE displays SET picture_session=%s, changed_at=%s, changed_by=%s WHERE id=%s",
+                         (Jsonb({**_session_json(session), "id": str(session.session_id), "frame_id": frame_id,
+                                 "began_at_change": session.began_at_change, "created_at": now}),
+                          now, by, display_id))
             notify_nodes_in(conn, _NODES_SEEING, (display_id,))
         return _session_view(session)
 
-    def edit_hardware(self, session_id: UUID, edit: HardwareEdit) -> PictureSequence:
+    def edit_hardware(self, session_id: UUID, edit: HardwareEdit, *, by: Actor) -> PictureSequence:
         with self._db.transaction() as conn:
             row, session, now = self._session_in(conn, session_id)
             changed = edited_hardware(session, edit.code, edit.value, offered=_offered(row),
                                       expected_sequence=edit.expected_sequence, now=now)
-            self._write_session_in(conn, changed)
+            self._write_session_in(conn, changed, now, by=by)
         return PictureSequence(sequence=changed.sequence)
 
-    def edit_software(self, session_id: UUID, edit: SoftwareEdit) -> PictureSequence:
+    def edit_software(self, session_id: UUID, edit: SoftwareEdit, *, by: Actor) -> PictureSequence:
         with self._db.transaction() as conn:
             _row, session, now = self._session_in(conn, session_id)
             changed = edited_software(session, edit.setting, edit.value, expected_sequence=edit.expected_sequence,
                                       now=now)
-            self._write_session_in(conn, changed)
+            self._write_session_in(conn, changed, now, by=by)
         return PictureSequence(sequence=changed.sequence)
 
-    def edit_light(self, session_id: UUID, edit: LightEdit) -> PictureSequence:
+    def edit_light(self, session_id: UUID, edit: LightEdit, *, by: Actor) -> PictureSequence:
         """The Display's light, live on the Display. unknown_session, session_ended, stale_sequence."""
         with self._db.transaction() as conn:
             _row, session, now = self._session_in(conn, session_id)
             changed = edited_light(session, DisplayLight(matched_lux=edit.matched_lux, black=edit.black),
                                    expected_sequence=edit.expected_sequence, now=now)
-            self._write_session_in(conn, changed)
+            self._write_session_in(conn, changed, now, by=by)
         return PictureSequence(sequence=changed.sequence)
 
-    def edit_signal_range(self, session_id: UUID, edit: SignalRangeEdit) -> PictureSequence:
+    def edit_signal_range(self, session_id: UUID, edit: SignalRangeEdit, *, by: Actor) -> PictureSequence:
         with self._db.transaction() as conn:
             _row, session, now = self._session_in(conn, session_id)
             changed = edited_signal_range(session, edit.signal_range, expected_sequence=edit.expected_sequence,
                                           now=now)
-            self._write_session_in(conn, changed)
+            self._write_session_in(conn, changed, now, by=by)
         return PictureSequence(sequence=changed.sequence)
 
-    def edit_test_pattern(self, session_id: UUID, edit: TestPatternEdit) -> PictureSequence:
+    def edit_test_pattern(self, session_id: UUID, edit: TestPatternEdit, *, by: Actor) -> PictureSequence:
         with self._db.transaction() as conn:
             _row, session, now = self._session_in(conn, session_id)
             changed = edited_test_pattern(session, edit.test_pattern, expected_sequence=edit.expected_sequence,
                                           now=now)
-            self._write_session_in(conn, changed)
+            self._write_session_in(conn, changed, now, by=by)
         return PictureSequence(sequence=changed.sequence)
 
-    def keep_picture_alive(self, session_id: UUID) -> PictureSessionView:
+    def keep_picture_alive(self, session_id: UUID, *, by: Actor) -> PictureSessionView:
         with self._db.transaction() as conn:
             _row, session, now = self._session_in(conn, session_id)
             kept = kept_alive(session, now)
-            conn.execute("UPDATE picture_sessions SET idle_until=%s WHERE id=%s",
-                         (kept.lease.idle_until, session_id))
+            _write_session(conn, kept, now, by=by)
         return _session_view(kept)
 
-    def picture_done(self, session_id: UUID) -> None:
+    def picture_done(self, session_id: UUID, *, by: Actor) -> None:
         with self._db.transaction() as conn:
             row, session, now = self._session_in(conn, session_id)
             _require_live(session, now)
             if not presented(session.draft, _stored_picture_document(row), _stored_picture_report(row)):
                 raise PictureRefused("not_presented_yet", 409)
-            self._end_in(conn, session)
+            self._end_in(conn, session, now, by=by)
 
-    def revert_picture(self, session_id: UUID) -> None:
+    def revert_picture(self, session_id: UUID, *, by: Actor) -> None:
         """End the session: the stored values stay, and the display is put back once
         (`picture.restore_of`), until the Pi answers it (`record_picture_report`)."""
         with self._db.transaction() as conn:
             row, session, now = self._session_in(conn, session_id)
             _require_live(session, now)
-            _fold_session_in(conn, stored_picture(row), session)
+            _fold_session_in(conn, stored_picture(row), session, now, by=by)
             notify_nodes_in(conn, _NODES_SEEING, (session.display_id,))
 
-    def restore_picture(self, session_id: UUID, request: PictureRestore) -> PictureRestoreResult:
+    def restore_picture(self, session_id: UUID, request: PictureRestore, *, by: Actor) -> PictureRestoreResult:
         """`PictureCommands.restore_picture`: the entry through picture_history_store
         `picture_entry_in`, the rule `picture.restored` (offered: `_offered(row)`; light_recorded:
         the entry's), the session written as an edit's (`_write_session_in`, with
@@ -1357,11 +1374,11 @@ class PgPictureSessions:
             result = restored(session, entry_id=entry.entry_id, entry_display_id=entry.display_id,
                               picture=entry.record.picture, light_recorded=entry.record.light_recorded,
                               offered=_offered(row), expected_sequence=request.expected_sequence, now=now)
-            self._write_session_in(conn, result.session)
+            self._write_session_in(conn, result.session, now, by=by)
         return PictureRestoreResult(sequence=result.session.sequence, hardware_skipped=result.hardware_skipped,
                                     light_kept=result.light_kept)
 
-    def copy_picture(self, frame_id: str, request: PictureCopyRequest) -> tuple[PictureCopyResult, ...]:
+    def copy_picture(self, frame_id: str, request: PictureCopyRequest, *, by: Actor) -> tuple[PictureCopyResult, ...]:
         with self._db.transaction() as conn:
             frames = {row["frame_id"]: row for row in conn.execute(
                 _PICTURE_FRAME + " WHERE f.id=ANY(%s)", ([frame_id, *request.to_frames],)).fetchall()}
@@ -1380,12 +1397,12 @@ class PgPictureSessions:
                     outcome = CopyOutcome.NO_DISPLAY
                 elif display_id == source["display_id"]:
                     outcome = CopyOutcome.SAME_DISPLAY
-                elif (stored := _fold_in(conn, display_id, now)) is None:
+                elif (stored := _fold_in(conn, display_id, now, by=by)) is None:
                     outcome = CopyOutcome.SESSION_OPEN
                 else:
                     result, skipped = copied(values, stored, source_offered=source_offered,
                                              target_offered=_offered(frames[target]))
-                    write_picture(conn, display_id, copied_record(result))
+                    write_picture(conn, display_id, copied_record(result), by=by)
                     notify_nodes_in(conn, _NODES_SEEING, (display_id,))
                     outcome = CopyOutcome.COPIED
                 outcomes.append(PictureCopyResult(frame_id=target, outcome=outcome, hardware_skipped=skipped))
@@ -1394,7 +1411,7 @@ class PgPictureSessions:
     @staticmethod
     def _session_in(conn: Any, session_id: UUID) -> tuple[Mapping[str, Any], PictureSession, float]:
         """The session's row (its Display locked) and rules' view; unknown_session when there is none."""
-        row = conn.execute(_PICTURE_SESSION, (session_id,)).fetchone()
+        row = conn.execute(_PICTURE_SESSION, (str(session_id),)).fetchone()
         if row is None:
             raise DisplayRefused("unknown_session", 404)
         session = picture_session(row)
@@ -1402,48 +1419,41 @@ class PgPictureSessions:
         return row, session, _CLOCK.now_in(conn)
 
     @staticmethod
-    def _write_session_in(conn: Any, session: PictureSession) -> None:
-        pattern = session.test_pattern
-        conn.execute("UPDATE picture_sessions SET sequence=%s, draft=%s, touched_hardware=%s, touched_software=%s, "
-                     "idle_until=%s, test_pattern=%s, test_pattern_ask=%s, restored_from=%s WHERE id=%s",
-                     (session.sequence, Jsonb(picture_fields(session.draft)), sorted(session.touched_hardware),
-                      sorted(setting.value for setting in session.touched_software), session.lease.idle_until,
-                      None if pattern is None else pattern.pattern.value, None if pattern is None else pattern.ask,
-                      session.restored_from, session.session_id))
+    def _write_session_in(conn: Any, session: PictureSession, now: float, *, by: Actor) -> None:
+        _write_session(conn, session, now, by=by)
         notify_nodes_in(conn, _NODES_SEEING, (session.display_id,))
 
     @staticmethod
-    def _end_in(conn: Any, session: PictureSession) -> None:
+    def _end_in(conn: Any, session: PictureSession, now: float, *, by: Actor) -> None:
         """Done: store the session's draft on the Display (its kept-done entry beside it) and end the
         session, in one transaction."""
-        write_picture(conn, session.display_id, done_record(session))
-        conn.execute("DELETE FROM picture_sessions WHERE id=%s", (session.session_id,))
+        write_picture(conn, session.display_id, done_record(session), by=by)
+        conn.execute("UPDATE displays SET picture_session=NULL, changed_at=%s, changed_by=%s WHERE id=%s",
+                     (now, by, session.display_id))
         notify_nodes_in(conn, _NODES_SEEING, (session.display_id,))
 
 
-def _fold_session_in(conn: Any, stored: DisplayPicture, session: PictureSession) -> dict[str, int]:
+def _fold_session_in(conn: Any, stored: DisplayPicture, session: PictureSession, now: float, *,
+                     by: Actor) -> dict[str, int]:
     """End `session` without Done: its one-time instruction (`picture.restore_of`) joins the
-    Display's pending one, the stored values unchanged, and the session row goes. The instruction."""
+    Display's pending one, the stored values unchanged, and the session goes. The instruction."""
     restore = restore_of(stored, session)
-    if restore:
-        conn.execute("UPDATE displays SET hardware_restore = hardware_restore || %s WHERE id=%s",
-                     (Jsonb(restore), session.display_id))
-    conn.execute("DELETE FROM picture_sessions WHERE id=%s", (session.session_id,))
+    conn.execute("UPDATE displays SET hardware_restore = hardware_restore || %s, picture_session=NULL, "
+                 "changed_at=%s, changed_by=%s WHERE id=%s", (Jsonb(restore), now, by, session.display_id))
     return restore
 
 
-def _fold_in(conn: Any, display_id: UUID, now: float) -> DisplayPicture | None:
+def _fold_in(conn: Any, display_id: UUID, now: float, *, by: Actor) -> DisplayPicture | None:
     """The Display's stored picture with its row locked, after folding a session whose lease ran out
     (`_fold_session_in`: the stored values unchanged); None while a live session holds it."""
     row = conn.execute(f"SELECT {PICTURE_COLUMNS}, {_SESSION_COLUMNS} FROM displays d "  # noqa: S608
-                       "LEFT JOIN picture_sessions ps ON ps.display_id=d.id WHERE d.id=%s FOR NO KEY UPDATE OF d",
-                       (display_id,)).fetchone()
+                       "WHERE d.id=%s FOR NO KEY UPDATE OF d", (display_id,)).fetchone()
     stored, session = stored_picture(row), picture_session(row)
     if session is None:
         return stored
     if session.lease.live(now):
         return None
-    _fold_session_in(conn, stored, session)
+    _fold_session_in(conn, stored, session, now, by=by)
     return stored
 
 

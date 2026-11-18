@@ -221,9 +221,9 @@ def test_an_entry_from_before_the_displays_light_says_its_light_was_not_recorded
         _kept_contrast(page)
         # Every entry but the newest kept one as written before the Display had a light.
         unrecorded = "SET picture = picture - 'matched_lux' - 'panel_black'"
-        _sql(registry, f"UPDATE picture_sent_entries {unrecorded}")
-        _sql(registry, f"UPDATE picture_kept_entries {unrecorded} WHERE number < "
-                       "(SELECT max(number) FROM picture_kept_entries)")
+        _sql(registry, f"UPDATE picture_history {unrecorded} WHERE kind='sent'")
+        _sql(registry, f"UPDATE picture_history {unrecorded} WHERE kind='kept' AND number < "
+                       "(SELECT max(number) FROM picture_history WHERE kind='kept')")
 
         page.reload()
         kept = _rows(page, KEPT)

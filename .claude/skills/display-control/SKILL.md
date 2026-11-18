@@ -192,7 +192,7 @@ finish"); time a real batch, `setvcp` and `capabilities` on the bench before tru
 From Central, `GET /v1/operator/frames/{id}/picture` (admin token) gives whether the display's
 list is known, one row per hardware setting (offered with its range and current value, the value
 set in Photo Wall, the last write's result with `before` and `after`), the Photo Wall values, and
-whether the Player presented the latest change. In the database, `picture_reports.report` is the
+whether the Player presented the latest change. In the database, `outputs.picture_report` is the
 Pi's latest picture report per port.
 
 **Bench steps** (NOT RUN until a release with the picture split is on the test Pi; each needs the
@@ -416,7 +416,7 @@ picture") and, after 120 s, `nothing_to_show`. A pattern or calibration target h
 number rises only when the rectangle's digest changes):
 
 ```sql
-SELECT player_id, output_id, region_change, region_digest FROM output_documents ORDER BY player_id, output_id;
+SELECT player_id, output_id, region_change, region_digest FROM outputs ORDER BY player_id, output_id;
 ```
 
 The rectangle itself is `central/displays/model.py` `frame_region`: the Frame's Position box placed

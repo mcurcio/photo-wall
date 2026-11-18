@@ -34,7 +34,7 @@ from central.tuning_history.views import TuningSnapshotView
 from contracts.models import Identifier
 
 _CANONICAL_CHANGE: Final = re.compile(r"[1-9][0-9]*")
-_BIGINT_MAX: Final = 2**63 - 1      # picture_sent_entries.picture_change is BIGINT
+_BIGINT_MAX: Final = 2**63 - 1      # picture_history.picture_change is BIGINT
 
 
 def _picture_change(text: str) -> int:

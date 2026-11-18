@@ -52,7 +52,8 @@ from contracts.node_picture import HardwareResult, WriteResult
 
 
 def _sent_rows(registry, output_id: str = "HDMI-A-1") -> list[dict]:
-    return _sql(registry, "SELECT * FROM picture_sent_entries WHERE output_id=%s ORDER BY picture_change",
+    return _sql(registry, "SELECT id, player_id, output_id, picture_change, display_id, frame_id, entry_kind AS kind, at, by, session_id, restored_from, picture, test_pattern FROM picture_history WHERE kind='sent' AND output_id=%s "
+                          "ORDER BY picture_change",
                 (output_id,))
 
 
@@ -141,7 +142,8 @@ def test_a_lapsed_session_is_a_back_entry_on_time(registry):
         session = _begin(client)
         _software(client, session, "contrast", 90, 1)
         _picture(registry)
-    [lease] = _sql(registry, "SELECT idle_until FROM picture_sessions")
+    [lease] = _sql(registry, "SELECT (picture_session->>'idle_until')::float8 AS idle_until FROM displays "
+                             "WHERE picture_session IS NOT NULL")
     with registry.db.transaction() as conn:
         now = DatabaseTransactionClock().now_in(conn)
         assert _until_next_deadline(conn, device_id, now) <= lease["idle_until"] - now
@@ -161,10 +163,12 @@ def test_one_entry_per_picture_change(registry):
     assert len(_sent_rows(registry)) == 1
     record = PictureRecord(PictureEntryKind.SENT_KEPT, default_picture(), None, None, None)
     with registry.db.transaction() as conn:
-        append_sent_in(conn, Port(player, "HDMI-A-1"), 1, display_id=display_id, frame_id="kitchen", record=record)
+        append_sent_in(conn, Port(player, "HDMI-A-1"), 1, display_id=display_id, frame_id="kitchen", record=record,
+                       by="central")
         with pytest.raises(ValueError, match="picture_history_kind"):
             append_sent_in(conn, Port(player, "HDMI-A-1"), 2, display_id=display_id, frame_id="kitchen",
-                           record=PictureRecord(PictureEntryKind.KEPT_DONE, default_picture(), uuid4(), None, None))
+                           record=PictureRecord(PictureEntryKind.KEPT_DONE, default_picture(), uuid4(), None, None),
+                           by="central")
     assert len(_sent_rows(registry)) == 1
 
 
@@ -191,7 +195,8 @@ def test_copy_onto_a_seen_display_is_sent_as_its_kept_values(registry):
         assert client.post("/v1/operator/frames/a/picture-copies", headers=AUTH,
                            json={"to_frames": ["b"]}).json()[0]["outcome"] == "copied"
     _picture(registry, "pi-b")
-    rows = _sql(registry, "SELECT * FROM picture_sent_entries WHERE player_id=%s ORDER BY picture_change", (pi_b,))
+    rows = _sql(registry, "SELECT id, player_id, output_id, picture_change, display_id, frame_id, entry_kind AS kind, at, by, session_id, restored_from, picture, test_pattern FROM picture_history WHERE kind='sent' AND player_id=%s "
+                          "ORDER BY picture_change", (pi_b,))
     assert [(row["picture_change"], row["kind"], row["frame_id"], row["picture"]["software_contrast_percent"])
             for row in rows] == [(1, "sent-kept", "b", 100), (2, "sent-kept", "b", 130)]
 
@@ -230,3 +235,22 @@ def test_a_port_keeps_its_newest_sent_entries(registry, monkeypatch):
             _picture(registry)
     assert [(row["picture_change"], row["picture"]["software_contrast_percent"]) for row in _sent_rows(registry)] == [
         (4, 93), (5, 94), (6, 95)]
+
+
+def test_the_trim_counts_a_ports_entries_whichever_display_was_seen(registry, monkeypatch):
+    """(9) Retention is per port, across the Displays seen there: another display plugged into the
+    port shares the port's SENT_ENTRIES. Mutation probe: trim sent entries per Display instead of
+    per port -> the first Display's oldest entry stays."""
+    monkeypatch.setattr(retention, "SENT_ENTRIES", 3)
+    _bound(registry)
+    with _client(registry) as client:
+        _picture(registry)
+        session = _begin(client)
+        for sequence, contrast in enumerate((91, 92), start=1):
+            _software(client, session, "contrast", contrast, sequence)
+            _picture(registry)
+    _report(registry, SERIAL, "HDMI-A-1", SERIAL_DISPLAY)          # another display on the port
+    _picture(registry)
+    rows = _sent_rows(registry)
+    assert [row["picture_change"] for row in rows] == [2, 3, 4]
+    assert len({row["display_id"] for row in rows}) == 2
