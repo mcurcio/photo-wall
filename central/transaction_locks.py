@@ -35,8 +35,7 @@ def acquire_node_lock(conn, device_id: str) -> None:
     """Take the Node's transaction lock: `pg_advisory_xact_lock(NODE_LOCK_CLASS, hashtext(device_id))`.
     Serializes that Node's display exchanges and admissions, and nothing else. Lock order:
     Coordination, Runtime, then Node (an operator calibration trial, in
-    `NodeDisplay.current_frame_in`, and an exchange reporting a completion take the Node lock
-    after them); a holder of a Node lock never takes Coordination or Runtime after it, so no
+    `NodeDisplay.current_frame_in`, takes the Node lock after them); a holder of a Node lock never takes Coordination or Runtime after it, so no
     lock-order cycle exists. A Node's steady exchange takes the Node lock alone."""
     conn.execute("SELECT pg_advisory_xact_lock(%s, hashtext(%s))", (NODE_LOCK_CLASS, device_id))
 

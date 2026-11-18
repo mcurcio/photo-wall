@@ -83,13 +83,10 @@ def test_display_admission_needs_the_nodes_own_lock(registry):
         assert coordinator.display_admission_in(conn, **arguments).allowed
 
 
-def test_a_completion_alone_waits_on_coordination_and_is_refused_as_retryable(registry):
-    """A handoff's completion resolves the Output's loss (`reconcile_node_output_in`), Runtime state
-    the Coordinator and the inbox write under Coordination and Runtime, so a completion alone still
-    takes them, before the Node lock (erratum, overlay-always fix pass). While another transaction
-    holds Coordination it waits out the transaction's lock_timeout and ends in LockNotAvailable,
-    which `mount_lock_refusal` answers 503 lock_busy, never a 500. Mutation probe: drop the
-    completion's acquire_runtime_locks -> the exchange answers display_handoff_decision_unknown."""
+def test_a_completion_never_waits_on_the_coordination_lock(registry):
+    """A handoff's completion resolves no Output loss (decision 0034, S4b part 2: a loss is judged
+    from the display line), so it too takes the Node lock alone: with Coordination held elsewhere
+    it is answered at once (here refused, its decision unknown), never a lock_timeout."""
     coordinator, _, _, sessions, claims, grants, facts, _, _ = rig(registry)
     claim, grant, fact = claims["display_host"], grants["display_host"], facts[0]
     display = NodeDisplay(sessions, runtime=coordinator)
@@ -97,7 +94,5 @@ def test_a_completion_alone_waits_on_coordination_and_is_refused_as_retryable(re
                                                   completed_decision_id=uuid4(), completed_boottime_ms=1299))
     with psycopg.connect(registry.db.dsn) as holder:
         holder.execute("SELECT pg_advisory_xact_lock(%s)", (COORDINATION_LOCK,))
-        with pytest.raises(psycopg.errors.LockNotAvailable):
+        with pytest.raises(NodeControlError, match="display_handoff_decision_unknown"):
             display.exchange(claim.session_id, claim.credential, raw)
-    with pytest.raises(NodeControlError, match="display_handoff_decision_unknown"):
-        display.exchange(claim.session_id, claim.credential, raw)

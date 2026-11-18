@@ -25,6 +25,7 @@ from test_display_identity import enroll_pi
 
 from appliance.display_host.bus import DISPLAY_COMPONENT, DISPLAY_SLICE, DISPLAY_VERSION
 from central.content_catalog.catalog import device_id_for_serial
+from central.coordination import OutputLossLedger
 from central.db import DatabaseTransactionClock
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.infra.display_store import (
@@ -107,7 +108,7 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
         # listen here too. A connect wakes all, so a key nobody holds counts the connect alone.
         connects = wakes.count(_LISTEN_PROBE)
         listening = asyncio.create_task(wakes.listen(database.dsn))
-        stores = PgLinkStores(database, {REPORT_STREAM: OutputReportJudge(wakes)})
+        stores = PgLinkStores(database, {REPORT_STREAM: OutputReportJudge(wakes, losses=OutputLossLedger())})
         links = NodeLinks(Pipe.FLEET, hub.client_url, stores, 
                          DisplayDocuments(stores, wakes, times=DatabaseTransactionClock()))
         stop = asyncio.Event()

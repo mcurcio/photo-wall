@@ -20,29 +20,16 @@ from central.coordination import CoordinationError
 from central.displays.model import Readiness
 from central.fleet.device_fence import standing_in
 from central.fleet.node_acceptance import current_cohort_in
-from central.fleet.node_app_links import NodeAppLinks
 from central.fleet.node_boot import parse_node_deployment
 from central.fleet.node_display import NodeDisplay
-from central.fleet.node_ingest import NodeIngest
 from central.fleet.node_lifecycle import NodeLifecycle, OperatorAppStage
 from central.fleet.node_sessions import NodeControlError
-from central.node_runtime_reconciliation import NodeRuntimeReconciler
-from contracts.node_app_link import (
-    NodeAppLinkChallengeV2,
-    NodeAppLinkV2,
-    encode_node_app_link,
-    node_app_link_message,
-)
 from contracts.node_boot import NodeBootRequestV2
 from contracts.node_display import DisplayExchange, encode_display_exchange
 from contracts.node_lifecycle import AppEffectEventV2, encode_app_effect_event, parse_stage_command
 from contracts.node_protocol import (
-    AppProcessFact,
-    NodeEventV2,
     NodeProcessIdentity,
-    encode_node_message,
 )
-from contracts.player_control import ControlAck, ControlHello
 
 
 class Rig:
@@ -414,8 +401,10 @@ def _committed(coordinator, player_id, epoch):
 
 
 def test_a_bound_players_switch_follows_the_operator_reboot_rule(registry):
-    """D16 (G6): the old app's observed exit interrupts each bound Output; bindings and
-    calibration are untouched; the new app's enrollment rejoins the Run at its current point."""
+    """D16 (G6): bindings and calibration are untouched by a switch, and the new app's enrollment
+    rejoins the Run at its current point. The old app's exit interrupts no Output (decision 0034,
+    S4b part 2): an Output's loss is judged from the display line alone (tests/test_output_losses.py);
+    epoch 1 stops being deliverable when epoch 2 enrolls."""
     fixture = Rig(registry, unbound=False)
     coordinator = fixture.coordinator
     player_id = fixture.proof.challenge.player_id
@@ -427,21 +416,17 @@ def test_a_bound_players_switch_follows_the_operator_reboot_rule(registry):
     runtime = coordinator.runtime.read().export_state()
     command = fixture.stage()  # admitted while bound
     fixture.report(command, 'intent_stop', 1)
-    # The broker stops the old process: its observed exit, as on an operator reboot.
-    exited = AppProcessFact(fixture.proof.challenge.process, 42, 'd' * 64, 'exited')
-    NodeIngest(fixture.sessions).ingest(fixture.claim.session_id, fixture.claim.credential, encode_node_message(
-        NodeEventV2(fixture.grants['app_effect_broker'].producer, uuid4(), 2, 1300, (exited,))))
-    assert NodeRuntimeReconciler(fixture.sessions, coordinator).advance() == 1
     fixture.report(command, 'stopped', 2)
-    assert _committed(coordinator, player_id, 1) == set()  # each bound Output interrupted
     after_bindings, after_frames, losses = _bound_state(registry)
     assert after_bindings == bindings and after_frames == frames  # calibration and bindings kept
-    assert [(row['frame_id'], row['authority_epoch']) for row in losses] == [('node-f0', 1), ('node-f1', 1)]
+    assert losses == []
     assert coordinator.runtime.read().export_state() == runtime  # the Run continues
     registry.clock.advance(20)  # the switch takes time; the Run advances meanwhile
     # The new app enrolls (a new authority epoch, as on a reboot) and reports readiness.
     player, _, _ = enroll(registry, fixture.key, device_id=DEVICE_ID)
     assert player['player_id'] == player_id and player['authority_epoch'] == 2
+    with pytest.raises(CoordinationError, match='stale_authority'):  # epoch 1 is no longer deliverable
+        coordinator.delivery(player_id, 1)
     coordinator.advance()
     coordinator.readiness(player_id, report(coordinator, player))
     assert _committed(coordinator, player_id, 2) == both  # rejoined
@@ -453,72 +438,3 @@ def test_a_bound_players_switch_follows_the_operator_reboot_rule(registry):
     fixture.report(command, 'starting_new', 3)
     fixture.report(command, 'running', 4)
     assert fixture.states() == ['target_running']
-
-
-def test_a_bound_switch_whose_new_app_enrolls_before_the_exit_is_reconciled_rejoins_with_nothing_stale(registry):
-    """D16 (G6), the other ordering: the new app enrolls (epoch 2) before the reconciler reads
-    the old app's exit. Stated costs, pinned here: no interruption fact is ever recorded in this
-    order (`output_losses` stays empty); the exit's work item stays `awaiting_output_link`,
-    re-queued, until the new app links, then finishes as `before_process_link`, so the loss is
-    dropped for good. Nothing of epoch 1 stays deliverable, bindings and calibration are kept, and
-    epoch 2 rejoins the Run at its current point."""
-    fixture = Rig(registry, unbound=False)
-    coordinator = fixture.coordinator
-    player_id = fixture.proof.challenge.player_id
-    bindings, frames, _ = _bound_state(registry)
-    both = {('node-f0', 'HDMI-A-1'), ('node-f1', 'HDMI-A-2')}
-    assert _committed(coordinator, player_id, 1) == both
-    runtime = coordinator.runtime.read().export_state()
-    command = fixture.stage()
-    fixture.report(command, 'intent_stop', 1)
-    exited = AppProcessFact(fixture.proof.challenge.process, 42, 'd' * 64, 'exited')
-    exit_evidence = uuid4()
-    NodeIngest(fixture.sessions).ingest(fixture.claim.session_id, fixture.claim.credential, encode_node_message(
-        NodeEventV2(fixture.grants['app_effect_broker'].producer, exit_evidence, 2, 1300, (exited,))))
-    player, _, _ = enroll(registry, fixture.key, device_id=DEVICE_ID)  # before the reconciler runs
-    assert player['authority_epoch'] == 2
-    reconciler = NodeRuntimeReconciler(fixture.sessions, coordinator)
-    for _ in range(3):  # each retry after its 5 s back-off
-        reconciler.advance()
-        registry.clock.advance(6)
-    with registry.db.transaction() as conn:
-        work = conn.execute('SELECT completed_at,result FROM node_reconciliation_work WHERE evidence_id=%s',
-                            (exit_evidence,)).fetchone()
-    assert dict(work) == {'completed_at': None, 'result': 'awaiting_output_link'}
-    assert _bound_state(registry)[2] == []  # no interruption fact in this order
-    with pytest.raises(CoordinationError, match='stale_authority'):  # epoch 1 is no longer deliverable at all
-        coordinator.delivery(player_id, 1)
-    after_bindings, after_frames, _ = _bound_state(registry)
-    assert after_bindings == bindings and after_frames == frames
-    registry.clock.advance(20)
-    coordinator.advance()
-    coordinator.readiness(player_id, report(coordinator, player))
-    assert _committed(coordinator, player_id, 2) == both  # rejoined
-    rejoined = coordinator.runtime.read().export_state()
-    assert rejoined == runtime   # only time moved, so nothing was saved (decision 0034)
-    # The new app links (its sample after the exit's), and the reconciler finishes the exit's item.
-    _link_new_app(fixture, player, command, sampled_boottime_ms=1400)
-    reconciler.advance()
-    with registry.db.transaction() as conn:
-        work = conn.execute('SELECT completed_at,result FROM node_reconciliation_work WHERE evidence_id=%s',
-                            (exit_evidence,)).fetchone()
-    assert work['completed_at'] is not None and work['result'] == 'before_process_link'
-    assert _bound_state(registry)[2] == []  # the loss is never recorded
-
-
-def _link_new_app(fixture, player, command, *, sampled_boottime_ms):
-    """The re-enrolled Player app applies its epoch's control delivery and the broker links it."""
-    registry, player_id, epoch = fixture.registry, player['player_id'], player['authority_epoch']
-    registry.control_hello(player_id, ControlHello(authority_epoch=epoch, schemas=(2,), capabilities=()))
-    delivery = registry.issue_control_delivery_record(player_id, epoch, 'c' * 64)
-    receipt = registry.control_ack_response(player_id, ControlAck(
-        authority_epoch=epoch, delivery_id=delivery['delivery_id'], result='applied')).receipt
-    broker = fixture.grants['app_effect_broker']
-    challenge = NodeAppLinkChallengeV2(broker.producer, broker.session_id, NodeProcessIdentity(456, 30, uuid4()),
-        command.old_app_epoch + 1, command.target.environment_sha256, player_id, epoch,
-        json.dumps(receipt.model_dump(mode='json', by_alias=True), sort_keys=True, separators=(',', ':')),
-        'f' * 64, sampled_boottime_ms)
-    proof = NodeAppLinkV2(challenge, fixture.key.public_key().public_bytes_raw().hex(),
-                          fixture.key.sign(node_app_link_message(challenge)).hex())
-    NodeAppLinks(fixture.sessions).admit(fixture.claim.session_id, fixture.claim.credential,
-                                         encode_node_app_link(proof))

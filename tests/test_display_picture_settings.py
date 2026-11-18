@@ -41,6 +41,7 @@ from test_display_identity import (
 )
 
 from central.app import create_app
+from central.coordination import OutputLossLedger
 from central.db import DatabaseTransactionClock
 from central.displays.model import Readiness
 from central.displays.picture import DisplayPicture, presented
@@ -127,7 +128,7 @@ def _picture_report(registry, *, offered: tuple[HardwareSetting, ...] | None = O
     token = Token(EPOCH, next(_SEQ))
     read = Read(token, "$KV.state_display." + picture_report_key(output_id), {},
                 encode_picture_report(report) if data is None else data)
-    stores = PgLinkStores(registry.db, {REPORT_STREAM: OutputReportJudge(DisplayWakes())})
+    stores = PgLinkStores(registry.db, {REPORT_STREAM: OutputReportJudge(DisplayWakes(), losses=OutputLossLedger())})
     asyncio.run(stores.store(serial, Pipe.FLEET).commit(REPORT_STREAM, Batch((read,), token, False)))
 
 

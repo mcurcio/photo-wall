@@ -105,7 +105,7 @@ class Incident:
             registry.clock.advance(self.read_at - k * HOST_OBSERVATION_INTERVAL_SECONDS
                                    - registry.clock.utc())
             self.host_sample()
-        NodeRuntimeReconciler(self.sessions, self.coordinator).advance()
+        NodeRuntimeReconciler(self.sessions).advance()
 
     def host_sample(self):
         """One Host Management sample on its own boot clock (the test clock's monotonic): its post on
@@ -177,9 +177,10 @@ def test_an_app_exit_with_no_app_link_is_readable_on_the_player(registry):
         work = conn.execute("SELECT completed_at,result FROM node_reconciliation_work "
                             "WHERE evidence_id=%s", (incident.exit_evidence,)).fetchone()
         links = conn.execute("SELECT count(*) n FROM node_app_links").fetchone()["n"]
-    # The replay's premise: no app link, so the exit stays pending work and fences nothing.
+    # The replay's premise: no app link; the exit fences nothing (an Output's loss is the display
+    # line's, decision 0034 S4b), so its work item finishes as `display_line`.
     assert links == 0
-    assert dict(work) == {"completed_at": None, "result": "awaiting_process_link"}
+    assert work["completed_at"] is not None and work["result"] == "display_line"
     _, _, device = _reads(registry)
     broker = [session for session in device["sessions"]
               if session["current"] and session["producer"]["owner"] == "app_effect_broker"]

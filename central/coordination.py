@@ -10,9 +10,10 @@ import hashlib
 import json
 import logging
 import math
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from psycopg.types.json import Jsonb
 from pydantic import Field, ValidationError
@@ -197,6 +198,68 @@ def _membership(layers, groups: dict[str, str]) -> dict[str, str]:
     so a layer with no group starts at its instant with no Commit."""
     return {layer.assignment_id: groups[layer.assignment_id] for layer in layers
             if layer.assignment_id in groups}
+
+
+class OutputLossLedger:
+    """The one home of an Output loss's rule (`central.displays.ports.OutputLosses`): Runtime state
+    the Coordinator reads (`_commit_due`, `output_interruptions_in`). Stateless, so the worker that
+    judges the display line builds it with no Coordinator. Both calls run in the caller's
+    transaction, which holds Coordination then Runtime (`acquire_runtime_locks`) before any row lock
+    of its own; ValueError("output_loss_runtime_locks_required") otherwise."""
+
+    def lost_in(self, conn: Any, *, player_id: str, output_id: str, cause_layer: Literal["display_host"],
+                cause_kind: Literal["output_disconnected"], detail: Mapping[str, object], at: float) -> bool:
+        """One unresolved `output_losses` row for the Frame bound to (player_id, output_id) now (its
+        generation and configuration revision, the player's authority epoch), and every
+        execution_commits row of an offer layer on that exact binding marked invalid. False, writing
+        nothing, when no Frame is bound there or that binding's loss is already unresolved."""
+        _require_runtime_locks(conn)
+        bound = conn.execute(
+            "SELECT f.id AS frame_id,f.generation,f.configuration_revision,p.authority_epoch FROM frames f "
+            "JOIN players p ON p.id=f.player_id WHERE f.player_id=%s AND f.output_id=%s",
+            (player_id, output_id)).fetchone()
+        if bound is None:
+            return False
+        key = (player_id, bound["authority_epoch"], output_id, bound["frame_id"], bound["generation"])
+        existing = conn.execute("SELECT resolved_at FROM output_losses WHERE player_id=%s AND authority_epoch=%s "
+                                "AND output_id=%s AND frame_id=%s AND binding_generation=%s", key).fetchone()
+        if existing is not None and existing["resolved_at"] is None:
+            return False
+        conn.execute("INSERT INTO output_losses(player_id,authority_epoch,output_id,frame_id,binding_generation,"
+                     "configuration_revision,cause_layer,cause_kind,detail,interrupted_at,created_at,created_by,"
+                     "changed_at,changed_by) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'node',%s,'node') "
+                     "ON CONFLICT(player_id,authority_epoch,output_id,frame_id,binding_generation) DO UPDATE "
+                     "SET configuration_revision=EXCLUDED.configuration_revision,cause_layer=EXCLUDED.cause_layer,"
+                     "cause_kind=EXCLUDED.cause_kind,detail=EXCLUDED.detail,interrupted_at=EXCLUDED.interrupted_at,"
+                     "resolved_at=NULL,changed_at=EXCLUDED.changed_at,changed_by=EXCLUDED.changed_by",
+                     (*key, bound["configuration_revision"], cause_layer, cause_kind, Jsonb(dict(detail)),
+                      at, at, at))
+        # Invalidate only layers on this exact Output binding, across retained revisions.
+        offers = conn.execute("SELECT revision,manifest FROM plan_offers WHERE player_id=%s AND authority_epoch=%s",
+                              (player_id, bound["authority_epoch"])).fetchall()
+        for row in offers:
+            plan = Plan.model_validate(row["manifest"])
+            assignments = [layer.assignment_id for layer in plan.layers if layer.output_id == output_id
+                           and layer.frame_id == bound["frame_id"] and layer.binding_generation == bound["generation"]]
+            if assignments:
+                conn.execute("UPDATE execution_commits SET valid=FALSE,changed_at=%s,changed_by='central' "
+                             "WHERE player_id=%s AND authority_epoch=%s AND revision=%s AND assignment_id=ANY(%s)",
+                             (at, player_id, bound["authority_epoch"], row["revision"], assignments))
+        return True
+
+    def restored_in(self, conn: Any, *, player_id: str, output_id: str, at: float) -> bool:
+        """Resolve every unresolved loss of (player_id, output_id), whatever Frame or generation it
+        names (a rebind while disconnected leaves none behind); False when there was none."""
+        _require_runtime_locks(conn)
+        return bool(conn.execute(
+            "UPDATE output_losses SET resolved_at=%s,changed_at=%s,changed_by='node' "
+            "WHERE player_id=%s AND output_id=%s AND resolved_at IS NULL RETURNING frame_id",
+            (at, at, player_id, output_id)).fetchall())
+
+
+def _require_runtime_locks(conn: Any) -> None:
+    if not holds_runtime_locks_in(conn):
+        raise ValueError("output_loss_runtime_locks_required")
 
 
 class Coordinator:
@@ -1272,66 +1335,6 @@ class Coordinator:
                     surface.config_revision]
         fence = identity("withdraw-", [player_id, authority_epoch, parts(previous_surface), parts(expected_surface)])
         return DisplayAdmission(True, fence, "old_registry_surface_revoked")
-
-    def reconcile_node_output_in(self, conn, *, player_id: str, authority_epoch: int,
-                                 output_id: str, binding_generation: int,
-                                 configuration_revision: int, recovering: bool, frame_id: str | None = None,
-                                 producer_id, evidence_kind: str, detail: dict) -> bool:
-        """Apply one affirmatively linked Output fact without changing its Run.
-
-        Caller holds Coordination→Runtime locks, then the device fence, and owns the inbox
-        transaction.
-        This port rechecks Registry epoch/binding; no other Frame or Actuator is commanded.
-        """
-        if not holds_runtime_locks_in(conn):
-            raise ValueError("node_reconciliation_runtime_locks_required")
-        observed = self.installation.configuration_in(conn, player_id, authority_epoch)
-        if observed is None:
-            return False
-        binding = next((b for b in observed["bindings"] if b.output_id == output_id
-                        and b.frame_id == frame_id and b.generation == binding_generation
-                        and b.configuration_revision == configuration_revision), None)
-        if binding is None:
-            return False
-        now = self.clock.utc()
-        existing = conn.execute("SELECT resolved_at FROM output_losses WHERE player_id=%s "
-                                "AND authority_epoch=%s AND output_id=%s AND frame_id=%s AND binding_generation=%s",
-                                (player_id, authority_epoch, output_id, frame_id, binding_generation)).fetchone()
-        if recovering:
-            if existing is None or existing["resolved_at"] is not None:
-                return False
-            conn.execute("UPDATE output_losses SET resolved_at=%s,changed_at=%s,changed_by='node' WHERE player_id=%s "
-                         "AND authority_epoch=%s AND output_id=%s AND frame_id=%s AND binding_generation=%s",
-                         (now, now, player_id, authority_epoch, output_id, frame_id, binding_generation))
-        else:
-            if existing is not None and existing["resolved_at"] is None:
-                return False
-            # The cause is the layer that reported the loss (its producer's owner), kept inline.
-            conn.execute("INSERT INTO output_losses(player_id,authority_epoch,output_id,frame_id,"
-                         "binding_generation,configuration_revision,cause_layer,cause_kind,detail,interrupted_at,"
-                         "created_at,created_by,changed_at,changed_by) VALUES(%s,%s,%s,%s,%s,%s,"
-                         "(SELECT owner FROM node_producers WHERE producer_id=%s),%s,%s,%s,%s,'node',%s,'node') "
-                         "ON CONFLICT(player_id,authority_epoch,output_id,frame_id,binding_generation) DO UPDATE "
-                         "SET configuration_revision=EXCLUDED.configuration_revision,"
-                         "cause_layer=EXCLUDED.cause_layer,"
-                         "cause_kind=EXCLUDED.cause_kind,detail=EXCLUDED.detail,"
-                         "interrupted_at=EXCLUDED.interrupted_at,resolved_at=NULL,"
-                         "changed_at=EXCLUDED.changed_at,changed_by=EXCLUDED.changed_by",
-                         (player_id, authority_epoch, output_id, frame_id, binding_generation,
-                          configuration_revision, producer_id, evidence_kind, Jsonb(detail), now, now, now))
-            # Invalidate only layers on this exact Output binding, across retained revisions.
-            offers = conn.execute("SELECT revision,manifest FROM plan_offers WHERE player_id=%s "
-                                  "AND authority_epoch=%s", (player_id, authority_epoch)).fetchall()
-            for row in offers:
-                plan = Plan.model_validate(row["manifest"])
-                assignments = [layer.assignment_id for layer in plan.layers if layer.output_id == output_id
-                               and layer.frame_id == frame_id and layer.binding_generation == binding_generation]
-                if assignments:
-                    conn.execute("UPDATE execution_commits SET valid=FALSE,changed_at=%s,changed_by='central' "
-                                 "WHERE player_id=%s AND authority_epoch=%s AND revision=%s "
-                                 "AND assignment_id=ANY(%s)",
-                                 (now, player_id, authority_epoch, row["revision"], assignments))
-        return True
 
     def _commit_due(self, conn, configurations, now, *, by: Actor):
         interrupted = {(row["player_id"], row["authority_epoch"], row["output_id"], row["frame_id"], row["binding_generation"])

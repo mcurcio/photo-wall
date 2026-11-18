@@ -17,7 +17,7 @@ from central.fleet.node_app_links import (
 )
 from central.fleet.node_sessions import NodeControlError, NodeSessions
 from central.installation_repository import PostgresInstallationRepository
-from central.transaction_locks import acquire_node_lock, acquire_runtime_locks
+from central.transaction_locks import acquire_node_lock
 from contracts.node_commands import parse_session_grant
 from contracts.node_display import (
     DisplayDecision,
@@ -147,11 +147,6 @@ class NodeDisplay:
             if located is None:
                 raise NodeControlError("node_session_unavailable", 401)
             device_id = located["device_id"]
-            if request.completed_decision_id is not None:
-                # A completion reports a decision's effect once: a handoff's resolves the Output's
-                # loss, Runtime state the Coordinator reads (`reconcile_node_output_in`), so it
-                # alone takes Coordination and Runtime, before the Node lock, in the one order.
-                acquire_runtime_locks(conn)
             acquire_node_lock(conn, device_id)
             principal = self.sessions.authenticate_in(conn, session_id, credential)
             if request.producer != principal.grant.producer:
@@ -491,31 +486,13 @@ class NodeDisplay:
         )
         if not admission.allowed or admission.fence != decision.runtime_fence:
             raise NodeControlError("display_handoff_authority_changed", 409)
-        inserted = conn.execute(
+        # The handoff is recorded once. An Output's loss is judged from the display line alone
+        # (`OutputReportJudge`, decision 0034 S4b): a completion resolves none.
+        conn.execute(
             "INSERT INTO node_display_handoffs(decision_id,receipt_request_id,received_at) "
-            "VALUES(%s,%s,%s) ON CONFLICT DO NOTHING RETURNING decision_id",
+            "VALUES(%s,%s,%s) ON CONFLICT DO NOTHING",
             (decision.decision_id, request.request_id, now),
-        ).fetchone()
-        if inserted:
-            # The owning Runtime port rechecks the current Registry tuple. No Run is settled.
-            self.runtime.reconcile_node_output_in(
-                conn,
-                player_id=link.player_id,
-                authority_epoch=link.authority_epoch,
-                output_id=surface.output.output_id,
-                frame_id=surface.frame_id,
-                binding_generation=surface.binding_generation,
-                configuration_revision=surface.config_revision,
-                recovering=True,
-                producer_id=principal.producer_id,
-                evidence_kind="display_handoff",
-                detail={
-                    "decision_id": str(decision.decision_id),
-                    "grant_id": str(receipt.grant_id),
-                    "buffer_id": receipt.buffer_id,
-                    "runtime_fence": decision.runtime_fence,
-                },
-            )
+        )
 
 
 @dataclass(frozen=True)

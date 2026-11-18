@@ -32,6 +32,7 @@ from typing import Final, Protocol
 
 from central import cache_layout
 from central.content_wiring import build_release_services
+from central.coordination import OutputLossLedger
 from central.db import Database, DatabaseTransactionClock, PoolName
 from central.fleet.node_bus_hub import HUB_LISTENERS, FleetHub
 from central.fleet.node_release_catalog import NodeReleaseCatalog
@@ -230,7 +231,8 @@ def build_node_bus(dsn: str, env: Mapping[str, str]) -> NodeBus | None:
     """The worker's NodeBus over its own database pool, or None without HUB_URL_ENV (no hub
     deployed). Both pipes' links take their documents from `DisplayDocuments` (the fleet pipe's
     Output documents; the show pipe's are empty), and the display line's Output reports are judged
-    as they are recorded (`OutputReportJudge`); a console command in Central's API process wakes the
+    as they are recorded (`OutputReportJudge`, which keeps each Output's loss through
+    `OutputLossLedger`); a console command in Central's API process wakes the
     documents through `DisplayWakes.listen`. A Pi's light meter on the host line is judged as it is
     recorded (`LightSensorJudge`; each Player's drawn report is read where its line is recorded), and
     a recorded host base wakes the look that ends a Pi's install (`InstallEnds`);
@@ -245,7 +247,7 @@ def build_node_bus(dsn: str, env: Mapping[str, str]) -> NodeBus | None:
     clock = SystemClock()
     wakes = DisplayWakes()
     room_lights = PgRoomLights(db, PgHouseLock())
-    stores = PgLinkStores(db, {REPORT_STREAM: OutputReportJudge(wakes),
+    stores = PgLinkStores(db, {REPORT_STREAM: OutputReportJudge(wakes, losses=OutputLossLedger()),
                                HOST_STATE_STREAM: AllJudges(LightSensorJudge(room_lights), InstallEnds())})
     documents = DisplayDocuments(stores, wakes, times=DatabaseTransactionClock())
     links = tuple(NodeLinks(pipe, hub_url, stores, documents) for pipe in (Pipe.FLEET, Pipe.SHOW))

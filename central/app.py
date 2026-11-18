@@ -924,7 +924,7 @@ def create_app(
         mount_content_routes(app, content)
     mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,
                       content=content)
-    app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions, coordinator)
+    app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions)
     app.state.scheduler = Scheduler(app.state.node_reconciler, coordinator,
                                     media_application.request_measurements, clock,
                                     retentions={

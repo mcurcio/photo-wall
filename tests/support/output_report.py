@@ -3,13 +3,14 @@
 A Frame's screen size comes from its Output's report on the Node's display line (`current_mode`,
 then the seen Display's preferred mode; `central.displays.model.screen_px`, issue #124), never from
 the Player's enrolment. A Player run without a Node sends no such report, so `report_modes`
-records the one its display line would have sent, through Central's real OutputReportJudge in one
-transaction, as the hub's link store commits it.
+records the one its display line would have sent, through Central's real OutputReportJudge (with
+its Output loss ledger, as the worker wires it) in one transaction, as the hub's link store commits it.
 """
 from __future__ import annotations
 
 import itertools
 
+from central.coordination import OutputLossLedger
 from central.infra.display_store import REPORT_STREAM, DisplayWakes, OutputReportJudge
 from contracts.node_output import OutputReport, encode_output_report, output_report_key
 from nodeapi.epoch import Token
@@ -27,4 +28,4 @@ def report_modes(registry, device_id: str, output_ids: tuple[str, ...], mode: tu
                                                current_mode=mode)))
         for output_id in output_ids)
     with registry.db.transaction() as conn:
-        OutputReportJudge(DisplayWakes()).judge_in(conn, device_id, REPORT_STREAM, reads)
+        OutputReportJudge(DisplayWakes(), losses=OutputLossLedger()).judge_in(conn, device_id, REPORT_STREAM, reads)

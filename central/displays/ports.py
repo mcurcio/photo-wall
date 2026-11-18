@@ -4,7 +4,8 @@ implements both over PostgreSQL; central/display_routes.py depends only on these
 """
 from __future__ import annotations
 
-from typing import Protocol
+from collections.abc import Mapping
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 from central.actor import Actor
@@ -141,3 +142,21 @@ class PictureCommands(Protocol):
         source, or any target), no_display (the source)."""
         ...
 
+
+
+class OutputLosses(Protocol):
+    """Where an Output's loss is kept: Runtime state the Coordinator reads (`_commit_due`,
+    `output_interruptions_in`). Called by the display line's judge in the commit that records the
+    Output report, with Coordination then Runtime held (`transaction_locks.acquire_runtime_locks`).
+    `conn` is the caller's transaction."""
+
+    def lost_in(self, conn: Any, *, player_id: str, output_id: str, cause_layer: Literal["display_host"],
+                cause_kind: Literal["output_disconnected"], detail: Mapping[str, object], at: float) -> bool:
+        """One unresolved loss for the Frame bound to (player_id, output_id) now; False, writing
+        nothing, when no Frame is bound there or that binding's loss is already unresolved."""
+        ...
+
+    def restored_in(self, conn: Any, *, player_id: str, output_id: str, at: float) -> bool:
+        """Every unresolved loss of (player_id, output_id) resolved, whatever Frame or binding
+        generation it names; False when there was none."""
+        ...

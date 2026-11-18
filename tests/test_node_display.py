@@ -10,7 +10,6 @@ from test_node_runtime_reconciliation import rig
 from test_registry import SKEWED
 
 from central.fleet.node_display import NodeDisplay
-from central.fleet.node_ingest import NodeIngest
 from central.fleet.node_sessions import NodeControlError
 from contracts.node_display import (
     DisplayExchange,
@@ -20,29 +19,14 @@ from contracts.node_display import (
     parse_display_decision,
     parse_display_exchange,
 )
-from contracts.node_protocol import NodeEventV2, encode_node_message
 
 
 def test_display_decision_and_completion_renewal(registry):
-    coordinator, _, _, sessions, claims, grants, facts, reconciler, _ = rig(registry)
+    coordinator, _, _, sessions, claims, grants, facts, _, _ = rig(registry)
     claim, grant, fact = claims["display_host"], grants["display_host"], facts[0]
     surface = Surface(
         fact.output, fact.process, fact.app_epoch, fact.binding_generation, fact.config_revision, fact.frame_id
     )
-    NodeIngest(sessions).ingest(
-        grant.session_id,
-        claim.credential,
-        encode_node_message(
-            NodeEventV2(
-                grant.producer,
-                uuid4(),
-                3,
-                1200,
-                (replace(fact, state="invalidated", buffer_id=None),),
-            )
-        ),
-    )
-    reconciler.advance()
     display = NodeDisplay(sessions, runtime=coordinator)
 
     def exchange(request, carrier=claim):
@@ -64,11 +48,6 @@ def test_display_decision_and_completion_renewal(registry):
     )
     handoff = exchange(pending)
     assert handoff.operation == "handoff"
-    with registry.db.transaction() as conn:
-        assert (
-            conn.execute("SELECT resolved_at FROM output_losses").fetchone()["resolved_at"]
-            is None
-        )
     # Renewal transports the already-observed effect, preserving original decision/time.
     renewed = replace(
         claim,
@@ -87,10 +66,6 @@ def test_display_decision_and_completion_renewal(registry):
     )
     assert exchange(completion, renewed).operation == "retain"
     with registry.db.transaction() as conn:
-        assert (
-            conn.execute("SELECT resolved_at FROM output_losses").fetchone()["resolved_at"]
-            is not None
-        )
         assert conn.execute("SELECT count(*) n FROM node_display_handoffs").fetchone()["n"] == 1
     # An expired decision cannot be reinterpreted as a new effect after renewal.
     late = replace(

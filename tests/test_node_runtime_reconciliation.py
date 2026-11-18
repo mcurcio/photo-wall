@@ -4,7 +4,7 @@ from dataclasses import replace
 from uuid import uuid4
 
 import pytest
-from support.position import LIGHTING, PORTRAIT_ON_WIDE, save_position
+from support.position import PORTRAIT_ON_WIDE, save_position
 from test_coordination import report
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_registry import enroll, frame
@@ -85,7 +85,7 @@ def rig(registry):
         surfaces.append(surface)
         ingest.ingest(display.session_id, claims["display_host"].credential, encode_node_message(
             NodeEventV2(display.producer, uuid4(), index + 1, 1100, (surface,))))
-    reconciler = NodeRuntimeReconciler(sessions, coordinator)
+    reconciler = NodeRuntimeReconciler(sessions)
     reconciler.advance()
     return coordinator, player, key, sessions, claims, grants, surfaces, reconciler, proof
 
@@ -95,60 +95,32 @@ def commit_assignments(coordinator, player):
             for assignment in commit.assignment_ids}
 
 
-def test_initiation_never_interrupts_and_output_loss_preserves_other_frame_run_actuator(registry):
-    coordinator, player, _, sessions, claims, grants, surfaces, reconciler, _ = rig(registry)
+def test_old_evidence_finishes_as_display_line_and_never_fences(registry):
+    """Decision 0034, S4b part 2: an Output's loss is judged from the display line alone
+    (tests/test_output_losses.py). A reboot initiation, a surface invalidated and the Player's exit
+    on the old evidence path each finish as `display_line`: no loss, every commit kept, the Run
+    unchanged."""
+    coordinator, player, _, sessions, claims, grants, surfaces, reconciler, proof = rig(registry)
     before = coordinator.runtime.read().export_state()
     initial = commit_assignments(coordinator, player)
     assert len(initial) == 2
-    host = grants["host_core"]
-    NodeIngest(sessions).ingest(host.session_id, claims["host_core"].credential, encode_node_message(
+    host, display, broker = grants["host_core"], grants["display_host"], grants["app_effect_broker"]
+    ingest = NodeIngest(sessions)
+    ingest.ingest(host.session_id, claims["host_core"].credential, encode_node_message(
         NodeEventV2(host.producer, uuid4(), 1, 1200, (RebootFact("unknown", "base_observer"),))))
-    reconciler.advance()
-    assert commit_assignments(coordinator, player) == initial
-    display = grants["display_host"]
-    event = NodeEventV2(display.producer, uuid4(), 3, 1300,
-                        (replace(surfaces[0], state="invalidated", buffer_id=None),))
-    NodeIngest(sessions).ingest(display.session_id, claims["display_host"].credential, encode_node_message(event))
-    assert reconciler.advance() == 1
-    remaining = commit_assignments(coordinator, player)
-    assert len(remaining) == 1
-    plan = coordinator.delivery(player["player_id"], 1)["plan"]
-    assert {layer.output_id for layer in plan.layers if layer.assignment_id in remaining} == {surfaces[1].output.output_id}
-    assert coordinator.runtime.read().export_state() == before
+    ingest.ingest(display.session_id, claims["display_host"].credential, encode_node_message(
+        NodeEventV2(display.producer, uuid4(), 3, 1300, (replace(surfaces[0], state="invalidated", buffer_id=None),))))
+    ingest.ingest(broker.session_id, claims["app_effect_broker"].credential, encode_node_message(
+        NodeEventV2(broker.producer, uuid4(), 2, 1300, (AppProcessFact(proof.challenge.process, 42, "d" * 64, "exited"),))))
+    assert reconciler.advance() == 3
     assert reconciler.advance() == 0
-    coordinator.readiness(player["player_id"], report(coordinator, player, sequence=2))
-    assert commit_assignments(coordinator, player) == remaining
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM output_losses WHERE resolved_at IS NULL").fetchone()["n"] == 1
-
-
-def test_process_exit_reconciles_both_linked_outputs_without_cancelling_run(registry):
-    coordinator, player, _, sessions, claims, grants, _, reconciler, proof = rig(registry)
-    before = coordinator.runtime.read().export_state()
-    broker = grants["app_effect_broker"]
-    exit_event = NodeEventV2(broker.producer, uuid4(), 2, 1300,
-        (AppProcessFact(proof.challenge.process, 42, "d" * 64, "exited"),))
-    NodeIngest(sessions).ingest(broker.session_id, claims["app_effect_broker"].credential,
-                               encode_node_message(exit_event))
-    reconciler.advance()
-    assert commit_assignments(coordinator, player) == set()
+    assert commit_assignments(coordinator, player) == initial
     assert coordinator.runtime.read().export_state() == before
-
-
-@pytest.mark.parametrize("replacement", ["epoch", "binding"])
-def test_old_loss_does_not_target_replacement_authority_or_binding(registry, replacement):
-    coordinator, player, key, sessions, claims, grants, surfaces, reconciler, _ = rig(registry)
-    display = grants["display_host"]
-    event = NodeEventV2(display.producer, uuid4(), 3, 1300,
-                        (replace(surfaces[0], state="invalidated", buffer_id=None),))
-    NodeIngest(sessions).ingest(display.session_id, claims["display_host"].credential, encode_node_message(event))
-    if replacement == "epoch":
-        enroll(registry, key, device_id=DEVICE_ID)
-    else:
-        registry.unbind("node-f0", expected_generation=1, by="console")
-    reconciler.advance()
     with registry.db.transaction() as conn:
         assert conn.execute("SELECT count(*) AS n FROM output_losses").fetchone()["n"] == 0
+        results = {row["result"] for row in conn.execute(
+            "SELECT result FROM node_reconciliation_work WHERE completed_at IS NOT NULL").fetchall()}
+    assert results == {"display_line"}
 
 
 def test_link_replay_exact_but_modified_proof_and_new_control_rejected(registry):
@@ -187,79 +159,3 @@ def test_display_admission_is_exact_and_never_releases_runtime(registry):
         assert not coordinator.display_admission_in(conn, **{**arguments,
             "config_revision": surface.config_revision+1}).allowed
     assert coordinator.runtime.read().export_state() == before
-
-
-def test_first_compositor_frame_cannot_release_output_loss(registry):
-    coordinator, player, _, sessions, claims, grants, surfaces, reconciler, _ = rig(registry)
-    display = grants["display_host"]
-    ingest = NodeIngest(sessions)
-    for sequence, state in ((3, "invalidated"), (4, "presented_to_compositor")):
-        fact = replace(surfaces[0], state=state, buffer_id="recovery-candidate" if sequence==4 else None)
-        ingest.ingest(display.session_id, claims["display_host"].credential, encode_node_message(
-            NodeEventV2(display.producer, uuid4(), sequence, 1300 + sequence, (fact,))))
-        reconciler.advance()
-    coordinator.readiness(player["player_id"], report(coordinator, player, sequence=2))
-    assert len(commit_assignments(coordinator, player)) == 1
-
-
-def test_equal_counter_frame_rebind_preserves_historical_loss_without_fencing_replacement(registry):
-    from central.transaction_locks import acquire_node_lock, acquire_runtime_locks
-    from contracts.node_display import Surface
-
-    coordinator, player, _, sessions, claims, grants, surfaces, reconciler, _ = rig(registry)
-    old = surfaces[0]
-    display = grants["display_host"]
-    event = NodeEventV2(display.producer, uuid4(), 3, 1300,
-        (replace(old, state="invalidated", buffer_id=None),))
-    NodeIngest(sessions).ingest(display.session_id, claims["display_host"].credential,
-                                encode_node_message(event))
-    reconciler.advance()
-    assert len(commit_assignments(coordinator, player)) == 1
-    registry.unbind(old.frame_id, expected_generation=old.binding_generation, by="console")
-    frame(registry, "replacement-frame")
-    registry.bind("replacement-frame", player["player_id"], old.output.output_id, expected_generation=0, by="console")
-    binding = next(b for b in coordinator.configuration(player["player_id"], 1).bindings
-                   if b.frame_id == "replacement-frame")
-    # The Registry owner port fixtures commissioning; no synthetic Trial witness.
-    with registry.db.transaction() as conn:
-        acquire_runtime_locks(conn)
-        registry.commit_calibration_trial_in(conn, frame_id=binding.frame_id,
-            player_id=player["player_id"], authority_epoch=1, output_id=binding.output_id,
-            binding_generation=binding.generation, config_revision=binding.configuration_revision,
-            calibration_revision=binding.calibration.revision, calibration=PORTRAIT_ON_WIDE, lighting=LIGHTING, session_id=None, restored_from=None, by="console")
-    binding = next(b for b in coordinator.configuration(player["player_id"], 1).bindings
-                   if b.frame_id == "replacement-frame")
-    assert (binding.generation, binding.configuration_revision) == (old.binding_generation, old.config_revision)
-    previous = Surface(old.output, old.process, old.app_epoch, old.binding_generation, old.config_revision, old.frame_id)
-    expected = replace(previous, frame_id=binding.frame_id)
-    with registry.db.transaction() as conn:
-        acquire_runtime_locks(conn)
-        acquire_node_lock(conn, DEVICE_ID)
-        assert coordinator.display_withdrawal_in(conn, device_id=DEVICE_ID, player_id=player["player_id"],
-            authority_epoch=1, previous_surface=previous, expected_surface=expected).allowed
-        assert not coordinator.display_withdrawal_in(conn, device_id=DEVICE_ID, player_id=player["player_id"],
-            authority_epoch=1,
-            previous_surface=expected, expected_surface=expected).allowed
-        args = dict(player_id=player["player_id"], authority_epoch=1, output_id=old.output.output_id,
-            binding_generation=old.binding_generation, configuration_revision=old.config_revision,
-            producer_id=display.producer.incarnation_id,
-            evidence_kind="event", detail={})
-        # Neither old Frame evidence nor missing historical identity may clear an
-        # unresolved loss. No wrong-frame insertion occurs either.
-        for frame_id in (old.frame_id, None):
-            for recovering in (True, False):
-                assert not coordinator.reconcile_node_output_in(conn, **args,
-                    frame_id=frame_id, recovering=recovering)
-        assert not coordinator.reconcile_node_output_in(conn, **args,
-            frame_id=binding.frame_id, recovering=True)
-        rows = conn.execute("SELECT frame_id,resolved_at FROM output_losses").fetchall()
-        assert rows == [{"frame_id": old.frame_id, "resolved_at": None}]
-    coordinator.runtime.command("set_scene", Scene(scene_id="replacement-scene", loop=True, cycle_seconds=60,
-        contributions=(Contribution(target="frame:replacement-frame", kind="black"),)), by="console")
-    coordinator.runtime.command("activate", "replacement-scene", "replacement-run", 1000, by="console")
-    coordinator.advance()
-    coordinator.readiness(player["player_id"], report(coordinator, player, sequence=2))
-    delivery = coordinator.delivery(player["player_id"], 1)
-    committed = commit_assignments(coordinator, player)
-    assert any(layer.frame_id == binding.frame_id and layer.assignment_id in committed
-               for layer in delivery["plan"].layers)

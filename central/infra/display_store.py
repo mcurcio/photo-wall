@@ -134,7 +134,7 @@ from central.displays.picture_history import (
     sent_record,
     unrecorded_record,
 )
-from central.displays.ports import DisplayRefused
+from central.displays.ports import DisplayRefused, OutputLosses
 from central.displays.views import (
     ChoiceView,
     CopyOutcome,
@@ -190,6 +190,7 @@ from central.infra.power_store import power_policy_in
 from central.installation_models import FrameOutput
 from central.live_session import Lease, begin_lease
 from central.power.timetable import frame_timetable, unbound_timetable
+from central.transaction_locks import acquire_runtime_locks
 from contracts.models import Calibration, frame_output, frame_size_mm
 from contracts.node_link import Pipe
 from contracts.node_output import (
@@ -681,37 +682,97 @@ class OutputReportJudge:
     Output (`record_report`), and each `picture-…` report as its Output's picture report
     (`record_picture_report`), in the commit that records it; a record that is not a valid report
     for its key is logged with its coordinates and skipped. A Node with no player yet is only
-    recorded. `wakes` tells this process's document source that the Node's facts changed."""
+    recorded. `wakes` tells this process's document source that the Node's facts changed.
 
-    def __init__(self, wakes: DisplayWakes) -> None:
+    An Output report is also the one judge of an Output's loss (decision 0034, S4b part 2): one
+    turning a bound Output's `connected` from True to False is a loss (`losses.lost_in`), one turning
+    it from False or NULL to True while a loss of that Output is unresolved resolves it
+    (`losses.restored_in`), each after `record_report` in this commit. NULL -> False (never seen
+    connected) is neither. Lock order: what is due is decided unlocked (`outputs.connected` has this
+    judge as its only writer and a Node's stream is judged serially, so the unlocked read is
+    authoritative); only when a loss or a restore is due are Coordination then Runtime taken, before
+    this judge's first row lock (the Node's `players` row). Every other report takes neither advisory
+    lock (issue #127)."""
+
+    def __init__(self, wakes: DisplayWakes, *, losses: OutputLosses) -> None:
         self._wakes = wakes
+        self._losses = losses
 
     def judge_in(self, conn: Any, device_id: str, stream: str, items: tuple[Read, ...]) -> None:
         if stream != REPORT_STREAM or not items:
             return
+        reports = tuple(report for report in (self._report_of(device_id, stream, item) for item in items)
+                        if report is not None)
+        if not reports:
+            return
+        unlocked = _player_of(conn, device_id, "")
+        if unlocked is not None and _losses_due(conn, unlocked, reports):
+            acquire_runtime_locks(conn)
         player_id = _player_of(conn, device_id, "FOR NO KEY UPDATE")
         if player_id is None:
             log.info("output reports of %s: no enrolled player", device_id)
             return
         now = _CLOCK.now_in(conn)
-        judged = False
-        for item in items:
-            key = item.subject.removeprefix(_REPORT_SUBJECT)
-            if not key.startswith(("output-", "picture-")) or (item.headers or {}).get(KV_OPERATION_HEADER):
-                continue
-            try:
-                report = _decoded_report(key, item.data)
-            except ValueError as refused:
-                log.warning("display report refused: device=%s stream=%s epoch=%s seq=%s key=%s: %s",
-                            device_id, stream, item.token.epoch, item.token.seq, key, refused)
-                continue
+        for report in reports:
             if isinstance(report, OutputReport):
+                change = _connection_change(conn, player_id, report)
                 record_report(conn, player_id, report, now)
+                if change == "lost":
+                    self._losses.lost_in(conn, player_id=player_id, output_id=report.output_id,
+                                         cause_layer="display_host", cause_kind="output_disconnected",
+                                         detail={"cause": "output_disconnected"}, at=now)
+                elif change == "restored":
+                    self._losses.restored_in(conn, player_id=player_id, output_id=report.output_id, at=now)
             else:
                 record_picture_report(conn, player_id, report, now)
-            judged = True
-        if judged:
-            self._wakes.wake(device_id)
+        self._wakes.wake(device_id)
+
+    @staticmethod
+    def _report_of(device_id: str, stream: str, item: Read) -> OutputReport | PictureReport | None:
+        key = item.subject.removeprefix(_REPORT_SUBJECT)
+        if not key.startswith(("output-", "picture-")) or (item.headers or {}).get(KV_OPERATION_HEADER):
+            return None
+        try:
+            return _decoded_report(key, item.data)
+        except ValueError as refused:
+            log.warning("display report refused: device=%s stream=%s epoch=%s seq=%s key=%s: %s",
+                        device_id, stream, item.token.epoch, item.token.seq, key, refused)
+            return None
+
+
+def _connection_change(conn: Any, player_id: str, report: OutputReport) -> str | None:
+    """What `report` does to its Output's loss, from the connection recorded before it: "lost" (True
+    -> False, a Frame bound there), "restored" (False or NULL -> True, a loss of that Output
+    unresolved), else None. Read without a lock: `record_report` is `outputs.connected`'s only
+    writer and the Node's stream is judged serially."""
+    row = conn.execute(
+        "SELECT o.connected, EXISTS (SELECT 1 FROM frames f WHERE f.player_id=o.player_id "
+        "AND f.output_id=o.output_id) AS bound, EXISTS (SELECT 1 FROM output_losses l "
+        "WHERE l.player_id=o.player_id AND l.output_id=o.output_id AND l.resolved_at IS NULL) AS lost "
+        "FROM outputs o WHERE o.player_id=%s AND o.output_id=%s", (player_id, report.output_id)).fetchone()
+    before = None if row is None else row["connected"]
+    if before is True and not report.connected and row["bound"]:
+        return "lost"
+    if before is not True and report.connected and row is not None and row["lost"]:
+        return "restored"
+    return None
+
+
+def _losses_due(conn: Any, player_id: str, reports: tuple[OutputReport | PictureReport, ...]) -> bool:
+    """Whether any Output report of the batch, taken in order, loses or restores an Output: each
+    report's change judged against the connection the batch's earlier reports left."""
+    connected: dict[str, bool | None] = {}
+    for report in reports:
+        if not isinstance(report, OutputReport):
+            continue
+        if report.output_id not in connected:
+            if _connection_change(conn, player_id, report) is not None:
+                return True
+        elif connected[report.output_id] is not report.connected and (
+                report.connected or connected[report.output_id] is True):
+            return True
+        connected[report.output_id] = report.connected
+    return False
 
 
 def _decoded_report(key: str, data: bytes) -> OutputReport | PictureReport:

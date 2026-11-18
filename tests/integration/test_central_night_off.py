@@ -31,6 +31,7 @@ from appliance.display_host.bus import BusReportSink, display_session
 from appliance.display_host.output_power import OutputPowerController
 from appliance.display_host.runner import document_feed
 from central.app import create_app
+from central.coordination import OutputLossLedger
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.infra.display_store import (
     REPORT_STREAM,
@@ -120,7 +121,7 @@ def test_the_pi_keeps_night_off_while_central_is_away(database, tmp_path):
             return account_id(SERIAL) in leaf_connections(hub)
         await until(linked, 15, "the Node's leaf links")
         wakes = DisplayWakes()
-        stores = PgLinkStores(database, {REPORT_STREAM: OutputReportJudge(wakes)})
+        stores = PgLinkStores(database, {REPORT_STREAM: OutputReportJudge(wakes, losses=OutputLossLedger())})
 
         async def central_runs(wanted_change):
             """Central's links run until the judge has recorded the Pi's report for the document

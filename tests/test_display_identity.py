@@ -23,6 +23,7 @@ from support.frames import frame_create
 
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
+from central.coordination import OutputLossLedger
 from central.db import DatabaseTransactionClock
 from central.infra.display_store import (
     DOCUMENT_STREAM,
@@ -103,7 +104,7 @@ def _report(registry, serial: str, output_id: str, identity: DisplayIdentity | N
     token = Token(EPOCH, next(_SEQ))
     read = Read(token, "$KV.state_display." + output_report_key(output_id), {},
                 encode_output_report(report) if data is None else data)
-    stores = PgLinkStores(registry.db, {REPORT_STREAM: OutputReportJudge(DisplayWakes())})
+    stores = PgLinkStores(registry.db, {REPORT_STREAM: OutputReportJudge(DisplayWakes(), losses=OutputLossLedger())})
     asyncio.run(stores.store(serial, Pipe.FLEET).commit(REPORT_STREAM, Batch((read,), token, False)))
 
 
