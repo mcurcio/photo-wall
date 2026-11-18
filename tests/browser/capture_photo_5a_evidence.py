@@ -150,15 +150,18 @@ def test_before_scene_playback(page, registry, scheme):
 
 @pytest.mark.parametrize("scheme", SCHEMES)
 def test_before_photo_library(page, registry, scheme):
-    from runtime_fakes import apply_procrastinate_schema
-    from test_photo_library_settings_browser import ANNA, COUNTS, TESTED, _added, _contact
+    from test_photo_library_settings_browser import (
+        ANNA,
+        COUNTS,
+        TESTED,
+        _added,
+        _contact,
+        library_of,
+    )
 
-    from central.db import DatabaseTransactionClock
-    from central.infra.photo_library_store import PgPhotoLibrary
     from central.photo_library.model import ContactAnswer
 
-    apply_procrastinate_schema(registry.db.dsn)
-    library = PgPhotoLibrary(registry.db, times=DatabaseTransactionClock())
+    library = library_of(registry)
     ref = _added(registry)
     _contact(library, ref, ContactAnswer(version=TESTED, user=ANNA, counts=COUNTS, full_size_copies=False))
     _open(page, scheme)
@@ -441,15 +444,18 @@ def test_followup_settings(page, registry, scheme, suffix):
 @pytest.mark.parametrize("scheme", SCHEMES)
 def test_followup_photo_library_face_notice(page, registry, scheme, suffix):
     """Settings › Photo library: face detection off, as a notice with its consequence."""
-    from runtime_fakes import apply_procrastinate_schema
-    from test_photo_library_settings_browser import ANNA, COUNTS, TESTED, _added, _contact
+    from test_photo_library_settings_browser import (
+        ANNA,
+        COUNTS,
+        TESTED,
+        _added,
+        _contact,
+        library_of,
+    )
 
-    from central.db import DatabaseTransactionClock
-    from central.infra.photo_library_store import PgPhotoLibrary
     from central.photo_library.model import ContactAnswer
 
-    apply_procrastinate_schema(registry.db.dsn)
-    library = PgPhotoLibrary(registry.db, times=DatabaseTransactionClock())
+    library = library_of(registry)
     ref = _added(registry)
     _contact(library, ref, ContactAnswer(version=TESTED, user=ANNA, counts=COUNTS, full_size_copies=False,
                                          face_detection=False))

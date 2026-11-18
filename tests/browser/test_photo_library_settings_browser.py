@@ -21,6 +21,7 @@ from support.photo_pools import seed_source
 
 from central.db import DatabaseTransactionClock
 from central.infra.photo_library_store import PgPhotoLibrary
+from central.media_queue import ProcrastinateMediaQueue
 from central.photo_library.model import (
     ContactAnswer,
     ContactRefused,
@@ -47,21 +48,22 @@ COUNTS = LibraryCounts(photos=41203, videos=2110, albums=212, people=96)
 TESTED = ImmichVersion(major=3, minor=1, patch=0)
 
 
+def library_of(registry) -> PgPhotoLibrary:
+    """The store as Central and the media worker build it: the database's times and the media
+    queue, so adding a connection and seeding a contact defer their checks as they do there (no
+    worker runs them here)."""
+    apply_procrastinate_schema(registry.db.dsn)
+    return PgPhotoLibrary(registry.db, times=DatabaseTransactionClock(),
+                          queue=ProcrastinateMediaQueue(registry.db.dsn))
+
+
 @pytest.fixture
 def library(registry):
-    apply_procrastinate_schema(registry.db.dsn)
-    return PgPhotoLibrary(registry.db, times=DatabaseTransactionClock())
-
-
-class _Queue:
-    """The store's queue when the test adds a connection directly: the checks are not run."""
-
-    def enqueue_connection_check_in(self, conn, connection_ref, *, due_at):
-        return None
+    return library_of(registry)
 
 
 def _added(registry, name="Family"):
-    return PgPhotoLibrary(registry.db, times=DatabaseTransactionClock(), queue=_Queue()).add_connection(
+    return library_of(registry).add_connection(
         ConnectionWrite(name=name, url="http://immich.invalid:2283", key=KEY), by="console")
 
 
