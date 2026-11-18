@@ -6,7 +6,8 @@ line (`appliance/display_host/trials.py`). A fake shell and clock; no compositor
 Mutation probes: 3.2 (build the envelope's deadlines from anything but the arrival plus the
 durations) -> the arrival test fails; 3.3 (act on every put, not only a rising change) -> the
 re-put test fails; 3.5 (hash the whole Surface on the Pi again) -> the envelope refuses Central's
-candidate and nothing is handed.
+candidate and nothing is handed; TrialScope's Output id held to OUTPUT_IDS again (narrower than
+the Surface's OutputKey) -> the scope-of-any-Surface test fails on "headless".
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ from appliance.display_host.weston import CompositorPresentation
 from contracts.frame_lighting import FrameLighting
 from contracts.node_calibration import (
     PositionTrial,
+    TrialCandidate,
     TrialDocument,
     TrialReport,
     TrialScope,
@@ -156,3 +158,26 @@ def test_a_presentation_on_the_admitted_surface_names_the_trial_and_one_elsewher
 
 def presentation(tag: str, surface: Surface = ADMITTED) -> CompositorPresentation:
     return CompositorPresentation(surface.fact("presented_to_compositor", "buffer-1"), UUID(int=7), tag, 0)
+
+
+@pytest.mark.parametrize("output_id", ["HDMI-A-1", "Virtual-1", "headless", "headless-1", "DP-1"])
+def test_the_scope_of_any_surface_the_contract_admits_is_a_scope(output_id):
+    """TrialScope takes the Output id by the Surface's own rule (OutputKey), never a narrower list:
+    the headless test compositor's "headless" Output admits a Surface, so it has a trial scope and
+    a trial candidate (tests/native_screen_harness.py `trial_for`)."""
+    admitted = replace(ADMITTED, output=replace(KEY, output_id=output_id))
+    scope = TrialScope.of(admitted)
+    assert scope.output_id == output_id
+    trial_id = UUID(int=9)
+    candidate = TrialCandidate(trial_id, 1, 1, admitted, CALIBRATION,
+                               candidate_hash(trial_id, 1, 1, scope, CALIBRATION, LIGHTING),
+                               5_000, 10_000, LIGHTING)
+    assert candidate.baseline.output.output_id == output_id
+
+
+@pytest.mark.parametrize("output_id", ["", "bad id", "-HDMI", "x" * 129])
+def test_an_output_id_the_surface_refuses_the_scope_refuses(output_id):
+    with pytest.raises(ValueError):
+        OutputKey(UUID(int=1), UUID(int=2), output_id, 1, 1)
+    with pytest.raises(ValueError):
+        TrialScope(output_id, "kitchen", 3, 4)

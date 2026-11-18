@@ -100,15 +100,17 @@ def lighting_text(lighting: FrameLighting) -> str:
 @dataclass(frozen=True)
 class TrialScope:
     """The binding a trial is for: what Central holds of the admitted surface (its Output, its Frame,
-    the binding's generation and configuration revision; never the Player's process)."""
+    the binding's generation and configuration revision; never the Player's process). Its Output id
+    takes the rule the Surface's own does (`OutputKey`: a node token), so the scope of every Surface
+    the contract admits is a scope; which Outputs have a `trial-<port>` key on the bus is the
+    bus documents' rule (`TrialDocument`, OUTPUT_IDS), not the scope's."""
     output_id: str
     frame_id: str
     binding_generation: int
     config_revision: int
 
     def __post_init__(self) -> None:
-        if self.output_id not in OUTPUT_IDS:
-            raise ValueError("trial_scope")
+        token(self.output_id)                   # OutputKey.__post_init__'s rule for output_id
         token(self.frame_id, 96)
         counter(self.binding_generation, 1)
         counter(self.config_revision, 1)
