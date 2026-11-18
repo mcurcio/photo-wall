@@ -84,7 +84,7 @@ def test_frames_carry_each_bindings_generation_and_the_light_drawn_on_it(tmp_pat
             # Bound again: a new generation and the Frame's lights.
             server.offer(bindings=(binding().model_copy(update={"generation": 2, "lighting": WASHED}),),
                          configuration_revision=2, revision=2, layers=())
-            await service.poll_state()
+            await server.push(service)
             assert [report.generation for report in line.frames[-1].frames] == [2]
             assert line.frames[-1].frames[0].light_lux is None           # nothing drawn yet
 
@@ -113,7 +113,7 @@ def test_a_frame_reads_showing_once_its_picture_is_drawn(tmp_path):
             server.offer(commits=(Commit(plan_id="offered", revision=1, authority_epoch=1,
                                          readiness_sequence=readiness.sequence, assignment_ids=("picture",),
                                          committed_at=100),))
-            await service.poll_state()
+            await server.push(service)
             assert service.line.frames[-1].frames[0].showing is True
         finally:
             await close(service)
@@ -162,8 +162,8 @@ def test_the_drawn_report_is_put_on_a_change_and_again_every_repeat_period(tmp_p
 
 
 def test_a_running_session_sends_no_drawn_report_over_http(tmp_path, monkeypatch):
-    """The report left the control link (P4): a running session polls its state, and no request it
-    makes carries the drawn report."""
+    """The report left the control link (P4): a running session's requests (its readiness among
+    them) never carry the drawn report."""
     monkeypatch.setattr(service_module, "BACKOFF", (.001,) * 4)
 
     async def check():
@@ -181,14 +181,14 @@ def test_a_running_session_sends_no_drawn_report_over_http(tmp_path, monkeypatch
         service = PlayerService(
             PlayerConfig(central_origin="http://central", cache_dir=str(directory), cache_bytes=1024**2),
             load_identity(), (), RecordingRenderer(), immediate, find_central=finding("http://central"),
-            trust=TRUST, clock=server.clock, client=client, time_client=client, websocket_connect=False,
+            trust=TRUST, clock=server.clock, client=client, time_client=client, websocket_connect=server.connect,
             boot_context=boot_context(), luts=PlayerLuts())
         task = asyncio.create_task(service.run())
         try:
-            async def polled():
-                while sum(request.url.path == "/v1/player/state" for request in server.requests) < 3:
+            async def reported():
+                while not any(request.url.path == "/v1/player/readiness" for request in server.requests):
                     await asyncio.sleep(.01)
-            await asyncio.wait_for(polled(), 5)
+            await asyncio.wait_for(reported(), 5)
             assert ROOM_LIGHTS_DRAWN_PATH not in {request.url.path for request in server.requests}
         finally:
             service.stop()

@@ -6,10 +6,10 @@ upsert and a grant pass each), the session socket re-sending an unchanged state 
 (a delivery under the lock each), and every state answered by an acknowledgment that row-locked
 the Player (`SELECT ... FOR UPDATE`), however often that delivery had been acknowledged before.
 
-Here each is sent and written only on a change: a re-sent readiness (the Player's retry), a state
-poll of an unchanged state and a re-acknowledged delivery write nothing; the socket pushes a state
-when one changed (an event, never a timer); liveness ("heard") is its own small write outside the
-Coordination lock, at most every HEARD_WRITE_SECONDS. A real change still reaches the other side.
+Here each is sent and written only on a change: a re-sent readiness (the Player's retry) and a
+re-acknowledged delivery write nothing; the Player never asks for its state, which the socket
+pushes when it changed (an event, never a timer); liveness is the socket's open and close, written
+then and never between (decision 0034). A real change still reaches the other side.
 
 `Watched` is the real Database with one look at the end of each transaction: whether it took a
 transaction id (any row written or row-locked: the WAL flush a commit then waits for) and whether
@@ -22,15 +22,15 @@ import time
 from contextlib import contextmanager
 
 from fastapi.testclient import TestClient
+from support.player_state import player_state
 from test_coordination import report, schedule, setup_players
 from test_registry import ADMIN, hello
 
 from central.app import create_app
 from central.db import Database
 from central.transaction_locks import COORDINATION_LOCK
-from contracts.liveness import HEARD_WRITE_SECONDS
 
-IDLE_MINUTE = 120       # the Player's state polls in a minute (REPORT_INTERVAL 0.5 s)
+IDLE_MINUTE = 120       # half-second turns in a minute
 
 
 class Watched(Database):
@@ -76,7 +76,7 @@ def _ready_and_applied(client, app, registry, player, headers):
     answer = client.post("/v1/player/readiness", headers=headers,
                          json=readiness.model_dump(mode="json"))
     assert answer.json() == {"accepted": True}, answer.text
-    state = client.get("/v1/player/state", headers=headers).json()
+    state = player_state(client, player["token"])
     assert state["commits"], state
     acked = client.post("/v1/player/control-acks", headers=headers, json={
         "authority_epoch": player["authority_epoch"], "delivery_id": state["delivery_id"],
@@ -91,36 +91,36 @@ def _heard(client, player_id):
     return entry["last_report_at"], inventory.json()["read_at"]
 
 
-def test_an_idle_player_minute_writes_nothing_under_the_coordination_lock(registry):
-    """A minute of an idle Player's traffic (a state poll every half second, each delivery
-    acknowledged again, its unchanged readiness re-sent after a lost answer) commits no write under
-    the Coordination lock and row-locks nothing; liveness is written at most every
-    HEARD_WRITE_SECONDS, and the console still reads the Player as just heard. Mutation probes:
-    take `FOR UPDATE` on the ack's replay path, or on the delivery's unchanged path -> a write per
-    poll; write the contact on every request -> 120 writes."""
+def test_an_idle_player_minute_writes_nothing(registry):
+    """A minute of an idle Player's traffic (its socket open, a clock probe every half second, its
+    delivery acknowledged again, its unchanged readiness re-sent after a lost answer) commits no
+    write and row-locks nothing, and the console reads the Player as heard now. Mutation probes:
+    take `FOR UPDATE` on the ack's replay path -> a write per turn; write a contact on every
+    authenticated request (the old `heard_in`) -> writes."""
     player, watched, app = _granted(registry)
     headers = {"Authorization": "Bearer " + player["token"]}
     try:
         with TestClient(app) as client:
             readiness, state, acked = _ready_and_applied(client, app, registry, player, headers)
-            mark = len(watched.log)
-            for turn in range(IDLE_MINUTE):
-                registry.clock.advance(.5)
-                again = client.get("/v1/player/state", headers=headers).json()
-                assert again["delivery_id"] == state["delivery_id"], turn
-                reacked = client.post("/v1/player/control-acks", headers=headers, json={
+            with client.websocket_connect("/v1/player/session", headers=headers) as connection:
+                assert _receive(connection, 5)["delivery_id"] == state["delivery_id"]
+                time.sleep(.3)      # its open's contact write, and the wake it may cause
+                mark = len(watched.log)
+                for turn in range(IDLE_MINUTE):
+                    registry.clock.advance(.5)
+                    assert client.get("/v1/player/time", headers=headers).status_code == 200
+                    reacked = client.post("/v1/player/control-acks", headers=headers, json={
                     "authority_epoch": player["authority_epoch"],
-                    "delivery_id": state["delivery_id"], "result": "applied"})
-                assert reacked.json() == acked, turn
-                if turn % 40 == 0:      # the Player's retry of a report whose answer it lost
-                    resent = client.post("/v1/player/readiness", headers=headers,
-                                         json=readiness.model_dump(mode="json"))
-                    assert resent.json() == {"accepted": False}, resent.text
-            counts = watched.since(mark)
-            assert counts["coordination_writes"] == 0, counts
-            assert counts["writes"] <= IDLE_MINUTE * .5 / HEARD_WRITE_SECONDS + 1, counts
-            heard, read_at = _heard(client, player["player_id"])
-            assert heard is not None and read_at - heard <= HEARD_WRITE_SECONDS, (heard, read_at)
+                        "delivery_id": state["delivery_id"], "result": "applied"})
+                    assert reacked.json() == acked, turn
+                    if turn % 40 == 0:      # the Player's retry of a report whose answer it lost
+                        resent = client.post("/v1/player/readiness", headers=headers,
+                                             json=readiness.model_dump(mode="json"))
+                        assert resent.json() == {"accepted": False}, resent.text
+                counts = watched.since(mark)
+                assert counts["writes"] == 0, counts
+                heard, read_at = _heard(client, player["player_id"])
+                assert heard == read_at, (heard, read_at)
     finally:
         watched.close()
 
@@ -145,7 +145,7 @@ def test_a_re_acknowledged_delivery_takes_no_row_lock_and_a_new_one_is_accepted(
             lost = report(app.state.coordinator, player, sequence=2, prepared=False)
             assert client.post("/v1/player/readiness", headers=headers,
                                json=lost.model_dump(mode="json")).json() == {"accepted": True}
-            changed = client.get("/v1/player/state", headers=headers).json()
+            changed = player_state(client, player["token"])
             assert changed["delivery_id"] != state["delivery_id"]
             mark = len(watched.log)
             new = client.post("/v1/player/control-acks", headers=headers, json={

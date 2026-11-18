@@ -59,7 +59,12 @@ from central.infra.light_sensor_judge import PI_SOURCE, PiMeterAdvice, is_player
 from central.infra.node_record_retention import NodeRecordRetention
 from central.infra.paper_profile_store import PgPaperProfiles
 from central.infra.photo_library_store import PgPhotoLibrary
-from central.infra.player_contact_store import player_reports_in
+from central.infra.player_contact_store import (
+    closed_in,
+    disconnected_all_in,
+    opened_in,
+    player_reports_in,
+)
 from central.infra.player_state_wakes import PlayerStateWakes
 from central.infra.power_store import PgPower
 from central.infra.room_light_store import PgRoomLights
@@ -282,6 +287,11 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app):
         db.migrate()
+        if isinstance(db, Database):
+            # This process holds every Player socket (decision 0034): none is open before it
+            # accepts one, whatever a Central that stopped without closing its sockets left.
+            with db.transaction() as conn:
+                disconnected_all_in(conn)
         if isinstance(db, Database):    # Settings › House starts from Central's own zone (a stand-in has none)
             seed_house(db, DatabaseTransactionClock())
         if isinstance(media_queue, ProcrastinateMediaQueue) or (
@@ -533,10 +543,6 @@ def create_app(
         config = coordinator.configuration(identity["id"], identity["authority_epoch"])
         return {**config.model_dump(mode="json"), "server_time": clock.utc()}
 
-    @app.get("/v1/player/state")
-    def player_state(identity: dict = Depends(player)):
-        return timed_state(identity)
-
     @app.post("/v1/player/control-acks")
     def control_ack(request: ControlAck, identity: dict = Depends(player)):
         if request.authority_epoch != identity["authority_epoch"]:
@@ -607,6 +613,11 @@ def create_app(
             return
         await websocket.accept()
 
+        def contact(write) -> None:
+            # Liveness (central/infra/player_contact_store.py): the socket's open and close only.
+            with db.transaction() as conn:
+                write(conn, identity["id"], identity["authority_epoch"], clock.utc())
+
         async def handle(raw: str) -> None:
             if len(raw.encode()) > 1024**2:
                 raise ValueError("session message limit")
@@ -630,12 +641,15 @@ def create_app(
         # state re-read under the Coordination lock and re-sent every half second): at the start,
         # at each wake (a write under the Coordination lock committed, in any process:
         # central/infra/player_state_wakes.py), and after each message the Player sends; and sent
-        # only when its delivery differs from the last one sent.
+        # only when its delivery differs from the last one sent. The Player never asks for it.
         sent: tuple | None = None
         seen = player_state_wakes.count()
         receiving = asyncio.ensure_future(websocket.receive_text())
         waking: asyncio.Future | None = None
+        opened = False
         try:
+            await asyncio.to_thread(contact, opened_in)
+            opened = True
             while True:
                 # Reauthenticate existing sessions too, including token rotation/retirement.
                 current = await asyncio.to_thread(registry.authenticate, token)
@@ -668,6 +682,12 @@ def create_app(
             for pending in (receiving, waking):
                 if pending is not None and not pending.done():
                     pending.cancel()
+            if opened:
+                try:
+                    await asyncio.shield(asyncio.to_thread(contact, closed_in))
+                except Exception:   # it reads connected until the next start clears it
+                    LOG.warning("player %s: the session's close was not written", identity["id"],
+                                exc_info=True)
 
     @app.get(
         "/v1/operator/inventory",

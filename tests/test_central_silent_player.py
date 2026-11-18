@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from support.frames import frame_create
+from support.player_state import heard_in
 from support.position import PORTRAIT_ON_WIDE, save_position
 from test_coordination import report
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
@@ -55,8 +56,8 @@ OUTPUT = "HDMI-A-1"
 class Incident:
     """One netbooted box in the incident's state, built through Central's owner services.
 
-    `last_report_at` (T) is when Central last heard from the Player app (its last request after
-    its readiness report; liveness is its own domain, central/infra/player_contact_store.py); the App Effect
+    `last_report_at` (T) is when Central last heard from the Player app (its session socket's close
+    after its readiness report; liveness is its own domain, central/infra/player_contact_store.py); the App Effect
     Broker reported the app running before it and exited after it, with no app link admitted on
     the boot (so Central can link the exit to no Output); Host Management reports every
     interval up to `read_at` = T + SILENT_AFTER_SECONDS + 1."""
@@ -86,7 +87,8 @@ class Incident:
         registry.clock.advance(1)
         self.coordinator.advance()
         assert self.coordinator.readiness(self.player_id, report(self.coordinator, identity))
-        registry.authenticate(identity["token"])    # its last request: Central last heard it
+        with registry.db.transaction() as conn:     # its socket closed: Central last heard it
+            heard_in(conn, self.player_id, identity["authority_epoch"], registry.clock.utc())
         self.last_report_at = registry.clock.utc()
         registry.clock.advance(2)
         self.exit_evidence = self._broker(NodeEventV2, 2, "exited")

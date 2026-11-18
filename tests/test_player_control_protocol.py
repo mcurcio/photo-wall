@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from starlette.websockets import WebSocketDisconnect
+from support.player_state import player_state
 from support.position import LIGHTING
 from test_registry import ADMIN, enroll, frame
 
@@ -70,16 +71,13 @@ def test_future_control_schema_offer_selects_highest_known_common():
 
 
 def test_state_before_hello_is_refused_and_identify_is_unsupported(registry):
-    """No state reaches a session that has not negotiated: HTTP answers 409 and the
-    WebSocket closes; Identify needs the negotiated capability. Mutation probe: serve an
+    """No state reaches a session that has not negotiated: the WebSocket closes; Identify needs
+    the negotiated capability. Mutation probe: serve an
     unnegotiated epoch any envelope."""
     player, _, _ = enroll(registry)
     app = create_app(registry.db, registry.clock, ADMIN)
     headers = {"Authorization": "Bearer " + player["token"]}
     with TestClient(app) as client:
-        state = client.get("/v1/player/state", headers=headers)
-        assert state.status_code == 409
-        assert state.json() == {"error": "control_negotiation_required"}
         with pytest.raises(WebSocketDisconnect) as closed:
             with client.websocket_connect("/v1/player/session", headers=headers) as socket:
                 socket.receive_json()
@@ -107,7 +105,7 @@ def test_hello_without_a_control_row_negotiates_the_current_epoch(registry):
         assert hello.status_code == 200
         assert hello.json() == {"authority_epoch": player["authority_epoch"],
                                 "schema": 2, "capabilities": ["identify_output"]}
-        assert client.get("/v1/player/state", headers=headers).json()["delivery_sequence"] == 1
+        assert player_state(client, player["token"])["delivery_sequence"] == 1
         refused = client.post("/v1/player/hello", json={**offer, "schemas": [1]},
                               headers=headers)
         assert refused.status_code == 409
@@ -115,7 +113,7 @@ def test_hello_without_a_control_row_negotiates_the_current_epoch(registry):
 
 def test_central_clock_on_the_state_never_makes_a_new_delivery(registry):
     """Every state answer carries Central's clock (the Player's show-clock sample, decision 0032),
-    read outside the delivery digest: two polls of an unchanged state are one delivery although
+    read outside the delivery digest: two reads of an unchanged state are one delivery although
     their clocks differ. Mutation probe: add `server_time` inside `finalize` -> a second record."""
     player, _, _ = enroll(registry)
     app = create_app(registry.db, registry.clock, ADMIN)
@@ -124,9 +122,9 @@ def test_central_clock_on_the_state_never_makes_a_new_delivery(registry):
              "capabilities": ["identify_output"]}
     with TestClient(app) as client:
         assert client.post("/v1/player/hello", json=offer, headers=headers).status_code == 200
-        first = client.get("/v1/player/state", headers=headers).json()
+        first = player_state(client, player["token"])
         registry.clock.advance(7)
-        second = client.get("/v1/player/state", headers=headers).json()
+        second = player_state(client, player["token"])
     assert first["server_time"] == pytest.approx(second["server_time"] - 7)
     assert (second["delivery_id"], second["delivery_sequence"]) == (
         first["delivery_id"], first["delivery_sequence"])
@@ -138,8 +136,8 @@ def test_a_refused_state_leaves_hello_open_and_new_epoch_can_negotiate(registry)
     offer = {"authority_epoch": player["authority_epoch"], "schemas": [2],
              "capabilities": ["identify_output"]}
     with TestClient(app) as client:
-        assert client.get("/v1/player/state", headers={
-            "Authorization": "Bearer " + player["token"]}).status_code == 409
+        with pytest.raises(WebSocketDisconnect):
+            player_state(client, player["token"])
         late = client.post("/v1/player/hello", json=offer, headers={
             "Authorization": "Bearer " + player["token"]})
         assert late.status_code == 200
@@ -167,7 +165,7 @@ def test_v2_applied_ack_replays_exact_receipt_until_superseded_and_epoch_fenced(
              "capabilities": ["identify_output"]}
     with TestClient(app) as client:
         assert client.post("/v1/player/hello", json=offer, headers=headers).status_code == 200
-        state = client.get("/v1/player/state", headers=headers).json()
+        state = player_state(client, player["token"])
         assert set(state) == {"configuration", "plan", "commits", "revocations",
                               "identify_output", "identify_expires_at", "delivery_id",
                               "delivery_sequence", "server_time"}
@@ -206,14 +204,14 @@ def test_v2_applied_ack_replays_exact_receipt_until_superseded_and_epoch_fenced(
         assert repeated == first
         # Unchanged state is the same delivery again, so its receipt stays current; only
         # Central's clock, read as it answers, moved.
-        again = client.get("/v1/player/state", headers=headers).json()
+        again = player_state(client, player["token"])
         assert again == {**state, "server_time": state["server_time"] + 10}
         assert client.post("/v1/player/control-acks", json=report,
                            headers=headers).json() == accepted
         # A real change is a new delivery, and the old receipt is no longer current.
         frame(registry, "changed")
         registry.bind("changed", player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
-        assert client.get("/v1/player/state", headers=headers).json()["delivery_id"] != state[
+        assert player_state(client, player["token"])["delivery_id"] != state[
             "delivery_id"]
         assert client.post("/v1/player/control-acks", json=report, headers=headers).json() == {
             "accepted": False}

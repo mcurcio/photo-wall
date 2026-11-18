@@ -119,7 +119,7 @@ const player = (id, serial, extra = {}) => ({ id, device_id: `dev-${id}`, regist
 const snapshotOf = ({ interrupted = [], silent = [], failing = [] } = {}) => ({
   readAt: 1000,
   inventory: {
-    read_at: 1000, silent_after_seconds: 30, report_interval_seconds: 5,
+    read_at: 1000, silent_after_seconds: 30, socket_keepalive_seconds: 10,
     players: [player("p-c"), player("p-a"), player("p-b"), player("p-gone", null, { retired_at: 5 })]
       .map((p) => (silent.includes(p.id) ? { ...p, last_report_at: 100 } : p)),
     outputs: ["p-a", "p-b", "p-c", "p-gone"].map((id) => ({ player_id: id, output_id: "HDMI-A-1", observation: { connected: true } })),

@@ -88,7 +88,7 @@ def test_after_relocating_elsewhere_nothing_authenticated_is_sent():
             with pytest.raises(Unauthorized):
                 await service.probe_time()
             with pytest.raises(Unauthorized, match="not_registered"):
-                await service.poll_state()
+                await service._websocket_loop()
             assert seen == []
         finally:
             await close(service)
@@ -112,7 +112,7 @@ def test_the_run_loop_reenrolls_at_a_new_origin_and_never_leaks_the_bearer(monke
     async def check():
         service, server = await finder_rig(find)
         steady = asyncio.Event()
-        inner = _until_steady(server, steady, fail_first_state=True)
+        inner = _until_steady(server, steady, fail_first_hello=True)
         sent = []
 
         def handle(request):
@@ -153,7 +153,7 @@ def _redirecting(calls, path_prefix):
     return handle
 
 
-@pytest.mark.parametrize("kind", ["media", "state"])
+@pytest.mark.parametrize("kind", ["media", "time"])
 def test_a_client_that_follows_redirects_still_never_follows_one(tmp_path, kind):
     """The redirect guard is CentralLink's response hook, not a per-call argument: even an
     injected client built with follow_redirects=True never fetches the Location."""
@@ -165,12 +165,12 @@ def test_a_client_that_follows_redirects_still_never_follows_one(tmp_path, kind)
             await service.link.client.aclose()
             service.link.client = httpx.AsyncClient(follow_redirects=True,
                 transport=httpx.MockTransport(_redirecting(
-                    calls, "/v1/media/" if kind == "media" else "/v1/player/state")))
+                    calls, "/v1/media/" if kind == "media" else "/v1/player/time")))
             with pytest.raises(UplinkError) as excinfo:
                 if kind == "media":
                     await service.download(service._jobs[0])
                 else:
-                    await service.request("GET", "/v1/player/state")
+                    await service.request("GET", "/v1/player/time")
             assert (excinfo.value.cause, excinfo.value.reason) == (Cause.REDIRECT, "unexpected")
             assert "location=upstream.example" in excinfo.value.detail
             assert len(calls) == 1 and calls[0].startswith("http://central/")

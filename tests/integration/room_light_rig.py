@@ -144,12 +144,13 @@ class Player:
         cache = tmp / "cache"
         cache.mkdir(mode=0o700, parents=True)
         clock = ManualClock(100)
-        self._client = httpx.AsyncClient(transport=httpx.MockTransport(Server(clock)), trust_env=False)
+        server = Server(clock)
+        self._client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
         self.renderer = RecordingRenderer()
         self.service = PlayerService(
             PlayerConfig(central_origin="http://central", cache_dir=str(cache), cache_bytes=1024**2),
             load_identity(), (), self.renderer, immediate, find_central=finding("http://central"), trust=TRUST,
-            clock=clock, client=self._client, time_client=self._client, websocket_connect=False,
+            clock=clock, client=self._client, time_client=self._client, websocket_connect=server.connect,
             boot_context=boot_context(), luts=PlayerLuts(), node_bus_url=node_url)
 
     def start(self) -> None:

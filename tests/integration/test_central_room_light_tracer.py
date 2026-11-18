@@ -46,6 +46,7 @@ from integration.room_light_rig import (
     light_sensor_root,
 )
 from support.devices import seed_device
+from support.player_state import player_state
 from test_registry import ADMIN, enroll, frame, hello
 
 from appliance.host.host_runner import start_host_bus
@@ -153,8 +154,8 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
             return answer.json() if answer.content else {}
 
         def control_state() -> dict:
-            """The Player's control State, as its control link reads it, and acknowledged applied."""
-            state = call("GET", "/v1/player/state", headers=player_headers)
+            """The Player's control State, as its session socket sends it, and acknowledged applied."""
+            state = player_state(client, player["token"])
             call("POST", "/v1/player/control-acks", headers=player_headers, json={
                 "authority_epoch": player["authority_epoch"], "delivery_id": state["delivery_id"],
                 "result": "applied"})

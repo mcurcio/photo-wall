@@ -14,12 +14,12 @@ from contextlib import contextmanager
 
 import uvicorn
 from playwright.sync_api import expect
+from support.player_state import heard_in
 from test_registry import ADMIN
 
 from central.app import create_app
 from central.coordination import Coordinator
 from central.fleet.node_sessions import NodeControlConfig
-from central.infra.player_contact_store import heard_in
 from central.installation_models import InstallationInventory
 from contracts.models import Readiness
 
@@ -116,7 +116,7 @@ def report_readiness(registry, player_id):
     """Have Central accept one readiness report from a Player at the current (controlled)
     clock, as a live Player's control loop does: advance() offers the Player a plan (an empty
     one when it is unbound or idle) and the Player reports on it; and Central hears the Player
-    then, as its state poll makes it heard (liveness, central/infra/player_contact_store.py)."""
+    then, as its session socket makes it heard (liveness, central/infra/player_contact_store.py)."""
     coordinator = Coordinator(registry.db, registry.clock)
     coordinator.advance()
     epoch = next(p.authority_epoch for p in registry.inventory().players if p.id == player_id)

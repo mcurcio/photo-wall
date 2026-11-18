@@ -11,7 +11,7 @@ from central.displays.model import Readiness
 from central.fleet.frame_dark import FrameDark
 from contracts.enrollment import OutputReport
 from contracts.frame_lighting import FrameLighting
-from contracts.liveness import REPORT_INTERVAL, SILENT_AFTER_SECONDS
+from contracts.liveness import KEEPALIVE_SECONDS, SILENT_AFTER_SECONDS
 from contracts.models import Calibration, ExactTurn, Identifier, Instant, Model
 from contracts.node_commands import Owner
 
@@ -28,8 +28,9 @@ class PlayerInventory(Model):
     # Defaulted (not always present on the wire, e.g. older fixtures/probes) rather than
     # required, so this addition does not break existing inventory consumers.
     is_bound: bool = False
-    # When Central last accepted a readiness report on this Player's current authority epoch
-    # (Central's clock); None until it has. Enrollment is not a report: see last_seen.
+    # When Central last heard from this Player on its current authority epoch (Central's clock;
+    # the read time while its session socket is open); None until it has. Enrollment is not
+    # contact: see last_seen.
     last_report_at: Instant | None = None
 
 
@@ -117,10 +118,11 @@ class FrameOutput(Model):
 
 
 class PlayerReports(Model):
-    """When Central last accepted a readiness report from each non-retired Player, for that
-    Player's current authority epoch only (player id -> received_at, Central's clock).
+    """When Central last heard from each non-retired Player, for that Player's current authority
+    epoch only (player id -> heard time, Central's clock; `read_at` while its session socket is
+    open: central/infra/player_contact_store.py).
 
-    Every received_at in `reports` is <= `read_at`, so an age taken from `read_at` is never
+    Every heard time in `reports` is <= `read_at`, so an age taken from `read_at` is never
     negative, even after the wall clock steps backward."""
 
     read_at: Instant
@@ -151,10 +153,10 @@ class InstallationInventory(Model):
     walls: tuple[WallInventory, ...]
     # Liveness facts, set by with_liveness: Central's clock at read time (no Player timestamp
     # in the payload is later), the silence threshold the console classifies against, and the
-    # Player's report interval (the console's grace before a fresh enrollment counts as a to-do).
+    # session socket's keepalive (the console's grace before a fresh enrollment counts as a to-do).
     read_at: Instant | None = None
     silent_after_seconds: float | None = None
-    report_interval_seconds: float | None = None
+    socket_keepalive_seconds: float | None = None
 
     def with_liveness(self, reports: PlayerReports) -> InstallationInventory:
         """A copy carrying each Player's last accepted report, read after this inventory.
@@ -168,7 +170,7 @@ class InstallationInventory(Model):
             ),
             "read_at": max((reports.read_at, *(player.last_seen for player in self.players))),
             "silent_after_seconds": SILENT_AFTER_SECONDS,
-            "report_interval_seconds": REPORT_INTERVAL,
+            "socket_keepalive_seconds": KEEPALIVE_SECONDS,
         })
 
 

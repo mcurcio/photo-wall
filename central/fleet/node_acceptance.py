@@ -18,7 +18,6 @@ from central.infra.node_releases import environment_reference_in
 from central.infra.player_contact_store import heard_at_in
 from central.installation_repository import PostgresInstallationRepository
 from central.transaction_locks import acquire_runtime_locks
-from contracts.liveness import HEARD_WRITE_SECONDS
 from contracts.models import Plan, Readiness
 from contracts.node_boot import parse_node_boot_offer
 from contracts.node_display import parse_display_exchange
@@ -135,11 +134,10 @@ class NodeAcceptance:
                                     "AND authority_epoch=%s AND readiness IS NOT NULL",
                                     (control.player_id, control.authority_epoch)).fetchone()
             # Readiness is sent once per change, so its age says nothing: the Player is live when
-            # Central heard from it within the gap (its contact is written at most every
-            # HEARD_WRITE_SECONDS, central/infra/player_contact_store.py).
-            heard = heard_at_in(conn, control.player_id, control.authority_epoch)
-            if (feedback is None or heard is None
-                    or now - heard > self.MAX_GAP_SECONDS + HEARD_WRITE_SECONDS):
+            # Central heard from it within the gap (its socket is open, or closed within it:
+            # central/infra/player_contact_store.py).
+            heard = heard_at_in(conn, control.player_id, control.authority_epoch, now)
+            if feedback is None or heard is None or now - heard > self.MAX_GAP_SECONDS:
                 raise NodeControlError("node_qualification_readiness_stale")
             ready = Readiness.model_validate(feedback["readiness"])
             plan_row = conn.execute("SELECT manifest FROM plan_offers WHERE player_id=%s AND authority_epoch=%s "

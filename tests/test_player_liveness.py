@@ -1,14 +1,15 @@
-"""Player liveness facts on the operator inventory (console pass 2, slice 1, bead 1).
+"""Player liveness on the operator inventory (console pass 2, slice 1, bead 1; decision 0034).
 
-Liveness is the Central-clock time Central last heard from a Player on its current authority
-epoch: any request the Player authenticates, written at most every HEARD_WRITE_SECONDS
-(central/infra/player_contact_store.py). It is its own domain: a readiness report is not liveness
-(readiness is sent once per change), and enrollment is not contact. Real PostgreSQL, explicit
-clocks."""
+A Player is live while its session socket is open, and for SILENT_AFTER_SECONDS after it closes:
+Central writes its contact (migrations 115, 125, central/infra/player_contact_store.py) when the
+socket opens and when it closes, never between, and an authenticated request writes nothing. It is
+its own domain: a readiness report is not liveness, and enrollment is not contact. Real PostgreSQL,
+explicit clocks."""
 
 import time
 
 from fastapi.testclient import TestClient
+from support.player_state import socket_closed
 from test_coordination import report, schedule, setup_players
 from test_registry import ADMIN, enroll, hello
 
@@ -17,7 +18,7 @@ import player.central_link
 import player.service
 from central.app import create_app
 from central.coordination import COORDINATION_LOCK, Coordinator
-from central.infra.player_contact_store import player_reports_in
+from central.infra.player_contact_store import closed_in, opened_in, player_reports_in
 
 OPERATOR = {"Authorization": "Bearer " + ADMIN}
 
@@ -36,50 +37,83 @@ def inventory(registry):
 
 
 def heard(registry, identity):
-    """One request the Player authenticates."""
-    assert registry.authenticate(identity["token"])["id"] == identity["player_id"]
+    """A session socket opened and closed now: heard now, not connected."""
+    with registry.db.transaction() as conn:
+        for write in (opened_in, closed_in):
+            write(conn, identity["player_id"], identity["authority_epoch"], registry.clock.utc())
 
 
-def test_silence_threshold_is_derived_from_the_players_own_loop_constants():
+def contact(registry, player_id):
+    with registry.db.transaction() as conn:
+        return conn.execute("SELECT heard_at, connected FROM player_contacts WHERE player_id=%s",
+                            (player_id,)).fetchone()
+
+
+def test_silence_threshold_is_derived_from_the_players_own_session_constants():
     assert liveness.SILENT_AFTER_SECONDS == (
-        2 * liveness.REQUEST_TIMEOUT + liveness.SESSION_BACKOFF[0] + liveness.REPORT_INTERVAL
-        + liveness.HEARD_WRITE_SECONDS
-    ) == 36.5
-    # The Player binds the same objects, so its loop cannot drift from the threshold.
+        2 * liveness.KEEPALIVE_SECONDS + liveness.SESSION_BACKOFF[0]
+        + 2 * liveness.REQUEST_TIMEOUT
+    ) == 51
+    # The Player binds the same objects, so its session cannot drift from the threshold.
     assert player.service.BACKOFF is liveness.SESSION_BACKOFF
-    assert player.service.REPORT_INTERVAL is liveness.REPORT_INTERVAL
     assert player.central_link.REQUEST_TIMEOUT is liveness.REQUEST_TIMEOUT
+    options = player.central_link.CentralLink.WEBSOCKET_OPTIONS
+    assert options["ping_interval"] == options["ping_timeout"] == liveness.KEEPALIVE_SECONDS
 
 
-def test_a_request_sets_last_report_at_from_centrals_clock_at_most_every_heard_write(registry):
-    """Mutation probe: write the contact on every request -> 1003 after the second."""
+def test_an_authenticated_request_writes_no_contact(registry):
+    """Mutation probe: write the contact on every authenticated request (the old `heard_in`) ->
+    a contact row."""
     identity, _, _ = enroll(registry)
-    registry.clock.advance(7)   # heard_at must differ from last_seen (enrollment time)
-    heard(registry, identity)
-    seen = players_by_id(inventory(registry))[identity["player_id"]]
-    assert (seen.last_report_at, seen.last_seen) == (1007, 1000)
-    registry.clock.advance(liveness.HEARD_WRITE_SECONDS - 1)
-    heard(registry, identity)
-    assert players_by_id(inventory(registry))[identity["player_id"]].last_report_at == 1007
-    registry.clock.advance(1)
-    heard(registry, identity)
-    assert players_by_id(inventory(registry))[identity["player_id"]].last_report_at == (
-        1007 + liveness.HEARD_WRITE_SECONDS)
+    registry.clock.advance(7)
+    assert registry.authenticate(identity["token"])["id"] == identity["player_id"]
+    assert contact(registry, identity["player_id"]) is None
+    assert players_by_id(inventory(registry))[identity["player_id"]].last_report_at is None
 
 
-def test_unbound_player_is_heard_over_http(registry):
+def test_a_player_with_an_open_socket_reads_live_and_silent_after_its_close(registry):
+    """The Player's socket open, then no request at all for 60 s: it reads heard now. Its socket
+    closes at T: it reads heard at T, and silent once SILENT_AFTER_SECONDS have passed. Mutation
+    probe: write `connected` false at open -> heard at the open, 60 s ago."""
     identity, _, _ = enroll(registry)
     hello(registry, identity)
-    player_headers = {"Authorization": "Bearer " + identity["token"]}
+    headers = {"Authorization": "Bearer " + identity["token"]}
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         before = client.get("/v1/operator/inventory", headers=OPERATOR).json()
         assert before["players"][0]["last_report_at"] is None
-        registry.clock.advance(2)
-        client.app.state.coordinator.advance()
-        plan = client.get("/v1/player/state", headers=player_headers).json()["plan"]
-        assert plan is not None and plan["layers"] == [] and plan["bindings"] == []
-        after = client.get("/v1/operator/inventory", headers=OPERATOR).json()
-        assert after["players"][0]["last_report_at"] == 1002
+        with client.websocket_connect("/v1/player/session", headers=headers) as socket:
+            assert socket.receive_json()["type"] == "state"
+            registry.clock.advance(60)
+            live = client.get("/v1/operator/inventory", headers=OPERATOR).json()
+            assert live["players"][0]["last_report_at"] == live["read_at"] == 1060
+            assert contact(registry, identity["player_id"])["connected"] is True
+        socket_closed(client, identity["player_id"])
+        closed = contact(registry, identity["player_id"])
+        assert (closed["heard_at"], closed["connected"]) == (1060, False)
+        registry.clock.advance(liveness.SILENT_AFTER_SECONDS)
+        quiet = client.get("/v1/operator/inventory", headers=OPERATOR).json()
+        assert quiet["read_at"] - quiet["players"][0]["last_report_at"] == (
+            liveness.SILENT_AFTER_SECONDS)                          # not yet past the limit
+        registry.clock.advance(1)
+        silent = client.get("/v1/operator/inventory", headers=OPERATOR).json()
+        assert silent["read_at"] - silent["players"][0]["last_report_at"] > (
+            silent["silent_after_seconds"])
+
+
+def test_a_dead_centrals_sockets_never_read_live_after_it_starts_again(registry):
+    """A Central that stopped without closing its sockets left `connected`: the API process's start
+    clears it (one process holds every Player socket), so the Player reads heard when that Central
+    last wrote, not now. Mutation probe: skip the reset at start -> it reads heard now."""
+    identity, _, _ = enroll(registry)
+    with registry.db.transaction() as conn:
+        opened_in(conn, identity["player_id"], identity["authority_epoch"], registry.clock.utc())
+    registry.clock.advance(120)
+    assert players_by_id(inventory(registry))[identity["player_id"]].last_report_at == 1120
+    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
+        body = client.get("/v1/operator/inventory", headers=OPERATOR).json()
+    assert contact(registry, identity["player_id"])["connected"] is False
+    assert body["players"][0]["last_report_at"] == 1000
+    assert body["read_at"] - 1000 > body["silent_after_seconds"]
 
 
 def test_a_readiness_report_is_not_liveness(registry):
@@ -163,5 +197,5 @@ def test_inventory_serves_the_liveness_constants_and_read_time(registry):
         body = client.get("/v1/operator/inventory", headers=OPERATOR).json()
     assert body["silent_after_seconds"] == liveness.SILENT_AFTER_SECONDS
     # The console's grace before a fresh enrollment counts as a to-do is derived from this.
-    assert body["report_interval_seconds"] == liveness.REPORT_INTERVAL
+    assert body["socket_keepalive_seconds"] == liveness.KEEPALIVE_SECONDS
     assert body["read_at"] == 1000

@@ -29,7 +29,7 @@ from pydantic import ConfigDict, Field, ValidationError, model_validator
 from contracts.clock_record import ClockRecord
 from contracts.enrollment import OutputReport
 from contracts.equipment import READ_CAP, equipment_device_id
-from contracts.liveness import REPORT_INTERVAL, SESSION_BACKOFF
+from contracts.liveness import SESSION_BACKOFF
 from contracts.lut import LUT_BYTES, LUT_MEDIA_TYPE, LutRef
 from contracts.models import (
     MAX_VARIANT_BYTES,
@@ -117,6 +117,10 @@ def served_sha256(header: str | None) -> str:
 # The session-cycle backoff is a liveness contract (Central's silence threshold is derived from
 # it); the name is kept so tests can shorten the session retry.
 BACKOFF = SESSION_BACKOFF
+# Seconds between two turns of the control loop: the held plan's feedback read on the GLib loop,
+# and its readiness posted when it changed. Local: never a request of its own (Central pushes the
+# state over the session socket; decision 0034).
+FEEDBACK_INTERVAL = 0.5
 # A failed media download retries on its own schedule; it is not a liveness contract.
 MEDIA_RETRY_BACKOFF = (1, 5, 15, 60)
 # The app link is tried the moment an applied receipt (or a relink) arrives; this is only
@@ -125,7 +129,7 @@ APP_LINK_RETRY = 5.0
 # How long a thread-to-main handoff may wait for the GLib loop before the Player raises the
 # main_loop_late fault instead of waiting on a starved loop in silence (G8). Readiness
 # is left as last sent: a late loop never withdraws prepared playback (E-G8-8 decision).
-DISPATCH_DEADLINE = 2 * REPORT_INTERVAL
+DISPATCH_DEADLINE = 2 * FEEDBACK_INTERVAL
 # The planning tick's period (player/mainloop.py `Tick`): the executor's draw grace must outlast a
 # commit in flight plus one of them (player/executor.py `DRAW_GRACE`).
 PLANNING_TICK_MS = 33
@@ -246,7 +250,7 @@ class State(Model):
     identify_expires_at: Instant | None = None
     delivery_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     delivery_sequence: int = Field(ge=1, le=2**63 - 1)
-    # Central's clock when it answered: a show-clock sample on every poll (decision 0032), read
+    # Central's clock when it answered: a show-clock sample on every state (decision 0032), read
     # after Central's delivery digest, so a new reading never makes a new delivery.
     server_time: Instant
 
@@ -464,7 +468,7 @@ class PlayerService:
         self._applied_proof_receipt: tuple[Session, ControlAppliedReceipt] | None = None
         self._control_proof_revision = 0
         # The last acknowledgment Central answered (session, delivery id, result): the same state
-        # again (each poll of an unchanged state) is not acknowledged again.
+        # again (a state sent again unchanged) is not acknowledged again.
         self._acknowledged: tuple[Session, str, str] | None = None
         # The last readiness Central answered, as (authority epoch, number): the executor numbers
         # it once per change and starts again at 1 in each epoch, so an unchanged readiness is not
@@ -803,7 +807,7 @@ class PlayerService:
                         self._main_loop_late()
                         if self._stop.is_set():
                             raise
-                        await asyncio.sleep(REPORT_INTERVAL)
+                        await asyncio.sleep(FEEDBACK_INTERVAL)
             except Exception as error:
                 if self.cache is not None:
                     await asyncio.get_running_loop().run_in_executor(self._worker, self.cache.close)
@@ -1145,14 +1149,13 @@ class PlayerService:
     def _state(body: dict) -> State:
         return State.model_validate(body)
 
-    async def poll_state(self):
-        """One poll of Central's state, which is also a show-clock sample: any answer anchors the
-        clock before its plan is applied, so a plan is never held on an unanchored clock however
-        Central's time route fares (decision 0032)."""
-        sent_monotonic = self.clock.monotonic()
-        # On the main client: the time client's one connection stays the time probe's alone, so
-        # a slow state answer never queues a time request behind it.
-        body, received_monotonic = await self._request_with_receipt("GET", "/v1/player/state")
+    async def receive_state(self, body: dict, sent_monotonic: float,
+                            received_monotonic: float) -> None:
+        """One state Central pushed over the session socket (`body` without its "type"). It is
+        also a show-clock sample: Central read its clock after the socket's opening request was
+        sent at `sent_monotonic`, so any state anchors the clock before its plan is applied, and a
+        plan is never held on an unanchored clock however Central's time route fares (decision
+        0032). A stale observation waiting for a newer revision goes again under it."""
         state = self._state(body)
 
         def apply():
@@ -1163,7 +1166,14 @@ class PlayerService:
             return self._apply_state(state)
 
         result = await self.dispatch(apply)
+        self._renew_stale_reports()
         await self._ack_control(state, result)
+
+    def _renew_stale_reports(self) -> None:
+        with self._lock:
+            plan = self._plan
+        if plan is not None:
+            self._reports.renewed(plan.plan_id, plan.revision)
 
     def _sample_show_clock(self, player_id: str, authority_epoch: int, server_time: float,
                            sent_monotonic: float, received_monotonic: float) -> bool:
@@ -1203,44 +1213,25 @@ class PlayerService:
                 self._main_loop_late()
             except Exception as error:
                 # A failed time request is named like any other; it never gates a plan or a
-                # photo, since every state poll also samples the show clock.
+                # photo, since every pushed state also samples the show clock.
                 self._request_failed(error)
             await asyncio.sleep(max(0, 1 - (asyncio.get_running_loop().time() - started)))
 
-    async def _poll_after_stale(self) -> None:
-        """Central refused feedback as stale: fetch state; a late loop applies it next turn."""
-        try:
-            await self.poll_state()
-        except MainLoopLate:
-            self._main_loop_late()
-
-    async def _recover_stale(self) -> None:
-        """`_poll_after_stale` inside a session's loop: a failed poll is `_request_failed`."""
-        try:
-            await self._poll_after_stale()
-        except REQUEST_FAILURES as error:
-            self._request_failed(error)
-
     async def _control_loop(self):
-        """Every REPORT_INTERVAL: poll Central's state, then the held plan's feedback (readiness
-        and the downloads still wanted) and its readiness post, only when readiness changed or
-        its post went unanswered (observations are `_observation_loop`'s). A failed request is
-        a fault and the next turn tries again (decision 0032, `_request_failed`): the feedback runs
-        whether or not the poll was answered, so downloads follow the held plan through an outage."""
+        """Every FEEDBACK_INTERVAL: the held plan's feedback (readiness and the downloads still
+        wanted) and its readiness post, only when readiness changed or its post went unanswered
+        (observations are `_observation_loop`'s). It asks Central for nothing: the state arrives
+        over the session socket (`_websocket_loop`). A failed request is a fault and the next turn
+        tries again (decision 0032, `_request_failed`), so downloads follow the held plan through
+        an outage."""
         while not self._stop.is_set():
             started = asyncio.get_running_loop().time()
             try:
-                try:
-                    await self.poll_state()
-                except MainLoopLate:
-                    raise
-                except REQUEST_FAILURES as error:
-                    self._request_failed(error)
                 readiness = await self.dispatch(self._feedback)
             except MainLoopLate:
                 # Nothing is posted: the readiness Central holds stays (E-G8-8 decision).
                 self._main_loop_late()
-                await asyncio.sleep(max(0, REPORT_INTERVAL - (asyncio.get_running_loop().time() - started)))
+                await asyncio.sleep(max(0, FEEDBACK_INTERVAL - (asyncio.get_running_loop().time() - started)))
                 continue
             numbered = None if readiness is None else (readiness.authority_epoch, readiness.sequence)
             if numbered is not None and numbered != self._readiness_answered:
@@ -1251,9 +1242,10 @@ class PlayerService:
                 except StaleFeedback:
                     # A 409 is not always a newer plan: Central also answers it while a variant
                     # is made again (`media_unavailable`) or a lock conflicts, and those clear by
-                    # themselves. So it stays unanswered and goes again next turn, after the poll
-                    # (a newer plan's readiness is numbered anew; a refused one writes nothing).
-                    await self._recover_stale()
+                    # themselves. So it stays unanswered and goes again next turn; a newer plan
+                    # arrives over the socket and its readiness is numbered anew (a refused one
+                    # writes nothing).
+                    pass
                 except REQUEST_FAILURES as error:
                     # Central answered and refused it (any other 4xx: its authority, binding or
                     # shape): judged, so not sent again; else it is sent again next turn with its
@@ -1261,7 +1253,7 @@ class PlayerService:
                     if isinstance(error, Refused) and 400 <= error.status < 500:
                         self._readiness_answered = numbered
                     self._request_failed(error)
-            await asyncio.sleep(max(0, REPORT_INTERVAL - (asyncio.get_running_loop().time() - started)))
+            await asyncio.sleep(max(0, FEEDBACK_INTERVAL - (asyncio.get_running_loop().time() - started)))
 
     async def _observation_loop(self):
         """Send the outbox's reports, each until Central answers it. A slow observation endpoint
@@ -1277,14 +1269,11 @@ class PlayerService:
                     await self.request("POST", "/v1/player/observations",
                                        body=observation.model_dump(mode="json"))
                 except StaleFeedback:
-                    # Central offered a newer revision meanwhile: sent again under it, once the
-                    # Player holds it (the executor reports a change once, never again).
+                    # Central offered a newer revision meanwhile: sent again under it once the
+                    # Player holds it (`receive_state`, or already; the executor reports a change
+                    # once, never again).
                     self._reports.stale(observation)
-                    await self._recover_stale()
-                    with self._lock:
-                        plan = self._plan
-                    if plan is not None:
-                        self._reports.renewed(plan.plan_id, plan.revision)
+                    self._renew_stale_reports()
                 except REQUEST_FAILURES as error:
                     # Decision 0032: tried again at the next turn, with its number, so a Frame's
                     # shown history survives an outage and Central writes it once however often
@@ -1294,23 +1283,25 @@ class PlayerService:
                         self._reports.again(observation)
                     self._request_failed(error)
                     if not judged:
-                        await asyncio.sleep(REPORT_INTERVAL)
+                        await asyncio.sleep(FEEDBACK_INTERVAL)
 
     async def _websocket_loop(self):
+        """The session socket: Central pushes the state on it first, then whenever it may have
+        changed; the Player's one source of its state (decision 0034), and its liveness while open
+        (central/infra/player_contact_store.py). Its close ends the session cycle."""
+        opening = self.clock.monotonic()
         async with self.link.websocket(self.session, "/v1/player/session",
                                        max_size=MAX_JSON) as socket:
             async for message in socket:
+                received = self.clock.monotonic()
                 body = _json(message)
                 if body.pop("type", None) != "state":
                     raise ServiceError("message_type")
-                state = self._state(body)
                 try:
-                    result = await self.dispatch(lambda: self._apply_state(state))
+                    await self.receive_state(body, opening, received)
                 except MainLoopLate:
-                    # Never started, so never applied; the next delivery or poll carries it.
+                    # Never started, so never applied; the next delivery carries it.
                     self._main_loop_late()
-                    continue
-                await self._ack_control(state, result)
             raise ServiceError("session_closed")
 
     async def _app_link_loop(self) -> None:
@@ -1404,25 +1395,17 @@ class PlayerService:
                     if proof_task is None:
                         proof_task = asyncio.create_task(self._app_link_loop())
                     await self.hello_protocol()
-                    # Reconnection reconciles authority before any download work; the poll
-                    # also anchors the show clock, so a failing time route never holds the plan
-                    # back (time is asked only in _time_loop). A late GLib loop does not end the
-                    # session here: its loops raise main_loop_late. A failed poll is like any
-                    # session request's (decision 0032): the held plan's downloads and feedback
-                    # start anyway, and the control loop polls again at its next turn.
-                    try:
-                        await self.poll_state()
-                    except MainLoopLate:
-                        self._main_loop_late()
-                    except REQUEST_FAILURES as error:
-                        self._request_failed(error)
+                    # The state arrives over the session socket, pushed first on its open, and
+                    # anchors the show clock too, so a failing time route never holds the plan
+                    # back. The held plan's downloads and feedback start at once (decision 0032),
+                    # and a late GLib loop does not end the session: its loops raise
+                    # main_loop_late.
                     session_started = self._loop.time()
-                    tasks = [asyncio.create_task(self._control_loop()),
+                    tasks = [asyncio.create_task(self._websocket_loop()),
+                             asyncio.create_task(self._control_loop()),
                              asyncio.create_task(self._time_loop()),
                              asyncio.create_task(self._media_loop()),
                              asyncio.create_task(self._observation_loop())]
-                    if self.link.websocket_connect is not False:
-                        tasks.append(asyncio.create_task(self._websocket_loop()))
                     done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                     for task in done:
                         task.result()

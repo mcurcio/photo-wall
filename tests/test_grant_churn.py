@@ -4,6 +4,7 @@ A row, and a projected Commit, changes only when its meaning changes: a Player r
 readiness every half second gets the same control delivery back, and Central writes no grant or
 configuration row for it."""
 from fastapi.testclient import TestClient
+from support.player_state import player_state
 from test_coordination import report, schedule, setup_players
 from test_registry import ADMIN, hello
 
@@ -45,7 +46,7 @@ def test_unchanged_readiness_reports_rewrite_nothing_and_resend_the_applied_deli
             assert answer.json() == {"accepted": True}, answer.text
 
         ready(1)
-        state = client.get("/v1/player/state", headers=headers).json()
+        state = player_state(client, player["token"])
         assert state["commits"], state
         acked = client.post("/v1/player/control-acks", headers=headers, json={
             "authority_epoch": player["authority_epoch"], "delivery_id": state["delivery_id"],
@@ -55,7 +56,7 @@ def test_unchanged_readiness_reports_rewrite_nothing_and_resend_the_applied_deli
         assert all(before)
         for sequence in range(2, 12):
             ready(sequence)
-            again = client.get("/v1/player/state", headers=headers).json()
+            again = player_state(client, player["token"])
             assert (again["delivery_id"], again["commits"]) == (state["delivery_id"], state["commits"])
         assert _rows(registry, player["player_id"]) == before
 

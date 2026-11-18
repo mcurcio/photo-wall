@@ -68,7 +68,7 @@ const frame = (id, extra = {}) => ({ id, surface_id: "wall", x_mm: 10, y_mm: 10,
 const output = (player_id, output_id) => ({ player_id, output_id,
   observation: { connected: true } });
 const snapshot = { inventory: {
-  read_at: 1000, silent_after_seconds: 30, report_interval_seconds: 5,
+  read_at: 1000, silent_after_seconds: 30, socket_keepalive_seconds: 10,
   players: [player("heard"), player("silent", { last_report_at: 100 }), player("raw")],
   outputs: [output("heard", "HDMI-A-1"), output("heard", "HDMI-A-2"), output("silent", "HDMI-A-1"),
     output("raw", "HDMI-A-1")],

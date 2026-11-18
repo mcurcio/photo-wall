@@ -1,9 +1,10 @@
-"""A Player's app link is admitted against the receipt its own state polls keep current."""
+"""A Player's app link is admitted against the receipt its own state reads keep current."""
 import json
 from dataclasses import replace
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from support.player_state import player_state
 from test_node_runtime_reconciliation import rig
 from test_registry import ADMIN
 
@@ -13,22 +14,22 @@ from contracts.node_app_link import NodeAppLinkV2, encode_node_app_link, node_ap
 from contracts.player_control import ControlAck
 
 
-def test_a_state_poll_between_acknowledgement_and_link_keeps_the_receipt_current(registry):
-    """The Player polls state every half second while the broker delivers its link later, so
-    a poll of unchanged state lands between the ACK and the link. That poll is the same
+def test_a_state_read_between_acknowledgement_and_link_keeps_the_receipt_current(registry):
+    """The Player's socket may open again (a reconnect) while the broker delivers its link later,
+    so a read of unchanged state lands between the ACK and the link. That read is the same
     delivery, the ACK replays the same receipt, and Central records the link. Mutation probe:
-    issue a new delivery on every poll (the old rotation) and the link is refused with 409
+    issue a new delivery on every read (the old rotation) and the link is refused with 409
     node_link_control_not_current."""
     _, player, key, sessions, claims, _, _, _, proof = rig(registry)
     headers = {"Authorization": "Bearer " + player["token"]}
     with TestClient(create_app(registry.db, registry.clock, ADMIN)) as client:
-        state = client.get("/v1/player/state", headers=headers).json()
+        state = player_state(client, player["token"])
         report = {"authority_epoch": player["authority_epoch"],
                   "delivery_id": state["delivery_id"], "result": "applied"}
         applied = client.post("/v1/player/control-acks", json=report, headers=headers).json()
         assert applied["accepted"] is True
-        # The Player's next poll and its ACK, before the broker's link reaches Central.
-        polled = client.get("/v1/player/state", headers=headers).json()
+        # The Player's next read and its ACK, before the broker's link reaches Central.
+        polled = player_state(client, player["token"])
         client.post("/v1/player/control-acks", headers=headers, json={
             **report, "delivery_id": polled["delivery_id"]})
     receipt = json.dumps(applied["receipt"], sort_keys=True, separators=(",", ":"))

@@ -132,7 +132,7 @@ def test_link_failure_does_not_stall_control_or_mark_player_offline(tmp_path):
             raise NodeLinkError("socket_unavailable")
 
     async def run():
-        service, _ = await rig(tmp_path, server=ReceiptServer(ManualClock(100)), negotiate=True)
+        service, server = await rig(tmp_path, server=ReceiptServer(ManualClock(100)), negotiate=True)
         link = UnavailableLink()
         service.node_link_client = link
         service.boot_id = BOOT_ID
@@ -175,7 +175,7 @@ def test_the_link_is_tried_as_soon_as_a_receipt_or_relink_arrives(tmp_path):
         return link.calls.get()
 
     async def run():
-        service, _ = await rig(tmp_path, server=ReceiptServer(ManualClock(100)), negotiate=True)
+        service, server = await rig(tmp_path, server=ReceiptServer(ManualClock(100)), negotiate=True)
         receipt = service._applied_proof_receipt
         assert receipt is not None
         service._applied_proof_receipt = None  # as at start, before the first applied ACK
@@ -187,7 +187,7 @@ def test_the_link_is_tried_as_soon_as_a_receipt_or_relink_arrives(tmp_path):
             await asyncio.sleep(.05)  # the loop is idle: nothing applied yet
             assert link.calls.empty()
             since = time.monotonic()
-            await service.poll_state()  # the real applied ACK path stores the receipt
+            await server.push(service)  # the real applied ACK path stores the receipt
             assert await attempted(link, since) == receipt[1]
             since = time.monotonic()
             threading.Thread(target=service.request_relink).start()  # the broker's thread
@@ -217,7 +217,7 @@ def test_a_missed_link_is_logged(tmp_path, caplog, outcome, level, message):
             return outcome
 
     async def run():
-        service, _ = await rig(tmp_path, server=ReceiptServer(ManualClock(100)), negotiate=True)
+        service, server = await rig(tmp_path, server=ReceiptServer(ManualClock(100)), negotiate=True)
         link = MissingLink()
         service.node_link_client, service.boot_id, service._proof_active = link, BOOT_ID, True
         task = asyncio.create_task(service._app_link_loop())
@@ -250,7 +250,7 @@ def test_service_exit_invalidates_in_flight_socket_worker(tmp_path):
             return "stale"
 
     async def run():
-        service, _ = await rig(tmp_path, server=ReceiptServer(ManualClock(100)), negotiate=True)
+        service, server = await rig(tmp_path, server=ReceiptServer(ManualClock(100)), negotiate=True)
         link = WaitingLink()
         service.node_link_client = link
         service.boot_id = BOOT_ID

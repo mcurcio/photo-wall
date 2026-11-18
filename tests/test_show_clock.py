@@ -155,7 +155,7 @@ def test_a_pi_clock_975402_seconds_behind_central_shows_the_photo_at_its_planned
         try:
             picture = layer(start=102, media_origin=102, data=server.data)
             server.offer(revision=2, layers=(picture,))
-            await service.poll_state()
+            await server.push(service)
             assert await service.probe_time()
             service._feedback()
             assert await service.download(service._jobs[0])
@@ -167,7 +167,7 @@ def test_a_pi_clock_975402_seconds_behind_central_shows_the_photo_at_its_planned
                             readiness_sequence=readiness.sequence, assignment_ids=("picture",),
                             committed_at=central.utc())
             server.offer(revision=2, layers=(picture,), commits=(commit,))
-            await service.poll_state()
+            await server.push(service)
             service.tick_main()
             assert shown(service) == []             # before its instant
             central.advance(2), pi.advance(2)
@@ -194,7 +194,7 @@ def test_a_wall_clock_step_while_a_photo_plays_changes_nothing(tmp_path, step):
                             readiness_sequence=readiness.sequence, assignment_ids=("picture",),
                             committed_at=central.utc())
             server.offer(commits=(commit,))
-            await service.poll_state()
+            await server.push(service)
             service.tick_main()
             drawn = service.renderer.outputs["hdmi1"]
             assert shown(service) == ["picture"]

@@ -453,7 +453,7 @@ def test_no_cors_headers_on_preflight_or_cross_origin_requests(client):
 
 def test_players_ignore_operator_cookies(client):
     cookie = signed_in(client)
-    for path in ("/v1/player/config", "/v1/player/state", "/v1/player/time", "/v1/media/abc/def"):
+    for path in ("/v1/player/config", "/v1/player/time", "/v1/media/abc/def"):
         assert client.get(path, headers=cookie).status_code == 401, path
 
 

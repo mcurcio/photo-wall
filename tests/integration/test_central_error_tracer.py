@@ -121,7 +121,7 @@ def test_the_frame_shows_centrals_card_while_its_doubt_blacks_it(registry, tmp_p
             service._room_lights_dispatch = hops.append   # the GLib hop, run here on the "main loop"
             server.offer(bindings=(binding(OUTPUT, FRAME, lighting=LIGHTING),),
                          configuration_revision=2, revision=2, layers=())
-            await service.poll_state()
+            await server.push(service)
 
             def turn() -> None:
                 while hops:

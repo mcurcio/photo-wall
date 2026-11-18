@@ -47,7 +47,6 @@ from central.infra.display_store import (
 )
 from central.infra.health_report_store import health_reports_in
 from central.infra.output_wakes import notify_nodes_in
-from central.infra.player_contact_store import heard_in
 from central.infra.player_state_wakes import notify_if_written_in
 from central.infra.position_history_store import record_created_in, write_position_in, write_turn_in
 from central.infra.power_store import forget_frame_in
@@ -324,8 +323,8 @@ class Registry:
         return {"player_id": player_id, "token": token, "authority_epoch": epoch}
 
     def authenticate(self, token: str) -> dict:
-        """The Player `token` names; Central heard from it (its liveness, written at most every
-        HEARD_WRITE_SECONDS: central/infra/player_contact_store.py)."""
+        """The Player `token` names; it writes nothing (a Player's liveness is its session
+        socket's open and close: central/infra/player_contact_store.py)."""
         if not 32 <= len(token) <= 256:
             raise RegistryError("unauthorized", 401)
         digest = hashlib.sha256(token.encode()).hexdigest()
@@ -334,7 +333,6 @@ class Registry:
                                "AND retired_at IS NULL", (digest,)).fetchone()
             if not row:
                 raise RegistryError("unauthorized", 401)
-            heard_in(conn, row["id"], row["authority_epoch"], self.clock.utc())
             return row
 
     @staticmethod

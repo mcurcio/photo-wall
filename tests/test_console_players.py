@@ -64,7 +64,7 @@ out.notAFact = [factText(null), factText({ kind: "nope" })];
 
 // --- playersByDevice: one row per box, enrolled first, then boxes seen only at boot.
 const snapshot = { inventory: {
-  read_at: 1000, silent_after_seconds: 30, report_interval_seconds: 5,
+  read_at: 1000, silent_after_seconds: 30, socket_keepalive_seconds: 10,
   players: [
     { id: "p-b", device_id: "device-b", authority_epoch: 1, registered_at: 20, last_seen: 20,
       retired_at: null, last_report_at: 990 },

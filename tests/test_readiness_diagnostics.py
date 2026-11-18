@@ -2,12 +2,14 @@
 
 from psycopg.types.json import Jsonb
 from support.frames import frame_create
+from support.player_state import heard_in
 from support.position import PORTRAIT_ON_WIDE, save_position
 from test_registry import enroll
 
 from central.coordination import Coordinator
-from central.infra.player_contact_store import heard_in, player_reports_in
+from central.infra.player_contact_store import player_reports_in
 from central.readiness_diagnostics import project_readiness_diagnostics
+from contracts.liveness import SILENT_AFTER_SECONDS
 from contracts.models import Failure, Layer, Plan, Readiness
 
 
@@ -154,7 +156,7 @@ def test_projection_suppresses_a_silent_players_failures_and_keeps_a_heard_ones(
     assert len(_project(registry)) == 1
     with registry.db.transaction() as conn:
         conn.execute("UPDATE player_contacts SET heard_at=%s WHERE player_id=%s",
-                     (registry.clock.utc() - 40, identity["player_id"]))
+                     (registry.clock.utc() - SILENT_AFTER_SECONDS - 1, identity["player_id"]))
     assert _project(registry) == ()
 
 

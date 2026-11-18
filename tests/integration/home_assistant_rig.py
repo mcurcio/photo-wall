@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import contextlib
+import json
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -25,6 +26,7 @@ from integration.room_light_rig import HomeAssistant, Player, Worker
 from test_player_service import TRUST, Server, boot_context
 from test_registry import ADMIN
 from uplink_fakes import finding
+from websockets.sync.client import connect as websocket_connect
 
 from central.app import create_app
 from central.db import Database
@@ -82,6 +84,15 @@ class CentralOrigin:
         answer = self._http.request(method, path, json=json, content=content, headers=dict(headers))
         assert answer.status_code < 300, (method, path, answer.status_code, answer.text)
         return answer
+
+    def player_state(self, token: str) -> dict:
+        """The state Central's session socket sends first after it opens (the Player never asks
+        for its state: decision 0034)."""
+        with websocket_connect(f"ws://127.0.0.1:{self.port}/v1/player/session", open_timeout=10,
+                               additional_headers={"Authorization": f"Bearer {token}"}) as socket:
+            message = json.loads(socket.recv(timeout=10))
+        assert message.pop("type") == "state", message
+        return message
 
     def stop(self) -> None:
         self._http.close()
@@ -159,10 +170,10 @@ class BoundServer(Server):
         super().__init__(clock)
         self.bindings = tuple(bindings)
 
-    def __call__(self, request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/v1/player/state" and self.state is None:
+    def connect(self, uri, **options):
+        if self.state is None:
             self.offer(bindings=self.bindings, layers=())
-        return super().__call__(request)
+        return super().connect(uri, **options)
 
 
 class _IdleLoop:
@@ -193,15 +204,15 @@ class BoundPlayer(Player):
         cache = tmp / "cache"
         cache.mkdir(mode=0o700, parents=True)
         clock = ManualClock(100)
-        self._client = httpx.AsyncClient(transport=httpx.MockTransport(BoundServer(clock, bindings)),
-                                         trust_env=False)
+        server = BoundServer(clock, bindings)
+        self._client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
         self.renderer = RecordingRenderer()
         self._idle = _IdleLoop()
         self._loop: asyncio.Task | None = None
         self.service = PlayerService(
             PlayerConfig(central_origin="http://central", cache_dir=str(cache), cache_bytes=1024**2),
             load_identity(), (), self.renderer, MainLoopDispatcher(self._idle), find_central=finding("http://central"),
-            trust=TRUST, clock=clock, client=self._client, time_client=self._client, websocket_connect=False,
+            trust=TRUST, clock=clock, client=self._client, time_client=self._client, websocket_connect=server.connect,
             boot_context=boot_context(), luts=PlayerLuts(), node_bus_url=node_url)
 
     def start(self) -> None:
@@ -225,8 +236,7 @@ class BoundPlayer(Player):
 
 def central_bindings(central: CentralOrigin, player: Mapping[str, object]) -> tuple[OutputBinding, ...]:
     """The bindings Central's control route serves the enrolled `player` (after its hello)."""
-    answer = central.call("GET", "/v1/player/state", headers={"Authorization": f"Bearer {player['token']}"})
-    return PlayerConfiguration.model_validate(answer.json()["configuration"]).bindings
+    return PlayerConfiguration.model_validate(central.player_state(player["token"])["configuration"]).bindings
 
 
 __all__ = [
