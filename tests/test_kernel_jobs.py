@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from enum import Enum, StrEnum
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from hypothesis import given
@@ -11,7 +11,13 @@ from pydantic import ConfigDict, ValidationError
 
 from central.kernel import jobs as jobs_module
 from central.kernel.assets import AssetKey, AssetKind, AssetReady
-from central.kernel.job_types import CATALOG, FetchOsImage, FetchSealedEnvironment, SyncReleases
+from central.kernel.job_types import (
+    CATALOG,
+    FetchOsImage,
+    FetchSealedEnvironment,
+    RebootPi,
+    SyncReleases,
+)
 from central.kernel.jobs import (
     Delivery,
     Job,
@@ -227,6 +233,37 @@ def test_keys_do_not_collide_on_separator_characters(p, q):
     left, right = TwoFields(a=p[0], b=p[1]), TwoFields(a=q[0], b=q[1])
     assert job_keys(left).queueing_lock != job_keys(right).queueing_lock
     assert job_keys(left).lock != job_keys(right).lock
+
+
+class QueuedByA(Job[None], name="test.queued_by_a", delivery=FETCH, queued_by=("a",)):
+    a: str
+    b: str
+    who: Literal["x", "y"]
+
+
+def test_queued_by_narrows_only_the_queueing_lock():
+    """One pending copy per the named fields (RebootPi: per Pi, whoever asked); the lock (the
+    outcome's key) stays every field."""
+    one, other = job_keys(QueuedByA(a="p", b="1", who="x")), job_keys(QueuedByA(a="p", b="2", who="y"))
+    assert one.queueing_lock == other.queueing_lock == 'test.queued_by_a["p"]'
+    assert one.lock == 'test.queued_by_a["p","1","x"]' != other.lock
+    assert QueuedByA.queued_by == ("a",) and TwoFields.queued_by == ("a", "b")
+    assert RebootPi.queued_by == ("device_id",)
+
+
+@pytest.mark.parametrize("queued_by", [(), ("c",), ("b", "a"), ("a", "a"), "a"])
+def test_check_9_queued_by_names_some_fields_in_order(queued_by):
+    with pytest.raises(TypeError, match="queued_by"):
+        class A(Job[None], name="test.queued_by_bad", delivery=FETCH, queued_by=queued_by):
+            a: str
+            b: str
+    assert "test.queued_by_bad" not in jobs_module._REGISTRY
+
+
+def test_check_5_a_literal_of_strings_is_keyable_and_others_are_not():
+    with pytest.raises(TypeError, match="unkeyable"):
+        class A(Job[None], name="test.literal_int", delivery=FETCH):
+            x: Literal[1, 2]
 
 
 def test_field_less_keys_are_constant():

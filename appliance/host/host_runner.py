@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import logging
+import queue
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -50,6 +52,8 @@ from contracts.node_observation import (
 from contracts.node_protocol import encode_node_message
 from contracts.strict_json import loads_object
 from nodeapi.node import NodeSession as BusSession
+
+log = logging.getLogger(__name__)
 
 
 class HostRunner:
@@ -210,6 +214,36 @@ class HostRunner:
 
 
 
+class BusReboots:
+    """The bus's `reboot` asks, run on HostCore's own thread: the session's thread only queues the
+    reason (`ask`), and the host's loop runs each queued ask (`run_asked`) with the effect the HTTP
+    command runs (SystemdRebootDriver). Once a reboot started, a later ask runs nothing."""
+
+    def __init__(self, driver=None) -> None:
+        self._asked: queue.SimpleQueue[str] = queue.SimpleQueue()
+        self._driver = driver if driver is not None else SystemdRebootDriver()
+        self._started = False
+
+    def ask(self, reason: str) -> None:
+        """From any thread: reboot for `reason` at the host loop's next turn."""
+        self._asked.put(reason)
+
+    def run_asked(self) -> None:
+        """On HostCore's thread: run every queued ask, at most one reboot started."""
+        while True:
+            try:
+                reason = self._asked.get_nowait()
+            except queue.Empty:
+                return
+            if self._started:
+                continue
+            log.info("reboot asked over the bus: %s", reason)
+            try:
+                self._started = self._driver.initiate() is True
+            except Exception:   # an unknown effect: never blindly retried (RebootDriver)
+                log.exception("reboot asked over the bus: not started")
+
+
 @dataclass(frozen=True)
 class HostBus:
     """HostCore on the Node's bus: its host-line session and the wired light meter feeding it."""
@@ -221,11 +255,11 @@ class HostBus:
         self.session.stop()
 
 
-def start_host_bus(base_tag: str, *, url: str = NODE_BUS_URL, iio_root: Path = IIO_ROOT) -> HostBus:
+def start_host_bus(base_tag: str, *, reboot, url: str = NODE_BUS_URL, iio_root: Path = IIO_ROOT) -> HostBus:
     """The host component on the Node's bus (appliance/host/bus.py), on its own thread and never waited
-    on, and a wired light meter, if any, on its own thread onto the host line's state; both started
-    (it returns at once)."""
-    session = host_session(base_tag, url=url)
+    on, serving `reboot` through `reboot(reason)`, and a wired light meter, if any, on its own thread
+    onto the host line's state; both started (it returns at once)."""
+    session = host_session(base_tag, url=url, reboot=reboot)
     session.start()
     return HostBus(session, start_light_meter(session.state.put, root=iio_root))
 
@@ -249,13 +283,15 @@ def main() -> None:
                         base_tag=value["base_tag"])
     recovery = runner.recovery
     server = RecoveryServer(recovery)
-    bus = start_host_bus(value["base_tag"])
+    reboots = BusReboots()
+    bus = start_host_bus(value["base_tag"], reboot=reboots.ask)
     last_tick = 0.0
     try:
         while True:
             # The local recovery owner runs before telemetry/session work.
             server.serve_one()
             recovery.service(now_ms=boottime_ms())
+            reboots.run_asked()
             try:
                 if time.monotonic() - last_tick >= 2:
                     last_tick = time.monotonic()

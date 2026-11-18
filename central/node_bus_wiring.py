@@ -34,9 +34,9 @@ from central import cache_layout
 from central.content_wiring import build_release_services
 from central.db import Database, DatabaseTransactionClock, PoolName
 from central.fleet.node_bus_hub import HUB_LISTENERS, FleetHub
-from central.fleet.node_commands import NodeCommands
 from central.fleet.node_release_catalog import NodeReleaseCatalog
 from central.fleet.node_sessions import NodeControlConfig, NodeSessions
+from central.fleet.pi_reboot import BusPiReboot, PiReboot
 from central.hub_api import central_state, hub_methods
 from central.infra.central_state import PgCentralStateReads, PgStateWakes
 from central.infra.display_store import (
@@ -49,11 +49,16 @@ from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.home_assistant.states import HomeAssistantListener
 from central.infra.light_sensor_judge import HOST_STATE_STREAM, LightSensorJudge
 from central.infra.listen import listen
-from central.infra.node_link_store import LINK_STORE_CONCURRENCY, PgLinkStores, PgWallMarks
+from central.infra.node_link_store import (
+    LINK_STORE_CONCURRENCY,
+    AllJudges,
+    PgLinkStores,
+    PgWallMarks,
+)
 from central.infra.node_links import NodeLinks
 from central.infra.node_releases import RELEASES_CHANNEL
 from central.infra.player_state_wakes import PLAYER_STATE_CHANNEL
-from central.infra.player_versions import PgPlayerVersions
+from central.infra.player_versions import InstallEnds, PgPlayerVersions
 from central.infra.room_light_store import ROOM_LIGHTS_CHANNEL, PgRoomLights
 from central.room_light.ports import RoomLightsDocuments
 from central.version import central_version
@@ -146,6 +151,11 @@ class NodeBus:
         self._hub_session = hub_session
         self._state_wakes = state_wakes
 
+    def pi_reboot(self) -> PiReboot:
+        """A Pi's reboot over its fleet-pipe link (the worker's `RebootPi` handler's)."""
+        [fleet] = (links for links in self._links if links.pipe is Pipe.FLEET)
+        return BusPiReboot(fleet)
+
     def _room_lights_changed(self) -> None:
         self.room_lights.wake()
         self._state_wakes.wake()
@@ -222,10 +232,12 @@ def build_node_bus(dsn: str, env: Mapping[str, str]) -> NodeBus | None:
     Output documents; the show pipe's are empty), and the display line's Output reports are judged
     as they are recorded (`OutputReportJudge`); a console command in Central's API process wakes the
     documents through `DisplayWakes.listen`. A Pi's light meter on the host line is judged as it is
-    recorded (`LightSensorJudge`; each Player's drawn report is read where its line is recorded);
+    recorded (`LightSensorJudge`; each Player's drawn report is read where its line is recorded), and
+    a recorded host base wakes the look that ends a Pi's install (`InstallEnds`);
     WALL carries the room-lights document (`RoomLightsWall`). Central's hub session serves its state
     and installPlayer (`PgPlayerVersions`, whose running installs move on at each FleetHub look) and
-    hands Home Assistant's states to `HomeAssistantListener`."""
+    hands Home Assistant's states to `HomeAssistantListener`. `NodeBus.pi_reboot()` asks a Pi's host
+    to reboot over the fleet pipe's links (the worker's `RebootPi` handler)."""
     hub_url = env.get(HUB_URL_ENV)
     if not hub_url:
         return None
@@ -234,13 +246,13 @@ def build_node_bus(dsn: str, env: Mapping[str, str]) -> NodeBus | None:
     wakes = DisplayWakes()
     room_lights = PgRoomLights(db, PgHouseLock())
     stores = PgLinkStores(db, {REPORT_STREAM: OutputReportJudge(wakes),
-                               HOST_STATE_STREAM: LightSensorJudge(room_lights)})
+                               HOST_STATE_STREAM: AllJudges(LightSensorJudge(room_lights), InstallEnds())})
     documents = DisplayDocuments(stores, wakes, times=DatabaseTransactionClock())
     links = tuple(NodeLinks(pipe, hub_url, stores, documents) for pipe in (Pipe.FLEET, Pipe.SHOW))
     wall = RoomLightsWall(room_lights)
     sessions = NodeSessions(db, clock, NodeControlConfig())
     readiness, publisher = build_release_services(db, clock, cache_root=cache_layout.cache_root())
-    versions = PgPlayerVersions(db, clock, readiness, publisher, NodeCommands(sessions))
+    versions = PgPlayerVersions(db, clock, readiness, publisher)
     state_wakes = PgStateWakes()
     reads = PgCentralStateReads(db, clock, versions, room_lights,
                                 NodeReleaseCatalog(sessions, readiness=readiness).view)

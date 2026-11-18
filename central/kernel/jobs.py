@@ -3,7 +3,9 @@
 A job type declares its name, delivery and (for asset jobs) asset kind as class keywords. Every
 rule a declaration can break raises `TypeError` at class definition, and a type is registered only
 after all rules pass. Keys are derived here and never written by callers: the subject (the lock)
-is every field, in declaration order.
+is every field, in declaration order. The queueing lock (one pending copy) is the subject too,
+unless the type names the fields one pending copy is per (`queued_by`, a subset of its fields in
+declaration order): `RebootPi` is queued once per Pi whoever asked.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ import re
 from dataclasses import dataclass
 from datetime import timedelta
 from enum import Enum, StrEnum
-from typing import Any, ClassVar, Final, Generic, TypeVar
+from typing import Any, ClassVar, Final, Generic, Literal, TypeVar, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict
 
@@ -61,7 +63,7 @@ R = TypeVar("R")
 _NAME = re.compile(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+")
 _MAX_NAME_LENGTH = 64
 _RESERVED_MEMBERS: Final = frozenset({
-    "job_name", "delivery", "subject", "asset_kind", "result_type",
+    "job_name", "delivery", "subject", "queued_by", "asset_kind", "result_type",
     "model_config", "__init_subclass__", "__pydantic_init_subclass__",
 })
 _RESERVED_FIELDS: Final = frozenset({"timestamp"})  # the procrastinate mapping reserves it
@@ -79,12 +81,13 @@ class Job(BaseModel, Generic[R]):
     job_name: ClassVar[str]
     delivery: ClassVar[Delivery]
     subject: ClassVar[tuple[str, ...]]
+    queued_by: ClassVar[tuple[str, ...]]  # the fields one pending copy is per (default: the subject)
     asset_kind: ClassVar[AssetKind | None]
     result_type: ClassVar[type[Any] | None]  # None <=> Job[None]
 
     def __init_subclass__(
         cls, *, name: str | None = None, delivery: Delivery | None = None,
-        asset: AssetKind | None = None, **kwargs: Any,
+        asset: AssetKind | None = None, queued_by: tuple[str, ...] | None = None, **kwargs: Any,
     ) -> None:
         # Swallow the job keywords so object.__init_subclass__ does not reject them; pydantic
         # passes them again to __pydantic_init_subclass__ once the fields are built.
@@ -93,7 +96,7 @@ class Job(BaseModel, Generic[R]):
     @classmethod
     def __pydantic_init_subclass__(
         cls, *, name: str | None = None, delivery: Delivery | None = None,
-        asset: AssetKind | None = None, **kwargs: Any,
+        asset: AssetKind | None = None, queued_by: tuple[str, ...] | None = None, **kwargs: Any,
     ) -> None:
         super().__pydantic_init_subclass__(**kwargs)
         if cls.__pydantic_generic_metadata__["origin"] is not None:
@@ -109,10 +112,12 @@ class Job(BaseModel, Generic[R]):
         if delivery.every is not None and fields:
             raise TypeError(f"{cls.__name__}: a periodic job type has no fields")
         _check_asset(cls, asset, result_type, fields, delivery)
+        queued = _check_queued_by(cls, queued_by, fields, asset)
 
         cls.job_name = name  # type: ignore[assignment]
         cls.delivery = delivery
         cls.subject = fields
+        cls.queued_by = queued
         cls.asset_kind = asset
         cls.result_type = result_type
         _REGISTRY[name] = cls  # type: ignore[index]
@@ -160,9 +165,12 @@ def _check_members(cls: type[Job[Any]]) -> None:
 
 
 def _check_keyable(cls: type[Job[Any]], field: str) -> None:
-    """Check 5: str, int, bool, or an Enum whose values are all str or all int."""
+    """Check 5: str, int, bool, a Literal of str values, or an Enum whose values are all str or all
+    int."""
     annotation = cls.model_fields[field].annotation
     if annotation in _KEYABLE_SCALARS:
+        return
+    if get_origin(annotation) is Literal and all(isinstance(v, str) for v in get_args(annotation)):
         return
     if isinstance(annotation, type) and issubclass(annotation, Enum):
         values = [member.value for member in annotation]
@@ -195,10 +203,22 @@ def _check_asset(
         raise TypeError(f"{cls.__name__}: asset kind {asset.value!r} is already claimed")
 
 
+def _check_queued_by(cls: type[Job[Any]], queued_by: object, fields: tuple[str, ...],
+                     asset: object) -> tuple[str, ...]:
+    """Check 9: `queued_by` names some of the type's fields, in declaration order; an asset job's
+    one field is its whole key, so it never narrows."""
+    if queued_by is None:
+        return fields
+    if (not isinstance(queued_by, tuple) or not queued_by or asset is not None
+            or list(queued_by) != [field for field in fields if field in queued_by]):
+        raise TypeError(f"{cls.__name__}: queued_by names some of its fields in declaration order")
+    return queued_by
+
+
 @dataclass(frozen=True, slots=True)
 class JobKeys:
     lock: str  # job_outcomes key + NOTIFY payload; one RUNNING copy, for asset jobs only
-    queueing_lock: str  # one PENDING copy
+    queueing_lock: str  # one PENDING copy per the type's `queued_by` fields
 
 
 def _registered(job: object) -> type[Job[Any]]:
@@ -219,7 +239,7 @@ def job_keys(job: Job[Any]) -> JobKeys:
     payload = job.model_dump(mode="json")
     return JobKeys(
         lock=job_type.job_name + _encode([payload[f] for f in job_type.subject]),
-        queueing_lock=job_type.job_name + _encode([payload[f] for f in job_type.model_fields]),
+        queueing_lock=job_type.job_name + _encode([payload[f] for f in job_type.queued_by]),
     )
 
 

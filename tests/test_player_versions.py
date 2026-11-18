@@ -9,6 +9,7 @@ Pi's version and previous.
 """
 from __future__ import annotations
 
+import asyncio
 from uuid import uuid4
 
 import pytest
@@ -20,12 +21,20 @@ from test_node_release_ingest import Upstream, make_sync_world, node_upload, syn
 from test_registry import ADMIN
 
 from central.app import create_app
-from central.fleet.node_observations import NodeObservations
-from central.fleet.node_sessions import NodeControlConfig, NodeSessions
+from central.content_catalog.catalog import device_id_for_serial
+from central.fleet.node_sessions import NodeControlConfig
+from central.infra.job_queue import task_name
+from central.infra.node_link_store import PgLinkStores
 from central.infra.node_releases import wanted_deployments
+from central.infra.player_versions import InstallEnds
+from central.kernel.job_types import RebootPi
 from contracts.node_boot import NodeBootRequestV2, encode_node_boot_request, parse_node_boot_offer
 from contracts.node_commands import encode_session_claim, parse_session_grant
-from contracts.node_host_facts import HostFactsV2, encode_host_facts
+from contracts.node_link import Pipe
+from contracts.node_state import HOST_BASE_KEY, HOST_LINE, HostBase, encode_host_base
+from nodeapi.buffers import state_prefix, state_stream
+from nodeapi.epoch import Token
+from nodeapi.pull import Batch, Read
 
 HEADERS = {"Authorization": "Bearer " + ADMIN}
 CONFIG = NodeControlConfig("node-test")
@@ -112,7 +121,7 @@ def test_update_the_wall_sets_every_pi_and_restarts_none(registry, wall):
     assert answer.status_code == 200, answer.text
     assert {pi["serial"]: (pi["version"], pi["chosen"], pi["install"]) for pi in answer.json()["players"]} == {
         A: ("v2.0.0", True, None), B: ("v2.0.0", True, None)}
-    assert _rows(registry, "SELECT command_id FROM node_reboot_commands") == []
+    assert _reboots(registry) == []
     refused = client.put("/v1/operator/releases/wall", json={"version": "v9.9.9"}, headers=HEADERS)
     assert (refused.status_code, refused.json()) == (404, {"error": "unknown_version"})
 
@@ -126,27 +135,46 @@ def _host(client, serial: str):
     return parse_session_grant(enrolled.content), claim
 
 
-def test_an_install_restarts_its_pi_once_ready_and_ends_when_its_host_runs_the_version(registry, wall):
+def _reboots(registry) -> list[dict]:
+    """The queued `RebootPi` jobs' fields."""
+    return [{key: row["args"][key] for key in ("device_id", "reason", "by")} for row in _rows(
+        registry, "SELECT args FROM procrastinate_jobs WHERE task_name=%s AND status='todo' ORDER BY id",
+        (task_name(RebootPi),))]
+
+
+def _host_states_base(registry, serial: str, tag: str, seq: int) -> None:
+    """`serial`'s host line states `tag` as its base, recorded by the real link store as the
+    worker's NodeLink records it, with the install's judge."""
+    read = Read(Token("epoch", seq), state_prefix(HOST_LINE) + HOST_BASE_KEY, {},
+                encode_host_base(HostBase(base_tag=tag)))
+    asyncio.run(PgLinkStores(registry.db, {state_stream(HOST_LINE): InstallEnds()}).store(serial, Pipe.FLEET).commit(
+        state_stream(HOST_LINE), Batch((read,), Token("epoch", seq), False)))
+
+
+def test_an_install_restarts_its_pi_once_ready_and_ends_when_its_host_line_states_the_version(registry, wall):
+    """Mutation probes: `_restart` publishes nothing -> no reboot queued; RebootPi queued per every
+    field -> two reboots queued; `_running` reads a constant -> the install never ends."""
     client, world, uploads, _ = wall
-    grant, claim = _host(client, A)
+    _host_states_base(registry, A, "v2.1.0", 1)
     assert _install(client, A, "v2.2.0").json()["install"] == "downloading"   # not ready: no restart yet
-    assert _rows(registry, "SELECT session_id FROM node_reboot_commands") == []
+    assert _reboots(registry) == []
     versions = client.app.state.player_versions
     versions.advance_installs()
     assert _pis(client)[A]["install"] == "downloading"
     store_files(world, uploads["v2.2.0"])
     versions.advance_installs()
     assert _pis(client)[A]["install"] == "restarting"
-    assert [row["session_id"] for row in _rows(registry, "SELECT session_id FROM node_reboot_commands")] == [
-        claim.session_id]
-    # The host of A's next boot reports the version's base: the install ends.
-    grant, claim = _host(client, A)
-    sessions = NodeSessions(registry.db, registry.clock, CONFIG)
-    NodeObservations(sessions).record_facts(claim.session_id, claim.credential, encode_host_facts(HostFactsV2(
-        grant.producer, 1, 1000, kernel_release="6.6.51", interface="eth0", link_state="up",
-        address="192.168.1.40", base_tag="v2.2.0")))
+    device = device_id_for_serial(A)
+    assert _reboots(registry) == [{"device_id": device, "reason": "install:v2.2.0", "by": "central"}]
+    # A second Install while that reboot is queued queues no second one.
+    assert _install(client, A, "v2.2.0").json()["install"] == "restarting"
+    assert len(_reboots(registry)) == 1
     versions.advance_installs()
-    assert (_pis(client)[A]["install"], _pis(client)[A]["running"]) == (None, "v2.2.0")
+    assert _pis(client)[A]["install"] == "restarting"   # its host still states the old base
+    # A's next boot: its host line states the version's base, and the install ends.
+    _host_states_base(registry, A, "v2.2.0", 2)
+    versions.advance_installs()
+    assert _pis(client)[A]["install"] is None
 
 
 def test_the_keep_set_holds_every_pis_version_and_previous(registry, wall):

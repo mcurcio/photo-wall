@@ -189,7 +189,8 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
             worker.start()
             stoppers.append(worker.stop)
             nonlocal host
-            host = start_host_bus("base-room-light", url=node.client_url, iio_root=light_sensor_root(tmp_path, LUX))
+            host = start_host_bus("base-room-light", reboot=lambda _reason: None, url=node.client_url,
+                                  iio_root=light_sensor_root(tmp_path, LUX))
             followed = Player(tmp_path / "player", node.client_url)
             followed.start()
             stoppers.append(followed.stop)

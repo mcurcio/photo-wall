@@ -14,17 +14,38 @@ there.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 
 import nats.errors
 import pytest
-from integration.bus_servers import door, door_get, hub_server, local, node_server, until
+from integration.bus_servers import (
+    FileLinkStore,
+    Projection,
+    central,
+    door,
+    door_get,
+    hub_server,
+    local,
+    node_server,
+    until,
+)
 from nats.js.errors import NotFoundError
 from node_pid1_bus_probe import host_state
 
 from appliance.host.bus import HOST_SLICE, host_session
-from contracts.node_link import NODE_DOOR_API_PREFIX, bus_server_name
-from contracts.node_state import HostBase, decode_host_base
+from contracts.node_link import NODE_DOOR_API_PREFIX, Pipe, bus_server_name
+from contracts.node_state import (
+    HOST_LINE,
+    HOST_REBOOT_METHOD,
+    HostBase,
+    HostReboot,
+    HostRebootAnswer,
+    decode_host_base,
+    decode_host_reboot_answer,
+    encode_host_reboot,
+)
+from nodeapi.hub import HubUnavailable, NodeLink
 
 SERIAL = "serial-h"
 RECORDS = "RECORD_host"
@@ -51,7 +72,7 @@ async def _held(node) -> dict | None:
 def test_the_host_component_writes_birth_and_refills_it_after_a_bus_crash(tmp_path):
     node = node_server(tmp_path, SERIAL, hub_server(tmp_path, [SERIAL]))   # its hub is never started
     node.start()
-    session = host_session(BASE_TAG, url=node.client_url)
+    session = host_session(BASE_TAG, url=node.client_url, reboot=lambda _reason: None)
     session.start()
     try:
         async def first():
@@ -90,7 +111,7 @@ def test_the_door_reads_the_pis_values_and_refuses_every_write(tmp_path):
     `allowed_connection_types` from `local` -> local over the door is admitted."""
     node = node_server(tmp_path, SERIAL, hub_server(tmp_path, [SERIAL]))   # its hub is never started
     node.start()
-    session = host_session(BASE_TAG, url=node.client_url)
+    session = host_session(BASE_TAG, url=node.client_url, reboot=lambda _reason: None)
     session.start()
 
     async def run():
@@ -153,3 +174,49 @@ def test_the_door_reads_the_pis_values_and_refuses_every_write(tmp_path):
     finally:
         session.stop()
         node.stop()
+
+
+def test_the_host_answers_reboot_from_central_and_then_reboots_once(tmp_path):
+    """S4a: Central's fleet-pipe NodeLink calls the host's `reboot` across the leaf; the host answers
+    accepted and only then hands the reason to its reboot effect, once per ask; an ask that does not
+    decode is answered as an error and reboots nothing. Mutation probe: call the effect before
+    decoding the ask -> the undecodable ask reboots."""
+    hub = hub_server(tmp_path, [SERIAL])
+    node = node_server(tmp_path, SERIAL, hub)
+    asked: list[str] = []
+    session = host_session(BASE_TAG, url=node.client_url, reboot=asked.append)
+
+    async def run():
+        client = await central(hub, SERIAL)
+        try:
+            store = FileLinkStore(tmp_path / "link.jsonl")
+            link = NodeLink(client, Pipe.FLEET, store, Projection())
+
+            async def answered():
+                with contextlib.suppress(HubUnavailable):
+                    return await link.call(HOST_LINE, HOST_REBOOT_METHOD,
+                                           encode_host_reboot(HostReboot(reason="install:v2.1.0")), timeout=1)
+            reply = await until(answered, 20, "the host answers reboot across the leaf")
+            assert decode_host_reboot_answer(reply) == HostRebootAnswer(accepted=True)
+
+            async def rebooted():
+                return asked == ["install:v2.1.0"]
+            await until(rebooted, 5, "the host's reboot effect runs once")
+            assert {"component": "host", "method": "reboot", "outcome": "ok"} in store.actions("call")
+
+            await link.call(HOST_LINE, HOST_REBOOT_METHOD, b'{"why":"no reason"}', timeout=1)
+            assert {"component": "host", "method": "reboot", "outcome": "error 500"} in store.actions("call")
+            await asyncio.sleep(0.2)
+            assert asked == ["install:v2.1.0"]
+        finally:
+            await client.close()
+
+    hub.start()
+    node.start()
+    session.start()
+    try:
+        asyncio.run(run())
+    finally:
+        session.stop()
+        node.stop()
+        hub.stop()

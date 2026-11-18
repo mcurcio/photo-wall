@@ -69,7 +69,7 @@ from nodeapi.buffers import (
 )
 from nodeapi.documents import DocumentWriter
 from nodeapi.epoch import Token, epoch_of
-from nodeapi.hub import DRAIN_BATCH, WALL_MARGIN, NodeLink, WallWriter
+from nodeapi.hub import DRAIN_BATCH, WALL_MARGIN, HubUnavailable, NodeLink, WallWriter
 from nodeapi.node import MethodCall, NodeSession, Release
 from nodeapi.pull import ConsumerLost, CursorReader, Gap, Pulled, Read, StartAt, StreamAbsent, pull
 
@@ -190,7 +190,7 @@ def test_the_node_api_tracer(tmp_path):
 
             # Step 1: the method answers across the leaf; events and state are recorded once, in order.
             async def answered():
-                with contextlib.suppress(nats.errors.NoRespondersError, nats.errors.TimeoutError):
+                with contextlib.suppress(HubUnavailable):
                     return await link.call("display", "identify", b"hello", timeout=1)
             assert await until(answered, 15, "the display method answers across the leaf") == b"display:hello"
             assert callers[-1] == CENTRAL_WRITER

@@ -115,7 +115,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     # release is ready, so no boot is offered and the Releases routes are not mounted.
     readiness = content.readiness if content else None
     versions = (None if readiness is None
-                else PgPlayerVersions(db, clock, readiness, content.publisher if content else None, commands))
+                else PgPlayerVersions(db, clock, readiness, content.publisher if content else None))
     boots = None if versions is None else NodeBootService(sessions, versions=versions)
     lifecycle = NodeLifecycle(sessions)
     links = NodeAppLinks(sessions)

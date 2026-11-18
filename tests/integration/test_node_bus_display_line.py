@@ -173,7 +173,7 @@ def _births(store: FileLinkStore) -> int:
 def test_the_display_line_carries_centrals_output_document(tmp_path):
     hub = hub_server(tmp_path, [SERIAL])
     node = node_server(tmp_path, SERIAL, hub)
-    host = host_session("base-test", url=node.client_url)
+    host = host_session("base-test", url=node.client_url, reboot=lambda _reason: None)
     display = NodeSession(DISPLAY_COMPONENT, DISPLAY_SLICE,
                           Release(DISPLAY_VERSION, "sha256:display-test", {DISPLAY_COMPONENT: SCHEMA_MAJOR}),
                           url=node.client_url)

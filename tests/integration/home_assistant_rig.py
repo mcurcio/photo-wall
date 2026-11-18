@@ -104,10 +104,12 @@ class CentralOrigin:
         self._server = self._thread = None
 
 
-def worker(dsn: str, hub: BusServer, tmp: Path) -> Worker:
-    """room_light_rig's Worker (`media.worker`'s loops, its Node bus from `build_node_bus`) on the
-    environment the worker reads: the hub's client URL and its configuration file."""
-    return Worker(dsn, {HUB_URL_ENV: hub.client_url, HUB_CONFIG_ENV: str(tmp / "worker-hub.json")})
+def worker(dsn: str, hub: BusServer, tmp: Path, *, runtime=None) -> Worker:
+    """room_light_rig's Worker (`media.worker`'s loops, its Node bus from `build_node_bus`, and
+    `runtime(bus)` when given) on the environment the worker reads: the hub's client URL and its
+    configuration file."""
+    return Worker(dsn, {HUB_URL_ENV: hub.client_url, HUB_CONFIG_ENV: str(tmp / "worker-hub.json")},
+                  runtime=runtime)
 
 
 async def central_state(house: HomeAssistant, key: str) -> CentralStateValue | None:

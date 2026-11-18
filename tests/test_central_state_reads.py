@@ -12,7 +12,6 @@ from test_node_boot import ALL_READY
 from test_node_fleet_hosts import Host, _rig
 from test_node_host_facts_ingest import _facts, _send
 
-from central.fleet.node_commands import NodeCommands
 from central.infra.central_state import PgCentralStateReads
 from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.player_versions import PgPlayerVersions
@@ -34,7 +33,7 @@ def _reads(registry, sessions=None) -> tuple[PgCentralStateReads, PgRoomLights]:
     lights = PgRoomLights(registry.db, PgHouseLock())
     if sessions is None:
         _, sessions = _rig(registry)
-    versions = PgPlayerVersions(registry.db, registry.clock, ALL_READY, None, NodeCommands(sessions))
+    versions = PgPlayerVersions(registry.db, registry.clock, ALL_READY, None)
     return PgCentralStateReads(registry.db, registry.clock, versions, lights, lambda: None), lights
 
 

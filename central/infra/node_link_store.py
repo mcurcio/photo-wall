@@ -67,6 +67,18 @@ class RecordJudge(Protocol):
         # `items` are the batch's Reads that this commit stored (not the repeats), in sequence order
 
 
+class AllJudges:
+    """Several judges of one stream, run in order in the same commit (the host line's state: the
+    light sensor's and the install's)."""
+
+    def __init__(self, *judges: RecordJudge) -> None:
+        self._judges = judges
+
+    def judge_in(self, conn: Any, device_id: str, stream: str, items: tuple[Read, ...]) -> None:
+        for judge in self._judges:
+            judge.judge_in(conn, device_id, stream, items)
+
+
 class PgLinkStores:
     """One per process: every (Node, pipe) link's store over one Database, behind one gate, with a
     judge per stream name (`RecordJudge`)."""

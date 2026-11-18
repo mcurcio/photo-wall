@@ -352,7 +352,8 @@ class NodeLink:
                 again.set()
 
     async def call(self, component: str, method: str, payload: bytes, *, timeout: float) -> bytes:
-        """Call `<component>.method.<method>` as Central; the outcome goes to the action log."""
+        """Call `<component>.method.<method>` as Central; the outcome goes to the action log. No
+        responder, no answer within `timeout` or a link down raise HubUnavailable."""
         line = STORE_LINES.get(component)
         if line is None or line.pipe is not self._pipe:
             raise ValueError("call_outside_pipe")
@@ -360,9 +361,9 @@ class NodeLink:
         try:
             reply = await self._client.request(f"{component}.{METHOD_TOKEN}.{method}", payload, timeout=timeout,
                                                headers=caller_headers(CENTRAL_WRITER))
-        except nats.errors.Error as error:
+        except (nats.errors.Error, asyncio.TimeoutError) as error:
             await self._store.action("call", {**body, "outcome": type(error).__name__})
-            raise
+            raise HubUnavailable(f"call {component}.{method}: {error!r}") from error
         code = (reply.headers or {}).get(_SERVICE_ERROR)
         await self._store.action("call", {**body, "outcome": "ok" if code is None else f"error {code}"})
         return reply.data
@@ -411,12 +412,13 @@ class NodeLink:
 
 
 async def run_link(url: str, serial: str, pipe: Pipe, store: LinkStore, documents: DocumentSource,
-                   stop: asyncio.Event) -> None:
+                   stop: asyncio.Event, *, linked: Callable[[NodeLink | None], None] | None = None) -> None:
     """One Node's link on one pipe, as Central's user in the Node's hub account (central_user(serial),
     inboxes under CENTRAL_INBOX_PREFIX): connect, retrying with the NodeLink backoff until `stop`; run
     NodeLink(...).run(stop); connect again if the client closed; close the client on `stop`. The client
     reconnects forever. A store error propagates (Central's process is what failed); a hub that does not
-    answer never raises out of here. Callers never see a nats type."""
+    answer never raises out of here. Callers never see a nats type. `linked` is handed each NodeLink
+    while it runs (for `call`) and None once it ended."""
     delay = _BACKOFF[0]
     while not stop.is_set():
         try:
@@ -427,9 +429,14 @@ async def run_link(url: str, serial: str, pipe: Pipe, store: LinkStore, document
             delay = min(delay * 2, _BACKOFF[1])
             continue
         delay = _BACKOFF[0]
+        link = NodeLink(client, pipe, store, documents)
+        if linked is not None:
+            linked(link)
         try:
-            await NodeLink(client, pipe, store, documents).run(stop)
+            await link.run(stop)
         finally:
+            if linked is not None:
+                linked(None)
             await _close(client)
         await _pause(stop, _BACKOFF[0])   # the client closed under the link: connect again
 

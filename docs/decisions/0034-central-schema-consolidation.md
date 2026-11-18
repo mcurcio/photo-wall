@@ -109,6 +109,7 @@ One pull request; the slices are build order within it. Migrations are forward-o
 - `execution_events`, `audit_events` and `runtime_changes`, which nothing reads. Each record's audit columns say who changed it last; the history of who changed what before that is gone.
 - Home Assistant's "last heard" is written at most once a minute, not on every state.
 - The settings documents lose per-field SQL constraints; their models validate them.
+- A reboot Central asks of a Pi (an Install's restart, a `RebootPi` job the worker runs over the Pi's fleet-pipe link) is kept a week, as an `events` row, where `node_reboot_commands` kept every reboot.
 - The console's "Central has not looked at its hub for …" becomes two facts: the worker is not running (its queue heartbeat lapsed), or Central cannot reach its hub. A worker whose bus task hangs while its job loops still beat reads as running.
 - A one-time enrolment nonce lives in memory; one issued before a Central restart is refused and retried.
 - Central is down about a minute at the deploy.

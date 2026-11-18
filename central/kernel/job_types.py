@@ -9,6 +9,7 @@ from __future__ import annotations
 from datetime import timedelta
 from typing import Any, Final, TypeAlias
 
+from central.actor import Actor
 from central.kernel.assets import AssetKind, AssetReady, MediaReady
 from central.kernel.jobs import Delivery, Job, QueueName
 from central.kernel.types import LibraryAssetId, MediaVariantKey, Sha256
@@ -84,8 +85,22 @@ class PurgeFinishedJobs(Job[None], name="queue.purge_finished",
     pass
 
 
+class RebootPi(Job[None], name="node.reboot", delivery=Delivery(queue=QueueName.UPKEEP),
+               queued_by=("device_id",)):
+    """Ask one Pi's host to reboot, over its fleet-pipe link (central/fleet/pi_reboot.py
+    `RebootPiHandler`), and record the ask in `events`. `request_id` names the ask (Install: a new
+    uuid4; S4c's operator reboot: the console's command id), `by` who asked. Queued once per Pi: a
+    second ask while one is queued is not queued (an Install coalesces). Never retried: a Pi with no
+    link now takes its version at its next boot."""
+
+    request_id: str
+    device_id: str
+    reason: str
+    by: Actor
+
+
 AssetJob: TypeAlias = (FetchOsImage | FetchSealedEnvironment | FetchLibraryThumbnail
                        | PrepareMedia)
 CATALOG: Final[tuple[type[Job[Any]], ...]] = (
     FetchOsImage, FetchSealedEnvironment, FetchLibraryThumbnail, PrepareMedia,
-    SyncReleases, Prefetch, MaintainCache, RescueStalledJobs, PurgeFinishedJobs)
+    SyncReleases, Prefetch, MaintainCache, RescueStalledJobs, PurgeFinishedJobs, RebootPi)

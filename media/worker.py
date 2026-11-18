@@ -22,6 +22,7 @@ from central.assets.maintenance import CacheSettings, MediaCacheBudget
 from central.assets.store import CacheStore
 from central.content_wiring import build_job_runtime
 from central.db import Database, DatabaseTransactionClock
+from central.fleet.pi_reboot import NoHubReboot
 from central.infra.house_store import seed_house
 from central.infra.key_content_store import PgKeyContent
 from central.infra.media_cache_records import PgMediaVariantUse
@@ -347,11 +348,14 @@ async def _entry():
         lambda secret: ImmichClient.for_connection(secret, clock=clock))
     # The one worker kind (design §10.5): every asset handler behind JobRuntime, in EVERY worker
     # process; only the legacy media loop is single-writer. Its boot checks run here, so a wiring
-    # mistake fails before any job is claimed.
+    # mistake fails before any job is claimed. The Node bus is built first: its fleet-pipe links
+    # are where `RebootPi` asks a Pi's host to reboot (no hub deployed: no Pi is asked).
+    bus = build_node_bus(dsn, os.environ)
     runtime = build_job_runtime(
         db, clock, cache_root=cache_root, env=os.environ, thumbnails=thumbnails,
         media_maker=worker.media_maker(store=media_store,
-                                       transactions=PgTransactions(db)))
+                                       transactions=PgTransactions(db)),
+        reboot=NoHubReboot() if bus is None else bus.pi_reboot())
     await _blocking(repository.db.migrate)
     # Settings › House starts from this process's zone when Central has not seeded it yet: the
     # worker reads Runtime (the Planner's Program windows) in house time, as Central does.
@@ -364,7 +368,7 @@ async def _entry():
     media = _media_loop(worker, lambda: _media_queue(app, additional_context))
     try:
         async with app.open_async():
-            await _run_workers(media, runtime, build_node_bus(dsn, os.environ))
+            await _run_workers(media, runtime, bus)
     finally:
         await worker._close_clients()
         await checks.close()

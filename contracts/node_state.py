@@ -10,6 +10,9 @@ A key's subject is nodeapi.buffers `state_prefix(line) + key`, in the line's sta
 - `base` (the host line, HostCore): `HostBase`, the base this boot runs. A release's base carries
   the release's own tag (scripts/node_release_artifacts.py: the base is tagged with the release), so
   `base_tag` is the release this Pi booted: Home Assistant's "installed" version of a Player.
+- `reboot` (the host's one bus method, `HOST_REBOOT_METHOD`; decision 0034, S4a): `HostReboot`
+  asks the host to reboot and names why; the host answers `HostRebootAnswer` before it schedules
+  the reboot. Central asks it over the Pi's fleet-pipe link (central/fleet/pi_reboot.py).
 - The Player's own line (0017 E7/E8, pulled into #106; the Player declares it):
   `frames`, `FrameReports`: per Frame it draws, the binding generation it draws, its Output,
   whether it is showing and the light on the Frame at its centre as last drawn;
@@ -38,6 +41,8 @@ BIRTH_BYTES: Final = 4096                  # its largest value (nodeapi.buffers 
 HOST_LINE: Final = "host"
 HOST_BASE_KEY: Final = "base"              # the host line's state key of HostBase
 HOST_BASE_BYTES: Final = 256
+HOST_REBOOT_METHOD: Final = "reboot"       # the host's bus method: HostReboot in, HostRebootAnswer out
+HOST_REBOOT_BYTES: Final = 512             # the largest ask or answer
 PLAYER_LINE: Final = "player"              # the Player's line (contracts.node_link.STORE_LINES)
 PLAYER_COMPONENT: Final = "player"         # the component writing it, and its birth's name
 PLAYER_SCHEMA_MAJOR: Final = 1             # the major of the Player line's keys below (its birth names it)
@@ -64,6 +69,16 @@ class Birth(Model):
 class HostBase(Model):
     """The base this boot runs (HostCore, the host line's `base` key): its tag, the release's tag."""
     base_tag: Annotated[str, Field(min_length=1, max_length=128)]
+
+
+class HostReboot(Model):
+    """An ask of the host's `reboot` method: why (Install: "install:<version>")."""
+    reason: Annotated[str, Field(min_length=1, max_length=128)]
+
+
+class HostRebootAnswer(Model):
+    """The host's answer to `reboot`, given before the reboot is scheduled."""
+    accepted: bool
 
 
 class FrameReport(Model):
@@ -107,6 +122,26 @@ def decode_host_base(raw: bytes) -> HostBase:
     return decoded(HostBase, raw, HOST_BASE_BYTES, "host_base")
 
 
+def encode_host_reboot(ask: HostReboot) -> bytes:
+    """Canonical JSON of at most HOST_REBOOT_BYTES."""
+    return encode(ask.model_dump(mode="json"), HOST_REBOOT_BYTES, "host_reboot_too_large")
+
+
+def decode_host_reboot(raw: bytes) -> HostReboot:
+    """The ask `raw` encodes; ValueError("host_reboot") for anything else."""
+    return decoded(HostReboot, raw, HOST_REBOOT_BYTES, "host_reboot")
+
+
+def encode_host_reboot_answer(answer: HostRebootAnswer) -> bytes:
+    """Canonical JSON of at most HOST_REBOOT_BYTES."""
+    return encode(answer.model_dump(mode="json"), HOST_REBOOT_BYTES, "host_reboot_answer_too_large")
+
+
+def decode_host_reboot_answer(raw: bytes) -> HostRebootAnswer:
+    """The answer `raw` encodes; ValueError("host_reboot_answer") for anything else."""
+    return decoded(HostRebootAnswer, raw, HOST_REBOOT_BYTES, "host_reboot_answer")
+
+
 def encode_frame_reports(reports: FrameReports) -> bytes:
     """Canonical JSON of at most FRAME_REPORTS_BYTES; ValueError("frame_reports_too_large") past it."""
     return encode(reports.model_dump(mode="json"), FRAME_REPORTS_BYTES, "frame_reports_too_large")
@@ -119,7 +154,9 @@ def decode_frame_reports(raw: bytes) -> FrameReports:
 
 __all__ = [
     "BIRTH_BYTES", "BIRTH_KEY", "FRAMES_KEY", "FRAMES_PER_PLAYER_MAX", "FRAME_REPORTS_BYTES", "HOST_BASE_BYTES",
-    "HOST_BASE_KEY", "HOST_LINE", "OUTPUT_ID_PATTERN", "PLAYER_COMPONENT", "PLAYER_LINE", "PLAYER_SCHEMA_MAJOR",
-    "ROOM_LIGHTS_DRAWN_KEY", "Birth", "FrameReport", "FrameReports", "HostBase", "OutputId", "decode_birth",
-    "decode_frame_reports", "decode_host_base", "encode_birth", "encode_frame_reports", "encode_host_base",
+    "HOST_BASE_KEY", "HOST_LINE", "HOST_REBOOT_BYTES", "HOST_REBOOT_METHOD", "OUTPUT_ID_PATTERN", "PLAYER_COMPONENT", "PLAYER_LINE", "PLAYER_SCHEMA_MAJOR",
+    "ROOM_LIGHTS_DRAWN_KEY", "Birth", "FrameReport", "FrameReports", "HostBase", "HostReboot", "HostRebootAnswer",
+    "OutputId", "decode_birth", "decode_frame_reports", "decode_host_base", "decode_host_reboot",
+    "decode_host_reboot_answer", "encode_birth", "encode_frame_reports", "encode_host_base", "encode_host_reboot",
+    "encode_host_reboot_answer",
 ]

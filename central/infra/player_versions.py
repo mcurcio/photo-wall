@@ -9,19 +9,20 @@ or Update the wall, never because a newer release became ready (0010: no auto-ad
 set holds the release it runs. Install sets one Pi's version (its old one becomes its previous), queues the download (a Prefetch in the same
 transaction: the version is now part of the keep set, `boot_policy.kept`), and restarts that Pi once
 the release is ready: at once when it already is, else at the worker's next `advance_installs` after
-it is. A restart is a reboot command on the Pi's current host session (NodeCommands
-`reboot_for_install`); a Pi with none stays `restarting` until it boots, and its next boot offer
-carries the version anyway. The install ends when the Pi's host reports the version's base tag (a
-release's base carries the release's own tag). Update the wall sets every enrolled Pi's version in
-one transaction and restarts none (the console's rollout does).
+it is. A restart is a `RebootPi` job published in the transaction that sets `install = 'restarting'`
+(central/fleet/pi_reboot.py: the worker asks the Pi's host over its fleet-pipe link), so an Install
+that rolls back queues no reboot; a Pi with no link then stays `restarting` until it boots, and its
+next boot offer carries the version anyway. The install ends when the Pi's host line states the
+version's base tag (`node_states`, the host line's `base`; a release's base carries the release's own
+tag): `InstallEnds` wakes the look that ends it when a host's base is recorded. Update the wall sets
+every enrolled Pi's version in one transaction and restarts none (the console's rollout does).
 """
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from central.actor import Actor
 from central.content_catalog.boot_policy import newest_first, newest_ready_stable
@@ -30,9 +31,7 @@ from central.content_catalog.deployment import parse_node_deployment
 from central.content_catalog.ports import StableDeployment, VersionRefused
 from central.db import Database
 from central.fleet.node_bus_hub import enrolled_devices_in
-from central.fleet.node_commands import NodeCommands
-from central.fleet.node_observations import NodeObservations, host_facts_of
-from central.fleet.node_sessions import NodeControlError
+from central.infra.node_link_latest import latest_values_in
 from central.infra.node_releases import (
     PgNodeReleaseRecords,
     deployment_jobs,
@@ -40,7 +39,7 @@ from central.infra.node_releases import (
     tag_deployments_in,
 )
 from central.infra.transactions import PgTransaction, pg_connection
-from central.kernel.job_types import Prefetch
+from central.kernel.job_types import Prefetch, RebootPi
 from central.kernel.ports import AssetReadiness
 from central.kernel.publishing import Publisher
 from contracts.central_api import (
@@ -50,9 +49,11 @@ from contracts.central_api import (
     PiVersion,
     Versions,
 )
+from contracts.node_state import HOST_BASE_KEY, HOST_LINE, decode_host_base
 from contracts.time import Clock
+from nodeapi.buffers import KV_OPERATION_HEADER, state_prefix, state_stream
+from nodeapi.pull import Read
 
-log = logging.getLogger(__name__)
 
 @dataclass(frozen=True, slots=True)
 class PiVersionRow:
@@ -131,13 +132,11 @@ def _deployment_of(conn: Any, version: str) -> UUID:
 class PgPlayerVersions:
     """PlayerVersions over one Database."""
 
-    def __init__(self, db: Database, clock: Clock, readiness: AssetReadiness, publisher: Publisher | None,
-                 commands: NodeCommands) -> None:
+    def __init__(self, db: Database, clock: Clock, readiness: AssetReadiness, publisher: Publisher | None) -> None:
         self._db = db
         self._clock = clock
         self._readiness = readiness
         self._publisher = publisher
-        self._commands = commands
 
     def versions(self) -> Versions:
         with self._db.read_snapshot() as conn:
@@ -153,8 +152,8 @@ class PgPlayerVersions:
             deployment = _deployment_of(conn, version)
             install: InstallProgress = "restarting" if self._ready(conn, deployment) else "downloading"
             self._set_in(conn, device_id, deployment, install, by)
-        if install == "restarting":
-            self._restart(device_id, version)
+            if install == "restarting":
+                self._restart(conn, device_id, version, by)
         return InstallStarted(serial=serial, version=version, install=install)
 
     def set_wall_version(self, version: str, *, by: Actor) -> Versions:
@@ -186,7 +185,6 @@ class PgPlayerVersions:
         return default.deployment_id
 
     def advance_installs(self) -> None:
-        restart: list[tuple[str, str | None]] = []
         with self._db.transaction() as conn:
             rows = conn.execute("SELECT v.device_id, v.deployment_id, v.install, r.deployment_document FROM devices v "
                                 "JOIN node_releases r USING(deployment_id) WHERE v.install IS NOT NULL "
@@ -200,7 +198,7 @@ class PgPlayerVersions:
                 if row["install"] == "downloading" and self._ready(conn, row["deployment_id"]):
                     conn.execute("UPDATE devices SET install='restarting', changed_at=%s, changed_by='central' "
                                  "WHERE device_id=%s", (now, row["device_id"]))
-                    restart.append((row["device_id"], tags.get(row["deployment_id"])))
+                    self._restart(conn, row["device_id"], tags.get(row["deployment_id"]), "central")
                 elif (row["install"] == "restarting"
                       and running.get(row["device_id"]) == parse_node_deployment(bytes(row["deployment_document"])).base.tag):
                     conn.execute("UPDATE devices SET install=NULL, changed_at=%s, changed_by='central' "
@@ -208,8 +206,6 @@ class PgPlayerVersions:
                 else:
                     continue
                 notify_releases_in(conn)
-        for device_id, version in restart:
-            self._restart(device_id, version)
 
     def _set_in(self, conn: Any, device_id: str, deployment: UUID, install: InstallProgress | None,
                 by: Actor) -> None:
@@ -232,15 +228,37 @@ class PgPlayerVersions:
         return self._readiness.readiness(PgTransaction(conn), jobs, wanted=True).state == "ready"
 
     def _running(self, conn: Any) -> dict[str, str | None]:
-        """device id -> the base tag its host reports this boot (the console's host read)."""
-        hosts = NodeObservations(self._commands.sessions).fleet_hosts_in(conn, self._clock.utc())
-        return {device_id: facts.get("base_tag") for device_id, facts in host_facts_of(hosts).items()}
+        """device id -> the base tag its host line states (its `base`, the newest Central recorded)."""
+        return {value.device_id: None if (base := value.decoded(decode_host_base, "host base")) is None
+                else base.base_tag for value in latest_values_in(conn, HOST_LINE, HOST_BASE_KEY, of_players=False)}
 
-    def _restart(self, device_id: str, version: str | None) -> None:
-        try:
-            self._commands.reboot_for_install(device_id, audit_ref=f"install:{version or 'unknown'}")
-        except NodeControlError as error:   # no current host session: its next boot takes the version
-            log.info("install on %s: not restarted now: %s", device_id, error.code)
+    def _restart(self, conn: Any, device_id: str, version: str | None, by: Actor) -> None:
+        """Queue the Pi's reboot onto its version in the caller's transaction (none without a
+        publisher: tests); one pending per Pi, so a second ask while one is queued is not queued."""
+        if self._publisher is not None:
+            self._publisher.publish(RebootPi(request_id=str(uuid4()), device_id=device_id,
+                                             reason=f"install:{version or 'unknown'}", by=by),
+                                    within=PgTransaction(conn))
 
 
-__all__ = ["PgPlayerVersions", "PiVersionRow", "PiVersions", "default_deployment_in", "pi_versions_in"]
+_HOST_STATE_STREAM = state_stream(HOST_LINE)
+_HOST_BASE_SUBJECT = state_prefix(HOST_LINE) + HOST_BASE_KEY
+
+
+class InstallEnds:
+    """A RecordJudge for the host line's state bucket: when a Pi whose install is `restarting` has a
+    new `base` recorded, the commit that records it sends `notify_releases_in`, so the worker's next
+    FleetHub look (its `advance_installs`) ends the install as soon as the Pi states its base, not at
+    the look's ceiling."""
+
+    def judge_in(self, conn: Any, device_id: str, stream: str, items: tuple[Read, ...]) -> None:
+        if stream != _HOST_STATE_STREAM or not any(
+                item.subject == _HOST_BASE_SUBJECT and not (item.headers or {}).get(KV_OPERATION_HEADER)
+                for item in items):
+            return
+        if conn.execute("SELECT 1 FROM devices WHERE device_id=%s AND install='restarting'",
+                        (device_id,)).fetchone() is not None:
+            notify_releases_in(conn)
+
+
+__all__ = ["InstallEnds", "PgPlayerVersions", "PiVersionRow", "PiVersions", "default_deployment_in", "pi_versions_in"]

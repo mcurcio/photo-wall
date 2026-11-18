@@ -156,7 +156,7 @@ def keep_version(db: Database, serial: str, deployment_id: UUID, now: float) -> 
 
 def player_versions(sessions: NodeSessions, *, readiness: AssetReadiness = NOTHING_READY,
                     publisher=None) -> PgPlayerVersions:
-    return PgPlayerVersions(sessions.db, sessions.clock, readiness, publisher, NodeCommands(sessions))
+    return PgPlayerVersions(sessions.db, sessions.clock, readiness, publisher)
 
 
 def boot_service(sessions: NodeSessions, *, readiness: AssetReadiness = NOTHING_READY) -> NodeBootService:
