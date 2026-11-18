@@ -108,7 +108,7 @@ def test_a_frame_whose_output_states_no_mode_takes_its_displays_preferred_mode(r
     mode Weston runs and no Display seen, the screen is unknown; then the Display's preferred mode."""
     pi = enroll_pi(registry, "pi-a")
     frame = "kitchen"
-    registry.create_frame(frame_create(frame))
+    registry.create_frame(frame_create(frame), by="console")
     _bind(registry, frame, pi, "HDMI-A-1")
     with registry.db.transaction() as conn:
         [before] = frame_outputs_in(conn)

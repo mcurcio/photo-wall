@@ -31,8 +31,8 @@ POOL = "library:1"
 
 def _matted_frame(registry) -> None:
     player, _, _ = enroll(registry, count=1, size=DISPLAY)
-    registry.create_frame(frame_create("hall"))
-    registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("hall"), by="console")
+    registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     # The opening in the Display's top-left corner: a box of its size.
     save_position(registry, "hall", Calibration(fit=PositionBox(
         width=OPENING[0] / DISPLAY[0], height=OPENING[1] / DISPLAY[1])))
@@ -78,8 +78,8 @@ def test_a_bound_frame_with_no_known_screen_is_judged_for_no_photo_anywhere(regi
     no photo, the candidates route answers "frame_size_unknown", authoring onto it is refused
     "authored_frame_size_unknown" and the photo sheet lists it under no photo's Frames."""
     player, _, _ = enroll(registry, count=1, size=(0, 0))
-    registry.create_frame(frame_create("hall"))
-    registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("hall"), by="console")
+    registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, "hall")
     fitting = photo("fitting", taken_at=900, width=3840, height=2160)
     seed_pool(registry, POOL, (fitting,))

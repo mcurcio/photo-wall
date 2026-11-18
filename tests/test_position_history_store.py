@@ -79,7 +79,7 @@ class Node:
 
     def restore(self, trial: dict, entry_id, expected: int | None = None) -> dict:
         return self.trials.restore("node-f0", UUID(trial["trial_id"]), entry_id=UUID(str(entry_id)),
-                                   expected_sequence=trial["sequence"] if expected is None else expected)
+                                   expected_sequence=trial["sequence"] if expected is None else expected, by="console")
 
 
 def _client(registry) -> TestClient:
@@ -112,7 +112,7 @@ def _see_display(registry, frame_id: str = "node-f0") -> UUID:
                    "VALUES (%s, 'SAM', 1, 'Samsung QN43Q8F', %s, 1000.0, 0.0003, 0, 'node', 0, 'node')",
          (display, display.hex))
     _sql(registry, "UPDATE outputs o SET connected=true, display_id=%s, display_report='{}', display_reported_at=0 "
-                   "FROM bindings b WHERE b.frame_id=%s AND o.player_id=b.player_id AND o.output_id=b.output_id",
+                   "FROM frames f WHERE f.id=%s AND o.player_id=f.player_id AND o.output_id=f.output_id",
          (display, frame_id))
     _sql(registry, "UPDATE frames SET position_display_id=%s WHERE id=%s", (display, frame_id))
     return display
@@ -132,7 +132,7 @@ def _entry(registry, *, frame_id: str = "node-f0", kind: str = "kept-saved", dis
 
 def _turn(registry, frame_id: str, turn: int) -> None:
     generation = _sql(registry, "SELECT generation FROM frames WHERE id=%s", (frame_id,))[0]["generation"]
-    registry.turn_frame(frame_id, turn, expected_generation=generation)
+    registry.turn_frame(frame_id, turn, expected_generation=generation, by="console")
 
 
 def test_save_appends_a_kept_entry_made_for_the_turn_and_the_display_seen(registry):
@@ -223,7 +223,7 @@ def test_the_kept_write_takes_only_a_kept_kind_and_its_own_values(registry):
              "position_history_kind"),
             (saved, Calibration(fit=SHIFTED), "position_history_values")):
         with registry.db.transaction() as conn, pytest.raises(ValueError, match=code):
-            write_position_in(conn, "node-f0", record, calibration=calibration)
+            write_position_in(conn, "node-f0", record, calibration=calibration, now=0.0, by="console")
     assert _sql(registry, "SELECT calibration, lighting, generation FROM frames WHERE id='node-f0'") == before
 
 
@@ -351,7 +351,7 @@ def test_restore_refusals_in_order(registry):
                                       (UUID(trial["trial_id"]), other_display, 1),
                                       (UUID(trial["trial_id"]), own, 7)):
         with pytest.raises(NodeControlError) as refused:
-            node.trials.restore("node-f0", trial_id, entry_id=UUID(str(entry)), expected_sequence=expected)
+            node.trials.restore("node-f0", trial_id, entry_id=UUID(str(entry)), expected_sequence=expected, by="console")
         refusals.append((refused.value.code, refused.value.status))
     assert refusals == [("trial_sequence_invalid", 422), ("trial_unknown", 404), ("unknown_entry", 404),
                         ("other_frame", 409), ("made_for_other_turn", 409), ("made_for_other_display", 409),

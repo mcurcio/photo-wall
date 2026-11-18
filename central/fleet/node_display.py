@@ -338,8 +338,8 @@ class NodeDisplay:
         session order. Lock order: Coordination, Runtime, Node; an exchange takes the Node lock
         alone, so no cycle."""
         row = conn.execute(
-            "SELECT b.player_id,b.output_id,p.authority_epoch,p.device_id "
-            "FROM bindings b JOIN players p ON p.id=b.player_id WHERE b.frame_id=%s "
+            "SELECT f.player_id,f.output_id,p.authority_epoch,p.device_id "
+            "FROM frames f JOIN players p ON p.id=f.player_id WHERE f.id=%s "
             "AND p.retired_at IS NULL",
             (frame_id,),
         ).fetchone()
@@ -508,7 +508,6 @@ class NodeDisplay:
                 configuration_revision=surface.config_revision,
                 recovering=True,
                 producer_id=principal.producer_id,
-                evidence_id=decision.decision_id,
                 evidence_kind="display_handoff",
                 detail={
                     "decision_id": str(decision.decision_id),

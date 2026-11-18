@@ -296,19 +296,20 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     async def calibration_capability(frame_id: str):
         return await invoke(Registry(db, clock, lighting=lighting).calibration_capability, frame_id)
 
-    @app.post("/v1/operator/frames/{frame_id}/calibration-trials", dependencies=[Depends(admin)])
-    async def calibration_begin(frame_id: str, request: Request):
+    @app.post("/v1/operator/frames/{frame_id}/calibration-trials")
+    async def calibration_begin(frame_id: str, request: Request, by: Actor = Depends(admin)):
         # An empty body, or `{}`, begins at the saved calibration and lighting (TrialBegin).
         raw = await body(request, 4096)
-        return await invoke(trials.begin, frame_id, _trial_body(_BEGIN, raw if raw.strip() else b"{}"))
+        begin = _trial_body(_BEGIN, raw if raw.strip() else b"{}")
+        return await invoke(lambda: trials.begin(frame_id, begin, by=by))
 
-    @app.post("/v1/operator/frames/{frame_id}/calibration-trials/{trial_id}", dependencies=[Depends(admin)])
-    async def calibration_operate(frame_id: str, trial_id: UUID, request: Request):
+    @app.post("/v1/operator/frames/{frame_id}/calibration-trials/{trial_id}")
+    async def calibration_operate(frame_id: str, trial_id: UUID, request: Request, by: Actor = Depends(admin)):
         operation = _trial_body(_OPERATION, await body(request, 4096))
-        return await invoke(trials.operate, frame_id, trial_id, operation)
+        return await invoke(lambda: trials.operate(frame_id, trial_id, operation, by=by))
 
-    @app.post("/v1/operator/frames/{frame_id}/calibration-trials/{trial_id}/restores", dependencies=[Depends(admin)])
-    async def calibration_restore(frame_id: str, trial_id: UUID, request: Request):
+    @app.post("/v1/operator/frames/{frame_id}/calibration-trials/{trial_id}/restores")
+    async def calibration_restore(frame_id: str, trial_id: UUID, request: Request, by: Actor = Depends(admin)):
         # Configuration snapshots' Restore: a Position history entry into the trial's draft; the
         # answer is the trial's view, as an edit's (the console replaces its draft with it).
         value = loads_object(await body(request, 4096), max_bytes=4096)
@@ -317,7 +318,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         except ValidationError as exc:
             raise TrialRefused(TrialRefusal.OPERATION_INVALID) from exc
         return await invoke(lambda: trials.restore(frame_id, trial_id, entry_id=restore.entry_id,
-                                                   expected_sequence=restore.expected_sequence))
+                                                   expected_sequence=restore.expected_sequence, by=by))
 
     @app.post("/v2/node/display")
     async def display_exchange(request: Request):

@@ -184,11 +184,11 @@ def seed_varied_frames(registry) -> tuple[str, str]:
     from test_registry import enroll
 
 
-    registry.create_frame(frame_create(TALL_FRAME, surface_id="hall", x_mm=100, y_mm=100))
-    registry.create_frame(frame_create(WIDE_FRAME, surface_id="living", x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(TALL_FRAME, surface_id="hall", x_mm=100, y_mm=100), by="console")
+    registry.create_frame(frame_create(WIDE_FRAME, surface_id="living", x_mm=100, y_mm=100), by="console")
     for frame_id, screen in ((TALL_FRAME, (1080, 1920)), (WIDE_FRAME, (3840, 2160))):
         player, _, _ = enroll(registry, count=1, size=screen)
-        registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
+        registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     return TALL_FRAME, WIDE_FRAME
 
 

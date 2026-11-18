@@ -507,8 +507,8 @@ def _reboot(page):
 
 def test_the_reboot_dialog_names_frames_and_a_recorded_reboot_is_requested(page, registry):
     box = Box(registry)
-    registry.create_frame(frame_create("lobby", x_mm=100, y_mm=100))
-    registry.bind("lobby", box.player_id, "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("lobby", x_mm=100, y_mm=100), by="console")
+    registry.bind("lobby", box.player_id, "HDMI-A-1", expected_generation=0, by="console")
     with _node_server(registry) as origin:
         sent = _reboot_posts(page)
         connect(page, origin)

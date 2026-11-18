@@ -962,8 +962,8 @@ class Coordinator:
             identify = conn.execute(
                 "SELECT i.request_id,i.output_id,i.authority_epoch,i.expires_at,p.authority_epoch "
                 "AS current_epoch,p.retired_at,o.observation,"
-                "EXISTS(SELECT 1 FROM bindings b WHERE b.player_id=i.player_id "
-                "AND b.output_id=i.output_id) AS is_bound "
+                "EXISTS(SELECT 1 FROM frames f WHERE f.player_id=i.player_id "
+                "AND f.output_id=i.output_id) AS is_bound "
                 "FROM player_output_identification i JOIN players p ON p.id=i.player_id "
                 "LEFT JOIN outputs o ON o.player_id=i.player_id AND o.output_id=i.output_id "
                 "WHERE i.player_id=%s",
@@ -1059,12 +1059,10 @@ class Coordinator:
         never attach it to whatever Frame is bound there now. Read-only; takes no lock."""
         rows = conn.execute(
             "SELECT l.frame_id,l.player_id,l.output_id,l.binding_generation,"
-            "pr.owner AS cause_layer,l.interrupted_at FROM node_output_losses l "
+            "l.cause_layer,l.interrupted_at FROM output_losses l "
             "JOIN players p ON p.id=l.player_id AND p.authority_epoch=l.authority_epoch "
-            "JOIN bindings b ON b.frame_id=l.frame_id AND b.player_id=l.player_id "
-            "AND b.output_id=l.output_id "
             "JOIN frames f ON f.id=l.frame_id AND f.generation=l.binding_generation "
-            "JOIN node_producers pr ON pr.producer_id=l.cause_producer_id "
+            "AND f.player_id=l.player_id AND f.output_id=l.output_id "
             "WHERE l.resolved_at IS NULL ORDER BY l.frame_id"
         ).fetchall()
         return tuple(OutputInterruption.model_validate(dict(row)) for row in rows)
@@ -1266,7 +1264,7 @@ class Coordinator:
     def reconcile_node_output_in(self, conn, *, player_id: str, authority_epoch: int,
                                  output_id: str, binding_generation: int,
                                  configuration_revision: int, recovering: bool, frame_id: str | None = None,
-                                 producer_id, evidence_id, evidence_kind: str, detail: dict) -> bool:
+                                 producer_id, evidence_kind: str, detail: dict) -> bool:
         """Apply one affirmatively linked Output fact without changing its Run.
 
         Caller holds Coordination→Runtime locks, then the device fence, and owns the inbox
@@ -1284,28 +1282,31 @@ class Coordinator:
         if binding is None:
             return False
         now = self.clock.utc()
-        existing = conn.execute("SELECT resolved_at FROM node_output_losses WHERE player_id=%s "
+        existing = conn.execute("SELECT resolved_at FROM output_losses WHERE player_id=%s "
                                 "AND authority_epoch=%s AND output_id=%s AND frame_id=%s AND binding_generation=%s",
                                 (player_id, authority_epoch, output_id, frame_id, binding_generation)).fetchone()
         if recovering:
             if existing is None or existing["resolved_at"] is not None:
                 return False
-            conn.execute("UPDATE node_output_losses SET resolved_at=%s WHERE player_id=%s "
+            conn.execute("UPDATE output_losses SET resolved_at=%s,changed_at=%s,changed_by='node' WHERE player_id=%s "
                          "AND authority_epoch=%s AND output_id=%s AND frame_id=%s AND binding_generation=%s",
-                         (now, player_id, authority_epoch, output_id, frame_id, binding_generation))
+                         (now, now, player_id, authority_epoch, output_id, frame_id, binding_generation))
         else:
             if existing is not None and existing["resolved_at"] is None:
                 return False
-            conn.execute("INSERT INTO node_output_losses(player_id,authority_epoch,output_id,frame_id,"
-                         "binding_generation,configuration_revision,cause_producer_id,cause_evidence_id,"
-                         "cause_kind,detail,interrupted_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            # The cause is the layer that reported the loss (its producer's owner), kept inline.
+            conn.execute("INSERT INTO output_losses(player_id,authority_epoch,output_id,frame_id,"
+                         "binding_generation,configuration_revision,cause_layer,cause_kind,detail,interrupted_at,"
+                         "created_at,created_by,changed_at,changed_by) VALUES(%s,%s,%s,%s,%s,%s,"
+                         "(SELECT owner FROM node_producers WHERE producer_id=%s),%s,%s,%s,%s,'node',%s,'node') "
                          "ON CONFLICT(player_id,authority_epoch,output_id,frame_id,binding_generation) DO UPDATE "
                          "SET configuration_revision=EXCLUDED.configuration_revision,"
-                         "cause_producer_id=EXCLUDED.cause_producer_id,cause_evidence_id=EXCLUDED.cause_evidence_id,"
+                         "cause_layer=EXCLUDED.cause_layer,"
                          "cause_kind=EXCLUDED.cause_kind,detail=EXCLUDED.detail,"
-                         "interrupted_at=EXCLUDED.interrupted_at,resolved_at=NULL",
+                         "interrupted_at=EXCLUDED.interrupted_at,resolved_at=NULL,"
+                         "changed_at=EXCLUDED.changed_at,changed_by=EXCLUDED.changed_by",
                          (player_id, authority_epoch, output_id, frame_id, binding_generation,
-                          configuration_revision, producer_id, evidence_id, evidence_kind, Jsonb(detail), now))
+                          configuration_revision, producer_id, evidence_kind, Jsonb(detail), now, now, now))
             # Invalidate only layers on this exact Output binding, across retained revisions.
             offers = conn.execute("SELECT revision,manifest FROM plan_offers WHERE player_id=%s "
                                   "AND authority_epoch=%s", (player_id, authority_epoch)).fetchall()
@@ -1325,7 +1326,7 @@ class Coordinator:
     def _commit_due(self, conn, configurations, now):
         interrupted = {(row["player_id"], row["authority_epoch"], row["output_id"], row["frame_id"], row["binding_generation"])
                        for row in conn.execute("SELECT player_id,authority_epoch,output_id,frame_id,binding_generation "
-                                               "FROM node_output_losses WHERE resolved_at IS NULL").fetchall()}
+                                               "FROM output_losses WHERE resolved_at IS NULL").fetchall()}
         plans = {
             p: self._current_plan(conn, p, c.authority_epoch) for p, c in configurations.items()
         }

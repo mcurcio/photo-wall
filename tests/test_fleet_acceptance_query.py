@@ -38,6 +38,6 @@ def test_control_snapshot_refuses_missing_or_historical_player_row(registry):
     player, _, request = enroll(registry)
     with registry.db.transaction() as conn:
         assert load_current_app_control_in(conn, "device-" + "0" * 64, lock=True) is None
-        conn.execute("DELETE FROM player_control_sessions WHERE player_id=%s",
+        conn.execute("UPDATE players SET control_session=NULL WHERE id=%s",
                      (player["player_id"],))
         assert load_current_app_control_in(conn, request.device_id, lock=True) is None

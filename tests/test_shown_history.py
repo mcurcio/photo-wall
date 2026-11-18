@@ -34,7 +34,7 @@ def showing(assignment: str, asset: str, *, start: float, end: float | None = No
 @pytest.fixture
 def store(registry) -> ShownHistory:
     for frame_id in ("frame-1", "frame-2"):
-        registry.create_frame(frame_create(frame_id))
+        registry.create_frame(frame_create(frame_id), by="console")
     return PgShownHistory()
 
 

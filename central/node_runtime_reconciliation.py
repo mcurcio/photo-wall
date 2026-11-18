@@ -153,8 +153,7 @@ class NodeRuntimeReconciler:
                         conn, player_id=link.player_id, authority_epoch=link.authority_epoch,
                         output_id=surface.output.output_id, binding_generation=surface.binding_generation,
                         configuration_revision=surface.config_revision, frame_id=surface.frame_id, recovering=recovering,
-                        producer_id=row["producer_id"], evidence_id=row["evidence_id"],
-                        evidence_kind=row["kind"], detail=detail)
+                        producer_id=row["producer_id"], evidence_kind=row["kind"], detail=detail)
                     handled = handled or applied
             if not handled and any(type(fact) is AppProcessFact and fact.state == "exited" for fact in facts):
                 return self._pending(conn, work_id, "awaiting_output_link")

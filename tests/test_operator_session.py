@@ -49,7 +49,7 @@ VALUE = re.compile(r"v1\.[0-9]{10}\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{1,344}\.[A-
 
 
 def _portrait(registry):
-    registry.create_frame(frame_create("portrait"))
+    registry.create_frame(frame_create("portrait"), by="console")
 
 
 @pytest.fixture

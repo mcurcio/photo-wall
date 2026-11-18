@@ -37,7 +37,7 @@ def players(registry, count):
     for index in range(count):
         player, _, _ = enroll(registry)
         frame(registry, f"frame-{index}")
-        registry.bind(f"frame-{index}", player["player_id"], "HDMI-A-1", expected_generation=0)
+        registry.bind(f"frame-{index}", player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
         save_position(registry, f"frame-{index}", PORTRAIT_ON_WIDE)
         enrolled.append(player)
     return enrolled
@@ -221,11 +221,11 @@ def test_the_production_runtime_plans_after_seventeen_hours(registry, wall):
     registry.clock.advance(snapshot["now"] - registry.clock.utc())
     hourly, _, _ = enroll(registry)
     frame(registry, "my-frame")
-    registry.bind("my-frame", hourly["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("my-frame", hourly["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, "my-frame", PORTRAIT_ON_WIDE)
     good, _, _ = enroll(registry)
     frame(registry, "good")
-    registry.bind("good", good["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("good", good["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, "good", PORTRAIT_ON_WIDE)
     runtime = Runtime.restore(snapshot, house=UTC_HOUSE)
     runtime.set_scene(scene("good-scene", "good", 30))

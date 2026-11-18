@@ -70,7 +70,7 @@ def _commit_by_trial(registry, frame_id: str, player_id: str) -> None:
             conn, frame_id=frame_id, player_id=player_id, authority_epoch=_epoch(registry, player_id),
             output_id=frame.output_id, binding_generation=frame.generation,
             config_revision=frame.configuration_revision, calibration_revision=frame.calibration.revision,
-            calibration=PORTRAIT_ON_WIDE, lighting=LIGHTING, session_id=None, restored_from=None)
+            calibration=PORTRAIT_ON_WIDE, lighting=LIGHTING, session_id=None, restored_from=None, by="console")
 
 
 POSITION_COMMITS = pytest.mark.parametrize("commit", [_commit_by_calibrate, _commit_by_trial],
@@ -172,7 +172,7 @@ def _presence(registry, serial: str, linked: bool) -> None:
 
 
 def _unbind(registry, frame_id: str) -> None:
-    registry.unbind(frame_id, expected_generation=_frame_row(registry, frame_id).generation)
+    registry.unbind(frame_id, expected_generation=_frame_row(registry, frame_id).generation, by="console")
 
 
 @pytest.mark.parametrize("commit_first", [False, True], ids=["both-seen-then-commit", "commit-then-second"])

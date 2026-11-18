@@ -43,7 +43,7 @@ def rig(registry):
     player, key, _ = enroll(registry, device_id=DEVICE_ID)
     for index in range(2):
         frame(registry, f"node-f{index}")
-        registry.bind(f"node-f{index}", player["player_id"], f"HDMI-A-{index+1}", expected_generation=0)
+        registry.bind(f"node-f{index}", player["player_id"], f"HDMI-A-{index+1}", expected_generation=0, by="console")
         save_position(registry, f"node-f{index}", PORTRAIT_ON_WIDE)
     coordinator = Coordinator(registry.db, registry.clock)
     coordinator.runtime.command("set_scene", Scene(scene_id="node-scene", loop=True, cycle_seconds=60,
@@ -119,7 +119,7 @@ def test_initiation_never_interrupts_and_output_loss_preserves_other_frame_run_a
     coordinator.readiness(player["player_id"], report(coordinator, player, sequence=2))
     assert commit_assignments(coordinator, player) == remaining
     with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM node_output_losses WHERE resolved_at IS NULL").fetchone()["n"] == 1
+        assert conn.execute("SELECT count(*) AS n FROM output_losses WHERE resolved_at IS NULL").fetchone()["n"] == 1
 
 
 def test_process_exit_reconciles_both_linked_outputs_without_cancelling_run(registry):
@@ -145,10 +145,10 @@ def test_old_loss_does_not_target_replacement_authority_or_binding(registry, rep
     if replacement == "epoch":
         enroll(registry, key, device_id=DEVICE_ID)
     else:
-        registry.unbind("node-f0", expected_generation=1)
+        registry.unbind("node-f0", expected_generation=1, by="console")
     reconciler.advance()
     with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM node_output_losses").fetchone()["n"] == 0
+        assert conn.execute("SELECT count(*) AS n FROM output_losses").fetchone()["n"] == 0
 
 
 def test_link_replay_exact_but_modified_proof_and_new_control_rejected(registry):
@@ -215,9 +215,9 @@ def test_equal_counter_frame_rebind_preserves_historical_loss_without_fencing_re
                                 encode_node_message(event))
     reconciler.advance()
     assert len(commit_assignments(coordinator, player)) == 1
-    registry.unbind(old.frame_id, expected_generation=old.binding_generation)
+    registry.unbind(old.frame_id, expected_generation=old.binding_generation, by="console")
     frame(registry, "replacement-frame")
-    registry.bind("replacement-frame", player["player_id"], old.output.output_id, expected_generation=0)
+    registry.bind("replacement-frame", player["player_id"], old.output.output_id, expected_generation=0, by="console")
     binding = next(b for b in coordinator.configuration(player["player_id"], 1).bindings
                    if b.frame_id == "replacement-frame")
     # The Registry owner port fixtures commissioning; no synthetic Trial witness.
@@ -226,7 +226,7 @@ def test_equal_counter_frame_rebind_preserves_historical_loss_without_fencing_re
         registry.commit_calibration_trial_in(conn, frame_id=binding.frame_id,
             player_id=player["player_id"], authority_epoch=1, output_id=binding.output_id,
             binding_generation=binding.generation, config_revision=binding.configuration_revision,
-            calibration_revision=binding.calibration.revision, calibration=PORTRAIT_ON_WIDE, lighting=LIGHTING, session_id=None, restored_from=None)
+            calibration_revision=binding.calibration.revision, calibration=PORTRAIT_ON_WIDE, lighting=LIGHTING, session_id=None, restored_from=None, by="console")
     binding = next(b for b in coordinator.configuration(player["player_id"], 1).bindings
                    if b.frame_id == "replacement-frame")
     assert (binding.generation, binding.configuration_revision) == (old.binding_generation, old.config_revision)
@@ -242,7 +242,7 @@ def test_equal_counter_frame_rebind_preserves_historical_loss_without_fencing_re
             previous_surface=expected, expected_surface=expected).allowed
         args = dict(player_id=player["player_id"], authority_epoch=1, output_id=old.output.output_id,
             binding_generation=old.binding_generation, configuration_revision=old.config_revision,
-            producer_id=display.producer.incarnation_id, evidence_id=event.event_id,
+            producer_id=display.producer.incarnation_id,
             evidence_kind="event", detail={})
         # Neither old Frame evidence nor missing historical identity may clear an
         # unresolved loss. No wrong-frame insertion occurs either.
@@ -252,7 +252,7 @@ def test_equal_counter_frame_rebind_preserves_historical_loss_without_fencing_re
                     frame_id=frame_id, recovering=recovering)
         assert not coordinator.reconcile_node_output_in(conn, **args,
             frame_id=binding.frame_id, recovering=True)
-        rows = conn.execute("SELECT frame_id,resolved_at FROM node_output_losses").fetchall()
+        rows = conn.execute("SELECT frame_id,resolved_at FROM output_losses").fetchall()
         assert rows == [{"frame_id": old.frame_id, "resolved_at": None}]
     coordinator.runtime.command("set_scene", Scene(scene_id="replacement-scene", loop=True, cycle_seconds=60,
         contributions=(Contribution(target="frame:replacement-frame", kind="black"),)), by="console")

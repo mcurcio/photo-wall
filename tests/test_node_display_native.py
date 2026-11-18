@@ -103,7 +103,7 @@ def test_production_display_driver_native_chain(registry, monkeypatch):
         )
         fixture_player = player["player_id"]
         frame(registry, "native-frame")
-        registry.bind("native-frame", player["player_id"], "headless", expected_generation=0)
+        registry.bind("native-frame", player["player_id"], "headless", expected_generation=0, by="console")
         registry.control_hello(
             player["player_id"], ControlHello(authority_epoch=1, schemas=(2,), capabilities=())
         )
@@ -159,7 +159,7 @@ def test_production_display_driver_native_chain(registry, monkeypatch):
 
     @app.post("/fixture/unbind")
     def unbind():
-        registry.unbind("native-frame", expected_generation=1)
+        registry.unbind("native-frame", expected_generation=1, by="console")
         return {"unbound": True}
 
     @app.get("/fixture/completed")

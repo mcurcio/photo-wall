@@ -105,8 +105,8 @@ def _wide_frame_with_scene(registry):
     from central.runtime import Contribution, Scene
 
     identity, _key, _request = enroll(registry, count=1)
-    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
-    registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100), by="console")
+    registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0, by="console")
     save_position(registry, FRAME)
     now = registry.clock.utc()
     photos = (public_photo(number=1, width=1920, height=1080, captured_at=now),
@@ -251,7 +251,7 @@ def _matted_living_room(registry):
     from contracts.models import Calibration, PositionBox
 
     player, _key, _request = enroll(registry, count=1, size=(3840, 2160))
-    registry.bind("living-room", player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("living-room", player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, "living-room", Calibration(fit=PositionBox(left=0.25, top=0.25, width=0.5, height=0.5)))
 
 

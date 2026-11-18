@@ -78,7 +78,7 @@ def enroll_pi(registry, serial: str) -> str:
 
 
 def _frame(registry, frame_id: str) -> str:
-    registry.create_frame(frame_create(frame_id))
+    registry.create_frame(frame_create(frame_id), by="console")
     return frame_id
 
 
@@ -88,11 +88,11 @@ def _generation(registry, frame_id: str) -> int:
 
 
 def _bind(registry, frame_id: str, player_id: str, output_id: str) -> None:
-    registry.bind(frame_id, player_id, output_id, expected_generation=_generation(registry, frame_id))
+    registry.bind(frame_id, player_id, output_id, expected_generation=_generation(registry, frame_id), by="console")
 
 
 def _unbind(registry, frame_id: str) -> None:
-    registry.unbind(frame_id, expected_generation=_generation(registry, frame_id))
+    registry.unbind(frame_id, expected_generation=_generation(registry, frame_id), by="console")
 
 
 def _report(registry, serial: str, output_id: str, identity: DisplayIdentity | None, *, connected: bool = True,

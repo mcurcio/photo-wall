@@ -39,9 +39,9 @@ P4K = Screen(3840, 2160, inches=55)
 def add_frame(registry, frame_id: str, screen: Screen) -> None:
     """A Frame bound full screen to an Output of `screen`'s pixels: its Frame output is those
     pixels (frame box run fb-8: a Frame with no known screen asks no copy)."""
-    registry.create_frame(frame_create(frame_id))
+    registry.create_frame(frame_create(frame_id), by="console")
     player, _, _ = enroll(registry, count=1, size=(screen.width_px, screen.height_px))
-    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
 
 
 def wall(registry, *screens: tuple[str, Screen]) -> MediaRepository:
@@ -201,7 +201,7 @@ def test_a_frame_with_no_known_screen_asks_no_copy(registry):
     screen (unbound here) has none and asks nothing, so a photo on a 1080p wall beside it is
     still prepared at the 1920 step."""
     repository = wall(registry, ("living", P1080))
-    registry.create_frame(frame_create("attic"))
+    registry.create_frame(frame_create("attic"), by="console")
     big = photo("big", taken_at=1, width=6000, height=4000)
     seed_pool(registry, "family:1", (big,))
     (key,) = prepared(repository, big.asset_id, "living")

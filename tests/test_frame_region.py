@@ -106,7 +106,7 @@ def test_a_turn_turns_the_regions_screen_and_its_rectangle(registry):
     """(b) A quarter turn: the screen as it hangs is 1080 x 1920, and the whole-screen box with it."""
     _kitchen(registry)
     assert _region(registry).region == FrameRegion("kitchen", (1920, 1080), OutputRect(0, 0, 1920, 1080))
-    registry.turn_frame("kitchen", 90, expected_generation=_generation(registry, "kitchen"))
+    registry.turn_frame("kitchen", 90, expected_generation=_generation(registry, "kitchen"), by="console")
     turned = _region(registry)
     assert (turned.change, turned.region) == (2, FrameRegion("kitchen", (1080, 1920), OutputRect(0, 0, 1080, 1920)))
 

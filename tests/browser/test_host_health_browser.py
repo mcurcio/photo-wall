@@ -39,9 +39,9 @@ def _players(registry, *, bound=True):
     and names."""
     bound_identity, _, bound_request = enroll(registry, count=1)
     spare_identity, _, spare_request = enroll(registry, count=1)
-    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100), by="console")
     if bound:
-        registry.bind(FRAME, bound_identity["player_id"], "HDMI-A-1", expected_generation=0)
+        registry.bind(FRAME, bound_identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     return ((bound_request.device_id, player_name(registry, bound_identity["player_id"])),
             (spare_request.device_id, player_name(registry, spare_identity["player_id"])))
 
@@ -413,8 +413,8 @@ def _frames_with_players(registry, frame_ids, device_ids=None):
     boxes = []
     for index, frame_id in enumerate(frame_ids):
         identity, _, request = enroll(registry, count=1, device_id=device_ids[index] if device_ids else None)
-        registry.create_frame(frame_create(frame_id, x_mm=100 + 400 * index, y_mm=100))
-        registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0)
+        registry.create_frame(frame_create(frame_id, x_mm=100 + 400 * index, y_mm=100), by="console")
+        registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
         boxes.append((identity["player_id"], request.device_id, player_name(registry, identity["player_id"])))
     return boxes
 

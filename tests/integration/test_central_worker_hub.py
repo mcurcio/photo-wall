@@ -203,7 +203,7 @@ def test_the_worker_keeps_the_hub_and_records_a_node(database, tmp_path, monkeyp
                 assert [(each.id, each.driven_by) for each in listed.frames] == [("hall", None)]
                 assert [(each.serial, each.address) for each in listed.players] == [(SERIAL, None)]
                 bound = await asyncio.to_thread(registry.bind, "hall", player["player_id"], "HDMI-A-1",
-                                                expected_generation=0)
+                                                expected_generation=0, by="console")
 
                 async def driven():
                     [hall] = (await installation()).frames

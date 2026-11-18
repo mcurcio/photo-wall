@@ -40,11 +40,11 @@ def test_every_frame_reads_its_frame_output_by_frame_id(registry):
     """A bound Frame with a reported Output reads its picture's pixels; a Frame whose Output
     reports no mode (disconnected) and an unbound Frame read None for both; ordered by frame id."""
     player, _key, request = enroll(registry, count=2)
-    registry.create_frame(frame_create("c-lounge"))
-    registry.create_frame(frame_create("a-hall"))
-    registry.create_frame(frame_create("b-attic"))
-    registry.bind("c-lounge", player["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.bind("b-attic", player["player_id"], "HDMI-A-2", expected_generation=0)
+    registry.create_frame(frame_create("c-lounge"), by="console")
+    registry.create_frame(frame_create("a-hall"), by="console")
+    registry.create_frame(frame_create("b-attic"), by="console")
+    registry.bind("c-lounge", player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
+    registry.bind("b-attic", player["player_id"], "HDMI-A-2", expected_generation=0, by="console")
     save_position(registry, "c-lounge", OPENING)
     report_modes(registry, request.device_id, ("HDMI-A-2",), None)
     with registry.db.transaction() as conn:
@@ -66,10 +66,10 @@ def test_a_turned_frames_box_reads_its_frame_output_on_the_screen_as_it_hangs(re
     turn: the screen is 2160 x 3840, so its Frame output is 2160 x 1215 and its turn is the Frame's
     (frames.turn)."""
     player, _key, _request = enroll(registry, count=1, size=(3840, 2160))
-    registry.create_frame(frame_create("lounge"))
-    registry.bind("lounge", player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("lounge"), by="console")
+    registry.bind("lounge", player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     generation = next(frame for frame in registry.inventory().frames if frame.id == "lounge").generation
-    registry.turn_frame("lounge", 90, expected_generation=generation)
+    registry.turn_frame("lounge", 90, expected_generation=generation, by="console")
     save_position(registry, "lounge", Calibration(fit=PositionBox(top=1313 / 3840, height=1215 / 3840)))
     with registry.db.transaction() as conn:
         outputs = frame_outputs_in(conn)
@@ -88,10 +88,10 @@ def test_a_frame_reads_its_videos_setting_and_its_size_from_its_display(registry
     high is 475 x 270 mm); a Display that states no size gives none."""
     pi = enroll_pi(registry, "pi-a")
     _report(registry, "pi-a", "HDMI-A-1", None, current_mode=(1920, 1080))
-    registry.create_frame(frame_create("kitchen"))
+    registry.create_frame(frame_create("kitchen"), by="console")
     _bind(registry, "kitchen", pi, "HDMI-A-1")
     save_position(registry, "kitchen", OPENING)
-    registry.set_frame_video("kitchen", False)
+    registry.set_frame_video("kitchen", False, by="console")
     with registry.db.transaction() as conn:
         [unsized] = frame_outputs_in(conn)
     assert (unsized.video, unsized.size_mm, unsized.output_px) == (False, None, (960, 540))

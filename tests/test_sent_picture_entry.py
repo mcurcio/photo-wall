@@ -68,8 +68,9 @@ def test_the_key_is_exact(registry):
     """(2) Acceptance 2: another Pi on the same output id with the same change answers its own entry.
     Mutation probe K1-player: ignore player_id -> one of the two answers the other's."""
     display, port, change = _target_sent(registry)
-    _sql(registry, "INSERT INTO players(id, public_key, token_hash, registered_at, last_seen, device_id) "
-                   "VALUES (%s, 'other-public-key', 'other-token-hash', 900, 900, %s)", (OTHER_PI, OTHER_PI))
+    _sql(registry, "INSERT INTO players(id, public_key, token_hash, registered_at, last_seen, device_id, created_at, "
+                   "created_by, changed_at, changed_by) VALUES (%s, 'other-public-key', 'other-token-hash', 900, 900, "
+                   "%s, 900, 'node', 900, 'node')", (OTHER_PI, OTHER_PI))
     other_picture = replace(default_picture(), software=replace(default_picture().software, gamma_tenths=26))
     with registry.db.transaction() as conn:
         append_sent_in(conn, Port(OTHER_PI, port.output_id), change, display_id=display, frame_id=None,

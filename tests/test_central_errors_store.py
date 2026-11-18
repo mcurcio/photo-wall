@@ -241,7 +241,7 @@ def test_needs_attention_and_the_frame_page_read_what_central_keeps(registry):
 
     player = _pi(registry)
     hello(registry, player)
-    registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     assert errors.impeded("hall").impediment == FrameNotReported()
     entry = Impeded(frame_id="hall", output_id="HDMI-A-1", grant_id=GRANT, lights=("room",),
                     words=lights.current().lights["family"].doubt)

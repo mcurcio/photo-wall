@@ -38,7 +38,7 @@ def _served(registry):
 
 def _unresolved(registry):
     with registry.db.transaction() as conn:
-        return conn.execute("SELECT count(*) AS n FROM node_output_losses "
+        return conn.execute("SELECT count(*) AS n FROM output_losses "
                             "WHERE resolved_at IS NULL").fetchone()["n"]
 
 
@@ -82,9 +82,9 @@ def test_a_loss_from_an_earlier_binding_generation_of_the_same_output_is_not_ser
     _, player, _, sessions, claims, grants, surfaces, reconciler, _ = rig(registry)
     _lose_first_output(sessions, claims, grants, surfaces, reconciler)
     old = surfaces[0]
-    registry.unbind(old.frame_id, expected_generation=old.binding_generation)
+    registry.unbind(old.frame_id, expected_generation=old.binding_generation, by="console")
     registry.bind(old.frame_id, player["player_id"], old.output.output_id,
-                  expected_generation=old.binding_generation + 1)
+                  expected_generation=old.binding_generation + 1, by="console")
     assert _unresolved(registry) == 1  # the historical fence is kept; it is not served
     assert _served(registry) == []
 
@@ -93,10 +93,10 @@ def test_a_frame_newly_bound_to_that_output_inherits_nothing(registry):
     _, player, _, sessions, claims, grants, surfaces, reconciler, _ = rig(registry)
     _lose_first_output(sessions, claims, grants, surfaces, reconciler)
     old = surfaces[0]
-    registry.unbind(old.frame_id, expected_generation=old.binding_generation)
+    registry.unbind(old.frame_id, expected_generation=old.binding_generation, by="console")
     frame(registry, "replacement-frame")
     generation = registry.bind("replacement-frame", player["player_id"], old.output.output_id,
-                               expected_generation=0)["generation"]
+                               expected_generation=0, by="console")["generation"]
     # Same Player, Output and binding generation number; only the Frame differs.
     assert generation == old.binding_generation
     assert _unresolved(registry) == 1
@@ -117,7 +117,7 @@ def test_only_an_unresolved_loss_is_served(registry, resolved):
     _lose_first_output(sessions, claims, grants, surfaces, reconciler)
     if resolved:
         with registry.db.transaction() as conn:
-            conn.execute("UPDATE node_output_losses SET resolved_at=interrupted_at+1")
+            conn.execute("UPDATE output_losses SET resolved_at=interrupted_at+1")
     assert len(_served(registry)) == (0 if resolved else 1)
 
 

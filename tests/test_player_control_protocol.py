@@ -93,10 +93,10 @@ def test_state_before_hello_is_refused_and_identify_is_unsupported(registry):
 
 
 def test_hello_without_a_control_row_negotiates_the_current_epoch(registry):
-    """A missing row (enrollment opens one; nothing else removes it) is an open epoch."""
+    """A missing control session (enrollment opens one; nothing else removes it) is an open epoch."""
     player, _, _ = enroll(registry)
     with registry.db.transaction() as conn:
-        conn.execute("DELETE FROM player_control_sessions WHERE player_id=%s",
+        conn.execute("UPDATE players SET control_session=NULL WHERE id=%s",
                      (player["player_id"],))
     app = create_app(registry.db, registry.clock, ADMIN)
     headers = {"Authorization": "Bearer " + player["token"]}
@@ -189,7 +189,8 @@ def test_v2_applied_ack_replays_exact_receipt_until_superseded_and_epoch_fenced(
         assert "ack_nonce" not in registry.control_fact(player["player_id"])
         with registry.db.transaction() as conn:
             first = conn.execute(
-                "SELECT applied_at,applied_sequence FROM player_control_sessions WHERE player_id=%s",
+                "SELECT (control_session->>'applied_at')::float8 AS applied_at, "
+                "(control_session->>'applied_sequence')::bigint AS applied_sequence FROM players WHERE id=%s",
                 (player["player_id"],),
             ).fetchone()
         assert first["applied_at"] is not None and first["applied_sequence"] == 1
@@ -198,7 +199,8 @@ def test_v2_applied_ack_replays_exact_receipt_until_superseded_and_epoch_fenced(
                            headers=headers).json() == accepted
         with registry.db.transaction() as conn:
             repeated = conn.execute(
-                "SELECT applied_at,applied_sequence FROM player_control_sessions WHERE player_id=%s",
+                "SELECT (control_session->>'applied_at')::float8 AS applied_at, "
+                "(control_session->>'applied_sequence')::bigint AS applied_sequence FROM players WHERE id=%s",
                 (player["player_id"],),
             ).fetchone()
         assert repeated == first
@@ -210,7 +212,7 @@ def test_v2_applied_ack_replays_exact_receipt_until_superseded_and_epoch_fenced(
                            headers=headers).json() == accepted
         # A real change is a new delivery, and the old receipt is no longer current.
         frame(registry, "changed")
-        registry.bind("changed", player["player_id"], "HDMI-A-1", expected_generation=0)
+        registry.bind("changed", player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
         assert client.get("/v1/player/state", headers=headers).json()["delivery_id"] != state[
             "delivery_id"]
         assert client.post("/v1/player/control-acks", json=report, headers=headers).json() == {
@@ -239,8 +241,8 @@ def test_delivery_sequence_and_applied_receipt_remain_distinct_from_latest_resul
     assert registry.control_ack_response(player_id, first_ack).model_dump(exclude_none=True) == {
         "accepted": False}
     with registry.db.transaction() as conn:
-        assert conn.execute("SELECT applied_ack_nonce FROM player_control_sessions "
-                            "WHERE player_id=%s", (player_id,)).fetchone()[
+        assert conn.execute("SELECT control_session->>'applied_ack_nonce' AS applied_ack_nonce FROM players "
+                            "WHERE id=%s", (player_id,)).fetchone()[
                                 "applied_ack_nonce"] is None
     assert not registry.control_ack_response(player_id, ControlAck(
         authority_epoch=epoch, delivery_id=first["delivery_id"], result="applied")).accepted

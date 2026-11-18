@@ -38,8 +38,8 @@ def _wide_frame(registry):
     """FRAME, 16:9, bound to a Pi's output with its position saved (a Scene may target it)."""
     # The Output's report runs WIDE (the mode Weston runs, issue #124).
     identity, _key, _request = enroll(registry, count=1, size=(WIDE.width_px, WIDE.height_px))
-    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
-    registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100), by="console")
+    registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0, by="console")
     save_position(registry, FRAME)
 
 
@@ -88,7 +88,7 @@ def test_a_frame_whose_screen_size_is_not_known_says_so_instead_of_judging(page,
 
     from central.runtime import Contribution, Scene
 
-    registry.create_frame(frame_create("attic", x_mm=0, y_mm=0))
+    registry.create_frame(frame_create("attic", x_mm=0, y_mm=0), by="console")
     now = registry.clock.utc()
     wide = public_photo(number=1, width=1920, height=1080, captured_at=now)
     queue = _photos(registry, wide)

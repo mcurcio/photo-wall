@@ -42,6 +42,7 @@ from uuid import UUID, uuid4
 from psycopg.types.json import Jsonb
 from pydantic import Field
 
+from central.actor import Actor
 from central.fleet.models import TrialRefusal, TrialRefused
 from central.fleet.node_sessions import NodeControlError
 from central.fleet.position_history import (
@@ -115,10 +116,10 @@ class NodeCalibration:
         return {
             key: str(value) if isinstance(value, UUID) else value
             for key, value in row.items()
-            if key not in ("producer_id",)
+            if key not in ("producer_id", "created_by", "changed_at", "changed_by")
         }
 
-    def begin(self, frame_id: str, body: TrialBegin) -> dict:
+    def begin(self, frame_id: str, body: TrialBegin, *, by: Actor) -> dict:
         """A new trial for the Frame, at the saved calibration or at `body.calibration`, the
         operator's draft whose `revision` is the saved revision it was made from; and at the
         saved lighting (frames.lighting) or at `body.lighting`, the operator's draft lighting."""
@@ -130,20 +131,20 @@ class NodeCalibration:
             context = self.display.current_frame_in(conn, frame_id)
             now = self.sessions.clock.utc()
             conn.execute(
-                "UPDATE node_calibration_trials SET state='expired' WHERE frame_id=%s "
+                "UPDATE frame_trials SET state='expired',changed_at=%s,changed_by=%s WHERE frame_id=%s "
                 "AND state='active' AND expires_at<=%s",
-                (frame_id, now),
+                (now, by, frame_id, now),
             )
             if conn.execute(
-                "SELECT 1 FROM node_calibration_trials WHERE frame_id=%s AND state='active'",
+                "SELECT 1 FROM frame_trials WHERE frame_id=%s AND state='active'",
                 (frame_id,),
             ).fetchone():
                 raise TrialRefused(TrialRefusal.ALREADY_ACTIVE)
             return self._open(conn, frame_id, context, draft, draft_lighting, now, session_id=None,
-                              restored_from=None)
+                              restored_from=None, by=by)
 
     def _open(self, conn, frame_id: str, context, draft: Calibration | None, draft_lighting: FrameLighting | None,
-              now: float, *, session_id: UUID | None, restored_from: UUID | None) -> dict:
+              now: float, *, session_id: UUID | None, restored_from: UUID | None, by: Actor) -> dict:
         """Insert the Frame's next-generation active trial (the caller holds the locks and has
         ended any active one): at the saved calibration, or at `draft` if its base is it; at the
         saved lighting, or at `draft_lighting`. Its Position history session is `session_id` (a renew's
@@ -156,7 +157,7 @@ class NodeCalibration:
         lighting = context.binding.lighting if draft_lighting is None else draft_lighting
         generation = conn.execute(
             "SELECT COALESCE(max(generation),0)+1 AS n "
-            "FROM node_calibration_trials WHERE frame_id=%s",
+            "FROM frame_trials WHERE frame_id=%s",
             (frame_id,),
         ).fetchone()["n"]
         trial_id = uuid4()
@@ -165,10 +166,11 @@ class NodeCalibration:
         payload = canonical(calibration.model_dump(mode="json"))
         sha = candidate_hash(trial_id, generation, 1, baseline, payload, lighting)
         row = conn.execute(
-            "INSERT INTO node_calibration_trials(trial_id,frame_id,generation,player_id,"
+            "INSERT INTO frame_trials(trial_id,frame_id,generation,player_id,"
             "authority_epoch,producer_id,baseline,calibration_revision,sequence,calibration,lighting,candidate_sha256,"
-            "state,created_at,touched_at,expires_at,hard_expires_at,session_id,restored_from) "
-            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s,'active',%s,%s,%s,%s,%s,%s) RETURNING *",
+            "state,created_at,touched_at,expires_at,hard_expires_at,session_id,restored_from,"
+            "created_by,changed_at,changed_by) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,1,%s,%s,%s,'active',%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *",
             (
                 trial_id,
                 frame_id,
@@ -187,11 +189,14 @@ class NodeCalibration:
                 now + self.hard_seconds,
                 session_id,
                 restored_from,
+                by,
+                now,
+                by,
             ),
         ).fetchone()
         return self._view(row)
 
-    def operate(self, frame_id: str, trial_id: UUID, body: TrialOperation) -> dict:
+    def operate(self, frame_id: str, trial_id: UUID, body: TrialOperation, *, by: Actor) -> dict:
         """One operation on the trial; `edit` and `renew` carry the whole draft (`TrialEdit`)."""
         operation, expected_sequence = body.operation, body.expected_sequence
         proposed = body.calibration if isinstance(body, TrialEdit) else None
@@ -200,7 +205,7 @@ class NodeCalibration:
             proposed_lighting = (self.lighting.fitted_within(PgTransaction(conn), body.lighting)
                                  if isinstance(body, TrialEdit) else None)
             terminal = conn.execute(
-                "SELECT * FROM node_calibration_trials WHERE trial_id=%s AND frame_id=%s",
+                "SELECT * FROM frame_trials WHERE trial_id=%s AND frame_id=%s",
                 (trial_id, frame_id),
             ).fetchone()
             if terminal is not None and terminal["state"] != "active":
@@ -215,7 +220,7 @@ class NodeCalibration:
                 if operation not in ("status", "end", "keepalive"):
                     raise
             row = conn.execute(
-                "SELECT * FROM node_calibration_trials WHERE trial_id=%s AND frame_id=%s "
+                "SELECT * FROM frame_trials WHERE trial_id=%s AND frame_id=%s "
                 "FOR UPDATE",
                 (trial_id, frame_id),
             ).fetchone()
@@ -232,8 +237,8 @@ class NodeCalibration:
                     terminal = "invalidated"
             if terminal:
                 row = conn.execute(
-                    "UPDATE node_calibration_trials SET state=%s WHERE trial_id=%s RETURNING *",
-                    (terminal, trial_id),
+                    "UPDATE frame_trials SET state=%s,changed_at=%s,changed_by=%s WHERE trial_id=%s RETURNING *",
+                    (terminal, now, by, trial_id),
                 ).fetchone()
             if operation == "status" or row["state"] != "active":
                 return self._view(row)
@@ -241,9 +246,9 @@ class NodeCalibration:
                 # Slides only the idle deadline, never past the hard one; the candidate, its
                 # sequence and its presentation are unchanged, so Save stays as it was.
                 return self._view(conn.execute(
-                    "UPDATE node_calibration_trials SET touched_at=%s,expires_at=%s "
+                    "UPDATE frame_trials SET touched_at=%s,expires_at=%s,changed_at=%s,changed_by=%s "
                     "WHERE trial_id=%s RETURNING *",
-                    (now, self._touched(row, now), trial_id),
+                    (now, self._touched(row, now), now, by, trial_id),
                 ).fetchone())
             try:
                 sequence = next_sequence(row["sequence"], expected_sequence)
@@ -255,20 +260,22 @@ class NodeCalibration:
                 if proposed.revision != row["calibration_revision"]:
                     raise TrialRefused(TrialRefusal.BASELINE_REVISION_CHANGED)
                 conn.execute(
-                    "UPDATE node_calibration_trials SET state='ended' WHERE trial_id=%s", (trial_id,)
+                    "UPDATE frame_trials SET state='ended',changed_at=%s,changed_by=%s WHERE trial_id=%s",
+                    (now, by, trial_id),
                 )
                 return self._open(conn, frame_id, context, proposed, proposed_lighting, now,
-                                  session_id=row["session_id"], restored_from=row["restored_from"])
+                                  session_id=row["session_id"], restored_from=row["restored_from"], by=by)
             if operation == "end":
                 row = conn.execute(
-                    "UPDATE node_calibration_trials SET state='ended' WHERE trial_id=%s RETURNING *",
-                    (trial_id,),
+                    "UPDATE frame_trials SET state='ended',changed_at=%s,changed_by=%s WHERE trial_id=%s "
+                    "RETURNING *",
+                    (now, by, trial_id),
                 ).fetchone()
             elif operation == "edit":
                 if proposed.revision != row["calibration_revision"]:
                     raise TrialRefused(TrialRefusal.BASELINE_REVISION_CHANGED)
                 row = self._edited_in(conn, row, sequence, proposed, proposed_lighting, now,
-                                      restored_from=row["restored_from"])
+                                      restored_from=row["restored_from"], by=by)
             elif operation == "save":
                 receipt = context.request.receipt
                 if (
@@ -292,15 +299,17 @@ class NodeCalibration:
                     lighting=FrameLighting.model_validate(row["lighting"]),
                     session_id=row["session_id"],
                     restored_from=row["restored_from"],
+                    by=by,
                 )
                 row = conn.execute(
-                    "UPDATE node_calibration_trials SET state='saved',saved_calibration=%s,saved_lighting=%s "
-                    "WHERE trial_id=%s RETURNING *",
-                    (Jsonb(committed.model_dump(mode="json")), Jsonb(row["lighting"]), trial_id),
+                    "UPDATE frame_trials SET state='saved',saved_calibration=%s,saved_lighting=%s,"
+                    "changed_at=%s,changed_by=%s WHERE trial_id=%s RETURNING *",
+                    (Jsonb(committed.model_dump(mode="json")), Jsonb(row["lighting"]), now, by, trial_id),
                 ).fetchone()
             return self._view(row)
 
-    def restore(self, frame_id: str, trial_id: UUID, *, entry_id: UUID, expected_sequence: int) -> dict:
+    def restore(self, frame_id: str, trial_id: UUID, *, entry_id: UUID, expected_sequence: int,
+                by: Actor) -> dict:
         """Load a Position history entry into the active trial's draft (configuration snapshots,
         "View and restore"): an `edit` whose calibration and lighting are
         `position_history.restored_draft(entry, base_revision=<the trial's calibration_revision>)`,
@@ -321,7 +330,7 @@ class NodeCalibration:
             with suppress(NodeControlError):
                 context = self.display.current_frame_in(conn, frame_id)
             row = conn.execute(
-                "SELECT * FROM node_calibration_trials WHERE trial_id=%s AND frame_id=%s FOR UPDATE",
+                "SELECT * FROM frame_trials WHERE trial_id=%s AND frame_id=%s FOR UPDATE",
                 (trial_id, frame_id),
             ).fetchone()
             if row is None:
@@ -348,11 +357,11 @@ class NodeCalibration:
             # through the same check as an edit's, so Save never keeps lighting that adds nothing.
             lighting = self.lighting.fitted_within(PgTransaction(conn), lighting)
             return self._view(self._edited_in(conn, row, sequence, calibration, lighting, now,
-                                              restored_from=entry_id))
+                                              restored_from=entry_id, by=by))
 
     def _edited_in(self, conn, row, sequence: int, calibration: Calibration, lighting: FrameLighting,
                    now: float, *,
-                   restored_from: UUID | None):
+                   restored_from: UUID | None, by: Actor):
         """The active trial `row` at a new draft (an edit's or a Restore's): its candidate rehashed at
         `sequence`, its presentation cleared, its idle deadline slid, and the entry its draft was last
         restored from. The updated row."""
@@ -365,9 +374,10 @@ class NodeCalibration:
             lighting,
         )
         return conn.execute(
-            "UPDATE node_calibration_trials SET sequence=%s,calibration=%s,lighting=%s,candidate_sha256=%s,"
+            "UPDATE frame_trials SET sequence=%s,calibration=%s,lighting=%s,candidate_sha256=%s,"
             "touched_at=%s,expires_at=%s,presented_sequence=NULL,presented_sha256=NULL,"
-            "presentation_request_id=NULL,presented_at=NULL,restored_from=%s WHERE trial_id=%s RETURNING *",
+            "presentation_request_id=NULL,presented_at=NULL,restored_from=%s,changed_at=%s,changed_by=%s "
+            "WHERE trial_id=%s RETURNING *",
             (
                 sequence,
                 Jsonb(calibration.model_dump(mode="json")),
@@ -376,6 +386,8 @@ class NodeCalibration:
                 now,
                 self._touched(row, now),
                 restored_from,
+                now,
+                by,
                 row["trial_id"],
             ),
         ).fetchone()
@@ -400,7 +412,7 @@ class NodeCalibration:
             return None
         saved = position_values(binding.calibration, binding.lighting)
         row = conn.execute(
-            "SELECT * FROM node_calibration_trials WHERE frame_id=%s AND state='active' FOR UPDATE",
+            "SELECT * FROM frame_trials WHERE frame_id=%s AND state='active' FOR UPDATE",
             (binding.frame_id,),
         ).fetchone()
         if row is None:
@@ -413,8 +425,8 @@ class NodeCalibration:
             or row["authority_epoch"] != link.authority_epoch
         ):
             conn.execute(
-                "UPDATE node_calibration_trials SET state=%s WHERE trial_id=%s",
-                ("invalidated" if live else "expired", row["trial_id"]),
+                "UPDATE frame_trials SET state=%s,changed_at=%s,changed_by='node' WHERE trial_id=%s",
+                ("invalidated" if live else "expired", now, row["trial_id"]),
             )
             record_sent_in(conn, binding.frame_id, trial=None, saved=saved)
             return None
@@ -426,10 +438,10 @@ class NodeCalibration:
             and self.display.recent(request, receipt)
         ):
             conn.execute(
-                "UPDATE node_calibration_trials SET presented_sequence=sequence,"
-                "presented_sha256=candidate_sha256,presentation_request_id=%s,presented_at=%s "
-                "WHERE trial_id=%s",
-                (request.request_id, now, row["trial_id"]),
+                "UPDATE frame_trials SET presented_sequence=sequence,"
+                "presented_sha256=candidate_sha256,presentation_request_id=%s,presented_at=%s,"
+                "changed_at=%s,changed_by='node' WHERE trial_id=%s",
+                (request.request_id, now, now, row["trial_id"]),
             )
         candidate = TrialCandidate(
             row["trial_id"],

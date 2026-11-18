@@ -152,7 +152,7 @@ class NodeAcceptance:
                 raise NodeControlError("node_qualification_plan_changed")
             media = [layer for layer in plan.layers if layer.presentation == "media"
                      and layer.assignment_id in ready.prepared and layer.start<=now<layer.end]
-            bindings = conn.execute("SELECT output_id FROM bindings WHERE player_id=%s", (control.player_id,)).fetchall()
+            bindings = conn.execute("SELECT output_id FROM frames WHERE player_id=%s", (control.player_id,)).fetchall()
             required = {row["output_id"] for row in bindings}
             if not required or required != {layer.output_id for layer in media}:
                 raise NodeControlError("node_representative_media_evidence_required")

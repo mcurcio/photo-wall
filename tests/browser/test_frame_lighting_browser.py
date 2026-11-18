@@ -87,14 +87,14 @@ def _save(registry, calibration, lighting, expected_revision):
     """Central's Save: the trial's calibration and lighting through the Registry's Save CAS."""
     with registry.db.transaction() as conn:
         acquire_runtime_locks(conn)
-        row = conn.execute("SELECT f.generation, f.configuration_revision, b.player_id, b.output_id, "
-                           "p.authority_epoch FROM frames f JOIN bindings b ON b.frame_id=f.id "
-                           "JOIN players p ON p.id=b.player_id WHERE f.id=%s", (FRAME,)).fetchone()
+        row = conn.execute("SELECT f.generation, f.configuration_revision, f.player_id, f.output_id, "
+                           "p.authority_epoch FROM frames f "
+                           "JOIN players p ON p.id=f.player_id WHERE f.id=%s", (FRAME,)).fetchone()
         registry.commit_calibration_trial_in(
             conn, frame_id=FRAME, player_id=row["player_id"], authority_epoch=row["authority_epoch"],
             output_id=row["output_id"], binding_generation=row["generation"],
             config_revision=row["configuration_revision"], calibration_revision=expected_revision,
-            calibration=calibration, lighting=lighting, session_id=None, restored_from=None)
+            calibration=calibration, lighting=lighting, session_id=None, restored_from=None, by="console")
 
 
 class LightingSessions(FakeSessions):

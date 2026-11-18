@@ -354,7 +354,7 @@ def _central_fixture(
             with registry.db.transaction() as conn:
                 principal, link = current_in(conn)
                 if conn.execute(
-                    "SELECT 1 FROM bindings WHERE player_id=%s", (link.player_id,)
+                    "SELECT 1 FROM frames WHERE player_id=%s", (link.player_id,)
                 ).fetchone():
                     raise HTTPException(409, "fixture_requires_unbound_player")
                 cohort = current_cohort_in(conn, DEVICE_ID, 1, clock.utc())
@@ -457,7 +457,7 @@ def _central_fixture(
                 ),
                 unbound=not bool(
                     conn.execute(
-                        "SELECT 1 FROM bindings WHERE player_id=%s", (link.player_id,)
+                        "SELECT 1 FROM frames WHERE player_id=%s", (link.player_id,)
                     ).fetchone()
                 ),
             )

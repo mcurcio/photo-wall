@@ -67,8 +67,8 @@ class Rig:
             publish_deployment(registry.db, selected, registry.clock)
             self.deployments.append(selected)
         if unbound:
-            registry.unbind('node-f0', expected_generation=1)
-            registry.unbind('node-f1', expected_generation=1)
+            registry.unbind('node-f0', expected_generation=1, by="console")
+            registry.unbind('node-f1', expected_generation=1, by="console")
         self.coordinator, self.key, self.grants = coordinator, key, grants
         self.service = NodeLifecycle(sessions)
         self.claim = claims['app_effect_broker']
@@ -154,7 +154,7 @@ def test_stage_admits_a_frame_bound_player(registry):
     command = bound.stage()
     assert bound.desired() == [command] and bound.states() == ['staged']
     with registry.db.transaction() as conn:
-        assert conn.execute('SELECT count(*) n FROM bindings').fetchone()['n'] == 2
+        assert conn.execute('SELECT count(*) n FROM frames WHERE player_id IS NOT NULL').fetchone()['n'] == 2
 
 
 def test_the_app_attempts_read_serves_the_linked_app_and_this_generations_acceptances(registry):
@@ -399,10 +399,10 @@ def test_a_finished_stage_reads_ended_by_a_later_boot_and_unchanged_without_one(
 
 def _bound_state(registry):
     with registry.db.transaction() as conn:
-        bindings = conn.execute('SELECT frame_id,player_id,output_id FROM bindings ORDER BY frame_id').fetchall()
+        bindings = conn.execute('SELECT id AS frame_id,player_id,output_id FROM frames WHERE player_id IS NOT NULL ORDER BY id').fetchall()
         frames = conn.execute('SELECT id,generation,configuration_revision,calibration,position_generation,position_display_id '
                               'FROM frames ORDER BY id').fetchall()
-        losses = conn.execute('SELECT frame_id,authority_epoch FROM node_output_losses '
+        losses = conn.execute('SELECT frame_id,authority_epoch FROM output_losses '
                               'WHERE resolved_at IS NULL ORDER BY frame_id').fetchall()
     return bindings, frames, losses
 
@@ -458,7 +458,7 @@ def test_a_bound_players_switch_follows_the_operator_reboot_rule(registry):
 def test_a_bound_switch_whose_new_app_enrolls_before_the_exit_is_reconciled_rejoins_with_nothing_stale(registry):
     """D16 (G6), the other ordering: the new app enrolls (epoch 2) before the reconciler reads
     the old app's exit. Stated costs, pinned here: no interruption fact is ever recorded in this
-    order (`node_output_losses` stays empty); the exit's work item stays `awaiting_output_link`,
+    order (`output_losses` stays empty); the exit's work item stays `awaiting_output_link`,
     re-queued, until the new app links, then finishes as `before_process_link`, so the loss is
     dropped for good. Nothing of epoch 1 stays deliverable, bindings and calibration are kept, and
     epoch 2 rejoins the Run at its current point."""

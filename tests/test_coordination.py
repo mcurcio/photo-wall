@@ -30,7 +30,7 @@ def setup_players(registry, count=2):
         player, key, _ = enroll(registry)
         frame_id = f"frame-{i}"
         frame(registry, frame_id)
-        registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
+        registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
         save_position(registry, frame_id, PORTRAIT_ON_WIDE)
         players.append(player)
     return players
@@ -94,7 +94,7 @@ def test_configuration_revision_detects_independent_output_changes(registry):
     player, key, _ = enroll(registry)
     for i in range(2):
         frame(registry, f"f{i}")
-        registry.bind(f"f{i}", player["player_id"], f"HDMI-A-{i+1}", expected_generation=0)
+        registry.bind(f"f{i}", player["player_id"], f"HDMI-A-{i+1}", expected_generation=0, by="console")
     coordinator = Coordinator(registry.db, registry.clock)
     first = coordinator.configuration(player["player_id"], 1)
     assert len(first.bindings) == 2 and first.enabled_outputs == ()
@@ -347,7 +347,7 @@ def test_stale_generation_and_unknown_feedback_cannot_create_locks(registry):
     bogus = ready.model_copy(update={"failures": (Failure(assignment_id="unknown", code="decode"),)})
     with pytest.raises(CoordinationError, match="unknown_assignment"):
         coordinator.readiness(players[0]["player_id"], bogus)
-    registry.bind("frame-0", players[1]["player_id"], "HDMI-A-2", expected_generation=1)
+    registry.bind("frame-0", players[1]["player_id"], "HDMI-A-2", expected_generation=1, by="console")
     with pytest.raises(CoordinationError, match="stale_binding"):
         coordinator.readiness(players[0]["player_id"], ready)
     with registry.db.transaction() as conn:
@@ -401,7 +401,7 @@ def test_missing_ready_blob_refuses_whole_offer_but_persists_current_runtime(reg
 def test_mixed_calibrated_outputs_use_complete_plan_configuration_and_suppress_stale_calibration(registry):
     player = setup_players(registry, count=1)[0]
     frame(registry, "review-required")
-    registry.bind("review-required", player["player_id"], "HDMI-A-2", expected_generation=0)
+    registry.bind("review-required", player["player_id"], "HDMI-A-2", expected_generation=0, by="console")
     coordinator = Coordinator(registry.db, registry.clock)
     schedule(coordinator, ["frame-0"])
     delivered = coordinator.delivery(player["player_id"], 1)
@@ -454,7 +454,7 @@ def test_explicit_binding_cohort_change_offers_fresh_revision_for_current_state(
     coordinator.advance()
     old = coordinator.delivery(player["player_id"], 1)
     frame(registry, "missing")
-    registry.bind("missing", player["player_id"], "HDMI-A-2", expected_generation=0)
+    registry.bind("missing", player["player_id"], "HDMI-A-2", expected_generation=0, by="console")
     save_position(registry, "missing", PORTRAIT_ON_WIDE)
     registry.clock.advance(1)
     coordinator.advance()
@@ -774,7 +774,7 @@ def test_a_new_binding_supersedes_the_pending_cohort_it_replaces(registry):
     coordinator.advance()
     before = next(g for g in cohorts(registry) if g["starts_at"] == 1100 + shift)
     frame(registry, "late")
-    registry.bind("late", player["player_id"], "HDMI-A-2", expected_generation=0)
+    registry.bind("late", player["player_id"], "HDMI-A-2", expected_generation=0, by="console")
     save_position(registry, "late", PORTRAIT_ON_WIDE)
     registry.clock.advance(90)
     drive(registry, coordinator, [player], 1110 + shift)

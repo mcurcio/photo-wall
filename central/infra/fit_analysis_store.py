@@ -186,8 +186,7 @@ class PgFitAnalysisReader:
         """FitAnalysisReader.display_sizes: `frame_outputs_in`'s join, its Display's size alone."""
         with self.db.transaction() as conn:
             rows = conn.execute(
-                f"SELECT f.id, {SCREEN_COLUMNS} FROM frames f "  # noqa: S608
-                f"LEFT JOIN bindings b ON b.frame_id=f.id {SCREEN_JOIN}").fetchall()
+                f"SELECT f.id, {SCREEN_COLUMNS} FROM frames f {SCREEN_JOIN}").fetchall()  # noqa: S608
         return {row["id"]: frame_display_mm(row) for row in rows}
 
     @staticmethod

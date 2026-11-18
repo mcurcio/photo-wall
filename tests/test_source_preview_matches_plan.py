@@ -165,9 +165,9 @@ class Wall:
     def frames(self, *frame_ids: str, box_px: tuple[int, int] = LANDSCAPE) -> None:
         player, _, _ = enroll(self.registry, count=len(frame_ids))
         for index, frame_id in enumerate(frame_ids):
-            self.registry.create_frame(frame_create(frame_id))
+            self.registry.create_frame(frame_create(frame_id), by="console")
             self.registry.bind(frame_id, player["player_id"], f"HDMI-A-{index + 1}",
-                               expected_generation=0)
+                               expected_generation=0, by="console")
             # Follow-ups B1: the fit rule needs the Frame output (its picture on the enrolled
             # 1920 x 1080 Output), so each Frame's Position is a box of `box_px`
             # pixels in the screen's top-left corner and the fixture's 96 x 64 photos hold it.

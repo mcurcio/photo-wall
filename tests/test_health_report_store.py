@@ -50,7 +50,7 @@ def test_a_recorded_verdict_makes_only_the_bound_outputs_frame_dark(registry):
     identity = enroll(registry, device_id=device, count=2)[0]
     frame(registry, "hearth")
     frame(registry, "spare")
-    registry.bind("hearth", identity["player_id"], "HDMI-A-2", expected_generation=0)
+    registry.bind("hearth", identity["player_id"], "HDMI-A-2", expected_generation=0, by="console")
     assert _dark(registry, "hearth") is None            # no verdict yet
 
     # The other Output is dark; the Frame's own is lit: the Frame is not dark.

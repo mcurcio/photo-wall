@@ -40,7 +40,7 @@ def _seed(registry):
     _, player, _, sessions, claims, grants, surfaces, reconciler, _ = rig(registry)
     registry.authenticate(player["token"])
     for index, frame_id in enumerate((LOST, KEPT)):
-        registry.place_frame(frame_id, FramePlacement(x_mm=100 + 500 * index, y_mm=100))
+        registry.place_frame(frame_id, FramePlacement(x_mm=100 + 500 * index, y_mm=100), by="console")
     _lose_first_output(sessions, claims, grants, surfaces, reconciler)
     return player["player_id"], surfaces[0]
 
@@ -81,10 +81,10 @@ def test_a_served_interruption_shows_on_the_tile_run_chip_attention_and_output_r
 
 def test_a_frame_newly_bound_to_the_lost_output_shows_nothing(page, registry):
     player_id, old = _seed(registry)
-    registry.unbind(LOST, expected_generation=old.binding_generation)
+    registry.unbind(LOST, expected_generation=old.binding_generation, by="console")
     frame(registry, "replacement")
-    registry.place_frame("replacement", FramePlacement(x_mm=1100, y_mm=100))
-    registry.bind("replacement", player_id, old.output.output_id, expected_generation=0)
+    registry.place_frame("replacement", FramePlacement(x_mm=1100, y_mm=100), by="console")
+    registry.bind("replacement", player_id, old.output.output_id, expected_generation=0, by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         replacement = tile_health(page, "replacement")

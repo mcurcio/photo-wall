@@ -29,7 +29,8 @@ def _seed_player(registry, *, canonical_device: bool) -> None:
         if canonical_device:
             seed_device(conn, DEVICE_ID, SERIAL, at=900)
         conn.execute("INSERT INTO players(id,public_key,token_hash,registered_at,last_seen,"
-                     "device_id) VALUES(%s,%s,%s,900,900,%s)",
+                     "device_id,created_at,created_by,changed_at,changed_by) "
+                     "VALUES(%s,%s,%s,900,900,%s,900,'node',900,'node')",
                      (PLAYER_ID, "test-public-key", "test-token-hash", DEVICE_ID))
 
 
@@ -73,8 +74,8 @@ def test_bound_retirement_refusal_does_not_create_a_device_tombstone(registry) -
                      "changed_by) VALUES(%s,%s,%s,0,'node',0,'node')",
                      (PLAYER_ID, "HDMI-A-1", Jsonb({"output_id": "HDMI-A-1",
                                                     "width_px": 1920, "height_px": 1080})))
-    registry.create_frame(frame_create("lifecycle-frame"))
-    registry.bind("lifecycle-frame", PLAYER_ID, "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("lifecycle-frame"), by="console")
+    registry.bind("lifecycle-frame", PLAYER_ID, "HDMI-A-1", expected_generation=0, by="console")
     with pytest.raises(RegistryError, match="player_bound"):
         registry.retire(PLAYER_ID, by="console")
     with registry.db.transaction() as conn:

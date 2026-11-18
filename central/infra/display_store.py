@@ -243,18 +243,18 @@ _CONSOLE_TEST: Final = "console-test"            # power_requests.reason of 1b's
 
 # --- Readiness facts -----------------------------------------------------------------------------
 
-# A frames row `f`, its binding `b` (LEFT JOIN or JOIN) and this join give POSITION_COLUMNS.
-SEEN_DISPLAY_JOIN: Final = ("LEFT JOIN outputs seen ON seen.player_id=b.player_id "
-                            "AND seen.output_id=b.output_id")
+# A frames row `f` (its binding: `f.player_id`, `f.output_id`) and this join give POSITION_COLUMNS.
+SEEN_DISPLAY_JOIN: Final = ("LEFT JOIN outputs seen ON seen.player_id=f.player_id "
+                            "AND seen.output_id=f.output_id")
 POSITION_FACTS: Final = ("bound", "generation", "position_generation", "position_display_id",
                          "seen_display_id")
-POSITION_COLUMNS: Final = ("b.player_id IS NOT NULL AS bound, f.generation, f.position_generation, "
+POSITION_COLUMNS: Final = ("f.player_id IS NOT NULL AS bound, f.generation, f.position_generation, "
                            "f.position_display_id, seen.display_id AS seen_display_id")
 
 
 def frame_outputs_in(conn: Any) -> tuple[FrameOutput, ...]:
     """Every Frame's FrameOutput, ordered by frame id, in the caller's transaction (follow-ups
-    2026-10-11, slice A1; frame box run fb-8): frames LEFT JOIN bindings LEFT JOIN outputs on
+    2026-10-11, slice A1; frame box run fb-8): frames LEFT JOIN outputs on its binding
     (player_id, output_id) and the Display seen there; `display_px` is `model.screen_px` of the
     Output report's `current_mode` (outputs.display_report) and that Display's modes; `turn` is `f.turn`; `output_px` is `contracts.models.frame_output` at that
     turn; `video` is `f.video`; `size_mm` is `contracts.models.frame_size_mm` of the Position's box
@@ -263,7 +263,7 @@ def frame_outputs_in(conn: Any) -> tuple[FrameOutput, ...]:
     and the fit analysis all ask here. Never raises for a Frame without an Output."""
     rows = conn.execute(
         f"SELECT f.id, f.video, f.calibration, f.turn, {SCREEN_COLUMNS} FROM frames f "  # noqa: S608
-        f"LEFT JOIN bindings b ON b.frame_id=f.id {SCREEN_JOIN} ORDER BY f.id").fetchall()
+        f"{SCREEN_JOIN} ORDER BY f.id").fetchall()
     frames = []
     for row in rows:
         calibration = Calibration.model_validate(row["calibration"])
@@ -280,7 +280,7 @@ def frame_outputs_in(conn: Any) -> tuple[FrameOutput, ...]:
 DISPLAY_SIZE_JOIN: Final = "LEFT JOIN displays d ON d.id=seen.display_id"
 DISPLAY_SIZE_COLUMNS: Final = "d.width_mm AS display_width_mm, d.height_mm AS display_height_mm"
 
-# A frames row `f` and its binding `b` (LEFT JOIN) and this join give SCREEN_COLUMNS: the mode
+# A frames row `f` (its binding on the row) and this join give SCREEN_COLUMNS: the mode
 # Weston runs on the Output, from its Output report (`seen.display_report`'s `current_mode`, issue #124),
 # and the Display seen there (`frame_screen_px`, `frame_display_mm`).
 SCREEN_JOIN: Final = f"{SEEN_DISPLAY_JOIN} {DISPLAY_SIZE_JOIN}"
@@ -322,27 +322,30 @@ def frame_readiness(row: Mapping[str, Any]) -> Readiness:
 
 def frame_readiness_in(conn: Any, frame_id: str) -> Readiness | None:
     """The Frame's readiness in the caller's transaction; None for an unknown Frame."""
-    row = conn.execute(f"SELECT {POSITION_COLUMNS} FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "  # noqa: S608
+    row = conn.execute(f"SELECT {POSITION_COLUMNS} FROM frames f "  # noqa: S608
                        f"{SEEN_DISPLAY_JOIN} WHERE f.id=%s", (frame_id,)).fetchone()
     return None if row is None else frame_readiness(row)
 
 
-def commit_position(conn: Any, frame_id: str) -> None:
+def commit_position(conn: Any, frame_id: str, *, now: float, by: Actor) -> None:
     """A Position commit, in the committing transaction: it is made at the Frame's current
     generation, against the Display last seen on its bound Output (NULL when none)."""
     conn.execute("UPDATE frames f SET position_generation=f.generation, position_display_id=("
-                 "SELECT seen.display_id FROM bindings b " + SEEN_DISPLAY_JOIN + " WHERE b.frame_id=f.id) "
-                 "WHERE f.id=%s", (frame_id,))
+                 "SELECT seen.display_id FROM outputs seen WHERE seen.player_id=f.player_id "
+                 "AND seen.output_id=f.output_id), changed_at=%s, changed_by=%s "
+                 "WHERE f.id=%s", (now, by, frame_id))
 
 
-def _adopt(conn: Any, player_id: str, output_id: str, seen_before: UUID | None, display_id: UUID) -> None:
+def _adopt(conn: Any, player_id: str, output_id: str, seen_before: UUID | None, display_id: UUID, *,
+           now: float) -> None:
     """The Frame bound to this Output takes `display_id`, newly recorded there, as its Position's
     Display when `model.adopts` says so (a first sighting, and its Position commit names none)."""
-    frame = conn.execute(f"SELECT f.id, {POSITION_COLUMNS} FROM bindings b JOIN frames f ON f.id=b.frame_id "  # noqa: S608
-                         f"{SEEN_DISPLAY_JOIN} WHERE b.player_id=%s AND b.output_id=%s FOR NO KEY UPDATE OF f",
+    frame = conn.execute(f"SELECT f.id, {POSITION_COLUMNS} FROM frames f "  # noqa: S608
+                         f"{SEEN_DISPLAY_JOIN} WHERE f.player_id=%s AND f.output_id=%s FOR NO KEY UPDATE OF f",
                          (player_id, output_id)).fetchone()
     if frame is not None and adopts(frame_position(frame), seen_before, display_id):
-        conn.execute("UPDATE frames SET position_display_id=%s WHERE id=%s", (display_id, frame["id"]))
+        conn.execute("UPDATE frames SET position_display_id=%s, changed_at=%s, changed_by='node' WHERE id=%s",
+                     (display_id, now, frame["id"]))
 
 
 # --- Recognising a Display -----------------------------------------------------------------------
@@ -391,7 +394,7 @@ def _recognise(conn: Any, player_id: str, output_id: str, identity: DisplayIdent
     shared = {(row["maker"], row["product"], row["serial"]) for row in conn.execute(
         "SELECT maker, product, serial FROM displays WHERE maker=%s AND product=%s AND shared_serial",
         (identity.maker, identity.product)).fetchall()}
-    bound = conn.execute("SELECT frame_id FROM bindings WHERE player_id=%s AND output_id=%s",
+    bound = conn.execute("SELECT id AS frame_id FROM frames WHERE player_id=%s AND output_id=%s",
                          (player_id, output_id)).fetchone()
     key = display_key(identity, serial_counts=serial_usable(sighting, others, shared),
                       bound_frame_id=None if bound is None else bound["frame_id"])
@@ -406,9 +409,9 @@ def _rekey_shared(conn: Any, identity: DisplayIdentity, now: float, *, by: Actor
     bound Frame's Position commit that named the serial's Display names the new one. The same
     monitor on the same port is not a display change, whichever port reported first."""
     rows = conn.execute(
-        "SELECT o.player_id, o.output_id, o.display_identity, o.display_id, o.display_report, b.frame_id FROM outputs o "
-        "JOIN displays d ON d.id=o.display_id LEFT JOIN bindings b ON b.player_id=o.player_id "
-        "AND b.output_id=o.output_id WHERE d.maker=%s AND d.product=%s AND d.serial=%s FOR UPDATE OF o",
+        "SELECT o.player_id, o.output_id, o.display_identity, o.display_id, o.display_report, f.id AS frame_id "
+        "FROM outputs o JOIN displays d ON d.id=o.display_id LEFT JOIN frames f ON f.player_id=o.player_id "
+        "AND f.output_id=o.output_id WHERE d.maker=%s AND d.product=%s AND d.serial=%s FOR UPDATE OF o",
         (identity.maker, identity.product, identity.serial)).fetchall()
     for row in rows:
         held = _identity(row["display_identity"]) or identity
@@ -417,8 +420,9 @@ def _rekey_shared(conn: Any, identity: DisplayIdentity, now: float, *, by: Actor
         display_id = None if key is None else _display_for(conn, key, held, modes, size_mm, now, by=by)
         _set_seen_display(conn, row["player_id"], row["output_id"], display_id, now, by=by)
         if display_id is not None:
-            conn.execute("UPDATE frames SET position_display_id=%s WHERE id=%s AND position_display_id=%s",
-                         (display_id, row["frame_id"], row["display_id"]))
+            conn.execute("UPDATE frames SET position_display_id=%s, changed_at=%s, changed_by=%s "
+                         "WHERE id=%s AND position_display_id=%s",
+                         (display_id, now, by, row["frame_id"], row["display_id"]))
 
 
 def _sighted(report: Mapping[str, Any] | None) -> tuple[tuple[DisplayMode, ...], tuple[int, int] | None]:
@@ -484,7 +488,7 @@ def record_report(conn: Any, player_id: str, report: OutputReport, now: float) -
         display_id = _recognise(conn, player_id, report.output_id, report.identity, report.modes,
                                 report.size_mm, before=before, recorded=display_id, now=now, by="node")
     if display_id is not None and display_id != seen_before:   # a Display newly recorded here
-        _adopt(conn, player_id, report.output_id, seen_before, display_id)
+        _adopt(conn, player_id, report.output_id, seen_before, display_id, now=now)
     identity = report.identity or before
     conn.execute(
         "INSERT INTO outputs(player_id, output_id, connected, display_identity, display_id, display_report, "
@@ -850,8 +854,8 @@ def _until_next_deadline(conn: Any, device_id: str, now: float) -> float:
     does not changes no document), and the next house midnight (the horizon moves), which always
     comes."""
     row = conn.execute(
-        "SELECT least((SELECT min(r.ends_at) FROM players p JOIN bindings b ON b.player_id=p.id "
-        "JOIN power_requests r ON r.frame_id=b.frame_id WHERE p.device_id=%(device)s "
+        "SELECT least((SELECT min(r.ends_at) FROM players p JOIN frames f ON f.player_id=p.id "
+        "JOIN power_requests r ON r.frame_id=f.id WHERE p.device_id=%(device)s "
         "AND p.retired_at IS NULL AND r.ends_at > %(now)s), "
         "(SELECT min((d.picture_session->>'idle_until')::float8) FROM players p JOIN outputs o "
         "ON o.player_id=p.id JOIN displays d ON d.id=o.display_id WHERE p.device_id=%(device)s "
@@ -870,8 +874,8 @@ def _until_next_deadline(conn: Any, device_id: str, now: float) -> float:
 
 def _bound_frames(conn: Any, device_id: str) -> tuple[str, ...]:
     return tuple(row["frame_id"] for row in conn.execute(
-        "SELECT b.frame_id FROM players p JOIN bindings b ON b.player_id=p.id "
-        "WHERE p.device_id=%s AND p.retired_at IS NULL ORDER BY b.frame_id", (device_id,)).fetchall())
+        "SELECT f.id AS frame_id FROM players p JOIN frames f ON f.player_id=p.id "
+        "WHERE p.device_id=%s AND p.retired_at IS NULL ORDER BY f.id", (device_id,)).fetchall())
 
 
 def _power_test(row: Mapping[str, Any]) -> PowerTest | None:
@@ -883,7 +887,7 @@ def _power_test(row: Mapping[str, Any]) -> PowerTest | None:
 
 
 _TEST_COLUMNS: Final = "r.id AS test_id, r.power AS test_power, r.for_seconds, r.ends_at"
-_TEST_JOIN: Final = f"LEFT JOIN power_requests r ON r.frame_id=b.frame_id AND r.reason='{_CONSOLE_TEST}'"
+_TEST_JOIN: Final = f"LEFT JOIN power_requests r ON r.frame_id=f.id AND r.reason='{_CONSOLE_TEST}'"
 
 
 def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
@@ -906,13 +910,13 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
     house = house_time_in(conn)
     policy = power_policy_in(conn, now)
     rows = conn.execute(
-        "SELECT seen.output_id, b.frame_id, d.id AS d_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
+        "SELECT seen.output_id, f.id AS frame_id, d.id AS d_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
         f"{PICTURE_COLUMNS}, d.hardware_restore, {_SESSION_COLUMNS}, seen.document_change, seen.document_digest, "
         "seen.region_change, seen.region_digest, seen.picture_change, f.calibration, "
         f"seen.picture_digest, COALESCE(f.turn, 0) AS turn, {_TEST_COLUMNS}, {SCREEN_COLUMNS} "
         "FROM outputs seen LEFT JOIN displays d ON d.id=seen.display_id "
-        f"LEFT JOIN bindings b ON b.player_id=seen.player_id AND b.output_id=seen.output_id {_TEST_JOIN} "
-        "LEFT JOIN frames f ON f.id=b.frame_id WHERE seen.player_id=%(player)s ORDER BY seen.output_id",
+        "LEFT JOIN frames f ON f.player_id=seen.player_id AND f.output_id=seen.output_id "
+        f"{_TEST_JOIN} WHERE seen.player_id=%(player)s ORDER BY seen.output_id",
         {"player": player_id}).fetchall()
     documents: dict[str, bytes] = {}
     for row in rows:
@@ -1011,8 +1015,8 @@ class PgDisplayQueries:
 
     def frame_display(self, frame_id: str) -> FrameDisplayView:
         with self._db.transaction() as conn:
-            frame = conn.execute(f"SELECT {POSITION_COLUMNS}, b.player_id, b.output_id, seen.connected, "  # noqa: S608
-                                 f"seen.display_reported_at AS reported_at FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "
+            frame = conn.execute(f"SELECT {POSITION_COLUMNS}, f.player_id, f.output_id, seen.connected, "  # noqa: S608
+                                 f"seen.display_reported_at AS reported_at FROM frames f "
                                  f"{SEEN_DISPLAY_JOIN} WHERE f.id=%s", (frame_id,)).fetchone()
             if frame is None:
                 raise DisplayRefused("unknown_frame", 404)
@@ -1029,10 +1033,10 @@ class PgDisplayQueries:
     def frame_power(self, frame_id: str) -> FramePowerView:
         with self._db.transaction() as conn:
             frame = conn.execute(
-                f"SELECT b.player_id, b.output_id, p.device_id, seen.display_id, seen.display_report AS report, "  # noqa: S608
+                f"SELECT f.player_id, f.output_id, p.device_id, seen.display_id, seen.display_report AS report, "  # noqa: S608
                 f"d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, seen.document, "
-                f"{_TEST_COLUMNS} FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "
-                f"LEFT JOIN players p ON p.id=b.player_id {SEEN_DISPLAY_JOIN} "
+                f"{_TEST_COLUMNS} FROM frames f "
+                f"LEFT JOIN players p ON p.id=f.player_id {SEEN_DISPLAY_JOIN} "
                 f"LEFT JOIN displays d ON d.id=seen.display_id "
                 f"LEFT JOIN power_requests r ON r.frame_id=f.id AND r.reason='{_CONSOLE_TEST}' WHERE f.id=%s",
                 (frame_id,)).fetchone()
@@ -1080,8 +1084,8 @@ class FramePowerFacts:
 def power_facts_in(conn: Any, frame_id: str) -> FramePowerFacts | None:
     """The Frame's power facts in the caller's transaction; None for an unknown Frame."""
     frame = conn.execute(
-        f"SELECT b.player_id, seen.display_report AS report, seen.document, {_TEST_COLUMNS} FROM frames f "  # noqa: S608
-        f"LEFT JOIN bindings b ON b.frame_id=f.id {SEEN_DISPLAY_JOIN} "
+        f"SELECT f.player_id, seen.display_report AS report, seen.document, {_TEST_COLUMNS} FROM frames f "  # noqa: S608
+        f"{SEEN_DISPLAY_JOIN} "
         f"LEFT JOIN power_requests r ON r.frame_id=f.id AND r.reason='{_CONSOLE_TEST}' WHERE f.id=%s",
         (frame_id,)).fetchone()
     if frame is None:
@@ -1105,8 +1109,8 @@ class PgDisplayCommands:
     def request_power_test(self, frame_id: str, *, by: Actor) -> PowerTestAccepted:
         request_id = uuid.uuid4()
         with self._db.transaction() as conn:
-            frame = conn.execute("SELECT b.player_id FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "
-                                 "WHERE f.id=%s FOR NO KEY UPDATE OF f", (frame_id,)).fetchone()
+            frame = conn.execute("SELECT player_id FROM frames WHERE id=%s FOR NO KEY UPDATE",
+                                 (frame_id,)).fetchone()
             if frame is None:
                 raise DisplayRefused("unknown_frame", 404)
             if frame["player_id"] is None:
@@ -1125,8 +1129,8 @@ class PgDisplayCommands:
 
     def end_power_test(self, frame_id: str) -> None:
         with self._db.transaction() as conn:
-            frame = conn.execute("SELECT b.player_id FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "
-                                 "WHERE f.id=%s FOR NO KEY UPDATE OF f", (frame_id,)).fetchone()
+            frame = conn.execute("SELECT player_id FROM frames WHERE id=%s FOR NO KEY UPDATE",
+                                 (frame_id,)).fetchone()
             if frame is None:
                 raise DisplayRefused("unknown_frame", 404)
             ended = conn.execute("DELETE FROM power_requests WHERE frame_id=%s AND reason=%s RETURNING id",
@@ -1152,8 +1156,8 @@ class PgDisplayCommands:
 
 # --- The Picture tab (roadmap 1c's Live model; the picture split, slice S2) ----------------------
 
-# The Output's recorded identity, latest picture document and picture report, joined to a binding
-# `b` and SEEN_DISPLAY_JOIN.
+# The Output's recorded identity, latest picture document and picture report, joined to a Frame
+# `f` (its binding) and SEEN_DISPLAY_JOIN.
 _PICTURE_FACTS: Final = (
     "seen.display_identity AS seen_identity, seen.picture_change AS output_picture_change, "
     "seen.picture_document, seen.picture_report")
@@ -1161,15 +1165,15 @@ _PICTURE_FACTS: Final = (
 # A Frame `f` with its binding, the Display last seen on its Output, that Display's open session
 # and the Output's picture facts.
 _PICTURE_FRAME: Final = (
-    f"SELECT f.id AS frame_id, b.player_id, seen.display_id, seen.connected, {_PICTURE_FACTS}, "  # noqa: S608
-    f"d.id AS d_id, {PICTURE_COLUMNS}, {_SESSION_COLUMNS} FROM frames f LEFT JOIN bindings b ON b.frame_id=f.id "
+    f"SELECT f.id AS frame_id, f.player_id, seen.display_id, seen.connected, {_PICTURE_FACTS}, "  # noqa: S608
+    f"d.id AS d_id, {PICTURE_COLUMNS}, {_SESSION_COLUMNS} FROM frames f "
     f"{SEEN_DISPLAY_JOIN} LEFT JOIN displays d ON d.id=seen.display_id")
 
 # A session (by its id, as text) with its Display and the picture facts of the Output of the Frame it
 # was opened on.
 _PICTURE_SESSION: Final = (
     f"SELECT {_SESSION_COLUMNS}, {PICTURE_COLUMNS}, {_PICTURE_FACTS} FROM displays d "  # noqa: S608
-    "LEFT JOIN bindings b ON b.frame_id=d.picture_session->>'frame_id' "
+    "LEFT JOIN frames f ON f.id=d.picture_session->>'frame_id' "
     f"{SEEN_DISPLAY_JOIN} WHERE d.picture_session->>'id'=%s FOR UPDATE OF d")
 
 _NODES_SEEING: Final = ("SELECT DISTINCT p.device_id FROM outputs o JOIN players p ON p.id=o.player_id "

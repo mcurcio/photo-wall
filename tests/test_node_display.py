@@ -66,7 +66,7 @@ def test_display_decision_and_completion_renewal(registry):
     assert handoff.operation == "handoff"
     with registry.db.transaction() as conn:
         assert (
-            conn.execute("SELECT resolved_at FROM node_output_losses").fetchone()["resolved_at"]
+            conn.execute("SELECT resolved_at FROM output_losses").fetchone()["resolved_at"]
             is None
         )
     # Renewal transports the already-observed effect, preserving original decision/time.
@@ -88,7 +88,7 @@ def test_display_decision_and_completion_renewal(registry):
     assert exchange(completion, renewed).operation == "retain"
     with registry.db.transaction() as conn:
         assert (
-            conn.execute("SELECT resolved_at FROM node_output_losses").fetchone()["resolved_at"]
+            conn.execute("SELECT resolved_at FROM output_losses").fetchone()["resolved_at"]
             is not None
         )
         assert conn.execute("SELECT count(*) n FROM node_display_handoffs").fetchone()["n"] == 1
@@ -114,9 +114,9 @@ def test_same_process_config_change_requests_revision(registry):
 
     with registry.db.transaction() as conn:
         acquire_runtime_locks(conn)
-        registry.commit_calibration_trial_in(conn, frame_id="node-f0", player_id=conn.execute("SELECT player_id FROM bindings WHERE frame_id='node-f0'").fetchone()["player_id"],
+        registry.commit_calibration_trial_in(conn, frame_id="node-f0", player_id=conn.execute("SELECT player_id FROM frames WHERE id='node-f0'").fetchone()["player_id"],
             authority_epoch=1, output_id=old.output.output_id, binding_generation=old.binding_generation,
-            config_revision=old.config_revision, calibration_revision=2, calibration=SKEWED, lighting=LIGHTING, session_id=None, restored_from=None)
+            config_revision=old.config_revision, calibration_revision=2, calibration=SKEWED, lighting=LIGHTING, session_id=None, restored_from=None, by="console")
     request = DisplayExchange(grant.producer, uuid4(), 1500, fact.output, True, admitted=old)
     decision = parse_display_decision(
         NodeDisplay(sessions, runtime=coordinator).exchange(
@@ -156,15 +156,15 @@ def test_equal_counter_frame_rebind_requires_exact_withdrawal_and_role_removal(r
     request = DisplayExchange(grant.producer, uuid4(), 1300, fact.output, True, admitted=old)
     assert exchange(request).operation == "retain"
     with registry.db.transaction() as conn:
-        player_id = conn.execute("SELECT player_id FROM bindings WHERE frame_id='node-f0'").fetchone()["player_id"]
-    registry.unbind("node-f0", expected_generation=1)
+        player_id = conn.execute("SELECT player_id FROM frames WHERE id='node-f0'").fetchone()["player_id"]
+    registry.unbind("node-f0", expected_generation=1, by="console")
     frame(registry, "replacement-frame")
-    registry.bind("replacement-frame", player_id, fact.output.output_id, expected_generation=0)
+    registry.bind("replacement-frame", player_id, fact.output.output_id, expected_generation=0, by="console")
     with registry.db.transaction() as conn:
         acquire_runtime_locks(conn)
         registry.commit_calibration_trial_in(conn, frame_id="replacement-frame", player_id=player_id,
             authority_epoch=1, output_id=fact.output.output_id, binding_generation=1,
-            config_revision=2, calibration_revision=1, calibration=PORTRAIT_ON_WIDE, lighting=LIGHTING, session_id=None, restored_from=None)
+            config_revision=2, calibration_revision=1, calibration=PORTRAIT_ON_WIDE, lighting=LIGHTING, session_id=None, restored_from=None, by="console")
     request = replace(request, request_id=uuid4(), sampled_boottime_ms=1400)
     withdraw = exchange(request)
     assert withdraw.operation == "withdraw" and withdraw.surface == old
@@ -205,15 +205,15 @@ def test_promoted_revision_unbind_before_upload_uses_exact_issued_role(registry,
 
     with registry.db.transaction() as conn:
         acquire_runtime_locks(conn)
-        player_id = conn.execute("SELECT player_id FROM bindings WHERE frame_id='node-f0'").fetchone()["player_id"]
+        player_id = conn.execute("SELECT player_id FROM frames WHERE id='node-f0'").fetchone()["player_id"]
         registry.commit_calibration_trial_in(conn, frame_id="node-f0", player_id=player_id,
             authority_epoch=1, output_id=old.output.output_id, binding_generation=old.binding_generation,
-            config_revision=old.config_revision, calibration_revision=2, calibration=SKEWED, lighting=LIGHTING, session_id=None, restored_from=None)
+            config_revision=old.config_revision, calibration_revision=2, calibration=SKEWED, lighting=LIGHTING, session_id=None, restored_from=None, by="console")
     request = DisplayExchange(grant.producer, uuid4(), 1300, fact.output, True, admitted=old)
     revision = exchange(request)
     assert revision.operation == "revision"
     # Real native promotion occurred but was not uploaded before Registry unbound.
-    registry.unbind("node-f0", expected_generation=1)
+    registry.unbind("node-f0", expected_generation=1, by="console")
     if renew:
         claim = replace(claim, session_id=uuid4(), credential=uuid4().hex+uuid4().hex)
         sessions.enroll(claim)
@@ -265,13 +265,13 @@ def test_a_still_outputs_old_receipt_stands_and_a_revision_is_still_decided(regi
     with registry.db.transaction() as conn:
         acquire_runtime_locks(conn)
         player_id = conn.execute(
-            "SELECT player_id FROM bindings WHERE frame_id='node-f0'").fetchone()["player_id"]
+            "SELECT player_id FROM frames WHERE id='node-f0'").fetchone()["player_id"]
         registry.commit_calibration_trial_in(
             conn, frame_id="node-f0", player_id=player_id, authority_epoch=1,
             output_id=old.output.output_id, binding_generation=old.binding_generation,
             config_revision=old.config_revision, calibration_revision=2,
             calibration=SKEWED, lighting=LIGHTING, session_id=None,
-            restored_from=None)
+            restored_from=None, by="console")
     decision = exchange(replace(request, request_id=uuid4(), sampled_boottime_ms=62_500))
     assert decision.operation == "revision"
     assert decision.surface.config_revision > old.config_revision

@@ -173,16 +173,16 @@ def _seed(registry):
     id_a, _key_a, _req_a = enroll(registry, count=1, size=size)
     id_b, _key_b, _req_b = enroll(registry, count=1, size=size)
 
-    registry.create_frame(frame_create(VALID_FRAME, x_mm=100, y_mm=100))
-    registry.create_frame(frame_create(INVALID_FRAME, x_mm=500, y_mm=100))
+    registry.create_frame(frame_create(VALID_FRAME, x_mm=100, y_mm=100), by="console")
+    registry.create_frame(frame_create(INVALID_FRAME, x_mm=500, y_mm=100), by="console")
 
     # VALID_FRAME: bind (generation 0->1, position needed) then commit
     # (ready, revision 2).
-    registry.bind(VALID_FRAME, id_a["player_id"], OUTPUT, expected_generation=0)
+    registry.bind(VALID_FRAME, id_a["player_id"], OUTPUT, expected_generation=0, by="console")
     save_position(registry, VALID_FRAME)
 
     # INVALID_FRAME: bind only -> it still needs its position.
-    registry.bind(INVALID_FRAME, id_b["player_id"], OUTPUT, expected_generation=0)
+    registry.bind(INVALID_FRAME, id_b["player_id"], OUTPUT, expected_generation=0, by="console")
     # A Program's windows are on the house clock: UTC, so the test clock's instants read plainly.
     set_house(registry.db, UTC_HOUSE)
     return id_a["player_id"], id_b["player_id"]
@@ -909,7 +909,7 @@ LOBBY_FRAME = "lobby-left"
 
 
 def _add_lobby_frame(registry):
-    registry.create_frame(frame_create(LOBBY_FRAME, surface_id="lobby", x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(LOBBY_FRAME, surface_id="lobby", x_mm=100, y_mm=100), by="console")
 
 
 def _refused_by_guard(registry):

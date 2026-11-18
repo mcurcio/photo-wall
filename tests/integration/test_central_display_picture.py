@@ -97,8 +97,8 @@ def test_picture_documents_and_reports_cross_the_display_line_on_their_own_keys(
     monkeypatch.setattr(NodeLink, "reconcile", counted)
     registry = Registry(database, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
     player = enroll_pi(registry, SERIAL)
-    registry.create_frame(frame_create("kitchen"))
-    registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("kitchen"), by="console")
+    registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0, by="console")
     hub = hub_server(tmp_path, [SERIAL])
     node = node_server(tmp_path, SERIAL, hub)
     display = NodeSession(DISPLAY_COMPONENT, DISPLAY_SLICE,

@@ -36,8 +36,8 @@ def _client(registry) -> TestClient:
 
 def _ready_frame(registry, *, video: bool = True) -> None:
     player, _, _ = enroll(registry, count=1, size=DISPLAY)
-    registry.create_frame(frame_create("hall", video=video))
-    registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("hall", video=video), by="console")
+    registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, "hall")
 
 
@@ -127,8 +127,8 @@ def before_105(registry, profiles: dict[str, dict]) -> None:
 
 
 def test_105_carries_each_profiles_video_onto_its_frame(registry):
-    registry.create_frame(frame_create("still-only", video=True))
-    registry.create_frame(frame_create("moving", video=False))
+    registry.create_frame(frame_create("still-only", video=True), by="console")
+    registry.create_frame(frame_create("moving", video=False), by="console")
     shape = {"width_px": 1920, "height_px": 1080, "diagonal_inches": 24}
     # The profiles as stored before 105; one stored before `video` was written: shows videos.
     before_105(registry, {"still-only": {**shape, "video": False}, "moving": shape})

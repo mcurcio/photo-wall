@@ -150,9 +150,3 @@ def test_122b_puts_the_session_and_the_flag_on_the_display_and_the_entries_in_on
         "sent", "sent-draft", PLAYER, "HDMI-A-1", 5, FRAME, SESSION, "white", "unknown")
     assert (power["created_by"], power["changed_at"], power["changed_by"]) == ("unknown", 700, "unknown")
     assert not tables & {"picture_sessions", "shared_serials", "picture_kept_entries", "picture_sent_entries"}
-
-
-def test_after_122b_central_has_77_tables(registry):
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM pg_tables WHERE schemaname='public' "
-                            "AND tablename NOT LIKE 'procrastinate%%'").fetchone()["n"] == 77

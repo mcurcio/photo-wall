@@ -1490,8 +1490,8 @@ def test_a_demo_frame_has_its_players_screen_and_is_ready(registry):
     from central.infra.display_store import frame_outputs_in
     from scripts.demo_wall import DEMO_OPENING_PX, position_demo_frame
     identity, _, request = enroll(registry, count=1, report=False)
-    registry.create_frame(frame_create("demo-frame-1"))
-    registry.bind("demo-frame-1", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("demo-frame-1"), by="console")
+    registry.bind("demo-frame-1", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     output = next(item for item in registry.inventory().outputs if item.player_id == identity["player_id"])
     position_demo_frame(registry, "demo-frame-1", request.device_id, output.model_dump(mode="json"))
     with registry.db.transaction() as conn:

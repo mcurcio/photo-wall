@@ -62,7 +62,7 @@ class Wall:
         self.player_id, self.epoch = identity["player_id"], identity["authority_epoch"]
         for number, output in enumerate(OUTPUTS):
             frame(registry, f"frame-{number}")
-            registry.bind(f"frame-{number}", self.player_id, output, expected_generation=0)
+            registry.bind(f"frame-{number}", self.player_id, output, expected_generation=0, by="console")
             save_position(registry, f"frame-{number}", PORTRAIT_ON_WIDE)
         portraits = tuple(photo(f"still-{n:02}", taken_at=900 + n, width=2400, height=3600)
                           for n in range(12))

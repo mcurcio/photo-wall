@@ -14,9 +14,9 @@ def bound_portrait_frame(registry, frame_id: str = "left") -> None:
     from support.frames import frame_create
     from test_registry import enroll
 
-    registry.create_frame(frame_create(frame_id))
+    registry.create_frame(frame_create(frame_id), by="console")
     player, _, _ = enroll(registry, count=1, size=(1080, 1920))
-    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
 
 
 @pytest.fixture(autouse=True)

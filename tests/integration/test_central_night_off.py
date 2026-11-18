@@ -92,8 +92,8 @@ def test_the_pi_keeps_night_off_while_central_is_away(database, tmp_path):
     registry = Registry(database, ManualClock(FOUR_PM), lighting=PgFrameLighting(LUT_RECIPE_ID))
     set_house(database, LONDON)
     player = enroll_pi(registry, SERIAL)
-    registry.create_frame(frame_create("bedroom"))
-    registry.bind("bedroom", player, OUTPUT, expected_generation=0)
+    registry.create_frame(frame_create("bedroom"), by="console")
+    registry.bind("bedroom", player, OUTPUT, expected_generation=0, by="console")
     with database.transaction() as conn:   # Night off on every Frame (the seed chose the Frames there were)
         conn.execute("""UPDATE singletons SET document = jsonb_set(document, '{night_off,frames}', '{"kind": "all-frames"}') WHERE name = 'power_policy'""")
 

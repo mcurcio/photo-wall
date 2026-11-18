@@ -70,8 +70,8 @@ class Incident:
         identity, _, _ = enroll(registry, count=2, device_id=DEVICE_ID)
         self.player_id = identity["player_id"]
         if bound:
-            registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
-            registry.bind(FRAME, self.player_id, OUTPUT, expected_generation=0)
+            registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100), by="console")
+            registry.bind(FRAME, self.player_id, OUTPUT, expected_generation=0, by="console")
             save_position(registry, FRAME, PORTRAIT_ON_WIDE)
         # The node sessions are admitted after the Position commit: an admitted node boot turns
         # the commit into a native trial, which this replay does not exercise.

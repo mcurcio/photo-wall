@@ -41,8 +41,8 @@ FRAME = "lobby-left"
 def _bound_frame(registry, frame_id=FRAME, *, x_mm=100, commissioned=True):
     """A placed frame bound to a fresh Player's connected HDMI-A-1; returns the Player id."""
     identity, _key, _request = enroll(registry, count=1)
-    registry.create_frame(frame_create(frame_id, x_mm=x_mm, y_mm=100))
-    registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create(frame_id, x_mm=x_mm, y_mm=100), by="console")
+    registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     if commissioned:
         save_position(registry, frame_id, PORTRAIT_ON_WIDE)
     return identity["player_id"]
@@ -288,7 +288,7 @@ def test_a_stale_401_does_not_log_the_operator_out(page, registry):
 
 def test_a_poll_in_flight_when_a_bind_completes_is_dropped_and_polling_continues(
         page, registry):
-    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100), by="console")
     identity, _key, _request = enroll(registry, count=1)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall", paused_at=registry.clock.utc())
@@ -358,7 +358,7 @@ def _seed_attention(registry):
     fine = _bound_frame(registry, "all-good", x_mm=1300)
     for player_id in (heard, fine):
         report_readiness(registry, player_id)
-    registry.create_frame(frame_create("no-player", x_mm=1700, y_mm=100))
+    registry.create_frame(frame_create("no-player", x_mm=1700, y_mm=100), by="console")
 
 
 def test_the_strip_counts_incidents_and_leaves_to_dos_to_the_wall(page, registry):
@@ -531,7 +531,7 @@ LONG_ID = "reception-" + "north-wall-left-of-the-main-entrance-" * 2 + "panel"
 def _seed_layout(registry):
     _seed_attention(registry)
     enroll(registry, count=1)  # a pending Player on the rail
-    registry.create_frame(frame_create(LONG_ID, x_mm=0, y_mm=0))
+    registry.create_frame(frame_create(LONG_ID, x_mm=0, y_mm=0), by="console")
 
 
 @pytest.mark.parametrize("viewport", [{"width": 1440, "height": 900}, {"width": 390, "height": 844}])

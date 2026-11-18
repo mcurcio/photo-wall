@@ -200,10 +200,10 @@ def test_a_pool_photos_facts_say_which_frames_the_preview_holds(client, registry
                         CheckStep(progress={}, entries=(InPool(asset=shown),), seen_so_far=1))
     player, _, _ = enroll(registry, count=2)
     for frame_id in ("attic", "lounge", "study"):
-        registry.create_frame(frame_create(frame_id))
-    registry.bind("lounge", player["player_id"], "HDMI-A-1", expected_generation=0)
+        registry.create_frame(frame_create(frame_id), by="console")
+    registry.bind("lounge", player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, "lounge")
-    registry.bind("study", player["player_id"], "HDMI-A-2", expected_generation=0)
+    registry.bind("study", player["player_id"], "HDMI-A-2", expected_generation=0, by="console")
     save_position(registry, "study", Calibration(fit=PositionBox(width=600 / 1920, height=800 / 1080)))
 
     unknown = test_client.get(PHOTOS + shown.asset_id, headers=AUTH).json()["frames"]

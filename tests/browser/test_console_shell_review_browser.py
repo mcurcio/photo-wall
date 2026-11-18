@@ -47,7 +47,7 @@ def _heading(page, section):
 
 
 def _frame(registry, frame_id, *, x_mm=100, surface="wall"):
-    registry.create_frame(frame_create(frame_id, surface_id=surface, x_mm=x_mm, y_mm=100))
+    registry.create_frame(frame_create(frame_id, surface_id=surface, x_mm=x_mm, y_mm=100), by="console")
 
 
 # --- Landing (item 9: CI's race).
@@ -302,7 +302,7 @@ def test_show_all_focuses_the_needs_attention_heading(page, registry):
     # An incident (a Player enrolled long ago that never reported), so the strip lists a row.
     identity, _key, _request = enroll(registry, count=1)
     _frame(registry, "dark")
-    registry.bind("dark", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("dark", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     registry.clock.advance(240)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "schedule")

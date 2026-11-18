@@ -15,7 +15,7 @@ from contracts.models import Readiness
 def _player_with_frame(registry, frame_id="frame-0"):
     player, key, _ = enroll(registry, count=1)
     frame(registry, frame_id)
-    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, frame_id, PORTRAIT_ON_WIDE)
     return player, key, frame_id
 
@@ -158,9 +158,9 @@ def test_changed_binding_generation_cannot_reuse_old_epoch_content(registry):
     old_plan = coordinator.delivery(player["player_id"], 1)["plan"]
 
     other, _, _ = enroll(registry, count=1)
-    registry.bind("frame-0", other["player_id"], "HDMI-A-1", expected_generation=1)
+    registry.bind("frame-0", other["player_id"], "HDMI-A-1", expected_generation=1, by="console")
     save_position(registry, "frame-0", PORTRAIT_ON_WIDE)
-    registry.bind("frame-0", player["player_id"], "HDMI-A-1", expected_generation=2)
+    registry.bind("frame-0", player["player_id"], "HDMI-A-1", expected_generation=2, by="console")
     save_position(registry, "frame-0", PORTRAIT_ON_WIDE)
     _publish_catalog(registry, digest="b" * 64, asset="original-b")
     fresh = enroll(registry, key, count=1)[0]

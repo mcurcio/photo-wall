@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import secrets
+import threading
 import uuid
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -168,17 +169,69 @@ def _smallest_free(conn, table: str, word: str) -> str:
     return f"{word} {row['n']}"
 
 
-def _ensure_wall(conn, surface_id: str) -> None:
+def _ensure_wall(conn, surface_id: str, *, now: float, by: Actor) -> None:
     """A wall row for `surface_id`, named "Wall N" when it is new: every surface a Frame is placed
     on is a named wall."""
     if conn.execute("SELECT 1 FROM walls WHERE surface_id=%s", (surface_id,)).fetchone() is None:
-        conn.execute("INSERT INTO walls(surface_id, name) VALUES (%s, %s) ON CONFLICT (surface_id) DO NOTHING",
-                     (surface_id, _smallest_free(conn, "walls", "Wall")))
+        conn.execute("INSERT INTO walls(surface_id, name, created_at, created_by, changed_at, changed_by) "
+                     "VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (surface_id) DO NOTHING",
+                     (surface_id, _smallest_free(conn, "walls", "Wall"), now, by, now, by))
 
 
 def _name_or(exc: UniqueViolation, code: str) -> str:
     """name_taken when `exc` is migration 091's case-insensitive Frame name index, else `code`."""
     return "name_taken" if exc.diag.constraint_name == "frames_name" else code
+
+
+class _EnrolmentNonces:
+    """Outstanding enrolment challenges, in this process's memory (decision 0034): at most one per
+    public key and `LIMIT` in all, each until its expiry. A challenge is one-time and short-lived,
+    so it is never stored: one issued by a Central that restarted since is not held here, and the
+    Player's enrolment is refused as expired; the Player asks for a new challenge."""
+
+    LIMIT = 1024
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._held: dict[str, tuple[str, float]] = {}   # nonce -> (public key, expires_at)
+
+    def issue(self, nonce: str, public_key: str, expires_at: float, now: float) -> bool:
+        """Hold `nonce` for `public_key`, replacing the key's earlier challenge and dropping expired
+        ones; False when `LIMIT` challenges are outstanding."""
+        with self._lock:
+            self._held = {held: (key, expires) for held, (key, expires) in self._held.items()
+                          if expires > now and key != public_key}
+            if len(self._held) >= self.LIMIT:
+                return False
+            self._held[nonce] = (public_key, expires_at)
+            return True
+
+    def take(self, nonce: str, public_key: str, now: float) -> bool:
+        """Use `nonce` once: True when it is held for `public_key` and not expired."""
+        with self._lock:
+            held = self._held.get(nonce)
+            if held is None or held[0] != public_key or held[1] <= now:
+                return False
+            del self._held[nonce]
+            return True
+
+
+def _control_document(epoch: int, status: str) -> dict:
+    """A new control session (`players.control_session`) for enrolment `epoch`: nothing offered,
+    issued or acknowledged yet."""
+    return {"authority_epoch": epoch, "status": status, "capabilities": [], "offered_schemas": None,
+            "offered_capabilities": None, "issued_sequence": 0, "pending_id": None, "pending_digest": None,
+            "pending_expires": None, "applied_sequence": 0, "applied_at": None, "applied_delivery_id": None,
+            "applied_digest": None, "applied_ack_nonce": None, "last_delivery_id": None,
+            "last_result_sequence": None, "last_result_digest": None, "last_result": None,
+            "last_result_at": None}
+
+
+# The control session's facts `control_fact` reads (an operator's provenance read).
+_CONTROL_FACTS = ("authority_epoch", "status", "issued_sequence", "pending_id", "pending_digest",
+                  "applied_sequence", "applied_at", "applied_delivery_id", "applied_digest",
+                  "last_delivery_id", "last_result_sequence", "last_result_digest", "last_result",
+                  "last_result_at")
 
 
 class Registry:
@@ -192,6 +245,7 @@ class Registry:
         self.db, self.clock = db, clock
         self.lighting = lighting
         self.installation: InstallationSessions = installation or PostgresInstallationRepository(clock)
+        self._nonces = _EnrolmentNonces()
 
     @contextmanager
     def _equipment_write(self):
@@ -212,15 +266,9 @@ class Registry:
         except ValueError as exc:
             raise RegistryError("invalid_key", 422) from exc
         now, nonce = self.clock.utc(), secrets.token_hex(32)
-        with self.db.transaction() as conn:
-            conn.execute("SELECT pg_advisory_xact_lock(734118322)")
-            conn.execute("DELETE FROM enrollment_nonces WHERE expires_at <= %s", (now,))
-            # A bounded outstanding challenge per key avoids unbounded growth on ordinary retry.
-            conn.execute("DELETE FROM enrollment_nonces WHERE public_key=%s", (public_key,))
-            if conn.execute("SELECT count(*) AS n FROM enrollment_nonces").fetchone()["n"] >= 1024:
-                raise RegistryError("enrollment_busy", 429)
-            conn.execute("INSERT INTO enrollment_nonces VALUES(%s,%s,%s)",
-                         (nonce, public_key, now + 60))
+        # A bounded outstanding challenge per key avoids unbounded growth on ordinary retry.
+        if not self._nonces.issue(nonce, public_key, now + 60, now):
+            raise RegistryError("enrollment_busy", 429)
         return {"nonce": nonce, "expires_at": now + 60}
 
     def enroll(self, request: Enrollment) -> dict:
@@ -240,11 +288,7 @@ class Registry:
             from central.coordination import COORDINATION_LOCK
 
             conn.execute("SELECT pg_advisory_xact_lock(%s)", (COORDINATION_LOCK,))
-            conn.execute("SELECT pg_advisory_xact_lock(734118322)")
-            challenge = conn.execute("DELETE FROM enrollment_nonces WHERE nonce=%s "
-                                     "AND public_key=%s AND expires_at>%s RETURNING nonce",
-                                     (request.nonce, request.public_key, now)).fetchone()
-            if not challenge:
+            if not self._nonces.take(request.nonce, request.public_key, now):
                 raise RegistryError("expired_or_used_challenge", 403)
             # Serial enrollment has no OS command authority. It must still respect permanent
             # device retirement: it acts under the device fence that retirement changes under.
@@ -258,19 +302,20 @@ class Registry:
                 raise RegistryError("retired_player", 403)
             if old:
                 conn.execute("UPDATE players SET public_key=%s,token_hash=%s,last_seen=%s,"
-                             "authority_epoch=authority_epoch+1 WHERE id=%s",
-                             (request.public_key, token_hash, now, player_id))
+                             "authority_epoch=authority_epoch+1,changed_at=%s,changed_by='node' WHERE id=%s",
+                             (request.public_key, token_hash, now, now, player_id))
             else:
-                conn.execute("INSERT INTO players(id,public_key,token_hash,registered_at,last_seen,device_id) "
-                             "VALUES(%s,%s,%s,%s,%s,%s)",
+                conn.execute("INSERT INTO players(id,public_key,token_hash,registered_at,last_seen,device_id,"
+                             "created_at,created_by,changed_at,changed_by) "
+                             "VALUES(%s,%s,%s,%s,%s,%s,%s,'node',%s,'node')",
                              (player_id, request.public_key, token_hash, now, now,
-                              request.device_id))
+                              request.device_id, now, now))
             observe_outputs_in(conn, player_id, {output.output_id: output.model_dump()
                                                  for output in request.outputs}, now)
             epoch = conn.execute("SELECT authority_epoch FROM players WHERE id=%s",
                                  (player_id,)).fetchone()["authority_epoch"]
             # Negotiation belongs to this enrollment epoch, never to the serial or package tag.
-            self._reset_control(conn, player_id, epoch, "open")
+            self._reset_control(conn, player_id, epoch, "open", now)
             # Every Player enrolls unbound (pending) by serial alone; its boot is recorded.
             conn.execute("UPDATE players SET health=health || %s WHERE id=%s",
                          (Jsonb({"boot_id": request.boot_id}), player_id))
@@ -308,24 +353,29 @@ class Registry:
             raise RegistryError("stale_authority", 403)
 
     @staticmethod
-    def _reset_control(conn, player_id: str, epoch: int, status: str) -> None:
-        conn.execute(
-            "INSERT INTO player_control_sessions(player_id,authority_epoch,status) "
-            "VALUES(%s,%s,%s) ON CONFLICT(player_id) DO UPDATE SET "
-            "authority_epoch=EXCLUDED.authority_epoch,status=EXCLUDED.status,"
-            "capabilities='[]',offered_schemas=NULL,offered_capabilities=NULL,"
-            "issued_sequence=0,pending_id=NULL,pending_digest=NULL,pending_expires=NULL,"
-            "applied_sequence=0,applied_at=NULL,applied_delivery_id=NULL,"
-            "applied_digest=NULL,applied_ack_nonce=NULL,last_delivery_id=NULL,last_result_sequence=NULL,"
-            "last_result_digest=NULL,last_result=NULL,last_result_at=NULL",
-            (player_id, epoch, status),
-        )
+    def _control_session_in(conn, player_id: str) -> dict | None:
+        """The Player's control session (`players.control_session`); None before its first
+        enrolment opened one."""
+        row = conn.execute("SELECT control_session FROM players WHERE id=%s", (player_id,)).fetchone()
+        return None if row is None else row["control_session"]
+
+    @staticmethod
+    def _write_control(conn, player_id: str, changes: Mapping[str, Any], now: float) -> None:
+        """Merge `changes` into the Player's control session, under the Player's row lock (the
+        Player's own request: `node`)."""
+        conn.execute("UPDATE players SET control_session=control_session || %s, changed_at=%s, "
+                     "changed_by='node' WHERE id=%s", (Jsonb(dict(changes)), now, player_id))
+
+    @staticmethod
+    def _reset_control(conn, player_id: str, epoch: int, status: str, now: float) -> None:
+        conn.execute("UPDATE players SET control_session=%s, changed_at=%s, changed_by='node' WHERE id=%s",
+                     (Jsonb(_control_document(epoch, status)), now, player_id))
 
     def control_hello(self, player_id: str, request: ControlHello) -> ControlSelection:
         with self.db.transaction() as conn:
             self._control_player(conn, player_id, request.authority_epoch)
-            row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
-                               (player_id,)).fetchone()
+            now = self.clock.utc()
+            row = self._control_session_in(conn, player_id)
             current = row is not None and row["authority_epoch"] == request.authority_epoch
             if current and row["status"] == "negotiated":
                 if (row["offered_schemas"] != list(request.schemas)
@@ -339,15 +389,11 @@ class Registry:
                 raise RegistryError("control_schema_unsupported")
             if not current:
                 # Enrollment opens each epoch's row; the epoch is current (checked above).
-                self._reset_control(conn, player_id, request.authority_epoch, "open")
-            conn.execute(
-                "UPDATE player_control_sessions SET status='negotiated',"
-                "capabilities=%s,offered_schemas=%s,offered_capabilities=%s "
-                "WHERE player_id=%s",
-                (Jsonb(list(selection.capabilities)),
-                 Jsonb(list(request.schemas)),
-                 Jsonb(list(request.capabilities)), player_id),
-            )
+                self._reset_control(conn, player_id, request.authority_epoch, "open", now)
+            self._write_control(conn, player_id, {
+                "status": "negotiated", "capabilities": list(selection.capabilities),
+                "offered_schemas": list(request.schemas),
+                "offered_capabilities": list(request.capabilities)}, now)
             return selection
 
     def control_selection(self, player_id: str, epoch: int) -> ControlSelection:
@@ -359,8 +405,7 @@ class Registry:
         transaction when issuing state. State is served only after the hello. A read: no row
         lock."""
         self._control_player(conn, player_id, epoch, lock=False)
-        row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
-                           (player_id,)).fetchone()
+        row = self._control_session_in(conn, player_id)
         if not row or row["authority_epoch"] != epoch or row["status"] != "negotiated":
             raise RegistryError("control_negotiation_required")
         return ControlSelection(authority_epoch=epoch, schema=SCHEMA,
@@ -380,8 +425,7 @@ class Registry:
         for lock in (False, True):
             self._control_player(conn, player_id, epoch, lock=lock)
             now = self.clock.utc()      # sampled after any wait for the row lock
-            row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
-                               (player_id,)).fetchone()
+            row = self._control_session_in(conn, player_id)
             if not row or row["authority_epoch"] != epoch or row["status"] != "negotiated":
                 raise RegistryError("control_protocol_mismatch")
             if (row["pending_id"] and row["pending_digest"] == digest
@@ -394,15 +438,11 @@ class Registry:
                 return ControlDelivery(delivery_id=row["applied_delivery_id"],
                                        delivery_sequence=row["applied_sequence"]).model_dump()
         delivery_id = secrets.token_hex(16)
-        issued = conn.execute(
-            "UPDATE player_control_sessions SET issued_sequence=issued_sequence+1,"
-            "pending_id=%s,pending_digest=%s,pending_expires=%s,"
-            "applied_ack_nonce=NULL WHERE player_id=%s "
-            "RETURNING issued_sequence",
-            (delivery_id, digest, now + 60, player_id),
-        ).fetchone()
-        return ControlDelivery(delivery_id=delivery_id,
-                               delivery_sequence=issued["issued_sequence"]).model_dump()
+        issued = row["issued_sequence"] + 1
+        self._write_control(conn, player_id, {
+            "issued_sequence": issued, "pending_id": delivery_id, "pending_digest": digest,
+            "pending_expires": now + 60, "applied_ack_nonce": None}, now)
+        return ControlDelivery(delivery_id=delivery_id, delivery_sequence=issued).model_dump()
 
     @staticmethod
     def _current_applied_receipt(row: dict, report: ControlAck) -> ControlAppliedReceipt | None:
@@ -429,8 +469,7 @@ class Registry:
                 return replay
             self._control_player(conn, player_id, report.authority_epoch)
             now = self.clock.utc()
-            row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
-                               (player_id,)).fetchone()
+            row = self._control_session_in(conn, player_id)
             if (not row or row["authority_epoch"] != report.authority_epoch
                     or row["status"] != "negotiated"):
                 return ControlAckResponse(accepted=False)
@@ -440,10 +479,8 @@ class Registry:
                     # The Player re-applied the re-sent delivery and it did not take: that is
                     # the latest result, so the receipt is no longer current and the next
                     # poll issues a fresh delivery. A partial application never counts.
-                    conn.execute(
-                        "UPDATE player_control_sessions SET last_result=%s,last_result_at=%s,"
-                        "applied_ack_nonce=NULL WHERE player_id=%s",
-                        (report.result, now, player_id))
+                    self._write_control(conn, player_id, {
+                        "last_result": report.result, "last_result_at": now, "applied_ack_nonce": None}, now)
                     return ControlAckResponse(accepted=True)
                 receipt = self._current_applied_receipt(row, report)
                 return ControlAckResponse(accepted=receipt is not None, receipt=receipt)
@@ -452,23 +489,14 @@ class Registry:
             # The nonce is generated only after the ACK passes the current-epoch,
             # pending-delivery and expiry checks. It is committed with the result.
             nonce = secrets.token_hex(32) if report.result == "applied" else None
-            conn.execute(
-                "UPDATE player_control_sessions SET pending_id=NULL,pending_digest=NULL,"
-                "pending_expires=NULL,last_delivery_id=%s,last_result_sequence=issued_sequence,"
-                "last_result_digest=pending_digest,last_result=%s,last_result_at=%s,"
-                "applied_ack_nonce=%s,"
-                "applied_sequence=CASE WHEN %s='applied' THEN issued_sequence "
-                "ELSE applied_sequence END,"
-                "applied_at=CASE WHEN %s='applied' THEN %s ELSE applied_at END,"
-                "applied_delivery_id=CASE WHEN %s='applied' THEN pending_id "
-                "ELSE applied_delivery_id END,"
-                "applied_digest=CASE WHEN %s='applied' THEN pending_digest "
-                "ELSE applied_digest END "
-                "WHERE player_id=%s",
-                (report.delivery_id, report.result, now, nonce,
-                 report.result, report.result, now,
-                 report.result, report.result, player_id),
-            )
+            changes = {"pending_id": None, "pending_digest": None, "pending_expires": None,
+                       "last_delivery_id": report.delivery_id, "last_result_sequence": row["issued_sequence"],
+                       "last_result_digest": row["pending_digest"], "last_result": report.result,
+                       "last_result_at": now, "applied_ack_nonce": nonce}
+            if report.result == "applied":
+                changes |= {"applied_sequence": row["issued_sequence"], "applied_at": now,
+                            "applied_delivery_id": row["pending_id"], "applied_digest": row["pending_digest"]}
+            self._write_control(conn, player_id, changes, now)
             receipt = None
             if nonce is not None:
                 receipt = ControlAppliedReceipt(
@@ -487,8 +515,7 @@ class Registry:
         replayed; None when it records a result (the pending delivery, or a re-applied one that
         did not take), which `control_ack_response` writes under the row lock."""
         self._control_player(conn, player_id, report.authority_epoch, lock=False)
-        row = conn.execute("SELECT * FROM player_control_sessions WHERE player_id=%s",
-                           (player_id,)).fetchone()
+        row = self._control_session_in(conn, player_id)
         if (not row or row["authority_epoch"] != report.authority_epoch
                 or row["status"] != "negotiated"):
             return ControlAckResponse(accepted=False)
@@ -502,17 +529,12 @@ class Registry:
     def control_fact(self, player_id: str) -> dict | None:
         """Read provenance-labelled app-control history without readiness inference."""
         with self.db.transaction() as conn:
-            row = conn.execute(
-                "SELECT c.authority_epoch,c.status,c.issued_sequence,"
-                "c.pending_id,c.pending_digest,c.applied_sequence,c.applied_at,"
-                "c.applied_delivery_id,c.applied_digest,c.last_delivery_id,"
-                "c.last_result_sequence,c.last_result_digest,c.last_result,c.last_result_at "
-                "FROM player_control_sessions c JOIN players p ON p.id=c.player_id "
-                "AND p.authority_epoch=c.authority_epoch WHERE c.player_id=%s "
-                "AND p.retired_at IS NULL",
-                (player_id,),
-            ).fetchone()
-            return dict(row) if row else None
+            row = conn.execute("SELECT authority_epoch, control_session FROM players WHERE id=%s "
+                               "AND retired_at IS NULL", (player_id,)).fetchone()
+        session = None if row is None else row["control_session"]
+        if session is None or session["authority_epoch"] != row["authority_epoch"]:
+            return None
+        return {fact: session[fact] for fact in _CONTROL_FACTS}
 
     def identify_output(self, player_id: str, output_id: str) -> dict:
         """Ask one active, connected, unbound Output to identify itself briefly."""
@@ -521,25 +543,21 @@ class Registry:
         expires_at = now + self.IDENTIFY_OUTPUT_TTL_SECONDS
         with self._equipment_write() as conn:
             player = conn.execute(
-                "SELECT authority_epoch FROM players WHERE id=%s AND retired_at IS NULL FOR UPDATE",
-                (player_id,),
+                "SELECT authority_epoch, control_session FROM players WHERE id=%s AND retired_at IS NULL "
+                "FOR UPDATE", (player_id,),
             ).fetchone()
             if not player:
                 raise RegistryError("unknown_or_retired_player", 404)
-            negotiated = conn.execute(
-                "SELECT 1 FROM player_control_sessions WHERE player_id=%s "
-                "AND authority_epoch=%s AND status='negotiated' "
-                "AND capabilities ? 'identify_output'",
-                (player_id, player["authority_epoch"]),
-            ).fetchone()
-            if not negotiated:
+            session = player["control_session"]
+            if (session is None or session["authority_epoch"] != player["authority_epoch"]
+                    or session["status"] != "negotiated" or "identify_output" not in session["capabilities"]):
                 raise RegistryError("identify_unsupported")
             observation = output_observation_in(conn, player_id, output_id, lock=True)
             if observation is None:
                 raise RegistryError("unknown_output", 404)
             if not observation.get("connected", False):
                 raise RegistryError("output_disconnected")
-            if conn.execute("SELECT 1 FROM bindings WHERE player_id=%s AND output_id=%s",
+            if conn.execute("SELECT 1 FROM frames WHERE player_id=%s AND output_id=%s",
                             (player_id, output_id)).fetchone():
                 raise RegistryError("output_bound")
             conn.execute(
@@ -553,39 +571,42 @@ class Registry:
         return {"request_id": str(request_id), "output_id": output_id,
                 "expires_at": expires_at}
 
-    def create_frame(self, frame: FrameCreate) -> dict:
+    def create_frame(self, frame: FrameCreate, *, by: Actor) -> dict:
         """A new Frame at the default Position (`Calibration()`: the whole screen), showing videos as
         `frame.video` says, with the lighting a new Frame starts with (a new Frame is bound to no
         port yet, so no Display is seen: UPGRADE_DISPLAY_LIGHT), and its KEPT_CREATED Position
         entry, in one transaction."""
         try:
+            now = self.clock.utc()
             with self.db.transaction() as conn:
                 name = frame.name if frame.name is not None else _smallest_free(conn, "frames", "Frame")
                 calibration = Calibration()
                 lighting = self.lighting.new_frame_within(PgTransaction(conn), UPGRADE_DISPLAY_LIGHT)
-                conn.execute("INSERT INTO frames(id,name,surface_id,x_mm,y_mm,video,calibration,lighting) "
-                             "VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                conn.execute("INSERT INTO frames(id,name,surface_id,x_mm,y_mm,video,calibration,lighting,"
+                             "created_at,created_by,changed_at,changed_by) "
+                             "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
                              (frame.id, name, frame.surface_id, frame.x_mm, frame.y_mm, frame.video,
-                              Jsonb(calibration.model_dump(mode="json")), Jsonb(lighting.model_dump(mode="json"))))
+                              Jsonb(calibration.model_dump(mode="json")), Jsonb(lighting.model_dump(mode="json")),
+                              now, by, now, by))
                 record_created_in(conn, frame.id, created_record(position_values(calibration, lighting)))
-                _ensure_wall(conn, frame.surface_id)
+                _ensure_wall(conn, frame.surface_id, now=now, by=by)
         except UniqueViolation as exc:
             raise RegistryError(_name_or(exc, "frame_exists")) from exc
         return {**frame.model_dump(), "name": name}
 
-    def rename_frame(self, frame_id: str, name: str) -> dict:
+    def rename_frame(self, frame_id: str, name: str, *, by: Actor) -> dict:
         """Name a Frame (#94). RegistryError unknown_frame 404, name_taken 409 (ignoring case)."""
         try:
             with self.db.transaction() as conn:
-                row = conn.execute("UPDATE frames SET name=%s WHERE id=%s RETURNING id",
-                                   (name, frame_id)).fetchone()
+                row = conn.execute("UPDATE frames SET name=%s, changed_at=%s, changed_by=%s WHERE id=%s RETURNING id",
+                                   (name, self.clock.utc(), by, frame_id)).fetchone()
                 if row is None:
                     raise RegistryError("unknown_frame", 404)
         except UniqueViolation as exc:
             raise RegistryError(_name_or(exc, "frame_exists")) from exc
         return {"frame_id": frame_id, "name": name}
 
-    def set_frame_video(self, frame_id: str, video: bool) -> dict:
+    def set_frame_video(self, frame_id: str, video: bool, *, by: Actor) -> dict:
         """Whether the Frame shows videos (frames.video): {"frame_id", "video", "changed"}.
         RegistryError unknown_frame 404. Last write wins: no generation, configuration revision or
         Position check (it changes planning, not the picture), so a ready Frame stays ready. The Planner reads it at its next plan, as
@@ -596,20 +617,24 @@ class Registry:
                 raise RegistryError("unknown_frame", 404)
             if row["video"] == video:
                 return {"frame_id": frame_id, "video": video, "changed": False}
-            conn.execute("UPDATE frames SET video=%s WHERE id=%s", (video, frame_id))
+            conn.execute("UPDATE frames SET video=%s, changed_at=%s, changed_by=%s WHERE id=%s",
+                         (video, self.clock.utc(), by, frame_id))
         return {"frame_id": frame_id, "video": video, "changed": True}
 
-    def name_wall(self, surface_id: str, naming: WallNaming) -> WallInventory:
+    def name_wall(self, surface_id: str, naming: WallNaming, *, by: Actor) -> WallInventory:
         """Name a wall and label its room (#92). RegistryError unknown_wall 404."""
         with self.db.transaction() as conn:
-            row = conn.execute("UPDATE walls SET name=%s, room=%s WHERE surface_id=%s "
+            row = conn.execute("UPDATE walls SET name=%s, room=%s, changed_at=%s, changed_by=%s WHERE surface_id=%s "
                                "RETURNING surface_id, name, room",
-                               (naming.name, naming.room, surface_id)).fetchone()
+                               (naming.name, naming.room, self.clock.utc(), by, surface_id)).fetchone()
             if row is None:
                 raise RegistryError("unknown_wall", 404)
         return WallInventory.model_validate(row)
 
-    def bind(self, frame_id: str, player_id: str, output_id: str, *, expected_generation: int) -> dict:
+    def bind(self, frame_id: str, player_id: str, output_id: str, *, expected_generation: int,
+             by: Actor) -> dict:
+        """Bind the Frame to the Player's Output (`frames.player_id`, `output_id`; one Frame per
+        Output: output_already_bound 409)."""
         try:
             with self._equipment_write() as conn:
                 # Common lock ordering for bind and retire avoids transferring retired equipment.
@@ -623,46 +648,41 @@ class Registry:
                     raise RegistryError("unknown_frame", 404)
                 if output_observation_in(conn, player_id, output_id) is None:
                     raise RegistryError("unknown_output", 404)
-                existing = conn.execute("SELECT * FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone()
-                if existing and (existing["player_id"], existing["output_id"]) == (player_id, output_id):
+                if (frame["player_id"], frame["output_id"]) == (player_id, output_id):
                     return {"generation": frame["generation"], "changed": False}
                 if frame["generation"] != expected_generation:
                     raise RegistryError("binding_generation_conflict")
-                conn.execute("DELETE FROM bindings WHERE frame_id=%s", (frame_id,))
-                conn.execute("INSERT INTO bindings VALUES(%s,%s,%s)", (frame_id, player_id, output_id))
+                row = conn.execute("UPDATE frames SET player_id=%s,output_id=%s,generation=generation+1,"
+                                   "configuration_revision=configuration_revision+1,changed_at=%s,changed_by=%s "
+                                   "WHERE id=%s RETURNING generation",
+                                   (player_id, output_id, self.clock.utc(), by, frame_id)).fetchone()
                 # The Output now carries this Frame (its timetable and turn), and the one it left
                 # carries none: wake both Nodes' document sources, on commit.
-                _wake_nodes_of(conn, player_id, None if existing is None else existing["player_id"])
+                _wake_nodes_of(conn, player_id, frame["player_id"])
                 resolve_output(conn, player_id, output_id)   # the display there, under this binding
-                row = conn.execute("UPDATE frames SET generation=generation+1,"
-                                   "configuration_revision=configuration_revision+1 "
-                                   "WHERE id=%s RETURNING generation",
-                                   (frame_id,)).fetchone()
                 return {**row, "changed": True}
         except UniqueViolation as exc:
             raise RegistryError("output_already_bound") from exc
 
-    def unbind(self, frame_id: str, *, expected_generation: int) -> dict:
+    def unbind(self, frame_id: str, *, expected_generation: int, by: Actor) -> dict:
         """Release a Frame's active binding, reversibly: unlike retire, the player record
         (and its ability to be re-bound, to this or another Frame) is untouched."""
         with self._equipment_write() as conn:
             frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
             if not frame:
                 raise RegistryError("unknown_frame", 404)
-            existing = conn.execute("SELECT * FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone()
-            if not existing:
+            if frame["player_id"] is None:
                 raise RegistryError("not_bound", 404)
             if frame["generation"] != expected_generation:
                 raise RegistryError("binding_generation_conflict")
-            conn.execute("DELETE FROM bindings WHERE frame_id=%s", (frame_id,))
-            _wake_nodes_of(conn, existing["player_id"])   # its Output now carries no Frame (turn 0)
-            row = conn.execute("UPDATE frames SET generation=generation+1,"
-                               "configuration_revision=configuration_revision+1 "
+            _wake_nodes_of(conn, frame["player_id"])   # its Output now carries no Frame (turn 0)
+            row = conn.execute("UPDATE frames SET player_id=NULL,output_id=NULL,generation=generation+1,"
+                               "configuration_revision=configuration_revision+1,changed_at=%s,changed_by=%s "
                                "WHERE id=%s RETURNING generation",
-                               (frame_id,)).fetchone()
+                               (self.clock.utc(), by, frame_id)).fetchone()
             return {**row, "changed": True}
 
-    def place_frame(self, frame_id: str, placement: FramePlacement) -> dict:
+    def place_frame(self, frame_id: str, placement: FramePlacement, *, by: Actor) -> dict:
         """Move the Frame on the wall (its top-left): last-write-wins, no token (the one deliberate
         exception to R3, design §9a). FOR UPDATE makes the read-merge-write atomic; the row is
         still LWW. Bumps NO generation, NO configuration_revision; never touches calibration.
@@ -674,12 +694,13 @@ class Registry:
                 raise RegistryError("unknown_frame", 404)
             merged = {field: value if value is not None else frame[field]
                       for field, value in placement.model_dump().items()}
-            conn.execute("UPDATE frames SET surface_id=%s,x_mm=%s,y_mm=%s WHERE id=%s",
-                         (merged["surface_id"], merged["x_mm"], merged["y_mm"], frame_id))
-            _ensure_wall(conn, merged["surface_id"])
+            now = self.clock.utc()
+            conn.execute("UPDATE frames SET surface_id=%s,x_mm=%s,y_mm=%s,changed_at=%s,changed_by=%s WHERE id=%s",
+                         (merged["surface_id"], merged["x_mm"], merged["y_mm"], now, by, frame_id))
+            _ensure_wall(conn, merged["surface_id"], now=now, by=by)
             return {"id": frame_id, **merged}
 
-    def turn_frame(self, frame_id: str, turn: DisplayTurn, *, expected_generation: int) -> dict:
+    def turn_frame(self, frame_id: str, turn: DisplayTurn, *, expected_generation: int, by: Actor) -> dict:
         """Set how the Frame's screen hangs (frames.turn), in one equipment write: RegistryError
         unknown_frame 404, then binding_generation_conflict 409 when `expected_generation` is not the
         Frame's (the token before idempotency); the same turn answers
@@ -691,7 +712,7 @@ class Registry:
         document carries the turn without waiting for a deadline; answers {..., "changed": True}.
         Never touches the Position, the binding or the lighting."""
         with self._equipment_write() as conn:
-            frame = conn.execute("SELECT generation, turn FROM frames WHERE id=%s FOR UPDATE",
+            frame = conn.execute("SELECT generation, turn, player_id FROM frames WHERE id=%s FOR UPDATE",
                                  (frame_id,)).fetchone()
             if not frame:
                 raise RegistryError("unknown_frame", 404)
@@ -700,10 +721,8 @@ class Registry:
             if frame["turn"] == turn:
                 return {"frame_id": frame_id, "turn": turn, "generation": frame["generation"],
                         "changed": False}
-            row = {"generation": write_turn_in(conn, frame_id, turn)}
-            bound = conn.execute("SELECT player_id FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone()
-            if bound is not None:
-                _wake_nodes_of(conn, bound["player_id"])
+            row = {"generation": write_turn_in(conn, frame_id, turn, now=self.clock.utc(), by=by)}
+            _wake_nodes_of(conn, frame["player_id"])
             return {"frame_id": frame_id, "turn": turn, **row, "changed": True}
 
     def delete_frame(self, frame_id: str, *, conn, references: Mapping[str, tuple[str, ...]],
@@ -728,7 +747,7 @@ class Registry:
         frame = conn.execute("SELECT * FROM frames WHERE id=%s FOR UPDATE", (frame_id,)).fetchone()
         if not frame:
             raise RegistryError("unknown_frame", 404)
-        if conn.execute("SELECT 1 FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone():
+        if frame["player_id"] is not None:
             raise RegistryError("frame_bound")
         if references.get("scene_ids") or references.get("queued_activation_ids"):
             raise RegistryError("frame_referenced", 409, details={
@@ -744,7 +763,7 @@ class Registry:
         """Retire a Player permanently. Refuses (409 player_bound), for every caller,
         while any of its Outputs is bound: replacement is unbind, then retire.
 
-        The bindings check runs AFTER the Player row lock, which bind takes first
+        The binding check runs AFTER the Player row lock, which bind takes first
         too, so a bind and a retire serialize. Under READ COMMITTED (the default;
         central/db.py sets no isolation) the check is a new statement after any lock
         wait and sees a bind that committed during it. Retiring twice is a no-op."""
@@ -759,14 +778,14 @@ class Registry:
             player = conn.execute("SELECT * FROM players WHERE id=%s FOR UPDATE", (player_id,)).fetchone()
             if player["retired_at"] is not None:
                 return
-            if conn.execute("SELECT 1 FROM bindings WHERE player_id=%s LIMIT 1",
+            if conn.execute("SELECT 1 FROM frames WHERE player_id=%s LIMIT 1",
                             (player_id,)).fetchone():
                 raise RegistryError("player_bound")
             # A Player that never booted from a node offer (a Compose or demo Player) has no
             # `devices` row; retirement writes its canonical tombstone.
             retire_in(fenced, now, by=by)
-            conn.execute("UPDATE players SET retired_at=%s,authority_epoch=authority_epoch+1 "
-                         "WHERE id=%s", (now, player_id))
+            conn.execute("UPDATE players SET retired_at=%s,authority_epoch=authority_epoch+1,"
+                         "changed_at=%s,changed_by=%s WHERE id=%s", (now, now, by, player_id))
 
     @staticmethod
     def calibration_mode_in(conn, frame_id: str) -> str:
@@ -775,9 +794,9 @@ class Registry:
         that never booted from a node offer (a Compose or demo Player) has no calibration
         protocol. A revoked admission does not withdraw the capability."""
         row = conn.execute(
-            "SELECT EXISTS(SELECT 1 FROM bindings b JOIN players p ON p.id=b.player_id "
+            "SELECT EXISTS(SELECT 1 FROM frames f JOIN players p ON p.id=f.player_id "
             "JOIN node_boot_admissions a ON a.device_id=p.device_id "
-            "WHERE b.frame_id=%s) AS native",
+            "WHERE f.id=%s) AS native",
             (frame_id,),
         ).fetchone()
         return "native_trial" if row["native"] else "not_admitted"
@@ -787,8 +806,8 @@ class Registry:
         """central_errors.ports FrameOutputs: the Frame's bound, not retired Player's device and
         Output; None when unbound or the Player has no device."""
         row = pg_connection(tx).execute(
-            "SELECT b.output_id, p.device_id FROM bindings b JOIN players p ON p.id = b.player_id "
-            "AND p.retired_at IS NULL WHERE b.frame_id=%s", (frame_id,)).fetchone()
+            "SELECT f.output_id, p.device_id FROM frames f JOIN players p ON p.id = f.player_id "
+            "AND p.retired_at IS NULL WHERE f.id=%s", (frame_id,)).fetchone()
         if row is None or row["device_id"] is None:
             return None
         return BoundOutput(device_id=row["device_id"], output_id=row["output_id"])
@@ -803,7 +822,7 @@ class Registry:
             authority_epoch: int, output_id: str, binding_generation: int,
             config_revision: int, calibration_revision: int,
             calibration: Calibration, lighting: FrameLighting, session_id: uuid.UUID | None,
-            restored_from: uuid.UUID | None) -> Calibration:
+            restored_from: uuid.UUID | None, by: Actor) -> Calibration:
         """Registry-owned Save CAS inside the Trial owner's existing transaction.
 
         Caller holds Coordination→Runtime, then the device fence and session locks. This method
@@ -819,9 +838,8 @@ class Registry:
         """
         if not holds_runtime_locks_in(conn):
             raise RegistryError("calibration_runtime_locks_required")
-        row = conn.execute("SELECT f.*,p.authority_epoch,p.retired_at,b.player_id,b.output_id "
-                           "FROM frames f JOIN bindings b ON b.frame_id=f.id "
-                           "JOIN players p ON p.id=b.player_id "
+        row = conn.execute("SELECT f.*,p.authority_epoch,p.retired_at "
+                           "FROM frames f JOIN players p ON p.id=f.player_id "
                            "WHERE f.id=%s FOR UPDATE OF f",
                            (frame_id,)).fetchone()
         if row is None or row["retired_at"] is not None or (
@@ -834,9 +852,11 @@ class Registry:
             raise TrialRefused(TrialRefusal.CALIBRATION_REVISION_CONFLICT)
         committed = Calibration.model_validate(calibration.model_dump()).model_copy(
             update={"revision": current.revision + 1})
+        now = self.clock.utc()
         write_position_in(conn, frame_id, saved_record(position_values(committed, lighting), session_id=session_id,
-                                                       restored_from=restored_from), calibration=committed)
-        commit_position(conn, frame_id)
+                                                       restored_from=restored_from), calibration=committed,
+                          now=now, by=by)
+        commit_position(conn, frame_id, now=now, by=by)
         _wake_nodes_of(conn, player_id)
         return committed
 
@@ -868,8 +888,8 @@ class Registry:
         outputs = observed_outputs_in(conn)
         frames = conn.execute("SELECT f.id,f.name,f.surface_id,f.x_mm,f.y_mm,f.video,"  # noqa: S608
                               "f.calibration,f.lighting,f.turn,f.configuration_revision,"
-                              f"b.player_id,b.output_id,{POSITION_COLUMNS},{SCREEN_COLUMNS} FROM frames f "
-                              f"LEFT JOIN bindings b ON b.frame_id=f.id {SCREEN_JOIN} ORDER BY f.id").fetchall()
+                              f"f.player_id,f.output_id,{POSITION_COLUMNS},{SCREEN_COLUMNS} FROM frames f "
+                              f"{SCREEN_JOIN} ORDER BY f.id").fetchall()
         bound_player_ids = {frame["player_id"] for frame in frames if frame["player_id"] is not None}
         health = health_reports_in(conn)
         return InstallationInventory(

@@ -10,7 +10,6 @@ import threading
 from uuid import uuid4
 
 import pytest
-from psycopg.types.json import Jsonb
 from test_fleet_attempts import DEVICE_ID, SERIAL
 from test_node_boot import boot_service, claim_for
 from test_node_runtime_reconciliation import rig
@@ -73,7 +72,7 @@ def _reboot(sessions):
 def test_each_table_is_trimmed_in_whole_batches_and_keeps_what_central_reads(registry):
     """Old records go in whole batches of `batch_rows`, each table's rule in its own
     transactions, while another transaction holds the Coordination and Runtime locks; a table
-    one short of a batch is left as it is; unfinished work, work an Output loss names and every
+    one short of a batch is left as it is; unfinished work and every
     event's evidence stay at any age, and a handoff and a withdrawal go with their exchange.
     Mutation probes: drop the unfinished-work guard (the unfinished work goes in the first
     batch); drop the whole-batch count (the second pass deletes the three left over). The
@@ -94,12 +93,6 @@ def test_each_table_is_trimmed_in_whole_batches_and_keeps_what_central_reads(reg
             "SELECT received_at FROM node_reconciliation_work"))  # the rig's are all young
         # The oldest first: what a dropped guard would put in the first batch.
         unfinished = _evidence(conn, host_producer, "snapshot", OLD - 30, completed=False)
-        named = _evidence(conn, host_producer, "snapshot", OLD - 20)
-        conn.execute("INSERT INTO node_output_losses(player_id,authority_epoch,output_id,frame_id,"
-                     "binding_generation,configuration_revision,cause_producer_id,"
-                     "cause_evidence_id,cause_kind,detail,interrupted_at) "
-                     "VALUES(%s,1,'HDMI-A-9','node-f0',1,1,%s,%s,'snapshot',%s,%s)",
-                     (player["player_id"], host_producer, named, Jsonb({}), OLD))
         event = _evidence(conn, host_producer, "event", OLD - 10, sequence=900)
         finished = [_evidence(conn, host_producer, "snapshot", OLD + index) for index in range(12)]
         young = _evidence(conn, host_producer, "snapshot", YOUNG)
@@ -148,10 +141,10 @@ def test_each_table_is_trimmed_in_whole_batches_and_keeps_what_central_reads(reg
     with registry.db.transaction() as conn:
         work = {row["evidence_id"] for row in conn.execute(
             "SELECT evidence_id FROM node_reconciliation_work WHERE received_at < %s", (NOW,))}
-        assert work == {unfinished, named, *finished[9:], young}
+        assert work == {unfinished, *finished[9:], young}
         evidence = {row["evidence_id"] for row in conn.execute(
             "SELECT evidence_id FROM node_evidence WHERE received_at < %s", (NOW,))}
-        assert evidence == {unfinished, named, event, *finished[9:], young}
+        assert evidence == {unfinished, event, *finished[9:], young}
         assert _count(conn, "SELECT count(*) n FROM node_display_handoffs") == 0
         assert _count(conn, "SELECT count(*) n FROM node_display_withdrawals") == 0
         assert _count(conn, "SELECT count(*) n FROM node_display_exchanges WHERE received_at < %s",

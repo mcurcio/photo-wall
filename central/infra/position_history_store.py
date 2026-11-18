@@ -30,6 +30,7 @@ from uuid import UUID
 
 from psycopg.types.json import Jsonb
 
+from central.actor import Actor
 from central.fleet.position_history import (
     KEPT_KINDS,
     SENT_KINDS,
@@ -60,14 +61,15 @@ def frame_made_for_in(conn: Any, frame_id: str) -> MadeFor | None:
     """What an entry for Frame `frame_id` is made for now: its turn and the
     Display seen on its bound port (None: unbound, or none seen). None when there is no such Frame.
     The one read of it: every append, Restore's refusal and the history's `restore_refusal`."""
-    row = conn.execute("SELECT f.turn, seen.display_id FROM frames f LEFT JOIN bindings b "
-                       f"ON b.frame_id=f.id {SEEN_DISPLAY_JOIN} WHERE f.id=%s", (frame_id,)).fetchone()
+    row = conn.execute(f"SELECT f.turn, seen.display_id FROM frames f {SEEN_DISPLAY_JOIN} "  # noqa: S608
+                       "WHERE f.id=%s", (frame_id,)).fetchone()
     if row is None:
         return None
     return MadeFor(int(row["turn"]), row["display_id"])
 
 
-def write_position_in(conn: Any, frame_id: str, record: PositionRecord, *, calibration: Calibration) -> int:
+def write_position_in(conn: Any, frame_id: str, record: PositionRecord, *, calibration: Calibration, now: float,
+                      by: Actor) -> int:
     """Store `calibration` and `record`'s lighting on Frame `frame_id` and append `record` as its kept
     entry, in the caller's transaction: the one kept Position write (Save: KEPT_SAVED). First, when the stored fit and lighting differ from the Frame's newest kept entry, the change made
     outside Photo Wall is recorded (`position_history.unrecorded_record`). Answers the
@@ -86,15 +88,15 @@ def write_position_in(conn: Any, frame_id: str, record: PositionRecord, *, calib
     if unrecorded is not None:
         _append_in(conn, frame_id, unrecorded)
     generation = conn.execute(
-        "UPDATE frames SET calibration=%s, lighting=%s, configuration_revision=configuration_revision+1 "
-        "WHERE id=%s RETURNING generation",
+        "UPDATE frames SET calibration=%s, lighting=%s, configuration_revision=configuration_revision+1, "
+        "changed_at=%s, changed_by=%s WHERE id=%s RETURNING generation",
         (Jsonb(calibration.model_dump(mode="json")), Jsonb(record.values.lighting.model_dump(mode="json")),
-         frame_id)).fetchone()["generation"]
+         now, by, frame_id)).fetchone()["generation"]
     _append_in(conn, frame_id, record)
     return generation
 
 
-def write_turn_in(conn: Any, frame_id: str, turn: int) -> int:
+def write_turn_in(conn: Any, frame_id: str, turn: int, *, now: float, by: Actor) -> int:
     """Set Frame `frame_id`'s turn (a new generation and configuration revision) and append its
     KEPT_TURN_CHANGED entry of the Frame's fit and lighting, made for the new turn, in the caller's
     transaction: the one kept turn write. First, when the stored fit and lighting differ from the
@@ -109,8 +111,9 @@ def write_turn_in(conn: Any, frame_id: str, turn: int) -> int:
     if unrecorded is not None:
         _append_in(conn, frame_id, unrecorded)
     generation = conn.execute("UPDATE frames SET turn=%s, generation=generation+1, "
-                              "configuration_revision=configuration_revision+1 WHERE id=%s RETURNING generation",
-                              (turn, frame_id)).fetchone()["generation"]
+                              "configuration_revision=configuration_revision+1, changed_at=%s, changed_by=%s "
+                              "WHERE id=%s RETURNING generation",
+                              (turn, now, by, frame_id)).fetchone()["generation"]
     _append_in(conn, frame_id, turn_changed_record(values))
     return generation
 

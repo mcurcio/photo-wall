@@ -37,12 +37,12 @@ _OPERATION: TypeAdapter[TrialOperation] = TypeAdapter(TrialOperation)
 
 def operate(trials, frame_id, trial_id, **body):
     """One trial operation from its body's fields (`TrialOperation`)."""
-    return trials.operate(frame_id, trial_id, _OPERATION.validate_python(body))
+    return trials.operate(frame_id, trial_id, _OPERATION.validate_python(body), by="console")
 
 
 def begin(trials, frame_id, calibration=None, lighting=None):
     """Begin a trial at the saved values or the given drafts (`TrialBegin`)."""
-    return trials.begin(frame_id, TrialBegin.model_validate({"calibration": calibration, "lighting": lighting}))
+    return trials.begin(frame_id, TrialBegin.model_validate({"calibration": calibration, "lighting": lighting}), by="console")
 
 
 def setup_trial(registry):
@@ -199,7 +199,7 @@ def test_a_frame_whose_player_never_booted_a_node_is_not_admitted(registry):
     identity, _, _ = enroll(registry)
     frame(registry, "plain")
     assert registry.calibration_capability("plain")["mode"] == "not_admitted"
-    registry.bind("plain", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("plain", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     assert registry.calibration_capability("plain")["mode"] == "not_admitted"
 
 

@@ -230,7 +230,7 @@ def test_changed_output_cohort_or_media_assignment_restarts_window(registry,chan
 def test_binding_change_cannot_keep_old_qualification_witness(registry):
     witness = Witnesses(registry)
     witness.advance()
-    registry.unbind('node-f0',expected_generation=1)
+    registry.unbind('node-f0',expected_generation=1, by="console")
     with pytest.raises(NodeControlError,match='plan_changed'):
         witness.acceptance.sample(witness.qualification)
 
@@ -254,8 +254,8 @@ def test_actual_qualification_selects_fallback_but_changed_mode_blocks_new_stage
         deployment.manager_primary.environment_sha256:deployment.environment_sources[deployment.manager_primary.environment_sha256],
         target.environment_sha256:'https://example.invalid/target'}))
     publish_deployment(registry.db,selected,registry.clock)
-    registry.unbind('node-f0',expected_generation=1)
-    registry.unbind('node-f1',expected_generation=1)
+    registry.unbind('node-f0',expected_generation=1, by="console")
+    registry.unbind('node-f1',expected_generation=1, by="console")
     lifecycle=NodeLifecycle(witness.sessions)
     claim=witness.claims['app_effect_broker']
     issued=lifecycle.stage(DEVICE_ID,OperatorAppStage(uuid4(),uuid4(),claim.session_id,1,selected.deployment_id,'operator:qualified'))

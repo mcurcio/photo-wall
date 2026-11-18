@@ -16,9 +16,9 @@ def _seed(registry):
     player_id, epoch = identity["player_id"], identity["authority_epoch"]
     for index in range(2):
         frame_id = f"diagnostic-frame-{index}"
-        registry.create_frame(frame_create(frame_id))
+        registry.create_frame(frame_create(frame_id), by="console")
         output_id = f"HDMI-A-{index + 1}"
-        registry.bind(frame_id, player_id, output_id, expected_generation=0)
+        registry.bind(frame_id, player_id, output_id, expected_generation=0, by="console")
         save_position(registry, frame_id, PORTRAIT_ON_WIDE)
     bindings = tuple(registry.configuration_for(player_id, epoch)["bindings"])
     Coordinator(registry.db, registry.clock).configuration(player_id, epoch)
@@ -134,7 +134,7 @@ def test_projection_suppresses_stale_frame_generation(registry):
     identity, bindings, layers, _, _ = _seed(registry)
     plan = _offer(registry, identity, bindings, layers)
     _report(registry, plan, [Failure(assignment_id=layers[0].assignment_id, code="decode")])
-    registry.unbind(layers[0].frame_id, expected_generation=1)
+    registry.unbind(layers[0].frame_id, expected_generation=1, by="console")
     assert _project(registry) == ()
 
 

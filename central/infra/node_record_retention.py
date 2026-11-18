@@ -19,7 +19,7 @@ stamped (`NodeSessions.clock`): a clock is compared only with itself.
 
 | Result key (the rule's table) | Deleted: rows received before the cut | Never deleted | Index |
 |---|---|---|---|
-| `node_reconciliation_work` | finished work, and with each row its `node_evidence` row | unfinished work; work whose evidence an Output loss names (`node_output_losses`' foreign key); the evidence of an event (the reboot audit reads events at any age) | `received_at` (migration 113) |
+| `node_reconciliation_work` | finished work, and with each row its `node_evidence` row | unfinished work; the evidence of an event (the reboot audit reads events at any age) | `received_at` (migration 113) |
 | `node_display_exchanges` | exchanges, and with each its `node_display_handoffs` and `node_display_withdrawals` rows | of a producer of its device's current boot, the newest `RECENT_EXCHANGES` (128) per Output by its boot clock, at any age: `node_display.py` reads the newest per Output (`DISPLAY_OUTPUTS_SQL`) and a withdrawal looks through the newest 128, `node_acceptance.py` the latest per Output and its handoff | `received_at` (migration 113) |
 | `node_host_observations` | samples | of a producer of its device's current or most recently superseded boot, the newest sample, at any age: `node_observations.py` reads the newest per producer (G12 shows both boots' "last heard") | `received_at` (migration 113) |
 | `node_manager_observations` | samples | of a producer of its device's current or most recently superseded boot, the newest `PREPARATION_KEYS` (8), at any age: `node_observations.py` reads the newest per producer and coalesces among the newest 8 | `received_at` (migration 113) |
@@ -104,9 +104,7 @@ _RULES: Final[tuple[tuple[str, str], ...]] = (
      _whole_batch(
          "SELECT w.work_id, w.producer_id, w.kind, w.evidence_id, w.received_at "
          "FROM node_reconciliation_work w WHERE w.received_at < %(cut)s "
-         "AND w.completed_at IS NOT NULL AND NOT EXISTS (SELECT 1 FROM node_output_losses l "
-         "WHERE l.cause_producer_id = w.producer_id AND l.cause_kind = w.kind "
-         "AND l.cause_evidence_id = w.evidence_id)")
+         "AND w.completed_at IS NOT NULL")
      + ", evidence AS (DELETE FROM node_evidence e USING batch b "
      "WHERE e.producer_id = b.producer_id AND e.kind = b.kind AND e.evidence_id = b.evidence_id "
      "AND b.kind <> 'event') "

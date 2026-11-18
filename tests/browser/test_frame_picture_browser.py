@@ -136,8 +136,8 @@ def _seen(registry, frame=FRAME, serial=SERIAL, output_id="HDMI-A-1", player=Non
 
 
 def _display(registry, frame=FRAME):
-    [row] = _sql(registry, "SELECT d.* FROM frames f JOIN bindings b ON b.frame_id=f.id "
-                           "JOIN outputs o ON o.player_id=b.player_id AND o.output_id=b.output_id "
+    [row] = _sql(registry, "SELECT d.* FROM frames f "
+                           "JOIN outputs o ON o.player_id=f.player_id AND o.output_id=f.output_id "
                            "JOIN displays d ON d.id=o.display_id WHERE f.id=%s", (frame,))
     return row
 

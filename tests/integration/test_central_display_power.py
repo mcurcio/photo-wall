@@ -61,8 +61,8 @@ def test_a_console_test_reaches_the_nodes_desired_bucket_by_notification(databas
     monkeypatch.setattr(NodeLink, "reconcile", counted)
     registry = Registry(database, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
     player = enroll_pi(registry, SERIAL)
-    registry.create_frame(frame_create("kitchen"))
-    registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("kitchen"), by="console")
+    registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0, by="console")
     hub = hub_server(tmp_path, [SERIAL])
     node = node_server(tmp_path, SERIAL, hub)
     display = NodeSession(DISPLAY_COMPONENT, DISPLAY_SLICE,

@@ -81,8 +81,8 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
     player = enroll_pi(registry, SERIAL)
     with database.transaction() as conn:   # one enrolled Output only: HDMI-A-2 has no `outputs` row
         conn.execute("DELETE FROM outputs WHERE player_id=%s AND output_id='HDMI-A-2'", (player,))
-    registry.create_frame(frame_create("kitchen"))
-    registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("kitchen"), by="console")
+    registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0, by="console")
     hub = hub_server(tmp_path, [SERIAL])
     node = node_server(tmp_path, SERIAL, hub)
     display = NodeSession(DISPLAY_COMPONENT, DISPLAY_SLICE,
@@ -156,7 +156,7 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
             before = await held("HDMI-A-1")
             assert (before.change, before.turn) == (1, 0)
             [kitchen] = [frame for frame in registry.inventory().frames if frame.id == "kitchen"]
-            turned = registry.turn_frame("kitchen", 90, expected_generation=kitchen.generation)
+            turned = registry.turn_frame("kitchen", 90, expected_generation=kitchen.generation, by="console")
             assert turned["changed"] is True
 
             async def hanging(turn: int):
@@ -167,7 +167,7 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
             assert len(reconciles) == reconciled   # turn_frame's wake carried it, not a reconcile
 
             # (5) Unbinding the Frame leaves its Output unturned, through the unbind's wake.
-            registry.unbind("kitchen", expected_generation=turned["generation"])
+            registry.unbind("kitchen", expected_generation=turned["generation"], by="console")
             document = await until(lambda: hanging(0), 3, "output-HDMI-A-1 back to turn 0 on the Node")
             assert document.change == 3
             assert len(reconciles) == reconciled   # the unbind's wake carried it, not a reconcile

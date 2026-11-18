@@ -135,7 +135,7 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
     player, _, _ = enroll(registry, device_id=device_id)
     hello(registry, player)
     frame(registry, "hall")
-    registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     player_headers = {"Authorization": "Bearer " + player["token"]}
 
     hub = hub_server(tmp_path, [SERIAL])

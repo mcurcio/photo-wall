@@ -31,8 +31,8 @@ def _reader(registry) -> PgFitAnalysisReader:
 
 def _wide_frame(registry, frame_id: str = "hall") -> None:
     player, _, _ = enroll(registry, count=1)
-    registry.create_frame(frame_create(frame_id))
-    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create(frame_id), by="console")
+    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, frame_id)
 
 
@@ -149,11 +149,11 @@ def test_a_frame_draft_is_judged_by_its_box_alone_and_an_unbound_frame_is_unsize
     unbound Frame (no known screen) is listed in `unsized` and has no answer. A draft carrying a
     profile is refused (no such field)."""
     pi = enroll_pi(registry, "pi-a")
-    registry.create_frame(frame_create("lounge"))
+    registry.create_frame(frame_create("lounge"), by="console")
     _bind(registry, "lounge", pi, "HDMI-A-1")
     save_position(registry, "lounge")
     _sized(registry, "pi-a", "HDMI-A-1", (950, 540))
-    registry.create_frame(frame_create("attic"))
+    registry.create_frame(frame_create("attic"), by="console")
     seed_pool(registry, "family:1", (photo("tall", taken_at=900, width=1200, height=1350),
                                      photo("clip", taken_at=901, width=640, height=720,
                                            kind="video")))

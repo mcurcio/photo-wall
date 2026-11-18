@@ -48,7 +48,7 @@ def offer(registry, repository: MediaRepository, variant: Variant, player_id: st
           secured: bool = False, frame_id: str = "portrait", epoch: int = 1) -> Plan:
     """Bind the enrolled `player_id`'s HDMI-A-1 to `frame_id` and offer (or, `secured`, lock) it
     one layer that shows `variant`, pinned as coordination pins it."""
-    registry.bind(frame_id, player_id, "HDMI-A-1", expected_generation=0)
+    registry.bind(frame_id, player_id, "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, frame_id, PORTRAIT_ON_WIDE)
     binding = registry.bindings_for(player_id, epoch)[0]
     layer = Layer(assignment_id="assignment", run_id="run", output_id=binding.output_id,

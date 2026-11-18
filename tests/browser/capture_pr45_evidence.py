@@ -49,8 +49,8 @@ def _box(registry):
     from test_player_page_browser import Box
 
     box = Box(registry)
-    registry.create_frame(frame_create("lobby", x_mm=100, y_mm=100))
-    registry.bind("lobby", box.player_id, "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("lobby", x_mm=100, y_mm=100), by="console")
+    registry.bind("lobby", box.player_id, "HDMI-A-1", expected_generation=0, by="console")
     report_readiness(registry, box.player_id)
     box.preparation()
     box.app_running()
@@ -72,8 +72,8 @@ def _frame(registry):
     from test_registry import enroll
 
     identity, _key, _request = enroll(registry, count=1, device_id="device-pr45-pi")
-    registry.create_frame(frame_create("lobby", x_mm=100, y_mm=100))
-    registry.bind("lobby", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("lobby", x_mm=100, y_mm=100), by="console")
+    registry.bind("lobby", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
 
 
 def _journey(page, origin, registry):

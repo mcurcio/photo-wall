@@ -88,7 +88,7 @@ def _at_117(conn, *, rows: bool) -> None:
 
 
 def _migrate(registry, *, rows: bool = True) -> dict[str, dict]:
-    registry.create_frame(frame_create("hall"))
+    registry.create_frame(frame_create("hall"), by="console")
     with registry.db.transaction() as conn:
         conn.execute("INSERT INTO power_holds (frame_id, hold_id, power, source, started_at, ends_at,"
                      " created_at, created_by, changed_at, changed_by) VALUES ('hall',"

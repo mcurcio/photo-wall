@@ -703,21 +703,21 @@ def create_app(
         await _content().catalog.refresh()
         return JSONResponse({"status": "polling"}, status_code=202)
 
-    @app.post("/v1/operator/frames", dependencies=[Depends(admin)], status_code=201)
-    def create_frame(frame: FrameCreate):
-        return registry.create_frame(frame)
+    @app.post("/v1/operator/frames", status_code=201)
+    def create_frame(frame: FrameCreate, by: Actor = Depends(admin)):
+        return registry.create_frame(frame, by=by)
 
-    @app.patch("/v1/operator/frames/{frame_id}", dependencies=[Depends(admin)])
-    def reposition(frame_id: Identifier, placement: FramePlacement) -> dict:
-        return registry.place_frame(frame_id, placement)
+    @app.patch("/v1/operator/frames/{frame_id}")
+    def reposition(frame_id: Identifier, placement: FramePlacement, by: Actor = Depends(admin)) -> dict:
+        return registry.place_frame(frame_id, placement, by=by)
 
-    @app.put("/v1/operator/frames/{frame_id}/name", dependencies=[Depends(admin)])
-    def rename_frame(frame_id: Identifier, request: FrameName) -> dict:
-        return registry.rename_frame(frame_id, request.name)
+    @app.put("/v1/operator/frames/{frame_id}/name")
+    def rename_frame(frame_id: Identifier, request: FrameName, by: Actor = Depends(admin)) -> dict:
+        return registry.rename_frame(frame_id, request.name, by=by)
 
-    @app.put("/v1/operator/walls/{surface_id}", dependencies=[Depends(admin)], response_model=WallInventory)
-    def name_wall(surface_id: Identifier, naming: WallNaming) -> WallInventory:
-        return registry.name_wall(surface_id, naming)
+    @app.put("/v1/operator/walls/{surface_id}", response_model=WallInventory)
+    def name_wall(surface_id: Identifier, naming: WallNaming, by: Actor = Depends(admin)) -> WallInventory:
+        return registry.name_wall(surface_id, naming, by=by)
 
     def _refuse_frame_in_use(frame_id: str) -> None:
         # Runs refer to Frame ids by string, so keep destructive/reconfiguring
@@ -727,17 +727,17 @@ def create_app(
         if any(run.phase in ("body", "outro") and target in run.participants for run in view.runs):
             raise RegistryError("frame_in_use", 409)
 
-    @app.put("/v1/operator/frames/{frame_id}/turn", dependencies=[Depends(admin)])
-    def turn_frame(frame_id: Identifier, request: FrameTurnChange) -> dict:
+    @app.put("/v1/operator/frames/{frame_id}/turn")
+    def turn_frame(frame_id: Identifier, request: FrameTurnChange, by: Actor = Depends(admin)) -> dict:
         # How the Frame's screen hangs (render redesign S2): the Frame's own setting, sent in its
         # Output's document; Registry owns the write, the generation and the Node's wake.
-        return registry.turn_frame(frame_id, request.turn, expected_generation=request.expected_generation)
+        return registry.turn_frame(frame_id, request.turn, expected_generation=request.expected_generation, by=by)
 
-    @app.put("/v1/operator/frames/{frame_id}/video", dependencies=[Depends(admin)])
-    def set_frame_video(frame_id: Identifier, request: FrameVideoChange) -> dict:
+    @app.put("/v1/operator/frames/{frame_id}/video")
+    def set_frame_video(frame_id: Identifier, request: FrameVideoChange, by: Actor = Depends(admin)) -> dict:
         # Shows videos (frame box run, fb-5): the Frame's own setting, last write wins; it changes
         # what the Planner may put on the Frame, never its picture, so no generation is asked.
-        return registry.set_frame_video(frame_id, request.video)
+        return registry.set_frame_video(frame_id, request.video, by=by)
 
     @app.delete("/v1/operator/frames/{frame_id}")
     def remove_frame(frame_id: Identifier, by: Actor = Depends(admin)) -> dict:
@@ -754,18 +754,19 @@ def create_app(
 
             return registry.delete_frame(frame_id, conn=conn, references=references, by=by)
 
-    @app.put("/v1/operator/frames/{frame_id}/binding", dependencies=[Depends(admin)])
-    def bind(frame_id: Identifier, binding: BindingRequest):
+    @app.put("/v1/operator/frames/{frame_id}/binding")
+    def bind(frame_id: Identifier, binding: BindingRequest, by: Actor = Depends(admin)):
         return registry.bind(
             frame_id,
             binding.player_id,
             binding.output_id,
             expected_generation=binding.expected_generation,
+            by=by,
         )
 
-    @app.delete("/v1/operator/frames/{frame_id}/binding", dependencies=[Depends(admin)])
-    def unbind(frame_id: Identifier, request: UnbindRequest):
-        return registry.unbind(frame_id, expected_generation=request.expected_generation)
+    @app.delete("/v1/operator/frames/{frame_id}/binding")
+    def unbind(frame_id: Identifier, request: UnbindRequest, by: Actor = Depends(admin)):
+        return registry.unbind(frame_id, expected_generation=request.expected_generation, by=by)
 
     @app.post("/v1/operator/players/{player_id}/retire")
     def retire(player_id: Identifier, by: Actor = Depends(admin)):

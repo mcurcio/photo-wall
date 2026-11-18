@@ -34,9 +34,9 @@ def _wall(registry) -> None:
         for output in range(2):
             index = 2 * pi + output
             frame_id = f"frame-{index}"
-            registry.create_frame(frame_create(frame_id))
+            registry.create_frame(frame_create(frame_id), by="console")
             registry.bind(frame_id, player["player_id"], f"HDMI-A-{output + 1}",
-                          expected_generation=0)
+                          expected_generation=0, by="console")
             save_position(registry, frame_id, PORTRAIT_ON_WIDE)
 
 

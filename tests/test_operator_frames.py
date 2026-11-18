@@ -36,7 +36,7 @@ AUTH = {"Authorization": "Bearer " + ADMIN}
 
 
 def _frame(registry, frame_id="portrait"):
-    registry.create_frame(frame_create(frame_id))
+    registry.create_frame(frame_create(frame_id), by="console")
 
 
 def enroll(registry, count=2):
@@ -157,7 +157,7 @@ def test_delete_bound_frame_is_refused_409_frame_bound(registry):
     # store guard returns a clean 409 instead. (Mutation probe 1 targets this.)
     identity = enroll(registry)
     _frame(registry)
-    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         response = client.delete("/v1/operator/frames/portrait", headers=AUTH)
     assert response.status_code == 409

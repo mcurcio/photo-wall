@@ -332,9 +332,9 @@ def capture() -> tuple[int, int, bytes]:
         registry = display.get_registry()
         registry.dispatcher["global"] = lambda _r, name, iface, _v: found.setdefault(iface, name)
         display.roundtrip()
-        out = registry.bind(found["wl_output"], WlOutput, 1)
-        shm = registry.bind(found["wl_shm"], WlShm, 1)
-        source = registry.bind(found["weston_capture_v1"], WestonCaptureV1, 1).create(
+        out = registry.bind(found["wl_output"], WlOutput, 1, by="console")
+        shm = registry.bind(found["wl_shm"], WlShm, 1, by="console")
+        source = registry.bind(found["weston_capture_v1"], WestonCaptureV1, 1, by="console").create(
             out, WestonCaptureV1.source.framebuffer)
         state = {}
         source.dispatcher["format"] = lambda _s, drm: state.update(format=drm)

@@ -63,7 +63,7 @@ pytestmark = pytest.mark.skipif(
 def _placed_frame(registry, frame_id):
     # A frame with a distinct (non-origin) position so it renders on the plan and
     # is selectable by identity, rather than being routed to the Unplaced tray.
-    registry.create_frame(frame_create(frame_id, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(frame_id, x_mm=100, y_mm=100), by="console")
 
 
 def _port(output_id):
@@ -103,7 +103,7 @@ def _bound(registry, frame_id="bound-1", count=1):
     """A placed frame bound to a fresh Player's HDMI-A-1 (generation 1); the Player id."""
     identity, _, _ = enroll(registry, count=count)
     _placed_frame(registry, frame_id)
-    registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     return identity["player_id"]
 
 
@@ -323,8 +323,8 @@ def test_stale_generation_bind_surfaces_the_reload_review_message(page, registry
         # Server-side, advance the Frame's generation (bind then unbind each bump it),
         # and let a poll deliver the new generation to the console. The Output is free
         # again, so the choice stands.
-        registry.bind("stale-1", identity["player_id"], "HDMI-A-1", expected_generation=0)
-        registry.unbind("stale-1", expected_generation=1)
+        registry.bind("stale-1", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
+        registry.unbind("stale-1", expected_generation=1, by="console")
         _poll(page)
         expect(_option(inspector, identity["player_id"])).to_be_checked()
 
@@ -354,8 +354,8 @@ def test_the_second_output_of_a_bound_player_is_bindable_and_stored(page, regist
     identity, _, _ = enroll(registry, count=2)
     player_id = identity["player_id"]
     _placed_frame(registry, "left")
-    registry.create_frame(frame_create("right", x_mm=600, y_mm=100))
-    registry.bind("left", player_id, "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("right", x_mm=600, y_mm=100), by="console")
+    registry.bind("left", player_id, "HDMI-A-1", expected_generation=0, by="console")
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         inspector = open_frame(page, "right", "hardware")
@@ -392,7 +392,7 @@ def test_a_chosen_output_that_vanishes_on_a_poll_is_cleared_and_announced(page, 
     identity, _, _ = enroll(registry, count=1)
     player_id = identity["player_id"]
     _placed_frame(registry, "mine")
-    registry.create_frame(frame_create("theirs", x_mm=600, y_mm=100))
+    registry.create_frame(frame_create("theirs", x_mm=600, y_mm=100), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         pause_page_clock(page, registry.clock.utc())
         sign_in(page, origin)
@@ -400,7 +400,7 @@ def test_a_chosen_output_that_vanishes_on_a_poll_is_cleared_and_announced(page, 
         _option(inspector, player_id).check()
 
         # Another operator binds that Output elsewhere; the next poll removes it.
-        registry.bind("theirs", player_id, "HDMI-A-1", expected_generation=0)
+        registry.bind("theirs", player_id, "HDMI-A-1", expected_generation=0, by="console")
         _poll(page)
 
         expect(inspector.get_by_role("status")).to_contain_text(
@@ -433,7 +433,7 @@ def test_a_returning_bound_player_shows_its_enrollment_on_its_page_and_no_wall_b
     identity, key, request = enroll(registry, count=2)
     player_id = identity["player_id"]
     _placed_frame(registry, "rec-2")
-    registry.bind("rec-2", player_id, "HDMI-A-1", expected_generation=0)
+    registry.bind("rec-2", player_id, "HDMI-A-1", expected_generation=0, by="console")
     name = player_name(registry, player_id)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
@@ -460,7 +460,7 @@ def test_a_bound_players_free_second_output_can_be_identified_from_both_homes(pa
     player_id = identity["player_id"]
     _placed_frame(registry, "taken")
     _placed_frame(registry, "spare")
-    registry.bind("taken", player_id, "HDMI-A-1", expected_generation=0)
+    registry.bind("taken", player_id, "HDMI-A-1", expected_generation=0, by="console")
     name = player_name(registry, player_id)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
@@ -564,8 +564,8 @@ def test_an_unbind_with_a_stale_generation_is_changed_terminal_and_never_resent(
 
         # The Frame changes under the open dialog (unbound, then bound again: generation
         # 3), and a poll delivers that to the console.
-        registry.unbind("bound-1", expected_generation=1)
-        registry.bind("bound-1", player_id, "HDMI-A-1", expected_generation=2)
+        registry.unbind("bound-1", expected_generation=1, by="console")
+        registry.bind("bound-1", player_id, "HDMI-A-1", expected_generation=2, by="console")
         _poll(page)
 
         dialog.get_by_role("button", name="Disconnect", exact=True).click()
@@ -584,7 +584,7 @@ def test_an_unbind_that_already_happened_reads_already_done(page, registry):
         pause_page_clock(page, registry.clock.utc())
         sign_in(page, origin)
         _inspector, dialog = _open_unbind(page)
-        registry.unbind("bound-1", expected_generation=1)
+        registry.unbind("bound-1", expected_generation=1, by="console")
         dialog.get_by_role("button", name="Disconnect", exact=True).click()
         expect(dialog.get_by_role("status")).to_have_text("Already done.")
         expect(dialog.get_by_role("alert")).to_have_count(0)
@@ -797,9 +797,9 @@ def _two_bound(registry, *, live_run_on=None):
     identity, _, _ = enroll(registry, count=2)
     player_id = identity["player_id"]
     _placed_frame(registry, "left")
-    registry.create_frame(frame_create("right", x_mm=600, y_mm=100))
-    registry.bind("left", player_id, "HDMI-A-1", expected_generation=0)
-    registry.bind("right", player_id, "HDMI-A-2", expected_generation=0)
+    registry.create_frame(frame_create("right", x_mm=600, y_mm=100), by="console")
+    registry.bind("left", player_id, "HDMI-A-1", expected_generation=0, by="console")
+    registry.bind("right", player_id, "HDMI-A-2", expected_generation=0, by="console")
     if live_run_on is not None:
         store = RuntimeStore(registry.db, registry.clock)
         store.command("set_scene", Scene(
@@ -826,7 +826,7 @@ def test_the_player_page_lists_each_output_with_its_state_and_offers_no_retire_w
     handle = player_id[-6:]
     name = player_name(registry, player_id)
     _placed_frame(registry, "lobby-left")
-    registry.bind("lobby-left", player_id, "HDMI-A-1", expected_generation=0)
+    registry.bind("lobby-left", player_id, "HDMI-A-1", expected_generation=0, by="console")
     _disconnect_output(registry, player_id, "HDMI-A-2")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
@@ -887,8 +887,8 @@ def test_a_player_page_bind_carries_the_generation_captured_on_selection(page, r
         _frame_select(page, player_id).select_option("lobby-left")  # captures generation 0
         # The Frame changes (bound elsewhere, then unbound: generation 2), and a poll
         # delivers that; it is still unbound, so the choice stands.
-        registry.bind("lobby-left", other["player_id"], "HDMI-A-1", expected_generation=0)
-        registry.unbind("lobby-left", expected_generation=1)
+        registry.bind("lobby-left", other["player_id"], "HDMI-A-1", expected_generation=0, by="console")
+        registry.unbind("lobby-left", expected_generation=1, by="console")
         _poll(page)
         expect(_frame_select(page, player_id)).to_have_value("lobby-left")
         outputs = _card_outputs(page, name)
@@ -908,7 +908,7 @@ def test_a_player_page_pick_whose_frame_is_bound_elsewhere_is_dropped_and_announ
         connect(page, origin)
         open_player(page, player_name(registry, player_id))
         _frame_select(page, player_id).select_option("lobby-left")
-        registry.bind("lobby-left", other["player_id"], "HDMI-A-1", expected_generation=0)
+        registry.bind("lobby-left", other["player_id"], "HDMI-A-1", expected_generation=0, by="console")
         _poll(page)
         expect(visible_page(page).get_by_role("status").filter(
             has_text="Frame lobby-left is no longer available. Choose another frame.")
@@ -935,8 +935,8 @@ def test_unbind_all_reports_each_frame_and_never_resends_a_conflict(page, regist
         sent = _binding_requests(page)
         dialog = _open_unbind_all(page, registry, player_id)  # captures left@1, right@1
         # `right` changes under the open dialog (generation 3), and a poll delivers it.
-        registry.unbind("right", expected_generation=1)
-        registry.bind("right", player_id, "HDMI-A-2", expected_generation=2)
+        registry.unbind("right", expected_generation=1, by="console")
+        registry.bind("right", player_id, "HDMI-A-2", expected_generation=2, by="console")
         _poll(page)
 
         dialog.get_by_role("button", name="Confirm unbind all", exact=True).click()
@@ -977,7 +977,7 @@ def test_a_dialog_survives_a_poll_that_changes_its_players_standing(page, regist
         dialog.get_by_label(f"Type {handle} to confirm", exact=True).fill(handle)
 
         # Another operator binds the Player; the poll makes it Bound.
-        registry.bind("lobby-left", player_id, "HDMI-A-1", expected_generation=0)
+        registry.bind("lobby-left", player_id, "HDMI-A-1", expected_generation=0, by="console")
         _poll(page)
         expect(player).to_contain_text("Standing: Bound")
 
@@ -1008,7 +1008,7 @@ def test_the_fleet_pages_never_scroll_sideways_at_390_px(page, registry):
     long_id = "reception-" + "north-wall-left-of-the-main-entrance-" * 2 + "panel"
     identity, _, _ = enroll(registry, count=2)
     _two_bound(registry)
-    registry.create_frame(frame_create(long_id, x_mm=100, y_mm=900))
+    registry.create_frame(frame_create(long_id, x_mm=100, y_mm=900), by="console")
     page.set_viewport_size({"width": 390, "height": 844})
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "hardware")

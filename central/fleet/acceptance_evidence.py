@@ -44,7 +44,7 @@ def applied_is_latest(row: Mapping[str, object]) -> bool:
 
     One home for the rule Registry uses to re-send (and replay the receipt of) an applied
     delivery and that app-link admission and qualification use to call a receipt current;
-    `row` is a `player_control_sessions` row or an `AppControl`'s fields.
+    `row` is a Player's control session (`players.control_session`) or an `AppControl`'s fields.
     """
     return (row["status"] == "negotiated"
             and row["pending_id"] is None and row["pending_digest"] is None

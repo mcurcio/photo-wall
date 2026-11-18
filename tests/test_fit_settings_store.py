@@ -124,8 +124,8 @@ def test_a_row_saved_before_the_skew_existed_keeps_its_values_and_takes_the_skew
 
 def _one_wide_frame(registry) -> None:
     player, _, _ = enroll(registry)
-    registry.create_frame(frame_create("frame-wide"))
-    registry.bind("frame-wide", player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("frame-wide"), by="console")
+    registry.bind("frame-wide", player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, "frame-wide")
 
 

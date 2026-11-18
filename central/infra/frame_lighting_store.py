@@ -22,7 +22,7 @@ from contracts.frame_lighting import FrameLighting
 from contracts.node_picture import DisplayLight
 
 _LIGHTINGS = ("SELECT id AS frame_id, lighting FROM frames UNION ALL "
-              "SELECT frame_id, lighting FROM node_calibration_trials WHERE state='active'")
+              "SELECT frame_id, lighting FROM frame_trials WHERE state='active'")
 
 
 def _share_lock(conn: Any) -> None:

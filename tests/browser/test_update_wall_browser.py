@@ -205,8 +205,8 @@ def _add_player(registry, index):
     enrolled, key, _ = enroll(registry, count=1)
     player_id = enrolled["player_id"]
     frame = f"frame-{index}"
-    registry.create_frame(frame_create(frame, x_mm=100 + 500 * index, y_mm=100))
-    registry.bind(frame, player_id, "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create(frame, x_mm=100 + 500 * index, y_mm=100), by="console")
+    registry.bind(frame, player_id, "HDMI-A-1", expected_generation=0, by="console")
     report_readiness(registry, player_id)
     device = next(p.device_id for p in registry.inventory().players if p.id == player_id)
     _ENROLLED[device] = (registry, key, player_id)

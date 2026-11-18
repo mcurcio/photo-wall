@@ -60,7 +60,7 @@ def bind_a_player(registry) -> None:
     """One enrolled player bound to a frame: `bound_player_count` becomes 1."""
     identity, _, _ = enroll(registry)
     frame(registry)
-    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
 
 
 class Reads:

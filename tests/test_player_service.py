@@ -2148,7 +2148,7 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             await service.probe_time()
             await service.poll_state()
             assert service._plan is None
-            registry.bind("portrait", registered.player_id, "HDMI-A-1", expected_generation=0)
+            registry.bind("portrait", registered.player_id, "HDMI-A-1", expected_generation=0, by="console")
             save_position(registry, "portrait", PORTRAIT_ON_WIDE)
             schedule(app.state.coordinator, ["portrait"], starts=1000, media=True)
             await service.poll_state()
