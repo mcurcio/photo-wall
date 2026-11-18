@@ -1,5 +1,5 @@
 import { appHandle, fact, words } from "./facts.js";
-import { rebootCommandState, rebootOffer, rebootTarget } from "./fleetCommands.js";
+import { hostBoot, rebootCommandState, rebootOffer, rebootTarget } from "./fleetCommands.js";
 import { frameHealth, outputStates } from "./health.js";
 import { playersByDevice } from "./players.js";
 import { readinessRecoveryForFrame } from "./readinessRecovery.js";
@@ -65,7 +65,7 @@ import { STAGE_REFUSAL } from "./stage.js";
  *            evidence?: import("./facts.js").Fact}} RowState
  *   `evidence`: the page's inference behind an on-the-release or Not rejoined row, as a
  *   `derived` fact naming its basis (rule 2: an inference never reads as device truth)
- *   `pause`: why rolling must stop on this row (a rejected or unknown reboot, a stall)
+ *   `pause`: why rolling must stop on this row (an undelivered or unknown reboot, a stall)
  */
 
 /** Rebooting or Rejoining for this long (the page's own monotonic time) reads Not rejoined. */
@@ -335,13 +335,6 @@ export function playerEpoch(snapshot, playerId) {
   return Number.isInteger(epoch) ? epoch : null;
 }
 
-/** The kernel boot id of the box's current Host Management session, or null. */
-function hostBoot(read) {
-  const hosts = (read?.sessions ?? []).filter((session) => session.current && session.producer?.owner === "host_core");
-  return hosts.length === 1 && typeof hosts[0].producer.kernel_boot_id === "string"
-    ? hosts[0].producer.kernel_boot_id : null;
-}
-
 /** The Frames this Player's bound Outputs show, from the snapshot. */
 function boundFrames(snapshot, playerId) {
   return outputStates(snapshot, playerId).filter((output) => output.state === "bound").map((output) => output.frameId);
@@ -388,7 +381,7 @@ export function keepRow({ node, snapshot, playerId, target, sent, waitedMs, skip
   const appLinked = target.app === null || linked === target.app;
   const booted = sent != null && (() => {
     const boot = hostBoot(node.read);
-    return boot !== null && boot !== sent.request.kernelBootId;
+    return boot !== null && sent.request.kernelBootId !== null && boot !== sent.request.kernelBootId;
   })();
   // A stage not yet ended by a later boot ran on the current boot: its app is that boot's only,
   // never evidence of the Player's version (the tried Player after Try reads exactly so).
@@ -432,8 +425,8 @@ export function keepRow({ node, snapshot, playerId, target, sent, waitedMs, skip
   }
   if (sent != null) {
     const record = (node.read.reboot_commands ?? []).find((entry) => entry.command_id === sent.request.body.command_id);
-    const state = record === undefined ? null : rebootCommandState(record, node.readAt, { nodeDevice: node });
-    if (state?.state === "rejected" || state?.state === "outcome_unknown") {
+    const state = record === undefined ? null : rebootCommandState(record, node.readAt);
+    if (state?.state === "not_delivered" || state?.state === "outcome_unknown") {
       return row(playerId, "rebooting", state.label, { pause: state.label });
     }
     if (stalled) {

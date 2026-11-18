@@ -20,7 +20,8 @@ its offer named.
 The reboot (decision 0034, S4a): Install from the console's route on a Pi whose host is on its bus
 queues one `RebootPi`, which the worker's job runtime runs over A's fleet-pipe link: A's host is
 asked to reboot once, the ask is one `events` row, and the install ends when A's host line states
-the new release's base.
+the new release's base. The operator's reboot (S4c) is the same job: the console's reboot route
+queues it, A's host is asked over its link, and the device read lists it asked.
 """
 from __future__ import annotations
 
@@ -167,6 +168,23 @@ def test_install_reboots_its_pi_over_its_link_and_ends_when_its_host_line_states
         assert len(_rows(database, "SELECT id FROM procrastinate_jobs WHERE task_name=%s",
                          (task_name(RebootPi),))) == 1
         assert running.running()
+
+        # The operator's reboot (S4c): the console's route queues the same job; A's host is asked.
+        command_id = str(uuid4())
+        answer = await asyncio.to_thread(central.call, "POST", f"/v1/operator/node/devices/{device}/reboots",
+                                         json={"command_id": command_id, "reason": "console/2026-11-18"})
+        assert answer.json() == {"duplicate": False}, answer.text
+
+        async def operator_asked() -> bool:
+            return asked == [f"install:{NEWER}", "console/2026-11-18"]
+        await until(operator_asked, SECONDS, "A's host is asked the operator's reboot over its link")
+
+        async def listed():
+            read = await asyncio.to_thread(central.call, "GET", f"/v1/operator/node/devices/{device}")
+            newest = read.json()["reboot_commands"][0]
+            return newest if newest["command_id"] == command_id and newest["delivered"] is True else None
+        newest = await until(listed, SECONDS, "the device read lists the operator's reboot as asked")
+        assert (newest["reason"], newest["outstanding"]) == ("console/2026-11-18", False)
 
     async def main() -> None:
         try:

@@ -573,7 +573,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
             return (
               <>
                 <p className="player__state">{record === undefined ? "Reboot sent; Central has not listed it yet"
-                  : rebootCommandState(record, triedNode.readAt, { nodeDevice: triedNode }).label}</p>
+                  : rebootCommandState(record, triedNode.readAt).label}</p>
                 <FactLine label="Current node session's boot" fact={boot.fact ?? boot.none} />
               </>
             );

@@ -137,8 +137,8 @@ out.planUntried = uw.keepPlan(snapshotOf(), { devices: boot }, null).map((entry)
 // --- keepRow: every row of the Keep table.
 const host = (bootId) => ({ session_id: `s-${bootId}`, current: true, scope: "operator_reboot", command_eligible: true,
   producer: { owner: "host_core", kernel_boot_id: bootId } });
-const command = (id, extra = {}) => ({ command_id: id, issued_at: 990, expires_at: 1020, outstanding: true,
-  command: { command_session_id: "s-boot-1", producer: { kernel_boot_id: "boot-1" } }, responses: [], effects: [], ...extra });
+const command = (id, extra = {}) => ({ command_id: id, reason: "console/2026-10-02", by: "console", requested_at: 990,
+  delivered: null, answered_at: null, outstanding: true, ...extra });
 const node = ({ bootId = "boot-1", linked = OLD_APP, commands = [] } = {}) => ({
   read: { device_generation: 3, read_at: 1000, sessions: [host(bootId)], reboot_commands: commands, boot_claims: [] },
   operations: ops([], linked), readAt: 1000, error: null });
@@ -172,9 +172,9 @@ out.rows = {
   waitingNoApp: keep({ target: NOAPP }),
   rebootingHeldUnlisted: keep({ sent: sent() }),
   rebootingListed: keep({ sent: sent(), node: node({ commands: [command("cmd-1")] }) }),
-  rebootingRejected: keep({ sent: sent(), node: node({ commands: [command("cmd-1", { responses: [
-    { received_at: 995, message: { message: { decision: "rejected", reason: "busy" } } }] })] }) }),
-  rebootingOutcomeUnknown: keep({ sent: sent(), node: node({ commands: [command("cmd-1", { expires_at: 999 })] }) }),
+  rebootingNotDelivered: keep({ sent: sent(), node: node({ commands: [command("cmd-1", { delivered: false,
+    answered_at: 995, outstanding: false })] }) }),
+  rebootingOutcomeUnknown: keep({ sent: sent(), node: node({ commands: [command("cmd-1", { outstanding: false })] }) }),
   // Another page's reboot that Central lists as outstanding.
   rebootingOutstanding: keep({ node: node({ commands: [command("cmd-other")] }) }),
   rejoiningApp: keep({ sent: sent(), node: node({ bootId: "boot-2", linked: OLD_APP }) }),
@@ -190,7 +190,8 @@ out.rows = {
   notRejoinedRebooting: keep({ sent: sent(), waitedMs: 600000 }),
   notRejoinedRejoining: keep({ sent: sent(), node: node({ bootId: "boot-2", linked: OLD_APP }), waitedMs: 600000 }),
   stillRejoiningAt599: keep({ sent: sent(), node: node({ bootId: "boot-2", linked: OLD_APP }), waitedMs: 599999 }),
-  cannotNoHost: keep({ node: { ...node(), read: { ...node().read, sessions: [] } } }),
+  // No current Host Management session: the reboot goes over the Pi's link all the same.
+  waitingNoHost: keep({ node: { ...node(), read: { ...node().read, sessions: [] } } }),
   skipped: keep({ skipped: true }),
   // A base-only release: its app is the old release's too, so a Player not rebooted by this page
   // whose linked app is that app is NOT on the selection (it may still run the old base).
@@ -407,13 +408,13 @@ def test_every_row_of_the_keep_table_derives_from_the_reads():
     states = {name: row["state"] for name, row in rows.items()}
     assert states == {
         "reading": "reading", "readFailed": "cannot_reboot", "waiting": "waiting", "waitingNoApp": "waiting",
-        "rebootingHeldUnlisted": "rebooting", "rebootingListed": "rebooting", "rebootingRejected": "rebooting",
+        "rebootingHeldUnlisted": "rebooting", "rebootingListed": "rebooting", "rebootingNotDelivered": "rebooting",
         "rebootingOutcomeUnknown": "rebooting", "rebootingOutstanding": "rebooting", "rejoiningApp": "rejoining",
         "rejoiningOutput": "rejoining", "rejoiningSilent": "rejoining", "rejoined": "rejoined",
         "rejoiningStaleSnapshot": "rejoining",
         "rejoinedInferred": "rejoined", "rejoinedNoApp": "rejoined", "notRejoinedRebooting": "not_rejoined",
         "notRejoinedRejoining": "not_rejoined", "stillRejoiningAt599": "rejoining",
-        "cannotNoHost": "cannot_reboot", "skipped": "skipped", "baseOnlyNotRebooted": "waiting",
+        "waitingNoHost": "waiting", "skipped": "skipped", "baseOnlyNotRebooted": "waiting",
         "sharedAppNotRebooted": "waiting", "baseOnlyRebooted": "rejoined", "triedStageRunning": "waiting",
         "stageEndedByLaterBoot": "rejoined",
     }
@@ -430,13 +431,13 @@ def test_every_row_of_the_keep_table_derives_from_the_reads():
     assert rows["waitingNoApp"]["label"].startswith("Waiting · unknown whether it booted this release")
     assert rows["rebootingHeldUnlisted"]["label"] == "Reboot sent by this page; Central has not listed it yet"
     assert rows["rebootingListed"]["label"].startswith("Requested · delivery unknown")
-    assert rows["rebootingRejected"]["pause"] == "Rejected by Host Management"
+    assert rows["rebootingNotDelivered"]["pause"].startswith("Not delivered: the Pi had no link to Central")
     assert rows["rebootingOutcomeUnknown"]["pause"].startswith("Outcome unknown")
     assert rows["rebootingListed"]["pause"] is None
     assert rows["rejoiningApp"]["label"] == f"Rejoining: the Player app has not linked app {NEW_APP[:6]}… yet"
     assert rows["rejoiningOutput"]["label"] == "Rejoining: a bound Output's Frame is not live yet"
     assert rows["notRejoinedRejoining"]["pause"] == "This Player has not rejoined after 10 minutes"
-    assert rows["cannotNoHost"]["label"] == "Cannot reboot: no current Host Management session on this box"
+    assert rows["waitingNoHost"]["label"] == "Waiting"
 
 
 def test_the_linked_app_counts_only_when_it_identifies_the_target():

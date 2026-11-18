@@ -9,7 +9,6 @@ from test_fleet_attempts import BOOT_ID, DEVICE_ID, OFFER_ID, SERIAL, _seed
 from test_registry import ADMIN
 
 from central.app import create_app
-from central.fleet.node_commands import NodeCommands, OperatorReboot
 from central.fleet.node_ingest import NodeIngest
 from central.fleet.node_observations import NodeObservations
 from central.fleet.node_sessions import (
@@ -22,7 +21,6 @@ from contracts.node_commands import NodeSessionClaim, encode_session_claim, pars
 from contracts.node_observation import HostMetricV2, HostObservationV2, encode_host_observation
 from contracts.node_protocol import (
     AppProcessFact,
-    NodeCommandResponseV2,
     NodeEventV2,
     NodeProcessIdentity,
     NodeSnapshotV2,
@@ -129,95 +127,6 @@ def test_observation_replay_keeps_sample_and_receipt_age(registry):
     with pytest.raises(NodeControlError, match="identity_conflict"):
         service.record(grant.session_id, claim.credential,
                        encode_host_observation(replace(sample, sampled_boottime_ms=2000)))
-
-
-def test_reboot_audit_response_and_initiation_are_separate(registry):
-    from test_node_boot import claim_for, cold_setup
-
-    from contracts.node_boot import NodeBootRequestV2
-    service, sessions, _ = cold_setup(registry)
-    claim = claim_for(service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64)))
-    grant = sessions.enroll(claim)
-    commands = NodeCommands(sessions)
-    request = OperatorReboot(uuid4(), grant.session_id, 1, "operator:fixture")
-    issued = commands.request_reboot(DEVICE_ID, request)
-    assert not issued["effect_established"]
-    assert commands.request_reboot(DEVICE_ID, request)["duplicate"]
-    assert commands.poll(grant.session_id, claim.credential)["commands"] == [issued["command"]]
-    response = NodeCommandResponseV2(grant.producer, request.command_id,
-        issued["command"]["command_sha256"], grant.session_id, "operator_reboot", "accepted", "reboot_admitted")
-    ingest = NodeIngest(sessions)
-    ingest.ingest(grant.session_id, claim.credential, encode_node_message(response))
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM node_evidence").fetchone()["n"] == 0
-    event = NodeEventV2(grant.producer, uuid4(), 1, 1500,
-                        (RebootFact("operator_command", "requester"),), request.command_id)
-    ingest.ingest(grant.session_id, claim.credential, encode_node_message(event))
-    status = NodeObservations(sessions).status(DEVICE_ID)
-    audit = status["reboot_commands"][0]
-    assert audit["responses"][0]["message"]["message"]["decision"] == "accepted"
-    assert audit["effects"][0]["event_id"] == str(event.event_id)
-    assert audit["effects"][0]["physical_completion"] == "unknown"
-    assert status["boot_claims"][0]["kernel_boot_id"] == str(BOOT_ID)
-    registry.clock.advance(31)
-    assert commands.poll(grant.session_id, claim.credential)["commands"] == []
-    with pytest.raises(NodeControlError, match="expired"):
-        commands.request_reboot(DEVICE_ID, request)
-    second = service.offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))
-    status = NodeObservations(sessions).status(DEVICE_ID)
-    assert any(item["kernel_boot_id"] == str(second.kernel_boot_id) for item in status["boot_claims"])
-    assert not any(item["producer"]["kernel_boot_id"] == str(second.kernel_boot_id) for item in status["sessions"])
-
-
-def test_reboot_fence_one_outstanding_per_session_and_served_outstanding(registry):
-    from test_node_boot import claim_for, cold_setup
-
-    from contracts.node_boot import NodeBootRequestV2
-    service, sessions, _ = cold_setup(registry)
-    claim = claim_for(service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64)))
-    grant = sessions.enroll(claim)
-    commands, ingest, reads = NodeCommands(sessions), NodeIngest(sessions), NodeObservations(sessions)
-
-    def reboot():
-        return OperatorReboot(uuid4(), grant.session_id, 1, "operator:fixture")
-
-    def respond(request, issued, decision):
-        ingest.ingest(grant.session_id, claim.credential, encode_node_message(NodeCommandResponseV2(
-            grant.producer, request.command_id, issued["command"]["command_sha256"], grant.session_id,
-            "operator_reboot", decision, "reboot_scope_or_expiry")))
-
-    def served():
-        return {item["command_id"]: item["outstanding"] for item in reads.status(DEVICE_ID)["reboot_commands"]}
-
-    def stored():
-        with registry.db.transaction() as conn:
-            return conn.execute("SELECT count(*) AS n FROM node_reboot_commands").fetchone()["n"]
-
-    first = reboot()
-    first_issued = commands.request_reboot(DEVICE_ID, first)
-    assert served() == {str(first.command_id): True}
-    with pytest.raises(NodeControlError, match="node_reboot_outstanding") as refused:
-        commands.request_reboot(DEVICE_ID, reboot())
-    assert refused.value.status == 409 and stored() == 1
-    assert commands.request_reboot(DEVICE_ID, first)["duplicate"]  # the same id is unaffected
-    respond(first, first_issued, "rejected")
-    assert served() == {str(first.command_id): False}
-    second = reboot()
-    second_issued = commands.request_reboot(DEVICE_ID, second)  # accepted after a rejection
-    assert served() == {str(first.command_id): False, str(second.command_id): True}
-    respond(second, second_issued, "accepted")  # accepted, not initiated: still outstanding
-    assert served()[str(second.command_id)] is True
-    with pytest.raises(NodeControlError, match="node_reboot_outstanding"):
-        commands.request_reboot(DEVICE_ID, reboot())
-    registry.clock.advance(31)
-    assert served()[str(second.command_id)] is False
-    third = reboot()
-    commands.request_reboot(DEVICE_ID, third)  # accepted after expiry
-    assert served()[str(third.command_id)] is True and stored() == 3
-    later = sessions.enroll(claim_for(service.offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))))
-    commands.request_reboot(DEVICE_ID, OperatorReboot(uuid4(), later.session_id, 1,
-                                                      "operator:fixture"))  # an earlier session never blocks
-    assert stored() == 4
 
 
 def test_display_read_serves_the_newest_exchange_per_output_on_the_current_boot(registry):
@@ -399,9 +308,10 @@ def test_an_undecodable_display_exchange_fails_only_its_own_output(registry):
     assert "reboot_commands" in status and any(item["current"] for item in status["sessions"])
 
 
-def test_the_default_app_serves_node_routes_and_an_admin_reboot_reaches_host_core(registry):
-    """Node control is not a mode: the default composition serves the node path, and an admin
-    Reboot is issued and polled with nothing opened first (no effect gate, owner answer G-A)."""
+def test_the_default_app_serves_node_routes_and_no_command_poll(registry):
+    """Node control is not a mode: the default composition serves the node path, with nothing
+    opened first (no effect gate, owner answer G-A). The host polls for no command: an operator's
+    reboot goes over the bus (tests/test_operator_reboot.py), so `GET /v2/node/commands` is gone."""
     _, offer = node_offer(registry, NodeControlConfig())
     claim = NodeSessionClaim(SERIAL, offer.offer_id, BOOT_ID, "host_core", uuid4(), uuid4(),
                              "d" * 64)
@@ -415,15 +325,9 @@ def test_the_default_app_serves_node_routes_and_an_admin_reboot_reaches_host_cor
         grant = parse_session_grant(response.content)
         headers = {"Authorization": "Bearer " + claim.credential, "X-Node-Session": str(grant.session_id)}
         assert grant.command_eligible and grant.command_reason == "boot_admitted"
-        assert client.get("/v2/node/commands", headers=headers).json() == {"commands": []}
+        assert client.get("/v2/node/commands", headers=headers).status_code in (404, 405)
         assert client.post("/v2/node/evidence", content=b"{}", headers=headers).status_code == 422
         assert client.post("/v2/node/observations", content=b"x" * 20000, headers=headers).status_code == 413
         admin = {"Authorization": "Bearer " + ADMIN}
         assert client.get("/v1/operator/node/status", headers=admin).status_code == 404
-        reboot = {"command_id": str(uuid4()), "session_id": str(grant.session_id), "device_generation": 1,
-                  "operator_audit_ref": "console/2026-10-10"}
-        issued = client.post(f"/v1/operator/node/devices/{DEVICE_ID}/reboots", json=reboot, headers=admin)
-        assert issued.status_code == 200, issued.text
-        assert issued.json()["duplicate"] is False
-        assert client.get("/v2/node/commands", headers=headers).json() == {"commands": [issued.json()["command"]]}
 

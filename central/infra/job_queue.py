@@ -170,6 +170,17 @@ def defer(app: procrastinate.App, job: Job[Any], *, attempt: int, connection: An
     return True
 
 
+_PENDING_SQL: Final = ("SELECT task_name, args, status FROM procrastinate_jobs WHERE queueing_lock = %s "
+                       "AND task_name = %s AND status IN ('todo', 'doing') ORDER BY id")
+
+
+def pending_in(connection: Any, job: Job[Any]) -> tuple[tuple[Job[Any], str], ...]:
+    """The copies of `job`'s type under its queueing lock not yet finished, oldest first, each
+    with its status ('todo': the one pending copy; 'doing': running), as `connection` sees them."""
+    rows = connection.execute(_PENDING_SQL, (job_keys(job).queueing_lock, task_name(type(job)))).fetchall()
+    return tuple((decode(row["task_name"], row["args"])[0], str(row["status"])) for row in rows)
+
+
 async def defer_async(app: procrastinate.App, job: Job[Any], *, attempt: int,
                       schedule_at: datetime | None = None) -> bool:
     """Insert one delivery through the app's own (opened) async pool; True inserted, False merged."""

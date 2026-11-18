@@ -2,13 +2,13 @@
 
 The base supplies a root-owned boot configuration and dedicated /run directory.
 Local observation continues during Central/session failure. HTTP replies cannot
-redirect credentials. Accepted commands are journaled before PID1 invocation.
+redirect credentials. A reboot is asked only over the bus (`BusReboots`, decision 0034 S4c): the
+host polls Central for no command.
 """
 from __future__ import annotations
 
 import argparse
 import http.client
-import json
 import logging
 import queue
 import time
@@ -35,7 +35,6 @@ from appliance.kernel.boot_stage import read_boot_report
 from appliance.kernel.boot_store import BootStore
 from appliance.node.recovery import RecoverySupervisor
 from appliance.node.recovery_linux import RecoveryObserver, RecoveryServer
-from contracts.node_commands import parse_reboot_request
 from contracts.node_host_facts import (
     FACT_RULES,
     HostFactsState,
@@ -136,13 +135,6 @@ class HostRunner:
         self._put_on_line(metrics, recovery_fault)
         if not self.establish_session():
             return
-        # New authority is polled before backlog or telemetry HTTP. No network
-        # response is required between durable admission and the effect fence.
-        try:
-            self._poll_commands()
-        except (OSError, ValueError, http.client.HTTPException):
-            if self.store.failed:
-                raise
         if self._observation_due():
             self._posted = (self.core.session_id, self.monotonic())
             observation = HostObservationV2(self.core.producer, self.journal.next_sequence(),
@@ -224,25 +216,11 @@ class HostRunner:
             return True
         return self.monotonic() - self._posted[1] >= HOST_OBSERVATION_INTERVAL_SECONDS
 
-    def _poll_commands(self) -> None:
-        status, raw = self.session.request("GET", "/v2/node/commands")
-        if status != 200:
-            return
-        document = loads_object(raw, max_bytes=65536)
-        if document is None or set(document) != {"commands"} or not isinstance(document["commands"], list) or len(document["commands"]) > 16:
-            raise ValueError("host_command_envelope")
-        for value in document["commands"]:
-            command = parse_reboot_request(json.dumps(value, separators=(",", ":")).encode())
-            response = self.core.receive(command, now_ms=boottime_ms())
-            if response.decision == "accepted":
-                self.core.initiate(command.command_id, now_ms=boottime_ms())
-
-
 
 class BusReboots:
     """The bus's `reboot` asks, run on HostCore's own thread: the session's thread only queues the
-    reason (`ask`), and the host's loop runs each queued ask (`run_asked`) with the effect the HTTP
-    command runs (SystemdRebootDriver). Once a reboot started, a later ask runs nothing."""
+    reason (`ask`), and the host's loop runs each queued ask (`run_asked`) with the reboot effect
+    (SystemdRebootDriver). Once a reboot started, a later ask runs nothing."""
 
     def __init__(self, driver=None) -> None:
         self._asked: queue.SimpleQueue[str] = queue.SimpleQueue()

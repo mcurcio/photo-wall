@@ -38,6 +38,11 @@ def _enrolled(registry, owner="host_core"):
     return sessions, claim, sessions.enroll(claim)
 
 
+def _sample(grant) -> bytes:
+    """One Host Management sample, the host session's own node request (its command poll is gone)."""
+    return encode_host_observation(HostObservationV2(grant.producer, 1, 1000, (HostMetricV2("uptime", 1, "seconds"),)))
+
+
 class _Held:
     """A transaction that authenticated `claim`'s session and stays open, as a node request
     whose COMMIT waits on a stalled WAL flush does."""
@@ -63,15 +68,15 @@ class _Held:
         self.thread.join()
 
 
-def test_a_slow_node_request_never_stalls_the_next_poll_or_the_device_page(registry):
+def test_a_slow_node_request_never_stalls_the_next_node_request_or_the_device_page(registry):
     sessions, claim, grant = _enrolled(registry)
     app = create_app(registry.db, registry.clock, ADMIN)
     node = {"Authorization": "Bearer " + claim.credential, "X-Node-Session": str(grant.session_id)}
     admin = {"Authorization": "Bearer " + ADMIN}
     with TestClient(app, raise_server_exceptions=False) as client, _Held(registry, sessions, claim):
         started = time.monotonic()
-        polled = client.get("/v2/node/commands", headers=node)
-        assert (polled.status_code, polled.json()) == (200, {"commands": []})
+        polled = client.post("/v2/node/observations", content=_sample(grant), headers=node)
+        assert polled.status_code == 200, polled.text
         page = client.get(f"/v1/operator/node/devices/{DEVICE_ID}", headers=admin)
         assert page.status_code == 200, page.text
         attempts = client.get(f"/v1/operator/node/devices/{DEVICE_ID}/app-attempts", headers=admin)
@@ -90,7 +95,7 @@ def test_retirement_waits_for_an_open_act_then_refuses_every_act(registry):
             time.sleep(0.5)
             assert not retiring.done()
         retiring.result(10)
-        polled = client.get("/v2/node/commands", headers=node)
+        polled = client.post("/v2/node/observations", content=_sample(grant), headers=node)
         assert (polled.status_code, polled.json()) == (403, {"error": "node_device_unavailable"})
     registry.retire(player["player_id"], by="console")     # retiring a retired device changes nothing
     with registry.db.transaction() as conn:

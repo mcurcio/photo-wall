@@ -58,7 +58,7 @@ function RebootDialog({ deviceId, name, request, retry, node, onSent, onClose })
     <dialog ref={dialogRef} className="confirm" aria-labelledby={titleId} tabIndex={-1}>
       <h2 id={titleId} className="confirm__title">{retry ? `Retry rebooting ${name}?` : `Reboot ${name}?`}</h2>
       <div className="confirm__body">
-        <p>{`Host Management restarts the box on boot ${request.kernelBootId}.`}</p>
+        <p>Host Management restarts the box.</p>
         {request.frames.length === 0 ? (
           <p>No Frames are bound to this Player.</p>
         ) : (
@@ -81,14 +81,13 @@ function RebootDialog({ deviceId, name, request, retry, node, onSent, onClose })
           <a href={RELEASES}>Releases</a>
           {")."}
         </p>
-        <p>{`Central offers the request to Host Management for ${request.windowSeconds} s. Delivery is unknown until Host Management responds.`}</p>
+        <p>Central asks Host Management once, over the Pi&apos;s link. Delivery is unknown until Host Management answers.</p>
         {request.previous !== null && <p>{request.previous}</p>}
         <details>
           <summary>Request</summary>
           <ul>
-            <li>{`Audit reference ${body.operator_audit_ref}`}</li>
+            <li>{`Reason ${body.reason}`}</li>
             <li>{`Command ${body.command_id}`}</li>
-            <li>{`Session ${body.session_id} · device generation ${body.device_generation}`}</li>
           </ul>
         </details>
       </div>
@@ -114,10 +113,10 @@ function RebootDialog({ deviceId, name, request, retry, node, onSent, onClose })
 
 /**
  * The Reboot section (§9, §10): "Reboot Player", with its reason when it is unavailable,
- * and the reboot history with one named state per request. While any command on the target
- * session is outstanding the only offer is a retry of the request this page sent (its
- * frozen body); one this page does not hold cannot be resent, so Reboot waits for it to
- * expire. Retry is derived from the held request (fleetCommands.js `rebootOffer`).
+ * and the reboot history with one named state per request. While any request is outstanding
+ * (queued, not yet run) the only offer is a retry of the request this page sent (its frozen
+ * body); one this page does not hold cannot be resent, so Reboot waits for Central to run it.
+ * Retry is derived from the held request (fleetCommands.js `rebootOffer`).
  *
  * @param {{deviceId: string, name: string, node: object, snapshot: object,
  *          playerId: string|null}} props
@@ -190,13 +189,13 @@ export function RebootSection({ deviceId, name, node, snapshot, playerId }) {
       ) : (
         <ul className="player__commands" aria-label="Reboot history">
           {commands.map((command) => (
-            <StateEntry key={command.command_id} state={rebootCommandState(command, node.readAt, { nodeDevice: node })}>
+            <StateEntry key={command.command_id} state={rebootCommandState(command, node.readAt)}>
               <details className="player__details">
                 <summary>{`Request ${tail(command.command_id)}`}</summary>
                 <ul>
                   <li>{`Command ${command.command_id}`}</li>
-                  {typeof command.issued_at === "number" && <li>{`Recorded at ${clock(command.issued_at)}`}</li>}
-                  <li>{`Targeted boot ${command.command?.producer?.kernel_boot_id ?? "not served"}`}</li>
+                  {typeof command.requested_at === "number" && <li>{`Requested at ${clock(command.requested_at)}`}</li>}
+                  {typeof command.answered_at === "number" && <li>{`Answered at ${clock(command.answered_at)}`}</li>}
                 </ul>
               </details>
             </StateEntry>

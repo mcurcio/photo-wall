@@ -30,7 +30,7 @@ import json
 import os
 import re
 from dataclasses import replace
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from console_tasks import connect, current_hash, go, hardware_list, open_pi, open_player
@@ -43,6 +43,7 @@ from operator_harness import (
 )
 from playwright.sync_api import expect
 from support.frames import frame_create
+from support.pi_reboots import ask_reboot, reboot_queue, run_queued
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_node_acceptance import Witnesses
 from test_node_boot import (
@@ -58,7 +59,6 @@ from test_node_lifecycle import Rig
 from test_registry import enroll
 
 from central.fleet.node_boot import parse_node_deployment
-from central.fleet.node_commands import NodeCommands, OperatorReboot
 from central.fleet.node_ingest import NodeIngest
 from central.fleet.node_observations import NodeObservations
 from central.fleet.node_sessions import NodeControlConfig
@@ -75,7 +75,6 @@ from contracts.node_observation import (
 from contracts.node_preparation import ManagerPreparationV2, encode_manager_preparation
 from contracts.node_protocol import (
     AppProcessFact,
-    NodeCommandResponseV2,
     NodeProcessIdentity,
     NodeSnapshotV2,
     OutputKey,
@@ -425,19 +424,15 @@ RUN_STAYS = "The Run stays active. Central sends no command to other Frames or A
 
 
 def _node_server(registry):
+    reboot_queue(registry.db)   # the reboot route queues S4a's RebootPi
     return operator_server(registry.db, registry.clock, node_control=NODE)
 
 
-def _respond(box, command_id, decision, reason="reboot_scope_or_expiry"):
-    """Host Management answers a recorded reboot request (stored with no expiry check)."""
-    with box.registry.db.transaction() as conn:
-        payload = json.loads(bytes(conn.execute(
-            "SELECT payload FROM node_reboot_commands WHERE command_id=%s", (command_id,)
-        ).fetchone()["payload"]))
-    claim, grant = box.claims["host_core"]
-    response = NodeCommandResponseV2(grant.producer, command_id, payload["command_sha256"],
-                                     grant.session_id, "operator_reboot", decision, reason)
-    NodeIngest(box.sessions).ingest(grant.session_id, claim.credential, encode_node_message(response))
+def _asks(registry) -> int:
+    """The operator's reboot asks Central recorded (central/fleet/pi_reboot.py)."""
+    with registry.db.transaction() as conn:
+        return conn.execute("SELECT count(*) AS n FROM events WHERE kind='link-action' "
+                            "AND body->>'kind'='reboot-asked'").fetchone()["n"]
 
 
 def _reboot_posts(page):
@@ -530,7 +525,7 @@ def test_the_reboot_dialog_names_frames_and_a_recorded_reboot_is_requested(page,
         dialog = page.get_by_role("dialog", name=f"Reboot {NAME}?", exact=True)
         expect(dialog).to_contain_text("Frame lobby: no live Run")
         expect(dialog).to_contain_text(RUN_STAYS)
-        expect(dialog).to_contain_text("Central offers the request to Host Management for 30 s.")
+        expect(dialog).to_contain_text("Central asks Host Management once, over the Pi's link.")
         # NR2: the one static sentence on what the next boot is offered, linking to Releases.
         expect(dialog).to_contain_text("On its next boot, Central offers this Player its own version (see Releases).")
         expect(dialog.get_by_role("link", name="Releases", exact=True)).to_have_attribute("href", "#/releases")
@@ -540,7 +535,7 @@ def test_the_reboot_dialog_names_frames_and_a_recorded_reboot_is_requested(page,
             "Reboot recorded. Requested · delivery unknown.")
         history = _reboot(page).get_by_role("list", name="Reboot history", exact=True)
         expect(history).to_contain_text(
-            "Requested · delivery unknown · Central offers it to Host Management until")
+            "Requested · delivery unknown · Central asks Host Management over the Pi's link")
         # While it is Requested, no new command id can be sent: only its retry is offered.
         expect(_reboot(page).get_by_role("button", name="Reboot Player", exact=True)).to_have_count(0)
         _reboot(page).get_by_role("button", name="Send the reboot request again", exact=True).click()
@@ -548,10 +543,8 @@ def test_the_reboot_dialog_names_frames_and_a_recorded_reboot_is_requested(page,
         expect(page.get_by_role("dialog").get_by_role("status")).to_have_text(
             "Already recorded. Requested · delivery unknown.")
         assert len(sent) == 2 and sent[0] == sent[1]
-        assert sent[0]["operator_audit_ref"].startswith("console/")
-        assert sent[0]["valid_for_seconds"] == 30
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM node_reboot_commands").fetchone()["n"] == 1
+        assert set(sent[0]) == {"command_id", "reason"} and sent[0]["reason"].startswith("console/")
+    assert _asks(registry) == 1
 
 
 def test_a_lost_answer_is_retried_with_the_identical_body_inside_the_window(page, registry):
@@ -585,56 +578,34 @@ def test_a_double_click_on_reboot_player_sends_one_post(page, registry):
         expect(_reboot(page).get_by_role("status")).to_have_text("Reboot recorded. Requested · delivery unknown.")
         page.wait_for_timeout(500)
         assert len(sent) == 1
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM node_reboot_commands").fetchone()["n"] == 1
+    assert _asks(registry) == 1
 
 
-def test_a_retry_after_the_window_is_outcome_unknown_and_a_late_response_moves_it_on(page, registry):
-    box = Box(registry)
+def test_a_queued_reboot_once_run_settles_and_a_new_request_states_its_outcome(page, registry):
+    """The worker runs the queued reboot (the real handler; this Pi has no link to answer): the
+    history reads Not delivered, Reboot Player is offered again, and the new dialog names it."""
+    Box(registry)
     with _node_server(registry) as origin:
-        sent = _reboot_posts(page)
-        _lose_first_response(page)
-        held = _HeldDeviceRead(page)
         connect(page, origin)
         open_pi(page, NAME)
         _reboot(page).get_by_role("button", name="Reboot Player", exact=True).click()
-        dialog = page.get_by_role("dialog")
-        dialog.get_by_role("button", name="Reboot Player", exact=True).click()
-        expect(dialog.get_by_role("button", name="Send the same request again", exact=True)).to_be_enabled()
-        # The window ends before the next read arrives: Central, not the page, answers the retry.
-        held.freeze()
-        registry.clock.advance(31)
-        dialog.get_by_role("button", name="Send the same request again", exact=True).click()
-        expect(dialog.get_by_role("status")).to_have_text(
-            "Outcome unknown: Central stopped offering this request before it was confirmed.")
-        held.release()
-        expect(dialog.get_by_role("button", name="Send the same request again", exact=True)).to_have_count(0)
-        assert len(sent) == 2 and sent[0] == sent[1]
-        dialog.get_by_role("button", name="Close", exact=True).click()
+        page.get_by_role("dialog").get_by_role("button", name="Reboot Player", exact=True).click()
         history = _reboot(page).get_by_role("list", name="Reboot history", exact=True)
-        # The first read after the release arrives within one 5 s poll interval.
-        expect(history).to_contain_text(
-            "Outcome unknown: no response from Host Management; Central stopped offering it at",
-            timeout=10_000)
-        # After the window a NEW request may be made; it states the previous outcome and boot.
+        expect(history).to_contain_text("Requested · delivery unknown")
+        run_queued(registry.db, DEVICE_ID, delivered=False)
+        # The first read after the run arrives within one 5 s poll interval.
+        expect(history).to_contain_text("Not delivered: the Pi had no link to Central or did not answer",
+                                        timeout=10_000)
         _reboot(page).get_by_role("button", name="Reboot Player", exact=True).click()
-        expect(page.get_by_role("dialog")).to_contain_text(
-            "The previous request's outcome is unknown. Host Management's current session is the "
-            "same boot that request targeted.")
+        expect(page.get_by_role("dialog")).to_contain_text("The previous request: Not delivered")
         page.get_by_role("dialog").get_by_role("button", name="Cancel", exact=True).click()
-        # A late response is stored and shown: Outcome unknown was never terminal.
-        _respond(box, UUID(sent[0]["command_id"]), "accepted")
-        expect(history).to_contain_text("Accepted by Host Management, not yet started", timeout=10_000)
 
 
-def test_rejected_reboots_and_app_operations_show_their_named_states(page, registry):
-    box = Box(registry)
-    _, grant = box.claims["host_core"]
-    command_id = uuid4()
-    NodeCommands(box.sessions).request_reboot(
-        DEVICE_ID, OperatorReboot(command_id, grant.session_id, 1, "operator:fixture"))
+def test_asked_reboots_and_app_operations_show_their_named_states(page, registry):
+    Box(registry)
+    ask_reboot(registry.db, registry.clock, DEVICE_ID, uuid4(), reason="operator:fixture")
     registry.clock.advance(2)
-    _respond(box, command_id, "rejected")
+    run_queued(registry.db, DEVICE_ID, delivered=True)
 
     def rejected_stage(route):
         data = route.fetch().json()
@@ -652,10 +623,10 @@ def test_rejected_reboots_and_app_operations_show_their_named_states(page, regis
         connect(page, origin)
         open_pi(page, NAME)
         history = _reboot(page).get_by_role("list", name="Reboot history", exact=True)
-        expect(history).to_contain_text("Rejected by Host Management")
+        expect(history).to_contain_text("Host Management accepted the reboot · completion unknown")
         expect(history).to_contain_text(
-            'Host Management reported a "rejected" response (reboot scope or expiry) · first received 0 s ago')
-        # Rejected is a settled answer, so a new request may be made.
+            "Host Management reported an accepted answer to Central's ask · first received 0 s ago")
+        # Asked is a settled answer, so a new request may be made.
         expect(_reboot(page).get_by_role("button", name="Reboot Player", exact=True)).to_be_enabled()
         _software(page)
         app = page.get_by_role("region", name="App", exact=True).get_by_role(
@@ -673,7 +644,7 @@ def test_a_dialog_frozen_at_an_older_read_sends_nothing_once_another_request_is_
     """R0's stale dialog: the dialog freezes its request at one read; another page then records
     a different reboot request, which the next read lists as outstanding. Send is disabled, and
     the dialog's own send handler, called directly, refuses inside `sendReboot`: zero POSTs."""
-    box = Box(registry)
+    Box(registry)
     with _node_server(registry) as origin:
         sent = _reboot_posts(page)
         connect(page, origin)
@@ -683,9 +654,7 @@ def test_a_dialog_frozen_at_an_older_read_sends_nothing_once_another_request_is_
         send = dialog.get_by_role("button", name="Reboot Player", exact=True)
         expect(send).to_be_enabled()
         # Another tab's request, recorded by Central's real reboot owner after the dialog froze.
-        _, grant = box.claims["host_core"]
-        NodeCommands(box.sessions).request_reboot(
-            DEVICE_ID, OperatorReboot(uuid4(), grant.session_id, 1, "operator:other-tab"))
+        ask_reboot(registry.db, registry.clock, DEVICE_ID, uuid4())
         registry.clock.advance(5)
         expect(dialog.get_by_role("alert")).to_have_text(
             "Another reboot request for this Player is outstanding; close this dialog and review it.", timeout=10_000)
@@ -694,14 +663,13 @@ def test_a_dialog_frozen_at_an_older_read_sends_nothing_once_another_request_is_
         expect(dialog.get_by_role("status")).to_have_text(
             "Another reboot request for this Player is outstanding; close this dialog and review it.")
         assert sent == []
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM node_reboot_commands").fetchone()["n"] == 1
+    assert _asks(registry) == 1
 
 
 def test_centrals_outstanding_fence_reads_as_changed(page, registry):
     """A 409 node_reboot_outstanding (another page's request committed after this page's newest
     read) reads as changed, never as a refusal of this Player."""
-    box = Box(registry)
+    Box(registry)
     with _node_server(registry) as origin:
         sent = _reboot_posts(page)
         held = _HeldDeviceRead(page)
@@ -710,15 +678,12 @@ def test_centrals_outstanding_fence_reads_as_changed(page, registry):
         _reboot(page).get_by_role("button", name="Reboot Player", exact=True).click()
         dialog = page.get_by_role("dialog", name=f"Reboot {NAME}?", exact=True)
         held.freeze()  # the other page's commit lands after this page's newest read
-        _, grant = box.claims["host_core"]
-        NodeCommands(box.sessions).request_reboot(
-            DEVICE_ID, OperatorReboot(uuid4(), grant.session_id, 1, "operator:other-tab"))
+        ask_reboot(registry.db, registry.clock, DEVICE_ID, uuid4())
         dialog.get_by_role("button", name="Reboot Player", exact=True).click()
         expect(dialog.get_by_role("status")).to_have_text(
             "Another reboot request for this Player is outstanding; close this dialog and review it.")
         assert len(sent) == 1
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM node_reboot_commands").fetchone()["n"] == 1
+    assert _asks(registry) == 1
 
 
 # --- NS1 (Part E): Stage app against Central's real stage owner.

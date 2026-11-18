@@ -32,13 +32,13 @@ from central.fleet.node_acceptance import NodeAcceptance
 from central.fleet.node_app_links import NodeAppLinks
 from central.fleet.node_boot import NodeBootService
 from central.fleet.node_calibration import NodeCalibration, TrialBegin, TrialOperation
-from central.fleet.node_commands import NodeCommands, OperatorReboot
 from central.fleet.node_display import NodeDisplay
 from central.fleet.node_ingest import NodeIngest
 from central.fleet.node_lifecycle import NodeLifecycle, OperatorAppStage
 from central.fleet.node_observations import NodeObservations
 from central.fleet.node_release_catalog import NodeReleaseCatalog
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
+from central.fleet.pi_reboot import OperatorReboots, parse_operator_reboot
 from central.fleet.position_views import PositionRestore
 from central.fleet.principal import PrincipalError
 from central.frame_lighting.model import FrameLightingRefused
@@ -72,17 +72,6 @@ def _credentials(request: Request) -> tuple[UUID, str]:
         raise NodeControlError("node_credential_required", 401) from exc
 
 
-def _operator_reboot(raw: bytes) -> OperatorReboot:
-    value = loads_object(raw, max_bytes=MAX_COMMAND_BYTES)
-    if value is None:
-        raise ValueError("invalid_operator_reboot")
-    try:
-        return OperatorReboot(**{**value, "command_id": UUID(value["command_id"]),
-                                 "session_id": UUID(value["session_id"])})
-    except (TypeError, KeyError, AttributeError) as exc:
-        raise ValueError("invalid_operator_reboot") from exc
-
-
 # The Releases routes' refusals: one status per InstallRefusal (central/content_catalog/views.py).
 VERSION_REFUSAL_STATUS: dict[InstallRefusal, int] = {
     InstallRefusal.UNKNOWN_PLAYER: 404, InstallRefusal.UNKNOWN_VERSION: 404, InstallRefusal.NOT_DEPLOYABLE: 409}
@@ -90,6 +79,9 @@ SerialPath = Annotated[str, Path(pattern=rf"^{SERIAL_PATTERN}$")]
 
 _BEGIN: TypeAdapter[TrialBegin] = TypeAdapter(TrialBegin)
 _OPERATION: TypeAdapter[TrialOperation] = TypeAdapter(TrialOperation)
+
+
+MAX_REBOOT_BYTES = 1024   # the operator's reboot body: a command id and a one-word reason
 
 
 def _trial_body[T](adapter: TypeAdapter[T], raw: bytes) -> T:
@@ -110,7 +102,7 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     ingest, observations = NodeIngest(sessions), NodeObservations(sessions)
     display = NodeDisplay(sessions, runtime=coordinator)
     bytes_reader = OfferByteReader(content.reader if content else None)
-    commands = NodeCommands(sessions)
+    reboots = OperatorReboots(db, content.publisher if content else None)
     # Each Pi's version needs the cache's readiness: without content services (a fake database) no
     # release is ready, so no boot is offered and the Releases routes are not mounted.
     readiness = content.readiness if content else None
@@ -326,18 +318,15 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         result = await invoke(display.exchange, *_credentials(request), raw)
         return Response(result, media_type="application/json")
 
-    @app.get("/v2/node/commands")
-    async def poll(request: Request):
-        return await invoke(commands.poll, *_credentials(request))
-
-    @app.post("/v1/operator/node/devices/{device_id}/reboots", dependencies=[Depends(admin)])
-    async def reboot(device_id: str, request: Request):
-        raw = await body(request, MAX_COMMAND_BYTES)
+    @app.post("/v1/operator/node/devices/{device_id}/reboots")
+    async def reboot(device_id: str, request: Request, by: Actor = Depends(admin)):
+        """The operator's reboot over the bus (S4a's `RebootPi`): {"command_id", "reason"}."""
+        raw = await body(request, MAX_REBOOT_BYTES)
         try:
-            command = _operator_reboot(raw)
+            command = parse_operator_reboot(loads_object(raw, max_bytes=MAX_REBOOT_BYTES))
         except ValueError as exc:
             raise NodeControlError("invalid_operator_reboot", 422) from exc
-        return await invoke(commands.request_reboot, device_id, command)
+        return await invoke(lambda: reboots.request_operator_reboot(device_id, command, by=by))
 
     @app.get("/v1/operator/node/devices/{device_id}/app-attempts", dependencies=[Depends(admin)])
     async def app_status(device_id: str):

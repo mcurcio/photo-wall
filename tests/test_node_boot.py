@@ -28,7 +28,6 @@ from central.content_catalog.catalog import device_id_for_serial
 from central.content_catalog.ports import NodeReleaseRefused
 from central.db import Database
 from central.fleet.node_boot import NodeBootService, NodeDeployment, claim_new_device
-from central.fleet.node_commands import NodeCommands, OperatorReboot
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
 from central.infra.player_versions import PgPlayerVersions
 from central.kernel.ports import AssetReadiness, Readiness
@@ -232,9 +231,12 @@ def test_new_boot_supersedes_prior_boot_and_revokes_its_sessions(registry):
     first = service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
     claim = claim_for(first)
     grant = sessions.enroll(claim)
-    commands = NodeCommands(sessions)
-    request = OperatorReboot(uuid4(), grant.session_id, 1, "fixture:operator")
-    commands.request_reboot(DEVICE_ID, request)
+
+    def authenticate(session_id, credential):
+        with registry.db.transaction() as conn:
+            return sessions.authenticate_in(conn, session_id, credential)
+
+    authenticate(grant.session_id, claim.credential)
     # A second boot of the same serial needs no knowledge of its predecessor.
     second = service.offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))
     second_claim = claim_for(second)
@@ -242,14 +244,12 @@ def test_new_boot_supersedes_prior_boot_and_revokes_its_sessions(registry):
     assert second_grant.command_eligible
     assert sessions.enroll(claim_for(second, owner="app_effect_broker")).command_eligible
     with pytest.raises(NodeControlError, match="superseded"):
-        commands.poll(grant.session_id, claim.credential)
-    with pytest.raises(NodeControlError, match="session_unavailable"):
-        commands.request_reboot(DEVICE_ID, replace(request, command_id=uuid4()))
-    assert commands.poll(second_grant.session_id, second_claim.credential) == {"commands": []}
+        authenticate(grant.session_id, claim.credential)
+    authenticate(second_grant.session_id, second_claim.credential)
     # The old boot's frozen offer still enrolls; it supersedes in turn (duplicate serials flap visibly).
     assert sessions.enroll(claim_for(first)).command_eligible
     with pytest.raises(NodeControlError, match="superseded"):
-        commands.poll(second_grant.session_id, second_claim.credential)
+        authenticate(second_grant.session_id, second_claim.credential)
 
 
 def test_refusal_is_frozen_and_never_retargeted(registry):

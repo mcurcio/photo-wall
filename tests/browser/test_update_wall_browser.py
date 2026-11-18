@@ -145,10 +145,10 @@ class Fleet:
         body = request.post_data_json
         if tail == "reboots":
             self.reboots.append(device)
-            box["commands"].insert(0, {"command_id": body["command_id"], "issued_at": 1_759_363_300,
-                                       "expires_at": 1_759_363_330, "outstanding": True, "responses": [],
-                                       "effects": [], "operator_audit_ref": body["operator_audit_ref"],
-                                       "command": {"command_session_id": body["session_id"]}})
+            # Central's reboot record (central/fleet/pi_reboot.py `reboot_records_in`), queued.
+            box["commands"].insert(0, {"command_id": body["command_id"], "reason": body["reason"], "by": "console",
+                                       "requested_at": 1_759_363_300, "delivered": None, "answered_at": None,
+                                       "outstanding": True})
             return self._json(route, {"duplicate": False})
         if tail == "app-stages":
             self.stages.append(device)
@@ -175,7 +175,7 @@ class Fleet:
                               "commands": [], "operations": []}
 
     def reboot(self, device):
-        """The box restarts: a new boot, its earlier commands no longer outstanding, a stage ended,
+        """The box restarts: a new boot, its earlier reboots asked and no longer outstanding, a stage ended,
         and its Player app enrolls again with Central (a new authority epoch) and reports readiness."""
         registry, key, player_id = _ENROLLED[device]
         assert enroll(registry, key, count=1, device_id=device)[0]["player_id"] == player_id
@@ -183,7 +183,7 @@ class Fleet:
         box = self.boxes[device]
         box["boot"], box["linked"] = f"boot-{next(self._ids)}", self.target_app
         for command in box["commands"]:
-            command["outstanding"] = False
+            command.update(outstanding=False, delivered=True, answered_at=1_759_363_301)
         for operation in box["operations"][:1]:
             operation["state"] = ("ended_by_later_boot" if operation["state"] == "target_running"
                                   else "interrupted_by_reboot")

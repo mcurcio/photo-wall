@@ -60,13 +60,14 @@ def setup(store):
     return core, command, driver
 
 
-@pytest.mark.parametrize("backlog,expected", [(1023, 1), (1024, 0)])
-def test_full_backlog_does_not_delay_command_poll_and_evidence_is_bounded(
-    monkeypatch, backlog, expected
-):
+def test_a_tick_polls_central_for_no_command_and_evidence_is_bounded(monkeypatch):
+    """The host's tick over a recording HTTP transport: no GET at all (its command poll is gone; an
+    operator's reboot is asked over the bus, BusReboots), one observation, the process's first host
+    facts and at most two evidence sends from a full backlog; no reboot runs. Mutation probe:
+    restore `_poll_commands` -> a GET is recorded, fails."""
     store = MemoryStore()
     core, command, driver = setup(store)
-    for _ in range(backlog):
+    for _ in range(1024):
         value = command()
         core.journal.data["records"][str(value.command_id)] = {
             "request": request_dict(value),
@@ -77,16 +78,13 @@ def test_full_backlog_does_not_delay_command_poll_and_evidence_is_bounded(
             "event": None,
             "effect_unknown": False,
         }
-    fresh = command()
     calls = []
 
     class Transport:
         def request(self, method, path, body=None, claim=None):
             calls.append((method, path, body))
             if method == "GET":
-                return 200, json.dumps(
-                    {"commands": [json.loads(encode_reboot_request(fresh))]}
-                ).encode()
+                return 200, json.dumps({"commands": [json.loads(encode_reboot_request(command()))]}).encode()
             if path == "/v2/node/evidence":
                 raise TimeoutError("lost evidence response")
             return 200, b"{}"
@@ -105,10 +103,10 @@ def test_full_backlog_does_not_delay_command_poll_and_evidence_is_bounded(
     runner.delivery = RebootDelivery(store)
     monkeypatch.setattr("appliance.host.host_runner.boottime_ms", lambda: 20)
     runner.tick()
-    assert calls[0][:2] == ("GET", "/v2/node/commands")
-    assert driver.calls == expected
-    # One poll, one observation, the process's first host facts, at most two evidence sends.
-    assert len(calls) == 5
+    assert [method for method, _, _ in calls if method == "GET"] == []
+    assert driver.calls == 0
+    assert [path for _, path, _ in calls][:2] == ["/v2/node/observations", "/v2/node/host-facts"]
+    assert 3 <= len(calls) <= 4 and all(path == "/v2/node/evidence" for _, path, _ in calls[2:])
     assert len(core.journal.data["records"]) == 1024
     assert "observation" in store.values
 
