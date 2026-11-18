@@ -257,9 +257,9 @@ def _pool_photo(library, number):
     pool, a check begins and records one step holding the photo. Returns (asset id, draft)."""
     refs = {view.name: view.connection_ref for view in library.connections()}
     ref = refs.get("Home") or library.add_connection(ConnectionWrite(
-        name="Home", url="http://immich.invalid", key="PUBLIC-FIXTURE-KEY-1234"))
+        name="Home", url="http://immich.invalid", key="PUBLIC-FIXTURE-KEY-1234"), by="console")
     query = SourceQuery(connection_ref=ref)
-    draft = library.create_draft(query, None)
+    draft = library.create_draft(query, None, by="console")
     photo = LibraryAsset(connection_ref=ref, upstream_id=str(uuid.UUID(int=number)),
                          revision=f"{number:040x}", kind="image", taken_at=100.0 + number,
                          width=4000, height=3000)

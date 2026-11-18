@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 from runtime_fakes import apply_procrastinate_schema
 from support.frames import frame_create
+from support.photo_pools import seed_source
 
 from central.app import create_app
 from central.media_queue import CHECK_CONNECTION_TASK
@@ -149,8 +150,9 @@ def test_a_put_keeps_or_replaces_the_key_and_queues_a_check_each_time(client):
 def test_a_cut_over_row_needs_its_key_once(client):
     test_client, library = client
     with library.db.transaction() as conn:
-        conn.execute("INSERT INTO library_connections(connection_ref,name,created_at) "
-                     "VALUES('family-library','family-library',0)")
+        conn.execute("INSERT INTO library_connections(connection_ref,name,created_at,created_by,"
+                     "changed_at,changed_by) VALUES('family-library','family-library',0,'unknown',"
+                     "0,'unknown')")
     path = f"{CONNECTIONS}/family-library"
     assert test_client.put(path, json={"name": "family-library", "url": "http://h"},
                            headers=AUTH).json() == {"error": "key_required"}
@@ -165,14 +167,11 @@ def test_a_connection_a_source_uses_is_not_removed(client):
     ref = _add(test_client).json()["connection_ref"]
     query = SourceQuery(connection_ref=ref)
     with library.db.transaction() as conn:
-        conn.execute("INSERT INTO media_sources(source_ref,query) VALUES('family:1',%s)",
-                     (Jsonb(query.model_dump(mode="json")),))
-        conn.execute("INSERT INTO media_source_names(name,current_ref,revision) "
-                     "VALUES('family','family:1',1)")
+        seed_source(conn, "family", query)
     refused = test_client.delete(f"{CONNECTIONS}/{ref}", headers=AUTH)
     assert (refused.status_code, refused.json()) == (409, {"error": "sources_use_connection"})
     with library.db.transaction() as conn:
-        conn.execute("UPDATE media_source_names SET deleted=TRUE")
+        conn.execute("UPDATE media_sources SET deleted=TRUE WHERE head")
         conn.execute("UPDATE media_sources SET refresh_active=FALSE")
     assert test_client.delete(f"{CONNECTIONS}/{ref}", headers=AUTH).status_code == 204
     assert test_client.get(CONNECTIONS, headers=AUTH).json() == []
@@ -193,7 +192,7 @@ def test_a_pool_photos_facts_say_which_frames_the_preview_holds(client, registry
     ref = _add(test_client).json()["connection_ref"]
     shown = LibraryAsset(connection_ref=ref, upstream_id=str(UUID(int=8)), revision="c" * 40,
                          kind="image", taken_at=1_700_000_000.0, width=3024, height=4032)
-    draft = library.create_draft(SourceQuery(connection_ref=ref), None)
+    draft = library.create_draft(SourceQuery(connection_ref=ref), None, by="console")
     with library.db.transaction() as conn:
         pool_key = library.pool_of_draft_in(conn, draft)
     library.record_step(library.begin_check(pool_key),
@@ -229,7 +228,7 @@ def test_a_pool_photos_facts_name_its_original_and_immichs_copies(client):
         taken_at=1_700_000_000.0, width=3024, height=4032,
         original=OriginalFile(media_type="image/heic", width=4032, height=3024, orientation=6,
                               size_bytes=2_000_000))
-    draft = library.create_draft(SourceQuery(connection_ref=ref), None)
+    draft = library.create_draft(SourceQuery(connection_ref=ref), None, by="console")
     with library.db.transaction() as conn:
         pool_key = library.pool_of_draft_in(conn, draft)
         conn.execute("UPDATE library_connections SET full_size_copies=FALSE")

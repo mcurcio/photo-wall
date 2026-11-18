@@ -28,7 +28,7 @@ from central.infra.shown_history_store import PgShownHistory
 from central.installation_models import OutputInterruption
 from central.installation_ports import InstallationSessions
 from central.installation_repository import PostgresInstallationRepository
-from central.media_ports import CoordinationMedia, MediaPin
+from central.media_ports import CoordinationMedia
 from central.media_repository import MediaRepository
 from central.planner import (
     PLAN_SECONDS,
@@ -173,10 +173,6 @@ def _membership(layers, groups: dict[str, str]) -> dict[str, str]:
     so a layer with no group starts at its instant with no Commit."""
     return {layer.assignment_id: groups[layer.assignment_id] for layer in layers
             if layer.assignment_id in groups}
-
-
-def offer_owner(plan: Plan) -> str:
-    return f"offer:{plan.player_id}:{plan.authority_epoch}:{plan.revision}"
 
 
 class Coordinator:
@@ -583,17 +579,8 @@ class Coordinator:
         ).fetchone()["groups"]
 
     def _offer(self, conn, plan: Plan, groups: dict[str, str]):
-        self.media.pin_variants_in(
-            conn,
-            (
-                MediaPin(
-                    owner=offer_owner(plan), variant=layer.variant, expires_at=plan.valid_until
-                )
-                for layer in plan.layers
-                if layer.variant
-            ),
-            require_ready=True,
-        )
+        # The offer is its variants' pin (decision 0034): each must be ready.
+        self.media.require_ready_in(conn, (layer.variant for layer in plan.layers if layer.variant))
         conn.execute(
             "INSERT INTO plan_offers(player_id,authority_epoch,revision,plan_id,manifest,groups,"
             "created_at,valid_until,created_by,changed_at,changed_by) "
@@ -649,7 +636,7 @@ class Coordinator:
             offers = self._offers(conn, configurations)
             self.media.reconcile_source_activity_in(conn, runtime.planning_source_refs())
             lines = self.media.scene_lines_in(conn)
-            authored = self.media.authored_in(conn)
+            authored = self.media.authored_in(conn, runtime.authored_asset_ids())
             locks, refused = self._locks(conn, configurations, offers)
             for player, code in sorted(refused.items()):
                 _left_out(player, code)
@@ -801,12 +788,11 @@ class Coordinator:
         self._record_selected(conn, plan, projection)
 
     def _settle(self) -> None:
-        """Commit the cues that are due, release expired pins, clean up expired offers."""
+        """Commit the cues that are due and clean up expired offers and locks (their pins go with them)."""
         with self._transaction() as conn:
             now = self.clock.utc()
             configurations = self._configurations(conn, report=False, by="scheduler")
             self._commit_due(conn, configurations, now, by="scheduler")
-            self.media.expire_pins_in(conn, now)
             self._cleanup(
                 conn,
                 now,
@@ -1082,7 +1068,7 @@ class Coordinator:
                 raise CoordinationError("unknown_assignment")
             if any(not self._authorized(layers[a], config) for a in reported):
                 raise CoordinationError("stale_binding", 403)
-            pins = []
+            variants = []
             for assignment in report.secured:
                 layer = layers[assignment]
                 if layer.end <= now:
@@ -1111,14 +1097,9 @@ class Coordinator:
                     ),
                 )
                 if layer.variant:
-                    pins.append(
-                        MediaPin(
-                            owner=f"secured:{player_id}:{report.authority_epoch}:{assignment}",
-                            variant=layer.variant,
-                            expires_at=layer.end,
-                        )
-                    )
-            self.media.pin_variants_in(conn, pins, require_ready=True)
+                    variants.append(layer.variant)
+            # The lock is its variant's pin (decision 0034): each must be ready.
+            self.media.require_ready_in(conn, variants)
             # The show state's row is this epoch's: `_configurations` just kept its configuration.
             conn.execute(
                 "UPDATE player_show_state SET readiness_sequence=%s,readiness_received_at=%s,"

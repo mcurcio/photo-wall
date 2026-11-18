@@ -10,9 +10,9 @@ import struct
 import zlib
 from uuid import UUID
 
-from psycopg.types.json import Jsonb
 from runtime_fakes import apply_procrastinate_schema
 from support.frames import frame_create
+from support.photo_pools import seed_source
 
 from central.db import DatabaseTransactionClock
 from central.infra.photo_library_store import PgPhotoLibrary
@@ -65,7 +65,7 @@ def library_of(registry) -> PgPhotoLibrary:
 
 def connected(library: PgPhotoLibrary, name="Family", answer: ContactAnswer | None = None) -> str:
     """A connection whose first check passed (Anna's key, Immich's counts)."""
-    ref = library.add_connection(ConnectionWrite(name=name, url="http://immich.invalid:2283", key=KEY))
+    ref = library.add_connection(ConnectionWrite(name=name, url="http://immich.invalid:2283", key=KEY), by="console")
     library.record_contact(library.begin_contact(ref), answer or ContactAnswer(
         version=TESTED, user=ANNA, counts=COUNTS, full_size_copies=True))
     return ref
@@ -133,7 +133,7 @@ def seed_varied_library(store: PgPhotoLibrary, connection_ref: str, *, pool_key:
     of every photo of `connection_ref`), seeded through the store's worker side, no Immich.
     Returns the seeded asset ids, in VARIED's order."""
     if pool_key is None:
-        draft = store.create_draft(SourceQuery(connection_ref=connection_ref), None)
+        draft = store.create_draft(SourceQuery(connection_ref=connection_ref), None, by="console")
         with store.db.transaction() as conn:
             pool_key = store.pool_of_draft_in(conn, draft)
     assets = varied_assets(connection_ref)
@@ -237,16 +237,18 @@ def draft_pool_key(registry, draft_ref: str | None = None) -> str:
     """The pool of the newest draft (or of `draft_ref`)."""
     with registry.db.transaction() as conn:
         row = conn.execute(
-            "SELECT pool_key FROM photo_drafts WHERE (%s::uuid IS NULL OR draft_ref=%s::uuid) "
-            "ORDER BY created_at DESC LIMIT 1", (draft_ref, draft_ref)).fetchone()
+            "SELECT pool_key FROM media_sources WHERE draft IS NOT NULL AND "
+            "(%s::text IS NULL OR source_ref=%s::text) ORDER BY created_at DESC LIMIT 1",
+            (draft_ref, draft_ref)).fetchone()
     assert row is not None, "no draft yet"
     return row["pool_key"]
 
 
 def drafts(registry) -> list[dict]:
     with registry.db.transaction() as conn:
-        return conn.execute("SELECT d.draft_ref,d.pool_key,p.query FROM photo_drafts d "
-                            "JOIN photo_pools p USING (pool_key) ORDER BY d.created_at").fetchall()
+        return conn.execute("SELECT d.source_ref AS draft_ref,d.pool_key,p.query FROM "
+                            "media_sources d JOIN photo_pools p USING (pool_key) "
+                            "WHERE d.draft IS NOT NULL ORDER BY d.created_at").fetchall()
 
 
 def begin(library: PgPhotoLibrary, pool_key: str):
@@ -279,15 +281,9 @@ def filled(library: PgPhotoLibrary, pool_key: str, entries, finish_with=None) ->
 
 def saved_source(registry, library: PgPhotoLibrary, name: str, query: SourceQuery) -> str:
     """A saved Photo source (`name:1`) of `query` and its pool, wanted as Runtime's are."""
-    draft = library.create_draft(query, None)
+    draft = library.create_draft(query, None, by="console")
     with registry.db.transaction() as conn:
         pool_key = library.pool_of_draft_in(conn, draft)
-        conn.execute("INSERT INTO media_sources(source_ref,query,pool_key,refresh_active) "
-                     "VALUES(%s,%s,%s,TRUE)",
-                     (f"{name}:1", Jsonb(query.model_dump(mode="json")), pool_key))
-        conn.execute("INSERT INTO media_source_names(name,current_ref,revision) VALUES(%s,%s,1)",
-                     (name, f"{name}:1"))
-        conn.execute("INSERT INTO media_source_name_versions(source_ref,name,revision) VALUES(%s,%s,1)",
-                     (f"{name}:1", name))
+        seed_source(conn, name, query, pool_key=pool_key)
         library.remove_draft_in(conn, draft)
     return f"{name}:1"

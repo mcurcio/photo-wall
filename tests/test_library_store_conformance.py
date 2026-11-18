@@ -194,15 +194,16 @@ class PgHarness:
         self._names += 1
         name = f"Library {self._names}"
         if key is not None:
-            return self.store.add_connection(ConnectionWrite(name=name, url=URL, key=key))
+            return self.store.add_connection(ConnectionWrite(name=name, url=URL, key=key), by="console")
         ref = f"library-{self._names:012d}"   # a cut-over row (C12): no URL, no key yet
         with self.db.transaction() as conn:
-            conn.execute("INSERT INTO library_connections(connection_ref,name,created_at) "
-                         "VALUES(%s,%s,0)", (ref, name))
+            conn.execute("INSERT INTO library_connections(connection_ref,name,created_at,"
+                         "created_by,changed_at,changed_by) VALUES(%s,%s,0,'unknown',0,'unknown')",
+                         (ref, name))
         return ref
 
     def want(self, query: SourceQuery) -> str:
-        draft = self.store.create_draft(query, None)
+        draft = self.store.create_draft(query, None, by="console")
         with self.db.transaction() as conn:
             key = self.store.pool_of_draft_in(conn, draft)
         self._drafts[key] = draft
@@ -215,7 +216,7 @@ class PgHarness:
     def request_check(self, pool_key: str) -> None:
         with self.db.transaction() as conn:
             query = self.store.draft_for_save_in(conn, self._drafts[pool_key]).query
-        self.store.set_draft_query(self._drafts[pool_key], query)   # Check now on a draft
+        self.store.set_draft_query(self._drafts[pool_key], query, by="console")   # Check now on a draft
 
     def rows(self, pool_key: str) -> dict[str, str]:
         with self.db.transaction() as conn:
@@ -241,8 +242,9 @@ class PgHarness:
     def listed(self, ref: str, kind: str) -> tuple[str, ...]:
         with self.db.transaction() as conn:
             return tuple(row["item_ref"] for row in conn.execute(
-                "SELECT item_ref FROM library_list_items WHERE connection_ref=%s AND kind=%s "
-                "ORDER BY item_ref", (ref, kind)).fetchall())
+                "SELECT e->>'ref' AS item_ref FROM library_connections c, "
+                "jsonb_array_elements(COALESCE(c.lists->%s->'items','[]'::jsonb)) AS e "
+                "WHERE c.connection_ref=%s ORDER BY 1", (kind, ref)).fetchall())
 
     def parent(self, ref: str, upstream_id: str) -> Parent | None:
         with self.db.transaction() as conn:
@@ -614,8 +616,9 @@ def test_one_immich_asset_seen_by_two_pools_and_two_checks_is_one_record(harness
     assert harness.leased(shown.asset_id) == redated    # the same revision, the new date
 
 
-def test_an_edit_is_a_second_revision_under_the_same_parent(harness, clock):
-    """A2 case 2: a new revision is a new child; known_revisions answers the newer."""
+def test_an_edit_replaces_the_revision_of_its_one_photo(harness, clock):
+    """A2 case 2, decision 0034: a new revision replaces the old on the photo's one record (the
+    old is no photo's revision any more); known_revisions answers the newer."""
     store = harness.store
     ref = harness.connect()
     key = harness.want(SourceQuery(connection_ref=ref))
@@ -628,7 +631,7 @@ def test_an_edit_is_a_second_revision_under_the_same_parent(harness, clock):
     store.record_step(store.begin_check(key), step(
         InPool(asset=edited, updated_at="2026-10-02T00:00:00.000Z")))
     assert (harness.leased(unedited.asset_id), harness.leased(edited.asset_id)) == (
-        unedited, edited)
+        None, edited)
     assert store.known_revisions(ref, [uid(1)]) == {
         uid(1): KnownRevision(updated_at="2026-10-02T00:00:00.000Z", revision=EDITED)}
 

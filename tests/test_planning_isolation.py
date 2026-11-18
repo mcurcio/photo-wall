@@ -150,7 +150,7 @@ def test_one_refused_scene_leaves_every_other_frame_planned(registry, wall, monk
 def test_the_runtime_moves_on_and_commits_settle_when_planning_fails(registry, wall, monkeypatch):
     """The Runtime is its own step: with planning failing, a Program window that opens after the
     last tick still opens (the saved Runtime is at the new time, its Run admitted), and an
-    expired pin is still released (settle). Mutation probe: move `runtime.advance` back inside
+    expired lock (a pin, decision 0034) is still released (settle). Mutation probe: move `runtime.advance` back inside
     `_plan`'s transaction (runtime_state's `now` stays put)."""
     app, client = wall
     players(registry, 1)
@@ -161,8 +161,11 @@ def test_the_runtime_moves_on_and_commits_settle_when_planning_fails(registry, w
                                mode="json", exclude={"program_id", "revision"}))
     assert response.status_code == 201, response.text
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO media_references(owner,variant_key,expires_at) "
-                     "VALUES('expired-offer','asset.recipe',1010)")
+        player = conn.execute("SELECT id FROM players LIMIT 1").fetchone()["id"]
+        conn.execute("INSERT INTO assignment_locks(player_id,authority_epoch,assignment_id,layer,"
+                     "secured_at,valid_until,created_at,created_by,changed_at,changed_by) "
+                     "VALUES(%s,1,'expired','{}',1000,1010,1000,'central',1000,'central')",
+                     (player,))
 
     def broken(*_args, **_kwargs):
         raise RuntimeError("planning is broken for the test")
@@ -174,7 +177,7 @@ def test_the_runtime_moves_on_and_commits_settle_when_planning_fails(registry, w
     assert (steps(app)["runtime"], steps(app)["settle"]) == ("ok", "ok")
     with registry.db.transaction() as conn:
         state = conn.execute("SELECT snapshot, changed_by FROM runtime_state").fetchone()
-        pins = conn.execute("SELECT count(*) AS n FROM media_references").fetchone()["n"]
+        pins = conn.execute("SELECT count(*) AS n FROM assignment_locks").fetchone()["n"]
     assert state["snapshot"]["now"] == 1025 and state["changed_by"] == "scheduler"
     assert [run["scene"]["scene_id"] for run in state["snapshot"]["runs"].values()] == ["evening"]
     assert pins == 0

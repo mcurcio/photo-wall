@@ -135,7 +135,7 @@ class CopyView(Model):
     """One of Immich's copies of a photo (follow-ups 2026-10-11, slice A3). `in_immich`: whether
     Immich keeps it for this photo (`central.photo_library.policy.copies_in_immich`; None: cannot
     tell, the connection has not said whether full-size copies are on). `measured`: its size when
-    Photo Wall last downloaded it (its `asset_copies` row; None: never downloaded, and always None
+    Photo Wall last downloaded it (its photo row's `copies`; None: never downloaded, and always None
     for the original, whose size is `PhotoFacts.original`). The console says "size known after
     first use", never an assumed size."""
 
@@ -157,8 +157,8 @@ class FrameCopy(Model):
 
 class PhotoFacts(Model):
     """`GET /v1/operator/library/photos/{asset_id}` (slice A3): what Photo Wall knows of one pool
-    photo and its copies, read from its `library_assets` row, its `asset_revisions` row, that
-    revision's `asset_copies` rows and its media variants' records. `width` x `height` is the photo as
+    photo and its copies, read from its `library_assets` row (its revision and that revision's
+    measured copies) and its media variants' records. `width` x `height` is the photo as
     Immich shows it (upright, edited). `original` None: no check with `withExif` has read it yet.
     `copies` lists thumbnail, preview, fullsize, original, in that order. `prepared_from`: the copy
     the wall's prepared copy was made from (`MediaReady.made_from` of its newest made media

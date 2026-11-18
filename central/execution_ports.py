@@ -15,6 +15,5 @@ class ExecutionMediaAuthorization(Protocol):
         authority_epoch: int,
         configuration: PlayerConfiguration,
         variant_key: str,
-        reference_owners: set[str],
         now: float,
     ) -> bool: ...

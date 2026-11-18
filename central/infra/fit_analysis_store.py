@@ -3,8 +3,8 @@
 
 `PgFitAnalysisReader` implements central.wall_plan.ports.FitAnalysisReader. A selection's photos
 are the in-pool rows of its Sources' and drafts' pools, each revision (`asset_id`) counted once
-however many pools hold it, with its kind from its Immich asset (`library_assets`) and its
-upright size from its revision (`asset_revisions`): owner item 6, the facts live once. Key content
+however many pools hold it, with its kind, upright size, copies and key content from its photo's
+`library_assets` row: owner item 6, the facts live once (decision 0034). Key content
 counts as checked only while it is not due a new measurement (the key-content store's due rule,
 central/infra/key_content_store.py `due_sql`), but the sample judges any key the Planner places
 with (`usable_key`, due or not), so what the board shows is what the wall is cropped from.
@@ -45,26 +45,28 @@ from central.wall_plan.fit_analysis import (
 # The selection's in-pool revisions, once each (`%(keys)s`: its pools' keys).
 _MEMBERS: Final = ("WITH members AS (SELECT DISTINCT asset_id FROM photo_pool_rows "
                    "WHERE pool_key = ANY(%(keys)s) AND outcome = 'in_pool' AND asset_id IS NOT NULL) ")
-# The inputs of `readable_of` for a revision `a` joined to its Immich asset `l`. `edited` is
-# `LibraryAsset.edited`'s test (an edit-list suffix on the revision) in SQL.
+# A measured copy's side on photo `l` (its `copies` document, by copy name).
+def _copy_side(copy: str, side: str) -> str:
+    return f"(l.copies->'{copy}'->>'{side}')::int"
+
+
+# The inputs of `readable_of` for a revision's photo `l`. `edited` is `LibraryAsset.edited`'s
+# test (an edit-list suffix on the revision) in SQL.
 READABLE_FACTS: Final = (
-    "l.kind, a.width, a.height, strpos(a.revision, '-') > 0 AS edited, l.original_media_type, "
-    "c.full_size_copies, pv.width AS preview_width, pv.height AS preview_height, "
-    "fs.width AS fullsize_width, fs.height AS fullsize_height ")
-READABLE_JOINS: Final = (
-    "LEFT JOIN library_connections c ON c.connection_ref = a.connection_ref "
-    "LEFT JOIN asset_copies pv ON pv.asset_id = a.asset_id AND pv.copy = 'preview' "
-    "LEFT JOIN asset_copies fs ON fs.asset_id = a.asset_id AND fs.copy = 'fullsize' ")
+    "l.kind, l.width, l.height, strpos(l.revision, '-') > 0 AS edited, l.original_media_type, "
+    f"c.full_size_copies, {_copy_side('preview', 'width')} AS preview_width, "
+    f"{_copy_side('preview', 'height')} AS preview_height, "
+    f"{_copy_side('fullsize', 'width')} AS fullsize_width, "
+    f"{_copy_side('fullsize', 'height')} AS fullsize_height ")
+READABLE_JOINS: Final = "LEFT JOIN library_connections c ON c.connection_ref = l.connection_ref "
 _FACT_COLUMNS: Final = ("kind", "width", "height", "edited", "original_media_type",
                         "full_size_copies", "preview_width", "preview_height", "fullsize_width",
                         "fullsize_height")
 _GROUP_BY: Final = "GROUP BY " + ", ".join(str(n) for n in range(1, len(_FACT_COLUMNS) + 1))
-# Each member's kind, size, readable-size facts and its measured key content, due or not.
-_FACTS: Final = ("FROM members m JOIN asset_revisions a USING (asset_id) "
-                 "JOIN library_assets l ON l.connection_ref = a.connection_ref "
-                 "AND l.upstream_id = a.upstream_id " + READABLE_JOINS +
-                 "LEFT JOIN photo_key_content k ON k.asset_id = m.asset_id "
-                 "AND k.status = 'measured' ")
+# Each member's kind, size, readable-size facts and its key content (on `l`, read when
+# `l.key_status = 'measured'`, due or not).
+_FACTS: Final = "FROM members m JOIN library_assets l USING (asset_id) " + READABLE_JOINS
+_MEASURED: Final = "l.key_status = 'measured'"
 # A row's facts equal to one of the arrays' (`%(f_<column>)s`; NULL equals NULL).
 _FACTS_IN: Final = (
     "EXISTS (SELECT 1 FROM unnest(%(f_kind)s::text[], %(f_width)s::int[], %(f_height)s::int[], "
@@ -72,14 +74,14 @@ _FACTS_IN: Final = (
     "%(f_preview_width)s::int[], %(f_preview_height)s::int[], %(f_fullsize_width)s::int[], "
     "%(f_fullsize_height)s::int[]) AS w(kind, width, height, edited, original_type, full_size, "
     "preview_width, preview_height, fullsize_width, fullsize_height) "
-    "WHERE w.kind = l.kind AND w.width = a.width AND w.height = a.height "
-    "AND w.edited = (strpos(a.revision, '-') > 0) "
+    "WHERE w.kind = l.kind AND w.width = l.width AND w.height = l.height "
+    "AND w.edited = (strpos(l.revision, '-') > 0) "
     "AND w.original_type IS NOT DISTINCT FROM l.original_media_type "
     "AND w.full_size IS NOT DISTINCT FROM c.full_size_copies "
-    "AND w.preview_width IS NOT DISTINCT FROM pv.width "
-    "AND w.preview_height IS NOT DISTINCT FROM pv.height "
-    "AND w.fullsize_width IS NOT DISTINCT FROM fs.width "
-    "AND w.fullsize_height IS NOT DISTINCT FROM fs.height) ")
+    f"AND w.preview_width IS NOT DISTINCT FROM {_copy_side('preview', 'width')} "
+    f"AND w.preview_height IS NOT DISTINCT FROM {_copy_side('preview', 'height')} "
+    f"AND w.fullsize_width IS NOT DISTINCT FROM {_copy_side('fullsize', 'width')} "
+    f"AND w.fullsize_height IS NOT DISTINCT FROM {_copy_side('fullsize', 'height')}) ")
 
 
 def readable_of_row(row: Any) -> Size | None:
@@ -100,10 +102,8 @@ def readable_sizes_in(conn: Any, asset_ids: Iterable[str]
     if not ids:
         return {}
     rows = conn.execute(
-        "SELECT a.asset_id, " + READABLE_FACTS + "FROM asset_revisions a "
-        "JOIN library_assets l ON l.connection_ref = a.connection_ref "
-        "AND l.upstream_id = a.upstream_id " + READABLE_JOINS + "WHERE a.asset_id = ANY(%s)",
-        (ids,)).fetchall()
+        "SELECT l.asset_id, " + READABLE_FACTS + "FROM library_assets l " + READABLE_JOINS +
+        "WHERE l.asset_id = ANY(%s)", (ids,)).fetchall()
     return {row["asset_id"]: (row["kind"], readable_of_row(row)) for row in rows}
 
 
@@ -119,7 +119,8 @@ class PgFitAnalysisReader:
             read_at = self.times.now_in(conn)
             facts = conn.execute(
                 _MEMBERS + "SELECT " + READABLE_FACTS + ", count(*) AS photos, "
-                "count(k.asset_id) FILTER (WHERE NOT " + due_sql("k") + ") AS measured " + _FACTS +
+                "count(*) FILTER (WHERE " + _MEASURED + " AND NOT " + due_sql("l") + ") AS measured "
+                + _FACTS +
                 _GROUP_BY,
                 {"keys": keys} | due_params(read_at)).fetchall()
             others = conn.execute(
@@ -164,8 +165,9 @@ class PgFitAnalysisReader:
                 return ()
             arrays = {"f_" + column: [row[column] for row in wanted] for column in _FACT_COLUMNS}
             rows = conn.execute(
-                _MEMBERS + "SELECT m.asset_id, " + READABLE_FACTS + ", k.key " + _FACTS +
-                "WHERE " + _FACTS_IN + ("AND k.asset_id IS NOT NULL " if measured_only else "") +
+                _MEMBERS + "SELECT m.asset_id, " + READABLE_FACTS + ", CASE WHEN " + _MEASURED +
+                " THEN l.key END AS key " + _FACTS +
+                "WHERE " + _FACTS_IN + (f"AND {_MEASURED} " if measured_only else "") +
                 "ORDER BY md5(m.asset_id || ':' || %(seed)s::text), m.asset_id LIMIT %(limit)s",
                 params | arrays | {"seed": seed, "limit": limit}).fetchall()
         photos = []
@@ -197,8 +199,8 @@ class PgFitAnalysisReader:
         keys: list[str] = []
         reading = False
         sources = {row["source_ref"]: row for row in conn.execute(
-            "SELECT source_ref, query, pool_key FROM media_sources WHERE source_ref = ANY(%s)",
-            (list(selection.sources),)).fetchall()}
+            "SELECT source_ref, query, pool_key FROM media_sources WHERE source_ref = ANY(%s) "
+            "AND draft IS NULL", (list(selection.sources),)).fetchall()}
         if len(sources) != len(set(selection.sources)):
             raise AnalysisRefused("source_unknown", 404)
         for row in sources.values():
@@ -209,8 +211,9 @@ class PgFitAnalysisReader:
             else:
                 keys.append(key)
         drafts = {row["draft_ref"]: row["pool_key"] for row in conn.execute(
-            "SELECT draft_ref, pool_key FROM photo_drafts WHERE draft_ref = ANY(%s)",
-            (list(selection.drafts),)).fetchall()}
+            "SELECT source_ref AS draft_ref, pool_key FROM media_sources "
+            "WHERE source_ref = ANY(%s) AND draft IS NOT NULL",
+            ([str(draft) for draft in selection.drafts],)).fetchall()}
         if len(drafts) != len(set(selection.drafts)):
             raise AnalysisRefused("draft_unknown", 404)
         keys.extend(drafts.values())

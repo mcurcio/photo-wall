@@ -19,8 +19,8 @@ import logging
 
 import pytest
 from fastapi.testclient import TestClient
-from psycopg.types.json import Jsonb
 from runtime_fakes import apply_procrastinate_schema
+from support.photo_pools import seed_source
 
 from central.app import create_app
 from central.media_queue import CHECK_CONNECTION_TASK
@@ -180,10 +180,7 @@ def test_removed_variables_make_it_an_ordinary_connection_and_keep_its_sources(s
     [row] = client.get(CONNECTIONS, headers=AUTH).json()
     ref = row["connection_ref"]
     with library.db.transaction() as conn:
-        conn.execute("INSERT INTO media_sources(source_ref,query) VALUES('family:1',%s)",
-                     (Jsonb(SourceQuery(connection_ref=ref).model_dump(mode="json")),))
-        conn.execute("INSERT INTO media_source_names(name,current_ref,revision) "
-                     "VALUES('family','family:1',1)")
+        seed_source(conn, "family", SourceQuery(connection_ref=ref))
     caplog.set_level(logging.WARNING)
     client, library = start()
     [after] = client.get(CONNECTIONS, headers=AUTH).json()
@@ -202,10 +199,12 @@ def test_it_takes_over_the_connection_waiting_since_the_cut_over(start, registry
     """Delivery 4's cut-over left the deployment's old connection as a row with no address or
     key that its Sources point at; the setting fills that row rather than adding a second."""
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO library_connections(connection_ref,name,created_at) "
-                     "VALUES('family-library','family-library',0)")
-        conn.execute("INSERT INTO library_connections(connection_ref,name,url,api_key,created_at) "
-                     "VALUES('library-000000000001','Immich','http://other.invalid/api','K-0000',1)")
+        conn.execute("INSERT INTO library_connections(connection_ref,name,created_at,created_by,"
+                     "changed_at,changed_by) VALUES('family-library','family-library',0,'unknown',"
+                     "0,'unknown')")
+        conn.execute("INSERT INTO library_connections(connection_ref,name,url,api_key,created_at,"
+                     "created_by,changed_at,changed_by) VALUES('library-000000000001','Immich',"
+                     "'http://other.invalid/api','K-0000',1,'console',1,'console')")
     client, library = start(**_set())
     rows = {row["connection_ref"]: row for row in client.get(CONNECTIONS, headers=AUTH).json()}
     assert rows["family-library"]["managed"] and rows["family-library"]["url"] == URL + "/api"
@@ -221,7 +220,8 @@ def test_a_set_connection_still_named_by_its_ref_is_named_immich_at_the_next_sta
     the more natural "Immich""). The next start names it; no check is queued for a rename."""
     with registry.db.transaction() as conn:
         conn.execute("INSERT INTO library_connections(connection_ref,name,url,api_key,managed,"
-                     "created_at) VALUES('immich-main','immich-main',%s,%s,TRUE,0)",
+                     "created_at,created_by,changed_at,changed_by) VALUES('immich-main',"
+                     "'immich-main',%s,%s,TRUE,0,'unknown',0,'unknown')",
                      (URL + "/api", KEY))
     client, library = start(**_set())
     [row] = client.get(CONNECTIONS, headers=AUTH).json()
@@ -231,8 +231,9 @@ def test_a_set_connection_still_named_by_its_ref_is_named_immich_at_the_next_sta
 
 def test_with_a_connection_of_that_name_it_is_named_immich_2(start, registry):
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO library_connections(connection_ref,name,url,api_key,created_at) "
-                     "VALUES('library-000000000001','Immich','http://other.invalid/api','K-0000',1)")
+        conn.execute("INSERT INTO library_connections(connection_ref,name,url,api_key,created_at,"
+                     "created_by,changed_at,changed_by) VALUES('library-000000000001','Immich',"
+                     "'http://other.invalid/api','K-0000',1,'console',1,'console')")
     client, _ = start(**_set())
     names = {row["name"]: row["managed"] for row in client.get(CONNECTIONS, headers=AUTH).json()}
     assert names == {"Immich": False, "Immich 2": True}

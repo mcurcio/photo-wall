@@ -3,7 +3,7 @@
 A media variant is named by its inputs (`<asset_id>.<recipe_id>`, kernel/types.py) and stored by
 its bytes (`media/blobs/<sha256>`, `CacheLayout`). `FrameMedia.resolve` decides, in one
 transaction and in the order the coordination lock imposes, whether a Player's bearer may read a
-variant now, and pins it for the transfer; the route then reads it through the AssetReader, which
+variant now, and stamps it served; the route then reads it through the AssetReader, which
 serves the file on a hit and publishes `PrepareMedia` on a miss (a purged or corrupt file is
 re-made). Nothing here reaches the library: Players never do (requirements.md).
 
@@ -12,15 +12,15 @@ The order (it serializes with coordination, so a grant reads one cut of its offe
 2. the bearer's session; none: 401;
 3. the session's configuration at its epoch; none: 401;
 4. the media lock, then the variant's Asset record; none: 404 `media_unavailable`;
-5. the variant's live pins;
-6. the execution's authorization (an offer or a lock that names the variant, pinned); refused:
-   403 `media_forbidden`;
-7. a transfer pin `transfer:<hex>`, valid for `TRANSFER_SECONDS`, released when the transfer ends.
+5. the execution's authorization (a current offer or lock of this session that names the variant:
+   that is the variant's pin, decision 0034); refused: 403 `media_forbidden`;
+6. the variant stamped served (`assets.last_served_at`, the database's clock): the media cache
+   spares a file served within `TRANSFER_SECONDS` (central/assets/maintenance.py), so it is never
+   evicted mid-transfer. Nothing is held or released after.
 """
 
 from __future__ import annotations
 
-import secrets
 from dataclasses import dataclass
 from typing import Final, Protocol
 
@@ -32,6 +32,7 @@ from central.kernel.types import require_media_variant_key
 from contracts.models import PlayerConfiguration
 from contracts.time import Clock
 
+# How long a transfer runs at most: the media cache spares a variant served this recently.
 TRANSFER_SECONDS: Final = 150
 # The reference a planned variant carries: "wanted", never where from. Its photo's library and key
 # are the media worker's alone (R22), which finds the revision from the variant's name; `.invalid`
@@ -68,7 +69,6 @@ class FrameMediaRefused(Exception):
 @dataclass(frozen=True, slots=True)
 class FrameGrant:
     candidates: Candidates  # the variant's one PrepareMedia job, pinned
-    transfer_owner: str  # released by `FrameMedia.release` when the transfer ends
 
 
 class FrameMediaGrants(Protocol):
@@ -85,18 +85,13 @@ class FrameMediaGrants(Protocol):
 
     def lock_media(self, tx: Transaction) -> None: ...
 
-    def live_references(self, tx: Transaction, key: str, now: float) -> set[str]: ...
-
-    def authorized(self, tx: Transaction, grantee: Grantee, key: str, references: set[str],
-                   now: float) -> bool: ...
-
-    def pin(self, tx: Transaction, owner: str, key: str, expires_at: float) -> None: ...
-
-    def release(self, tx: Transaction, owner: str) -> None: ...
+    def authorized(self, tx: Transaction, grantee: Grantee, key: str, now: float) -> bool:
+        """Whether a current offer or lock of the grantee's session names the variant `key`."""
+        ...
 
 
 class FrameMedia:
-    """Blocking: call `resolve` and `release` from a worker thread."""
+    """Blocking: call `resolve` from a worker thread."""
 
     def __init__(self, *, transactions: Transactions, records: AssetRecords,
                  grants: FrameMediaGrants, clock: Clock) -> None:
@@ -110,7 +105,6 @@ class FrameMedia:
             asset = variant_asset_key(key)
         except ValueError:
             raise FrameMediaRefused("media_unavailable", 404) from None
-        owner = "transfer:" + secrets.token_hex(24)
         with self._transactions.begin() as tx:
             self._grants.serialize(tx)
             grantee = self._grants.grantee(tx, token)
@@ -119,14 +113,7 @@ class FrameMedia:
             self._grants.lock_media(tx)
             if self._records.get(tx, asset) is None:
                 raise FrameMediaRefused("media_unavailable", 404)
-            now = self._clock.utc()
-            references = self._grants.live_references(tx, key, now)
-            if not self._grants.authorized(tx, grantee, key, references, now):
+            if not self._grants.authorized(tx, grantee, key, self._clock.utc()):
                 raise FrameMediaRefused("media_forbidden", 403)
-            self._grants.pin(tx, owner, key, now + TRANSFER_SECONDS)
-        return FrameGrant(Candidates(jobs=(PrepareMedia(key=key),), pinned=True), owner)
-
-    def release(self, owner: str) -> None:
-        """Drop a transfer pin; its expiry is the fallback when this cannot run."""
-        with self._transactions.begin() as tx:
-            self._grants.release(tx, owner)
+            self._records.touch_served(tx, asset)
+        return FrameGrant(Candidates(jobs=(PrepareMedia(key=key),), pinned=True))

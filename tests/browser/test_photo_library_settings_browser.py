@@ -16,8 +16,8 @@ import pytest
 from console_tasks import connect, current_hash, go
 from operator_harness import operator_server
 from playwright.sync_api import expect
-from psycopg.types.json import Jsonb
 from runtime_fakes import apply_procrastinate_schema
+from support.photo_pools import seed_source
 
 from central.db import DatabaseTransactionClock
 from central.infra.photo_library_store import PgPhotoLibrary
@@ -62,7 +62,7 @@ class _Queue:
 
 def _added(registry, name="Family"):
     return PgPhotoLibrary(registry.db, times=DatabaseTransactionClock(), queue=_Queue()).add_connection(
-        ConnectionWrite(name=name, url="http://immich.invalid:2283", key=KEY))
+        ConnectionWrite(name=name, url="http://immich.invalid:2283", key=KEY), by="console")
 
 
 def _contact(library, ref, result):
@@ -203,9 +203,7 @@ def test_each_problem_says_its_sentence_and_its_fix_and_needs_attention_lists_it
 def test_remove_is_refused_in_plain_words_while_a_source_uses_the_connection(page, registry, library):
     ref = _added(registry)
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO media_sources(source_ref,query) VALUES('family:1',%s)",
-                     (Jsonb(SourceQuery(connection_ref=ref).model_dump(mode="json")),))
-        conn.execute("INSERT INTO media_source_names(name,current_ref,revision) VALUES('family','family:1',1)")
+        seed_source(conn, "family", SourceQuery(connection_ref=ref))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "photo-library")
         row = _region(page, "Family")
@@ -217,8 +215,9 @@ def test_remove_is_refused_in_plain_words_while_a_source_uses_the_connection(pag
 
 def test_a_connection_waiting_since_the_cut_over_asks_for_its_address_and_key(page, registry, library):
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO library_connections(connection_ref,name,created_at) "
-                     "VALUES('family-library','family-library',0)")
+        conn.execute("INSERT INTO library_connections(connection_ref,name,created_at,created_by,"
+                     "changed_at,changed_by) VALUES('family-library','family-library',0,'unknown',"
+                     "0,'unknown')")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "photo-library")
         row = _region(page, "family-library")

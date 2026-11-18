@@ -57,8 +57,8 @@ def _pool(registry) -> None:
     assert library.finish_check(lease, CheckComplete())
     stored = key_content(4000, 3000).model_dump(mode="json")
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO photo_key_content(asset_id,analysis_version,status,key,"
-                     "measured_at) SELECT asset_id,%s,'measured',%s,0 FROM asset_revisions",
+        conn.execute("UPDATE library_assets SET key_analysis_version=%s,key_status='measured',"
+                     "key=%s,key_measured_at=0 WHERE asset_id IS NOT NULL",
                      (stored["analysis_version"], Jsonb(stored)))
         conn.execute("ANALYZE")
 

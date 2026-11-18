@@ -318,8 +318,7 @@ def test_offers_protect_possible_secured_bytes_across_central_restart_and_new_qu
     schedule(coordinator, ["frame-0"], starts=1000, media=True)
     offered = coordinator.delivery(player["player_id"], 1)["plan"]
     first = offered.layers[0]
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM media_references").fetchone()["n"] > 0
+    assert first.variant is not None   # the offer names its variant: its pin (decision 0034)
     registry.clock.advance(31)  # Missing 30-second ACK is not permission to reroll.
     publish_fixture_catalog(registry, digest="b" * 64, asset="original-b")
     restarted = Coordinator(registry.db, registry.clock)
@@ -387,7 +386,7 @@ def test_missing_ready_blob_refuses_whole_offer_but_persists_current_runtime(reg
     assert coordinator.delivery(player["player_id"], 1)["plan"] is None
     assert coordinator.runtime.read().project(1000).runs
     with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM media_references").fetchone()["n"] == 0
+        assert conn.execute("SELECT count(*) AS n FROM plan_offers").fetchone()["n"] == 0
 
 
 def test_mixed_calibrated_outputs_use_complete_plan_configuration_and_suppress_stale_calibration(registry):
@@ -930,7 +929,7 @@ def test_a_hand_placed_photo_is_authored_at_its_scenes_crop_limit(registry):
     scene, square = square_photo_scene(registry, crop_limit=0.5)
     coordinator = Coordinator(registry.db, registry.clock)
     result = coordinator.configure_authored_scene(scene, "square:1", (square.asset_id,), by="console")
-    assert result["scene"]["revision"] == 1 and result["created"] == 1
+    assert result["scene"]["revision"] == 1 and result["created"] == 0
 
 
 def test_a_hand_placed_photo_beyond_the_default_crop_limit_is_refused(registry):

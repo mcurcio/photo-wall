@@ -40,8 +40,11 @@ def authored_scene(*contributions, scene_id="authored-scene"):
 
 
 def count_authored(registry):
-    with registry.db.transaction() as conn:
-        return conn.execute("SELECT count(*) AS n FROM authored_candidates").fetchone()["n"]
+    """How many library photo ids the saved Runtime's Scenes name (decision 0034: authoring
+    stores nothing else)."""
+    from central.runtime_store import RuntimeStore
+
+    return len(RuntimeStore(registry.db, registry.clock).read().authored_asset_ids())
 
 
 def test_source_candidates_filters_originals_with_the_planner_policy(registry):
@@ -165,7 +168,7 @@ def test_authored_scene_accepts_an_eligible_alternative_for_each_frame(registry)
 
     result = coordinator.configure_authored_scene(scene, spec.source_ref,
                                                   tuple(item.asset_id for item in originals), by="console")
-    assert result["created"] == 2
+    assert result["created"] == 0
     assert count_authored(registry) == 2
 
 

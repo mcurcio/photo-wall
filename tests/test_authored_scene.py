@@ -31,8 +31,11 @@ def authored_scene(asset_id: str, *, source_refs=(), revision=1):
 
 
 def count_authored(registry):
-    with registry.db.transaction() as conn:
-        return conn.execute("SELECT count(*) AS n FROM authored_candidates").fetchone()["n"]
+    """How many library photo ids the saved Runtime's Scenes name (decision 0034: authoring
+    stores nothing else)."""
+    from central.runtime_store import RuntimeStore
+
+    return len(RuntimeStore(registry.db, registry.clock).read().authored_asset_ids())
 
 
 def test_authored_scene_commit_is_atomic_and_idempotent(registry):
@@ -43,7 +46,7 @@ def test_authored_scene_commit_is_atomic_and_idempotent(registry):
     result = coordinator.configure_authored_scene(scene, spec.source_ref, (originals[0].asset_id,), by="console")
     assert result == {"scene": scene.model_dump(mode="json"),
                       "earlier_version": {"playing": [], "waiting": []},
-                      "asset_refs": [originals[0].asset_id], "created": 1}
+                      "asset_refs": [originals[0].asset_id], "created": 0}
     assert coordinator.runtime.read().export_state()["scenes"][scene.scene_id] == scene.model_dump(mode="json")
     assert count_authored(registry) == 1
 
@@ -67,7 +70,7 @@ def test_runtime_failure_rolls_back_authored_rows_and_snapshot(registry, monkeyp
     with pytest.raises(RuntimeError, match="injected runtime failure"):
         coordinator.configure_authored_scene(authored_scene(originals[0].asset_id),
                                              spec.source_ref, (originals[0].asset_id,), by="console")
-    assert count_authored(registry) == 0
+    assert count_authored(registry) == 1      # the baseline's "old" alone
     assert coordinator.runtime.read().export_state() == before
 
 
@@ -112,7 +115,8 @@ def test_atomic_scene_api_validates_authority_and_commits_complete_request(regis
         assert count_authored(registry) == 0
         response = client.put(route, headers=headers, json=body)
         assert response.status_code == 200
-        assert response.json()["created"] == 1
+        assert response.json()["created"] == 0
+        assert count_authored(registry) == 1
         assert Coordinator(registry.db, registry.clock).runtime.read().export_state()["scenes"][scene.scene_id] == body["scene"]
 
 
@@ -147,3 +151,24 @@ def test_refresh_membership_change_serializes_before_atomic_scene(registry, monk
             future.result(timeout=3)
     assert count_authored(registry) == 0
     assert coordinator.runtime.read().export_state()["scenes"] == {}
+
+
+def test_an_authored_scene_plans_from_its_photos_current_facts(registry):
+    """Decision 0034: a Scene keeps its photo ids, and planning reads their current facts from
+    the library (`MediaRepository.authored_in` over `Runtime.authored_asset_ids`), never a copy
+    from the save. Mutation probe: read the facts the save saw (a copy kept at save time) -> the
+    photo's changed size is stale and this test fails."""
+    repo, spec, originals = setup_source(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    photo = originals[0]
+    coordinator.configure_authored_scene(authored_scene(photo.asset_id), spec.source_ref,
+                                         (photo.asset_id,), by="console")
+    with registry.db.transaction() as conn:   # the photo's facts change after the save
+        conn.execute("UPDATE library_assets SET width=width*2,height=height*2,taken_at=42 "
+                     "WHERE asset_id=%s", (photo.asset_id,))
+    with registry.db.transaction() as conn:
+        authored = coordinator.media.authored_in(conn, coordinator.runtime.read().authored_asset_ids())
+        assert repo.authored_in(conn, frozenset({"asset-gone"})) == {}
+    candidate = authored[photo.asset_id]
+    assert (candidate.original_width, candidate.original_height, candidate.captured_at) == (
+        photo.width * 2, photo.height * 2, 42)

@@ -832,6 +832,27 @@ class Runtime:
             refs.update(self._scene_source_refs(queued.scene))
         return refs
 
+    @staticmethod
+    def _scene_asset_refs(scene: Scene) -> set[str]:
+        refs = {ref for contribution in (*scene.contributions, *scene.outro_contributions)
+                for ref in contribution.asset_refs}
+        for child in scene.children:
+            refs.update(Runtime._scene_asset_refs(child.scene))
+        return refs
+
+    def authored_asset_ids(self) -> frozenset[str]:
+        """Every library photo id a stored Scene, an active Run's Scene copy or a queued activation names
+        (decision 0034: planning reads their current facts)."""
+        refs: set[str] = set()
+        for scene in self._state.scenes.values():
+            refs.update(self._scene_asset_refs(scene))
+        for run in self._state.runs.values():
+            if run.active:
+                refs.update(self._scene_asset_refs(run.scene))
+        for queued in self._state.queue:
+            refs.update(self._scene_asset_refs(queued.scene))
+        return frozenset(refs)
+
     def planning_selections(self) -> dict[str, SceneSelection]:
         """Roadmap 5a (slice O1): the selection of every Scene that can contribute to a current
         or future Run projection (configured Scenes, active Runs' and queued Scenes, each with

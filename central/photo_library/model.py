@@ -447,7 +447,7 @@ class OriginalFile(Model):
 
 class MeasuredCopy(Model):
     """A copy of one revision Photo Wall downloaded during one fetch, measured from its header
-    (upright). Stored as an `asset_copies` row (slice A2's table, written by slice A4)."""
+    (upright). Stored in its photo row's `copies` (decision 0034; written by slice A4)."""
 
     name: MeasurableCopy
     media_type: MediaTypeName
@@ -456,8 +456,8 @@ class MeasuredCopy(Model):
 
 
 class CopySize(Model):
-    """A copy's measured size as stored (table `asset_copies`, a child of the revision; slice
-    A2): when Photo Wall last measured it."""
+    """A copy's measured size as stored (its photo row's `copies`, measured on the current
+    revision; decision 0034): when Photo Wall last measured it."""
 
     name: MeasurableCopy
     media_type: MediaTypeName
@@ -473,11 +473,10 @@ class LibraryAsset(Model):
     fetch (C10).
     Invariant (validator): `duration` is set exactly for videos.
 
-    Stored normalized (follow-ups 2026-10-11, owner item 6; slice A2): `connection_ref`,
-    `upstream_id`, `kind`, `taken_at` and `original` on the asset's `library_assets` row (one per
-    Immich asset); `revision`, `width`, `height` and `duration` on its `asset_revisions` row (one
-    per edit, keyed by `asset_id`). `original`: None until a check with `withExif` read it
-    (slice A3).
+    Stored once (follow-ups 2026-10-11, owner item 6; decision 0034): on the asset's
+    `library_assets` row (one per Immich asset), with its current revision (`asset_id`,
+    `revision`, `width`, `height`, `duration`). `original`: None until a check with `withExif`
+    read it (slice A3).
     """
 
     connection_ref: ConnectionRef

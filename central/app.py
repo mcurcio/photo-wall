@@ -554,8 +554,8 @@ def create_app(
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
     ):
         """One media variant, by its name, through the one read path: the grant
-        (`FrameMedia`), then the AssetReader (a hit serves, a miss re-makes it and waits). The
-        transfer pin is released when the body ends, or at once when nothing is served."""
+        (`FrameMedia`, which stamps the variant served so the cache spares it mid-transfer), then
+        the AssetReader (a hit serves, a miss re-makes it and waits)."""
         if credentials is None:
             raise RegistryError("unauthorized", 401)
         if "range" in request.headers:
@@ -568,17 +568,11 @@ def create_app(
                                             f"{asset_id}.{recipe_id}")
         except FrameMediaRefused as refused:
             return error_response(refused.code, refused.status)
-        try:
-            opened = await until_disconnect(request, reader.read(grant.candidates))
-        except BaseException:
-            await asyncio.to_thread(frame_media.release, grant.transfer_owner)
-            raise
+        opened = await until_disconnect(request, reader.read(grant.candidates))
         if isinstance(opened, Unavailable):
-            await asyncio.to_thread(frame_media.release, grant.transfer_owner)
             return error_response("media_unavailable", 503,
                                   retry_after=opened.retry_after_seconds)
-        return stream_frame_media(opened, release=lambda: frame_media.release(
-            grant.transfer_owner))
+        return stream_frame_media(opened)
 
     @app.post("/v1/player/readiness")
     def readiness(request: Readiness, identity: dict = Depends(player)):

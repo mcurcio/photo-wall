@@ -50,8 +50,8 @@ def test_a_pass_over_fifty_thousand_photos_reads_only_the_top_of_its_line(regist
     assert library.finish_check(lease, CheckComplete())
     with registry.db.transaction() as conn:
         # Every photo measured, as on a wall that has played a while.
-        conn.execute("INSERT INTO photo_key_content(asset_id,analysis_version,status,key,"
-                     "measured_at) SELECT asset_id,%s,'measured',%s,0 FROM asset_revisions",
+        conn.execute("UPDATE library_assets SET key_analysis_version=%s,key_status='measured',"
+                     "key=%s,key_measured_at=0 WHERE asset_id IS NOT NULL",
                      (ANALYSIS_VERSION, Jsonb(key_content(3840, 2160).model_dump(mode="json"))))
         conn.execute("ANALYZE")
     repository = MediaRepository(registry.db, registry.clock,

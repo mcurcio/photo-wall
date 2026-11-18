@@ -25,6 +25,7 @@ from central.photo_library.model import (
     InPool,
     LeftOut,
     LibraryAsset,
+    MeasuredCopy,
     OriginalFile,
     PoolCursor,
     SourceQuery,
@@ -60,7 +61,7 @@ def pools(registry):
     queue = RecordingLibraryQueue()
     store = store_of(registry.db, queue)
     ref = store.add_connection(ConnectionWrite(name="Home", url="http://immich.invalid",
-                                               key="PUBLIC-FIXTURE-KEY-1234"))
+                                               key="PUBLIC-FIXTURE-KEY-1234"), by="console")
     return store, queue, ref
 
 
@@ -93,8 +94,9 @@ def _pages(store):
 
 def _save_source(store, source_ref, query, key, *, active=True):
     with store.db.transaction() as conn:
-        conn.execute("INSERT INTO media_sources(source_ref,query,pool_key,refresh_active) "
-                     "VALUES(%s,%s,%s,%s)",
+        conn.execute("INSERT INTO media_sources(source_ref,query,pool_key,refresh_active,"
+                     "created_at,created_by,changed_at,changed_by) "
+                     "VALUES(%s,%s,%s,%s,0,'console',0,'console')",
                      (source_ref, Jsonb(query.model_dump(mode="json")), key, active))
 
 
@@ -108,25 +110,25 @@ def test_equal_queries_share_one_pool_and_a_new_query_moves_the_draft(pools):
     """Case 1."""
     store, queue, ref = pools
     query = SourceQuery(connection_ref=ref, taken=TakenLast(years=3))
-    first = store.create_draft(query, None)
-    second = store.create_draft(SourceQuery.model_validate(query.model_dump()), None)
+    first = store.create_draft(query, None, by="console")
+    second = store.create_draft(SourceQuery.model_validate(query.model_dump()), None, by="console")
     assert _draft_pool(store, first) == _draft_pool(store, second) == query.pool_key()
     assert queue.pools == [query.pool_key()] * 2
     other = SourceQuery(connection_ref=ref, favourites_only=True)
-    store.set_draft_query(second, other)
+    store.set_draft_query(second, other, by="console")
     assert _draft_pool(store, second) == other.pool_key() and queue.pools[-1] == other.pool_key()
     with pytest.raises(LibraryRefused) as unknown:
-        store.set_draft_query(str(UUID(int=7)), other)
+        store.set_draft_query(str(UUID(int=7)), other, by="console")
     assert unknown.value.code == "draft_unknown"
     with pytest.raises(LibraryRefused) as gone:
-        store.create_draft(SourceQuery(connection_ref="library-000000000000"), None)
+        store.create_draft(SourceQuery(connection_ref="library-000000000000"), None, by="console")
     assert gone.value.code == "connection_unknown"
 
 
 def test_a_superseded_lease_writes_nothing(pools):
     """Case 2. Mutation probe: drop the check-number fence."""
     store, _, ref = pools
-    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None))
+    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None, by="console"))
     store.finish_check(store.begin_check(key), CheckComplete())
     second = store.begin_check(key)
     assert second.check_number == 2
@@ -142,7 +144,7 @@ def test_a_superseded_lease_writes_nothing(pools):
 def test_a_step_adds_its_rows_except_marked_ids_and_queues_the_next_in_one_transaction(pools):
     """Case 3. Mutation probes: let a marked entry in; drop `updated_at` from the upsert."""
     store, queue, ref = pools
-    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None))
+    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None, by="console"))
     lease = store.begin_check(key)
     excluded, copy = str(UUID(int=3)), str(UUID(int=4))
     queued = len(queue.pools)
@@ -164,7 +166,8 @@ def test_a_step_adds_its_rows_except_marked_ids_and_queues_the_next_in_one_trans
     assert rows[str(UUID(int=5))]["reason"] == "unreadable_answer"
     with store.db.transaction() as conn:
         stored = conn.execute("SELECT connection_ref,upstream_id::text AS upstream_id,"
-                              "updated_at FROM asset_revisions WHERE asset_id=%s",
+                              "revision_updated_at AS updated_at FROM library_assets "
+                              "WHERE asset_id=%s",
                               (asset(ref, 1, 100.0).asset_id,)).fetchone()
         leased = library_assets_in(conn, [asset(ref, 1, 100.0).asset_id])
         marks = conn.execute("SELECT u::text AS id,kind AS mark FROM photo_check_pages, "
@@ -192,7 +195,7 @@ def test_only_a_complete_check_sweeps(pools):
     """Case 4: a row the check did not see leaves through its re-check (follow-up S4), and a
     finish leaves no page of its check. Mutation probe: sweep on an incomplete finish."""
     store, _, ref = pools
-    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None))
+    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None, by="console"))
     first = store.begin_check(key)
     store.record_step(first, step(*(InPool(asset=asset(ref, n, 100.0 + n)) for n in (1, 2, 3))))
     store.finish_check(first, CheckComplete())
@@ -227,7 +230,7 @@ def _all_pages(store, draft, after=None):
 def test_pages_are_newest_first_and_a_cursor_survives_adds_and_sweeps(pools):
     """Case 5. Mutation probe: order pages by taken_at alone."""
     store, _, ref = pools
-    draft = store.create_draft(SourceQuery(connection_ref=ref), None)
+    draft = store.create_draft(SourceQuery(connection_ref=ref), None, by="console")
     key = _draft_pool(store, draft)
     lease = store.begin_check(key)
     assets = [asset(ref, n, 1000.0 + n // 3) for n in range(1, 151)]   # three per instant
@@ -261,7 +264,7 @@ def test_pages_are_newest_first_and_a_cursor_survives_adds_and_sweeps(pools):
 def test_counts_by_outcome(pools):
     """Case 6."""
     store, _, ref = pools
-    draft = store.create_draft(SourceQuery(connection_ref=ref), None)
+    draft = store.create_draft(SourceQuery(connection_ref=ref), None, by="console")
     lease = store.begin_check(_draft_pool(store, draft))
     store.record_step(lease, step(
         InPool(asset=asset(ref, 1, 1.0)), InPool(asset=asset(ref, 2, 2.0, "video")),
@@ -290,7 +293,7 @@ def test_no_ceiling_25000_photos_page_count_and_reach_the_planner(pools):
     """Case 7 (owner 2026-10-09: no limit on the count of a Source)."""
     store, _, ref = pools
     query = SourceQuery(connection_ref=ref)
-    draft = store.create_draft(query, None)
+    draft = store.create_draft(query, None, by="console")
     key = _draft_pool(store, draft)
     lease = store.begin_check(key)
     for page in range(25):
@@ -314,12 +317,12 @@ def test_retirement_keeps_wanted_pools_and_their_thumbnails_only(pools):
     store, _, ref = pools
     shared_query, lone_query = SourceQuery(connection_ref=ref), SourceQuery(connection_ref=ref,
                                                                            favourites_only=True)
-    shared = store.create_draft(shared_query, None)
-    lone = store.create_draft(lone_query, None)
-    fresh = store.create_draft(SourceQuery(connection_ref=ref, partners=True), None)
+    shared = store.create_draft(shared_query, None, by="console")
+    lone = store.create_draft(lone_query, None, by="console")
+    fresh = store.create_draft(SourceQuery(connection_ref=ref, partners=True), None, by="console")
     _save_source(store, "family:1", shared_query, shared_query.pool_key())
     for draft in (shared, lone):
-        _age(store, "photo_drafts", "created_at", "draft_ref", draft, 86400)
+        _age(store, "media_sources", "created_at", "source_ref", draft, 86400)
     for key, number in ((shared_query.pool_key(), 1), (lone_query.pool_key(), 2)):
         lease = store.begin_check(key)
         store.record_step(lease, step(InPool(asset=asset(ref, number, 1.0))))
@@ -332,7 +335,7 @@ def test_retirement_keeps_wanted_pools_and_their_thumbnails_only(pools):
     assert kept == frozenset({asset(ref, 1, 1.0).asset_id})
     with store.db.transaction() as conn:
         drafts = {row["draft_ref"] for row in conn.execute(
-            "SELECT draft_ref::text AS draft_ref FROM photo_drafts").fetchall()}
+            "SELECT source_ref AS draft_ref FROM media_sources WHERE draft IS NOT NULL").fetchall()}
         keys = {row["pool_key"] for row in conn.execute("SELECT pool_key FROM photo_pools")}
     assert drafts == {fresh}
     assert keys == {shared_query.pool_key(), _draft_pool(store, fresh)}
@@ -341,7 +344,7 @@ def test_retirement_keeps_wanted_pools_and_their_thumbnails_only(pools):
 def test_due_pools_by_the_database_clock(pools):
     """Case 9 (run 2: the staleness rule). Mutation probe: skip every checking pool again."""
     store, _, ref = pools
-    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None))
+    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None, by="console"))
     assert store.due_pools() == (key,)                            # requested
     lease = store.begin_check(key)
     assert store.due_pools() == ()                                # its step just began
@@ -368,7 +371,7 @@ def test_due_pools_by_the_database_clock(pools):
 def test_a_thumbnail_is_served_only_from_a_wanted_pool(pools):
     """Case 10."""
     store, _, ref = pools
-    draft = store.create_draft(SourceQuery(connection_ref=ref), None)
+    draft = store.create_draft(SourceQuery(connection_ref=ref), None, by="console")
     key = _draft_pool(store, draft)
     lease = store.begin_check(key)
     photo = asset(ref, 1, 1.0)
@@ -379,7 +382,7 @@ def test_a_thumbnail_is_served_only_from_a_wanted_pool(pools):
         ref, photo.upstream_id, photo.revision)
     assert store.pool_thumbnail("asset-" + "0" * 64) is None
     with store.db.transaction() as conn:
-        conn.execute("DELETE FROM photo_drafts")
+        conn.execute("DELETE FROM media_sources WHERE draft IS NOT NULL")
     assert store.pool_thumbnail(photo.asset_id) is None
 
 
@@ -410,12 +413,11 @@ def test_due_pools_assigns_wanted_pre_4_sources(pools):
 
 # --- A pass writes what changed, plus one page per step for what it saw (decision 0033) ---------
 
-_VERSIONED = {"library_assets": "upstream_id::text", "asset_revisions": "asset_id",
-              "photo_pool_rows": "upstream_id::text"}
+_VERSIONED = {"library_assets": "upstream_id::text", "photo_pool_rows": "upstream_id::text"}
 
 
 def _versions(store):
-    """Each row of the three pool-check tables by its key: (ctid, xmin, xmax). A write moves its
+    """Each row of the pool check's two tables by its key: (ctid, xmin, xmax). A write moves its
     ctid and xmin; a row lock (an upsert's `DO UPDATE ... WHERE false` included) sets its xmax."""
     with store.db.transaction() as conn:
         return {table: {row["key"]: (row["ctid"], row["xmin"], row["xmax"]) for row in conn.execute(
@@ -454,11 +456,11 @@ def test_a_pass_over_an_unchanged_library_writes_no_row_and_leaves_no_page(pools
     """Decision 0033, rule 1: a photo whose facts are as stored costs no write and no row lock.
     Mutation probe: put back the plain upsert -> every row's ctid and xmin move."""
     store, _, ref = pools
-    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None))
+    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None, by="console"))
     _pass(store, key, *_library(ref))
     before = _versions(store)
     assert {table: len(rows) for table, rows in before.items()} == {
-        "library_assets": 3, "asset_revisions": 2, "photo_pool_rows": 4}
+        "library_assets": 3, "photo_pool_rows": 4}
     _pass(store, key, *_library(ref))
     assert _versions(store) == before
     assert _pages(store) == []
@@ -468,7 +470,7 @@ def test_a_pass_over_an_unchanged_library_writes_no_row_and_leaves_no_page(pools
 def test_a_changed_capture_time_rewrites_only_its_photos_row(pools):
     """Mutation probe: leave capture time out of the comparison -> its row is not rewritten."""
     store, _, ref = pools
-    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None))
+    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None, by="console"))
     _pass(store, key, *_library(ref))
     before = _versions(store)
     first = _audit(store, "library_assets", "upstream_id", str(UUID(int=1)))
@@ -481,7 +483,6 @@ def test_a_changed_capture_time_rewrites_only_its_photos_row(pools):
     assert after["library_assets"][photo] != before["library_assets"][photo]
     assert {k: v for k, v in after["library_assets"].items() if k != photo} == {
         k: v for k, v in before["library_assets"].items() if k != photo}
-    assert after["asset_revisions"] == before["asset_revisions"]
     assert after["photo_pool_rows"] == before["photo_pool_rows"]
     audit = _audit(store, "library_assets", "upstream_id", photo)
     assert audit["created_at"] == first["created_at"] and audit["changed_at"] > first["changed_at"]
@@ -494,7 +495,7 @@ def test_a_changed_capture_time_rewrites_only_its_photos_row(pools):
 def test_a_newly_excluded_photo_leaves_at_completion_with_one_page_not_a_row_per_id(pools):
     """Mutation probe: skip the mark pages in finish_check -> the excluded photos stay."""
     store, _, ref = pools
-    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None))
+    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None, by="console"))
     photos = [InPool(asset=asset(ref, n, 100.0 + n)) for n in range(1, 6)]
     _pass(store, key, *photos)
     lease = store.begin_check(key)
@@ -512,7 +513,7 @@ def test_a_newly_excluded_photo_leaves_at_completion_with_one_page_not_a_row_per
 
 def test_starting_a_check_deletes_the_pages_an_unfinished_one_left(pools):
     store, _, ref = pools
-    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None))
+    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None, by="console"))
     abandoned = store.begin_check(key)
     store.record_step(abandoned, step(InPool(asset=asset(ref, 1, 1.0)), seen=1))
     with store.db.transaction() as conn:     # its worker died; a migration or reset ended it
@@ -552,7 +553,7 @@ def test_a_photo_that_left_immich_is_asked_about_alone_and_removed_by_the_next_p
     store, _, ref = pools
     client = _AskedClient([library_photo(n) for n in range(1, 6)])
     query = SourceQuery(connection_ref=ref, exclude=Exclusions(screenshots=False))
-    key = _draft_pool(store, store.create_draft(query, None))
+    key = _draft_pool(store, store.create_draft(query, None, by="console"))
     checks = LibraryChecks(store, lambda secret: client, ManualClock(wall=LIBRARY_T0, mono=0))
     _check_to_end(checks, store, key)
     assert len(_rows(store, key)) == 5 and client.asked == []
@@ -572,7 +573,7 @@ def test_a_photo_that_left_immich_is_asked_about_alone_and_removed_by_the_next_p
 def test_unseen_rows_and_the_finish_read_25_pages_against_21000_rows_within_a_second(pools):
     """Mutation probe: probe the pages once per row (`= ANY(page)`) -> over a second."""
     store, _, ref = pools
-    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None))
+    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None, by="console"))
     lease = store.begin_check(key)
     for page in range(21):
         assert store.record_step(lease, step(*(Waiting(
@@ -607,7 +608,7 @@ def test_a_waiting_photo_read_in_full_later_gets_its_originals_facts_once(pools)
     again writes nothing. Mutation probe: leave the original's facts out of the comparison ->
     the row never gets them."""
     store, _, ref = pools
-    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None))
+    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None, by="console"))
     photo = str(UUID(int=1))
     _pass(store, key, Waiting(upstream_id=photo, kind="image", taken_at=100.0))
     waiting = _versions(store)["library_assets"][photo]
@@ -631,11 +632,11 @@ def _with(entries, index, entry):
     ("a left-out photo's reason", "photo_pool_rows", 4,
      lambda e: e.model_copy(update={"reason": "over_item_limits"})),
     ("a photo's kind", "library_assets", 3, lambda e: e.model_copy(update={"kind": "video"})),
-    ("a revision's width", "asset_revisions", 2,
+    ("a revision's width", "library_assets", 2,
      lambda e: e.model_copy(update={"asset": e.asset.model_copy(update={"width": 3840})})),
-    ("a revision's height", "asset_revisions", 2,
+    ("a revision's height", "library_assets", 2,
      lambda e: e.model_copy(update={"asset": e.asset.model_copy(update={"height": 2160})})),
-    ("a revision's duration", "asset_revisions", 2,
+    ("a revision's duration", "library_assets", 2,
      lambda e: e.model_copy(update={"asset": e.asset.model_copy(update={"duration": 7.5})})),
 ])
 def test_each_compared_fact_rewrites_only_its_own_row(pools, fact, table, number, changed):
@@ -643,16 +644,49 @@ def test_each_compared_fact_rewrites_only_its_own_row(pools, fact, table, number
     Mutation probe: drop that fact from its comparison (`_POOL_ROW_FACTS`, `_asset_differs`,
     `_REVISION_FACTS`) -> its row keeps the old value."""
     store, _, ref = pools
-    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None))
+    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None, by="console"))
     library = _library(ref)
     _pass(store, key, *library)
     before = _versions(store)
     index = number - 1
     _pass(store, key, *_with(library, index, changed(library[index])))
     after = _versions(store)
-    row = (asset(ref, 2, 90.0, "video").asset_id if table == "asset_revisions"
-           else str(UUID(int=number)))
+    row = str(UUID(int=number))
     assert after[table][row] != before[table][row], fact
     assert {t: {k: v for k, v in rows.items() if (t, k) != (table, row)}
             for t, rows in after.items()} == {
         t: {k: v for k, v in rows.items() if (t, k) != (table, row)} for t, rows in before.items()}
+
+
+def test_an_edit_replaces_the_revision_on_its_one_row_and_every_pool_row_follows(pools):
+    """Decision 0034: a photo is one `library_assets` row. A new revision (an edit in Immich)
+    replaces the old on that row, clears the copies and key content measured on the old one,
+    and every pool row naming the old revision names the new one, in every pool. Mutation probe:
+    keep the copies on a new revision -> the edited photo claims the old one's measured copies."""
+    store, _, ref = pools
+    first = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None,
+                                                  by="console"))
+    second = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref,
+                                                               favourites_only=True), None,
+                                                   by="console"))
+    original = asset(ref, 1, 100.0)
+    for key in (first, second):
+        _pass(store, key, InPool(asset=original))
+    store.record_copies(original.asset_id, (MeasuredCopy(name="preview", media_type="image/jpeg",
+                                                         width=1440, height=1080),))
+    with store.db.transaction() as conn:
+        conn.execute("UPDATE library_assets SET key_analysis_version='1',key_status='failed',"
+                     "key_failure='decode',key_measured_at=1,key_retry_at=2 WHERE asset_id=%s",
+                     (original.asset_id,))
+    assert set(store.copy_sizes(original.asset_id)) == {"preview"}
+    edited = original.model_copy(update={"revision": f"{1:040x}-1", "width": 3000})
+    _pass(store, first, InPool(asset=edited))
+    with store.db.transaction() as conn:
+        rows = conn.execute("SELECT asset_id,width,copies,key_status FROM library_assets "
+                            "WHERE upstream_id=%s", (original.upstream_id,)).fetchall()
+        named = {row["pool_key"]: row["asset_id"] for row in conn.execute(
+            "SELECT pool_key,asset_id FROM photo_pool_rows").fetchall()}
+        assert library_assets_in(conn, [original.asset_id]) == {}
+    assert [(row["asset_id"], row["width"], row["copies"], row["key_status"]) for row in rows] == [
+        (edited.asset_id, 3000, {}, None)]
+    assert named == {first: edited.asset_id, second: edited.asset_id}

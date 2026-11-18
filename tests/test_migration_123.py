@@ -232,9 +232,3 @@ def test_123b_keeps_one_show_state_per_player_and_numbers_skips_past_the_old_log
     assert not tables & {"player_configurations", "player_feedback", "player_output_identification",
                          "execution_events"}
     assert "player_show_state" in tables
-
-
-def test_after_123b_central_has_71_tables(registry):
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM pg_tables WHERE schemaname='public' "
-                            "AND tablename NOT LIKE 'procrastinate%%'").fetchone()["n"] == 71

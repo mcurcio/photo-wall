@@ -7,9 +7,9 @@ check number; marks subtract (an id marked in a check never becomes a row of tha
 complete finish removes the rows the check marked, and a row it did not see leaves only through
 `record_recheck` (follow-up S4); any other finish removes nothing. What a check saw or marked is
 kept as its pages (decision 0033), gone when it finishes or the pool's next check starts.
-Photos are held as PostgreSQL holds them (slice A2): one `assets` record per Immich asset, its
-`revisions` by asset id, and each revision's measured `copies`; a record's `changed_at` moves
-only when a fact it holds differs.
+Photos are held as PostgreSQL holds them (decision 0034): one `assets` record per Immich asset
+and its one current revision (in `revisions` by asset id; a new revision replaces the old one
+and its measured `copies`); a record's `changed_at` moves only when a fact it holds differs.
 
 Time is `clock.utc()` (a ManualClock in tests), standing in for the database's clock.
 """
@@ -83,7 +83,7 @@ class LibraryAssetRecord:
 
 @dataclass
 class RevisionRecord:
-    """An `asset_revisions` row: the revision's own facts, keyed by its asset id."""
+    """A revision's facts on its photo's `library_assets` row, keyed by its asset id."""
     connection_ref: str
     upstream_id: str
     revision: str
@@ -275,6 +275,10 @@ class FakeLibraryStore:
         if stored is not None and (stored.width, stored.height, stored.duration,
                                    stored.updated_at) == facts:
             return
+        for asset_id, other in list(self.revisions.items()):   # the photo's one revision
+            if (other.connection_ref, other.upstream_id) == (asset.connection_ref,
+                                                             asset.upstream_id):
+                self.delete_revision(asset_id)
         self.revisions[asset.asset_id] = RevisionRecord(
             asset.connection_ref, asset.upstream_id, asset.revision, *facts, now)
 

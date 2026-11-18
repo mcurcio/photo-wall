@@ -1,5 +1,6 @@
-"""Key content over PostgreSQL through its ports (roadmap 5a, run ledger slice M1): migration
-082's `photo_key_content`, read by hydration, requested by the scheduler, written by the worker.
+"""Key content over PostgreSQL through its ports (roadmap 5a, run ledger slice M1): the key
+content columns of a photo's `library_assets` row (decision 0034; was 082's
+`photo_key_content`), read by hydration, requested by the scheduler, written by the worker.
 """
 
 from __future__ import annotations
@@ -114,9 +115,9 @@ def test_an_older_analysis_holds_until_replaced_and_an_unreadable_one_is_not_mea
     store.record_measured(older, KEY)
     store.record_measured(unreadable, KEY)
     with registry.db.transaction() as conn:
-        conn.execute("UPDATE photo_key_content SET analysis_version='0' WHERE asset_id=%s",
+        conn.execute("UPDATE library_assets SET key_analysis_version='0' WHERE asset_id=%s",
                      (older,))
-        conn.execute("UPDATE photo_key_content SET key='{\"interest\": 1}' WHERE asset_id=%s",
+        conn.execute("UPDATE library_assets SET key='{\"interest\": 1}' WHERE asset_id=%s",
                      (unreadable,))
     assert analyses(registry, store, [older, unreadable]) == {older: Measured(key=KEY, due=True)}
     assert request(registry, store, [older, unreadable]) == 2
@@ -176,7 +177,7 @@ def test_a_failed_measurement_of_an_unreadable_key_waits_for_its_retry(registry)
     (unreadable,) = seeded(registry, "unreadable")
     store.record_measured(unreadable, KEY)
     with registry.db.transaction() as conn:
-        conn.execute("UPDATE photo_key_content SET key='{\"interest\": 1}' WHERE asset_id=%s",
+        conn.execute("UPDATE library_assets SET key='{\"interest\": 1}' WHERE asset_id=%s",
                      (unreadable,))
     store.record_failed(unreadable, "decode")
     assert analyses(registry, store, [unreadable]) == {unreadable: MeasureFailed(reason="decode")}
@@ -186,19 +187,25 @@ def test_a_failed_measurement_of_an_unreadable_key_waits_for_its_retry(registry)
 
 
 def test_the_asset_row_carries_its_key_content_with_it(registry):
+    """Key content lives on the photo's row, measured on its current revision (decision 0034):
+    once the revision is replaced, the old one is no photo's, and a measurement of it finishing
+    late writes nothing."""
     store = store_of(registry)
     (gone,) = seeded(registry, "gone")
     assert store.asset_to_measure(gone).asset_id == gone
     store.record_measured(gone, KEY)
     with registry.db.transaction() as conn:
-        conn.execute("DELETE FROM photo_pool_rows WHERE asset_id=%s", (gone,))
-        conn.execute("DELETE FROM asset_revisions WHERE asset_id=%s", (gone,))
-        assert conn.execute("SELECT count(*) AS n FROM photo_key_content").fetchone()["n"] == 0
+        assert conn.execute("SELECT key_status FROM library_assets WHERE asset_id=%s",
+                            (gone,)).fetchone()["key_status"] == "measured"
+        conn.execute("UPDATE library_assets SET asset_id=%s,revision='edited',key_analysis_version"
+                     "=NULL,key_status=NULL,key=NULL,key_measured_at=NULL,key_retry_at=NULL "
+                     "WHERE asset_id=%s", ("asset-" + "e" * 64, gone))
     assert store.asset_to_measure(gone) is None
     store.record_measured(gone, KEY)            # a measurement finishing late writes nothing
     store.record_failed(gone, "timeout")
     with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM photo_key_content").fetchone()["n"] == 0
+        assert conn.execute("SELECT count(*) AS n FROM library_assets WHERE key_status IS NOT NULL"
+                            ).fetchone()["n"] == 0
 
 
 def test_requesting_without_a_queue_refuses_only_when_something_is_due(registry):

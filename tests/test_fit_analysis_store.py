@@ -41,10 +41,9 @@ def _draft(registry, photos) -> str:
     library = library_of(registry)
     draft = library.create_draft(SourceQuery(connection_ref=fixture_connection(registry),
                                              albums=("00000000-0000-4000-8000-00000000d0af",)),
-                                 None)
+                                 None, by="console")
     with registry.db.transaction() as conn:
-        key = conn.execute("SELECT pool_key FROM photo_drafts WHERE draft_ref=%s",
-                           (draft,)).fetchone()["pool_key"]
+        key = library.pool_of_draft_in(conn, draft)
     lease = library.begin_check(key)
     entries = tuple(InPool(asset=item) for item in photos)
     assert library.record_step(lease, CheckStep(progress={"page": 1}, marks=(), entries=entries,
@@ -84,7 +83,7 @@ def test_a_photo_due_a_new_measurement_is_not_counted_as_checked_until_it_is_mea
     seed_pool(registry, "family:1", photos)
     measure_all(registry, photos)
     with registry.db.transaction() as conn:
-        conn.execute("UPDATE photo_key_content SET analysis_version='2' WHERE asset_id=%s",
+        conn.execute("UPDATE library_assets SET key_analysis_version='2' WHERE asset_id=%s",
                      (photos[0].asset_id,))
     selection = FitSelection(sources=("family:1",))
     (group,) = _reader(registry).selection_sizes(selection).groups

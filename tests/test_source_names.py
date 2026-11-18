@@ -4,6 +4,7 @@ A revision is saved from a draft (`SourceNameService.save_draft`), as the consol
 pools are the photo library store's, fed by nothing here (no worker, no Immich).
 """
 
+import psycopg
 import pytest
 from fastapi.testclient import TestClient
 from support.house_time import UTC_HOUSE, set_house, window_program
@@ -33,7 +34,7 @@ class Names:
 
     def save(self, name: str, *, editing: str | None = None, favourites: bool = False) -> dict:
         query = SourceQuery(connection_ref=self.connection, favourites_only=favourites)
-        return self.service.save_draft(self.library.create_draft(query, editing), name, by="console")
+        return self.service.save_draft(self.library.create_draft(query, editing, by="console"), name, by="console")
 
     def reconcile(self) -> None:
         with self.registry.db.transaction() as conn, self.runtime.edit(conn, by="console", command="reconcile") as current:
@@ -164,22 +165,52 @@ def test_the_delete_api_reports_dependent_scene_ids(names, registry):
         assert retired.status_code in (404, 405)   # a rename is a draft saved under a new name
 
 
-def test_migration_preserves_legacy_collisions_and_large_numeric_suffix(registry):
-    refs = ("foo", "foo:1", "foo:bar", "large:" + "9" * 22)
+def test_two_sources_never_hold_one_name(names, registry):
+    """A name is the operator's handle on a Source (decision 0034): a second new Source saved
+    under a name another holds is refused, a rename onto a held name too, and the database holds
+    one head per name and one row per (name, revision) whatever the code does. Mutation probe:
+    drop the "source_name_exists" check in `save_draft` -> the second Source takes the name."""
+    from central.registry import RegistryError
+
+    names.save("family")
+    names.save("holiday")
+    with pytest.raises(RegistryError) as taken:
+        names.save("family", favourites=True)
+    assert taken.value.code == "source_name_exists"
+    with pytest.raises(RegistryError) as renamed:
+        names.save("family", editing="holiday:1")
+    assert renamed.value.code == "source_name_exists"
+    assert [(row["name"], row["source_ref"]) for row in names.repository.sources()] == [
+        ("family", "family:1"), ("holiday", "holiday:1")]
     with registry.db.transaction() as conn:
-        conn.execute("DROP TABLE media_source_name_versions")
-        # 080's drafts name a Source name: their reference goes with the table (030 re-runs).
-        conn.execute("DROP TABLE media_source_names CASCADE")
-        conn.execute("DELETE FROM schema_migrations WHERE name='030_source_names.sql'")
-        for ref in refs:
-            conn.execute("INSERT INTO media_sources(source_ref) VALUES(%s)", (ref,))
-    registry.db.migrate()
+        heads = conn.execute("SELECT name,source_ref,revision,deleted,renamed_to,created_by "
+                             "FROM media_sources WHERE head ORDER BY name").fetchall()
+    assert [tuple(row.values()) for row in heads] == [
+        ("family", "family:1", 1, False, None, "console"),
+        ("holiday", "holiday:1", 1, False, None, "console")]
+    for statement in (   # the schema refuses a second head or a repeated revision on its own
+            "INSERT INTO media_sources(source_ref,name,revision,head,created_at,created_by,"
+            "changed_at,changed_by) VALUES('family:9','family',9,TRUE,0,'console',0,'console')",
+            "INSERT INTO media_sources(source_ref,name,revision,created_at,created_by,"
+            "changed_at,changed_by) VALUES('family:x','family',1,0,'console',0,'console')"):
+        with pytest.raises(psycopg.errors.UniqueViolation), registry.db.transaction() as conn:
+            conn.execute(statement)
+
+
+def test_a_rename_leaves_the_old_name_deleted_and_free_for_a_new_source(names, registry):
+    """A rename marks the old name's head deleted and renamed; the old name can then name a new
+    Source, as its next revision (the hidden one), while the rename's new name keeps its own."""
+    names.save("old")
+    assert names.save("new", editing="old:1")["source_ref"] == "new:1"
     with registry.db.transaction() as conn:
-        versions = conn.execute("SELECT source_ref,name,revision FROM media_source_name_versions "
-                                "ORDER BY source_ref").fetchall()
-        assert len(versions) == len(refs)
-        assert {row["name"] for row in versions} == {"foo", "foo:bar", refs[-1]}
-        assert len({(row["name"], row["revision"]) for row in versions}) == len(refs)
+        old = conn.execute("SELECT source_ref,deleted,renamed_to FROM media_sources "
+                           "WHERE name='old' AND head").fetchone()
+    assert tuple(old.values()) == ("old:1", True, "new")
+    assert names.save("old", favourites=True)["source_ref"] == "old:2"
+    assert [(row["name"], row["source_ref"]) for row in names.repository.sources()] == [
+        ("new", "new:1"), ("old", "old:2")]
+    assert names.service.delete("old", 2, by="console")["deleted"] is True
+    assert [row["name"] for row in names.repository.sources()] == ["new"]
 
 
 def test_a_source_save_that_rewrites_scenes_stamps_its_actor(names, registry):

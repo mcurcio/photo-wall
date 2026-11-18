@@ -88,7 +88,8 @@ def test_saving_a_new_draft_makes_revision_one_with_its_pool(client):
     row = _source_row(library, "family:1")
     assert (row["pool_key"], row["query"]) == (query.pool_key(), query.model_dump(mode="json"))
     with library.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM photo_drafts").fetchone()["n"] == 0
+        assert conn.execute("SELECT count(*) AS n FROM media_sources WHERE draft IS NOT NULL"
+                            ).fetchone()["n"] == 0
 
 
 def test_saving_an_edit_makes_the_next_revision_and_moves_scenes(client, registry):
