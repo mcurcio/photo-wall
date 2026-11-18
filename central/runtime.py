@@ -13,7 +13,7 @@ from collections.abc import Mapping
 from datetime import timedelta
 from functools import lru_cache
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Annotated, Final, Literal, Self
+from typing import Annotated, Final, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
 
@@ -22,26 +22,11 @@ from central.house_time.model import HouseTime, LocalDateTime, When, Window
 from central.wall_plan.selection import SceneSelection
 from contracts.models import PREPARE_SECONDS, TARGET_ID_PATTERN, AfterEnd, fade_share
 
-if TYPE_CHECKING:
-    from central.execution_outcomes import ExecutionOutcome
-
 Target = Annotated[str, Field(pattern=rf"^(frame|actuator):{TARGET_ID_PATTERN}$")]
 Seconds = Annotated[FiniteFloat, Field(ge=0)]
 PositiveSeconds = Annotated[FiniteFloat, Field(gt=0)]
 Identifier = Annotated[str, Field(min_length=1, max_length=160)]
 Unit = Annotated[FiniteFloat, Field(ge=0, le=1)]
-
-
-def handle_execution_outcome(outcome: ExecutionOutcome) -> str:
-    """Own the lifecycle consequence of a reported execution fact.
-
-    Execution failures do not silently finish or cancel a logical Run. The
-    coordinator revokes affected execution while Runtime continues its authored
-    lifecycle. Observations are accepted as observations, not completion proof.
-    """
-    if outcome.kind == "observation":
-        return "record_observation"
-    return "preserve_lifecycle"
 
 
 class FrozenModel(BaseModel):

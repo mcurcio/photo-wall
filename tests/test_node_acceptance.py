@@ -175,7 +175,7 @@ def test_readiness_sent_long_ago_qualifies_while_central_hears_the_player(regist
     """Readiness is sent once per change, so an unchanged Player's readiness keeps its number and
     is as old as its last change: liveness is when Central last heard from it (its polls), never
     the readiness receipt's age nor an advancing readiness number. Mutations: gate on
-    `player_feedback.received_at` -> readiness_stale; ask each sample for a newer readiness
+    `player_show_state.readiness_received_at` -> readiness_stale; ask each sample for a newer readiness
     number -> awaiting_new_witnesses forever."""
     witness = Witnesses(registry)
     for _ in range(7):

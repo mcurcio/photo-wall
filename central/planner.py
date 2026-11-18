@@ -20,7 +20,7 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from pydantic import Field
 
@@ -80,25 +80,11 @@ from contracts.models import (
     stack_order,
 )
 
-if TYPE_CHECKING:
-    from central.execution_outcomes import ExecutionOutcome
-
 
 class PlanningError(ValueError):
     """The caller's input is inconsistent (a Frame bound twice, a pool keyed by another Source, a
     non-finite time). Raised within one Intent's `add`, it refuses that Intent alone
     (`intent_refused`); no budget raises it: a budget shortens the plan (`plan_shortened`)."""
-
-
-def handle_execution_outcome(outcome: ExecutionOutcome) -> str:
-    """Own the next-planning consequence without changing secured content."""
-    return {
-        "group_skipped": "preserve_selection",
-        "observation": "record_observation",
-        "offer_backpressure": "await_capacity",
-        "offer_unavailable": "await_media",
-        "readiness_lost": "replan",
-    }[outcome.kind]
 
 
 # Roadmap 5a: how far ahead the wall plan reaches, every Frame together (owner, 2026-10-11: "an

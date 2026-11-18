@@ -59,7 +59,9 @@ def offer(registry, repository: MediaRepository, variant: Variant, player_id: st
                 layers=(layer,))
     with repository.transaction() as conn:
         if secured:
-            conn.execute("INSERT INTO assignment_locks VALUES(%s,%s,%s,%s,1000,1200)",
+            conn.execute("INSERT INTO assignment_locks(player_id,authority_epoch,assignment_id,layer,"
+                         "secured_at,valid_until,created_at,created_by,changed_at,changed_by) "
+                         "VALUES(%s,%s,%s,%s,1000,1200,1000,'central',1000,'central')",
                          (player_id, epoch, layer.assignment_id,
                           Jsonb(layer.model_dump(mode="json"))))
             conn.execute("INSERT INTO media_references(owner,variant_key,expires_at) "

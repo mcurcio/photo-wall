@@ -23,15 +23,16 @@ from central.wall_plan.order import PhotoShowing, WallHistory
 class ShownHistory(Protocol):
     """Coordination's side of shown history (slice O1)."""
 
-    def record_selected_in(self, conn: Any, showings: Iterable[PhotoShowing]) -> None:
+    def record_selected_in(self, conn: Any, showings: Iterable[PhotoShowing], *, by: Actor) -> None:
         """Record what each newly offered layer shows: one row per assignment id, the first
-        write wins (a re-offer of a locked layer changes nothing)."""
+        write wins (a re-offer of a locked layer changes nothing); `by` its writer."""
         ...
 
-    def record_presented_in(self, conn: Any, assignment_id: str, presented_at: float) -> bool:
+    def record_presented_in(self, conn: Any, assignment_id: str, presented_at: float, *,
+                            by: Actor) -> bool:
         """Append the shown row for a layer its Player reported presented, from its recorded
-        selection; idempotent per assignment id. False when no selection names it (a layer
-        offered before 5a, or a black layer): nothing is written."""
+        selection, `by` its writer; idempotent per assignment id. False when no selection names
+        it (a layer offered before 5a, or a black layer): nothing is written."""
         ...
 
     def wall_history_in(self, conn: Any, scene_ids: Iterable[str], *, now: float,

@@ -4,9 +4,9 @@ One tick runs, in order: the Node reconciler ("reconcile"), the coordinator's th
 ("runtime": the Runtime moves to now; "planning": plan and offer; "settle": commits due, pin
 expiry and cleanup, central/coordination.py `Coordinator.advance`), the measurement requests
 of the plan ("measurement") and each retention in the order wired, one step per key
-("retention": execution events, central/infra/execution_event_retention.py; "node-retention":
-node records, central/infra/node_record_retention.py), each in whole bounded batches in their own
-transactions outside the coordinator's locks (central/infra/batched_retention.py). A step that fails never skips a later one: the Runtime keeps moving
+("node-retention": node records and events, central/infra/node_record_retention.py), each in whole
+bounded batches in their own transactions outside the coordinator's locks
+(central/infra/batched_retention.py). A step that fails never skips a later one: the Runtime keeps moving
 when planning fails, and planning still runs when the reconciler fails. Measurement alone needs
 an earlier step's answer (the plan): when planning fails it is "skipped" this tick, so no facet
 claims a step ran that did not. Each step's health is its

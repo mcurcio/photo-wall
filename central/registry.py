@@ -536,8 +536,10 @@ class Registry:
             return None
         return {fact: session[fact] for fact in _CONTROL_FACTS}
 
-    def identify_output(self, player_id: str, output_id: str) -> dict:
-        """Ask one active, connected, unbound Output to identify itself briefly."""
+    def identify_output(self, player_id: str, output_id: str, *, by: Actor) -> dict:
+        """Ask one active, connected, unbound Output to identify itself briefly: one request per
+        Player, kept in its show state (`player_show_state.identify`, its epoch inside it), which
+        Coordination's delivery serves and clears once spent."""
         now = self.clock.utc()
         request_id = uuid.uuid4()
         expires_at = now + self.IDENTIFY_OUTPUT_TTL_SECONDS
@@ -560,13 +562,15 @@ class Registry:
             if conn.execute("SELECT 1 FROM frames WHERE player_id=%s AND output_id=%s",
                             (player_id, output_id)).fetchone():
                 raise RegistryError("output_bound")
+            request = {"request_id": str(request_id), "output_id": output_id,
+                       "authority_epoch": player["authority_epoch"], "created_at": now,
+                       "expires_at": expires_at}
             conn.execute(
-                "INSERT INTO player_output_identification(player_id,request_id,output_id,"
-                "authority_epoch,created_at,expires_at) VALUES(%s,%s,%s,%s,%s,%s) "
-                "ON CONFLICT(player_id) DO UPDATE SET request_id=EXCLUDED.request_id,"
-                "output_id=EXCLUDED.output_id,authority_epoch=EXCLUDED.authority_epoch,"
-                "created_at=EXCLUDED.created_at,expires_at=EXCLUDED.expires_at",
-                (player_id, request_id, output_id, player["authority_epoch"], now, expires_at),
+                "INSERT INTO player_show_state(player_id,authority_epoch,identify,created_at,"
+                "created_by,changed_at,changed_by) VALUES(%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT(player_id) DO UPDATE SET identify=EXCLUDED.identify,"
+                "changed_at=EXCLUDED.changed_at,changed_by=EXCLUDED.changed_by",
+                (player_id, player["authority_epoch"], Jsonb(request), now, by, now, by),
             )
         return {"request_id": str(request_id), "output_id": output_id,
                 "expires_at": expires_at}

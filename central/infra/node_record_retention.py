@@ -7,10 +7,9 @@ Pi misbehaved (owner, 2026-10-05, guidance: "having Central throw away good debu
 observability data is silly"); Central's own readers need far less, and each rule below keeps
 what they read at any age.
 
-`prune()` is the scheduler's "node-retention" step, wired beside execution events' "retention"
-as `Scheduler(reconciler, coordinator, measurements, clock, retentions={"retention": ...,
-"node-retention": NodeRecordRetention(db.transaction, clock).prune})`: one `/healthz` facet per
-key, so a failing trim never hides behind the other. It runs outside the coordinator's
+`prune()` is the scheduler's "node-retention" step, wired as `Scheduler(reconciler, coordinator,
+measurements, clock, retentions={"node-retention": NodeRecordRetention(db.transaction,
+clock).prune})`: its own `/healthz` facet, so a failing trim never hides behind another step. It runs outside the coordinator's
 transactions, through `central.infra.batched_retention.drain`, one whole-batch statement per
 table.
 

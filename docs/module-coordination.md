@@ -150,19 +150,20 @@ A skip means only that the cue was superseded (`superseded`). A cue is no longer
 
 Readiness sequence numbers increase across an epoch. A secured receipt checks the
 retained offered manifest and creates an immutable byte lock before commitment.
-Failures invalidate prepared state and commitments, persist a bounded coded
-lifecycle event, and feed acquisition cooldown/replanning. Already executed output
+Failures invalidate prepared state and commitments; the failure codes stay in the
+Player's readiness, held in its show state, and feed acquisition cooldown/replanning. Already executed output
 cannot be retroactively revoked; Players independently reject invalid readiness
 and use compatible fallback. Observations are evidence, not execution authority.
 
-Each observation is also normalized as a typed `ExecutionOutcome` carrying kind,
-time, Player/Plan/assignment identity, result, and bounded detail. An
-`ExecutionOutcomeRouter` delivers the same value to Runtime and Planner before the
-audit event is accepted. Runtime preserves logical lifecycle semantics when a
-physical execution fails; Planner requests replanning for preparation/execution
-failure without silently changing an already secured assignment. Success and
-ordinary observations preserve the existing plan. This handoff replaces private
-cross-module callbacks with an explicit application contract.
+A Player's show state is one row, `player_show_state` (decision 0034), written only
+by Coordination: its last configuration, its readiness, the request to identify an
+Output, and the mark of its observations. A Player numbers its observations once per
+change, in order, within its epoch; one at or below the mark is a repeat (Central
+took it, then its answer was lost), answered and not written. A "presented"
+observation is shown history (`shown_photos`); Central keeps no other log of them.
+Runtime preserves logical lifecycle semantics when a physical execution fails: an
+observation never finishes or cancels a Run. A skipped group's revocation number
+comes from the sequence `coordination_skip_sequence`, so it always rises.
 
 Media references are inserted in the offer transaction before it becomes visible.
 The gateway rechecks epoch, binding and unexpired exact grants for every request,

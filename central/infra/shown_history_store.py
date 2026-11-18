@@ -7,6 +7,8 @@
 - `shown_photos`: one row per layer its Player reported presented (owner, 2026-10-11: "“Shown”
   means it was displayed on a frame"), copied from its selection, written by coordination's
   `observe`.
+Each row names its writer (`by`: "scheduler" for a selection, "node" for a shown row) and carries
+its own time (decision 0034).
 A layer planned wholly into wanted-off time (Night off, a hold: `power_store.wanted_off_in`) is
 never recorded shown: planning carries on through Night off so the morning reveals current state,
 but a photo shown to a dark room was not seen (Power and the week, F3).
@@ -18,6 +20,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Final
 
+from central.actor import Actor
 from central.infra.power_store import wanted_off_in
 from central.wall_plan.order import KeptStill, PhotoShowing, WallHistory
 
@@ -42,19 +45,20 @@ def _showing(row: dict) -> PhotoShowing:
 class PgShownHistory:
     """Stateless; every method runs in the caller's transaction (coordination's)."""
 
-    def record_selected_in(self, conn: Any, showings: Iterable[PhotoShowing]) -> None:
+    def record_selected_in(self, conn: Any, showings: Iterable[PhotoShowing], *, by: Actor) -> None:
         rows = [(s.assignment_id, s.asset_id, s.frame_id, s.scene_id, s.pass_number, s.start,
-                 s.end, s.fade_in, s.after_end) for s in showings]
+                 s.end, s.fade_in, s.after_end, by) for s in showings]
         if not rows:
             return
         with conn.cursor() as cursor:
             cursor.executemany(
-                f"INSERT INTO photo_selections ({_COLUMNS}) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
+                f"INSERT INTO photo_selections ({_COLUMNS}, by) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT DO NOTHING",
                 rows,
             )
 
-    def record_presented_in(self, conn: Any, assignment_id: str, presented_at: float) -> bool:
+    def record_presented_in(self, conn: Any, assignment_id: str, presented_at: float, *,
+                            by: Actor) -> bool:
         selected = conn.execute(
             "SELECT frame_id, starts_at, ends_at FROM photo_selections WHERE assignment_id=%s",
             (assignment_id,),
@@ -63,10 +67,10 @@ class PgShownHistory:
                                              selected["ends_at"]):
             return False
         conn.execute(
-            f"INSERT INTO shown_photos ({_COLUMNS}, presented_at) "
-            f"SELECT {_COLUMNS}, %s FROM photo_selections WHERE assignment_id=%s "
+            f"INSERT INTO shown_photos ({_COLUMNS}, presented_at, by) "
+            f"SELECT {_COLUMNS}, %s, %s FROM photo_selections WHERE assignment_id=%s "
             "ON CONFLICT DO NOTHING",
-            (presented_at, assignment_id),
+            (presented_at, by, assignment_id),
         )
         return True
 

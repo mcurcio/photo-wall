@@ -364,14 +364,6 @@ def test_offer_bound_applies_backpressure_without_stopping_runtime(registry):
     coordinator.advance()
     assert coordinator.delivery(player["player_id"], 1)["plan"] == original
     assert coordinator.runtime.read().export_state()["now"] == registry.clock.utc()
-    with registry.db.transaction() as conn:
-        event = conn.execute(
-            "SELECT detail FROM execution_events WHERE kind='offer_backpressure'"
-        ).fetchone()
-        assert event["detail"]["handling"] == {
-            "runtime": "preserve_lifecycle",
-            "planner": "await_capacity",
-        }
 
 
 def test_missing_ready_blob_refuses_whole_offer_but_persists_current_runtime(registry):
@@ -480,9 +472,12 @@ def cohorts(registry):
 
 
 def skip_codes(registry):
+    """Each skipped group's code: Central skips a group only when it is superseded (its cue
+    withdrawn or rewritten before it started), numbering it for its revocation."""
     with registry.db.transaction() as conn:
-        return {row["detail"]["group_id"]: row["detail"]["code"] for row in conn.execute(
-            "SELECT detail FROM execution_events WHERE kind='group_skipped'").fetchall()}
+        return {row["id"]: "superseded" for row in conn.execute(
+            "SELECT id FROM coordination_groups WHERE status='skipped' "
+            "AND skip_sequence IS NOT NULL").fetchall()}
 
 
 def assert_outro_plays_after_finish(registry, coordinator, player, start=1000):
@@ -613,10 +608,12 @@ def due_layers(registry, plan, now):
 
 
 def group_events(registry, group_id):
+    """The group's skip, as Central keeps it: its status and revocation number on its row."""
     with registry.db.transaction() as conn:
-        return [row["detail"] for row in conn.execute(
-            "SELECT detail FROM execution_events WHERE kind='group_skipped' "
-            "AND detail->>'group_id'=%s", (group_id,)).fetchall()]
+        return [{"code": "superseded", "cue_key": row["cue_key"], "sequence": row["skip_sequence"]}
+                for row in conn.execute(
+                    "SELECT cue_key,skip_sequence FROM coordination_groups WHERE id=%s "
+                    "AND status='skipped' AND skip_sequence IS NOT NULL", (group_id,)).fetchall()]
 
 
 def two_frame_scene():
@@ -636,8 +633,7 @@ def test_an_edit_inside_the_prepare_window_supersedes_a_committed_cue_and_both_f
     dark += drive(registry, coordinator, players, 1078, watch=players)
     assert dark == [], "no Frame goes dark in the cycle"
     detail = group_events(registry, committed["id"])
-    assert [(d["code"], d["cue_key"], d["root"] is not None) for d in detail] == [
-        ("superseded", committed["cue_key"], True)]
+    assert [(d["code"], d["cue_key"]) for d in detail] == [("superseded", committed["cue_key"])]
     assert [g["status"] for g in cohorts(registry) if g["cue_key"] == committed["cue_key"]] \
         == ["skipped", "committed"]
 
@@ -735,6 +731,58 @@ def test_a_cue_skipped_before_this_change_takes_a_fresh_cohort_on_the_next_tick(
     assert coordinator.delivery(player["player_id"], 1)["revocations"] == ()
     coordinator.readiness(player["player_id"], report(coordinator, player))
     assert coordinator.delivery(player["player_id"], 1)["commits"]
+
+
+def test_a_skipped_groups_revocation_number_rises_across_skips(registry):
+    """Decision 0034: a skipped group's revocation number comes from `coordination_skip_sequence`,
+    so each skip's is higher than the last (the Player ignores a number at or below the last it
+    took). Mutation probe: number every skip 1 -> the second revocation repeats it, this fails."""
+    player = setup_players(registry, count=1)[0]
+    coordinator = Coordinator(registry.db, registry.clock)
+    schedule(coordinator, ["frame-0"])
+    registry.clock.advance(15)
+    numbers = []
+    for _ in range(2):
+        group = next(g for g in cohorts(registry) if g["starts_at"] == 1020 and g["status"] != "skipped")
+        with coordinator._transaction() as conn:
+            coordinator._skip_group(conn, group["id"], registry.clock.utc())
+        (revocation,) = coordinator.delivery(player["player_id"], 1)["revocations"]
+        numbers.append(revocation.sequence)
+        coordinator.advance()   # the cue takes a fresh cohort, offered in a new revision
+    assert numbers[1] > numbers[0]
+
+
+def test_an_observation_sent_twice_is_taken_once_and_answered_both_times(registry):
+    """Decision 0034: a Player numbers its observations once per change, in order, within its
+    epoch; one at or below the show state's mark is a repeat (Central took it, then its answer was
+    lost), answered alike and writing nothing; a newer one moves the mark. Mutation probe: drop
+    the mark's check in `_observe` -> the repeat rewrites the show state, this fails."""
+    player = setup_players(registry, count=1)[0]
+    coordinator = Coordinator(registry.db, registry.clock)
+    schedule(coordinator, ["frame-0"], starts=1000)
+    plan = coordinator.delivery(player["player_id"], 1)["plan"]
+    layer = plan.layers[0]
+
+    def observed(sequence):
+        return Observation(plan_id=plan.plan_id, revision=plan.revision, authority_epoch=1,
+                           sequence=sequence, assignment_id=layer.assignment_id,
+                           observed_at=registry.clock.utc(), status="presented")
+
+    def state():
+        with registry.db.transaction() as conn:
+            return dict(conn.execute("SELECT xmin::text AS version, observed_sequence FROM "
+                                     "player_show_state WHERE player_id=%s",
+                                     (player["player_id"],)).fetchone())
+
+    coordinator.observe(player["player_id"], observed(2))
+    taken = state()
+    assert taken["observed_sequence"] == 2
+    registry.clock.advance(1)
+    coordinator.observe(player["player_id"], observed(2))     # sent again: answered, not written
+    coordinator.observe(player["player_id"], observed(1))     # an older number: a repeat too
+    assert state() == taken
+    coordinator.observe(player["player_id"], observed(3))
+    assert state()["observed_sequence"] == 3
 
 
 @pytest.mark.parametrize("seed", range(4))
@@ -1036,10 +1084,10 @@ def test_every_offer_a_player_may_be_cycling_and_its_carried_photo_stay_off_the_
 def test_a_continuation_slot_shown_is_recorded_against_its_source_photo_now_and_after_a_rejoin(
         registry):
     """C3, decision 0032 (E6): a Frame playing its continuation reports each slot under its own
-    generated id. Central records the observation under that id naming its source, and the shown
-    history against the source photo; one reported under a revision Central has since replaced
-    (a rejoin after an outage) is still refused as stale and still counts as shown. Mutation
-    probe: leave `continuation_source` out of `_observed_layer`."""
+    generated id. Central takes the observation (its show state's mark moves to its number) and
+    records the shown history against the source photo; one reported under a revision Central
+    has since replaced (a rejoin after an outage) is still refused as stale and still counts as
+    shown. Mutation probe: leave `continuation_source` out of `_observed_layer`."""
     player = setup_players(registry, count=1)[0]
     portraits = tuple(photo(f"portrait-{n:02}", taken_at=900 + n, width=2400, height=3600)
                       for n in range(20))
@@ -1072,13 +1120,13 @@ def test_a_continuation_slot_shown_is_recorded_against_its_source_photo_now_and_
 
     first = coordinator.delivery(player["player_id"], 1)["plan"]
     drawn, source = slot(first, 0)
-    coordinator.observe(player["player_id"], presented(first, drawn))
+    taken = presented(first, drawn)
+    coordinator.observe(player["player_id"], taken)
     with registry.db.transaction() as conn:
-        event = conn.execute("SELECT assignment_id, detail FROM execution_events "
-                             "WHERE kind='observation' ORDER BY sequence DESC LIMIT 1").fetchone()
-    assert event["assignment_id"] == drawn.assignment_id
-    assert event["detail"]["continuation_source"] == source
-    assert source in shown()
+        mark = conn.execute("SELECT observed_sequence FROM player_show_state WHERE player_id=%s",
+                            (player["player_id"],)).fetchone()["observed_sequence"]
+    assert mark == taken.sequence
+    assert source in shown() and drawn.assignment_id not in shown()
 
     registry.clock.advance(70)
     coordinator.advance()

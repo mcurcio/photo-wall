@@ -84,7 +84,7 @@ def test_unbound_player_is_heard_over_http(registry):
 
 def test_a_readiness_report_is_not_liveness(registry):
     """One concept, one domain: an accepted readiness report writes no contact. Mutation probe:
-    read liveness from player_feedback again -> 1016."""
+    read liveness from the readiness receipt (player_show_state) again -> 1016."""
     players = setup_players(registry, count=1)
     coordinator = Coordinator(registry.db, registry.clock)
     schedule(coordinator, ["frame-0"])

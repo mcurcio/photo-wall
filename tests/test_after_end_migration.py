@@ -66,9 +66,13 @@ def test_stored_scenes_runs_plans_and_locks_move_to_the_after_state(registry):
         conn.execute("INSERT INTO runtime_state(singleton,revision,snapshot,changed_at,created_at,"
                      "created_by,changed_by) VALUES(TRUE,1,%s,0,0,'console','console')",
                      (Jsonb(_previous_build(snapshot)),))
-        conn.execute("INSERT INTO plan_offers VALUES('p',1,1,'plan-1',%s,'{}',0,20)",
+        conn.execute("INSERT INTO plan_offers(player_id,authority_epoch,revision,plan_id,manifest,groups,"
+                     "created_at,valid_until,created_by,changed_at,changed_by) "
+                     "VALUES('p',1,1,'plan-1',%s,'{}',0,20,'scheduler',0,'scheduler')",
                      (Jsonb(_previous_build(plan.model_dump(mode="json"))),))
-        conn.execute("INSERT INTO assignment_locks VALUES('p',1,'kept',%s,0,10)",
+        conn.execute("INSERT INTO assignment_locks(player_id,authority_epoch,assignment_id,layer,secured_at,"
+                     "valid_until,created_at,created_by,changed_at,changed_by) "
+                     "VALUES('p',1,'kept',%s,0,10,0,'central',0,'central')",
                      (Jsonb(_previous_build(plan.layers[0].model_dump(mode="json"))),))
         assert "retain_on_expiry" in json.dumps(
             conn.execute("SELECT snapshot FROM runtime_state").fetchone()["snapshot"])

@@ -48,7 +48,6 @@ from central.infra.display_store import (
     PgPictureSessions,
     frame_outputs_in,
 )
-from central.infra.execution_event_retention import ExecutionEventRetention
 from central.infra.fit_analysis_store import PgFitAnalysisReader
 from central.infra.fit_settings_store import PgFitSettings
 from central.infra.frame_lighting_store import PgFrameLighting, PgHouseLock
@@ -773,10 +772,9 @@ def create_app(
         registry.retire(player_id, by=by)
         return {"status": "retired"}
 
-    @app.post("/v1/operator/players/{player_id}/outputs/{output_id}/identify",
-              dependencies=[Depends(admin)])
-    def identify_output(player_id: Identifier, output_id: Identifier):
-        return registry.identify_output(player_id, output_id)
+    @app.post("/v1/operator/players/{player_id}/outputs/{output_id}/identify")
+    def identify_output(player_id: Identifier, output_id: Identifier, by: Actor = Depends(admin)):
+        return registry.identify_output(player_id, output_id, by=by)
 
     @app.get("/v1/operator/runtime", dependencies=[Depends(admin)])
     def runtime_state():
@@ -910,7 +908,6 @@ def create_app(
     app.state.scheduler = Scheduler(app.state.node_reconciler, coordinator,
                                     media_application.request_measurements, clock,
                                     retentions={
-                                        "retention": ExecutionEventRetention(db).prune,
                                         "node-retention": NodeRecordRetention(db.transaction,
                                                                               clock).prune})
     # A Node's leaf and Home Assistant's door arrive at Central's origin (erratum E-E3D-CUT-4): relayed to the hub.

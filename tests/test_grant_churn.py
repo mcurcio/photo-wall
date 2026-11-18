@@ -14,12 +14,14 @@ from contracts.models import LostGrant, Readiness
 
 
 def _rows(registry, player_id):
-    """Each grant, configuration and committed group row's own version (`xmin` changes on every
-    rewrite)."""
+    """Each grant and committed group row's own version (`xmin` changes on every rewrite), and the
+    stored configuration."""
     with registry.db.transaction() as conn:
         grants = conn.execute("SELECT assignment_id,xmin::text AS version FROM execution_commits "
                               "WHERE player_id=%s ORDER BY assignment_id", (player_id,)).fetchall()
-        configuration = conn.execute("SELECT xmin::text AS version FROM player_configurations "
+        # The configuration shares the show state's row with readiness (each new readiness number
+        # is written), so its own meaning is what must stand: its revision and its document.
+        configuration = conn.execute("SELECT configuration_revision,configuration FROM player_show_state "
                                      "WHERE player_id=%s", (player_id,)).fetchall()
         groups = conn.execute("SELECT id,xmin::text AS version FROM coordination_groups "
                               "WHERE status='committed' ORDER BY id").fetchall()

@@ -70,12 +70,12 @@ def steps(app):
     return {name: step.status for name, step in app.state.scheduler.health().steps.items()}
 
 
-def unavailable(registry):
-    """Each `offer_unavailable` event as (player, code)."""
-    with registry.db.transaction() as conn:
-        return [(row["player_id"], row["detail"]["code"]) for row in conn.execute(
-            "SELECT player_id, detail FROM execution_events WHERE kind='offer_unavailable' "
-            "ORDER BY sequence").fetchall()]
+def unavailable(caplog):
+    """Each Player left out of a pass (`offer_unavailable`, logged: central/coordination.py
+    `_left_out`) as (player, code)."""
+    return [record.args for record in caplog.records
+            if record.name == "central.coordination"
+            and record.msg.startswith("offer_unavailable:")]
 
 
 def two_offered(registry, client, app):
@@ -251,7 +251,7 @@ def test_the_production_runtime_plans_after_seventeen_hours(registry, wall):
     assert not [issue for issue in issues if issue["code"] in ("intent_refused", "plan_shortened")]
 
 
-def test_a_player_gone_stale_is_left_out_alone(registry, wall, monkeypatch):
+def test_a_player_gone_stale_is_left_out_alone(registry, wall, monkeypatch, caplog):
     """The Player is the unit of isolation: one whose authority goes stale between its session's
     read and its configuration is left out of the pass (`offer_unavailable`, stale_authority)
     and the other is offered. Mutation probe: re-raise in `_configurations` (planning fails)."""
@@ -268,12 +268,12 @@ def test_a_player_gone_stale_is_left_out_alone(registry, wall, monkeypatch):
     app.state.scheduler.tick()
     assert steps(app)["planning"] == "ok"
     assert offered(app, one).layers
-    assert (two["player_id"], "stale_authority") in unavailable(registry)
+    assert (two["player_id"], "stale_authority") in unavailable(caplog)
 
 
 @pytest.mark.parametrize("failure", ["registry", "database"])
 def test_one_players_offer_that_fails_leaves_the_others_offered(registry, wall, monkeypatch,
-                                                                 failure):
+                                                                 failure, caplog):
     """Any failure while offering one Player, a registry refusal or a statement the database
     rejects, rolls back to that Player's savepoint (`offer_unavailable` naming it) and every
     other Player is offered. Mutation probe: catch only `media_unavailable` in `_propose`, or
@@ -295,12 +295,12 @@ def test_one_players_offer_that_fails_leaves_the_others_offered(registry, wall, 
     assert steps(app)["planning"] == "ok"
     assert offered(app, one).layers
     assert offered(app, two) is None
-    codes = [code for player, code in unavailable(registry) if player == two["player_id"]]
+    codes = [code for player, code in unavailable(caplog) if player == two["player_id"]]
     assert codes and (codes[0] == "other_code" if failure == "registry"
                       else codes[0].startswith("UndefinedTable at "))
 
 
-def test_one_players_inconsistent_lock_leaves_the_others_offered(registry, wall):
+def test_one_players_inconsistent_lock_leaves_the_others_offered(registry, wall, caplog):
     """A Player holding a content lock that disagrees with its offer is left out alone
     (`offer_unavailable`, inconsistent_content_lock; its offers stand); the other Player is
     still planned. Mutation probe: raise `CoordinationError("inconsistent_content_lock")` in
@@ -312,7 +312,8 @@ def test_one_players_inconsistent_lock_leaves_the_others_offered(registry, wall)
     layer = held.layers[0].model_copy(update={"opacity": 0.5})
     with registry.db.transaction() as conn:
         conn.execute("INSERT INTO assignment_locks(player_id,authority_epoch,assignment_id,layer,"
-                     "valid_until,secured_at) VALUES(%s,%s,%s,%s,%s,%s)",
+                     "valid_until,secured_at,created_at,created_by,changed_at,changed_by) "
+                     "VALUES(%s,%s,%s,%s,%s,%s,1000,'central',1000,'central')",
                      (two["player_id"], two["authority_epoch"], layer.assignment_id,
                       Jsonb(layer.model_dump(mode="json")), layer.end, 1000))
     response = client.post("/v1/operator/scenes/a/apply-now", headers=BEARER,
@@ -322,7 +323,7 @@ def test_one_players_inconsistent_lock_leaves_the_others_offered(registry, wall)
     assert steps(app)["planning"] == "ok"
     assert 20 in {layer.end - layer.start for layer in offered(app, one).layers}
     assert offered(app, two) == held
-    assert (two["player_id"], "inconsistent_content_lock") in unavailable(registry)
+    assert (two["player_id"], "inconsistent_content_lock") in unavailable(caplog)
 
 
 def test_a_wall_of_129_players_is_coordinated(registry, wall):

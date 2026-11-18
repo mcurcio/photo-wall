@@ -1,7 +1,7 @@
 """Read-only projection of current Player readiness failures for operator views.
 
-The projection joins the last accepted feedback to the latest offered plan and the
-caller's Frame snapshot. It deliberately stores no second copy of readiness state.
+The projection joins the Player's show state (its last accepted readiness and configuration) to
+the latest offered plan and the caller's Frame snapshot. It deliberately stores no second copy of readiness state.
 """
 
 from __future__ import annotations
@@ -81,13 +81,13 @@ def project_readiness_diagnostics(
     says nothing of the Player's.
     """
     rows = conn.execute(
-        "SELECT p.id AS player_id,p.authority_epoch,f.sequence,f.received_at,f.readiness,"
-        "c.revision AS config_revision,c.configuration,"
+        "SELECT p.id AS player_id,p.authority_epoch,s.readiness_sequence AS sequence,"
+        "s.readiness_received_at AS received_at,s.readiness,"
+        "s.configuration_revision AS config_revision,s.configuration,"
         "o.revision AS offer_revision,o.plan_id AS offer_plan_id,o.valid_until,o.manifest "
-        "FROM players p JOIN player_feedback f ON f.player_id=p.id "
-        "AND f.authority_epoch=p.authority_epoch "
-        "JOIN player_configurations c ON c.player_id=p.id "
-        "AND c.authority_epoch=p.authority_epoch "
+        "FROM players p JOIN player_show_state s ON s.player_id=p.id "
+        "AND s.authority_epoch=p.authority_epoch AND s.readiness IS NOT NULL "
+        "AND s.configuration IS NOT NULL "
         "JOIN LATERAL (SELECT revision,plan_id,valid_until,manifest FROM plan_offers "
         "WHERE player_id=p.id AND authority_epoch=p.authority_epoch "
         "ORDER BY revision DESC LIMIT 1) o ON TRUE "

@@ -10,6 +10,8 @@ import json
 from hashlib import sha256
 from pathlib import Path
 
+from support.migrations import migrate_before
+
 from central.db import Database
 from central.frame_lighting.policy import (
     UPGRADE_ROOM_LIGHT_ID,
@@ -82,7 +84,8 @@ def test_099_upgrades_every_frame_to_the_python_upgrade_rule(database_provisione
                 conn.execute("INSERT INTO plan_offers(player_id, authority_epoch, revision, plan_id, manifest, groups, "
                              "created_at, valid_until) VALUES ('p1', 1, 1, 'plan', %s, '[]', 1000, 1200)",
                              (json.dumps({"layers": [], "bindings": [binding, gone]}),))
-            db.migrate()
+            # Up to 123b, which folds `player_configurations` into the show state (decision 0034).
+            migrate_before(db, "123b")
             expected = {"hall": upgrade_lighting(UPGRADE_DISPLAY_LIGHT, 2.5, 50 / 100),
                         "dim": upgrade_lighting(UPGRADE_DISPLAY_LIGHT, 0.0, 0 / 100),
                         "lone": upgrade_lighting(UPGRADE_DISPLAY_LIGHT, 1.0, 1.0)}

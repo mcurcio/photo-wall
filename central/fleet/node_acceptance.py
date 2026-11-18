@@ -131,8 +131,9 @@ class NodeAcceptance:
             if (environment.base_abi, environment.graphics_abi, environment.plugin_abi) != (
                     offer.base.base_abi, offer.base.graphics_abi, offer.base.plugin_abi):
                 raise NodeControlError("node_qualification_base_abi_mismatch")
-            feedback = conn.execute("SELECT readiness FROM player_feedback WHERE player_id=%s "
-                                    "AND authority_epoch=%s", (control.player_id, control.authority_epoch)).fetchone()
+            feedback = conn.execute("SELECT readiness FROM player_show_state WHERE player_id=%s "
+                                    "AND authority_epoch=%s AND readiness IS NOT NULL",
+                                    (control.player_id, control.authority_epoch)).fetchone()
             # Readiness is sent once per change, so its age says nothing: the Player is live when
             # Central heard from it within the gap (its contact is written at most every
             # HEARD_WRITE_SECONDS, central/infra/player_contact_store.py).

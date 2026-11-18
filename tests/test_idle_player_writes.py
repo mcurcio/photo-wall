@@ -1,7 +1,7 @@
 """An idle Player costs Central reads, never writes, through the real routes on real PostgreSQL.
 
 On 2026-11-16 one idle Pi kept Central committing under the fleet-wide Coordination lock about
-six times a second: readiness re-posted every half second (a new sequence, a player_feedback
+six times a second: readiness re-posted every half second (a new sequence, a readiness
 upsert and a grant pass each), the session socket re-sending an unchanged state every half second
 (a delivery under the lock each), and every state answered by an acknowledgment that row-locked
 the Player (`SELECT ... FOR UPDATE`), however often that delivery had been acknowledged before.

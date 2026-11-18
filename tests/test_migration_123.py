@@ -7,8 +7,16 @@ Output loss an `output_losses` row whose `cause_layer` is its producer's owner; 
 Players, trials and losses carry their audit fields; `bindings`, `player_control_sessions` and
 `enrollment_nonces` are gone.
 
+Part 2 (123b_show_state): a Player's configuration, readiness, Identify request and observation mark
+(its epoch's highest report number) are one `player_show_state` row, an older epoch's facts left
+behind; the next skip number is past every number `execution_events` gave; Coordination's tables
+carry their audit fields and the shown history its writer; `player_configurations`, `player_feedback`,
+`player_output_identification` and `execution_events` are gone.
+
 Mutation probes: copy no binding onto the Frame in 123 -> the binding case fails; copy `cause_layer`
-from anything but the producer's owner -> the loss case fails.
+from anything but the producer's owner -> the loss case fails; start `coordination_skip_sequence` at
+the highest kept skip number alone -> the skip case fails; take the observation mark across epochs
+-> the show state case fails.
 """
 from __future__ import annotations
 
@@ -139,7 +147,94 @@ def test_123_holds_one_frame_per_output(database_provisioner):
             db.close()
 
 
-def test_after_123_central_has_74_tables(registry):
+READINESS = {"plan_id": "plan", "revision": 1, "authority_epoch": 2, "sequence": 6, "secured": [],
+             "prepared": [], "failures": [], "capacity_ok": True, "clock_uncertainty": 0.01,
+             "observed_at": 70, "lost_grants": [], "carried": []}
+REQUEST = UUID("00000000-0000-4000-8000-000000000128")
+SELECTION = ("'shown', 'asset', 'bound', 'scene', 1, 100, 160, 0, 'leave_as_is'")
+
+
+def _seed_show_state(conn) -> None:
+    """At 123: a Player (epoch 2) with its configuration, readiness, an Identify request and
+    observations of two epochs; a skipped group numbered from execution_events; an offer, its
+    commit and lock; a selection and its shown row."""
+    conn.execute("INSERT INTO devices(device_id, first_seen, last_seen, generation, created_at, created_by, "
+                 "changed_at, changed_by) VALUES (%s, 1, 2, 1, 1, 'node', 1, 'node')", (DEVICE,))
+    conn.execute("INSERT INTO players(id, public_key, token_hash, registered_at, last_seen, device_id, authority_epoch, "
+                 "created_at, created_by, changed_at, changed_by) "
+                 "VALUES (%s, 'key', 'hash', 10, 60, %s, 2, 10, 'node', 60, 'node')", (PLAYER, DEVICE))
+    conn.execute("INSERT INTO outputs(player_id, output_id, observation, created_at, created_by, changed_at, "
+                 "changed_by) VALUES (%s, 'HDMI-A-1', '{}', 10, 'node', 10, 'node')", (PLAYER,))
+    conn.execute("INSERT INTO player_configurations(player_id, authority_epoch, revision, configuration) "
+                 "VALUES (%s, 2, 4, '{\"bindings\": []}')", (PLAYER,))
+    conn.execute("INSERT INTO player_feedback(player_id, authority_epoch, sequence, received_at, readiness) "
+                 "VALUES (%s, 2, 6, 71, %s)", (PLAYER, json.dumps(READINESS)))
+    conn.execute("INSERT INTO player_output_identification(player_id, request_id, output_id, authority_epoch, "
+                 "created_at, expires_at) VALUES (%s, %s, 'HDMI-A-1', 2, 72, 102)", (PLAYER, REQUEST))
+    for epoch, number in ((2, 5), (2, 7), (1, 9)):
+        conn.execute("INSERT INTO execution_events(occurred_at, player_id, kind, detail, authority_epoch, "
+                     "report_sequence) VALUES (70, %s, 'observation', '{}', %s, %s)", (PLAYER, epoch, number))
+    skipped = conn.execute("INSERT INTO execution_events(occurred_at, kind, detail) "
+                           "VALUES (70, 'group_skipped', '{}') RETURNING sequence").fetchone()["sequence"]
+    conn.execute("INSERT INTO execution_events(occurred_at, kind, detail) VALUES (71, 'offer_backpressure', '{}')")
+    conn.execute("INSERT INTO coordination_groups(id, members, starts_at, deadline, valid_until, status, cue_key, "
+                 "skip_sequence) VALUES ('skipped', '{}', 100, 100, 160, 'skipped', 'cue', %s), "
+                 "('pending', '{}', 100, 100, 160, 'committed', 'cue', NULL)", (skipped,))
+    conn.execute("INSERT INTO plan_offers(player_id, authority_epoch, revision, plan_id, manifest, groups, "
+                 "created_at, valid_until) VALUES (%s, 2, 1, 'plan', '{}', '{}', 50, 160)", (PLAYER,))
+    conn.execute("INSERT INTO execution_commits(player_id, authority_epoch, revision, assignment_id, group_id, "
+                 "committed_at, readiness_sequence) VALUES (%s, 2, 1, 'shown', 'pending', 95, 6)", (PLAYER,))
+    conn.execute("INSERT INTO assignment_locks(player_id, authority_epoch, assignment_id, layer, secured_at, "
+                 "valid_until) VALUES (%s, 2, 'shown', '{}', 90, 160)", (PLAYER,))
+    conn.execute(f"INSERT INTO photo_selections VALUES ({SELECTION})")
+    conn.execute(f"INSERT INTO shown_photos VALUES ({SELECTION}, 101)")
+
+
+def test_123b_keeps_one_show_state_per_player_and_numbers_skips_past_the_old_log(database_provisioner):
+    with database_provisioner.empty() as conninfo:
+        db = Database(conninfo, application_name="photo-wall-test")
+        try:
+            migrate_before(db, "123b")
+            with db.transaction() as conn:
+                _seed_show_state(conn)
+                highest = conn.execute("SELECT max(sequence) AS n FROM execution_events").fetchone()["n"]
+            migrate_before(db, "124")
+            with db.transaction() as conn:
+                [state] = conn.execute("SELECT * FROM player_show_state").fetchall()
+                next_skip = conn.execute("SELECT nextval('coordination_skip_sequence') AS n").fetchone()["n"]
+                groups = {row["id"]: row for row in conn.execute("SELECT * FROM coordination_groups")}
+                [offer] = conn.execute("SELECT * FROM plan_offers").fetchall()
+                [commit] = conn.execute("SELECT * FROM execution_commits").fetchall()
+                [lock] = conn.execute("SELECT * FROM assignment_locks").fetchall()
+                [selection] = conn.execute("SELECT * FROM photo_selections").fetchall()
+                [shown] = conn.execute("SELECT * FROM shown_photos").fetchall()
+                tables = {row["tablename"] for row in conn.execute(
+                    "SELECT tablename FROM pg_tables WHERE schemaname='public'").fetchall()}
+        finally:
+            db.close()
+
+    assert (state["player_id"], state["authority_epoch"], state["configuration_revision"],
+            state["configuration"]) == (PLAYER, 2, 4, {"bindings": []})
+    assert (state["readiness_sequence"], state["readiness"], state["readiness_received_at"]) == (
+        6, READINESS, 71)
+    assert state["observed_sequence"] == 7        # epoch 2's highest; epoch 1's 9 is not this epoch's
+    assert state["identify"] == {"request_id": str(REQUEST), "output_id": "HDMI-A-1", "authority_epoch": 2,
+                                 "created_at": 72, "expires_at": 102}
+    assert (state["created_at"], state["created_by"], state["changed_at"], state["changed_by"]) == (
+        71, "unknown", 72, "unknown")
+    assert groups["skipped"]["skip_sequence"] < highest < next_skip
+    assert all(group["created_by"] == "unknown" for group in groups.values())
+    assert (offer["created_at"], offer["created_by"], offer["changed_at"], offer["changed_by"]) == (
+        50, "unknown", 50, "unknown")
+    assert (commit["created_at"], commit["changed_at"], commit["changed_by"]) == (95, 95, "unknown")
+    assert (lock["created_at"], lock["changed_at"], lock["changed_by"]) == (90, 90, "unknown")
+    assert (selection["by"], shown["by"], shown["presented_at"]) == ("unknown", "unknown", 101)
+    assert not tables & {"player_configurations", "player_feedback", "player_output_identification",
+                         "execution_events"}
+    assert "player_show_state" in tables
+
+
+def test_after_123b_central_has_71_tables(registry):
     with registry.db.transaction() as conn:
         assert conn.execute("SELECT count(*) AS n FROM pg_tables WHERE schemaname='public' "
-                            "AND tablename NOT LIKE 'procrastinate%%'").fetchone()["n"] == 74
+                            "AND tablename NOT LIKE 'procrastinate%%'").fetchone()["n"] == 71

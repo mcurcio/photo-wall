@@ -53,10 +53,12 @@ def _offer(registry, identity, bindings, layers, *, revision=1, valid_until=1200
     )
     with registry.db.transaction() as conn:
         conn.execute(
-            "INSERT INTO plan_offers VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+            "INSERT INTO plan_offers(player_id,authority_epoch,revision,plan_id,manifest,groups,"
+            "created_at,valid_until,created_by,changed_at,changed_by) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'scheduler',%s,'scheduler')",
             (plan.player_id, plan.authority_epoch, plan.revision, plan.plan_id,
              Jsonb(plan.model_dump(mode="json")), Jsonb({layer.assignment_id: "group" for layer in layers}),
-             plan.issued_at, plan.valid_until),
+             plan.issued_at, plan.valid_until, plan.issued_at),
         )
     return plan
 
@@ -74,12 +76,12 @@ def _report(registry, plan, failures, *, sequence=1):
         failures=tuple(failures),
     )
     with registry.db.transaction() as conn:
+        # As Coordination writes it: on the show state `_seed`'s configuration made, this epoch's.
         conn.execute(
-            "INSERT INTO player_feedback VALUES(%s,%s,%s,%s,%s) "
-            "ON CONFLICT(player_id,authority_epoch) DO UPDATE SET sequence=EXCLUDED.sequence,"
-            "received_at=EXCLUDED.received_at,readiness=EXCLUDED.readiness",
-            (plan.player_id, plan.authority_epoch, sequence, registry.clock.utc(),
-             Jsonb(report.model_dump(mode="json"))),
+            "UPDATE player_show_state SET readiness_sequence=%s,readiness_received_at=%s,"
+            "readiness=%s,changed_at=%s,changed_by='node' WHERE player_id=%s AND authority_epoch=%s",
+            (sequence, registry.clock.utc(), Jsonb(report.model_dump(mode="json")),
+             registry.clock.utc(), plan.player_id, plan.authority_epoch),
         )
         heard_in(conn, plan.player_id, plan.authority_epoch, registry.clock.utc())
 

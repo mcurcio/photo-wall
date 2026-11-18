@@ -108,7 +108,7 @@ def test_identify_output_epoch_is_fenced_by_reenrollment(registry):
     registry.control_hello(player["player_id"], ControlHello(
         authority_epoch=player["authority_epoch"], schemas=(2,),
         capabilities=("identify_output",)))
-    registry.identify_output(player["player_id"], "HDMI-A-2")
+    registry.identify_output(player["player_id"], "HDMI-A-2", by="console")
     current, _, _ = enroll(registry, key=key, device_id=request.device_id)
     hello(registry, current, ("identify_output",))
     app = create_app(registry.db, registry.clock, ADMIN)

@@ -1,10 +1,9 @@
 """Bounded batch deletes: the one home of Central's retention loop (decision 0033).
 
-Every retention deletes through `drain`: execution events
-(`central/infra/execution_event_retention.py`), node records
+Every retention deletes through `drain`: node records and events
 (`central/infra/node_record_retention.py`) and finished queue jobs
-(`central/infra/queue_ops.py` `FinishedJobs`). The loop was written once, for execution events,
-after the 2026-10-28 outage: one unbounded DELETE inside the coordinator's transaction was
+(`central/infra/queue_ops.py` `FinishedJobs`). The loop was written once, for execution events
+(a table gone since decision 0034), after the 2026-10-28 outage: one unbounded DELETE inside the coordinator's transaction was
 cancelled every second, rolled the whole step back and wrote log until the disk filled. Its
 rules are this module's contract, so no retention can repeat that.
 
@@ -20,7 +19,7 @@ What a retention statement must be (each caller's statement is held to it by a D
 - **A whole batch, where it runs every tick.** A statement the scheduler runs each second
   deletes exactly `%(batch_rows)s` rows or none: a delete of one row costs a commit (an fsync),
   and a per-tick retention that deletes whatever is due commits every tick (execution events'
-  did: 3,600 commits an hour). So its table holds between its rule's bound and that bound plus
+  did, before decision 0034 removed them: 3,600 commits an hour). So its table holds between its rule's bound and that bound plus
   `batch_rows` rows. A statement run by an hourly job (finished queue jobs) may delete a short
   last batch.
 """

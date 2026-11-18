@@ -1054,10 +1054,23 @@ def operator_action(action: str):
                              "ORDER BY player_id,assignment_id LIMIT 256").fetchall()
         commits = conn.execute("SELECT player_id,authority_epoch,revision,assignment_id,group_id,"
                                "committed_at,readiness_sequence,valid FROM execution_commits LIMIT 256").fetchall()
-        observations = conn.execute("SELECT occurred_at,player_id,assignment_id,detail FROM execution_events "
-                                    "WHERE kind='observation' ORDER BY sequence DESC LIMIT 128").fetchall()
-        faults = conn.execute("SELECT occurred_at,player_id,assignment_id,kind,detail FROM execution_events "
-                              "WHERE kind IN ('readiness_lost','group_skipped') ORDER BY sequence DESC LIMIT 64").fetchall()
+        # What Central keeps of the Players' reports (decision 0034): each Player's observation
+        # mark and readiness in its show state, the photos reported presented (shown history), and
+        # the groups it skipped.
+        observations = conn.execute("SELECT player_id,authority_epoch,observed_sequence,changed_at "
+                                    "FROM player_show_state WHERE observed_sequence IS NOT NULL "
+                                    "ORDER BY player_id").fetchall()
+        presented = conn.execute("SELECT assignment_id,asset_id,frame_id,presented_at FROM shown_photos "
+                                 "ORDER BY presented_at DESC LIMIT 128").fetchall()
+        faults = [*({"kind": "readiness_failed", "player_id": row["player_id"], "failures": row["failures"]}
+                    for row in conn.execute(
+                        "SELECT player_id,readiness->'failures' AS failures FROM player_show_state "
+                        "WHERE jsonb_array_length(coalesce(readiness->'failures','[]'::jsonb))>0 "
+                        "ORDER BY player_id").fetchall()),
+                  *({"kind": "group_skipped", "group_id": row["id"], "sequence": row["skip_sequence"]}
+                    for row in conn.execute(
+                        "SELECT id,skip_sequence FROM coordination_groups WHERE status='skipped' "
+                        "ORDER BY skip_sequence DESC LIMIT 64").fetchall())]
         offers = conn.execute("SELECT DISTINCT ON (player_id) player_id,manifest FROM plan_offers "
                               "ORDER BY player_id,authority_epoch DESC,revision DESC").fetchall()
         groups = conn.execute("SELECT id,members,status FROM coordination_groups ORDER BY starts_at DESC LIMIT 64").fetchall()
@@ -1072,7 +1085,7 @@ def operator_action(action: str):
                     assignment_id=row["assignment_id"], sha256=row["layer"]["variant"]["sha256"],
                     output_id=row["layer"]["output_id"],
                     start=row["layer"]["start"], end=row["layer"]["end"], valid_until=row["valid_until"], run_id=row["layer"]["run_id"]) for row in locks if row["layer"]["variant"]],
-        commits=commits, observations=observations, groups=groups, faults=faults,
+        commits=commits, observations=observations, presented=presented, groups=groups, faults=faults,
         offers=[dict(player_id=row["player_id"], plan=row["manifest"]) for row in offers])
 
 

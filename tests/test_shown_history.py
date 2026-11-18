@@ -40,17 +40,18 @@ def store(registry) -> ShownHistory:
 
 def shown_now(store, conn, *showings: PhotoShowing) -> None:
     """Offer each showing, then report it presented."""
-    store.record_selected_in(conn, showings)
+    store.record_selected_in(conn, showings, by="scheduler")
     for item in showings:
-        assert store.record_presented_in(conn, item.assignment_id, item.start)
+        assert store.record_presented_in(conn, item.assignment_id, item.start, by="node")
 
 
 def test_recording_a_selection_twice_keeps_the_first_row(registry, store):
     first = showing("a-1", "photo-1", start=NOW + 10)
     with registry.db.transaction() as conn:
-        store.record_selected_in(conn, [first])
-        store.record_selected_in(conn, [first.model_copy(update={"asset_id": "photo-2"})])
-        store.record_selected_in(conn, [])
+        store.record_selected_in(conn, [first], by="scheduler")
+        store.record_selected_in(conn, [first.model_copy(update={"asset_id": "photo-2"})],
+                                 by="scheduler")
+        store.record_selected_in(conn, [], by="scheduler")
         history = store.wall_history_in(conn, ["scene"], now=NOW, window_seconds=WEEK)
     assert history.selected == (first,)
     assert history.shown == ()
@@ -59,10 +60,10 @@ def test_recording_a_selection_twice_keeps_the_first_row(registry, store):
 def test_presented_copies_the_selection_once_and_refuses_an_unknown_layer(registry, store):
     offered = showing("a-1", "photo-1", start=NOW - 30, after_end="keep_this_photo", fade_in=2)
     with registry.db.transaction() as conn:
-        store.record_selected_in(conn, [offered])
-        assert store.record_presented_in(conn, "a-1", NOW - 29)
-        assert store.record_presented_in(conn, "a-1", NOW - 20)
-        assert not store.record_presented_in(conn, "never-offered", NOW)
+        store.record_selected_in(conn, [offered], by="scheduler")
+        assert store.record_presented_in(conn, "a-1", NOW - 29, by="node")
+        assert store.record_presented_in(conn, "a-1", NOW - 20, by="node")
+        assert not store.record_presented_in(conn, "never-offered", NOW, by="node")
         rows = conn.execute("SELECT assignment_id, presented_at FROM shown_photos").fetchall()
         history = store.wall_history_in(conn, ["scene"], now=NOW, window_seconds=WEEK)
     assert [(row["assignment_id"], row["presented_at"]) for row in rows] == [("a-1", NOW - 29)]
@@ -83,10 +84,10 @@ def test_a_layer_planned_into_night_off_is_not_shown_and_one_outside_it_is(regis
     elsewhere = showing("elsewhere", "photo-3", start=night, frame="frame-2")
     straddling = showing("dawn", "photo-4", start=at(UTC_HOUSE, "2001-09-10T06:59:50"))
     with registry.db.transaction() as conn:
-        store.record_selected_in(conn, [dark, day, elsewhere, straddling])
-        assert not store.record_presented_in(conn, "dark", night)
+        store.record_selected_in(conn, [dark, day, elsewhere, straddling], by="scheduler")
+        assert not store.record_presented_in(conn, "dark", night, by="node")
         for layer in (day, elsewhere, straddling):
-            assert store.record_presented_in(conn, layer.assignment_id, layer.start)
+            assert store.record_presented_in(conn, layer.assignment_id, layer.start, by="node")
         shown = conn.execute("SELECT assignment_id FROM shown_photos ORDER BY assignment_id").fetchall()
     assert [row["assignment_id"] for row in shown] == ["dawn", "day", "elsewhere"]
 
@@ -116,7 +117,7 @@ def test_wall_history_holds_the_window_the_current_pass_live_selections_and_kept
     with registry.db.transaction() as conn:
         shown_now(store, conn, old_pass, current_old, in_window, other_scene_old,
                   unnamed_in_window, *kept_then_cleared, *kept)
-        store.record_selected_in(conn, [live, ended])
+        store.record_selected_in(conn, [live, ended], by="scheduler")
         history = store.wall_history_in(conn, ["scene", "other"], now=NOW, window_seconds=WEEK)
     assert {row.assignment_id for row in history.shown} == {
         "current-old", "in-window", "other-old", "unnamed-window", "f1-keep", "f1-clear",
@@ -140,7 +141,7 @@ def test_a_covered_layer_that_keeps_its_photo_is_kept_though_never_reported_pres
                        after_end="keep_this_photo")
     with registry.db.transaction() as conn:
         shown_now(store, conn, presented)
-        store.record_selected_in(conn, [covered, upcoming])
+        store.record_selected_in(conn, [covered, upcoming], by="scheduler")
         history = store.wall_history_in(conn, ["scene"], now=NOW, window_seconds=WEEK)
     assert history.kept == (KeptStill(frame_id="frame-1", asset_id="covered", since=NOW - 59),)
 
@@ -162,7 +163,7 @@ def test_prune_keeps_a_selection_until_a_day_after_its_layer_ends(registry, stor
     recent = showing("recent", "p", start=NOW - DAY + 60, end=NOW - DAY + 90)
     stale = showing("stale", "q", start=NOW - DAY - 90, end=NOW - DAY - 60)
     with registry.db.transaction() as conn:
-        store.record_selected_in(conn, [recent, stale])
+        store.record_selected_in(conn, [recent, stale], by="scheduler")
         store.prune_in(conn, now=NOW)
         rows = conn.execute("SELECT assignment_id FROM photo_selections").fetchall()
     assert [row["assignment_id"] for row in rows] == ["recent"]
@@ -238,9 +239,10 @@ def test_offers_record_selections_and_only_presented_reports_record_shown(
 
 def test_an_observation_sent_again_adds_no_row(registry, scripted_scene_pass):
     """2026-11-16: Central committed a Player's report, then answered lock_busy, and the report
-    sent again was a second row. A report is written once per (Player, epoch, number) however often
-    it is sent, and answered alike; the next change of state, a new number, is written. Mutation
-    probe: drop `ON CONFLICT ... DO NOTHING` from `Coordinator._event`."""
+    sent again was a second row. A report is taken once per (Player, epoch, number) however often
+    it is sent, and answered alike: at or below its Player's show state mark it writes nothing;
+    the next change of state, a new number, moves the mark. Mutation probe: drop the mark's check
+    in `Coordinator._observe` -> the show state is rewritten by each repeat."""
     player = setup_players(registry, count=1)[0]
     publish_fixture_catalog(registry)
     coordinator = Coordinator(registry.db, registry.clock)
@@ -248,21 +250,23 @@ def test_an_observation_sent_again_adds_no_row(registry, scripted_scene_pass):
     plan = coordinator.delivery(player["player_id"], 1)["plan"]
     layer = next(layer for layer in plan.layers if layer.presentation == "media")
 
-    def events():
+    def mark():
         with registry.db.transaction() as conn:
-            return [(row["assignment_id"], row["detail"]["status"]) for row in conn.execute(
-                "SELECT assignment_id, detail FROM execution_events WHERE kind='observation' "
-                "ORDER BY sequence").fetchall()]
+            return dict(conn.execute(
+                "SELECT xmin::text AS version, observed_sequence FROM player_show_state "
+                "WHERE player_id=%s", (player["player_id"],)).fetchone())
 
     sent = observe(coordinator, player, plan, layer, "presented")
+    taken = mark()
+    assert taken["observed_sequence"] == sent.sequence
     for _ in range(3):
         registry.clock.advance(.5)
         coordinator.observe(player["player_id"], sent)       # the same report, sent again
-    assert events() == [(layer.assignment_id, "presented")]
-    assert [row["assignment_id"] for row in rows(registry, "shown_photos")] == [
-        layer.assignment_id]
-    observe(coordinator, player, plan, layer, "failed")
-    assert events() == [(layer.assignment_id, "presented"), (layer.assignment_id, "failed")]
+    assert mark() == taken
+    assert [(row["assignment_id"], row["by"]) for row in rows(registry, "shown_photos")] == [
+        (layer.assignment_id, "node")]
+    failed = observe(coordinator, player, plan, layer, "failed")
+    assert mark()["observed_sequence"] == failed.sequence > sent.sequence
 
 
 def test_the_next_advance_reads_the_shown_history_of_the_plannable_scenes(
