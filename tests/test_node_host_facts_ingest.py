@@ -8,6 +8,7 @@ from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from support.devices import seed_device
 from test_fleet_attempts import BASE_TAG, DEVICE_ID
 from test_node_central import setup as node_setup
 from test_node_fleet_hosts import Host, _device, _rig
@@ -175,7 +176,7 @@ def test_g12_boot_is_null_without_an_admission_and_the_node_offers_base_tag_with
     sessions, _claim, _grant = node_setup(registry)  # an admission of a node boot offer
     spare = "device-" + "e" * 64
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id,first_seen,last_seen) VALUES(%s,1,1)", (spare,))
+        seed_device(conn, spare, None)
     read = NodeObservations(sessions).fleet_hosts()
     assert _device(read, DEVICE_ID)["boot"] == {"base_tag": BASE_TAG}
     assert _device(read, DEVICE_ID)["facts"] is None

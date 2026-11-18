@@ -17,6 +17,7 @@ import pytest
 from console_tasks import connect, open_frame, open_pi, player_name
 from operator_harness import operator_server
 from playwright.sync_api import expect
+from support.devices import seed_device
 from test_console_frame_page_browser import DEVICE, FRAME, _seed
 from test_frame_picture_browser import _off_thread
 
@@ -43,8 +44,7 @@ def _drawn_on_line(registry, report: RoomLightsDrawn) -> None:
     """The Player's `room-lights-drawn` value on its line, as Central's link records it (node_states):
     Central judges it on read."""
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1) "
-                     "ON CONFLICT (device_id) DO NOTHING", (DEVICE, DRAWN_SERIAL))
+        seed_device(conn, DEVICE, DRAWN_SERIAL)
         conn.execute("INSERT INTO node_states(device_id, stream, subject, epoch, seq, removed, headers, data, "
                      "recorded_at) VALUES (%s, %s, %s, 'epoch', 1, false, '{}', %s, "
                      "EXTRACT(EPOCH FROM clock_timestamp()))",

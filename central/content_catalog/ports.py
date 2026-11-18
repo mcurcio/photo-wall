@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
+from central.actor import Actor
 from central.kernel.job_types import AssetJob
 from central.kernel.ports import PublishedRelease
 from central.kernel.transactions import Transaction
@@ -116,14 +117,14 @@ class PlayerVersions(Protocol):
         progress."""
         ...
 
-    def install(self, serial: str, version: str) -> InstallStarted:
+    def install(self, serial: str, version: str, *, by: Actor) -> InstallStarted:
         """Set the Pi `serial`'s version to `version` (its old one becomes its previous), download the
         release if it is not ready (a Prefetch in the same transaction), then restart that Pi onto it
         once it is ready (a reboot command to its current host session); answers once the version is
         set. VersionRefused(UNKNOWN_PLAYER | UNKNOWN_VERSION | NOT_DEPLOYABLE) before any write."""
         ...
 
-    def set_wall_version(self, version: str) -> Versions:
+    def set_wall_version(self, version: str, *, by: Actor) -> Versions:
         """Update the wall: set every enrolled Pi's version to `version` in one transaction (each old
         one becomes its previous) and download it; restarts no Pi (the console's rollout does).
         VersionRefused(UNKNOWN_VERSION | NOT_DEPLOYABLE) before any write."""

@@ -13,47 +13,16 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal
 
-import psycopg
-from runtime_fakes import apply_procrastinate_schema
+from support.devices import seed_device
 from test_registry import enroll, frame
 
 from central.assets.store import CacheStore
 from central.content_catalog.ports import StoredEtag
-from central.db import Database
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgReleaseRecords
 from central.infra.transactions import PgTransaction, PgTransactions, pg_connection
 from central.kernel.assets import AssetKey, AssetReady, AssetReference, OriginLocator
 from contracts.time import ManualClock
-
-MIGRATIONS = Path(__file__).resolve().parents[1] / "central" / "migrations"
-
-
-@contextmanager
-def schema_before(empty_database: str, first_unapplied: str, *,
-                  procrastinate: bool = True) -> Iterator[Database]:
-    """`empty_database` (the fixture's conninfo) migrated through the migration before
-    `first_unapplied` (a file-name prefix, e.g. "028"), recorded in the migration ledger, with
-    procrastinate installed unless `procrastinate=False`; `Database.migrate()` then applies the
-    rest."""
-    with psycopg.connect(empty_database) as conn:
-        conn.execute("""CREATE TABLE schema_migrations (
-            name TEXT PRIMARY KEY, sha256 TEXT NOT NULL,
-            applied_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
-        for path in sorted(MIGRATIONS.glob("*.sql")):
-            if path.name >= first_unapplied:
-                break
-            sql = path.read_text()
-            conn.execute(sql)
-            conn.execute("INSERT INTO schema_migrations(name,sha256) VALUES(%s,%s)",
-                         (path.name, hashlib.sha256(sql.encode()).hexdigest()))
-    if procrastinate:
-        apply_procrastinate_schema(empty_database)
-    db = Database(empty_database, application_name="photo-wall-test")
-    try:
-        yield db
-    finally:
-        db.close()
 
 
 class RecordingTransactions(PgTransactions):
@@ -84,10 +53,7 @@ def insert_device(db, device_id: str, *, serial: str | None = None, retired: boo
                   seen: float = 1000.0) -> None:
     """A `devices` row."""
     with db.transaction() as conn:
-        conn.execute(
-            "INSERT INTO devices(device_id, serial, first_seen, last_seen, retired_at) "
-            "VALUES(%s,%s,%s,%s,%s)",
-            (device_id, serial, seen, seen, seen if retired else None))
+        seed_device(conn, device_id, serial, at=seen, retired_at=seen if retired else None)
 
 
 def bind_a_player(registry) -> None:

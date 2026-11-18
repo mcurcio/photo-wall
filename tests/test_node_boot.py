@@ -6,8 +6,7 @@ row, as its first boot offer claims it), `keep_version` (a Pi's kept version, as
 `player_versions` and `boot_service` (Central's PgPlayerVersions and the boot offer over it),
 `NOTHING_READY` / `ALL_READY` (a cache with no release, or every release, ready; with releases
 ingested by the real sync pass its `world.stored`: tests/test_node_release_ingest.py
-`make_sync_world`, `Upstream`, `node_upload`), `FixedVersion` (a schema before migration 100),
-`cold_setup` and `publish_deployment`."""
+`make_sync_world`, `Upstream`, `node_upload`), `cold_setup` and `publish_deployment`."""
 from collections.abc import Collection
 from dataclasses import replace
 from uuid import UUID, uuid4
@@ -89,11 +88,10 @@ def keep_version(db: Database, serial: str, deployment_id: UUID, now: float) -> 
     """Enroll `serial` and keep `deployment_id` as its version; its device id."""
     device_id = enroll(db, serial, now)
     with db.transaction() as conn:
-        conn.execute("INSERT INTO player_versions(device_id, deployment_id, previous_deployment_id, install, changed_at) "
-                     "VALUES (%s, %s, NULL, NULL, to_timestamp(%s)) ON CONFLICT (device_id) DO UPDATE SET "
-                     "previous_deployment_id=CASE WHEN player_versions.deployment_id <> EXCLUDED.deployment_id "
-                     "THEN player_versions.deployment_id ELSE player_versions.previous_deployment_id END, "
-                     "deployment_id=EXCLUDED.deployment_id", (device_id, deployment_id, now))
+        conn.execute("UPDATE devices SET previous_deployment_id=CASE WHEN deployment_id <> %(deployment)s "
+                     "THEN deployment_id ELSE previous_deployment_id END, deployment_id=%(deployment)s, "
+                     "version_changed_at=%(now)s WHERE device_id=%(device)s",
+                     {"device": device_id, "deployment": deployment_id, "now": now})
     return device_id
 
 
@@ -106,17 +104,6 @@ def boot_service(sessions: NodeSessions, *, readiness: AssetReadiness = NOTHING_
     return NodeBootService(sessions, versions=player_versions(sessions, readiness=readiness))
 
 
-class FixedVersion:
-    """The boot offer's version source for a migration test's schema before migration 100 (no
-    player_versions table): every Pi boots `deployment_id`, as the wall's one selection did then."""
-
-    def __init__(self, deployment_id: UUID) -> None:
-        self._deployment_id = deployment_id
-
-    def boot_deployment_in(self, tx, serial: str) -> str | None:
-        return str(self._deployment_id)
-
-
 def cold_setup(registry, *, app=True):
     _seed(registry)
     sessions = NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test"))
@@ -127,17 +114,8 @@ def cold_setup(registry, *, app=True):
         BASE_ABI, "graphics-v1", "plugin-v1"), selected, manager, None,
         {ref.environment_sha256: "https://example.invalid/" + ref.environment_sha256 for ref in refs})
     publish_deployment(registry.db, deployment, registry.clock)
-    with registry.db.transaction() as conn:
-        versioned = conn.execute("SELECT to_regclass('player_versions') AS t").fetchone()["t"] is not None
-    if versioned:   # SERIAL's version, as Install keeps it
-        keep_version(registry.db, SERIAL, deployment.deployment_id, registry.clock.utc())
-        return boot_service(sessions), sessions, deployment
-    # A migration test's schema before 100: the wall's selection, as the Central of that schema kept
-    # it (migration 100 turns it into every enrolled Pi's version).
-    with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO node_boot_policy(singleton,revision,deployment_id,changed_at) "
-                     "VALUES(TRUE,1,%s,%s)", (deployment.deployment_id, registry.clock.utc()))
-    return NodeBootService(sessions, versions=FixedVersion(deployment.deployment_id)), sessions, deployment
+    keep_version(registry.db, SERIAL, deployment.deployment_id, registry.clock.utc())   # as Install keeps it
+    return boot_service(sessions), sessions, deployment
 
 
 def claim_for(offer, *, owner="host_core"):
@@ -170,7 +148,7 @@ def test_frozen_offer_selection_exact_retry_and_no_app(registry):
     with pytest.raises(NodeControlError, match="offer_unknown"):
         service.asset(uuid4(), "base")
     with registry.db.transaction() as conn:
-        conn.execute("UPDATE fleet_device_lifecycle SET generation=generation+1 WHERE device_id=%s",
+        conn.execute("UPDATE devices SET generation=generation+1 WHERE device_id=%s",
                      (offer.device_id,))
     with pytest.raises(NodeControlError, match="generation_stale"):
         service.asset(offer.offer_id, "base")
@@ -225,6 +203,26 @@ def test_refusal_is_frozen_and_never_retargeted(registry):
             service.offer(request)
     with registry.db.transaction() as conn:
         assert conn.execute("SELECT count(*) AS n FROM node_boot_offers").fetchone()["n"] == 1
+
+
+def test_a_first_boot_offer_creates_its_device_at_generation_one(registry):
+    """No trigger and no default writes a device's generation: the boot offer's own insert does
+    (decision 0034, S2e). Probe: leave `generation` out of `claim_new_device`'s insert -> NOT NULL
+    refuses the offer."""
+    sessions = NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test"))
+    serial = "0123456789abcdef"
+    device_id = device_id_for_serial(serial)
+    with pytest.raises(NodeControlError, match="node_boot_policy_unconfigured"):  # no version yet
+        boot_service(sessions).offer(NodeBootRequestV2(serial, BOOT_ID, "a" * 64))
+    now = registry.clock.utc()
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT serial, generation, retired_at, created_at, created_by, changed_at, "
+                            "changed_by FROM devices WHERE device_id=%s", (device_id,)).fetchone() == {
+            "serial": serial, "generation": 1, "retired_at": None, "created_at": now,
+            "created_by": "node", "changed_at": now, "changed_by": "node"}
+        assert conn.execute("SELECT device_generation, created_by FROM node_boot_offers WHERE "
+                            "device_id=%s", (device_id,)).fetchone() == {
+            "device_generation": 1, "created_by": "node"}
 
 
 def test_sealed_environment_worker_and_exact_reader_hold_inode_lease(registry, tmp_path):

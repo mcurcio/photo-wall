@@ -272,7 +272,7 @@ def test_tracer_one_valid_one_malformed_one_conflicting_release_in_one_run(regis
         ("v2.1.0", "v2.1.0", None),
         ("v2.0.0", "v2.0.0", "node_release_identity_conflict")]
     enroll(registry.db, "abcdef1234567890", registry.clock.utc())
-    player_versions(sessions_for(registry), readiness=world.stored).install("abcdef1234567890", "v2.1.0")
+    player_versions(sessions_for(registry), readiness=world.stored).install("abcdef1234567890", "v2.1.0", by="console")
     offer = offer_for(registry, world)
     assert offer.base == valid.release.base
     assert offer.app_environment == valid.release.app_environment
@@ -286,7 +286,7 @@ def test_ingest_writes_references_with_the_derived_id_and_never_selects(registry
     with registry.db.transaction() as conn:
         assets = conn.execute("SELECT kind, identity FROM node_deployment_assets "
                               "WHERE deployment_id=%s ORDER BY kind", (upload.deployment_id,)).fetchall()
-        assert conn.execute("SELECT 1 FROM player_versions").fetchone() is None
+        assert conn.execute("SELECT 1 FROM devices WHERE deployment_id IS NOT NULL").fetchone() is None
     assert [(row["kind"], row["identity"]) for row in assets] == [
         ("os-image", upload.release.base.content_key),
         ("sealed-environment", upload.release.manager_primary.environment_sha256)]

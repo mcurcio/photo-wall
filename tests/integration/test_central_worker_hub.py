@@ -24,6 +24,7 @@ import urllib.request
 
 import nats
 from integration.bus_servers import BusServer, line_slices, node_server, until
+from support.devices import seed_device
 
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import Database
@@ -135,8 +136,7 @@ def test_the_worker_keeps_the_hub_and_records_a_node(database, tmp_path, monkeyp
 
     assert build_node_bus(database.dsn, {}) is None
     with database.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (device_id_for_serial(SERIAL), SERIAL))
+        seed_device(conn, device_id_for_serial(SERIAL), SERIAL)
     config_dir = tmp_path / "hub-config"
     config_dir.mkdir()
     config_path = config_dir / "hub.json"

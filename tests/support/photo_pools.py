@@ -42,8 +42,8 @@ def library_of(registry) -> PgPhotoLibrary:
 def fixture_connection(registry) -> str:
     """The test database's one keyed connection `fixture`, added on first use. Its ref is fixed
     (as a cut-over row's, C12) so a photo can be built before the database is touched. Its address
-    and key are written as rows, in migration 080's columns only, so an upgrade test may seed it
-    on a database migrated part-way (tests/test_upgrade_087.py), before the store's newer columns."""
+    and key are written as rows, in migration 080's columns only, so a migration test may seed
+    it on a database migrated part-way, before the store's newer columns."""
     with registry.db.transaction() as conn:
         conn.execute("INSERT INTO library_connections(connection_ref,name,url,api_key,created_at) "
                      "VALUES(%s,%s,%s,%s,0) ON CONFLICT (connection_ref) DO UPDATE SET "

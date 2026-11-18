@@ -44,6 +44,7 @@ from operator_harness import (
     sign_in,
 )
 from playwright.sync_api import expect
+from support.devices import seed_device
 from support.frames import frame_create
 from test_registry import ADMIN, enroll
 
@@ -412,7 +413,7 @@ def test_no_display_and_retired_outputs_are_never_offered(page, registry):
     dark, _, _ = enroll(registry, count=2)
     gone, _, _ = enroll(registry, count=1)
     _disconnect_output(registry, dark["player_id"], "HDMI-A-2")
-    registry.retire(gone["player_id"])
+    registry.retire(gone["player_id"], by="console")
     _placed_frame(registry, "only")
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
@@ -651,9 +652,7 @@ def _netbooted_player(registry, serial=SERIAL):
     writes it) shares the Player's device_id, both derived from the serial."""
     device_id = device_id_for_serial(serial)
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id,serial,first_seen,last_seen) "
-                     "VALUES(%s,%s,%s,%s)",
-                     (device_id, serial, registry.clock.utc(), registry.clock.utc()))
+        seed_device(conn, device_id, serial, at=registry.clock.utc())
     identity, _, _ = enroll(registry, count=1, device_id=device_id)
     return identity["player_id"]
 

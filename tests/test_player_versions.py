@@ -102,7 +102,7 @@ def test_installs_refusals(registry, wall, serial, version, status, code):
     client, *_ = wall
     refused = _install(client, serial, version)
     assert (refused.status_code, refused.json()) == (status, {"error": code})
-    assert _rows(registry, "SELECT device_id FROM player_versions") == []   # refused before any write
+    assert _rows(registry, "SELECT device_id FROM devices WHERE deployment_id IS NOT NULL") == []   # refused before any write
 
 
 def test_update_the_wall_sets_every_pi_and_restarts_none(registry, wall):

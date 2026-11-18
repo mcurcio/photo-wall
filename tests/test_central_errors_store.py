@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 
 from fastapi.testclient import TestClient
+from support.devices import seed_device
 from test_registry import ADMIN, enroll, frame, hello
 
 from central.app import create_app
@@ -195,8 +196,7 @@ def test_a_closed_link_doubts_every_reference_of_its_source_with_facts(registry)
 def _pi(registry, serial: str = SERIAL) -> dict:
     device = device_id_for_serial(serial)
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (device, serial))
+        seed_device(conn, device, serial)
     return enroll(registry, device_id=device)[0]
 
 

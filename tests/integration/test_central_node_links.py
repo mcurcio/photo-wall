@@ -31,6 +31,7 @@ from integration.bus_servers import (
     until,
 )
 from nats.js.errors import NotFoundError
+from support.devices import seed_device
 
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import Database
@@ -141,8 +142,7 @@ def _central_connections(hub: BusServer) -> int:
 
 def test_central_records_every_node_fact_once(database, tmp_path):
     with database.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (DEVICE_ID, SERIAL))
+        seed_device(conn, DEVICE_ID, SERIAL)
     hub = hub_server(tmp_path, [SERIAL])
     node = node_server(tmp_path, SERIAL, hub)
     slices = line_slices()

@@ -180,8 +180,8 @@ def test_each_pi_reads_its_own_version_and_its_previous_one(registry, sync_world
         enroll(registry.db, serial, registry.clock.utc())
     versions = player_versions(NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test")),
                                readiness=world.stored)
-    versions.install("pi-a", "v2.0.0")
-    versions.install("pi-a", "v2.1.0")
+    versions.install("pi-a", "v2.0.0", by="console")
+    versions.install("pi-a", "v2.1.0", by="console")
     players = {pi["serial"]: pi for pi in read(registry, world)["players"]}
     assert {key: players["pi-a"][key] for key in ("version", "chosen", "previous", "install")} == {
         "version": "v2.1.0", "chosen": True, "previous": "v2.0.0", "install": "downloading"}

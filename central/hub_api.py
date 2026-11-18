@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
+from functools import partial
 from typing import Protocol
 
 from central.content_catalog.ports import PlayerVersions, VersionRefused
@@ -111,7 +112,8 @@ def hub_methods(versions: PlayerVersions) -> Mapping[str, MethodHandler]:
         request = decode_install_player(call.payload)   # ValueError: an error reply, never an install
         answer: InstallStarted | InstallRefused
         try:
-            answer = await asyncio.to_thread(versions.install, request.serial, request.version)
+            answer = await asyncio.to_thread(partial(versions.install, request.serial, request.version,
+                                                     by="home-assistant"))
         except VersionRefused as refused:
             answer = InstallRefused(refusal=refused.refusal)
         log.info("installPlayer %s %s from %s: %s", request.serial, request.version, call.caller,

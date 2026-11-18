@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from psycopg.types.json import Jsonb
+from support.devices import seed_device
 
 from central.infra.node_link_store import WallMark
 
@@ -39,8 +40,7 @@ def _at_118(conn) -> None:
     conn.execute("DELETE FROM singletons WHERE name='wall_mark'")
     conn.execute(AT_118)
     for device in (A, B):
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (device, device + "-serial"))
+        seed_device(conn, device, device + "-serial")
     records = "INSERT INTO node_link_records VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
     for device in (A, B):
         for key in ("x", "y"):

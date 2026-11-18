@@ -15,6 +15,7 @@ import re
 import typing
 
 import pytest
+from support.devices import seed_device
 
 from central.content_catalog.catalog import device_id_for_serial
 from central.infra.events import (
@@ -47,8 +48,7 @@ SHOW_STATE = "KV_state_content"
 
 def _device(registry) -> None:
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (DEVICE, SERIAL))
+        seed_device(conn, DEVICE, SERIAL)
 
 
 def _now(conn) -> float:

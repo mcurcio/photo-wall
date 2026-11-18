@@ -19,8 +19,8 @@ DROPPED = ("node_ci_publication_heads", "node_ci_publications", "node_ci_revoked
 # S2e drops the device lifecycle's trigger and function with its merge into `devices`. Procrastinate's
 # own (`procrastinate_*`, the job queue library's schema) are not Central's.
 LIBRARY = "procrastinate_"
-UNTIL_S2E_TRIGGERS = {("devices", "fleet_device_lifecycle_insert")}
-UNTIL_S2E_FUNCTIONS = {"fleet_initialize_device_lifecycle"}
+UNTIL_S2E_TRIGGERS: set[tuple[str, str]] = set()   # S2e (121) dropped the last, the device lifecycle's
+UNTIL_S2E_FUNCTIONS: set[str] = set()
 SCANNED = ("central", "media", "scripts")
 SOURCE = {".py", ".js", ".jsx", ".ts", ".tsx", ".sql", ".sh"}
 SKIPPED = {"migrations", "node_modules", "dist", "__pycache__"}

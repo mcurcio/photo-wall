@@ -43,13 +43,13 @@ OFFER_POLICY_REVISION: Final = 1
 
 
 def claim_new_device(conn, *, device_id: str, serial: str, now: float) -> None:
-    """Create the device row for a serial seen for the first time; a known device is a no-op.
-    No quota."""
+    """Insert the device for a serial seen for the first time, at generation 1 with its audit
+    fields (by "node"); a known device is a no-op. No quota."""
     if conn.execute("SELECT 1 FROM devices WHERE device_id=%s", (device_id,)).fetchone():
         return
-    conn.execute("INSERT INTO devices(device_id,serial,first_seen,last_seen) "
-                 "VALUES(%s,%s,%s,%s) ON CONFLICT(device_id) DO NOTHING",
-                 (device_id, serial, now, now))
+    conn.execute("INSERT INTO devices(device_id,serial,first_seen,last_seen,generation,created_at,created_by,"
+                 "changed_at,changed_by) VALUES(%s,%s,%s,%s,1,%s,'node',%s,'node') ON CONFLICT(device_id) DO NOTHING",
+                 (device_id, serial, now, now, now, now))
 
 
 class NodeBootService:
@@ -97,10 +97,10 @@ class NodeBootService:
                 else:
                     refusal = "node_boot_policy_unconfigured"
                 conn.execute("INSERT INTO node_boot_offers(offer_id,device_id,device_generation,kernel_boot_id,"
-                             "boot_nonce,request_payload,offer_payload,refusal,created_at) "
-                             "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                             "boot_nonce,request_payload,offer_payload,refusal,created_at,created_by,changed_at,changed_by) "
+                             "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,'node',%s,'node')",
                              (offer_id, device_id, generation, request.kernel_boot_id, request.boot_nonce,
-                              canonical, encode_node_boot_offer(result) if result else None, refusal, now))
+                              canonical, encode_node_boot_offer(result) if result else None, refusal, now, now))
         if refusal:
             raise NodeControlError(refusal, 503)
         assert result is not None

@@ -117,7 +117,7 @@ def test_reenrollment_hides_the_contact_from_the_previous_authority_epoch(regist
 def test_a_retired_player_has_no_report(registry):
     identity, _, _ = enroll(registry)
     heard(registry, identity)
-    registry.retire(identity["player_id"])
+    registry.retire(identity["player_id"], by="console")
     assert reports(registry).reports == {}
     assert players_by_id(inventory(registry))[identity["player_id"]].last_report_at is None
 

@@ -132,7 +132,7 @@ def test_another_players_media_unknown_names_and_retired_players_are_refused(wal
                           headers=headers).status_code == 404
         assert client.get("/v1/media/" + "0" * 64, headers=headers).status_code == 404
         registry.unbind("portrait", expected_generation=1)
-        registry.retire(player["player_id"])
+        registry.retire(player["player_id"], by="console")
         assert client.get(url, headers=headers).status_code == 401
     assert wall.transfers() == 0
 

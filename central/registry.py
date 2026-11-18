@@ -745,7 +745,7 @@ class Registry:
         forget_frame_in(conn, frame_id, by=by)
         return {"status": "deleted"}
 
-    def retire(self, player_id: str) -> None:
+    def retire(self, player_id: str, *, by: Actor) -> None:
         """Retire a Player permanently. Refuses (409 player_bound), for every caller,
         while any of its Outputs is bound: replacement is unbind, then retire.
 
@@ -769,7 +769,7 @@ class Registry:
                 raise RegistryError("player_bound")
             # A Player that never booted from a node offer (a Compose or demo Player) has no
             # `devices` row; retirement writes its canonical tombstone.
-            retire_in(fenced, now)
+            retire_in(fenced, now, by=by)
             conn.execute("UPDATE players SET retired_at=%s,authority_epoch=authority_epoch+1 "
                          "WHERE id=%s", (now, player_id))
 

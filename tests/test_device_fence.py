@@ -23,7 +23,7 @@ from central.fleet.device_fence import fence_in, retire_in
 from central.fleet.models import FleetError
 from central.fleet.node_boot import parse_node_deployment
 from central.fleet.node_observations import NodeObservations
-from central.fleet.node_sessions import NodeControlConfig, NodeSessions
+from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
 from contracts.node_commands import NodeSessionClaim
 from contracts.node_host_facts import HostFactsV2, encode_host_facts
 from contracts.node_observation import HostMetricV2, HostObservationV2, encode_host_observation
@@ -86,15 +86,15 @@ def test_retirement_waits_for_an_open_act_then_refuses_every_act(registry):
     node = {"Authorization": "Bearer " + claim.credential, "X-Node-Session": str(grant.session_id)}
     with TestClient(app, raise_server_exceptions=False) as client, ThreadPoolExecutor(1) as pool:
         with _Held(registry, sessions, claim):
-            retiring = pool.submit(registry.retire, player["player_id"])
+            retiring = pool.submit(registry.retire, player["player_id"], by="console")
             time.sleep(0.5)
             assert not retiring.done()
         retiring.result(10)
         polled = client.get("/v2/node/commands", headers=node)
         assert (polled.status_code, polled.json()) == (403, {"error": "node_device_unavailable"})
-    registry.retire(player["player_id"])     # retiring a retired device changes nothing
+    registry.retire(player["player_id"], by="console")     # retiring a retired device changes nothing
     with registry.db.transaction() as conn:
-        assert conn.execute("SELECT generation FROM fleet_device_lifecycle WHERE device_id=%s",
+        assert conn.execute("SELECT generation FROM devices WHERE device_id=%s",
                             (DEVICE_ID,)).fetchone()["generation"] == 2
 
 
@@ -111,13 +111,28 @@ def test_retirement_needs_change_and_bumps_the_generation_once(registry):
     _enrolled(registry)
     with registry.db.transaction() as conn:
         with pytest.raises(RuntimeError, match="device_fence_change_required"):
-            retire_in(fence_in(conn, DEVICE_ID, "act"), 1000.0)
+            retire_in(fence_in(conn, DEVICE_ID, "act"), 1000.0, by="console")
     for _ in range(2):
         with registry.db.transaction() as conn:
-            retire_in(fence_in(conn, DEVICE_ID, "change"), 1000.0)
+            retire_in(fence_in(conn, DEVICE_ID, "change"), 1000.0, by="console")
     with registry.db.transaction() as conn:
-        assert conn.execute("SELECT generation FROM fleet_device_lifecycle WHERE device_id=%s",
+        assert conn.execute("SELECT generation FROM devices WHERE device_id=%s",
                             (DEVICE_ID,)).fetchone()["generation"] == 2
+
+
+def test_a_session_of_an_earlier_generation_is_fenced_out(registry):
+    """The fence reads the device row's generation (decision 0034, S2e): once it moves on, the
+    session enrolled at the earlier one is refused. Probe: read the generation as a constant 1 ->
+    the stale session still authenticates."""
+    sessions, claim, grant = _enrolled(registry)
+    with registry.db.transaction() as conn:
+        assert fence_in(conn, DEVICE_ID, "act").generation() == 1
+        sessions.authenticate_in(conn, grant.session_id, claim.credential)
+        conn.execute("UPDATE devices SET generation=3 WHERE device_id=%s", (DEVICE_ID,))
+    with registry.db.transaction() as conn:
+        assert fence_in(conn, DEVICE_ID, "act").generation() == 3
+        with pytest.raises(NodeControlError, match="node_session_unavailable"):
+            sessions.authenticate_in(conn, grant.session_id, claim.credential)
 
 
 def test_the_release_writer_never_waits_on_a_device(registry):

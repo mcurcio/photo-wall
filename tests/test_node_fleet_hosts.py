@@ -10,6 +10,7 @@ import time
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from support.devices import seed_device
 from test_fleet_attempts import DEVICE_ID, SERIAL
 from test_node_boot import claim_for, cold_setup
 from test_registry import ADMIN, enroll
@@ -202,10 +203,10 @@ def test_g12_omits_retired_boxes_and_lists_active_ones_without_a_boot(registry):
     Host(registry, sessions, boots).post()
     spare_id = "device-" + "e" * 64
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id,first_seen,last_seen) VALUES(%s,1,1)", (spare_id,))
+        seed_device(conn, spare_id, None)
     retired_id = "device-" + "f" * 64
     retired = enroll(registry, count=1, device_id=retired_id)[0]["player_id"]
-    registry.retire(retired)
+    registry.retire(retired, by="console")
     read = NodeObservations(sessions).fleet_hosts()
     assert _device(read, retired_id) is None
     assert _device(read)["serial"] == SERIAL  # the box's claim at boot, for the console's names
@@ -222,8 +223,7 @@ def test_g12_serves_each_boxs_own_bus_link_linked_unlinked_and_never_seen(regist
     unlinked_id, unseen_id = "device-" + "d" * 64, "device-" + "e" * 64
     with registry.db.transaction() as conn:
         for device_id in (unlinked_id, unseen_id):
-            conn.execute("INSERT INTO devices(device_id,first_seen,last_seen) VALUES(%s,1,1)",
-                         (device_id,))
+            seed_device(conn, device_id, None)
         record_presence_in(conn, {DEVICE_ID: True}, 100.0)
         record_presence_in(conn, {unlinked_id: True}, 110.0)
         record_presence_in(conn, {unlinked_id: False}, 120.0)
@@ -271,8 +271,6 @@ def test_a_held_device_fence_does_not_block_g12(registry):
         with registry.db.transaction() as conn:
             fence_in(conn, DEVICE_ID, "change")
             conn.execute("SELECT 1 FROM devices WHERE device_id=%s FOR UPDATE", (DEVICE_ID,))
-            conn.execute("SELECT 1 FROM fleet_device_lifecycle WHERE device_id=%s FOR UPDATE",
-                         (DEVICE_ID,))
             held.set()
             release.wait(30)
 

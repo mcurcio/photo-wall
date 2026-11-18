@@ -36,6 +36,7 @@ from fastapi.testclient import TestClient
 from integration.bus_servers import hub_server, node_server, until
 from integration.room_light_rig import HomeAssistant, Worker
 from integration.test_central_room_light_tracer import V0_40_1_LIGHT
+from support.devices import seed_device
 from test_executor import binding
 from test_player_service import close, rig
 from test_registry import ADMIN
@@ -91,8 +92,7 @@ def test_the_frame_shows_centrals_card_while_its_doubt_blacks_it(registry, tmp_p
     monkeypatch.setenv("PHOTO_WALL_CACHE_ROOT", str(tmp_path / "worker-cache"))
     database = registry.db
     with database.transaction() as conn:   # the Node's device, as its boot offer records it
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (device_id_for_serial(SERIAL), SERIAL))
+        seed_device(conn, device_id_for_serial(SERIAL), SERIAL)
     hub = hub_server(tmp_path, [SERIAL])
     node = node_server(tmp_path, SERIAL, hub)
     house = HomeAssistant(f"ws://127.0.0.1:{hub.websocket_port}")

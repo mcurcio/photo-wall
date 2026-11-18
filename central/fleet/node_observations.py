@@ -56,9 +56,8 @@ _FLEET_HOSTS_SQL = (
     "cm.payload AS preparation_payload,cm.received_at AS preparation_received_at,"
     "cb.admission_id AS current_admission,co.offer_payload,"
     "cf.payload AS facts_payload,cf.first_received_at AS facts_first_received_at FROM devices d "
-    "JOIN fleet_device_lifecycle l ON l.device_id=d.device_id "
     "LEFT JOIN node_boot_admissions cb ON cb.device_id=d.device_id "
-    "AND cb.device_generation=l.generation AND cb.superseded_at IS NULL "
+    "AND cb.device_generation=d.generation AND cb.superseded_at IS NULL "
     "LEFT JOIN LATERAL (SELECT producer_id FROM node_producers WHERE admission_id=cb.admission_id "
     "AND owner='host_core' ORDER BY admitted_at DESC,producer_id DESC LIMIT 1) cp ON true "
     "LEFT JOIN LATERAL (" + _NEWEST_HOST_SQL.format(p="cp.producer_id") + ") ch ON true "
@@ -69,12 +68,12 @@ _FLEET_HOSTS_SQL = (
     "LEFT JOIN LATERAL (SELECT payload,received_at FROM node_manager_observations "
     "WHERE producer_id=mp.producer_id ORDER BY sequence DESC LIMIT 1) cm ON true "
     "LEFT JOIN LATERAL (SELECT admission_id FROM node_boot_admissions WHERE device_id=d.device_id "
-    "AND device_generation=l.generation AND superseded_at IS NOT NULL "
+    "AND device_generation=d.generation AND superseded_at IS NOT NULL "
     "ORDER BY superseded_at DESC,admission_id DESC LIMIT 1) pb ON true "
     "LEFT JOIN LATERAL (SELECT producer_id FROM node_producers WHERE admission_id=pb.admission_id "
     "AND owner='host_core' ORDER BY admitted_at DESC,producer_id DESC LIMIT 1) pp ON true "
     "LEFT JOIN LATERAL (" + _NEWEST_HOST_SQL.format(p="pp.producer_id") + ") ph ON true "
-    "WHERE d.retired_at IS NULL AND l.revoked_at IS NULL ORDER BY d.device_id")
+    "WHERE d.retired_at IS NULL ORDER BY d.device_id")
 
 
 def host_facts_of(hosts: dict) -> dict[str, dict]:

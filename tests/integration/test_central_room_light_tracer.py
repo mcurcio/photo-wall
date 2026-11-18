@@ -45,6 +45,7 @@ from integration.room_light_rig import (
     Worker,
     light_sensor_root,
 )
+from support.devices import seed_device
 from test_registry import ADMIN, enroll, frame, hello
 
 from appliance.host.host_runner import start_host_bus
@@ -130,8 +131,7 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
     database = registry.db
     device_id = device_id_for_serial(SERIAL)
     with database.transaction() as conn:   # the Node's device, as its boot offer records it
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (device_id, SERIAL))
+        seed_device(conn, device_id, SERIAL)
     player, _, _ = enroll(registry, device_id=device_id)
     hello(registry, player)
     frame(registry, "hall")

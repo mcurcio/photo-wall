@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 
+from support.devices import seed_device
 from test_registry import enroll, frame
 
 from central.content_catalog.catalog import device_id_for_serial
@@ -45,8 +46,7 @@ def _dark(registry, frame_id: str):
 def test_a_recorded_verdict_makes_only_the_bound_outputs_frame_dark(registry):
     device = device_id_for_serial(SERIAL)
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (device, SERIAL))
+        seed_device(conn, device, SERIAL)
     identity = enroll(registry, device_id=device, count=2)[0]
     frame(registry, "hearth")
     frame(registry, "spare")

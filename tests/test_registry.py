@@ -123,7 +123,7 @@ def test_unbound_player_gets_no_execution_bindings_until_operator_binds(registry
 
 def test_retired_serial_is_refused_reenrollment(registry):
     identity, _, request = enroll(registry)
-    registry.retire(identity["player_id"])
+    registry.retire(identity["player_id"], by="console")
     with pytest.raises(RegistryError, match="retired"):
         enroll(registry, device_id=request.device_id)
 
@@ -211,7 +211,7 @@ def test_replacement_preserves_frame_rejects_retired_identity_and_revalidates(re
     assert len(registry.bindings_for(old["player_id"], 1)) == 1
     # Replacement is unbind, then retire: a Player with a bound Output cannot be retired.
     registry.unbind("portrait", expected_generation=1)
-    registry.retire(old["player_id"])
+    registry.retire(old["player_id"], by="console")
     with pytest.raises(RegistryError, match="unauthorized"):
         registry.authenticate(old["token"])
     with pytest.raises(RegistryError, match="retired"):
@@ -260,7 +260,7 @@ def test_unbind_stays_reversible_while_retire_stays_permanent(registry):
     assert registry.inventory().players[0].retired_at is None
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=2)
     registry.unbind("portrait", expected_generation=3)
-    registry.retire(identity["player_id"])
+    registry.retire(identity["player_id"], by="console")
     with pytest.raises(RegistryError, match="unauthorized"):
         registry.authenticate(identity["token"])
     with pytest.raises(RegistryError, match="retired"):
@@ -272,7 +272,7 @@ def test_retire_refuses_a_player_with_a_bound_output_and_leaves_it_unretired(reg
     frame(registry)
     registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
     with pytest.raises(RegistryError, match="player_bound") as refused:
-        registry.retire(identity["player_id"])
+        registry.retire(identity["player_id"], by="console")
     assert refused.value.status == 409
     player = registry.inventory().players[0]
     assert player.retired_at is None and player.authority_epoch == identity["authority_epoch"]
@@ -314,7 +314,7 @@ def test_retire_waiting_on_a_bind_in_flight_sees_it_and_refuses(registry):
             holder.execute("SELECT 1 FROM players WHERE id=%s FOR UPDATE", (player_id,))
             holder.execute("INSERT INTO bindings VALUES(%s,%s,%s)",
                            ("portrait", player_id, "HDMI-A-1"))
-            retiring = pool.submit(registry.retire, player_id)
+            retiring = pool.submit(registry.retire, player_id, by="console")
             blocker = holder.info.backend_pid
             deadline = time.monotonic() + 5
             while True:
@@ -355,7 +355,7 @@ def test_pending_queue_lists_enrolled_unbound_non_retired_players_only(registry)
     retired, _, _ = enroll(registry)
     frame(registry)
     registry.bind("portrait", bound["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.retire(retired["player_id"])
+    registry.retire(retired["player_id"], by="console")
     inventory = registry.inventory()
     by_id = {p.id: p for p in inventory.players}
     assert by_id[pending["player_id"]].is_bound is False

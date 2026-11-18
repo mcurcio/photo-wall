@@ -18,6 +18,7 @@ import uuid
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
+from support.devices import seed_device
 from support.frames import frame_create
 
 from central.app import create_app
@@ -63,8 +64,7 @@ def enroll_pi(registry, serial: str) -> str:
     """A Pi with two HDMI ports, enrolled under its bus serial's device id; its player id."""
     device_id = device_id_for_serial(serial)
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (device_id, serial))
+        seed_device(conn, device_id, serial)
     key = Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes_raw().hex()
     boot_id = str(uuid.uuid4())

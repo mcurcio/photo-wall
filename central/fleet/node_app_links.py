@@ -194,11 +194,10 @@ def load_current_node_app_link_for_player_in(conn, player_id: str, authority_epo
                        "JOIN node_producers p USING(producer_id) "
                        "JOIN node_boot_admissions b USING(admission_id) "
                        "JOIN node_sessions s ON s.producer_id=p.producer_id "
-                       "JOIN fleet_device_lifecycle f ON f.device_id=l.device_id "
                        "JOIN devices d ON d.device_id=l.device_id "
                        "WHERE l.player_id=%s AND l.authority_epoch=%s "
                        "AND b.superseded_at IS NULL AND s.revoked_at IS NULL AND s.expires_at>%s "
-                       "AND f.generation=l.device_generation AND f.revoked_at IS NULL AND d.retired_at IS NULL",
+                       "AND d.generation=l.device_generation AND d.retired_at IS NULL",
                        (player_id, authority_epoch, now)).fetchone()
     if row is None:
         return None

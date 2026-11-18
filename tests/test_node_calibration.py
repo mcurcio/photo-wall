@@ -186,7 +186,7 @@ def test_native_capability_survives_generation_revocation_without_current_boot(r
     with registry.db.transaction() as conn:
         conn.execute("UPDATE node_sessions SET revoked_at=999")
         conn.execute("UPDATE node_boot_admissions SET superseded_at=999")
-        conn.execute("UPDATE fleet_device_lifecycle SET generation=generation+1")
+        conn.execute("UPDATE devices SET generation=generation+1")
     assert registry.calibration_capability("node-f0")["mode"] == "native_trial"
 
 

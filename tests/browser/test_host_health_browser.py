@@ -283,7 +283,7 @@ def test_spares_are_never_alarms_and_retired_boxes_sort_below_healthy_players(pa
     ((spare, spare_name),) = _enrolled(registry, 1)
     retired_identity, _, _ = enroll(registry, count=1)
     retired_name = player_name(registry, retired_identity["player_id"])
-    registry.retire(retired_identity["player_id"])
+    registry.retire(retired_identity["player_id"], by="console")
     _stub(page, {"read_at": 1000.0, "thresholds": THRESHOLDS,
                  "devices": [_row(bound, 999.0, 50), _row(spare, 100.0, 95)]})
     with operator_server(registry.db, registry.clock) as origin:

@@ -6,6 +6,8 @@ The queued-attempt tests left with the retired V1 T1/T2 command path; other suit
 
 from uuid import UUID
 
+from support.devices import seed_device
+
 from central.content_catalog.catalog import device_id_for_serial
 
 SERIAL = "abcdef1234567890"
@@ -22,5 +24,4 @@ BASE_ABI = "sha256:" + "c" * 64
 def _seed(registry) -> None:
     """The device every node test boots."""
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id,serial,first_seen,last_seen) "
-                     "VALUES(%s,%s,900,900)", (DEVICE_ID, SERIAL))
+        seed_device(conn, DEVICE_ID, SERIAL, at=900)

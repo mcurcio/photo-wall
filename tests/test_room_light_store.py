@@ -12,6 +12,7 @@ import threading
 import psycopg
 import pytest
 from psycopg.conninfo import make_conninfo
+from support.devices import seed_device
 from test_registry import enroll
 
 from central.content_catalog.catalog import device_id_for_serial
@@ -204,7 +205,8 @@ def test_refused_reports_are_events_cut_and_newest_first(registry, monkeypatch):
 def _pi(registry) -> dict:
     """A Pi enrolled with the device id its serial names (the link store's key)."""
     device = device_id_for_serial(SERIAL)
-    _sql(registry, "INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)", (device, SERIAL))
+    with registry.db.transaction() as conn:
+        seed_device(conn, device, SERIAL)
     return enroll(registry, device_id=device)[0]
 
 

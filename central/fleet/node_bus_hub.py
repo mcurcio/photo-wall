@@ -50,9 +50,8 @@ HUB_LOOK_SECONDS: Final = 2.0
 
 
 def enrolled_serials_in(conn) -> frozenset[str]:
-    """Serials of devices with retired_at IS NULL whose fleet_device_lifecycle.revoked_at IS NULL and
-    serial IS NOT NULL. A serial `account_id` refuses has
-    no hub account: it is left out and logged."""
+    """Serials of devices with retired_at IS NULL and serial IS NOT NULL. A serial `account_id`
+    refuses has no hub account: it is left out and logged."""
     return frozenset(_enrolled_accounts_in(conn))
 
 
@@ -63,10 +62,8 @@ def enrolled_devices_in(conn) -> dict[str, str]:
 
 def _enrolled_accounts_in(conn) -> dict[str, tuple[str, str]]:
     """`{serial: (device_id, hub account)}` of the devices `enrolled_serials_in` names."""
-    rows = conn.execute("SELECT device.device_id,device.serial FROM devices AS device "
-                        "JOIN fleet_device_lifecycle AS lifecycle ON lifecycle.device_id=device.device_id "
-                        "WHERE device.retired_at IS NULL AND lifecycle.revoked_at IS NULL "
-                        "AND device.serial IS NOT NULL").fetchall()
+    rows = conn.execute("SELECT device_id,serial FROM devices "
+                        "WHERE retired_at IS NULL AND serial IS NOT NULL").fetchall()
     accounts = {}
     for row in rows:
         try:

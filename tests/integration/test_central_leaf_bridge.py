@@ -30,6 +30,7 @@ from integration.bus_servers import (
     node_server,
     until,
 )
+from support.devices import seed_device
 from test_registry import ADMIN
 from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
@@ -100,8 +101,7 @@ class _WallMarks:
 
 def _enrol(db: Database, serial: str) -> None:
     with db.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (device_id_for_serial(serial), serial))
+        seed_device(conn, device_id_for_serial(serial), serial)
 
 
 async def _records(db: Database, stream: str) -> list[dict]:

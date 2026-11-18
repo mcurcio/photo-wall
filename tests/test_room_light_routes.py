@@ -9,6 +9,7 @@ from importlib.metadata import PackageNotFoundError
 
 import pytest
 from fastapi.testclient import TestClient
+from support.devices import seed_device
 from test_registry import ADMIN, enroll
 
 from central.app import create_app
@@ -154,8 +155,7 @@ def put_drawn(registry, report: RoomLightsDrawn, seq: int) -> None:
 def drawn_player(registry) -> dict:
     device = device_id_for_serial(SERIAL)
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (device, SERIAL))
+        seed_device(conn, device, SERIAL)
     return enroll(registry, device_id=device)[0]
 
 

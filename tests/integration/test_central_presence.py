@@ -21,6 +21,7 @@ import time
 from pathlib import Path
 
 from integration.bus_servers import BusServer, _free_port, node_server, until
+from support.devices import seed_device
 from test_console_flow import _require_node
 
 from central.content_catalog.catalog import device_id_for_serial
@@ -67,8 +68,7 @@ def _worker_beat(db: Database, seconds_ago: float) -> None:
 
 def _enrol(db: Database, serial: str) -> None:
     with db.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (device_id_for_serial(serial), serial))
+        seed_device(conn, device_id_for_serial(serial), serial)
 
 
 def _rendered(bus_link: dict, read_at: float) -> list[str]:

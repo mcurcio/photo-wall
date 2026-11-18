@@ -767,9 +767,9 @@ def create_app(
     def unbind(frame_id: Identifier, request: UnbindRequest):
         return registry.unbind(frame_id, expected_generation=request.expected_generation)
 
-    @app.post("/v1/operator/players/{player_id}/retire", dependencies=[Depends(admin)])
-    def retire(player_id: Identifier):
-        registry.retire(player_id)
+    @app.post("/v1/operator/players/{player_id}/retire")
+    def retire(player_id: Identifier, by: Actor = Depends(admin)):
+        registry.retire(player_id, by=by)
         return {"status": "retired"}
 
     @app.post("/v1/operator/players/{player_id}/outputs/{output_id}/identify",

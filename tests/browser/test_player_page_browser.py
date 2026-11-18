@@ -366,7 +366,7 @@ def test_a_box_seen_only_at_boot_is_listed_not_enrolled(page, registry):
 def test_a_retired_player_page_reads_no_node_records(page, registry):
     box = Box(registry)
     box.host_sample()
-    registry.retire(box.player_id)
+    registry.retire(box.player_id, by="console")
     with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         sent = _node_reads(page)
         connect(page, origin)

@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Callable
+from functools import partial
 from typing import Annotated
 from uuid import UUID
 
@@ -13,6 +14,7 @@ from fastapi import Depends, FastAPI, Path, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import TypeAdapter, ValidationError
 
+from central.actor import Actor
 from central.content_catalog.ports import VersionRefused
 from central.content_catalog.views import ReleasesView, VersionChoice
 from central.content_routes import (
@@ -357,11 +359,11 @@ def _mount_releases(app: FastAPI, admin: Callable[..., None], versions: PgPlayer
     async def releases() -> ReleasesView:
         return await asyncio.to_thread(publications.view)
 
-    @app.put("/v1/operator/releases/wall", dependencies=[Depends(admin)], response_model=ReleasesView)
-    async def update_the_wall(choice: VersionChoice) -> ReleasesView:
-        await asyncio.to_thread(versions.set_wall_version, choice.version)
+    @app.put("/v1/operator/releases/wall", response_model=ReleasesView)
+    async def update_the_wall(choice: VersionChoice, by: Actor = Depends(admin)) -> ReleasesView:
+        await asyncio.to_thread(partial(versions.set_wall_version, choice.version, by=by))
         return await asyncio.to_thread(publications.view)
 
-    @app.post("/v1/operator/players/{serial}/install", dependencies=[Depends(admin)], response_model=InstallStarted)
-    async def install(serial: SerialPath, choice: VersionChoice) -> InstallStarted:
-        return await asyncio.to_thread(versions.install, serial, choice.version)
+    @app.post("/v1/operator/players/{serial}/install", response_model=InstallStarted)
+    async def install(serial: SerialPath, choice: VersionChoice, by: Actor = Depends(admin)) -> InstallStarted:
+        return await asyncio.to_thread(partial(versions.install, serial, choice.version, by=by))

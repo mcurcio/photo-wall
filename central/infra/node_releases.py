@@ -3,7 +3,7 @@ wanted deployments (auto-ingest design §6; a version per Pi, Q2 A, 2026-10-16).
 
 Tables: `node_release_catalog` (058, immutable), `node_release_observations` (065),
 `node_deployments` / `node_deployment_assets` / `node_base_managers` / `node_environment_catalog`
-(054, 065); each Pi's version is `player_versions` (100, central/infra/player_versions.py).
+(054, 065); each Pi's version is on its `devices` row (121, central/infra/player_versions.py).
 
 * **Deployment writer** (`write_deployment`): used by the release sync's ingest. An existing id
   with the same canonical bytes is a `duplicate`, with other bytes a refusal.
@@ -182,10 +182,11 @@ def _deployment_ids(conn: Any, manifests: dict[str, str]) -> dict[str, UUID]:
 
 
 def wanted_deployments(conn: Any) -> WantedDeployments:
-    """The window, every Pi's version and every Pi's previous version (player_versions). A Pi still
+    """The window, every Pi's version and every Pi's previous version (`devices`). A Pi still
     preparing a deployment that is none of them (its version changed twice since its offer) is
     covered by `SERVE_GRACE` while it reads and by read-through after: nothing else roots it."""
-    rows = conn.execute("SELECT deployment_id, previous_deployment_id FROM player_versions").fetchall()
+    rows = conn.execute("SELECT deployment_id, previous_deployment_id FROM devices "
+                        "WHERE deployment_id IS NOT NULL").fetchall()
     observed = _stable_observed(conn)
     tags = window(observed)
     ids = _deployment_ids(conn, {tag: observed[tag] for tag in tags})
