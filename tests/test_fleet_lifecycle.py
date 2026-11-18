@@ -69,7 +69,8 @@ def test_retired_canonical_device_refuses_new_app_enrollment(registry) -> None:
 def test_bound_retirement_refusal_does_not_create_a_device_tombstone(registry) -> None:
     _seed_player(registry, canonical_device=False)
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO outputs(player_id,output_id,observation) VALUES(%s,%s,%s)",
+        conn.execute("INSERT INTO outputs(player_id,output_id,observation,created_at,created_by,changed_at,"
+                     "changed_by) VALUES(%s,%s,%s,0,'node',0,'node')",
                      (PLAYER_ID, "HDMI-A-1", Jsonb({"output_id": "HDMI-A-1",
                                                     "width_px": 1920, "height_px": 1080})))
     registry.create_frame(frame_create("lifecycle-frame"))

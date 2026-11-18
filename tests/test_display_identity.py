@@ -30,6 +30,7 @@ from central.infra.display_store import (
     DisplayDocuments,
     DisplayWakes,
     OutputReportJudge,
+    record_report,
 )
 from central.infra.node_link_store import PgLinkStores
 from central.registry import Enrollment, OutputReport, enrollment_message
@@ -110,8 +111,8 @@ def _seen(registry, player_id: str, output_id: str) -> dict:
     """The Output's row joined to the Display recorded there."""
     with registry.db.transaction() as conn:
         return conn.execute(
-            "SELECT o.connected, o.identity, o.display_id, d.serial, d.frame_id, d.power_method, "
-            "d.switch_input_on_power_on, d.never_off_on_other_input, d.modes FROM output_displays o "
+            "SELECT o.connected, o.display_identity AS identity, o.display_id, d.serial, d.frame_id, d.power_method, "
+            "d.switch_input_on_power_on, d.never_off_on_other_input, d.modes FROM outputs o "
             "LEFT JOIN displays d ON d.id=o.display_id WHERE o.player_id=%s AND o.output_id=%s",
             (player_id, output_id)).fetchone()
 
@@ -260,7 +261,7 @@ def test_the_output_document_changes_only_when_its_body_does(registry):
 def test_an_undecodable_report_is_skipped_and_the_rest_recorded(registry):
     pi = enroll_pi(registry, "pi-a")
     _report(registry, "pi-a", "HDMI-A-1", None, data=b'{"not": "a report"}')
-    assert _seen(registry, pi, "HDMI-A-1") is None
+    assert _seen(registry, pi, "HDMI-A-1")["connected"] is None   # the enrolled Output, no report recorded
     assert len(_sql(registry, "SELECT 1 FROM node_states WHERE stream=%s", (REPORT_STREAM,))) == 1
 
 
@@ -280,3 +281,25 @@ def test_the_hardware_tab_reads_the_display_on_a_frames_output(registry):
         assert {key: body["display"][key] for key in ("maker", "product", "name", "serial", "tied_to_frame")} == {
             "maker": "XYM", "product": 5475, "name": "MNN", "serial": None, "tied_to_frame": True}
         assert client.get(f"/v1/operator/frames/{frame}/display").status_code == 401
+
+
+def test_an_unchanged_output_report_writes_nothing(registry):
+    """(8) Decision 0034: the judge writes an Output row only when a column it holds changes. Read
+    again, the report a port last stated takes no transaction id (neither a write nor a row lock);
+    a changed one is recorded, stamped by the Pi. Mutation probe: write the Output row unconditionally
+    in `record_report` -> a transaction id is taken and this fails."""
+    player = enroll_pi(registry, "pi-quiet")
+    _bind(registry, _frame(registry, "quiet"), player, "HDMI-A-1")
+    _report(registry, "pi-quiet", "HDMI-A-1", SERIAL_DISPLAY)
+    report = WireReport("HDMI-A-1", True, SERIAL_DISPLAY, MODE, (), None, None, None, None, None, None)
+    with registry.db.transaction() as conn:
+        record_report(conn, player, report, 5000.0)
+        assert conn.execute("SELECT pg_current_xact_id_if_assigned() AS xid").fetchone()["xid"] is None
+    changed = WireReport("HDMI-A-1", False, None, (), (), None, None, None, None, None, None)
+    with registry.db.transaction() as conn:
+        record_report(conn, player, changed, 5000.0)
+        assert conn.execute("SELECT pg_current_xact_id_if_assigned() AS xid").fetchone()["xid"] is not None
+    [row] = _sql(registry, "SELECT connected, display_reported_at, changed_at, changed_by FROM outputs "
+                           "WHERE player_id=%s AND output_id='HDMI-A-1'", (player,))
+    assert (row["connected"], row["display_reported_at"], row["changed_at"], row["changed_by"]) == (
+        False, 5000.0, 5000.0, "node")

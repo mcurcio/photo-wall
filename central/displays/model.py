@@ -135,7 +135,7 @@ def display_key(identity: DisplayIdentity, *, serial_counts: bool, bound_frame_i
 
 @dataclass(frozen=True)
 class FramePosition:
-    """The facts readiness is worked out from (frames, bindings, output_displays)."""
+    """The facts readiness is worked out from (frames, bindings, outputs)."""
     bound: bool
     generation: int
     position_generation: int | None          # the Frame generation its latest Position commit was made at
@@ -160,7 +160,7 @@ def readiness(position: FramePosition) -> Readiness:
 def screen_px(current_mode: OutputSize | None, modes: Sequence[DisplayMode]) -> OutputSize | None:
     """The mode as built of a Frame's screen (frame box run, .claude/runs/frame-box/page.md; issue
     #124): `current_mode` (the mode Weston runs, from the bound Output's Output report,
-    output_displays.report's `current_mode`) when both sides are >= 1, else the first preferred mode
+    outputs.display_report's `current_mode`) when both sides are >= 1, else the first preferred mode
     of `modes` (the Display seen on that Output, displays.modes; Weston, given no mode, runs the
     preferred one), else None. The Player's enrolment report (outputs.observation) is not read. The
     one home of a Frame's screen size: central/infra/display_store.py `frame_outputs_in`, the Frame
@@ -189,7 +189,7 @@ def frame_region(frame_id: str | None, fit: PositionBox | None, screen: OutputSi
 def region_digest(region: FrameRegion | None) -> str:
     """sha256 hex of `region`'s canonical encoding (contracts.node_output `encode_frame_region`), or
     of b"null" for None: the region document's change rises exactly when this differs from the
-    digest recorded with the last change (output_documents.region_digest). Pure."""
+    digest recorded with the last change (outputs.region_digest). Pure."""
     return hashlib.sha256(b"null" if region is None else encode_frame_region(region)).hexdigest()
 
 

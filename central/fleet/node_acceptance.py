@@ -37,7 +37,8 @@ def current_cohort_in(conn, device_id: str, generation: int, now: float) -> dict
                           (device_id,)).fetchone()
     if player is None:
         raise NodeControlError("node_player_unavailable")
-    reports = conn.execute("SELECT output_id,observation FROM outputs WHERE player_id=%s ORDER BY output_id",
+    reports = conn.execute("SELECT output_id,observation FROM outputs WHERE player_id=%s "
+                           "AND observation IS NOT NULL ORDER BY output_id",
                            (player["id"],)).fetchall()
     rows = conn.execute("SELECT DISTINCT ON(e.output_id) e.output_id,e.request,e.received_at "
                         "FROM node_display_exchanges e JOIN node_sessions s USING(session_id) "

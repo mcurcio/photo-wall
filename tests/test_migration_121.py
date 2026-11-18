@@ -307,9 +307,3 @@ def test_121b_fails_loudly_rather_than_lose_a_release(registry, lost):
         else:
             conn.execute("DELETE FROM node_release_observations WHERE tag=%s", (CATALOGUED,))
         conn.execute(MIGRATION_B.read_text())
-
-
-def test_after_121b_central_has_84_tables(registry):
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM pg_tables WHERE schemaname='public' "
-                            "AND tablename NOT LIKE 'procrastinate%%'").fetchone()["n"] == 84

@@ -39,6 +39,9 @@ from central.infra.display_store import (
     frame_display_mm,
     frame_readiness,
     frame_screen_px,
+    observe_outputs_in,
+    observed_outputs_in,
+    output_observation_in,
     resolve_output,
 )
 from central.infra.health_report_store import health_reports_in
@@ -262,12 +265,8 @@ class Registry:
                              "VALUES(%s,%s,%s,%s,%s,%s)",
                              (player_id, request.public_key, token_hash, now, now,
                               request.device_id))
-            conn.execute("UPDATE outputs SET observation=jsonb_set(observation,'{connected}','false') "
-                         "WHERE player_id=%s", (player_id,))
-            for output in request.outputs:
-                conn.execute("INSERT INTO outputs VALUES(%s,%s,%s) ON CONFLICT(player_id,output_id) "
-                             "DO UPDATE SET observation=excluded.observation",
-                             (player_id, output.output_id, Jsonb(output.model_dump())))
+            observe_outputs_in(conn, player_id, {output.output_id: output.model_dump()
+                                                 for output in request.outputs}, now)
             epoch = conn.execute("SELECT authority_epoch FROM players WHERE id=%s",
                                  (player_id,)).fetchone()["authority_epoch"]
             # Negotiation belongs to this enrollment epoch, never to the serial or package tag.
@@ -535,13 +534,10 @@ class Registry:
             ).fetchone()
             if not negotiated:
                 raise RegistryError("identify_unsupported")
-            output = conn.execute(
-                "SELECT observation FROM outputs WHERE player_id=%s AND output_id=%s FOR UPDATE",
-                (player_id, output_id),
-            ).fetchone()
-            if not output:
+            observation = output_observation_in(conn, player_id, output_id, lock=True)
+            if observation is None:
                 raise RegistryError("unknown_output", 404)
-            if not output["observation"].get("connected", False):
+            if not observation.get("connected", False):
                 raise RegistryError("output_disconnected")
             if conn.execute("SELECT 1 FROM bindings WHERE player_id=%s AND output_id=%s",
                             (player_id, output_id)).fetchone():
@@ -625,8 +621,7 @@ class Registry:
                                      (frame_id,)).fetchone()
                 if not frame:
                     raise RegistryError("unknown_frame", 404)
-                if not conn.execute("SELECT 1 FROM outputs WHERE player_id=%s AND output_id=%s",
-                                    (player_id, output_id)).fetchone():
+                if output_observation_in(conn, player_id, output_id) is None:
                     raise RegistryError("unknown_output", 404)
                 existing = conn.execute("SELECT * FROM bindings WHERE frame_id=%s", (frame_id,)).fetchone()
                 if existing and (existing["player_id"], existing["output_id"]) == (player_id, output_id):
@@ -870,8 +865,7 @@ class Registry:
         """Read inventory in a caller-owned transaction; safe in read-only snapshots."""
         players = conn.execute("SELECT id,device_id,authority_epoch,registered_at,last_seen,retired_at,health "
                                "FROM players ORDER BY registered_at,id").fetchall()
-        outputs = conn.execute("SELECT player_id,output_id,observation FROM outputs "
-                               "ORDER BY player_id,output_id").fetchall()
+        outputs = observed_outputs_in(conn)
         frames = conn.execute("SELECT f.id,f.name,f.surface_id,f.x_mm,f.y_mm,f.video,"  # noqa: S608
                               "f.calibration,f.lighting,f.turn,f.configuration_revision,"
                               f"b.player_id,b.output_id,{POSITION_COLUMNS},{SCREEN_COLUMNS} FROM frames f "

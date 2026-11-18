@@ -109,9 +109,8 @@ def _see_display(registry, frame_id: str = "node-f0") -> UUID:
     display = uuid4()
     _sql(registry, "INSERT INTO displays(id, maker, product, name, serial, first_seen_at, matched_lux, panel_black) "
                    "VALUES (%s, 'SAM', 1, 'Samsung QN43Q8F', %s, 0, 1000.0, 0.0003)", (display, display.hex))
-    _sql(registry, "INSERT INTO output_displays(player_id, output_id, connected, display_id, report, reported_at) "
-                   "SELECT player_id, output_id, true, %s, '{}', 0 FROM bindings WHERE frame_id=%s "
-                   "ON CONFLICT (player_id, output_id) DO UPDATE SET display_id=EXCLUDED.display_id",
+    _sql(registry, "UPDATE outputs o SET connected=true, display_id=%s, display_report='{}', display_reported_at=0 "
+                   "FROM bindings b WHERE b.frame_id=%s AND o.player_id=b.player_id AND o.output_id=b.output_id",
          (display, frame_id))
     _sql(registry, "UPDATE frames SET position_display_id=%s WHERE id=%s", (display, frame_id))
     return display

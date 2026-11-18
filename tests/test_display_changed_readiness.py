@@ -155,7 +155,7 @@ def test_a_frame_ready_before_073_is_ready_after_with_no_report(registry):
 
 def _display_of(registry, player_id: str, output_id: str):
     with registry.db.transaction() as conn:
-        return conn.execute("SELECT o.display_id, d.serial, d.frame_id FROM output_displays o LEFT JOIN displays d "
+        return conn.execute("SELECT o.display_id, d.serial, d.frame_id FROM outputs o LEFT JOIN displays d "
                             "ON d.id=o.display_id WHERE o.player_id=%s AND o.output_id=%s",
                             (player_id, output_id)).fetchone()
 
@@ -219,9 +219,10 @@ def test_a_dead_pis_last_report_does_not_make_a_moved_displays_serial_shared(reg
     _report(registry, "pi-b", "HDMI-A-1", SERIAL_DISPLAY)
     assert _display_of(registry, pi_b, "HDMI-A-1")["display_id"] == first and _shared(registry) == []
 
-    # Positive control: while Pi A's link is held, the same serial on both is shared.
+    # Positive control: while Pi A's link is held, the same serial on both is shared, at Pi B's next
+    # sighting (a report that changed: an unchanged one is no new sighting, decision 0034).
     _presence(registry, "pi-a", True)
-    _report(registry, "pi-b", "HDMI-A-1", SERIAL_DISPLAY)
+    _report(registry, "pi-b", "HDMI-A-1", SERIAL_DISPLAY, current_mode=(1920, 1080))
     assert _shared(registry) == [{"serial": SERIAL_DISPLAY.serial}]
 
 

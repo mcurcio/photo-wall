@@ -4,7 +4,7 @@ slice S2; roadmap 1c's Live model).
 A real hub on Fleet's generated configuration, a real Node bus, and the display line's session on
 the shipped `DISPLAY_SLICE`, as tests/integration/test_central_display_power.py runs them. (1)
 Central writes `picture-HDMI-A-1` on the Node's desired bucket beside `output-HDMI-A-1`. (2) The
-Node's picture report on `picture-HDMI-A-1` is recorded (`picture_reports`), so the Picture tab
+Node's picture report on `picture-HDMI-A-1` is recorded (`outputs.picture_report`), so the Picture tab
 knows what the display offers. (3) A hardware edit made through the operator API, in its own
 process, reaches the Node's `picture-HDMI-A-1` with a new picture change within 3 s while
 `output-HDMI-A-1` keeps its change: carried by the notification (no reconcile runs between the edit
@@ -109,8 +109,9 @@ def test_picture_documents_and_reports_cross_the_display_line_on_their_own_keys(
 
     def offered() -> bool:
         with database.transaction() as conn:
-            return conn.execute("SELECT 1 FROM picture_reports WHERE player_id=%s AND output_id='HDMI-A-1' "
-                                "AND report->'offered' IS NOT NULL AND report->'offered' <> 'null'::jsonb",
+            return conn.execute("SELECT 1 FROM outputs WHERE player_id=%s AND output_id='HDMI-A-1' "
+                                "AND picture_report->'offered' IS NOT NULL "
+                                "AND picture_report->'offered' <> 'null'::jsonb",
                                 (player,)).fetchone() is not None
 
     async def run(client: TestClient) -> None:

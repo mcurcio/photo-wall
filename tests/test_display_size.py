@@ -64,7 +64,7 @@ def _sized(registry, serial: str, output_id: str, size_mm: tuple[int, int] | Non
 
 
 def _display_size(registry, player_id: str, output_id: str) -> tuple[int | None, int | None]:
-    [row] = _sql(registry, "SELECT d.width_mm, d.height_mm FROM output_displays o JOIN displays d "
+    [row] = _sql(registry, "SELECT d.width_mm, d.height_mm FROM outputs o JOIN displays d "
                            "ON d.id=o.display_id WHERE o.player_id=%s AND o.output_id=%s", (player_id, output_id))
     return row["width_mm"], row["height_mm"]
 
@@ -96,7 +96,7 @@ def test_a_display_first_seen_pending_takes_its_size_when_its_output_is_bound(re
     stored report, size and all."""
     pi = enroll_pi(registry, "pi-a")
     _sized(registry, "pi-a", "HDMI-A-1", (950, 540))
-    assert _sql(registry, "SELECT display_id FROM output_displays") == [{"display_id": None}]
+    assert _sql(registry, "SELECT display_id FROM outputs WHERE display_report IS NOT NULL") == [{"display_id": None}]
     _bind(registry, _frame(registry, "kitchen"), pi, "HDMI-A-1")
     assert _display_size(registry, pi, "HDMI-A-1") == (950, 540)
 

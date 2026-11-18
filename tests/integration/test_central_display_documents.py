@@ -4,7 +4,7 @@ A real hub on Fleet's generated configuration, a real Node bus, and the display 
 the shipped `DISPLAY_SLICE`. Central runs the worker's own composition of the fleet pipe:
 `NodeLinks` over `PgLinkStores` with the `OutputReportJudge`, its documents from
 `DisplayDocuments`. (1) The Node's desired bucket receives `output-HDMI-A-1` (its enrolled Output)
-with standing on. (2) The session's Output report is recorded and judged into `output_displays`
+with standing on. (2) The session's Output report is recorded and judged onto its `outputs` row
 (the Display recognised on the bound Frame, holding the size the report states). (3) A report from an Output Central had no row for
 gives that Output a document within 3 s, carried by the judge's wake (`changed()`), not by a
 reconcile: the link first settles (its reconcile after draining the session's `birth`), and no
@@ -129,11 +129,11 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
             display.state.put(output_report_key("HDMI-A-1"), _report("HDMI-A-1"))
 
             async def judged():
-                found = rows("SELECT o.connected, d.frame_id, d.width_mm, d.height_mm FROM output_displays o "
+                found = rows("SELECT o.connected, d.frame_id, d.width_mm, d.height_mm FROM outputs o "
                              "JOIN displays d "
                              "ON d.id=o.display_id WHERE o.player_id=%s AND o.output_id='HDMI-A-1'", (player,))
                 return found or None
-            [seen] = await until(judged, SECONDS, "the report judged into output_displays")
+            [seen] = await until(judged, SECONDS, "the report judged onto the Output row")
             assert (seen["connected"], seen["frame_id"]) == (True, "kitchen")
             assert (seen["width_mm"], seen["height_mm"]) == (950, 540)   # the Display's size, from the bus
             recorded = rows("SELECT data FROM node_states WHERE device_id=%s AND stream=%s "

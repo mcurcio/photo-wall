@@ -235,7 +235,7 @@ def test_the_edits_refuse_like_the_other_edits():
 
 def test_a_new_display_reads_auto_and_its_document_carries_auto_and_no_pattern(registry):
     """(1) Mutation probe: default_picture() returns FULL -> the Output with no Display reads full;
-    the displays column's default is 094's (tests/test_migration_094.py)."""
+    the displays column's default is 094's (central/migrations/094_display_tuning.sql)."""
     player = _bound(registry)
     assert _picture(registry, "pi-picture", "HDMI-A-2").signal_range is AUTO     # no Display seen there
     document = _picture(registry)

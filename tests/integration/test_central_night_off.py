@@ -74,7 +74,7 @@ class NotUnderTest:
 
 def _stored_report(database) -> Any:
     with database.transaction() as conn:
-        row = conn.execute("SELECT report FROM output_displays WHERE output_id=%s", (OUTPUT,)).fetchone()
+        row = conn.execute("SELECT display_report AS report FROM outputs WHERE output_id=%s", (OUTPUT,)).fetchone()
     if row is None or row["report"] is None:
         return None
     return decode_output_report(json.dumps(row["report"]).encode())
@@ -82,7 +82,8 @@ def _stored_report(database) -> Any:
 
 def _latest_change(database) -> int:
     with database.transaction() as conn:
-        return conn.execute("SELECT change FROM output_documents WHERE output_id=%s", (OUTPUT,)).fetchone()["change"]
+        return conn.execute("SELECT document_change FROM outputs WHERE output_id=%s",
+                            (OUTPUT,)).fetchone()["document_change"]
 
 
 def test_the_pi_keeps_night_off_while_central_is_away(database, tmp_path):

@@ -21,14 +21,10 @@ light.
 from __future__ import annotations
 
 import asyncio
-import json
-from pathlib import Path
 from typing import Final
 
 from fastapi.testclient import TestClient
-from psycopg.types.json import Jsonb
 from support.position import PORTRAIT_ON_WIDE, save_position
-from test_coordination import schedule, setup_players
 from test_display_identity import (
     _SEQ,
     ADMIN,
@@ -43,11 +39,8 @@ from test_display_identity import (
     _sql,
     enroll_pi,
 )
-from test_migration_092 import before_092, migrate_092
-from test_migration_094 import before_094, migrate_094
 
 from central.app import create_app
-from central.coordination import Coordinator
 from central.db import DatabaseTransactionClock
 from central.displays.model import Readiness
 from central.displays.picture import DisplayPicture, presented
@@ -57,16 +50,13 @@ from central.infra.display_store import (
     DisplayDocuments,
     DisplayWakes,
     OutputReportJudge,
-    frame_readiness_in,
 )
 from central.infra.node_link_store import PgLinkStores
-from contracts.models import Calibration, Plan
 from contracts.node_link import Pipe
 from contracts.node_output import (
     DisplayIdentity,
     OutputDocument,
     decode_output_document,
-    decode_output_report,
     output_document_key,
 )
 from contracts.node_picture import (
@@ -93,12 +83,7 @@ from contracts.node_picture import (
 from nodeapi.epoch import Token
 from nodeapi.pull import Batch, Read
 
-MIGRATION_075 = Path(__file__).parents[1] / "central/migrations/075_display_picture.sql"
-MIGRATION_096 = Path(__file__).parents[1] / "central/migrations/096_tuning_history.sql"
-MIGRATION_102 = Path(__file__).parents[1] / "central/migrations/102_rectangle_positions.sql"
-MIGRATION_104 = Path(__file__).parents[1] / "central/migrations/104_frame_box_positions.sql"
 SERIAL = "pi-picture"
-SKEWED_CORNERS = [[0.1, 0.05], [0.95, 0.0], [1.0, 1.0], [0.0, 0.9]]
 # The test monitor as the Pi asked it: brightness and contrast as levels of 100, a colour preset list.
 OFFERED = (HardwareSetting("10", HardwareRange(RangeKind.LEVEL, 100, ()), 60),
            HardwareSetting("12", HardwareRange(RangeKind.LEVEL, 100, ()), 50))
@@ -147,7 +132,7 @@ def _picture_report(registry, *, offered: tuple[HardwareSetting, ...] | None = O
 
 
 def _display(registry, player_id: str, output_id: str = "HDMI-A-1") -> dict:
-    [row] = _sql(registry, "SELECT d.* FROM output_displays o JOIN displays d ON d.id=o.display_id "
+    [row] = _sql(registry, "SELECT d.* FROM outputs o JOIN displays d ON d.id=o.display_id "
                            "WHERE o.player_id=%s AND o.output_id=%s", (player_id, output_id))
     return row
 
@@ -422,9 +407,9 @@ def test_a_picture_report_that_does_not_decode_or_names_another_output_is_skippe
     _picture_report(registry, data=b'{"output_id":"HDMI-A-1"}')
     _picture_report(registry, output_id="HDMI-A-2", data=encode_picture_report(
         PictureReport("HDMI-A-1", NO_SERIAL, OFFERED, None, {}, None)))
-    assert _sql(registry, "SELECT output_id FROM picture_reports") == []
+    assert _sql(registry, "SELECT output_id FROM outputs WHERE picture_report IS NOT NULL") == []
     _picture_report(registry)
-    assert [row["output_id"] for row in _sql(registry, "SELECT output_id FROM picture_reports")] == ["HDMI-A-1"]
+    assert [row["output_id"] for row in _sql(registry, "SELECT output_id FROM outputs WHERE picture_report IS NOT NULL")] == ["HDMI-A-1"]
 
 
 def test_a_session_needs_a_bound_frame_with_a_display(registry):
@@ -549,160 +534,6 @@ def test_a_value_changed_on_the_displays_buttons_is_shown_and_not_written_back(r
         session = _begin(client)
         _hardware(client, session, "10", 50, 1)                              # not projected yet
         assert (brightness(client)["changed_on_buttons"], brightness(client)["result"]) == (False, None)
-
-
-# --- Migration 075, carried through 092 --------------------------------------------------------------
-
-def _before_075(registry) -> None:
-    """The database as 1b's build left it: 094 and 092 undone, then no picture columns, the preview
-    columns back."""
-    before_094(registry)
-    before_092(registry)
-    _sql(registry, "DROP TABLE picture_sessions")
-    _sql(registry, "ALTER TABLE displays DROP COLUMN brightness_acts_on, DROP COLUMN brightness, "
-                   "DROP COLUMN contrast_acts_on, DROP COLUMN contrast, DROP COLUMN colour_temperature_kelvin, "
-                   "DROP COLUMN gamma_tenths")
-    _sql(registry, "ALTER TABLE output_documents DROP COLUMN picture_change, DROP COLUMN picture_digest")
-    _sql(registry, "ALTER TABLE frames ADD COLUMN preview JSONB, ADD COLUMN preview_expires DOUBLE PRECISION")
-
-
-def _migrate(registry) -> None:
-    """075, then 092, then 094, on the database `_before_075` left, then 096's own statement for the
-    session column (the table `_before_075` dropped came back without it; 096's history tables
-    were never dropped)."""
-    with registry.db.transaction() as conn:
-        conn.execute(MIGRATION_075.read_text())
-    migrate_092(registry)
-    migrate_094(registry)
-    statement, = (part for part in MIGRATION_096.read_text().split(";") if "ALTER TABLE picture_sessions" in part)
-    _sql(registry, statement)
-
-
-def _stored_1b(registry, frame_id: str, *, gain: float, rotation: int = 0, corners=None) -> None:
-    calibration = {"revision": 2, "rotation": rotation, "corners": corners or [[0, 0], [1, 0], [1, 1], [0, 1]],
-                   "crop": [0.1, 0, 1, 1], "gain": gain}
-    _sql(registry, "UPDATE frames SET calibration=%s, position_generation=generation WHERE id=%s",
-         (Jsonb(calibration), frame_id))
-
-
-def _frame_row(registry, frame_id: str):
-    return next(frame for frame in registry.inventory().frames if frame.id == frame_id)
-
-
-def test_075_then_092_move_a_frames_gain_to_its_displays_software_brightness(registry):
-    """(10) 1b's gain 0.8 became 1c's picture adjustment 40 %, and 092 makes it 80 %; gain 1.0 stays
-    unset, so 100 %. Mutation probe: drop 092's doubling -> 40 %."""
-    player = enroll_pi(registry, SERIAL)
-    for frame_id, output_id in (("bright", "HDMI-A-1"), ("plain", "HDMI-A-2")):
-        _bind(registry, _frame(registry, frame_id), player, output_id)
-        _report(registry, SERIAL, output_id, NO_SERIAL)
-    _before_075(registry)
-    _stored_1b(registry, "bright", gain=0.8)
-    _stored_1b(registry, "plain", gain=1.0)
-    _migrate(registry)
-
-    bright, plain = _display(registry, player, "HDMI-A-1"), _display(registry, player, "HDMI-A-2")
-    assert (bright["software_brightness_percent"], bright["hardware_picture"]) == (80, {})
-    assert (plain["software_brightness_percent"], plain["software_contrast_percent"]) == (100, 100)
-    assert (bright["colour_temperature_kelvin"], bright["gamma_tenths"]) == (6500, 22)
-
-
-def test_075_moves_every_frame_to_cover_at_angle_0_and_not_ready(registry):
-    """Owner q1 and his rotation answer (2026-10-10, "Every frame should reset to 0 rotation"): a
-    Frame stored with corners C and rotation 90 is stored as Cover with C as its opening at angle 0
-    (075's JSON, asserted as JSON: today's models no longer read Cover, migration 102 converts it);
-    its revision and configuration revision rise; trim and gain are gone; it is not ready until its
-    Position is saved again. Mutation probe: drop the readiness statement -> the Frame stays ready."""
-    _bound(registry, offered=False)
-    _before_075(registry)
-    _stored_1b(registry, "kitchen", gain=0.8, rotation=90, corners=SKEWED_CORNERS)
-    _sql(registry, "UPDATE frames SET preview=calibration, preview_expires=2000")
-    before = _sql(registry, "SELECT configuration_revision FROM frames")[0]["configuration_revision"]
-    # Positioned before 075 (the readiness rule's own input; the 1b record no longer parses).
-    assert _sql(registry, "SELECT position_generation = generation AS positioned FROM frames")[0]["positioned"]
-    _migrate(registry)
-
-    [row] = _sql(registry, "SELECT calibration, configuration_revision FROM frames")
-    assert row["calibration"] == {"revision": 3, "fit": {"mode": "cover", "corners": SKEWED_CORNERS, "rotation": 0}}
-    assert row["configuration_revision"] == before + 1
-    with registry.db.transaction() as conn:
-        assert frame_readiness_in(conn, "kitchen") is Readiness.POSITION_NEEDED
-    assert not _sql(registry, "SELECT 1 FROM information_schema.columns WHERE table_name='frames' "
-                              "AND column_name IN ('preview', 'preview_expires')")
-
-
-STORED_1B = {"revision": 2, "rotation": 90, "corners": SKEWED_CORNERS, "crop": [0.1, 0, 1, 1], "gain": 1.0}
-
-
-def _bindings_as_1b(registry, table: str, column: str) -> int:
-    """Every binding in `table`.`column` carries a Position as 1b stored it; the rows rewritten."""
-    rows = _sql(registry, f"SELECT ctid, {column} AS body FROM {table}")  # noqa: S608
-    for row in rows:
-        body = {**row["body"], "bindings": [{**binding, "calibration": STORED_1B}
-                                            for binding in row["body"]["bindings"]]}
-        _sql(registry, f"UPDATE {table} SET {column}=%s WHERE ctid=%s", (Jsonb(body), row["ctid"]))  # noqa: S608
-    return len(rows)
-
-
-def test_075_rewrites_the_stored_configurations_and_offers_so_central_still_plans(registry):
-    """A Player's last configuration and its plan offers hold copies of the Frame's Position; 075
-    rewrites them to 1c's Cover (asserted as JSON), 102 to a rectangle and 104 to a box, after which
-    today's strict models read them, so Central hands the Player a configuration and plans. Mutation probe:
-    drop the two binding rewrites -> `configuration` raises."""
-    [player] = setup_players(registry, 1)
-    coordinator = Coordinator(registry.db, registry.clock)
-    epoch = player["authority_epoch"]
-    coordinator.configuration(player["player_id"], epoch)
-    schedule(coordinator, ["frame-0"])
-    _before_075(registry)
-    _stored_1b(registry, "frame-0", gain=1.0, rotation=90, corners=SKEWED_CORNERS)
-    assert _bindings_as_1b(registry, "player_configurations", "configuration") == 1
-    assert _bindings_as_1b(registry, "plan_offers", "manifest") >= 1
-    _migrate(registry)
-    cover = {"mode": "cover", "corners": SKEWED_CORNERS, "rotation": 0}
-    [stored] = _sql(registry, "SELECT configuration FROM player_configurations")
-    assert [binding["calibration"]["fit"] for binding in stored["configuration"]["bindings"]] == [cover]
-    # 102 and 104 again on a database that already has them: 102's one column comes off first, and
-    # the profile columns they read come back for them (107 and 108 dropped them) and go after.
-    _sql(registry, "ALTER TABLE position_entries DROP COLUMN turn, "
-                   "ADD COLUMN profile_width_px INT, ADD COLUMN profile_height_px INT")
-    _sql(registry, "ALTER TABLE frames ADD COLUMN profile JSONB")
-    _sql(registry, "UPDATE frames SET profile='{\"width_px\": 1920, \"height_px\": 1080}'")
-    with registry.db.transaction() as conn:
-        conn.execute(MIGRATION_102.read_text())
-    with registry.db.transaction() as conn:
-        conn.execute(MIGRATION_104.read_text())
-    _sql(registry, "ALTER TABLE position_entries DROP COLUMN profile_width_px, DROP COLUMN profile_height_px")
-    _sql(registry, "ALTER TABLE frames DROP COLUMN profile")
-
-    configuration = coordinator.configuration(player["player_id"], epoch)
-    [binding] = configuration.bindings
-    [frame] = _sql(registry, "SELECT calibration FROM frames WHERE id='frame-0'")
-    assert binding.calibration == Calibration.model_validate(frame["calibration"])
-    assert binding.calibration.fit.mode == "box"
-    coordinator.advance()
-    for row in _sql(registry, "SELECT manifest FROM plan_offers"):
-        Plan.model_validate(row["manifest"])
-
-
-def test_a_1b_report_and_document_still_answer_after_075_and_092(registry):
-    """A Pi's report and Central's document as 1b stored them answer the Power and Picture tabs after
-    075 and 092, before the Pi reports again; the picture numbering carries (075's 1, then the
-    Display's own). Mutation probe: drop 092's report statement -> the stored report no longer decodes."""
-    _bound(registry, offered=False)
-    _documents(registry)
-    _before_075(registry)
-    _sql(registry, "UPDATE output_documents SET document = document - 'picture' - 'picture_change'")
-    _migrate(registry)
-    # A real database runs 104 after 075, which leaves every Frame's calibration in revision 3.
-    _sql(registry, "UPDATE frames SET calibration = jsonb_build_object('revision', 3, 'fit', '{}'::jsonb)")
-
-    with _client(registry) as client:
-        assert client.get("/v1/operator/frames/kitchen/power", headers=AUTH).status_code == 200
-        assert client.get("/v1/operator/frames/kitchen/picture", headers=AUTH).status_code == 200
-    [seen] = _sql(registry, "SELECT report FROM output_displays")
-    assert decode_output_report(json.dumps(seen["report"]).encode()).identity == NO_SERIAL
-    assert _picture(registry).picture_change == 2
 
 
 def test_a_display_that_is_away_keeps_its_list_and_takes_edits_until_it_is_back(registry):
