@@ -18,6 +18,9 @@ RuntimeDirectory=photo-wall-app-broker
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
 User=root
+# Display's ingress (display_paths.INGRESS_SOCKET, 0660 pw-display): the broker tells it the current
+# Player run (appliance/apps/display_runs.py); without CAP_DAC_OVERRIDE it connects through the group.
+SupplementaryGroups=pw-display
 UMask=0077
 Slice=photowallbase.slice
 OOMScoreAdjust=-500

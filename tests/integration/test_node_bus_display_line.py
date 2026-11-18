@@ -106,9 +106,9 @@ STATE = "KV_state_display"
 KEY = output_document_key("HDMI-A-1")
 UNLISTED = "output-HDMI-A-3"
 ALWAYS_ON = OutputPower(Power.ON, (), "2099-01-01T00:00:00Z", Darkness.DISPLAY_OFF, None)
-FIRST = OutputDocument("HDMI-A-1", 1, ALWAYS_ON, BEST_DETECTED, True, True, 0)
+FIRST = OutputDocument("HDMI-A-1", 1, ALWAYS_ON, BEST_DETECTED, True, True, 0, None)
 TEST_OFF = OutputDocument("HDMI-A-1", 2, replace(ALWAYS_ON, test=PowerRequest("req-1", Power.OFF, 300)),
-                          BEST_DETECTED, True, True, 90)
+                          BEST_DETECTED, True, True, 90, None)
 PICTURE_KEY = picture_document_key("HDMI-A-1")
 PICTURE_DOCUMENT = PictureDocument("HDMI-A-1", 8, {"10": 46}, SoftwarePicture(contrast_percent=114, colour_temperature_kelvin=6500, gamma_tenths=22),
                                   light=UPGRADE_DISPLAY_LIGHT)
@@ -199,7 +199,7 @@ def test_the_display_line_carries_centrals_output_document(tmp_path):
                                                                           sink.put_picture(PICTURE_REPORT),
                                                                           picture.document(output_id, document)))
         ignored = SimpleNamespace(document=lambda output_id, document: None)   # power, turns, regions: not here
-        display.desired.on_change(document_feed(ignored, controller, ignored, ignored, ignored))
+        display.desired.on_change(document_feed(ignored, controller, ignored, ignored, ignored, ignored))
 
         # (1) The display line applies beside the host line, inside the store's stream count.
         names = await _names(node)

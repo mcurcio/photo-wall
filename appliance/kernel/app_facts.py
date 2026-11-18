@@ -16,6 +16,11 @@ live here, the lowest layer both reach. Stdlib only.
 - `app_frames_black`: the Player's own statement, on its probe channel, of which of its Outputs
   are black while content is wanted and why (the channel's run, not the Player's word for it).
 
+The broker also tells Display which run is current (decision 0034, S4b part 4): one `app_run`
+packet (`AppRunOp`) on Display's root-only ingress (`appliance.kernel.display_paths.INGRESS_SOCKET`),
+sent by `appliance.apps.display_runs.DisplayRuns` and read by `appliance.display_host.runner`. The
+op's name and value shape live here, with the Player's uid both contexts name.
+
 The probe facts (`probe_*`, `app_renderer`, ...) keep their names where they are
 written today; moving them here is a residual, not 1b's.
 """
@@ -28,6 +33,8 @@ APP_EXITED: Final = "app_exited"
 APP_DESCRIPTORS: Final = "app_descriptors"
 APP_OBSERVATION_FAILED: Final = "app_observation_failed"
 APP_FRAMES_BLACK: Final = "app_frames_black"
+APP_RUN_OP: Final = "app_run"       # the broker's current run, on Display's ingress
+PLAYER_UID: Final = 10004           # the Player's uid (debian sysusers pw-player): its unit's User=, Display's grant
 
 
 class RunDocument(TypedDict):
@@ -37,6 +44,14 @@ class RunDocument(TypedDict):
     pid: int
     start_ticks: int
     app_epoch: int
+
+
+class AppRunOp(TypedDict):
+    """The `app_run` ingress packet: the broker's current run (`RunDocument`), None when no run is
+    current. Display holds the last one it accepted; a new controller is told again."""
+
+    op: str
+    run: RunDocument | None
 
 
 class AppRunValue(TypedDict):
@@ -74,6 +89,6 @@ class AppFramesBlackValue(TypedDict):
     frames: list[FrameBlackFact]
 
 
-__all__ = ["APP_DESCRIPTORS", "APP_EXITED", "APP_FRAMES_BLACK", "APP_OBSERVATION_FAILED", "APP_STARTED",
-           "AppDescriptorsValue", "AppFramesBlackValue", "AppObservationFailedValue", "AppRunValue",
-           "FrameBlackFact", "RunDocument"]
+__all__ = ["APP_DESCRIPTORS", "APP_EXITED", "APP_FRAMES_BLACK", "APP_OBSERVATION_FAILED", "APP_RUN_OP", "APP_STARTED",
+           "PLAYER_UID", "AppDescriptorsValue", "AppFramesBlackValue", "AppObservationFailedValue", "AppRunOp",
+           "AppRunValue", "FrameBlackFact", "RunDocument"]

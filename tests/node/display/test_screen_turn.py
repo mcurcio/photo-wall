@@ -27,7 +27,7 @@ OTHER = "HDMI-A-2"          # the sentinel Output: its ask proves the worker pas
 def document(turn: DisplayTurn, *, output_id: str = OUTPUT, change: int = 1) -> OutputDocument:
     return OutputDocument(output_id, change,
                           OutputPower(Power.ON, (), "2099-01-01T00:00:00Z", Darkness.DISPLAY_OFF, None),
-                          BEST_DETECTED, False, False, turn)
+                          BEST_DETECTED, False, False, turn, None)
 
 
 def until(condition: Callable[[], bool], seconds: float = 5.0) -> None:

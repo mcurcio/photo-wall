@@ -27,9 +27,11 @@ from uuid import UUID
 
 from appliance.feed import Feed, answer_feed_read
 from appliance.feed_socket import FEED_READERS, FEEDS_GROUP, FeedListener
+from appliance.kernel.app_facts import APP_RUN_OP
 from appliance.kernel.display_paths import (
     CONTROLLER_STATE,
     DISPLAY_UNIT,
+    INGRESS_SOCKET,
     RUNTIME,
     SIGNAL_RANGE_REQUEST,
 )
@@ -63,6 +65,7 @@ from .central_card import CentralCards
 from .ddc import DdcChannel
 from .domain import OutputState
 from .edid import EdidReading, parse_edid, read_edid
+from .handoff import AppRun, Handoffs
 from .output_power import OutputPowerController, PiClock, ReportSink
 from .picture import (
     DdcPictureAdapter,
@@ -89,8 +92,11 @@ from .weston import (
 log = logging.getLogger(__name__)
 
 # The display feed for node readers (root, pw-health): the `events` op only, over the kernel
-# feed socket. The root-only ingress (`<runtime>/ingress.sock`) keeps every operation.
+# feed socket. The root-only ingress (`<runtime>/ingress.sock`, display_paths.INGRESS_SOCKET) keeps
+# every operation; its mode is INGRESS_MODE (group pw-display, so the app broker, root without
+# CAP_DAC_OVERRIDE, can connect through its supplementary group), and any peer not uid 0 is refused.
 FEED_SOCKET = Path("/run/photo-wall-display-feed/feed.sock")
+INGRESS_MODE: Final = 0o660
 
 
 def _unit(unit: str) -> dict[str, str]:
@@ -465,9 +471,11 @@ def settle(controller: Controller, backend: WestonBackend, wiring: CentralCardWi
 
 
 def document_feed(power: OutputPowerController, picture: PictureController,
-                  turns: ScreenTurns, regions: ShellRegions, trials: Trials) -> Callable[[str, Document], None]:
+                  turns: ScreenTurns, regions: ShellRegions, trials: Trials,
+                  handoffs: Handoffs) -> Callable[[str, Document], None]:
     """The desired view's callback, routed by key: an Output document (`output-…`), decoded, to the
-    power controller and to the screen turns (its `turn`, render redesign S3); a picture document (`picture-…`, decision 0022), decoded, to the picture
+    power controller, to the screen turns (its `turn`, render redesign S3) and its binding to the
+    handoffs (`Handoffs.document`, decision 0034 S4b); a picture document (`picture-…`, decision 0022), decoded, to the picture
     controller (each acts on its own change number); a region document (`region-…`, issue #124),
     decoded, its region to the shell's regions; a trial document (`trial-…`, decision 0034 S4b),
     decoded, to the trials (`Trials.document`). A document that does not decode, sits under
@@ -506,6 +514,7 @@ def document_feed(power: OutputPowerController, picture: PictureController,
                     raise ValueError("output_document_key")
                 power.document(decoded.output_id, decoded)
                 turns.document(decoded.output_id, decoded)
+                handoffs.document(decoded.output_id, decoded.binding)
             elif key in picture_keys:
                 wanted = decode_picture_document(document.value)
                 if picture_document_key(wanted.output_id) != key:
@@ -572,6 +581,7 @@ class Controller:
         self.feed = Feed(256)
         self.service = None
         self.trials: Trials | None = None
+        self.handoffs = Handoffs()   # main shares its own with the document feed
         self.reports = reports
         if reports is not None:
             reports.observe(self.host.states())
@@ -617,6 +627,12 @@ class Controller:
             }
         if operation == "outputs":
             return {"outputs": [asdict(state) for state in self.host.states()]}
+        if operation == APP_RUN_OP:
+            # The app broker's current run (appliance/apps/display_runs.py); None: no run.
+            if set(value) != {"op", "run"}:
+                raise ValueError("app_run")
+            self.handoffs.run(None if value["run"] is None else AppRun.of(value["run"]))
+            return {}
         if operation == "candidate":
             surface = _surface(value["surface"])
             grant = SurfaceGrant(surface, value["uid"], value.get("starting_new"))
@@ -637,6 +653,32 @@ class Controller:
             state = self.host.authorize_handoff(surface, now_ms=time.monotonic_ns() // 1_000_000)
             return {"handoff_id": state.handoff_id}
         raise ValueError("display_operation_unsupported")
+
+
+def answer_ingress(connection: socket.socket, controller: Controller, *, root: int = 0) -> None:
+    """One accepted ingress connection: a peer whose uid is not `root` (0; a test passes its own)
+    gets no answer; else its one packet, with its credentials (`receive_credential_packet`), is
+    the controller's operation (`Controller.receive`), answered {"accepted": true, ...} or
+    {"accepted": false, "reason": <the error's type>}, bounded by MAX_PACKET."""
+    connection.settimeout(1)
+    _pid, uid, _gid = struct.unpack(
+        "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+    if uid != root:
+        return
+    try:
+        credentials, raw = receive_credential_packet(connection, maximum=MAX_PACKET)
+        if credentials[1] != root:
+            raise ValueError("display_ingress_peer")
+        value = json.loads(raw, object_pairs_hook=_pairs)
+        if type(value) is not dict:
+            raise ValueError("display_ingress_type")
+        result = {"accepted": True, **controller.receive(value)}
+    except (ValueError, KeyError, TypeError, OSError) as exc:
+        result = {"accepted": False, "reason": type(exc).__name__}
+    wire = json.dumps(result, default=str, separators=(",", ":")).encode()
+    if len(wire) > MAX_PACKET:
+        wire = b'{"accepted":false,"reason":"response_bound"}'
+    connection.sendall(wire)
 
 
 class _stopping:
@@ -707,7 +749,8 @@ def main() -> None:
         regions.start()
         cards.start()
         trials = Trials(backend, BusTrialSink(session))    # the Position trial (WestonBackend.trial)
-        feed = document_feed(power, picture, turns, regions, trials)
+        handoffs = Handoffs()                              # each Output's binding and the broker's run
+        feed = document_feed(power, picture, turns, regions, trials, handoffs)
         session.desired.on_change(feed)
         for output_id in OUTPUT_IDS:     # what arrived before the callback, once more (idempotent)
             for key in (output_document_key(output_id), picture_document_key(output_id),
@@ -718,6 +761,7 @@ def main() -> None:
                                                                 mode=backend.current_mode),
                                 power=power)
         controller.trials = trials
+        controller.handoffs = handoffs
         if config:
             from .service import DisplayService
 
@@ -733,11 +777,11 @@ def main() -> None:
             feed_listener(controller) as feeds,
             socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as ingress,
         ):
-            path = args.runtime / "ingress.sock"
+            path = args.runtime / INGRESS_SOCKET.name
             path.unlink(missing_ok=True)
             ingress.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
             ingress.bind(str(path))
-            os.chmod(path, 0o600)
+            os.chmod(path, INGRESS_MODE)
             ingress.listen(4)
             with selectors.DefaultSelector() as selector:
                 selector.register(channel, selectors.EVENT_READ, "backend")
@@ -754,29 +798,7 @@ def main() -> None:
                             continue
                         connection, _ = ingress.accept()
                         with connection:
-                            connection.settimeout(1)
-                            _pid, uid, _gid = struct.unpack(
-                                "3i",
-                                connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12),
-                            )
-                            if uid != 0:
-                                continue
-                            try:
-                                credentials, raw = receive_credential_packet(
-                                    connection, maximum=MAX_PACKET
-                                )
-                                if credentials[1] != 0:
-                                    raise ValueError("display_ingress_peer")
-                                value = json.loads(raw, object_pairs_hook=_pairs)
-                                if type(value) is not dict:
-                                    raise ValueError("display_ingress_type")
-                                result = {"accepted": True, **controller.receive(value)}
-                            except (ValueError, KeyError, TypeError, OSError) as exc:
-                                result = {"accepted": False, "reason": type(exc).__name__}
-                            wire = json.dumps(result, default=str, separators=(",", ":")).encode()
-                            if len(wire) > MAX_PACKET:
-                                wire = b'{"accepted":false,"reason":"response_bound"}'
-                            connection.sendall(wire)
+                            answer_ingress(connection, controller)
 
 
 if __name__ == "__main__":

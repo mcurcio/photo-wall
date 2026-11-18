@@ -200,6 +200,7 @@ from contracts.node_output import (
     DisplayIdentity,
     DisplayMode,
     FrameRegionDocument,
+    OutputBinding,
     OutputDocument,
     OutputReport,
     Power,
@@ -970,7 +971,8 @@ def output_documents(conn: Any, device_id: str, now: float, *, trials: TrialProj
     a number rises). A bound Output carries its Frame's timetable
     (`frame_timetable` over `power_policy_in` and `house_time_in`), an unbound one
     `unbound_timetable`; each carries its bound Frame's turn (frames.turn), 0 unbound, so a turn
-    raises `change` like a power edit; an Output with no Display seen gets `default_picture()` and no test
+    raises `change` like a power edit, and its binding (`OutputBinding` of frames.id, generation and
+    configuration_revision; None unbound), so a bind, unbind, rebind or Position Save raises it too; an Output with no Display seen gets `default_picture()` and no test
     pattern, one seen carries its live session's test pattern (`picture.session_test_pattern`). Its
     Frame region document (issue #124) carries `model.frame_region` of the bound Frame's Position,
     its screen (`frame_screen_px`) and its turn, null unbound or with no screen known, raising
@@ -988,7 +990,8 @@ def output_documents(conn: Any, device_id: str, now: float, *, trials: TrialProj
     house = house_time_in(conn)
     policy = power_policy_in(conn, now)
     rows = conn.execute(
-        "SELECT seen.output_id, f.id AS frame_id, d.id AS d_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
+        "SELECT seen.output_id, f.id AS frame_id, f.generation AS frame_generation, "
+        "f.configuration_revision AS frame_revision, d.id AS d_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
         f"{PICTURE_COLUMNS}, d.hardware_restore, {_SESSION_COLUMNS}, seen.document_change, seen.document_digest, "
         "seen.region_change, seen.region_digest, seen.picture_change, f.calibration, "
         "seen.trial_change, seen.trial_digest, seen.trial_document, "
@@ -1006,8 +1009,10 @@ def output_documents(conn: Any, device_id: str, now: float, *, trials: TrialProj
             continue
         timetable = (unbound_timetable(house, now) if row["frame_id"] is None
                      else frame_timetable(row["frame_id"], policy, house, now))
+        binding = (None if row["frame_id"] is None
+                   else OutputBinding(row["frame_id"], row["frame_generation"], row["frame_revision"]))
         projected = project_output(output_id, timetable=timetable, test=_power_test(row),
-                                   settings=_settings(row), turn=row["turn"], now=now)
+                                   settings=_settings(row), turn=row["turn"], binding=binding, now=now)
         digest = projected.digest()
         change = (row["document_change"] or 0) + (row["document_digest"] != digest)
         document = projected.at_change(change)

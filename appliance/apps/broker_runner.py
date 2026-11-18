@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 from appliance.apps.broker import AppEffectBroker, ColdStart, ForeignAppUnit
 from appliance.apps.descriptors import DESCRIPTOR_SAMPLE_MS, descriptor_use
+from appliance.apps.display_runs import DisplayRuns
 from appliance.apps.import_worker import RootImportWorker
 from appliance.apps.lifecycle_storage import FileEffectJournal, primitive, running_from
 from appliance.apps.online_runner import OnlineRunner
@@ -88,14 +89,16 @@ class BrokerLoop:
     """One main-loop turn. Every blocking call (systemctl, HTTP) lives here, never in the
     probe thread; the loop publishes the current app run to the probe thread each turn. Every
     known turn also reports the run's start and exit and samples its open files
-    (`appliance.kernel.app_facts`), Central session or not. Nothing here kills or restarts the
-    app (issue #125)."""
+    (`appliance.kernel.app_facts`), and tells Display the current run (`display`, a
+    `DisplayRuns`: sent only when it changed or Display's controller is new), Central session or
+    not. Nothing here kills or restarts the app (issue #125)."""
 
     def __init__(self, *, broker, online, store, session, driver, links, probes: ProbeThread,
-                 feeds: FeedListener, clock: Callable[[], int] = boottime_ms,
+                 feeds: FeedListener, display: DisplayRuns, clock: Callable[[], int] = boottime_ms,
                  proc: Path = Path("/proc")):
         self.broker, self.online, self.store, self.session = broker, online, store, session
         self.driver, self.links, self.probes, self.feeds = driver, links, probes, feeds
+        self.display = display
         self.clock, self.proc = clock, proc
         self.last_online_poll = 0.0
         self.last_run: AppRunKey | None = None  # the run the last known turn saw
@@ -121,6 +124,7 @@ class BrokerLoop:
         run = None if current is None else AppRunKey.of(current)
         if known:
             self._report_run(run)
+            self.display.tell(run)
             self.probes.publish_run(run)
             # The owed relink is restated every known turn, grant or not (delivery needs one);
             # the boot store keeps it across a broker restart.
@@ -276,7 +280,7 @@ def main() -> None:
                               probes=probes, feed=feed)
     feeds = feed_listener(feed)
     loop = BrokerLoop(broker=broker, online=online, store=store, session=session, driver=driver,
-                      links=links, probes=probes, feeds=feeds)
+                      links=links, probes=probes, feeds=feeds, display=DisplayRuns())
     try:
         probes.start()
         if broker.journal.current() is None:

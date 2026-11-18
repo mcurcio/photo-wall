@@ -296,9 +296,22 @@ controller. The credential is a JSON object with an optional absolute `runtime`
 path; default `/run/photo-wall-display`. Base unit names are
 `photo-wall-display.service` and `photo-wall-node-player.service`.
 
-The root broker ingress is `/run/photo-wall-display/ingress.sock`. Each connection
-carries one bounded JSON packet; replies carry `accepted`. Current operations are:
+The root broker ingress is `/run/photo-wall-display/ingress.sock`
+(`display_paths.INGRESS_SOCKET`). The controller binds it `0660`, group `pw-display` (its own),
+so the app broker, root without `CAP_DAC_OVERRIDE`, connects through
+`SupplementaryGroups=pw-display`; the directory stays `0700` and any peer whose `SO_PEERCRED` uid
+is not 0 gets no answer. Each connection carries one bounded JSON packet with its sender's
+credentials; replies carry `accepted`. Current operations are:
 
+- `app_run` (decision 0034, S4b part 4): the app broker's current Player run, its `RunDocument`
+  (`invocation_id`, `pid`, `start_ticks`, `app_epoch`), or `null` when none is current
+  (`appliance/kernel/app_facts.py` `AppRunOp`). The broker's `DisplayRuns`
+  ([`appliance/apps/display_runs.py`](../appliance/apps/display_runs.py)) sends it on a known
+  turn when the run changed or the socket is a new one (a new controller holds no run);
+  otherwise its turn costs a `stat`. The controller holds it in its `Handoffs`
+  ([`appliance/display_host/handoff.py`](../appliance/display_host/handoff.py)) beside each
+  Output's Frame binding from its Output document (`OutputBinding`), the inputs of the Pi's own
+  handoff; answers `{}`.
 - `outputs`: observed domain state and current OutputKeys.
 - `candidate`: exact `surface` identity, Player `uid`, and `starting_new: true`;
   returns a fresh `grant_id`. The caller must already own stop/start/configuration

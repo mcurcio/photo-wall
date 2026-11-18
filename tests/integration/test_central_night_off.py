@@ -114,7 +114,8 @@ def test_the_pi_keeps_night_off_while_central_is_away(database, tmp_path):
     async def run(client: TestClient) -> None:
         session.start()
         assert await asyncio.to_thread(session.wait_attached, 15)
-        session.desired.on_change(document_feed(power, NotUnderTest(), NotUnderTest(), NotUnderTest(), NotUnderTest()))
+        session.desired.on_change(document_feed(power, NotUnderTest(), NotUnderTest(), NotUnderTest(), NotUnderTest(),
+                                                    NotUnderTest()))
         power.start()
         power.output(OUTPUT, connected=True, identity=None, modes=())
 

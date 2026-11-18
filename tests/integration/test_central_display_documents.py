@@ -12,7 +12,9 @@ reconcile runs between the report and the document (E-1B-C3-3). (4) Turning the 
 (`Registry.turn_frame`, render redesign S2) puts its Output's document with the turn and the next
 `change` on the Node within 3 s, carried by the command's wake, with no reconcile between. (5)
 Unbinding the Frame brings that Output's document back to turn 0 within 3 s, likewise (the unbind's
-wake). Mutation probes: drop the judge's wake (step 3), or the `notify_nodes_in` call in
+wake). Each document names the Frame bound to its Output (decision 0034, S4b part 4, E1:
+`OutputBinding`, None unbound), and its `change` rises on the bind, the turn (a new generation) and
+the unbind, never on a report. Mutation probes: drop the judge's wake (step 3), or the `notify_nodes_in` call in
 `turn_frame` (step 4): the document then waits for a reconcile, or the 3 s pass.
 """
 from __future__ import annotations
@@ -45,6 +47,7 @@ from contracts.node_output import (
     SCHEMA_MAJOR,
     DisplayIdentity,
     DisplayMode,
+    OutputBinding,
     OutputReport,
     Power,
     decode_output_document,
@@ -126,6 +129,9 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
             assert (document.change, document.power.now, document.power.test, document.method) == (
                 1, Power.ON, None, BEST_DETECTED)
             assert display.desired.get(output_document_key("HDMI-A-2")) is None
+            [frame] = rows("SELECT generation, configuration_revision FROM frames WHERE id='kitchen'")
+            bound = OutputBinding("kitchen", frame["generation"], frame["configuration_revision"])
+            assert document.binding == bound                     # the bound Frame, as the Registry holds it
 
             # (2) The Node's report is recorded and judged: the Display on the bound Frame.
             display.state.put(output_report_key("HDMI-A-1"), _report("HDMI-A-1"))
@@ -156,7 +162,8 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
             # (4) A turn reaches the Node through turn_frame's wake, not a reconcile.
             await asyncio.wait_for(wakes.after(_LISTEN_PROBE, connects), SECONDS)   # LISTEN is on
             before = await held("HDMI-A-1")
-            assert (before.change, before.turn) == (1, 0)
+            assert (before.change, before.turn, before.binding) == (1, 0, bound)   # the report raised nothing
+            assert (await held("HDMI-A-2")).binding is None                           # no Frame on HDMI-A-2
             [kitchen] = [frame for frame in registry.inventory().frames if frame.id == "kitchen"]
             turned = registry.turn_frame("kitchen", 90, expected_generation=kitchen.generation, by="console")
             assert turned["changed"] is True
@@ -166,12 +173,15 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
                 return document if document and document.turn == turn else None
             document = await until(lambda: hanging(90), 3, "output-HDMI-A-1 turned 90 on the Node")
             assert document.change == 2
+            [frame] = rows("SELECT generation, configuration_revision FROM frames WHERE id='kitchen'")
+            assert frame["generation"] == turned["generation"] > bound.generation
+            assert document.binding == OutputBinding("kitchen", frame["generation"], frame["configuration_revision"])
             assert len(reconciles) == reconciled   # turn_frame's wake carried it, not a reconcile
 
             # (5) Unbinding the Frame leaves its Output unturned, through the unbind's wake.
             registry.unbind("kitchen", expected_generation=turned["generation"], by="console")
             document = await until(lambda: hanging(0), 3, "output-HDMI-A-1 back to turn 0 on the Node")
-            assert document.change == 3
+            assert (document.change, document.binding) == (3, None)
             assert len(reconciles) == reconciled   # the unbind's wake carried it, not a reconcile
             assert not running.done()
         finally:
@@ -262,6 +272,11 @@ def test_a_position_trial_crosses_the_display_line_and_its_presentation_lets_sav
                                         (player,)).fetchone()["connected"] is True
             await until(connected, SECONDS, "the Output's report judged connected")
 
+            async def output_document():
+                found = display.desired.get(output_document_key("HDMI-A-1"))
+                return None if found is None else decode_output_document(found.value)
+            before_save = await until(output_document, SECONDS, "output-HDMI-A-1 on the Node")
+
             begun = await asyncio.to_thread(client.post, path, headers=headers)
             assert begun.status_code == 200, begun.text
 
@@ -284,6 +299,19 @@ def test_a_position_trial_crosses_the_display_line_and_its_presentation_lets_sav
                                             json={"operation": "save", "expected_sequence": 1})
             assert saved.status_code == 200, saved.text
             assert saved.json()["state"] == "saved"
+
+            # The Save raised the Frame's configuration revision: the Output document names it, at
+            # the next change (decision 0034, S4b part 4, E1).
+            with database.transaction() as conn:
+                frame = conn.execute("SELECT generation, configuration_revision FROM frames "
+                                     "WHERE id='kitchen'").fetchone()
+            revised = OutputBinding("kitchen", frame["generation"], frame["configuration_revision"])
+
+            async def revised_on_the_node():
+                document = await output_document()
+                return document if document is not None and document.binding == revised else None
+            document = await until(revised_on_the_node, SECONDS, "output-HDMI-A-1 at the saved revision")
+            assert document.change == before_save.change + 1
         finally:
             stop.set()
             listening.cancel()

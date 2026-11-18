@@ -28,6 +28,7 @@ from central.registry import FrameTurnChange, RegistryError
 from central.tuning_history.bounds import HistoryPage
 from contracts.node_output import (
     Darkness,
+    OutputBinding,
     OutputPower,
     Power,
     decode_output_document,
@@ -56,10 +57,21 @@ def test_a_turn_change_takes_each_quarter_turn():
 
 def test_the_documents_digest_covers_the_turn():
     def projected(turn):
-        return ProjectedOutput("HDMI-A-1", POWER, DEFAULT_SETTINGS, turn)
+        return ProjectedOutput("HDMI-A-1", POWER, DEFAULT_SETTINGS, turn, None)
     assert projected(0).digest() != projected(90).digest()
     assert projected(90).digest() == projected(90).digest()
     assert projected(90).at_change(4).turn == 90
+
+
+def test_the_documents_digest_covers_the_binding():
+    """Decision 0034, S4b part 4 (E1): a bind, an unbind, a rebind, a new generation and a new
+    configuration revision each move the digest, so the projector raises `change` for each."""
+    def projected(binding):
+        return ProjectedOutput("HDMI-A-1", POWER, DEFAULT_SETTINGS, 0, binding)
+    bindings = (None, OutputBinding("kitchen", 1, 1), OutputBinding("hall", 1, 1),
+                OutputBinding("kitchen", 2, 1), OutputBinding("kitchen", 1, 2))
+    assert len({projected(binding).digest() for binding in bindings}) == len(bindings)
+    assert projected(OutputBinding("kitchen", 2, 3)).at_change(5).binding == OutputBinding("kitchen", 2, 3)
 
 
 # Through the Registry, the route and the document source.

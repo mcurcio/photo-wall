@@ -1,5 +1,6 @@
 """The broker's main loop reports each app run's start and exit, and samples its open files,
-for the health judge (1b P1b; `appliance.kernel.app_facts`), Central session or not."""
+for the health judge (1b P1b; `appliance.kernel.app_facts`), and tells Display the current run
+(decision 0034, S4b part 4), Central session or not."""
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -34,6 +35,7 @@ def broker_loop(tmp_path, monkeypatch, *, granted: bool):
     state = {"running": None, "ms": 0}
     session = Session(producer, granted=granted)
     feed = Feed(512)
+    told: list[AppRunKey | None] = []
     probes = SimpleNamespace(check=lambda: None, publish_run=lambda run: None,
                              owe_relink=lambda run: None, feed=feed)
     online = SimpleNamespace(broker=SimpleNamespace(record=None, service=lambda: None),
@@ -42,7 +44,9 @@ def broker_loop(tmp_path, monkeypatch, *, granted: bool):
                       session=session, driver=SimpleNamespace(current=lambda: state["running"]),
                       links=SimpleNamespace(serve_one=lambda: None, remember_grant=lambda: None),
                       probes=probes, feeds=SimpleNamespace(serve=lambda: None),
+                      display=SimpleNamespace(tell=lambda run: told.append(run) or True),
                       clock=lambda: state["ms"], proc=tmp_path / f"proc-{granted}")
+    loop.told = told
     return loop, feed, state, store
 
 
@@ -68,6 +72,20 @@ def test_one_exit_and_one_start_per_run_change_with_or_without_a_grant(tmp_path,
         three = AppRunKey.of(state["running"]).document()
         assert facts(feed, APP_STARTED, APP_EXITED)[-2:] == [
             (APP_EXITED, {"run": two}), (APP_STARTED, {"run": three})]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("granted", [True, False])
+def test_every_known_turn_hands_display_the_current_run(tmp_path, monkeypatch, granted):
+    """`DisplayRuns.tell` gets each known turn's run (it alone decides whether to send)."""
+    loop, _feed, state, store = broker_loop(tmp_path, monkeypatch, granted=granted)
+    try:
+        first = running_app(396, 1)
+        for running in (None, first, first, None):
+            state["running"] = running
+            loop.turn()
+        assert loop.told == [None, AppRunKey.of(first), AppRunKey.of(first), None]
     finally:
         store.close()
 

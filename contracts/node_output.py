@@ -7,8 +7,10 @@ Two documents ride the Node bus's `display` store line, one key per Output (HDMI
   `output_document_key(output_id)`): the port's power timetable (Central's decision now, the set
   times it changes at over the next days, and 1b's console test on top), plus the power method and the two input switches of the Display last seen on it, and the turn: how the screen
   hangs (contracts/display_turn.py; the bound Frame's turn, 0 for an unbound Output; render
-  redesign S2, schema major 9). Its `change` rises whenever the document but `change` differs:
-  power or turn. It explains itself, so any writer (Central today, a local writer later) can
+  redesign S2, schema major 9), and the Frame binding: which Frame the Registry binds to the port,
+  at which generation and configuration revision (`OutputBinding`, None unbound; decision 0034,
+  S4b), the Display Host's handoff input. Its `change` rises whenever the document but `change`
+  differs: power, turn or binding. It explains itself, so any writer (Central today, a local writer later) can
   produce it and the Pi needs nothing else.
 - The **Output report** (Pi -> Central, the display line's state bucket, key
   `output_report_key(output_id)`): whether a display is connected, its identity and modes as its
@@ -72,7 +74,8 @@ from contracts.wire_codec import (
 )
 
 SCHEMA_MAJOR: Final = 12                        # the display line's schema major (birth, envelope); 11 from the Frame region
-                                                # and the current mode (#124); 12 from the Position trial's keys (decision 0034, S4b)
+                                                # and the current mode (#124); 12 from the Position trial's keys and the
+                                                # Output document's binding (decision 0034, S4b)
 DISPLAY_MM_MAX: Final = 2550                    # an EDID base block states at most 255 cm a side
 
 # Every Output a Node can have: the Pi 5's two HDMI connectors, and the two virtual connectors the
@@ -221,11 +224,33 @@ def decode_set_time(text: str) -> int:
         raise ValueError("set_time") from error
 
 
+_FRAME_ID_LONGEST: Final = 96                   # a Frame id's longest token (the binding's, the region's)
+
+
+@dataclass(frozen=True)
+class OutputBinding:
+    """The Frame bound to the Output as Central's Registry holds it (frames.player_id/output_id):
+    its id, its generation (frames.generation: bind, unbind, a turn and a new screen size raise it)
+    and its configuration revision (frames.configuration_revision: a Position Save raises it). The
+    Display Host hands the Output to the Player for exactly this Frame (decision 0034, S4b)."""
+    frame_id: str
+    generation: int
+    configuration_revision: int
+
+    def __post_init__(self) -> None:
+        """ValueError("output_binding") unless frame_id is a node token of at most _FRAME_ID_LONGEST and
+        generation and configuration_revision are >= 1."""
+        require(_is_token(self.frame_id, _FRAME_ID_LONGEST) and whole(self.generation, 1)
+                and whole(self.configuration_revision, 1), "output_binding")
+
+
 @dataclass(frozen=True)
 class OutputDocument:
     """What is wanted on one HDMI port. `change` rises when the document's body (the power part:
-    power, method, switches; or the turn) differs; the report echoes the change it acted on. `power`
-    is the port's power timetable with the console test on top. `turn` is how the screen hangs."""
+    power, method, switches; the turn; or the binding) differs; the report echoes the change it
+    acted on. `power` is the port's power timetable with the console test on top. `turn` is how the
+    screen hangs. `binding` is the Frame bound to the port, None unbound: the field is always on
+    the wire (the strict decode requires it; no backwards compatibility, decision 0034 E2)."""
     output_id: str
     change: int
     power: OutputPower
@@ -233,16 +258,18 @@ class OutputDocument:
     switch_input_on_power_on: bool      # #117
     never_off_on_other_input: bool      # #118
     turn: DisplayTurn                   # how the screen hangs: the bound Frame's frames.turn, 0 unbound
+    binding: OutputBinding | None       # the bound Frame; None unbound
 
     def __post_init__(self) -> None:
         """ValueError("output_document") unless output_id is in OUTPUT_IDS, change >= 1, power is an
-        OutputPower, method is a PowerMethod or BEST_DETECTED, the two switches are bools, and
-        `is_turn(turn)`."""
+        OutputPower, method is a PowerMethod or BEST_DETECTED, the two switches are bools,
+        `is_turn(turn)`, and binding is None or an OutputBinding."""
         require(self.output_id in OUTPUT_IDS and whole(self.change, 1)
                  and isinstance(self.power, OutputPower)
                  and (isinstance(self.method, PowerMethod) or _is_best_detected(self.method))
                  and type(self.switch_input_on_power_on) is bool and type(self.never_off_on_other_input) is bool
-                 and is_turn(self.turn),
+                 and is_turn(self.turn)
+                 and (self.binding is None or isinstance(self.binding, OutputBinding)),
                  "output_document")
 
 
@@ -403,10 +430,11 @@ def decode_output_document(raw: bytes) -> OutputDocument:
     """The document `raw` encodes (contracts.strict_json rules: no duplicate keys, no NaN, no
     unknown field); ValueError("output_document") for anything else."""
     def build(value: dict[str, Any]) -> OutputDocument:
-        method = value["method"]
+        method, binding = value["method"], value["binding"]
         return OutputDocument(**{
             **value, "power": _output_power(value["power"]),
-            "method": BEST_DETECTED if _is_best_detected(method) else PowerMethod(method)})
+            "method": BEST_DETECTED if _is_best_detected(method) else PowerMethod(method),
+            "binding": None if binding is None else OutputBinding(**fields_of(OutputBinding, binding))})
     return decode(raw, OUTPUT_DOCUMENT_BYTES, OutputDocument, build, "output_document")
 
 
@@ -459,7 +487,6 @@ def decode_power_attempt(raw: bytes) -> PowerAttempt:
 
 REGION_DOCUMENT_BYTES: Final = 1024             # a region document's largest encoding
 _REGION_PREFIX: Final = "region-"               # desired bucket key: region-<output_id>
-_FRAME_ID_LONGEST: Final = 96                   # a Frame id's longest token
 
 
 @dataclass(frozen=True)
@@ -652,7 +679,7 @@ __all__ = [
     "BEST_DETECTED", "DISPLAY_MM_MAX", "MAX_DISPLAY_MODES", "MAX_REQUEST_SECONDS", "METHOD_PRECEDENCE",
     "OUTPUT_DOCUMENT_BYTES", "OUTPUT_IDS", "OUTPUT_REPORT_BYTES", "POWER_ATTEMPT_BYTES",
     "MAX_POWER_CHANGES", "SCHEMA_MAJOR", "SET_TIME_PATTERN", "Darkness", "DisplayIdentity", "DisplayMode",
-    "InForce", "InForceKind", "MethodChoice", "OutputDocument", "OutputPower", "OutputReport",
+    "InForce", "InForceKind", "MethodChoice", "OutputBinding", "OutputDocument", "OutputPower", "OutputReport",
     "Power", "PowerAttempt", "PowerChange", "PowerMethod", "PowerRequest", "PowerResult",
     "decode_output_document", "decode_output_report", "decode_power_attempt", "decode_set_time",
     "encode_output_document", "encode_output_report", "encode_power_attempt", "encode_set_time",

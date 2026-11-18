@@ -12,6 +12,11 @@ from typing import Final
 DISPLAY_UNIT = "photo-wall-display.service"
 # Weston's RuntimeDirectory (pw-display, 0700): control.sock and ingress.sock, gone with Weston.
 RUNTIME = Path("/run/photo-wall-display")
+# The controller's root-only ingress in Weston's RuntimeDirectory: bound 0660, group pw-display (the
+# controller's own), so the app broker (root, SupplementaryGroups=pw-display, no CAP_DAC_OVERRIDE)
+# can connect; the directory stays 0700 and the controller refuses any peer whose uid is not 0. The
+# broker tells its current run here (`appliance.kernel.app_facts.APP_RUN_OP`).
+INGRESS_SOCKET: Final = RUNTIME / "ingress.sock"
 # The public Wayland socket's own directory (tmpfiles.d: pw-display:pw-display 0750). It outlives
 # every Weston incarnation, so an app in group pw-display binds the directory, never the socket file.
 WAYLAND_DIRECTORY = Path("/run/photo-wall-display-wayland")

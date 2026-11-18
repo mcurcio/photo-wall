@@ -22,6 +22,7 @@ from appliance.apps.device_grants import DeviceGrant, player_device_grants
 from appliance.apps.environment import mounted_root
 from appliance.apps.lifecycle_storage import primitive, running_from
 from appliance.apps.stop_linux import STOP_TIMEOUT_SECONDS, StopObserver
+from appliance.kernel.app_facts import PLAYER_UID
 from appliance.kernel.boot_store import BootStore
 from appliance.kernel.capacity import ROOT_IMAGES, line
 from appliance.kernel.clock import boottime_ms
@@ -117,13 +118,13 @@ def app_unit_properties(root: Path, devices: Sequence[DeviceGrant]) -> tuple[str
         grants += ("BindReadOnlyPaths=" + " ".join(device.path for device in devices),)
     return (
         f"StopPropagatedFrom={DISPLAY_UNIT}", f"After={DISPLAY_UNIT}",
-        f"RootDirectory={root}", "User=10004", "Group=10004", f"SupplementaryGroups={groups}", "Slice=photowallapp.slice",
+        f"RootDirectory={root}", f"User={PLAYER_UID}", f"Group={PLAYER_UID}", f"SupplementaryGroups={groups}", "Slice=photowallapp.slice",
         "ProtectSystem=strict", "ProtectHome=yes", "PrivateDevices=yes", "PrivateTmp=yes",
         "NoNewPrivileges=yes", "CapabilityBoundingSet=", "RestrictSUIDSGID=yes",
         "ProtectKernelTunables=yes", "ProtectKernelModules=yes", "ProtectControlGroups=yes",
         "RestrictNamespaces=yes", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
         f"MemoryMax={line('app').cap_bytes}", "MemorySwapMax=0", "OOMScoreAdjust=500", "TasksMax=128", "CPUQuota=200%",
-        "TemporaryFileSystem=/run:rw,nosuid,nodev,size=64M /run/photo-wall-wayland:rw,nosuid,nodev,noexec,size=1M,uid=10004,gid=10004,mode=0700 /tmp:rw,nosuid,nodev,size=128M",
+        f"TemporaryFileSystem=/run:rw,nosuid,nodev,size=64M /run/photo-wall-wayland:rw,nosuid,nodev,noexec,size=1M,uid={PLAYER_UID},gid={PLAYER_UID},mode=0700 /tmp:rw,nosuid,nodev,size=128M",
         f"BindReadOnlyPaths=/run/photo-wall-app-proof:/run/photo-wall-client {WAYLAND_DIRECTORY} /etc/photo-wall/public.json:/etc/photo-wall/public.json /etc/resolv.conf:/etc/resolv.conf",
         *grants,
         "RuntimeMaxSec=infinity", "Restart=no", "KillMode=control-group",

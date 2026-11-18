@@ -23,7 +23,10 @@ One home each for:
   (central/power/timetable.py: Central's decision now, the set times it changes at, `until`, the
   darkness), with the Frame's live console test on top; method and switches come from the Display
   last seen on the Output (defaults when none); its turn is the bound Frame's (frames.turn), 0 for
-  an unbound Output, so `change` rises for a turn as for power. The console's one test is Test: turn off. It
+  an unbound Output, so `change` rises for a turn as for power; its binding is the bound Frame's id,
+  generation and configuration revision (contracts/node_output.py `OutputBinding`, None unbound;
+  decision 0034, S4b), so `change` rises on a bind, an unbind, a rebind, a new generation and a
+  Position Save, and the Pi hands the Output to its Player from the document alone. The console's one test is Test: turn off. It
   lasts TEST_SECONDS, "or less if you press Turn on. When the test ends, the request underneath
   takes over" (owner q1, 2026-10-10): Turn on ends the live test, so the timetable is underneath
   again. The Pi counts a test on its own clock, and Central drops it from the document at its own
@@ -54,6 +57,7 @@ from contracts.node_output import (
     DisplayMode,
     FrameRegion,
     InForceKind,
+    OutputBinding,
     OutputDocument,
     OutputPower,
     OutputRect,
@@ -221,13 +225,14 @@ class PowerTest:
 
 @dataclass(frozen=True)
 class ProjectedOutput:
-    """One Output's document, all but its change number: the power part and the turn (picture rides
+    """One Output's document, all but its change number: the power part, the turn and the binding (picture rides
     its own key with its own change number, central/displays/picture.py; decision 0022), so a
     picture edit never raises `change` and never re-runs power."""
     output_id: str
     power: OutputPower
     settings: DisplaySettings
     turn: DisplayTurn
+    binding: OutputBinding | None
 
     def digest(self) -> str:
         """sha256 hex of the canonical document but its change number; the projector raises `change`
@@ -241,7 +246,7 @@ class ProjectedOutput:
         return OutputDocument(self.output_id, change, self.power,
                               BEST_DETECTED if settings.power_method is None else settings.power_method,
                               settings.switch_input_on_power_on, settings.never_off_on_other_input,
-                              self.turn)
+                              self.turn, self.binding)
 
 
 def _sha256(value: object) -> str:
@@ -260,11 +265,13 @@ def output_power(timetable: Timetable, test: PowerTest | None, now: float) -> Ou
 
 
 def project_output(output_id: str, *, timetable: Timetable, test: PowerTest | None,
-                   settings: DisplaySettings | None, turn: DisplayTurn, now: float) -> ProjectedOutput:
+                   settings: DisplaySettings | None, turn: DisplayTurn, binding: OutputBinding | None,
+                   now: float) -> ProjectedOutput:
     """The Output's document body at Central's `now`: its power part (`output_power`); `settings`
-    or DEFAULT_SETTINGS; `turn`, the bound Frame's (0 unbound)."""
+    or DEFAULT_SETTINGS; `turn`, the bound Frame's (0 unbound); `binding`, the bound Frame's (None
+    unbound)."""
     return ProjectedOutput(output_id, output_power(timetable, test, now),
-                           DEFAULT_SETTINGS if settings is None else settings, turn)
+                           DEFAULT_SETTINGS if settings is None else settings, turn, binding)
 
 
 def power_status(*, bound: bool, test: PowerTest | None, document: OutputDocument | None,

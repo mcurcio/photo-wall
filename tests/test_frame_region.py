@@ -5,7 +5,9 @@ design revision 2; decision 0030: the Pi never computes a Frame's geometry).
 Weston runs, from the Output report's `current_mode`, else the seen Display's preferred mode) and its
 turn into whole pixels on the screen as it hangs; the worker's document source sends it on its own
 key, `region-<output>`, beside the Output and picture documents, with its own change number
-(`region_digest`), so a saved Position or a new mode never raises the Output document's `change`.
+(`region_digest`), so a new mode never raises the Output document's `change`, and a saved Position
+raises it only through its binding's configuration revision (decision 0034, S4b part 4, E1), never
+through the region.
 Every report travels the real path (a `PgLinkStore` commit judged by the `OutputReportJudge`); the
 Position is saved through the one Save CAS; documents come from the worker's `DisplayDocuments`.
 """
@@ -88,8 +90,9 @@ def _kitchen(registry) -> str:
     return pi
 
 
-def test_a_saved_position_moves_the_region_and_not_the_output_document(registry):
-    """(a) Mutation probe: add the region's digest to the Output document's -> its change rises."""
+def test_a_saved_position_moves_the_region_and_the_output_documents_binding(registry):
+    """(a) The region moves on its own key; the Output document rises once, for its binding's new
+    configuration revision (S4b E1), its turn and power unchanged."""
     _kitchen(registry)
     first, change = _region(registry), _output_change(registry)
     assert first == FrameRegionDocument("HDMI-A-1", 1, FrameRegion("kitchen", (1920, 1080),
@@ -99,7 +102,12 @@ def test_a_saved_position_moves_the_region_and_not_the_output_document(registry)
     save_position(registry, "kitchen", PORTRAIT_ON_WIDE)
     assert _region(registry) == FrameRegionDocument("HDMI-A-1", 2, FrameRegion(
         "kitchen", (1920, 1080), OutputRect(672, 28, 576, 1024)))
-    assert _output_change(registry) == change
+    assert _output_change(registry) == change + 1
+    document = decode_output_document(_documents(registry, "pi-a")[output_document_key("HDMI-A-1")])
+    with registry.db.transaction() as conn:
+        revision = conn.execute("SELECT configuration_revision FROM frames WHERE id='kitchen'").fetchone()[
+            "configuration_revision"]
+    assert (document.binding.frame_id, document.binding.configuration_revision) == ("kitchen", revision)
 
 
 def test_a_turn_turns_the_regions_screen_and_its_rectangle(registry):
@@ -112,8 +120,9 @@ def test_a_turn_turns_the_regions_screen_and_its_rectangle(registry):
 
 
 def test_a_new_mode_gives_the_region_its_pixels_and_not_the_output_document(registry):
-    """(c) Weston runs 3840 x 2160 now: the saved box lands at twice the pixels. Mutation probe:
-    `screen_px` skips `current_mode` -> the region stays at no screen (no Display seen)."""
+    """(c) Weston runs 3840 x 2160 now: the saved box lands at twice the pixels. Mutation probes:
+    `screen_px` skips `current_mode` -> the region stays at no screen (no Display seen); add the
+    region's digest to the Output document's -> its change rises."""
     _kitchen(registry)
     save_position(registry, "kitchen", PORTRAIT_ON_WIDE)
     before, change = _region(registry), _output_change(registry)
