@@ -15,10 +15,10 @@ import pytest
 from console_tasks import connect, go, open_player
 from operator_harness import operator_server, tile_health
 from playwright.sync_api import expect
+from support.output_report import report_modes
 from support.player_state import heard_in
-from test_fleet_attempts import SERIAL
+from test_fleet_attempts import DEVICE_ID, SERIAL
 from test_node_runtime_reconciliation import rig
-from test_operator_output_interruptions import _lose_first_output
 from test_registry import frame
 
 from central.registry import FramePlacement
@@ -38,12 +38,12 @@ SHORT = "Output interrupted · the Run continues"
 def _seed(registry):
     """rig's two bound Frames, placed on the plan, with Output 0's loss recorded, and the Player
     heard (its session socket: liveness, central/infra/player_contact_store.py)."""
-    _, player, _, sessions, claims, grants, surfaces, reconciler, _ = rig(registry)
+    _, player, _, _, _, _, surfaces, _, _ = rig(registry)
     with registry.db.transaction() as conn:
         heard_in(conn, player["player_id"], player["authority_epoch"], registry.clock.utc())
     for index, frame_id in enumerate((LOST, KEPT)):
         registry.place_frame(frame_id, FramePlacement(x_mm=100 + 500 * index, y_mm=100), by="console")
-    _lose_first_output(sessions, claims, grants, surfaces, reconciler)
+    report_modes(registry, DEVICE_ID, (surfaces[0].output.output_id,), None)  # the display line
     return player["player_id"], surfaces[0]
 
 
