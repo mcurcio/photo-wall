@@ -13,6 +13,13 @@ A key's subject is nodeapi.buffers `state_prefix(line) + key`, in the line's sta
 - `reboot` (the host's one bus method, `HOST_REBOOT_METHOD`; decision 0034, S4a): `HostReboot`
   asks the host to reboot and names why; the host answers `HostRebootAnswer` before it schedules
   the reboot. Central asks it over the Pi's fleet-pipe link (central/fleet/pi_reboot.py).
+- `facts` (the host line, HostCore; decision 0034, S4a): contracts/node_host_facts.py
+  `HostFactsState`, the host's short text facts and its boot report, put when they change.
+- `metrics` (the host line, HostCore): contracts/node_observation.py `HostMetricsState`, the host's
+  metrics, put when their categorical state changes (`metrics_state_key`: a band of
+  `HOST_METRIC_BANDS`, a count or flag, which metrics, the fault), never more often than every
+  HOST_METRICS_EVERY seconds; a gauge's move inside its band is not put. Central's console reads
+  both from what it records (central/fleet/node_observations.py `fleet_hosts_in`).
 - The Player's own line (0017 E7/E8, pulled into #106; the Player declares it):
   `frames`, `FrameReports`: per Frame it draws, the binding generation it draws, its Output,
   whether it is showing and the light on the Frame at its centre as last drawn;
@@ -32,6 +39,8 @@ from typing import Annotated, Final, Literal
 from pydantic import Field
 
 from contracts.identifiers import Instant, TargetIdentifier
+from contracts.node_host_facts import MAX_HOST_FACTS_BYTES
+from contracts.node_observation import MAX_OBSERVATION_BYTES
 from contracts.room_light import Lux
 from contracts.wire_codec import encode
 from contracts.wire_model import Model, decoded
@@ -43,6 +52,11 @@ HOST_BASE_KEY: Final = "base"              # the host line's state key of HostBa
 HOST_BASE_BYTES: Final = 256
 HOST_REBOOT_METHOD: Final = "reboot"       # the host's bus method: HostReboot in, HostRebootAnswer out
 HOST_REBOOT_BYTES: Final = 512             # the largest ask or answer
+HOST_FACTS_KEY: Final = "facts"            # the host line's state key of HostFactsState
+HOST_FACTS_BYTES: Final = MAX_HOST_FACTS_BYTES   # its largest value (contracts/node_host_facts.py)
+HOST_METRICS_KEY: Final = "metrics"        # the host line's state key of HostMetricsState
+HOST_METRICS_BYTES: Final = MAX_OBSERVATION_BYTES   # its largest value (contracts/node_observation.py)
+HOST_METRICS_EVERY: Final = 15             # seconds: the host puts its metrics at most this often
 PLAYER_LINE: Final = "player"              # the Player's line (contracts.node_link.STORE_LINES)
 PLAYER_COMPONENT: Final = "player"         # the component writing it, and its birth's name
 PLAYER_SCHEMA_MAJOR: Final = 1             # the major of the Player line's keys below (its birth names it)
@@ -154,7 +168,8 @@ def decode_frame_reports(raw: bytes) -> FrameReports:
 
 __all__ = [
     "BIRTH_BYTES", "BIRTH_KEY", "FRAMES_KEY", "FRAMES_PER_PLAYER_MAX", "FRAME_REPORTS_BYTES", "HOST_BASE_BYTES",
-    "HOST_BASE_KEY", "HOST_LINE", "HOST_REBOOT_BYTES", "HOST_REBOOT_METHOD", "OUTPUT_ID_PATTERN", "PLAYER_COMPONENT", "PLAYER_LINE", "PLAYER_SCHEMA_MAJOR",
+    "HOST_BASE_KEY", "HOST_FACTS_BYTES", "HOST_FACTS_KEY", "HOST_LINE", "HOST_METRICS_BYTES", "HOST_METRICS_EVERY",
+    "HOST_METRICS_KEY", "HOST_REBOOT_BYTES", "HOST_REBOOT_METHOD", "OUTPUT_ID_PATTERN", "PLAYER_COMPONENT", "PLAYER_LINE", "PLAYER_SCHEMA_MAJOR",
     "ROOM_LIGHTS_DRAWN_KEY", "Birth", "FrameReport", "FrameReports", "HostBase", "HostReboot", "HostRebootAnswer",
     "OutputId", "decode_birth", "decode_frame_reports", "decode_host_base", "decode_host_reboot",
     "decode_host_reboot_answer", "encode_birth", "encode_frame_reports", "encode_host_base", "encode_host_reboot",

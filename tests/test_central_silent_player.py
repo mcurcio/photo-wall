@@ -23,6 +23,7 @@ from support.position import PORTRAIT_ON_WIDE, save_position
 from test_coordination import report
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_node_boot import claim_for, cold_setup
+from test_node_fleet_hosts import on_line
 from test_registry import ADMIN, enroll
 
 from central.app import create_app
@@ -35,8 +36,10 @@ from contracts.liveness import SILENT_AFTER_SECONDS
 from contracts.node_boot import NodeBootRequestV2
 from contracts.node_observation import (
     HOST_OBSERVATION_INTERVAL_SECONDS,
+    HostMetricsState,
     HostMetricV2,
     HostObservationV2,
+    encode_host_metrics_state,
     encode_host_observation,
 )
 from contracts.node_protocol import (
@@ -46,6 +49,7 @@ from contracts.node_protocol import (
     NodeSnapshotV2,
     encode_node_message,
 )
+from contracts.node_state import HOST_METRICS_KEY
 
 NODE = NodeControlConfig("node-test")
 OPERATOR = {"Authorization": "Bearer " + ADMIN}
@@ -59,8 +63,8 @@ class Incident:
     `last_report_at` (T) is when Central last heard from the Player app (its session socket's close
     after its readiness report; liveness is its own domain, central/infra/player_contact_store.py); the App Effect
     Broker reported the app running before it and exited after it, with no app link admitted on
-    the boot (so Central can link the exit to no Output); Host Management reports every
-    interval up to `read_at` = T + SILENT_AFTER_SECONDS + 1."""
+    the boot (so Central can link the exit to no Output); Host Management puts its metrics on
+    its host line every interval up to `read_at` = T + SILENT_AFTER_SECONDS + 1."""
 
     def __init__(self, registry, *, bound=True):
         self.registry = registry
@@ -95,7 +99,7 @@ class Incident:
         self.exited_at = registry.clock.utc()
         self.read_at = self.last_report_at + SILENT_AFTER_SECONDS + 1
         # Samples one interval apart ending on read_at, so the last is stored (Central coalesces
-        # a sample within one interval of its stored one) and Host Management reads 0 s old.
+        # a sample within one interval of its stored one) and Host Management reads current.
         steps = int((self.read_at - registry.clock.utc()) // HOST_OBSERVATION_INTERVAL_SECONDS)
         for k in range(steps, -1, -1):
             registry.clock.advance(self.read_at - k * HOST_OBSERVATION_INTERVAL_SECONDS
@@ -104,13 +108,17 @@ class Incident:
         NodeRuntimeReconciler(self.sessions, self.coordinator).advance()
 
     def host_sample(self):
-        """One Host Management sample on its own boot clock (the test clock's monotonic)."""
+        """One Host Management sample on its own boot clock (the test clock's monotonic): its post on
+        the old path (the device read's sessions, until S4c) and its put on its host line (the fleet
+        host read, decision 0034)."""
         claim, grant = self.claims["host_core"]
         self.host_sequence += 1
+        metrics = (HostMetricV2("uptime", self.host_sequence, "seconds"),)
         sample = HostObservationV2(grant.producer, self.host_sequence,
-                                   int(self.registry.clock.monotonic() * 1000),
-                                   (HostMetricV2("uptime", self.host_sequence, "seconds"),))
+                                   int(self.registry.clock.monotonic() * 1000), metrics)
         self.observations.record(grant.session_id, claim.credential, encode_host_observation(sample))
+        on_line(self.registry, SERIAL, HOST_METRICS_KEY, encode_host_metrics_state(HostMetricsState(metrics)),
+                self.host_sequence)
 
     def _broker(self, kind, sequence, state):
         """The App Effect Broker's process fact for the Player app, as a snapshot or an event."""

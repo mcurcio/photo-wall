@@ -7,9 +7,9 @@ import { usePolledRead } from "./polledRead.js";
 /**
  * The fleet host read (console DDD §63 G12): ONE read of `GET /v1/operator/node/hosts`, every
  * 15 s while the tab is visible, mounted once in the Shell and skipped until sign-in is
- * confirmed (Shell.jsx). It serves each active box's current-boot Host
- * Management sample, the previous boot's receipt, Central's read time and Central's
- * numbers-only thresholds. hostHealth.js
+ * confirmed (Shell.jsx). It serves each active box's Host Management
+ * metrics and facts as its host line states them (decision 0034), its presence on Central's hub,
+ * Central's read time and Central's numbers-only thresholds. hostHealth.js
  * `classifyHost` is the one judge of it, and hostHealth.js `hostRow` finds one box in it
  * (a pure lookup kept out of this module, which reaches the write primitive, so the
  * classifier and the attention list import no write module: G1).

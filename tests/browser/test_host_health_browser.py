@@ -46,8 +46,12 @@ def _players(registry, *, bound=True):
             (spare_request.device_id, player_name(registry, spare_identity["player_id"])))
 
 
-def _row(device_id, received_at, temperature):
-    return {"device_id": device_id, "previous_boot_received_at": None,
+def _row(device_id, received_at, temperature, *, off_hub=None):
+    # A host whose receipt is old (before 990) is off Central's reachable hub unless the case says
+    # otherwise: with an old receipt, silence (decision 0034). Else no link is served.
+    off_hub = received_at < 990 if off_hub is None else off_hub
+    link = {"linked": False, "changed_at": 800.0, "hub": "reachable"} if off_hub else None
+    return {"device_id": device_id, "bus_link": link,
             "host": {"received_at": received_at, "fault_code": None,
                      "metrics": [{"name": "soc_temperature", "value": temperature,
                                   "unit": "celsius", "source": "host_sampler"}]}}
@@ -145,7 +149,7 @@ def test_the_served_limit_composes_and_moves_the_silence_judgement(page, registr
         expect(_card(page, bound_name)).to_contain_text("· 50 °C at last report")
         expect(_card(page, bound_name)).to_contain_text(
             "Host Management: Host Management silent · last reported 2 min ago "
-            "(Central's inference: no report for over 90 s, Central's limit)")
+            "(Central's inference: off Central's hub, no report for over 90 s, Central's limit)")
 
 
 # N1 (console DDD §62-§63): the firmware flags, CPU and storage lines on the Players card.
@@ -285,7 +289,7 @@ def test_spares_are_never_alarms_and_retired_boxes_sort_below_healthy_players(pa
     retired_name = player_name(registry, retired_identity["player_id"])
     registry.retire(retired_identity["player_id"], by="console")
     _stub(page, {"read_at": 1000.0, "thresholds": THRESHOLDS,
-                 "devices": [_row(bound, 999.0, 50), _row(spare, 100.0, 95)]})
+                 "devices": [_row(bound, 999.0, 50), _row(spare, 100.0, 95, off_hub=False)]})
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "hardware")
         expect(_card(page, retired_name)).to_contain_text("Not read: Player retired")

@@ -14,7 +14,7 @@ from uuid import UUID
 
 from central.content_catalog.boot_policy import newest_first
 from central.content_catalog.views import PlayerVersionView, ReleasesView, ReleaseView
-from central.fleet.node_observations import NodeObservations, host_facts_of
+from central.fleet.node_observations import host_facts_in
 from central.infra.node_releases import deployment_jobs, wanted_deployments
 from central.infra.player_versions import pi_versions_in
 from central.infra.transactions import PgTransaction
@@ -33,7 +33,7 @@ class NodeReleaseCatalog:
         """The Releases page under ONE read-only snapshot (no lock taken): one row per observed tag
         (newest release first, at most MAX_RELEASES) with its deployment's base and app, whether it is
         in the window and its readiness; every enrolled Pi's version (`pi_versions_in`) with the base
-        tag its host last reported (`running`, the console's host read); and `default`, the release a
+        tag its host line states (`running`, its `facts`); and `default`, the release a
         Pi with no version boots."""
         with self.sessions.db.read_snapshot() as conn:
             read_at = self.sessions.clock.utc()
@@ -55,7 +55,7 @@ class NodeReleaseCatalog:
             versions = pi_versions_in(conn, self.sessions.clock, self.readiness)
             players = {row["device_id"]: row["id"] for row in conn.execute(
                 "SELECT id, device_id FROM players WHERE retired_at IS NULL").fetchall()}
-            facts = host_facts_of(NodeObservations(self.sessions).fleet_hosts_in(conn, read_at))
+            facts = host_facts_in(conn)
         running = {device_id: each.get("base_tag") for device_id, each in facts.items()}
         return ReleasesView(
             read_at=read_at, releases=tuple(releases),

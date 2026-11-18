@@ -1,18 +1,24 @@
-"""Immutable host telemetry intake and operator read projection."""
+"""Host telemetry: the old path's intake (until S4c) and the operator's host read (G12), which reads
+the host's line (decision 0034, S4a)."""
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from typing import Any, Final
 from uuid import UUID
 
+from central.db import DatabaseTransactionClock
 from central.fleet.device_fence import standing_in
 from central.fleet.host_thresholds import thresholds_document
 from central.fleet.node_bus_presence import bus_links_in
 from central.fleet.node_commands import OUTSTANDING_REBOOT_SQL
 from central.fleet.node_display import display_outputs_in
 from central.fleet.node_sessions import NodeControlError, NodeSessions
+from central.infra.node_link_latest import latest_values_in
 from contracts.node_boot import parse_node_boot_offer
 from contracts.node_commands import parse_session_grant, producer_document
 from contracts.node_host_facts import (
+    decode_host_facts_state,
     encode_host_facts,
     fact_values_document,
     parse_host_facts,
@@ -20,11 +26,14 @@ from contracts.node_host_facts import (
 )
 from contracts.node_observation import (
     HOST_OBSERVATION_INTERVAL_SECONDS,
+    decode_host_metrics_state,
     encode_host_observation,
     parse_host_observation,
 )
 from contracts.node_preparation import encode_manager_preparation, parse_manager_preparation
 from contracts.node_protocol import RebootFact, parse_node_message
+from contracts.node_state import HOST_FACTS_KEY, HOST_LINE, HOST_METRICS_KEY
+from contracts.wire_codec import plain
 
 # A producer's newest host sample, by sequence through the primary key (never ORDER BY
 # received_at over the table): coalescing (its payload's boot clock) and G12 both read it.
@@ -45,40 +54,83 @@ def _preparation_key(sample) -> tuple:
     return sample.state, sample.operation_id, sample.fault
 
 
-# G12 (console DDD §63), one statement per read. Per active device in its current generation:
-# the current admission (at most one, node_current_boot) and the most recently superseded one,
-# each one's newest-admitted host_core producer, that producer's newest sample, the current
-# admission's newest-admitted app_manager producer and its newest preparation sample; the current
-# admission's node boot offer (its base tag) and
-# its host_core producer's facts row. Every sample read is producer-scoped on the primary key.
+# G12 (console DDD §63), one statement per read: every active device in its current generation, its
+# newest boot offer that carried an offer (Central's offer: its base tag), and the current
+# admission's newest-admitted app_manager producer's newest preparation sample (the App Manager's,
+# served until S4c removes it). The host's metrics and facts are its line's (`fleet_hosts_in`).
 _FLEET_HOSTS_SQL = (
-    "SELECT d.device_id,d.serial,ch.payload,ch.received_at,ph.received_at AS previous_received_at,"
-    "cm.payload AS preparation_payload,cm.received_at AS preparation_received_at,"
-    "cb.admission_id AS current_admission,co.offer_payload,"
-    "cf.payload AS facts_payload,cf.first_received_at AS facts_first_received_at FROM devices d "
+    "SELECT d.device_id,d.serial,co.offer_payload,"
+    "cm.payload AS preparation_payload,cm.received_at AS preparation_received_at FROM devices d "
+    "LEFT JOIN LATERAL (SELECT offer_payload FROM node_boot_offers WHERE device_id=d.device_id "
+    "AND device_generation=d.generation AND offer_payload IS NOT NULL "
+    "ORDER BY created_at DESC,offer_id DESC LIMIT 1) co ON true "
     "LEFT JOIN node_boot_admissions cb ON cb.device_id=d.device_id "
     "AND cb.device_generation=d.generation AND cb.superseded_at IS NULL "
-    "LEFT JOIN LATERAL (SELECT producer_id FROM node_producers WHERE admission_id=cb.admission_id "
-    "AND owner='host_core' ORDER BY admitted_at DESC,producer_id DESC LIMIT 1) cp ON true "
-    "LEFT JOIN LATERAL (" + _NEWEST_HOST_SQL.format(p="cp.producer_id") + ") ch ON true "
-    "LEFT JOIN node_boot_offers co ON co.offer_id=cb.offer_id "
-    "LEFT JOIN node_host_facts cf ON cf.producer_id=cp.producer_id "
     "LEFT JOIN LATERAL (SELECT producer_id FROM node_producers WHERE admission_id=cb.admission_id "
     "AND owner='app_manager' ORDER BY admitted_at DESC,producer_id DESC LIMIT 1) mp ON true "
     "LEFT JOIN LATERAL (SELECT payload,received_at FROM node_manager_observations "
     "WHERE producer_id=mp.producer_id ORDER BY sequence DESC LIMIT 1) cm ON true "
-    "LEFT JOIN LATERAL (SELECT admission_id FROM node_boot_admissions WHERE device_id=d.device_id "
-    "AND device_generation=d.generation AND superseded_at IS NOT NULL "
-    "ORDER BY superseded_at DESC,admission_id DESC LIMIT 1) pb ON true "
-    "LEFT JOIN LATERAL (SELECT producer_id FROM node_producers WHERE admission_id=pb.admission_id "
-    "AND owner='host_core' ORDER BY admitted_at DESC,producer_id DESC LIMIT 1) pp ON true "
-    "LEFT JOIN LATERAL (" + _NEWEST_HOST_SQL.format(p="pp.producer_id") + ") ph ON true "
     "WHERE d.retired_at IS NULL ORDER BY d.device_id")
+_CLOCK: Final = DatabaseTransactionClock()
 
 
-def host_facts_of(hosts: dict) -> dict[str, dict]:
-    """device id -> its current boot's host facts, from a `fleet_hosts` answer (absent: none reported)."""
-    return {host["device_id"]: host["facts"] for host in hosts["devices"] if host["facts"] is not None}
+def _line_values_in(conn, key: str, decode: Callable[[bytes], Any], what: str) -> dict[str, tuple[float, Any]]:
+    """device id -> (when Central recorded it, the value) of every enrolled device's host line `key`;
+    a removed or undecodable value is absent."""
+    values = {}
+    for latest in latest_values_in(conn, HOST_LINE, key, of_players=False):
+        value = latest.decoded(decode, what)
+        if value is not None:
+            values[latest.device_id] = (latest.recorded_at, value)
+    return values
+
+
+def host_facts_in(conn) -> dict[str, dict]:
+    """device id -> the facts its host line states now (`HostFactsState` as plain values; absent:
+    none stated), in the caller's transaction: the Releases page's running base, Central's state's
+    addresses."""
+    return {device_id: plain(facts) for device_id, (_, facts)
+            in _line_values_in(conn, HOST_FACTS_KEY, decode_host_facts_state, "host facts").items()}
+
+
+def fleet_hosts_in(conn) -> dict:
+    """G12 inside the caller's transaction: every active box's serial (its claim at boot), the metrics
+    and facts its host line states (decision 0034, S4a: `host` and `facts`, each with when Central
+    recorded it), Central's offer's base (`boot`), the App Manager's newest sample (`preparation`),
+    its presence on Central's hub (`bus_link`: the console's silence) and the numbers-only
+    thresholds; `read_at` is the database's clock, the clock every `received_at` here was stamped by
+    (`bus_link.changed_at` is the worker's)."""
+    read_at = _CLOCK.now_in(conn)
+    rows = conn.execute(_FLEET_HOSTS_SQL).fetchall()
+    bus_links = bus_links_in(conn, [row["device_id"] for row in rows])
+    metrics = _line_values_in(conn, HOST_METRICS_KEY, decode_host_metrics_state, "host metrics")
+    facts = _line_values_in(conn, HOST_FACTS_KEY, decode_host_facts_state, "host facts")
+    devices = []
+    for row in rows:
+        host = None
+        if row["device_id"] in metrics:
+            received_at, sample = metrics[row["device_id"]]
+            host = {"received_at": received_at, **plain(sample)}
+        stated = None
+        if row["device_id"] in facts:
+            # `base_tag` is the node's own record of its base: a host report, served beside
+            # `boot.base_tag` (Central's offer), never merged with it. `first_received_at`: when
+            # Central recorded these values (the host puts them only when they change).
+            received_at, values = facts[row["device_id"]]
+            stated = {"first_received_at": received_at, **plain(values)}
+        preparation = None
+        if row["preparation_received_at"] is not None:
+            sample = json.loads(bytes(row["preparation_payload"]))
+            preparation = {"received_at": row["preparation_received_at"],
+                           **{key: sample[key] for key in ("state", "fault", "available_bytes",
+                                                           "required_bytes")}}
+        boot = None
+        if row["offer_payload"] is not None:
+            boot = {"base_tag": parse_node_boot_offer(bytes(row["offer_payload"])).base.tag}
+        devices.append({"device_id": row["device_id"], "serial": row["serial"], "host": host,
+                        "boot": boot, "facts": stated, "preparation": preparation,
+                        "bus_link": bus_links[row["device_id"]]})
+    return {"read_at": read_at, "thresholds": thresholds_document(), "devices": devices}
 
 
 class NodeObservations:
@@ -193,50 +245,10 @@ class NodeObservations:
         return False
 
     def fleet_hosts(self) -> dict:
-        """G12: every active box's serial (its claim at boot) and current-boot host and App
-        Manager samples, read under one snapshot.
-
-        No fleet or device lock is taken, so a held lock never blocks this read. A superseded
-        boot's sample is never served as `host`; its receipt alone is served, and only when
-        the current boot has none."""
+        """G12 (`fleet_hosts_in`) under one read-only snapshot. No fleet or device lock is taken, so
+        a held lock never blocks this read."""
         with self.sessions.db.read_snapshot() as conn:
-            return self.fleet_hosts_in(conn, self.sessions.clock.utc())
-
-    def fleet_hosts_in(self, conn, read_at: float) -> dict:
-        """`fleet_hosts` inside the caller's transaction (a read that needs the hosts beside its
-        own rows in one snapshot: the Releases page, Central's state on its hub)."""
-        rows = conn.execute(_FLEET_HOSTS_SQL).fetchall()
-        bus_links = bus_links_in(conn, [row["device_id"] for row in rows])
-        devices = []
-        for row in rows:
-            host = None
-            if row["received_at"] is not None:
-                sample = json.loads(bytes(row["payload"]))
-                host = {"received_at": row["received_at"], "metrics": sample["metrics"],
-                        "fault_code": sample["fault_code"]}
-            preparation = None
-            if row["preparation_received_at"] is not None:
-                sample = json.loads(bytes(row["preparation_payload"]))
-                preparation = {"received_at": row["preparation_received_at"],
-                               **{key: sample[key] for key in ("state", "fault", "available_bytes",
-                                                               "required_bytes")}}
-            boot = None
-            if row["current_admission"] is not None:
-                # An admission is always a node offer's, issued with its payload.
-                boot = {"base_tag": parse_node_boot_offer(bytes(row["offer_payload"])).base.tag}
-            facts = None
-            if row["facts_payload"] is not None:
-                # Tolerant: an older-shape row serves its missing facts as None, never fails
-                # the read. `base_tag` is the node's own record of its base: a host report,
-                # served beside `boot.base_tag` (Central's offer), never merged with it.
-                # `facts.boot` is the node's boot stage report (None when absent or invalid).
-                facts = {"first_received_at": row["facts_first_received_at"],
-                         **stored_fact_values(bytes(row["facts_payload"]))}
-            devices.append({"device_id": row["device_id"], "serial": row["serial"], "host": host,
-                            "previous_boot_received_at": row["previous_received_at"] if host is None else None,
-                            "boot": boot, "facts": facts, "preparation": preparation,
-                            "bus_link": bus_links[row["device_id"]]})
-        return {"read_at": read_at, "thresholds": thresholds_document(), "devices": devices}
+            return fleet_hosts_in(conn)
 
     def status(self, device_id: str) -> dict:
         with self.sessions.db.read_snapshot() as conn:

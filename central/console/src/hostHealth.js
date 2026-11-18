@@ -10,19 +10,21 @@ import { formatRoute } from "./routes.js";
  * default threshold and no default silence limit. Every age is Central's read time minus
  * Central's receipt time, through `fact()` (R10).
  *
- * States, checked in this order:
- *   not_read           the box is absent from the read
- *   never              no Host Management receipt served: none from this boot and none from the
- *                      most recently superseded one (G12 sees no older boot)
- *   silent             the newest receipt (this boot's, else the previous boot's) is older than
- *                      the limit
- *   not_yet_this_boot  no sample from this boot; the previous boot's receipt is within it
- *   reporting          this boot's newest sample was received within the limit
- * Bands are judged only while `reporting`. On `silent` this boot's values read
- * "at last report", unbanded; the previous boot's values are never shown. Without a served
- * limit no receipt is judged silent.
+ * The host's metrics and facts are what its line states (decision 0034): it puts its metrics only
+ * when a band, a flag, a count or the set of metrics changes, so a receipt's age alone is how long
+ * the values have stood, never silence. Silence is both: Central's hub, reachable, does not hold
+ * the box's leaf (`bus_link`), and the newest receipt is older than the limit (one clock: Central's
+ * read time and its receipt both the database's).
  *
- * @typedef {"not_read"|"never"|"silent"|"not_yet_this_boot"|"reporting"} HostState
+ * States, checked in this order:
+ *   not_read   the box is absent from the read
+ *   never      its host line states no metrics
+ *   silent     off Central's reachable hub, and the newest receipt older than the limit
+ *   reporting  otherwise (a hub whose state is unknown judges no silence)
+ * Bands are judged only while `reporting`. On `silent` the values read "at last report",
+ * unbanded. Without a served limit no box is judged silent.
+ *
+ * @typedef {"not_read"|"never"|"silent"|"reporting"} HostState
  * @typedef {"alarm"|"notice"|"unknown"|"ok"} HostSeverity
  * @typedef {{name: string, group: string, label: string, fact: import("./facts.js").Fact,
  *            band: HostSeverity|null, suffix?: string, words?: string, brief?: string}} HostItem
@@ -309,7 +311,7 @@ function readRows(name, host) {
 
 /**
  * One item's reading from a box's current boot, with the receipt it carries: a metric item's
- * from this boot's newest sample (`latest`), a boot item's from the host facts record
+ * from the host line's metrics (`latest`), a boot item's from the host line's facts
  * (`first`, its record's receipt, renewed by any changed value). An older node that sends no
  * boot report reads "not reported", which raises no tier while reporting (§62 Tier).
  */
@@ -370,11 +372,8 @@ function reportedMetric(name, host, facts, readAt, thresholds) {
   return reported(limit === undefined ? null : "ok");
 }
 
-/** One metric as it was at this boot's last report, unbanded (silent). */
+/** One metric as it was at the last report, unbanded (silent). */
 function lastReportedMetric(name, host, facts, readAt) {
-  if (host === null) {
-    return item(name, { fact: fact({ kind: "unknown", why: `no ${HOST} sample from this boot` }) });
-  }
   const read = readItem(name, host, facts);
   if (read.why !== undefined) return item(name, { fact: fact({ kind: "unknown", why: read.why }) });
   return item(name, { fact: fact({ kind: "reported", source: HOST, value: `${read.text} at last report`,
@@ -396,6 +395,9 @@ function storageShort(preparation, readAt) {
     value: `${APP_MANAGER} refused a preparation: needs ${gigabytes(preparation.required_bytes)} GB, ` +
       `room ${gigabytes(preparation.available_bytes)} GB` }) })];
 }
+
+/** Whether Central's hub, reachable, does not hold the box's leaf (`bus_link`). */
+const offTheHub = (link) => link?.hub === "reachable" && link.linked === false;
 
 function judged(state, items, fallback) {
   const ranked = items.filter((entry) => entry.band !== null && entry.band !== "ok"
@@ -425,26 +427,15 @@ function classify(row, read, absent) {
   const limit = isNumber(thresholds?.host_silent_after_seconds) ? thresholds.host_silent_after_seconds : null;
   const host = row.host ?? null;
   const facts = row.facts ?? null;
-  const previous = isNumber(row.previous_boot_received_at) ? row.previous_boot_received_at : null;
-  if (host === null && previous === null) {
-    return allUnknown("never", `no ${HOST} report from this boot or the one before`);
-  }
-  const newest = receipt(host === null ? previous : host.received_at, readAt);
-  const ago = newest.age === null ? null : `${formatAge(newest.age)} ago`;
-  const whose = host === null ? `the previous boot's ${HOST} last reported` : "last reported";
+  if (host === null) return allUnknown("never", `no ${HOST} report on its line`);
+  const newest = receipt(host.received_at, readAt);
   const metrics = Object.keys(HOST_CATALOG);
-  if (limit !== null && newest.age !== null && newest.age > limit) {
-    const silence = fact({ kind: "derived", value: `${HOST} silent · ${whose} ${ago}`,
-      basis: `no report for over ${limit} s, Central's limit` });
+  if (limit !== null && offTheHub(row.bus_link) && newest.age !== null && newest.age > limit) {
+    const silence = fact({ kind: "derived", value: `${HOST} silent · last reported ${formatAge(newest.age)} ago`,
+      basis: `off Central's hub, no report for over ${limit} s, Central's limit` });
     return judged("silent", [item(RECEIPT, { fact: silence, band: "alarm",
       brief: `${HOST} silent ${formatAge(newest.age)}` }),
       ...metrics.map((name) => lastReportedMetric(name, host, facts, readAt))], "alarm");
-  }
-  if (host === null) {
-    const unknown = fact({ kind: "unknown",
-      why: `on this boot · the previous boot's ${HOST} last reported ${ago ?? "at a time not served"}` });
-    return judged("not_yet_this_boot", [RECEIPT, ...metrics].map((name) =>
-      item(name, { fact: unknown, band: "unknown" })), "unknown");
   }
   return judged("reporting", [item(RECEIPT, { fact: newest }),
     ...metrics.map((name) => reportedMetric(name, host, facts, readAt, thresholds)),
@@ -468,7 +459,7 @@ const BASE_SOURCE = "this boot's node session";
  * and `base` is Central's offer, the tag of the boot offer the current admission claimed
  * (`claimed`, labelled "Central's offer"). When both name a tag and the tags differ,
  * `base_mismatch` is a `derived` fact naming both; it carries no band (no alarm is defined).
- * Both come only from the current boot: G12 serves no other boot's facts.
+ * The facts are what the host line states now (decision 0034).
  * The facts take the classifier's state, so one gate words a box's values and its facts: on
  * `silent` each fact reads "… at last report", as its metrics do (§62, §66), and
  * never in the present tense of a box Central cannot hear.

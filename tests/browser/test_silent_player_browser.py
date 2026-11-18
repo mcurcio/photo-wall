@@ -55,7 +55,7 @@ def test_the_wall_marks_a_silent_players_frame_and_its_pages_show_the_apps_age_a
             "link", name="Hardware", exact=True).click()
         expect(page.get_by_role("heading", level=1, name="Hardware", exact=True)).to_be_visible()
         expect(page.get_by_role("region", name="Health", exact=True)).to_contain_text(
-            "Host Management: Host Management last reported 0 s ago")
+            re.compile(r"Host Management: Host Management last reported \d+ s ago"))
         expect(page.get_by_role("region", name="Link and sessions", exact=True).get_by_role(
             "group", name="Host Management", exact=True)).to_contain_text(
             "Last reported: Host Management last reported 0 s ago")

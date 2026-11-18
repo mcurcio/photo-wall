@@ -46,13 +46,10 @@ console.log(JSON.stringify([value.kind, factText(value)]));
 
 
 class _ReadClock:
-    """Central's clock for the read: the system's, or `at` once a leg pins it."""
-
-    def __init__(self) -> None:
-        self.at: float | None = None
+    """Central's process clock (the read's `read_at` is the database's)."""
 
     def utc(self) -> float:
-        return time.time() if self.at is None else self.at
+        return time.time()
 
     def monotonic(self) -> float:
         return time.monotonic()
@@ -158,11 +155,10 @@ def test_the_console_reads_whether_a_node_is_linked(database, tmp_path):
             stop.set()
             await asyncio.wait_for(running, 30)
             _worker_beat(database, 31)
-            clock.at = time.time()      # one read time for both reads below
             read_at, stopped = await read()
             assert _rendered(stopped, read_at) == ["unknown", "Unknown: Central's worker is not running"]
             page = await asyncio.to_thread(hardware_read)
-            assert (page["read_at"], page["bus_link"]) == (read_at, stopped)
+            assert page["bus_link"] == stopped
         finally:
             stop.set()
             await asyncio.wait_for(running, 30)

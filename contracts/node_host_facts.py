@@ -12,7 +12,8 @@ and the `photo-wall-*` units PID1 lists as failed (None when never read on this 
 issue #125): "watchdog" after a watchdog reset, None when not read (the driver cannot tell).
 
 Categorical state rides here, reported on change; numbers stay metrics
-(contracts/node_observation.py).
+(contracts/node_observation.py). On the Node's bus the same facts are the host line's `facts`
+(`HostFactsState`, decision 0034); the HTTP record (`HostFactsV2`) stays until the old path goes.
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ from typing import Final
 from contracts.node_commands import producer_document, producer_from_document
 from contracts.node_protocol import NodeProducerV2, counter, token
 from contracts.strict_json import loads_object
+from contracts.wire_codec import decode, encode
 
 MAX_HOST_FACTS_BYTES: Final[int] = 2048
 # The kernel's operstate values (Documentation/networking/operstates.rst).
@@ -281,3 +283,43 @@ def stored_fact_values(raw: bytes) -> dict:
     return {**{name: value.get(name) if valid_fact(name, value.get(name)) else None
                for name in FACT_RULES},
             "boot": _stored_boot(value.get("boot"))}
+
+
+@dataclass(frozen=True, slots=True)
+class HostFactsState:
+    """The host's facts as its line states them (contracts/node_state.py HOST_FACTS_KEY; decision
+    0034, S4a): the facts of `FACT_RULES` (None: not read) and the boot report (None: not read),
+    with no producer or sequence (the line's own record orders them). HostCore puts it when it
+    changes; Central serves it as the box's facts."""
+    kernel_release: str | None
+    interface: str | None
+    link_state: str | None
+    address: str | None
+    base_tag: str | None
+    reset_cause: str | None
+    wall_clock: str | None
+    boot: BootReportV2 | None
+
+    def __post_init__(self) -> None:
+        if self.boot is not None and type(self.boot) is not BootReportV2:
+            raise ValueError("invalid_host_facts")
+        for name, rule in FACT_RULES.items():
+            value = getattr(self, name)
+            if value is not None:
+                rule(value)
+
+
+def encode_host_facts_state(value: HostFactsState) -> bytes:
+    """Canonical JSON (contracts/wire_codec.py) of at most MAX_HOST_FACTS_BYTES (contracts/node_state.py
+    HOST_FACTS_BYTES)."""
+    if type(value) is not HostFactsState:
+        raise ValueError("invalid_host_facts")
+    return encode(value, MAX_HOST_FACTS_BYTES, "host_facts_too_large")
+
+
+def decode_host_facts_state(raw: bytes) -> HostFactsState:
+    """The facts `raw` encodes; ValueError("host_facts") for anything else."""
+    def build(value: dict) -> HostFactsState:
+        boot = value["boot"]
+        return HostFactsState(**{**value, "boot": None if boot is None else boot_from_document(boot)})
+    return decode(raw, MAX_HOST_FACTS_BYTES, HostFactsState, build, "host_facts")

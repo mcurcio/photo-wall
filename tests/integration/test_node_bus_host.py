@@ -33,10 +33,19 @@ from integration.bus_servers import (
 from nats.js.errors import NotFoundError
 from node_pid1_bus_probe import host_state
 
-from appliance.host.bus import HOST_SLICE, host_session
+from appliance.host.bus import HOST_SLICE, HostLine, host_session
+from contracts.node_host_facts import (
+    BootReportV2,
+    BootStageV2,
+    HostFactsState,
+    decode_host_facts_state,
+)
 from contracts.node_link import NODE_DOOR_API_PREFIX, Pipe, bus_server_name
+from contracts.node_observation import HostMetricsState, decode_host_metrics_state, valid_metrics
 from contracts.node_state import (
+    HOST_FACTS_KEY,
     HOST_LINE,
+    HOST_METRICS_KEY,
     HOST_REBOOT_METHOD,
     HostBase,
     HostReboot,
@@ -220,3 +229,38 @@ def test_the_host_answers_reboot_from_central_and_then_reboots_once(tmp_path):
         session.stop()
         node.stop()
         hub.stop()
+
+
+def test_the_host_states_its_facts_and_metrics_on_its_line(tmp_path):
+    """S4a part 2: HostLine puts the host's facts and every metric HostCore may post through the
+    session's state table (their keys and byte caps), and a reader of the host line gets them."""
+    node = node_server(tmp_path, SERIAL, hub_server(tmp_path, [SERIAL]))
+    node.start()
+    session = host_session(BASE_TAG, url=node.client_url, reboot=lambda _reason: None)
+    session.start()
+    facts = HostFactsState(kernel_release="6.6.51+rpt-rpi-v8", interface="eth0", link_state="up",
+                           address="192.168.1.40", base_tag=BASE_TAG, reset_cause="watchdog",
+                           wall_clock="synchronised",
+                           boot=BootReportV2((BootStageV2("handoff", "done", None, None, None),), (), 0))
+    # A full observation's worth of rows: every family at its budget.
+    rows = [(f"memory_peak:slice{i}", 1e9 + i, "bytes", "cgroup") for i in range(6)]
+    rows += [(f"oom_kill:slice{i}", i, "count", "cgroup") for i in range(4)]
+    metrics = HostMetricsState(valid_metrics([("soc_temperature", 61.5, "celsius"), *rows]))
+    line = HostLine(session.state.put)
+    line.facts(facts)
+    line.metrics(metrics)
+    try:
+        async def stated():
+            client = await local(node)
+            try:
+                bucket = await client.jetstream().key_value("state_host")
+                return (decode_host_facts_state((await bucket.get(HOST_FACTS_KEY)).value),
+                        decode_host_metrics_state((await bucket.get(HOST_METRICS_KEY)).value))
+            except (NotFoundError, nats.errors.Error):
+                return None
+            finally:
+                await client.close()
+        assert asyncio.run(until(stated, 10, "the host's facts and metrics on its line")) == (facts, metrics)
+    finally:
+        session.stop()
+        node.stop()

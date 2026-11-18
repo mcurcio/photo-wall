@@ -9,8 +9,7 @@ from __future__ import annotations
 
 from test_fleet_attempts import SERIAL
 from test_node_boot import ALL_READY
-from test_node_fleet_hosts import Host, _rig
-from test_node_host_facts_ingest import _facts, _send
+from test_node_fleet_hosts import FACTS, Host, _rig, on_line
 
 from central.infra.central_state import PgCentralStateReads
 from central.infra.frame_lighting_store import PgHouseLock
@@ -27,6 +26,8 @@ from central.room_light.model import (
     SensorRef,
     TypedColour,
 )
+from contracts.node_host_facts import encode_host_facts_state
+from contracts.node_state import HOST_FACTS_KEY
 
 
 def _reads(registry, sessions=None) -> tuple[PgCentralStateReads, PgRoomLights]:
@@ -37,12 +38,12 @@ def _reads(registry, sessions=None) -> tuple[PgCentralStateReads, PgRoomLights]:
     return PgCentralStateReads(registry.db, registry.clock, versions, lights, lambda: None), lights
 
 
-def test_the_installation_lists_each_pi_at_the_address_its_host_reported(registry):
+def test_the_installation_lists_each_pi_at_the_address_its_host_line_states(registry):
     boots, sessions = _rig(registry)
-    host = Host(registry, sessions, boots)
+    Host(registry, sessions, boots)
     reads, _ = _reads(registry, sessions)
     assert [(each.serial, each.address) for each in reads.installation().players] == [(SERIAL, None)]
-    _send(host, _facts(host.grant.producer, 2, address="192.168.1.40"))
+    on_line(registry, SERIAL, HOST_FACTS_KEY, encode_host_facts_state(FACTS), 1)
     assert [(each.serial, each.address) for each in reads.installation().players] == [(SERIAL, "192.168.1.40")]
 
 

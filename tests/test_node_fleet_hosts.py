@@ -1,12 +1,15 @@
 """Host-health tracer, Central side (console DDD §60, §63-§64, bead T1), on real PostgreSQL:
-observation coalescing on the producer's own boot clock (never a Central receipt clock, so a
-stepped or skewed Central replica changes nothing), and G12 (`GET /v1/operator/node/hosts`): the
-current boot's sample only, the previous boot's receipt, the numbers-only thresholds, the Node API
-link with the hub's state, its access rules and its lock-free snapshot. No post is ever refused for
-volume (decision 0034: the daily caps are gone)."""
+the old path's observation coalescing on the producer's own boot clock (never a Central receipt
+clock, so a stepped or skewed Central replica changes nothing; until S4c removes it), and G12
+(`GET /v1/operator/node/hosts`): the metrics and facts each Pi's host line states as Central's link
+store records them (decision 0034, S4a), the numbers-only thresholds, the Node API link with the
+hub's state, its access rules and its lock-free snapshot. No post is ever refused for volume
+(decision 0034: the daily caps are gone)."""
+import asyncio
 import math
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -24,15 +27,24 @@ from central.fleet.node_bus_presence import (
     record_hub_reachable_in,
     record_presence_in,
 )
-from central.fleet.node_observations import _FLEET_HOSTS_SQL, NodeObservations
+from central.fleet.node_observations import NodeObservations, host_facts_in
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
+from central.infra.node_link_store import PgLinkStores
 from contracts.node_boot import NodeBootRequestV2
+from contracts.node_host_facts import HostFactsState, encode_host_facts_state
+from contracts.node_link import Pipe
 from contracts.node_observation import (
     HOST_OBSERVATION_INTERVAL_SECONDS,
+    HostMetricsState,
     HostMetricV2,
     HostObservationV2,
+    encode_host_metrics_state,
     encode_host_observation,
 )
+from contracts.node_state import HOST_FACTS_KEY, HOST_LINE, HOST_METRICS_KEY
+from nodeapi.buffers import state_prefix, state_stream
+from nodeapi.epoch import Token
+from nodeapi.pull import Batch, Read
 
 INTERVAL = HOST_OBSERVATION_INTERVAL_SECONDS
 NODE = NodeControlConfig("node-test")
@@ -60,6 +72,27 @@ class Host:
                                    (HostMetricV2("soc_temperature", temperature, "celsius"),))
         return (observations or self.observations).record(
             self.claim.session_id, self.claim.credential, encode_host_observation(sample))
+
+
+def on_line(registry, serial, key, value, seq):
+    """`serial`'s host line states `value` under `key`, recorded by Central's real link store as the
+    worker's fleet-pipe NodeLink records it."""
+    read = Read(Token("epoch", seq), state_prefix(HOST_LINE) + key, {}, value)
+    commit = PgLinkStores(registry.db, {}).store(serial, Pipe.FLEET).commit(
+        state_stream(HOST_LINE), Batch((read,), Token("epoch", seq), False))
+    # Its own thread, so a caller already inside an event loop (Playwright's) can call it.
+    with ThreadPoolExecutor(1) as worker:
+        worker.submit(asyncio.run, commit).result()
+
+
+def metrics_on_line(registry, serial, temperature, seq):
+    on_line(registry, serial, HOST_METRICS_KEY, encode_host_metrics_state(
+        HostMetricsState((HostMetricV2("soc_temperature", temperature, "celsius"),))), seq)
+
+
+FACTS = HostFactsState(kernel_release="6.6.51+rpt-rpi-v8", interface="eth0", link_state="up",
+                       address="192.168.1.40", base_tag="v2.1.0", reset_cause=None,
+                       wall_clock="synchronised", boot=None)
 
 
 def _rig(registry, *, session_seconds=3600):
@@ -167,40 +200,58 @@ def test_the_same_sequence_is_still_a_duplicate_before_coalescing(registry):
     assert again["disposition"] == "duplicate" and again["received_at"] == first["received_at"]
 
 
-def test_g12_serves_the_current_boots_sample_and_only_the_previous_boots_receipt(registry):
+def test_g12_serves_what_the_host_line_states_and_not_the_old_path(registry):
+    """Criterion 4. Mutation probe: read `host` from node_host_observations -> the bus-only Pi reads
+    never heard, fails."""
     boots, sessions = _rig(registry)
     observations = NodeObservations(sessions)
-    first = Host(registry, sessions, boots)
-    first.post(81.2)
-    old_receipt = registry.clock.utc()
+    Host(registry, sessions, boots).post(12.0)          # the old path's post: never served
+    served = _device(observations.fleet_hosts())
+    assert served["host"] is None and served["facts"] is None
+    assert "previous_boot_received_at" not in served
+    metrics_on_line(registry, SERIAL, 81.2, 1)
+    on_line(registry, SERIAL, HOST_FACTS_KEY, encode_host_facts_state(FACTS), 2)
     read = observations.fleet_hosts()
     served = _device(read)
-    assert served["host"] == {"received_at": old_receipt, "fault_code": None,
+    with registry.db.transaction() as conn:
+        recorded = {row["subject"]: row["recorded_at"] for row in conn.execute(
+            "SELECT subject, recorded_at FROM node_states WHERE device_id=%s", (DEVICE_ID,)).fetchall()}
+    assert served["host"] == {"received_at": recorded[state_prefix(HOST_LINE) + HOST_METRICS_KEY],
+                              "fault_code": None,
                               "metrics": [{"name": "soc_temperature", "value": 81.2,
                                            "unit": "celsius", "source": "host_sampler"}]}
-    assert served["previous_boot_received_at"] is None and "intake_full" not in served
+    assert served["facts"] == {"first_received_at": recorded[state_prefix(HOST_LINE) + HOST_FACTS_KEY],
+                               "kernel_release": "6.6.51+rpt-rpi-v8", "interface": "eth0",
+                               "link_state": "up", "address": "192.168.1.40", "base_tag": "v2.1.0",
+                               "reset_cause": None, "wall_clock": "synchronised", "boot": None}
+    # Central's offer's base, from the device's newest boot offer.
+    assert served["boot"]["base_tag"]
+    # read_at is the database's clock, the one every receipt here was stamped by.
+    assert 0 <= read["read_at"] - served["host"]["received_at"] < 60
     assert read["thresholds"] == thresholds_document()
     assert read["thresholds"]["host_silent_after_seconds"] == HOST_SILENT_AFTER_SECONDS
     assert read["thresholds"]["metrics"][0] == {"name": "soc_temperature", "unit": "celsius",
                                                 "notice_at": 75, "alarm_at": 80}
-    # A reboot: the new admission has a session but no sample yet. The old boot's sample is
-    # newer than anything of the new boot, yet it is never served as `host`.
-    registry.clock.advance(30)
-    second = Host(registry, sessions, boots)
-    read = observations.fleet_hosts()
-    served = _device(read)
-    assert read["read_at"] == registry.clock.utc()
-    assert served["host"] is None and served["previous_boot_received_at"] == old_receipt
-    registry.clock.advance(5)
-    second.post(40.0)
-    served = _device(observations.fleet_hosts())
-    assert served["host"]["metrics"][0]["value"] == 40.0
-    assert served["previous_boot_received_at"] is None
+    # A newer value replaces it; the Releases page and Central's state read the same facts.
+    metrics_on_line(registry, SERIAL, 40.0, 3)
+    assert _device(observations.fleet_hosts())["host"]["metrics"][0]["value"] == 40.0
+    with registry.db.transaction() as conn:
+        assert host_facts_in(conn)[DEVICE_ID]["address"] == "192.168.1.40"
+
+
+def test_a_pi_heard_only_on_its_line_is_served(registry):
+    """A Pi with no old-path session at all (enrolled, never posted): its line alone is its host."""
+    boots, sessions = _rig(registry)
+    Host(registry, sessions, boots)
+    metrics_on_line(registry, SERIAL, 50.0, 1)
+    served = _device(NodeObservations(sessions).fleet_hosts())
+    assert served["host"]["metrics"][0]["value"] == 50.0
 
 
 def test_g12_omits_retired_boxes_and_lists_active_ones_without_a_boot(registry):
     boots, sessions = _rig(registry)
-    Host(registry, sessions, boots).post()
+    Host(registry, sessions, boots)
+    metrics_on_line(registry, SERIAL, 50.0, 1)
     spare_id = "device-" + "e" * 64
     with registry.db.transaction() as conn:
         seed_device(conn, spare_id, None)
@@ -211,7 +262,6 @@ def test_g12_omits_retired_boxes_and_lists_active_ones_without_a_boot(registry):
     assert _device(read, retired_id) is None
     assert _device(read)["serial"] == SERIAL  # the box's claim at boot, for the console's names
     assert _device(read, spare_id) == {"device_id": spare_id, "serial": None, "host": None,
-                                       "previous_boot_received_at": None,
                                        "boot": None, "facts": None, "preparation": None,
                                        "bus_link": {"linked": None, "changed_at": None,
                                                     "hub": "no_hub"}}
@@ -264,7 +314,8 @@ def _device_hub(registry) -> str:
 
 def test_a_held_device_fence_does_not_block_g12(registry):
     boots, sessions = _rig(registry)
-    Host(registry, sessions, boots).post()
+    Host(registry, sessions, boots)
+    metrics_on_line(registry, SERIAL, 50.0, 1)
     held, release = threading.Event(), threading.Event()
 
     def hold():
@@ -290,7 +341,7 @@ def test_a_held_device_fence_does_not_block_g12(registry):
 def test_g12_route_access(registry):
     boots, sessions = _rig(registry)
     host = Host(registry, sessions, boots)
-    host.post()
+    metrics_on_line(registry, SERIAL, 50.0, 1)
     app = create_app(registry.db, registry.clock, ADMIN, node_control=NODE)
     with TestClient(app) as client:
         assert client.get("/v1/operator/node/hosts").status_code == 401
@@ -300,22 +351,6 @@ def test_g12_route_access(registry):
         response = client.get("/v1/operator/node/hosts", headers={"Authorization": "Bearer " + ADMIN})
         assert response.status_code == 200, response.text
         assert _device(response.json())["host"]["metrics"][0]["name"] == "soc_temperature"
-
-
-def test_g12_reads_one_producers_newest_sample_through_the_primary_key(registry):
-    boots, sessions = _rig(registry)
-    host = Host(registry, sessions, boots)
-    host.post()
-    with registry.db.transaction() as conn:
-        producer = conn.execute("SELECT producer_id FROM node_producers WHERE owner='host_core'"
-                                ).fetchone()["producer_id"]
-        conn.execute("INSERT INTO node_host_observations(producer_id,sequence,payload,received_at) "
-                     "SELECT %s,s,'{}'::bytea,1000+s FROM generate_series(2,50001) s", (producer,))
-        conn.execute("ANALYZE node_host_observations")
-        plan = "\n".join(row["QUERY PLAN"] for row in conn.execute(
-            "EXPLAIN " + _FLEET_HOSTS_SQL, {"day": 0}).fetchall())
-    assert "node_host_observations_pkey" in plan, plan
-    assert "Seq Scan on node_host_observations" not in plan, plan
 
 
 def test_g12_preparation_is_the_current_boots_newest_app_manager_sample(registry, monkeypatch):

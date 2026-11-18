@@ -1,4 +1,8 @@
-"""Bounded command-free HostCore samples; receipt is not device identity or pixels."""
+"""Bounded command-free HostCore samples; receipt is not device identity or pixels.
+
+On the Node's bus the same metrics are the host line's `metrics` (`HostMetricsState`, decision
+0034), put when `metrics_state_key` changes; the HTTP observation (`HostObservationV2`) stays until
+the old path goes. `HOST_METRIC_BANDS` is the one table of the bands both the Pi and Central read."""
 from __future__ import annotations
 
 import json
@@ -10,6 +14,7 @@ from typing import Final
 from contracts.node_commands import producer_document, producer_from_document
 from contracts.node_protocol import NodeProducerV2, counter, token
 from contracts.strict_json import loads_object
+from contracts.wire_codec import decode, encode, fields_of, list_of
 
 MAX_OBSERVATION_BYTES = 16384
 # Host Management posts one observation per interval (console DDD §63). Central derives its
@@ -163,3 +168,78 @@ def parse_host_observation(raw: bytes) -> HostObservationV2:
                                  value["fault_code"])
     except (TypeError, KeyError, AttributeError) as exc:
         raise ValueError("invalid_host_observation") from exc
+
+
+@dataclass(frozen=True, slots=True)
+class MetricBand:
+    """A banded metric (console DDD §63): the value at or above which it is a notice or an alarm
+    (None: it has no such band), for a row of `name` in `unit`. Central serves them as its
+    thresholds (central/fleet/host_thresholds.py) and the console judges by them; HostCore puts
+    its metrics when one crosses a band (`metrics_state_key`)."""
+    name: str
+    unit: str
+    notice_at: float | None
+    alarm_at: float | None
+
+
+_FLAGS: Final = ("under_voltage", "frequency_capped", "throttled", "soft_temperature_limit")
+# Temperature: placeholders, to confirm against the bench Pi's firmware limit (§63). A firmware
+# flag set now is an alarm; a sticky "occurred" flag is a notice. CPU is never banded, so it has
+# no row. The values are current choices, edited here.
+HOST_METRIC_BANDS: Final[tuple[MetricBand, ...]] = (
+    MetricBand("soc_temperature", "celsius", 75, 80),
+    *(MetricBand(f"{flag}_now", "boolean", None, 1) for flag in _FLAGS),
+    *(MetricBand(f"{flag}_occurred", "boolean", 1, None) for flag in _FLAGS),
+)
+_BANDS: Final = {(band.name, band.unit): band for band in HOST_METRIC_BANDS}
+# The units whose every value is a state of its own (a flag, a count): any change is put.
+_CATEGORICAL_UNITS: Final = frozenset({"boolean", "count"})
+
+
+@dataclass(frozen=True, slots=True)
+class HostMetricsState:
+    """The host's metrics as its line states them (contracts/node_state.py HOST_METRICS_KEY;
+    decision 0034, S4a): the rows `valid_metrics` keeps and the local recovery's fault, with no
+    producer, sequence or boot clock (the line's own record orders them)."""
+    metrics: tuple[HostMetricV2, ...]
+    fault_code: str | None = None
+
+    def __post_init__(self) -> None:
+        if (type(self.metrics) is not tuple or len(self.metrics) > MAX_HOST_METRICS
+                or any(type(metric) is not HostMetricV2 for metric in self.metrics)
+                or len({(m.name, m.source) for m in self.metrics}) != len(self.metrics)):
+            raise ValueError("invalid_host_metrics")
+        if self.fault_code is not None:
+            token(self.fault_code, 64)
+
+
+def _band(metric: HostMetricV2) -> object:
+    band = _BANDS.get((metric.name, metric.unit))
+    if band is not None:
+        return sum(at is not None and metric.value >= at for at in (band.notice_at, band.alarm_at))
+    return metric.value if metric.unit in _CATEGORICAL_UNITS else None
+
+
+def metrics_state_key(state: HostMetricsState) -> tuple:
+    """What of `state` is put on change: its fault, which metrics it holds, each banded metric's
+    band (`HOST_METRIC_BANDS`: below, at or above its notice, at or above its alarm) and each flag's
+    or count's value. A gauge's own value (uptime, load, CPU, memory, storage, link speed, a
+    temperature inside its band) is not in it, so it moving is never put by itself."""
+    return state.fault_code, tuple(sorted((m.name, m.source, _band(m)) for m in state.metrics))
+
+
+def encode_host_metrics_state(value: HostMetricsState) -> bytes:
+    """Canonical JSON (contracts/wire_codec.py) of at most MAX_OBSERVATION_BYTES (contracts/node_state.py
+    HOST_METRICS_BYTES)."""
+    if type(value) is not HostMetricsState:
+        raise ValueError("invalid_host_metrics")
+    return encode(value, MAX_OBSERVATION_BYTES, "host_metrics_too_large")
+
+
+def decode_host_metrics_state(raw: bytes) -> HostMetricsState:
+    """The metrics `raw` encodes; ValueError("host_metrics") for anything else."""
+    def build(value: dict) -> HostMetricsState:
+        rows = list_of(value["metrics"])
+        return HostMetricsState(tuple(HostMetricV2(**fields_of(HostMetricV2, row)) for row in rows),
+                                value["fault_code"])
+    return decode(raw, MAX_OBSERVATION_BYTES, HostMetricsState, build, "host_metrics")

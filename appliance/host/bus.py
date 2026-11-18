@@ -1,9 +1,11 @@
 """The host component on its Node's bus.
 
 HostCore declares the host store line: a circular record buffer and its state bucket, which holds
-`birth`, `outbox` and two keys of its own: `base` (contracts/node_state.py `HostBase`, the base this
-boot runs) and, on a Pi with a wired light meter, LIGHT_SENSOR_KEY (contracts/room_light.py
-`LightSensorReading`; put by appliance/host/light_sensor.py `start_light_meter`). Anyone reads them:
+`birth`, `outbox` and keys of its own: `base` (contracts/node_state.py `HostBase`, the base this
+boot runs), `facts` and `metrics` (contracts/node_host_facts.py `HostFactsState`,
+contracts/node_observation.py `HostMetricsState`; put by `HostLine`, decision 0034) and, on a Pi
+with a wired light meter, LIGHT_SENSOR_KEY (contracts/room_light.py `LightSensorReading`; put by
+appliance/host/light_sensor.py `start_light_meter`). Anyone reads them:
 Central through its link, Home Assistant through the Pi's read-only door. The session connects
 forever on its own thread and attaches at every connect, so after a bus restart (which starts empty)
 the line, `birth` and `base` are back in the new epoch with no help from Central. HostCore never
@@ -18,14 +20,26 @@ decode is answered as an error and reboots nothing.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
 from typing import Final
 
+from contracts.node_host_facts import HostFactsState, encode_host_facts_state
 from contracts.node_link import NODE_BUS_URL, STORE_LINES
+from contracts.node_observation import (
+    HostMetricsState,
+    encode_host_metrics_state,
+    metrics_state_key,
+)
 from contracts.node_state import (
     HOST_BASE_BYTES,
     HOST_BASE_KEY,
+    HOST_FACTS_BYTES,
+    HOST_FACTS_KEY,
     HOST_LINE,
+    HOST_METRICS_BYTES,
+    HOST_METRICS_EVERY,
+    HOST_METRICS_KEY,
     HOST_REBOOT_METHOD,
     HostBase,
     HostRebootAnswer,
@@ -40,7 +54,8 @@ from nodeapi.node import NodeSession, Release
 
 HOST_VERSION: Final = "1.0.0"                     # the host component's release version (birth)
 # The host line's state table beside birth and outbox.
-HOST_STATE: Final = KeyTable({HOST_BASE_KEY: HOST_BASE_BYTES, LIGHT_SENSOR_KEY: LIGHT_SENSOR_BYTES})
+HOST_STATE: Final = KeyTable({HOST_BASE_KEY: HOST_BASE_BYTES, LIGHT_SENSOR_KEY: LIGHT_SENSOR_BYTES,
+                              HOST_FACTS_KEY: HOST_FACTS_BYTES, HOST_METRICS_KEY: HOST_METRICS_BYTES})
 
 
 def _host_slice() -> Slice:
@@ -77,3 +92,30 @@ def host_session(base_tag: str, *, url: str = NODE_BUS_URL, reboot: Callable[[st
                           methods={HOST_REBOOT_METHOD: _reboot_method(reboot)})
     session.state.put(HOST_BASE_KEY, encode_host_base(HostBase(base_tag=base_tag)))
     return session
+
+
+class HostLine:
+    """What HostCore puts on its line beside `base` (decision 0034, S4a), through `put(key, value)`
+    (the session's `state.put`, which keeps the newest value of each key and states it again in a
+    new epoch). `facts`: put when they differ from the last put. `metrics`: the first at once, then
+    only when `metrics_state_key` differs from the last put's and at least HOST_METRICS_EVERY
+    seconds after it on this process's monotonic clock; a change inside that time is put once the
+    time has passed, a gauge moving inside its band never. Called from HostCore's loop alone."""
+
+    def __init__(self, put: Callable[[str, bytes], None], *, monotonic: Callable[[], float] = time.monotonic) -> None:
+        self._put = put
+        self._monotonic = monotonic
+        self._facts: HostFactsState | None = None
+        self._metrics: tuple | None = None     # (metrics_state_key, monotonic seconds) of the last put
+
+    def facts(self, facts: HostFactsState) -> None:
+        if facts != self._facts:
+            self._put(HOST_FACTS_KEY, encode_host_facts_state(facts))
+            self._facts = facts
+
+    def metrics(self, metrics: HostMetricsState) -> None:
+        key, now = metrics_state_key(metrics), self._monotonic()
+        if self._metrics is not None and (key == self._metrics[0] or now - self._metrics[1] < HOST_METRICS_EVERY):
+            return
+        self._put(HOST_METRICS_KEY, encode_host_metrics_state(metrics))
+        self._metrics = (key, now)

@@ -20,8 +20,9 @@ const THRESHOLDS = { host_silent_after_seconds: 60,
 const read = (devices, thresholds = THRESHOLDS) => ({ read_at: 1000, thresholds, devices });
 const sample = (receivedAt, metrics) => ({ received_at: receivedAt, fault_code: null, metrics });
 const temp = (value) => ({ name: "soc_temperature", value, unit: "celsius", source: "host_sampler" });
-const row = (fields) => ({ device_id: "device-a", host: null, previous_boot_received_at: null,
-  ...fields });
+// Off Central's reachable hub unless a case says otherwise: silence needs it (decision 0034).
+const OFF = { linked: false, changed_at: 800, hub: "reachable" };
+const row = (fields) => ({ device_id: "device-a", host: null, bus_link: OFF, ...fields });
 const view = (r, doc) => {
   const c = classifyHost(r, doc);
   return { state: c.state, severity: c.severity,
@@ -43,8 +44,11 @@ out.unitMismatch = view(row({ host: sample(996, [{ ...temp(95), unit: "fahrenhei
 out.silentHot = view(row({ host: sample(880, [temp(95)]) }), read([]));
 out.silentLimit = view(row({ host: sample(880, [temp(95)]) }),
   read([], { ...THRESHOLDS, host_silent_after_seconds: 150 }));
-out.silentPrevious = view(row({ previous_boot_received_at: 880 }), read([]));
-out.notYet = view(row({ previous_boot_received_at: 960 }), read([]));
+// On the hub, or with the hub's state unknown, an old receipt is how long the values have stood.
+out.oldOnHub = view(row({ host: sample(880, [temp(95)]), bus_link: { ...OFF, linked: true } }), read([]));
+out.oldHubUnknown = view(row({ host: sample(880, [temp(95)]), bus_link: { ...OFF, hub: "worker_stopped" } }),
+  read([]));
+out.oldNoLink = view(row({ host: sample(880, [temp(95)]), bus_link: undefined }), read([]));
 out.clockStep = view(row({ host: sample(1010, [temp(50)]) }), read([]));
 
 const snapshot = { inventory: { read_at: 1000, frames: [{ id: "lobby-left", player_id: "p-a",
@@ -108,8 +112,7 @@ out.a1 = {
   silentThrottled: both({ host: sample(880, [temp(95), ...flags(0x4)]) }),
   never: both({}),
   notRead: hostIncidents(snapshot, read([], N1)),
-  previousSilent: both({ previous_boot_received_at: 880 }),
-  previousRecent: both({ previous_boot_received_at: 990 }),
+  oldOnHub: both({ host: sample(880, [temp(95)]), bus_link: { ...OFF, linked: true } }),
   throttled: both({ host: sample(996, flags(0x4)) }),
   hot: both({ host: sample(996, [temp(82)]) }),
   warm: both({ host: sample(996, [temp(76)]) }),
@@ -165,7 +168,7 @@ def test_states_bands_and_wording():
     assert out["notRead"]["state"] == "not_read" and out["notRead"]["severity"] == "unknown"
     assert {text for _, _, text in out["notRead"]["items"]} == {unknown_not_read}
     assert out["never"]["state"] == "never"
-    assert out["never"]["items"][0][2] == "Unknown: no Host Management report from this boot or the one before"
+    assert out["never"]["items"][0][2] == "Unknown: no Host Management report on its line"
 
     assert out["hot"]["state"] == "reporting" and out["hot"]["severity"] == "alarm"
     assert out["hot"]["items"][:2] == [
@@ -194,25 +197,25 @@ def test_no_served_threshold_means_no_band_and_no_incident():
     assert out["noThresholds"]["items"][1][2] == "Host Management last reported 15 min ago · 95 °C"
 
 
-def test_silence_refusal_and_previous_boot():
+def test_silence_is_off_the_hub_with_an_old_receipt():
+    """Mutation probe: judge silence by the receipt's age alone -> `oldOnHub` reads silent, fails."""
     out = _run()
     silent = out["silentHot"]
     assert silent["state"] == "silent" and silent["severity"] == "alarm"
     # One cause only: silence. The last value reads "at last report", unbanded.
     assert silent["worst"] == ["alarm", "Host Management silent · last reported 2 min ago "
-                               "(Central's inference: no report for over 60 s, Central's limit)"]
+                               "(Central's inference: off Central's hub, no report for over 60 s, "
+                               "Central's limit)"]
     assert silent["items"][1] == ["soc_temperature", None,
                                   "Host Management last reported 2 min ago · 95 °C at last report"]
     # The served limit composes the wording and moves the judgement.
     assert out["silentLimit"]["state"] == "reporting"
-    previous = out["silentPrevious"]
-    assert previous["state"] == "silent"
-    assert previous["worst"][1].startswith(
-        "Host Management silent · the previous boot's Host Management last reported 2 min ago")
-    assert previous["items"][1][2] == "Unknown: no Host Management sample from this boot"
-    assert out["notYet"]["state"] == "not_yet_this_boot"
-    assert out["notYet"]["items"][1][2] == (
-        "Unknown: on this boot · the previous boot's Host Management last reported 40 s ago")
+    # The host puts its metrics only when a band changes: on the hub (or with the hub's state not
+    # known) an old receipt is how long the values have stood, judged and banded, never silence.
+    for case in ("oldOnHub", "oldHubUnknown", "oldNoLink"):
+        assert out[case]["state"] == "reporting", case
+        assert out[case]["items"][0] == ["host", None, "Host Management last reported 2 min ago"], case
+        assert out[case]["items"][1][1] == "alarm", case
     # A receipt in Central's future (a clock step) clamps at 0 and reports.
     assert out["clockStep"]["state"] == "reporting"
 
@@ -260,7 +263,8 @@ const { factText, receiptText } = await import(process.argv[2]);
 const FACTS = { first_received_at: 1000 - 3 * 86400, kernel_release: "6.6.51+rpt-rpi-v8",
   interface: "eth0", link_state: "up", address: "192.168.1.40", base_tag: "2026.10.01" };
 const LIMITED = { read_at: 1000, thresholds: { host_silent_after_seconds: 60, metrics: [] } };
-const row = (fields) => ({ device_id: "device-a", host: null, previous_boot_received_at: null,
+const row = (fields) => ({ device_id: "device-a", host: null,
+  bus_link: { linked: false, changed_at: 800, hub: "reachable" },
   boot: { base_tag: "2026.10.01" }, facts: FACTS, ...fields });
 const view = (r, doc = { read_at: 1000 }) => {
   const { receipt, items } = hostFactItems(r, doc);
@@ -350,7 +354,8 @@ const { factText } = await import(process.argv[2]);
 const THRESHOLDS = { host_silent_after_seconds: 60,
   metrics: [{ name: "soc_temperature", unit: "celsius", notice_at: 75, alarm_at: 80 }] };
 const temp = (value) => ({ name: "soc_temperature", value, unit: "celsius", source: "host_sampler" });
-const host = (id, receivedAt, value) => ({ device_id: id, previous_boot_received_at: null,
+const host = (id, receivedAt, value) => ({ device_id: id,
+  bus_link: { linked: false, changed_at: 50, hub: "reachable" },
   host: { received_at: receivedAt, fault_code: null, metrics: [temp(value)] } });
 const box = (id, standing) => ({ deviceId: id, name: `Player ${id}`, standing, frames: [] });
 const hosts = { failed: false, error: null, read: { read_at: 1000, thresholds: THRESHOLDS, devices: [
@@ -414,12 +419,10 @@ def test_each_host_incident_kind_comes_from_its_own_row_for_bound_players_only()
     # A host that died throttled: silence only, never a "now" incident from its last sample.
     assert out["silentThrottled"] == [silence]
     assert out["never"] == [["player:device-a:host", "unknown",
-                             f"{who}Unknown: no Host Management report from this boot or the one before"]]
+                             f"{who}Unknown: no Host Management report on its line"]]
     assert out["notRead"] == []
-    # The previous boot's receipt: silence when old, nothing when recent, never a threshold.
-    assert out["previousSilent"] == [["player:device-a:host", "alarm", f"{who}Host Management silent · "
-                                      "the previous boot's Host Management last reported 2 min ago"]]
-    assert out["previousRecent"] == []
+    # An old receipt on the hub: its values stand and are judged (here: hot), never silence.
+    assert out["oldOnHub"] == [["player:device-a:soc_temperature", "alarm", f"{who}95 °C · hot"]]
     assert out["throttled"] == [["player:device-a:throttling", "alarm", f"{who}throttled now"]]
     assert out["hot"] == [["player:device-a:soc_temperature", "alarm", f"{who}82 °C · hot"]]
     # Notices raise nothing: a warm temperature, a sticky "occurred" flag.
@@ -437,7 +440,7 @@ def test_the_status_chip_names_the_worst_item_else_the_receipt():
     assert out["silent"] == {"text": "pi-07 · Host Management silent 3 min", "severity": "alarm"}
     assert out["ok"] == {"text": "pi-07 · Host Management last reported 3 s ago", "severity": "ok"}
     assert out["warm"] == {"text": "pi-07 · 76 °C · warm", "severity": "notice"}
-    assert out["never"] == {"text": "pi-07 · Unknown: no Host Management report from this boot or the one before",
+    assert out["never"] == {"text": "pi-07 · Unknown: no Host Management report on its line",
                             "severity": "unknown"}
 
 
@@ -468,7 +471,8 @@ const stage = (name, state, fault = null, required = null, room = null) =>
   ({ stage: name, state, fault, required_bytes: required, room_bytes: room });
 const boot = (stages, units = [], more = 0) => ({ stages, failed_units: units, failed_units_more: more });
 const oom = (slice, value) => ({ name: `oom_kill:${slice}`, value, unit: "count", source: "host_core" });
-const row = (fields, metrics = [], receivedAt = 996) => ({ device_id: "device-a", previous_boot_received_at: null,
+const row = (fields, metrics = [], receivedAt = 996) => ({ device_id: "device-a",
+  bus_link: { linked: false, changed_at: 800, hub: "reachable" },
   host: { received_at: receivedAt, fault_code: null, metrics },
   ...fields });
 const withBoot = (report, metrics = [], receivedAt = 996) => row({ facts: { first_received_at: 940,

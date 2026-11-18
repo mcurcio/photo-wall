@@ -18,7 +18,7 @@ from uuid import UUID
 
 from appliance.central_session.http import NodeHTTP
 from appliance.central_session.session import REFUSED, NodeSession
-from appliance.host.bus import host_session
+from appliance.host.bus import HostLine, host_session
 from appliance.host.host import HostCore
 from appliance.host.host_linux import (
     WATCHDOG_BOOTSTATUS,
@@ -37,6 +37,8 @@ from appliance.node.recovery import RecoverySupervisor
 from appliance.node.recovery_linux import RecoveryObserver, RecoveryServer
 from contracts.node_commands import parse_reboot_request
 from contracts.node_host_facts import (
+    FACT_RULES,
+    HostFactsState,
     HostFactsV2,
     encode_host_facts,
     fact_values_document,
@@ -45,11 +47,13 @@ from contracts.node_host_facts import (
 from contracts.node_link import NODE_BUS_URL
 from contracts.node_observation import (
     HOST_OBSERVATION_INTERVAL_SECONDS,
+    HostMetricsState,
     HostObservationV2,
     encode_host_observation,
     valid_metrics,
 )
 from contracts.node_protocol import encode_node_message
+from contracts.node_state import HOST_METRICS_EVERY
 from contracts.strict_json import loads_object
 from nodeapi.node import NodeSession as BusSession
 
@@ -85,6 +89,11 @@ class HostRunner:
     # PID1's failed units as last read by this process: a failed read reuses
     # the last successful one; None until one succeeds, so "not read" never reads "none failed".
     _failed_units: tuple | None = None
+    # The host line (appliance/host/bus.py HostLine; decision 0034): every tick's metrics, and the
+    # facts read every HOST_METRICS_EVERY seconds on this process's monotonic clock (`_line_facts_at`),
+    # whether or not Central's HTTP session is up. None: no bus (tests of the HTTP path alone).
+    line: HostLine | None = None
+    _line_facts_at: float | None = None
 
     def __init__(self, store: BootStore, transport: NodeHTTP, *, serial: str,
                  offer_id: UUID, kernel_boot_id: UUID, monotonic=time.monotonic,
@@ -124,6 +133,7 @@ class HostRunner:
         metrics = (self.sampler.sample() + self.sampler.throttling() + self.sampler.supervision()
                    + self.sampler.memory_rows() + recovery_metrics)
         self.store.write("observation", {"sampled_boottime_ms": now, "metrics": metrics})
+        self._put_on_line(metrics, recovery_fault)
         if not self.establish_session():
             return
         # New authority is polled before backlog or telemetry HTTP. No network
@@ -146,6 +156,24 @@ class HostRunner:
         self.delivery.flush(self.journal, session_id=self.claim.session_id,
                             send=self._send_evidence, budget=2)
 
+    def _put_on_line(self, metrics, fault_code) -> None:
+        """This tick's metrics onto the host line (HostLine puts only what changed), and the facts
+        once per HOST_METRICS_EVERY."""
+        if self.line is None:
+            return
+        self.line.metrics(HostMetricsState(valid_metrics(metrics), fault_code))
+        if self._line_facts_at is None or self.monotonic() - self._line_facts_at >= HOST_METRICS_EVERY:
+            self._line_facts_at = self.monotonic()
+            values, boot = self._fact_values()
+            self.line.facts(HostFactsState(**{name: values.get(name) for name in FACT_RULES}, boot=boot))
+
+    def _fact_values(self) -> tuple[dict, object]:
+        """The facts read now (the sampler's, the boot's base tag, the reset cause) and the boot report."""
+        values = {**self.sampler.facts(),
+                  "base_tag": self.base_tag if valid_fact("base_tag", self.base_tag) else None,
+                  "reset_cause": reset_cause(self.watchdog_bootstatus)}
+        return values, read_boot_report(directory=self.boot_stage_directory, units=self._read_failed_units)
+
     def _send_facts(self, now_ms: int) -> None:
         """The facts sender's state machine, run once per observation post: facts are read here only, so
         a flapping link sends at most one document per interval. A new document (next journal
@@ -158,10 +186,7 @@ class HostRunner:
             if self.monotonic() - self._facts_off_at < self.FACTS_ROUTE_RETRY_SECONDS:
                 return
             self._facts_state = "pending"
-        values = {**self.sampler.facts(),
-                  "base_tag": self.base_tag if valid_fact("base_tag", self.base_tag) else None,
-                  "reset_cause": reset_cause(self.watchdog_bootstatus)}
-        boot = read_boot_report(directory=self.boot_stage_directory, units=self._read_failed_units)
+        values, boot = self._fact_values()
         # Compared as the whole JSON-ready document (`boot` included), the same comparison
         # Central makes; the candidate's sequence is spent only when something changed.
         candidate = HostFactsV2(self.core.producer, 1, now_ms, **values, boot=boot)
@@ -285,6 +310,7 @@ def main() -> None:
     server = RecoveryServer(recovery)
     reboots = BusReboots()
     bus = start_host_bus(value["base_tag"], reboot=reboots.ask)
+    runner.line = HostLine(bus.session.state.put)
     last_tick = 0.0
     try:
         while True:

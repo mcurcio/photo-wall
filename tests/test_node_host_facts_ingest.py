@@ -1,6 +1,6 @@
 """Host facts record (console DDD §64, G13, bead F1), Central side, on real PostgreSQL: every
-row of the facts ingest table, the route's 422s, and G12's
-`facts` (the current boot's host_core producer only) and `boot` (the current admission's offer
+row of the old path's facts ingest table and the route's 422s (until S4c removes them), and G12's
+`facts` (what the Pi's host line states, decision 0034) and `boot` (Central's newest offer's
 tag)."""
 import json
 from dataclasses import replace
@@ -9,15 +9,23 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from support.devices import seed_device
-from test_fleet_attempts import BASE_TAG, DEVICE_ID
+from test_fleet_attempts import BASE_TAG, DEVICE_ID, SERIAL
 from test_node_central import setup as node_setup
-from test_node_fleet_hosts import Host, _device, _rig
+from test_node_fleet_hosts import Host, _device, _rig, on_line
 from test_registry import ADMIN
 
 from central.app import create_app
 from central.fleet.node_observations import NodeObservations
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError
-from contracts.node_host_facts import BootReportV2, BootStageV2, HostFactsV2, encode_host_facts
+from contracts.node_host_facts import (
+    BootReportV2,
+    BootStageV2,
+    HostFactsState,
+    HostFactsV2,
+    encode_host_facts,
+    encode_host_facts_state,
+)
+from contracts.node_state import HOST_FACTS_KEY
 
 VALUES = {"kernel_release": "6.6.51+rpt-rpi-v8", "interface": "eth0", "link_state": "up",
           "address": "192.168.1.40", "base_tag": BASE_TAG, "wall_clock": "synchronised"}
@@ -86,7 +94,6 @@ DONE = BootReportV2(tuple(BootStageV2(stage.stage, "done", None, None, None)
 def test_unchanged_detection_compares_boot_and_reads_an_older_row_without_it(registry):
     boots, sessions = _rig(registry)
     host = Host(registry, sessions, boots)
-    observations = NodeObservations(sessions)
     producer = host.grant.producer
     start = registry.clock.utc()
     # An older node's document: no `boot` key, stored as it was posted.
@@ -103,13 +110,10 @@ def test_unchanged_detection_compares_boot_and_reads_an_older_row_without_it(reg
     registry.clock.advance(10)
     _send(host, _facts(producer, 4, boot=RUNNING))
     assert _row(registry)[0]["first_received_at"] == running_at
-    # A stage moves: a change, served by G12 as the stored plain document.
+    # A stage moves: a change.
     registry.clock.advance(10)
     _send(host, _facts(producer, 5, boot=DONE))
-    served = _device(observations.fleet_hosts())["facts"]
-    assert served["first_received_at"] == registry.clock.utc()
-    assert [stage["state"] for stage in served["boot"]["stages"]] == ["done", "done", "done"]
-    assert served["boot"]["failed_units"] == [] and served["boot"]["failed_units_more"] == 0
+    assert _row(registry)[0]["first_received_at"] == registry.clock.utc()
 
 
 def test_a_producer_not_the_sessions_is_refused(registry):
@@ -145,31 +149,26 @@ def test_the_route_records_and_answers_422_for_each_malformed_body(registry):
         assert client.post("/v2/node/host-facts", content=json.dumps(good).encode()).status_code == 401
 
 
-def test_g12_serves_only_the_current_boots_facts_and_its_base_tag(registry):
+def test_g12_serves_the_facts_the_host_line_states_and_the_offers_base_tag(registry):
+    """The facts, boot report included, as the Pi's host line states them; the old path's facts
+    are never served; a changed value replaces them."""
     boots, sessions = _rig(registry)
     observations = NodeObservations(sessions)
-    first = Host(registry, sessions, boots)
-    received = registry.clock.utc()
-    _send(first, _facts(first.grant.producer, 1))
+    host = Host(registry, sessions, boots)
+    _send(host, _facts(host.grant.producer, 1))
     served = _device(observations.fleet_hosts())
-    assert served["facts"] == {"first_received_at": received, **VALUES, "reset_cause": None, "boot": None}
-    assert served["boot"] == {"base_tag": BASE_TAG}
-    # A reboot: the new admission has a session but no facts. The old boot's facts are the
-    # newest facts Central holds for this box, yet they are never served.
-    registry.clock.advance(30)
-    second = Host(registry, sessions, boots)
-    served = _device(observations.fleet_hosts())
-    assert served["facts"] is None
-    # The superseded boot's post still stores (allow_historical) and answers as the
-    # observation path does; it is never served.
-    assert _send(first, _facts(first.grant.producer, 2, address="192.168.1.41"))["disposition"] == "historical"
-    assert _device(observations.fleet_hosts())["facts"] is None
-    assert served["boot"] == {"base_tag": BASE_TAG}
-    registry.clock.advance(5)
-    _send(second, _facts(second.grant.producer, 1, kernel_release=None, address=None))
-    served = _device(observations.fleet_hosts())
-    assert served["facts"] == {**VALUES, "first_received_at": registry.clock.utc(),
-                               "kernel_release": None, "address": None, "reset_cause": None, "boot": None}
+    assert served["facts"] is None and served["boot"] == {"base_tag": BASE_TAG}
+    on_line(registry, SERIAL, HOST_FACTS_KEY, encode_host_facts_state(HostFactsState(
+        **{**VALUES, "reset_cause": None}, boot=DONE)), 1)
+    served = _device(observations.fleet_hosts())["facts"]
+    assert {key: value for key, value in served.items() if key not in ("first_received_at", "boot")} == {
+        **VALUES, "reset_cause": None}
+    assert [stage["state"] for stage in served["boot"]["stages"]] == ["done", "done", "done"]
+    assert served["boot"]["failed_units"] == [] and served["boot"]["failed_units_more"] == 0
+    on_line(registry, SERIAL, HOST_FACTS_KEY, encode_host_facts_state(HostFactsState(
+        **{**VALUES, "address": None, "reset_cause": "watchdog"}, boot=None)), 2)
+    served = _device(observations.fleet_hosts())["facts"]
+    assert (served["address"], served["reset_cause"], served["boot"]) == (None, "watchdog", None)
 
 
 def test_g12_boot_is_null_without_an_admission_and_the_node_offers_base_tag_with_one(registry):

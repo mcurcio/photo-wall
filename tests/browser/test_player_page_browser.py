@@ -53,6 +53,7 @@ from test_node_boot import (
     publish_deployment,
     released,
 )
+from test_node_fleet_hosts import on_line
 from test_node_lifecycle import Rig
 from test_registry import enroll
 
@@ -64,7 +65,13 @@ from central.fleet.node_sessions import NodeControlConfig
 from contracts.node_boot import NodeBootRequestV2
 from contracts.node_display import DisplayExchange, encode_display_exchange
 from contracts.node_lifecycle import parse_stage_command
-from contracts.node_observation import HostMetricV2, HostObservationV2, encode_host_observation
+from contracts.node_observation import (
+    HostMetricsState,
+    HostMetricV2,
+    HostObservationV2,
+    encode_host_metrics_state,
+    encode_host_observation,
+)
 from contracts.node_preparation import ManagerPreparationV2, encode_manager_preparation
 from contracts.node_protocol import (
     AppProcessFact,
@@ -74,6 +81,7 @@ from contracts.node_protocol import (
     OutputKey,
     encode_node_message,
 )
+from contracts.node_state import HOST_METRICS_KEY
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -103,11 +111,15 @@ class Box:
         self.player_id = enroll(registry, count=1, device_id=DEVICE_ID)[0]["player_id"] if enrolled else None
 
     def host_sample(self):
+        """One Host Management sample: its post on the old path (the device read's sessions, until
+        S4c) and its put on its host line (the fleet host read, decision 0034)."""
         claim, grant = self.claims["host_core"]
         self.sequence += 1
-        sample = HostObservationV2(grant.producer, self.sequence, 1000 * self.sequence,
-                                   (HostMetricV2("uptime", self.sequence, "seconds"),))
+        metrics = (HostMetricV2("uptime", self.sequence, "seconds"),)
+        sample = HostObservationV2(grant.producer, self.sequence, 1000 * self.sequence, metrics)
         self.observations.record(grant.session_id, claim.credential, encode_host_observation(sample))
+        on_line(self.registry, SERIAL, HOST_METRICS_KEY, encode_host_metrics_state(HostMetricsState(metrics)),
+                self.sequence)
 
     def preparation(self):
         claim, grant = self.claims["app_manager"]
@@ -339,7 +351,8 @@ def test_health_follows_reboot_from_the_fleet_host_read_and_link_keeps_only_the_
         sections = pi.locator("section[aria-label]").evaluate_all("(all) => all.map((s) => s.ariaLabel)")
         assert sections == ["Reboot", "Health", "Light", "Link and sessions", "Danger zone"], sections
         health = page.get_by_role("region", name="Health", exact=True)
-        expect(health).to_contain_text("Host Management: Host Management last reported 2 s ago")
+        # Health's age is the database's clock less its host line's record (decision 0034).
+        expect(health).to_contain_text(re.compile(r"Host Management: Host Management last reported \d+ s ago"))
         health.get_by_role("button", name="Every reported metric", exact=True).click()
         expect(health.get_by_role("list", name="Every reported metric", exact=True)).to_contain_text(
             "uptime: 1 seconds (host sampler)")

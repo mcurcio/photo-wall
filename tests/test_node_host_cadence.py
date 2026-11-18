@@ -14,6 +14,7 @@ from appliance.host.host_runner import HostRunner
 from central.fleet.host_thresholds import HOST_SILENT_AFTER_SECONDS, thresholds_document
 from contracts.node_observation import HOST_OBSERVATION_INTERVAL_SECONDS, parse_host_observation
 from contracts.node_protocol import NodeProducerV2
+from contracts.node_state import HOST_METRICS_EVERY
 
 ROOT = Path(__file__).parents[1]
 
@@ -117,12 +118,12 @@ def test_the_runner_posts_at_session_start_then_once_per_interval_while_sampling
 
 
 def test_the_silence_limit_derives_from_the_one_constant():
-    interval = HOST_OBSERVATION_INTERVAL_SECONDS
+    interval = HOST_METRICS_EVERY
     assert HOST_SILENT_AFTER_SECONDS == 4 * interval == 60
     assert thresholds_document()["host_silent_after_seconds"] == HOST_SILENT_AFTER_SECONDS
     # Change the constant before anything derives from it: the limit moves with it.
-    probe = ("import json, contracts.node_observation as c\n"
-             "c.HOST_OBSERVATION_INTERVAL_SECONDS = 7\n"
+    probe = ("import json, contracts.node_state as c\n"
+             "c.HOST_METRICS_EVERY = 7\n"
              "from central.fleet.host_thresholds import thresholds_document\n"
              "print(json.dumps(thresholds_document()['host_silent_after_seconds']))\n")
     out = subprocess.run([sys.executable, "-c", probe], cwd=ROOT, capture_output=True, text=True,

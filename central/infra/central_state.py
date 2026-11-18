@@ -4,7 +4,7 @@ service the console's route for it calls, and none writes.
 
 | Key | Read |
 |---|---|
-| installation | the registry's inventory (GET /v1/installation), each bound Frame's Pi by its device's serial, and every enrolled Pi with the IPv4 address HostCore last reported (GET /v1/operator/node/hosts) |
+| installation | the registry's inventory (GET /v1/installation), each bound Frame's Pi by its device's serial, and every enrolled Pi with the IPv4 address its host line states (`facts`, central/fleet/node_observations.py `host_facts_in`) |
 | listening | the room-light setup's references of Home Assistant's source (House › Lights) |
 | room-lights | each room light in House › Lights order, its name, and the room-lights document's entry, at the document's change (the WALL writer's `RoomLightsDocuments.current`) |
 | releases | the Releases page's read (GET /v1/operator/releases), its newest RELEASES_LISTED deployable releases |
@@ -28,8 +28,7 @@ from central.content_catalog.ports import PlayerVersions
 from central.content_catalog.views import ReleasesView
 from central.db import Database
 from central.fleet.node_bus_hub import enrolled_devices_in
-from central.fleet.node_observations import NodeObservations, host_facts_of
-from central.fleet.node_sessions import NodeControlConfig, NodeSessions
+from central.fleet.node_observations import host_facts_in
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.infra.frame_lighting_store import PgFrameLighting
 from central.infra.home_assistant.references import SOURCE
@@ -66,14 +65,13 @@ class PgCentralStateReads:
         self._documents = documents
         self._releases = releases
         self._registry = Registry(db, clock, lighting=PgFrameLighting(LUT_RECIPE_ID))
-        self._hosts = NodeObservations(NodeSessions(db, clock, NodeControlConfig()))
 
     def installation(self) -> Installation:
         with self._db.read_snapshot() as conn:
             now = self._clock.utc()
             inventory = self._registry.inventory_in(conn, now)
             serials = {device_id: serial for serial, device_id in enrolled_devices_in(conn).items()}
-            facts = host_facts_of(self._hosts.fleet_hosts_in(conn, now))
+            facts = host_facts_in(conn)
         device_of = {player.id: player.device_id for player in inventory.players if player.retired_at is None}
         addresses = {device_id: each.get("address") for device_id, each in facts.items()}
 
