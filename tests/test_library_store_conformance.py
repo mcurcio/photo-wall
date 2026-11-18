@@ -48,7 +48,7 @@ from central.photo_library.model import (
     Unreachable,
     Waiting,
 )
-from central.photo_library.policy import CHECK_EVERY_SECONDS, STALE_CHECK_SECONDS
+from central.photo_library.policy import CHECK_EVERY_SECONDS
 from central.photo_library.ports import (
     CheckComplete,
     CheckFailed,
@@ -106,16 +106,20 @@ def step(*entries, marks=(), seen=0, up_to=None, page=0):
 
 
 class _RecordingQueue:
-    """PgPhotoLibrary's two queueing calls, recorded (Procrastinate is not under test here)."""
+    """PgPhotoLibrary's two queueing calls, recorded (Procrastinate is not under test here):
+    `due` holds the due time of the last check queued per connection or pool."""
 
     def __init__(self):
         self.pools: list[str] = []
+        self.due: dict[str, float] = {}
 
-    def enqueue_connection_check_in(self, conn, connection_ref):
+    def enqueue_connection_check_in(self, conn, connection_ref, *, due_at):
+        self.due[connection_ref] = due_at
         return QueueReceipt(coalesced=False)
 
-    def enqueue_pool_check_in(self, conn, pool_key):
+    def enqueue_pool_check_in(self, conn, pool_key, *, due_at):
         self.pools.append(pool_key)
+        self.due[pool_key] = due_at
         return QueueReceipt(coalesced=False)
 
 
@@ -145,7 +149,10 @@ class FakeHarness:
         self.store.pools[pool_key].wanted = False
 
     def request_check(self, pool_key: str) -> None:
-        self.store.pools[pool_key].requested = True
+        self.store.request_check(pool_key)
+
+    def next_due(self, ref: str) -> float | None:
+        return self.store.next_due.get(ref)
 
     def rows(self, pool_key: str) -> dict[str, str]:
         if pool_key not in self.store.pools:
@@ -227,6 +234,9 @@ class PgHarness:
     def queued(self, pool_key: str) -> int:
         return self.queue.pools.count(pool_key)
 
+    def next_due(self, ref: str) -> float | None:
+        return self.queue.due.get(ref)
+
     def _view(self, ref: str):
         return next(view for view in self.store.connections() if view.connection_ref == ref)
 
@@ -270,25 +280,24 @@ def clock(registry):
     return registry.clock
 
 
-# --- Contacts: the fence, health, binding, due_contacts ---------------------------------------
+# --- Contacts: the fence, health, binding, the next contact -----------------------------------
 
 
-def test_a_keyed_connection_is_due_until_contacted_then_again_after_the_check_period(
-        harness, clock):
+def test_a_keyed_connection_is_queued_at_once_and_each_contact_queues_the_next(harness, clock):
+    """No poll (S3a): a contact queues the connection's next check CHECK_EVERY_SECONDS after it
+    began. Mutation probe: queue the next check without its due time (at once)."""
     store = harness.store
     keyed, keyless = harness.connect(), harness.connect(key=None)
-    assert store.due_contacts() == (keyed,)
+    assert harness.next_due(keyed) == clock.utc() and harness.next_due(keyless) is None
     assert store.begin_contact(keyless) is None
     assert store.begin_contact("library-unknown00000") is None
+    assert harness.next_due(keyless) is None
     assert store.connection_secret(keyless) is None
     secret = store.connection_secret(keyed)
     assert (secret.base_url, secret.api_key.get_secret_value()) == (URL, KEY)
+    clock.advance(7)
     assert store.begin_contact(keyed) is not None
-    assert store.due_contacts() == ()
-    clock.advance(CHECK_EVERY_SECONDS - 1)
-    assert store.due_contacts() == ()
-    clock.advance(1)
-    assert store.due_contacts() == (keyed,)
+    assert harness.next_due(keyed) == clock.utc() + CHECK_EVERY_SECONDS
 
 
 def test_the_latest_started_contact_wins_and_an_older_answer_writes_nothing(harness, clock):
@@ -374,54 +383,66 @@ def test_a_listing_replaces_its_kind_and_a_failed_one_keeps_it(harness):
 # --- Checks: begin, steps, finish, due --------------------------------------------------------
 
 
-def test_a_wanted_pool_is_due_until_checked_and_a_lost_step_makes_it_due_again(harness, clock):
-    """S1's staleness rule. Mutation probe: never count a checking pool as due."""
+def test_a_wanted_pool_is_checked_at_once_and_each_check_queues_the_next(harness, clock):
+    """No poll (S3a): a new pool's first check and each next step at once; a step whose retries
+    ran out queues the next check at its due time, which resumes from the stored progress; a
+    finished check queues the next at its due time. Mutation probe: queue the next check only
+    when a check completes (a failed step leaves none)."""
     store = harness.store
     ref = harness.connect()
     key = harness.want(SourceQuery(connection_ref=ref))
-    assert store.due_pools() == (key,)
+    assert harness.next_due(key) == clock.utc()
     lease = store.begin_check(key)
     assert lease.check_number == 1 and lease.progress is None
     assert lease.zone == HOUSE_ZONE                  # relative dates count on the house calendar
-    assert store.due_pools() == ()
+    clock.advance(5)
     assert store.record_step(lease, step(page=1))
-    clock.advance(STALE_CHECK_SECONDS - 1)
-    assert store.due_pools() == ()
-    clock.advance(1)
-    assert store.due_pools() == (key,)          # the worker that took the step is gone
+    assert harness.next_due(key) == clock.utc()
+    clock.advance(5)
+    store.check_step_failed(key)                     # the next step raised until its retries ran out
+    assert harness.next_due(key) == clock.utc() + CHECK_EVERY_SECONDS
     resumed = store.begin_check(key)
     assert (resumed.check_number, resumed.progress) == (1, {"page": 1})
-    assert store.due_pools() == ()
+    clock.advance(5)
     assert store.finish_check(resumed, CheckComplete())
-    assert store.due_pools() == ()
-    clock.advance(CHECK_EVERY_SECONDS)
-    assert store.due_pools() == (key,)
+    assert harness.next_due(key) == clock.utc() + CHECK_EVERY_SECONDS
     assert store.begin_check(key).check_number == 2
 
 
-def test_check_now_makes_a_finished_pool_due_at_once(harness):
+def test_check_now_queues_a_check_at_once_even_while_one_runs(harness, clock):
+    """Mutation probe: finish a check at its due time although a Check now came while it ran."""
     store = harness.store
     key = harness.want(SourceQuery(connection_ref=harness.connect()))
     store.finish_check(store.begin_check(key), CheckComplete())
-    assert store.due_pools() == ()
+    assert harness.next_due(key) == clock.utc() + CHECK_EVERY_SECONDS
+    clock.advance(10)
     harness.request_check(key)
-    assert store.due_pools() == (key,)
+    assert harness.next_due(key) == clock.utc()
+    lease = store.begin_check(key)
+    harness.request_check(key)
+    clock.advance(10)
+    store.finish_check(lease, CheckComplete())
+    assert harness.next_due(key) == clock.utc()
 
 
-def test_an_unwanted_pool_is_never_checked(harness):
+def test_an_unwanted_pool_is_never_checked_but_its_checks_go_on_while_it_stands(harness, clock):
     store = harness.store
     unwanted = harness.want(SourceQuery(connection_ref=harness.connect()))
     harness.unwant(unwanted)
-    assert store.due_pools() == () and store.begin_check(unwanted) is None
+    clock.advance(10)
+    assert store.begin_check(unwanted) is None
+    assert harness.next_due(unwanted) == clock.utc() + CHECK_EVERY_SECONDS
 
 
-def test_a_pool_of_a_connection_with_no_key_is_never_due(harness):
-    """A cut-over connection (C12) waits for its key: its pools are not queued for a check
-    begin_check would refuse."""
+def test_a_pool_of_a_connection_with_no_key_waits_for_its_key(harness, clock):
+    """A cut-over connection (C12) waits for its key: begin_check refuses, and the pool's next
+    check is queued at its due time, so it is checked once the key is pasted."""
     store = harness.store
     keyless = harness.want(SourceQuery(connection_ref=harness.connect(key=None)))
     assert store.begin_check(keyless) is None
-    assert keyless not in store.due_pools()
+    assert harness.next_due(keyless) == clock.utc() + CHECK_EVERY_SECONDS
+    store.check_step_failed("0" * 64)                # a pool that is gone: nothing queued
+    assert harness.next_due("0" * 64) is None
 
 
 def test_a_superseded_lease_writes_nothing(harness):
@@ -583,8 +604,9 @@ def test_maintenance_retires_unwanted_pools_and_keeps_wanted_ones(harness):
     assert harness.rows(gone) == {} and harness.rows(kept) == {uid(1): "in_pool"}
     assert unwanted.asset_id not in recorded and recorded <= {wanted.asset_id}
     assert store.pool_thumbnail(wanted.asset_id) is not None
-    assert store.due_pools() == ()
+    due = harness.next_due(gone)
     assert store.begin_check(gone) is None
+    assert harness.next_due(gone) == due             # a pool that is gone queues nothing
 
 
 # --- One record per Immich asset, its revisions and copies as children (slice A2) -------------

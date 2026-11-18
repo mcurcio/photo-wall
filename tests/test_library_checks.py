@@ -28,7 +28,7 @@ from central.photo_library.model import (
     TakenLast,
     Unreachable,
 )
-from central.photo_library.policy import STALE_CHECK_SECONDS
+from central.photo_library.policy import CHECK_EVERY_SECONDS
 from central.photo_library.ports import CheckComplete, CheckFailed
 from contracts.time import ManualClock
 from media.library_checks import LibraryChecks
@@ -252,43 +252,25 @@ def test_an_edited_photo_gets_its_fingerprint_in_its_revision():
     assert store.rows(key)[ref(1)].asset.revision == SHA + "-" + "f" * 16
 
 
-class RecordingQueue:
-    def __init__(self):
-        self.queued = []
-
-    async def connection(self, ref):
-        self.queued.append(("connection", ref))
-
-    async def pool(self, key):
-        self.queued.append(("pool", key))
-
-
-def _pools_queued_by_tick(checks):
-    checks.queue = RecordingQueue()
-    asyncio.run(checks.tick())
-    return [key for kind, key in checks.queue.queued if kind == "pool"]
-
-
-def test_a_check_whose_step_was_lost_resumes_after_the_stale_window_and_removes_only_on_re_check():
-    """S1: the staleness rule (policy.STALE_CHECK_SECONDS) over the fake store."""
+def test_a_check_whose_step_failed_resumes_at_its_due_time_and_removes_only_on_re_check():
+    """S3a: a step that raised until its retries ran out queues the pool's next check at its due
+    time (`check_step_failed`), which resumes from the stored progress."""
     client = FakeClient([photo(n) for n in range(1, 6)])
     store, key, checks, _ = setup(client)
     asyncio.run(check_to_end(checks, store, key))
     del client.photos[0]                               # ref(1) is gone from Immich
-    store.pools[key].requested = True                  # Check now
-    for _ in range(2):                                 # two steps, then the worker dies
+    store.request_check(key)                           # Check now
+    for _ in range(2):                                 # two steps, then a step fails for good
         asyncio.run(checks.check_pool(key))
     progress = store.pools[key].progress
     assert store.pools[key].checking and progress is not None
-    store.clock.advance(STALE_CHECK_SECONDS - 1)
-    assert _pools_queued_by_tick(checks) == []
-    store.clock.advance(1)
-    assert _pools_queued_by_tick(checks) == [key]
+    asyncio.run(checks.check_step_failed(key))
+    assert store.next_due[key] == store.clock.utc() + CHECK_EVERY_SECONDS
+    store.clock.advance(CHECK_EVERY_SECONDS)
     number = store.pools[key].check_number
     client.calls.clear()
     asyncio.run(checks.check_pool(key))                # resumed from its progress
     assert store.pools[key].check_number == number and "up_to" not in client.calls
-    assert _pools_queued_by_tick(checks) == []         # its step began again just now
     assert ref(1) in in_pool(store, key)
     removed = False
     while store.pools[key].checking:                   # nothing removed before its re-check
@@ -362,15 +344,15 @@ def test_a_new_key_gets_a_new_client():
     assert client.closed   # the old key's client is closed
 
 
-def test_tick_queues_due_contacts_and_due_pools():
+def test_a_contact_queues_the_connections_next_check_even_when_it_raises():
+    """S3a: the next contact is queued where a contact begins, so one that raises still has it."""
     client = FakeClient()
-    store, key, checks, _ = setup(client)
-    checks.queue = RecordingQueue()
-    asyncio.run(checks.tick())
-    assert checks.queue.queued == [("connection", "main"), ("pool", key)]
+    store, _, checks, _ = setup(client)
 
+    async def broken():
+        raise RuntimeError("immich vanished")
 
-def test_tick_without_a_queue_refuses():
-    _, _, checks, _ = setup(FakeClient())
+    client.contact = broken
     with pytest.raises(RuntimeError):
-        asyncio.run(checks.tick())
+        asyncio.run(checks.contact("main"))
+    assert store.next_due["main"] == store.clock.utc() + CHECK_EVERY_SECONDS

@@ -56,7 +56,7 @@ def library(registry):
 class _Queue:
     """The store's queue when the test adds a connection directly: the checks are not run."""
 
-    def enqueue_connection_check_in(self, conn, connection_ref):
+    def enqueue_connection_check_in(self, conn, connection_ref, *, due_at):
         return None
 
 

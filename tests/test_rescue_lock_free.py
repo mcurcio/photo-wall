@@ -22,7 +22,7 @@ from central.infra.job_queue import (
     job_kwargs,
     task_name,
 )
-from central.infra.queue_ops import QueueAdmin, RescueStalledJobsHandler
+from central.infra.queue_ops import QueueRescue, RescueStalledJobsHandler
 from central.infra.transactions import PgTransactions, pg_connection
 from central.kernel.job_types import (
     CATALOG,
@@ -86,10 +86,10 @@ class Queue:
 
 
 def run_rescue(queue, row):
-    """Run the fetched rescue row through the production handler and a real `QueueAdmin`."""
+    """Run the fetched rescue row through the production handler and a real `QueueRescue`."""
     job, attempt = decode(row["task_name"], row["args"])
     assert (job, attempt) == (RescueStalledJobs(), 0)
-    admin = QueueAdmin(queue.dsn)
+    admin = QueueRescue(queue.dsn)
 
     async def scenario():
         try:

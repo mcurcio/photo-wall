@@ -86,10 +86,10 @@ def _tool(name: str) -> str:
 class _Queue:
     """The store's two queueing calls: this test runs each step itself, as the queue would."""
 
-    def enqueue_connection_check_in(self, conn, connection_ref):
+    def enqueue_connection_check_in(self, conn, connection_ref, *, due_at):
         return QueueReceipt(coalesced=False)
 
-    def enqueue_pool_check_in(self, conn, pool_key):
+    def enqueue_pool_check_in(self, conn, pool_key, *, due_at):
         return QueueReceipt(coalesced=False)
 
 

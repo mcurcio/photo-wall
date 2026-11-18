@@ -1,8 +1,11 @@
-"""The one worker kind: one procrastinate App, one Worker loop per queue (design §10.3).
+"""The one worker kind: one procrastinate App, ONE Worker over every queue (design §10.3,
+decision 0034 S3a).
 
-A `Worker`'s concurrency spans all of its queues (procrastinate worker.py:34-51), so each queue
-gets its own loop with its own concurrency. Every boot check runs in `__init__`, so a wiring
-mistake fails at worker start, before any job is claimed.
+One worker row beats for the whole runtime (it was one per queue). A `Worker`'s concurrency spans
+all of its queues (procrastinate worker.py:34-51), so the queues share one `concurrency`: a burst
+on one queue can take every slot. Each job type's `lock`/`queueing_lock` still bounds its own
+parallelism. Every boot check runs in `__init__`, so a wiring mistake fails at worker start,
+before any job is claimed.
 
 procrastinate never retries in place (`retry=None`; the runtime retries by re-publishing). A
 delivery whose outcome is `transient` or `terminal` raises `RecordedFailure` so procrastinate
@@ -29,7 +32,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any, Final, Protocol
 
@@ -48,7 +51,7 @@ from central.infra.outcomes import JobOutcomes
 from central.infra.transactions import PgTransactions
 from central.kernel.handling import Handler
 from central.kernel.job_types import CATALOG
-from central.kernel.jobs import Job, QueueName
+from central.kernel.jobs import Job
 from central.kernel.ports import AssetRecords
 from contracts.time import Clock
 
@@ -136,21 +139,24 @@ class JobRuntime:
     """Runs every handler for every queue of its catalog in this process.
 
     `owned` are resources the handlers use (the queue-ops pool); `run()` closes them on exit.
+    `on_start` run once the app is open and before the worker claims a job (the rescue at a
+    worker's start); each must not raise.
     """
 
-    def __init__(self, dsn: str, handlers: Sequence[Handler[Any, Any]],
-                 concurrency: Mapping[QueueName, int], *, transactions: PgTransactions,
-                 assets: AssetRecords, clock: Clock,
+    def __init__(self, dsn: str, handlers: Sequence[Handler[Any, Any]], concurrency: int, *,
+                 transactions: PgTransactions, assets: AssetRecords, clock: Clock,
                  catalog: Sequence[type[Job[Any]]] = CATALOG,
-                 owned: Sequence[AsyncCloseable] = ()) -> None:
+                 owned: Sequence[AsyncCloseable] = (),
+                 on_start: Sequence[Callable[[], Awaitable[None]]] = ()) -> None:
+        """One Procrastinate worker over every queue of `catalog`, `concurrency` jobs at once."""
         self._executor = JobExecutor(handlers, transactions=transactions, outcomes=JobOutcomes(),
                                      assets=assets, clock=clock, redeliver=self._redeliver,
                                      catalog=catalog)
-        if set(concurrency) != self._executor.queues:
-            raise ValueError("concurrency must name exactly the catalog's queues")
-        if any(type(n) is not int or n < 1 for n in concurrency.values()):
-            raise ValueError("concurrency must be at least 1 per queue")
-        self._concurrency = dict(concurrency)
+        if type(concurrency) is not int or concurrency < 1:
+            raise ValueError("concurrency must be at least 1")
+        self._concurrency = concurrency
+        self._queues = sorted(queue.value for queue in self._executor.queues)
+        self._on_start = tuple(on_start)
         self._app = build_app(async_connector(dsn, application_name="photo-wall-jobs"), catalog,
                               self._body)
         # The worker reads `app.job_manager` at every call (procrastinate worker.py), so the
@@ -172,16 +178,17 @@ class JobRuntime:
             # other loop failed at boot) would skip the close and leave the pool reconnecting
             # forever, so the process could never exit.
             await self._app.open_async()
+            for start in self._on_start:
+                await start()
             async with asyncio.TaskGroup() as group:
                 self._loops = [
                     group.create_task(until_stopped(self._app.run_worker_async(
-                        queues=[queue.value], concurrency=count,
-                        name=f"photo-wall-{queue.value}",
+                        queues=self._queues, concurrency=self._concurrency,
+                        name="photo-wall-jobs",
                         install_signal_handlers=False,
                         update_heartbeat_interval=HEARTBEAT_SECONDS,
                         stalled_worker_timeout=STALLED_WORKER_SECONDS,
-                    ), lambda: self._stopping), name=f"worker {queue.value}")
-                    for queue, count in sorted(self._concurrency.items())
+                    ), lambda: self._stopping), name="worker jobs")
                 ]
                 if self._stopping:  # stop() raced the start
                     self._cancel_loops()

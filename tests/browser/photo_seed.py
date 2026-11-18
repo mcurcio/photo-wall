@@ -47,11 +47,11 @@ class NoQueue:
     def __init__(self):
         self.connections, self.pools = [], []
 
-    def enqueue_connection_check_in(self, conn, connection_ref):
+    def enqueue_connection_check_in(self, conn, connection_ref, *, due_at):
         self.connections.append(connection_ref)
         return QueueReceipt(coalesced=False)
 
-    def enqueue_pool_check_in(self, conn, pool_key):
+    def enqueue_pool_check_in(self, conn, pool_key, *, due_at):
         self.pools.append(pool_key)
         return QueueReceipt(coalesced=False)
 

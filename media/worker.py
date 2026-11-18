@@ -54,11 +54,7 @@ from media.media_maker import MediaMaker, PreparationClient
 from media.models import MediaError
 from media.prepare import PreparationLimits, Preparer
 from media.subject_map import SubjectMap, subject_map_from
-from media.task_queue import (
-    ProcrastinateCheckQueue,
-    RetryableMediaTask,
-    create_worker_app,
-)
+from media.task_queue import RetryableMediaTask, create_worker_app
 
 logger = logging.getLogger("photo_wall.worker")
 
@@ -363,8 +359,7 @@ async def _entry():
     await _blocking(ProcrastinateMediaQueue.apply_schema, dsn)
     app = create_worker_app(dsn)
     checks = LibraryChecks(
-        library, lambda secret: ImmichClient.for_connection(secret, clock=clock), clock,
-        queue=ProcrastinateCheckQueue(app))
+        library, lambda secret: ImmichClient.for_connection(secret, clock=clock), clock)
     additional_context = {"media_worker": worker, "library_checks": checks}
     media = _media_loop(worker, lambda: _media_queue(app, additional_context))
     try:

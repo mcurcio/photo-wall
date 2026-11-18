@@ -20,7 +20,7 @@ PoolName = Literal[
     "photo-wall-worker",           # media/worker.py build_repository: the worker's own pool
     "photo-wall-jobs",             # central/infra/runtime.py JobRuntime
     "photo-wall-media-jobs",       # media/task_queue.py create_worker_app
-    "photo-wall-queue-ops",        # central/infra/queue_ops.py QueueAdmin
+    "photo-wall-queue-ops",        # central/infra/queue_ops.py QueueRescue
     "photo-wall-publisher",        # central/infra/publisher.py
     "photo-wall-media-defer",      # central/media_queue.py ProcrastinateMediaQueue
     "photo-wall-schema",           # central/media_queue.py: the schema-install lock connection

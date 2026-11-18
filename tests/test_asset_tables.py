@@ -31,10 +31,10 @@ from central.photo_library.views import ConnectionWrite
 
 
 class _Queue:
-    def enqueue_connection_check_in(self, conn, connection_ref):
+    def enqueue_connection_check_in(self, conn, connection_ref, *, due_at):
         return QueueReceipt(coalesced=False)
 
-    def enqueue_pool_check_in(self, conn, pool_key):
+    def enqueue_pool_check_in(self, conn, pool_key, *, due_at):
         return QueueReceipt(coalesced=False)
 
 

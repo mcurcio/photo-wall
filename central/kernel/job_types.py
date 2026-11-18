@@ -69,8 +69,13 @@ class MaintainCache(Job[None], name="assets.maintain_cache",
     """Remove cached release files nothing wants (`central/assets/maintenance.py`)."""
 
 
+# The one rescue's cadence (central/infra/queue_ops.py `QueueRescue`, both apps' tasks; it also
+# runs when a worker starts): a dead worker's jobs wait at most about this long.
+RESCUE_EVERY: Final = timedelta(minutes=5)
+
+
 class RescueStalledJobs(Job[None], name="queue.rescue_stalled",
-                        delivery=Delivery(queue=QueueName.UPKEEP, every=timedelta(minutes=1))):
+                        delivery=Delivery(queue=QueueName.UPKEEP, every=RESCUE_EVERY)):
     pass
 
 

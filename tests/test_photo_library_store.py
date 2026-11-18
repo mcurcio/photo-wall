@@ -29,6 +29,7 @@ from central.photo_library.model import (
     SourceQuery,
     TakenBetween,
 )
+from central.photo_library.policy import CHECK_EVERY_SECONDS
 from central.photo_library.views import ConnectionWrite
 
 ANNA = ImmichUser(user_ref=str(UUID(int=1)), name="Anna", email="anna@example.test")
@@ -41,16 +42,20 @@ class RecordingLibraryQueue:
 
     def __init__(self):
         self.connections, self.pools, self.fail = [], [], False
+        self.connection_due: list[tuple[str, float]] = []
+        self.pool_due: list[tuple[str, float]] = []
 
-    def enqueue_connection_check_in(self, conn, connection_ref):
+    def enqueue_connection_check_in(self, conn, connection_ref, *, due_at):
         coalesced = connection_ref in self.connections
         self.connections.append(connection_ref)
+        self.connection_due.append((connection_ref, due_at))
         return QueueReceipt(coalesced=coalesced)
 
-    def enqueue_pool_check_in(self, conn, pool_key):
+    def enqueue_pool_check_in(self, conn, pool_key, *, due_at):
         if self.fail:
             raise RuntimeError("queue down")
         self.pools.append(pool_key)
+        self.pool_due.append((pool_key, due_at))
         return QueueReceipt(coalesced=False)
 
 
@@ -75,13 +80,6 @@ def store(registry):
     ref = library.add_connection(ConnectionWrite(name="Home", url="http://immich.invalid:2283",
                                                  key="PUBLIC-FIXTURE-KEY-1234"), by="console")
     return library, ref
-
-
-def _set_contact_age(db, ref, seconds):
-    with db.transaction() as conn:
-        conn.execute("UPDATE library_connections SET contact_started_at="
-                     "EXTRACT(EPOCH FROM clock_timestamp())-%s WHERE connection_ref=%s",
-                     (seconds, ref))
 
 
 # -- contacts: newest wins, the user binds once, health over time --------------------------------
@@ -137,19 +135,26 @@ def test_needs_a_look_keeps_its_since_then_clears(store):
     assert health_of(library, ref).health.state == "ok"
 
 
-def test_due_contacts_use_the_database_clock_and_skip_keyless_rows(store, registry):
-    """Case 9."""
+def test_a_contact_queues_the_next_one_by_the_database_clock_and_a_keyless_row_none(store,
+                                                                                    registry):
+    """Case 9, without a poll (S3a): a contact queues the connection's next check for
+    CHECK_EVERY_SECONDS after it began, by the database clock; a keyless row is never contacted
+    and queues nothing."""
     library, ref = store
     with registry.db.transaction() as conn:
         conn.execute("INSERT INTO library_connections(connection_ref,name,created_at,created_by,"
                      "changed_at,changed_by) VALUES('family-library','family-library',0,'console',"
                      "0,'console')")
-    assert library.due_contacts() == (ref,)                  # never contacted
-    _set_contact_age(registry.db, ref, 899)
-    assert library.due_contacts() == ()
-    _set_contact_age(registry.db, ref, 900)
-    assert library.due_contacts() == (ref,)
+    queue = library.queue
+    assert queue.connection_due[-1][0] == ref                # the new connection, at once
+    library.begin_contact(ref)
+    with registry.db.transaction() as conn:
+        started = conn.execute("SELECT contact_started_at FROM library_connections WHERE "
+                               "connection_ref=%s", (ref,)).fetchone()["contact_started_at"]
+    assert queue.connection_due[-1] == (ref, started + CHECK_EVERY_SECONDS)
+    queued = len(queue.connection_due)
     assert library.begin_contact("family-library") is None
+    assert len(queue.connection_due) == queued
     assert library.connection_secret("family-library") is None
 
 

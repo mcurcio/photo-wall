@@ -43,9 +43,6 @@ OLDEST_VERSION: Final = ImmichVersion(major=3, minor=1, patch=0)
 TESTED_RELEASE: Final[tuple[int, int]] = (3, 1)
 # #12 "Look for new photos every": each connection check and each Source's check (C2).
 CHECK_EVERY_SECONDS: Final = 900
-# A running check whose latest step began this long ago (database time) is due again, so a step
-# lost with its worker never leaves a pool checking. Varies independently of CHECK_EVERY_SECONDS.
-STALE_CHECK_SECONDS: Final = 900
 # C8: an unsaved draft and its pool, when nothing else uses that pool, go after a day.
 DRAFT_KEEP_SECONDS: Final = 86400
 # The original types Immich v2.5.6 calls web-supported (server/src/utils/mime-types.ts): for these
@@ -66,6 +63,13 @@ POOL_PAGE_SIZE: Final = 60
 # A stored connection URL's longest form (ConnectionSecret.base_url).
 _MAX_URL_LENGTH: Final = 2048
 _UNSAFE_URL_TEXT = re.compile(r"[\s\x00-\x1f\x7f]")
+
+
+def next_check_due(last_checked_at: float | None, now: float) -> float:
+    """When a connection's or pool's next check is due: `now` if never checked, else
+    `last_checked_at + CHECK_EVERY_SECONDS` (decision 0034, S3a). Each check defers its next one
+    for this time (the queue's `scheduled_at`); no poll looks for due checks."""
+    return now if last_checked_at is None else last_checked_at + CHECK_EVERY_SECONDS
 
 
 def normalise_url(text: str) -> str:

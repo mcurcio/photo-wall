@@ -23,9 +23,8 @@ from central.content_wiring import (
     build_job_runtime,
 )
 from central.infra.outcome_feed import OutcomeFeed
-from central.infra.queue_ops import QueueAdmin
+from central.infra.queue_ops import QueueRescue
 from central.infra.runtime import JobRuntime
-from central.kernel.jobs import QueueName
 from contracts.time import ManualClock
 
 DSN = "postgresql://unused.invalid/none"
@@ -58,19 +57,20 @@ class StubDatabase:
 
 def test_build_job_runtime_passes_every_boot_check(tmp_path):
     # JobRuntime.__init__ raises unless every CATALOG type has exactly one handler and the
-    # concurrency map names exactly the catalog's queues.
+    # concurrency is a positive whole number.
     runtime = build_job_runtime(StubDatabase(), ManualClock(0.0), cache_root=tmp_path, env=ENV,
                                 thumbnails=NoLibrary(), media_maker=PrepareMediaStub())
     assert isinstance(runtime, JobRuntime)
-    assert dict(WORKER_CONCURRENCY) == {QueueName.FETCH: 2, QueueName.UPKEEP: 2,
-                                        QueueName.TRANSCODE: 2}
+    assert WORKER_CONCURRENCY == 6   # one worker over every queue: today's 2 per queue, summed
 
 
 def test_the_job_runtime_owns_and_closes_its_queue_ops_pool(tmp_path):
     # No caller-held pool: `run()` closes it when the runtime ends (JobRuntime tests prove when).
     runtime = build_job_runtime(StubDatabase(), ManualClock(0.0), cache_root=tmp_path, env=ENV,
                                 thumbnails=NoLibrary(), media_maker=PrepareMediaStub())
-    assert [type(owned) for owned in runtime._owned] == [QueueAdmin]
+    assert [type(owned) for owned in runtime._owned] == [QueueRescue]
+    (start,) = runtime._on_start                       # the rescue at the worker's start
+    assert start.__self__ is runtime._owned[0] and start.__name__ == "rescue_at_start"
 
 
 def test_build_content_services_owns_one_feed_and_binds_no_handler(tmp_path):

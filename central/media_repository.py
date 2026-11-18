@@ -241,6 +241,8 @@ class MediaRepository:
         # Roadmap 5a (slice M1): key content, hydrated onto every candidate and requested by the
         # scheduler (`request_measurements`).
         self.key_content = PgKeyContent(db, times=times, queue=queue)
+        # A revision wanted again gets its pool back, and its pool's first check, here (S3a).
+        self._library = PgPhotoLibrary(db, times=times, queue=queue)
 
     @contextmanager
     def transaction(self):
@@ -269,10 +271,12 @@ class MediaRepository:
 
     def reconcile_source_activity_in(self, conn, runtime_refs: set[str]) -> None:
         """Mark which Source revisions are wanted: a name's current revision, or one current
-        execution needs (`refresh_active`). The photo library's `due_pools` and
-        `retire_unwanted` read it; a dormant revision keeps its immutable query and its
-        acquired assets for history and existing content locks. The caller holds Runtime's lock
-        before taking MEDIA_LOCK here."""
+        execution needs (`refresh_active`). The photo library's checks and `retire_unwanted`
+        read it; a dormant revision keeps its immutable query and its acquired assets for history
+        and existing content locks. A wanted revision with no pool (its pool forgotten while
+        dormant, or a pre-4 row) gets its pool here, and a new pool queues its first check
+        (`PgPhotoLibrary.assign_pools_in`; without a queue that refuses media_queue_unconfigured).
+        The caller holds Runtime's lock before taking MEDIA_LOCK here."""
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
         heads = {row["source_ref"] for row in conn.execute(
             "SELECT source_ref FROM media_sources WHERE head AND NOT deleted").fetchall()}
@@ -280,6 +284,7 @@ class MediaRepository:
         conn.execute("UPDATE media_sources SET refresh_active=(source_ref=ANY(%s)) "
                      "WHERE draft IS NULL AND refresh_active<>(source_ref=ANY(%s))",
                      (needed, needed))
+        self._library.assign_pools_in(conn)
 
     def variant_names_in(self, conn, asset_ids, *, record: bool = False,
                          sized: Mapping[str, tuple[str, tuple[int, int] | None]] | None = None

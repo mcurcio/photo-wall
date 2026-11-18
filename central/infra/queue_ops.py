@@ -1,8 +1,14 @@
 """Queue hygiene: rescue the jobs of dead workers, purge what has finished (design §4, §10.3).
 
-The rescue touches only OUR tasks (`TASK_PREFIX` + a type this admin was built with): legacy
-`photo_wall.media.*` rows and procrastinate's builtins are never rescued. The purge
-(`FinishedJobs`) takes every queue's finished jobs, legacy ones included (decision 0033).
+**One rescue** (decision 0034, S3a): `QueueRescue` covers both apps' tasks, the job runtime's
+typed jobs (a type it was built with, re-published at the SAME attempt) and the media app's
+tasks on `MEDIA_QUEUE` (copied as they stand: task, arguments, lock and queueing lock, from
+attempt 0; a periodic one is only closed, its schedule defers the next run). Procrastinate's
+builtins are never rescued. A worker is dead when it has not beaten for
+`STALLED_WORKER_SECONDS`, the one rule `worker_running_in` reads too. The rescue runs when a
+worker starts and every `RESCUE_EVERY` (`queue.rescue_stalled`), so a dead worker's jobs wait at
+most about five minutes (it was 30 seconds while the media app kept a rescue of its own). The
+purge (`FinishedJobs`) takes every queue's finished jobs (decision 0033).
 
 **Rescue re-publishes first, then closes** the stalled row. The pending (queueing-lock) index
 covers only `todo`, so the new copy inserts while the stalled row is still `doing`. An asset
@@ -24,31 +30,41 @@ from datetime import timedelta
 from typing import Any, Final
 
 import procrastinate
+from procrastinate.jobs import Job as QueueRow
 from procrastinate.jobs import Status
 
 from central.infra.batched_retention import Begin, drain
 from central.infra.job_queue import async_connector, build_app, decode, defer_async, task_name
 from central.infra.outcomes import JobOutcomes
+from central.infra.runtime import STALLED_WORKER_SECONDS
 from central.kernel.handling import TransientFailure
 from central.kernel.job_types import CATALOG, PurgeFinishedJobs, RescueStalledJobs
 from central.kernel.jobs import Job
 from central.kernel.transactions import Transactions
+from central.media_queue import MEDIA_QUEUE
 from contracts.time import Clock
 
 logger = logging.getLogger(__name__)
 
 RESCUE_INCOMPLETE: Final = "rescue_incomplete"
+# A periodic task's row carries the time it was deferred for (procrastinate's periodic deferrer).
+_PERIODIC_KWARG: Final = "timestamp"
 
 
 @dataclass(frozen=True, slots=True)
 class StalledJob:
+    """A `doing` row of a dead worker: a typed `job` at its `attempt`, or (`job` None) a media
+    app's task, re-published from its `row` as it stands."""
+
     id: int
-    job: Job[Any]
+    job: Job[Any] | None
     attempt: int
+    row: QueueRow | None = None
 
 
-class QueueAdmin:
-    """procrastinate's queue-maintenance calls, limited to our tasks.
+class QueueRescue:
+    """The one rescue of dead workers' jobs (module docstring), over procrastinate's own
+    queue-maintenance calls.
 
     Its async pool opens on first use; `aclose()` releases it.
     """
@@ -59,6 +75,36 @@ class QueueAdmin:
         self._names = frozenset(task_name(job_type) for job_type in job_types)
         self._opening = asyncio.Lock()
 
+    async def rescue(self) -> int:
+        """Re-publish then close every `doing` job, of any of our tasks in either app, whose
+        worker has not beaten for STALLED_WORKER_SECONDS; answers how many. Each row on its own:
+        one row's failure (e.g. `close` finds it no longer `doing`, its worker came back) never
+        skips the others, and any failure raises TransientFailure(RESCUE_INCOMPLETE) after them,
+        so the next run looks again."""
+        failed = rescued = 0
+        for stalled in await self.stalled():
+            logger.warning("rescuing stalled job %s (%s, attempt %s)", stalled.id,
+                           stalled.row.task_name if stalled.job is None
+                           else type(stalled.job).job_name, stalled.attempt)
+            try:
+                await self.republish(stalled)
+                await self.close(stalled)
+                rescued += 1
+            except Exception:
+                failed += 1
+                logger.exception("rescue of stalled job %s failed", stalled.id)
+        if failed:
+            raise TransientFailure(RESCUE_INCOMPLETE)
+        return rescued
+
+    async def rescue_at_start(self) -> None:
+        """The rescue when a worker starts (JobRuntime's `on_start`): a failure is logged and the
+        next `RESCUE_EVERY` run looks again; it never stops the worker."""
+        try:
+            await self.rescue()
+        except Exception:
+            logger.exception("the rescue at the worker's start failed")
+
     async def _opened(self) -> procrastinate.App:
         async with self._opening:
             await self._app.open_async()  # idempotent
@@ -67,14 +113,20 @@ class QueueAdmin:
     async def aclose(self) -> None:
         await self._app.close_async()
 
-    async def stalled(self, *, heartbeat_timeout: timedelta) -> list[StalledJob]:
-        """`doing` rows of ours whose worker has not beaten for `heartbeat_timeout`."""
+    async def stalled(self) -> list[StalledJob]:
+        """`doing` rows of ours (a typed job this rescue was built with, or any task on
+        MEDIA_QUEUE) whose worker has not beaten for STALLED_WORKER_SECONDS."""
         app = await self._opened()
         rows = await app.job_manager.get_stalled_jobs(
-            seconds_since_heartbeat=heartbeat_timeout.total_seconds())
+            seconds_since_heartbeat=STALLED_WORKER_SECONDS)
         found = []
         for row in rows:
-            if row.task_name not in self._names or row.id is None:
+            if row.id is None:
+                continue
+            if row.queue == MEDIA_QUEUE:
+                found.append(StalledJob(row.id, None, 0, row))
+                continue
+            if row.task_name not in self._names:
                 continue
             try:
                 job, attempt = decode(row.task_name, row.task_kwargs)
@@ -85,8 +137,23 @@ class QueueAdmin:
         return found
 
     async def republish(self, stalled: StalledJob) -> None:
-        """A new copy at the SAME attempt: a dead worker is not the job's failure."""
-        await defer_async(await self._opened(), stalled.job, attempt=stalled.attempt)
+        """A new copy: a typed job at the SAME attempt (a dead worker is not the job's failure);
+        a media task as it stands, from attempt 0 (`defer_job_async` cannot carry `attempts`),
+        an already queued copy absorbing it. A media periodic task's row gets no copy."""
+        app = await self._opened()
+        if stalled.job is not None:
+            await defer_async(app, stalled.job, attempt=stalled.attempt)
+            return
+        row = stalled.row
+        if row is None or _PERIODIC_KWARG in row.task_kwargs:
+            return
+        try:
+            await app.job_manager.defer_job_async(QueueRow(
+                queue=row.queue, priority=row.priority, lock=row.lock,
+                queueing_lock=row.queueing_lock, task_name=row.task_name,
+                task_kwargs=row.task_kwargs))
+        except procrastinate.exceptions.AlreadyEnqueued:
+            pass
 
     async def close(self, stalled: StalledJob) -> None:
         """End the stalled row `failed`; an asset fetch's row frees its lock for the new copy."""
@@ -148,29 +215,12 @@ class FinishedJobs:
 
 
 class RescueStalledJobsHandler:
-    def __init__(self, admin: QueueAdmin, *,
-                 heartbeat_timeout: timedelta = timedelta(seconds=30)) -> None:
-        self._admin = admin
-        self._heartbeat_timeout = heartbeat_timeout
+    def __init__(self, rescue: QueueRescue) -> None:
+        self._rescue = rescue
 
     async def handle(self, job: RescueStalledJobs) -> None:
-        """Rescue each stalled row on its own: one row's failure never skips the others.
-
-        A row can fail, e.g. `close` finds it no longer `doing` because its worker came back and
-        finished it. Any failure makes this run transient, so the next run looks again.
-        """
-        failed = 0
-        for stalled in await self._admin.stalled(heartbeat_timeout=self._heartbeat_timeout):
-            logger.warning("rescuing stalled job %s (%s, attempt %s)", stalled.id,
-                           type(stalled.job).job_name, stalled.attempt)
-            try:
-                await self._admin.republish(stalled)
-                await self._admin.close(stalled)
-            except Exception:
-                failed += 1
-                logger.exception("rescue of stalled job %s failed", stalled.id)
-        if failed:
-            raise TransientFailure(RESCUE_INCOMPLETE)
+        """`QueueRescue.rescue`, every RESCUE_EVERY; a row that failed makes the run transient."""
+        await self._rescue.rescue()
 
 
 class PurgeFinishedJobsHandler:

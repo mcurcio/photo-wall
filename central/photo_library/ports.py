@@ -268,12 +268,10 @@ class LibraryWorkerStore(Protocol):
     checks). Implemented by central.infra.photo_library_store.PgPhotoLibrary; media tests use
     tests/support/library_store_fake.py, held to the same behaviour by the conformance suite."""
 
-    def due_contacts(self) -> tuple[ConnectionRef, ...]:
-        """Connections with a key whose last contact started CHECK_EVERY_SECONDS ago or more."""
-        ...
-
     def begin_contact(self, connection_ref: ConnectionRef) -> ContactTicket | None:
-        """Take the next contact number and the secret; None for an unknown or keyless one."""
+        """Take the next contact number and the secret, and queue the connection's next check at
+        `policy.next_check_due(now, now)` in the same transaction (so a contact that raises still
+        leaves its next one queued); None, and nothing queued, for an unknown or keyless one."""
         ...
 
     def connection_secret(self, connection_ref: ConnectionRef) -> ConnectionSecret | None:
@@ -293,19 +291,13 @@ class LibraryWorkerStore(Protocol):
         age. Exactly one of `items` and `error`. No count cap (owner 2026-10-09)."""
         ...
 
-    def due_pools(self) -> tuple[PoolKey, ...]:
-        """Wanted pools (a live draft, or a Source revision Runtime or a name needs) whose
-        connection has a key, and either: no check running, and the last check finished
-        CHECK_EVERY_SECONDS ago or more, or never ran, or a Check now asked for one; or a check
-        running whose latest step began STALE_CHECK_SECONDS ago or more (database time), so a
-        step lost with its worker never leaves a pool checking."""
-        ...
-
     def begin_check(self, pool_key: PoolKey) -> CheckLease | None:
         """Resume the pool's running check from its stored progress, or start the next check
         number; either way the latest step's start (`step_at`) becomes now. Starting a check
         deletes the pages an earlier check of this pool left (one that never finished). None
-        when the pool is gone, unwanted, or its connection has no key."""
+        when the pool is gone, unwanted, or its connection has no key; an unwanted or keyless
+        pool that still stands has its next check queued at its due time
+        (`policy.next_check_due(now, now)`), so its checks go on should it be wanted again."""
         ...
 
     def known_revisions(self, connection_ref: ConnectionRef,
@@ -337,8 +329,9 @@ class LibraryWorkerStore(Protocol):
         `changed_at`. So the stored facts are read without a lock and only the rows that differ
         are upserted, in Immich-id order (two pools' steps lock shared rows in one order).
 
-        Errors: a database error propagates with nothing written; the check resumes from its
-        stored progress once its step is stale (`due_pools`)."""
+        Errors: a database error propagates with nothing written; the step is retried, and once
+        its retries run out `check_step_failed` queues the next check (which resumes from the
+        stored progress)."""
         ...
 
     def unseen_rows(self, lease: CheckLease, limit: int) -> tuple[LibraryRef, ...]:
@@ -363,7 +356,15 @@ class LibraryWorkerStore(Protocol):
         """Complete: remove the rows this check marked (the subtraction) and record the time; a
         row it did not see stays, since only `record_recheck` removes one (follow-up S4).
         Incomplete or failed: remove nothing (design rule 2). Fenced as `record_step`.
-        However it finishes, the check's pages are deleted: none outlives its check."""
+        However it finishes, the check's pages are deleted: none outlives its check, and the
+        pool's next check is queued in the same transaction: at once when a Check now came while
+        this check ran (`check_requested`), else at `policy.next_check_due(now, now)`."""
+        ...
+
+    def check_step_failed(self, pool_key: PoolKey) -> None:
+        """A step that raised until its retries ran out: queue the pool's next check at
+        `policy.next_check_due(now, now)`, as a completion does, so a failure never stops a
+        pool's checks. Nothing for a pool that is gone."""
         ...
 
     def frame_outputs(self) -> tuple[FrameOutput, ...]:

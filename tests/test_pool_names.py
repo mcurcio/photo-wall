@@ -17,9 +17,8 @@ from central.db import Database, with_application_name
 from central.infra.asset_records import PgAssetRecords
 from central.infra.outcomes import JobOutcomes
 from central.infra.publisher import ProcrastinatePublisher
-from central.infra.queue_ops import QueueAdmin
+from central.infra.queue_ops import QueueRescue
 from central.infra.runtime import JobRuntime
-from central.kernel.jobs import QueueName
 from contracts.time import ManualClock
 
 NAME_SQL = "SELECT current_setting('application_name') AS name, pg_backend_pid() AS pid"
@@ -49,8 +48,7 @@ def test_a_database_pool_connects_under_its_name(registry):
 
 
 def _job_runtime(dsn: str) -> JobRuntime:
-    return JobRuntime(dsn, catalog_stubs(), {QueueName.FETCH: 1, QueueName.UPKEEP: 1,
-                                             QueueName.TRANSCODE: 1},
+    return JobRuntime(dsn, catalog_stubs(), 3,
                       transactions=FakeTransactions(), assets=PgAssetRecords(ManualClock(0.0)),
                       clock=ManualClock(0.0))
 
@@ -66,11 +64,11 @@ async def _async_name(connector) -> str:
 
 
 @pytest.mark.db
-def test_the_job_runtime_and_queue_admin_connect_under_their_names(registry):
+def test_the_job_runtime_and_queue_rescue_connect_under_their_names(registry):
     dsn = registry.db.dsn
     runtime = _job_runtime(dsn)
     assert asyncio.run(_async_name(runtime._app.connector)) == "photo-wall-jobs"
-    admin = QueueAdmin(dsn)
+    admin = QueueRescue(dsn)
     assert asyncio.run(_async_name(admin._app.connector)) == "photo-wall-queue-ops"
 
 

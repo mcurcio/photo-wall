@@ -29,10 +29,10 @@ FIXTURE_CONNECTION = "fixture"   # its ref and its name, as migration 080 names 
 class NullLibraryQueue:
     """The store's two queueing calls, accepted and dropped: no worker runs a check here."""
 
-    def enqueue_connection_check_in(self, conn, connection_ref):
+    def enqueue_connection_check_in(self, conn, connection_ref, *, due_at):
         return QueueReceipt(coalesced=False)
 
-    def enqueue_pool_check_in(self, conn, pool_key):
+    def enqueue_pool_check_in(self, conn, pool_key, *, due_at):
         return QueueReceipt(coalesced=False)
 
 

@@ -13,7 +13,7 @@ from central.infra.runtime import STALLED_WORKER_SECONDS
 from media.subject_map import MODEL_VARIABLE
 from support.subject_model import subject_model_path
 
-JOB_LOOPS = 3  # the runtime's loops per process: fetch, upkeep and transcode
+JOB_LOOPS = 1  # the runtime's one worker per process, over every queue (decision 0034, S3a)
 MEDIA_LOOP = 1  # the library checks' and measurements' loop: one per process (no writer lock)
 
 

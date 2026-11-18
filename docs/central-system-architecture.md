@@ -88,7 +88,7 @@ flowchart LR
 | Unit | How many | Hosts | Must NEVER |
 | --- | --- | --- | --- |
 | **Central process** (HTTP server: FastAPI/uvicorn, async) | 1 per pod | HTTP routes. Calls into domain code (resolve, read-through read, health). Waiter caps per pod (32 OS/`.deb`, 8 media). One `LISTEN` connection. *(It also runs the existing playback-coordination tick, which is out of scope.)* | Write the cache disk. Call an origin. Run a job handler. Hold a thread while it waits. |
-| **Worker process** (procrastinate worker) | 1+ per pod, **all identical** | Claims jobs from every queue and dispatches each by type to its domain handler. Queues exist only to give each class of work its own concurrency (so transcoding cannot starve OS production). They never define kinds of worker. Every process runs one procrastinate loop per queue (§10.3). | Serve HTTP. Block its event loop (CPU and disk work go to threads). Do any work that did not arrive as a job. |
+| **Worker process** (procrastinate worker) | 1+ per pod, **all identical** | Claims jobs from every queue and dispatches each by type to its domain handler. Queues name classes of work and order nothing; they never define kinds of worker. Every process runs ONE procrastinate worker over every queue, one shared concurrency (§10.3; decision 0034, S3a). | Serve HTTP. Block its event loop (CPU and disk work go to threads). Do any work that did not arrive as a job. |
 | **Postgres** | 1, shared | Records (catalog, assets, devices), the job queue tables, NOTIFY | Store file bytes. |
 | **Cache disk** | 1 path. Per pod is fine with one pod; 2+ pods **must** share one. | Files named by asset key, in one subdirectory per kind | Be trusted to hold anything. |
 
@@ -484,10 +484,15 @@ class JobRuntime:  # central.infra, concrete
   and unclassified exceptions mean retry (§10.1); only `TerminalFailure` is terminal. Handlers
   write no outcome. A verified file on disk returns its recorded facts without fetching, so a
   crash between the rename and the outcome write is harmless. CPU and disk work runs on threads.
-- **One worker kind, one loop per queue.** A `Worker`'s concurrency spans its queues
-  (`worker.py:34-51`). So each identical process runs one `Worker` per queue on one `App`
-  (`install_signal_handlers=False`, SIGTERM handled once). The per-loop periodic deferrers
-  (`worker.py:611`) insert each tick once (`schema.sql:87`).
+- **One worker kind, one worker over every queue** (decision 0034, S3a). A `Worker`'s
+  concurrency spans its queues (`worker.py:34-51`), so each identical process runs ONE `Worker`
+  over every queue on one `App` (`install_signal_handlers=False`, SIGTERM handled once): one
+  heartbeat row per process, one shared concurrency (`WORKER_CONCURRENCY`); a burst on one queue
+  can take every slot, and each job type's lock and queueing lock still bound its own
+  parallelism. The periodic deferrer inserts each tick once (`schema.sql:87`).
+- **One rescue** (`QueueRescue`, S3a): the typed jobs and the media app's tasks alike, when a
+  worker starts and every five minutes (`RESCUE_EVERY`); a worker is dead when it has not beaten
+  for `STALLED_WORKER_SECONDS`, the rule `worker_running_in` reads too.
 - **Rescue re-publishes first, then closes** the stalled row. The pending index covers only `todo`,
   and the fetch skips a `todo` row whose lock a `doing` row holds (`procrastinate_fetch_job_v2`).
   Only an asset fetch has that lock; any other copy may start at once, and the rules make both
@@ -526,7 +531,7 @@ nothing.
   `write` from each reference's locator, newest first → verify against the reference or produced
   digest → `os.replace`.
 - `ReleaseOperations`, `PodProbe` (process + DB), `FleetHealth.snapshot(beats, failing)` (inputs from infra).
-- In infra: `OutcomeFeed`, `QueueAdmin`, `JobRuntime`, and the queue-ops handlers.
+- In infra: `OutcomeFeed`, `QueueRescue`, `JobRuntime`, and the queue-ops handlers.
 
 `OriginUnavailable(TransientFailure)` covers network errors, 5xx and 429 + `retry_after`.
 `OriginRejected(TerminalFailure)` covers 404, oversize and schema errors. Every fetch handler

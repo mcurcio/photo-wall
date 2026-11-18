@@ -406,7 +406,7 @@ class PgPhotoLibrary:
                          "created_at,created_by,changed_at,changed_by) "
                          "VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
                          (connection_ref, write.name, url, key, now, by, now, by))
-            queue.enqueue_connection_check_in(conn, connection_ref)
+            queue.enqueue_connection_check_in(conn, connection_ref, due_at=now)
         return connection_ref
 
     def change_connection(self, connection_ref: ConnectionRef, write: ConnectionWrite, *,
@@ -428,7 +428,8 @@ class PgPhotoLibrary:
                          "api_key=COALESCE(%s,api_key),changed_at=%s,changed_by=%s "
                          "WHERE connection_ref=%s",
                          (write.name, url, key, self.times.now_in(conn), by, connection_ref))
-            queue.enqueue_connection_check_in(conn, connection_ref)
+            queue.enqueue_connection_check_in(conn, connection_ref,
+                                              due_at=self.times.now_in(conn))
 
     def remove_connection(self, connection_ref: ConnectionRef) -> None:
         """Refused while a saved Source (a named Source's current revision, or a revision Runtime
@@ -494,7 +495,7 @@ class PgPhotoLibrary:
             conn.execute("UPDATE library_connections SET url=%s,api_key=%s,managed=TRUE,"
                          "changed_at=%s,changed_by='central' WHERE connection_ref=%s",
                          (url, secret, self.times.now_in(conn), ref))
-            queue.enqueue_connection_check_in(conn, ref)
+            queue.enqueue_connection_check_in(conn, ref, due_at=self.times.now_in(conn))
         return Provision(connection_ref=ref, outcome=outcome)
 
     @classmethod
@@ -527,7 +528,8 @@ class PgPhotoLibrary:
         queue = self._queue()
         with self.db.transaction() as conn:
             self._known_connection(conn, connection_ref)
-            queue.enqueue_connection_check_in(conn, connection_ref)
+            queue.enqueue_connection_check_in(conn, connection_ref,
+                                              due_at=self.times.now_in(conn))
 
     @staticmethod
     def _known_connection(conn: Any, connection_ref: str) -> None:
@@ -613,15 +615,6 @@ class PgPhotoLibrary:
 
     # --- Contacts and lists: worker side (C1) ---------------------------------------------------
 
-    def due_contacts(self) -> tuple[ConnectionRef, ...]:
-        with self.db.transaction() as conn:
-            now = self.times.now_in(conn)
-            rows = conn.execute(
-                "SELECT connection_ref FROM library_connections WHERE api_key IS NOT NULL AND "
-                "(contact_started_at IS NULL OR contact_started_at<=%s) ORDER BY connection_ref",
-                (now - policy.CHECK_EVERY_SECONDS,)).fetchall()
-        return tuple(row["connection_ref"] for row in rows)
-
     @staticmethod
     def _secret(row: dict) -> ConnectionSecret:
         user = row["immich_user"]
@@ -630,14 +623,20 @@ class PgPhotoLibrary:
                                 bound_user=None if user is None else user["user_ref"])
 
     def begin_contact(self, connection_ref: ConnectionRef) -> ContactTicket | None:
+        queue = self._queue()
         with self.db.transaction() as conn:
+            now = self.times.now_in(conn)
             row = conn.execute(
                 "UPDATE library_connections SET last_contact=last_contact+1,contact_started_at=%s "
                 "WHERE connection_ref=%s AND api_key IS NOT NULL "
                 "RETURNING connection_ref,url,api_key,immich_user,last_contact",
-                (self.times.now_in(conn), connection_ref)).fetchone()
-        if row is None:
-            return None
+                (now, connection_ref)).fetchone()
+            if row is None:
+                return None
+            # The next check, armed where this one starts (`contact_started_at`, the time the
+            # check period counts from): a contact that raises still leaves its next one queued.
+            queue.enqueue_connection_check_in(conn, connection_ref,
+                                              due_at=policy.next_check_due(now, now))
         return ContactTicket(contact_number=row["last_contact"], connection=self._secret(row))
 
     def connection_secret(self, connection_ref: ConnectionRef) -> ConnectionSecret | None:
@@ -843,18 +842,31 @@ class PgPhotoLibrary:
         self._known_connection(conn, query.connection_ref)
         key = query.pool_key()
         now = self.times.now_in(conn)
-        conn.execute("INSERT INTO photo_pools(pool_key,connection_ref,query,created_at,"
-                     "created_by,changed_at,changed_by) VALUES(%s,%s,%s,%s,%s,%s,%s) "
-                     "ON CONFLICT(pool_key) DO NOTHING",
-                     (key, query.connection_ref, Jsonb(query.model_dump(mode="json")), now, by,
-                      now, by))
+        created = conn.execute(
+            "INSERT INTO photo_pools(pool_key,connection_ref,query,created_at,"
+            "created_by,changed_at,changed_by) VALUES(%s,%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT(pool_key) DO NOTHING RETURNING pool_key",
+            (key, query.connection_ref, Jsonb(query.model_dump(mode="json")), now, by,
+             now, by)).fetchone()
+        if created is not None:   # a new pool's first check, at once
+            self._queue().enqueue_pool_check_in(conn, key, due_at=policy.next_check_due(None, now))
         return key
 
     def _request_check_in(self, conn: Any, pool_key: str, *, by: Actor) -> None:
         conn.execute("UPDATE photo_pools SET check_requested=TRUE,changed_at=%s,changed_by=%s "
                      "WHERE pool_key=%s AND NOT check_requested",
                      (self.times.now_in(conn), by, pool_key))
-        self._queue().enqueue_pool_check_in(conn, pool_key)
+        self._queue().enqueue_pool_check_in(conn, pool_key, due_at=self.times.now_in(conn))
+
+    def assign_pools_in(self, conn: Any) -> None:
+        """Give each wanted Source revision with a query and no pool its pool (C12's pre-4 rows,
+        and a dormant revision whose pool `retire_unwanted` forgot, wanted again): a pool created
+        here queues its first check at once. Called where a revision becomes wanted
+        (MediaRepository.reconcile_source_activity_in), in that transaction."""
+        for row in conn.execute("SELECT source_ref FROM media_sources WHERE refresh_active AND "
+                                "query IS NOT NULL AND pool_key IS NULL "
+                                "ORDER BY source_ref").fetchall():
+            self.pool_key_of_source_in(conn, row["source_ref"])
 
     def pool_key_of_source_in(self, conn: Any, source_ref: str, *,
                               by: Actor = "library-check") -> PoolKey | None:
@@ -1018,33 +1030,22 @@ class PgPhotoLibrary:
 
     # --- Checks: worker side (C2) ---------------------------------------------------------------
 
-    def due_pools(self) -> tuple[PoolKey, ...]:
-        """Also assigns the pool of each wanted pre-4 Source revision (C12's cut-over), so a
-        converted Source is checked without anyone opening it."""
-        with self.db.transaction() as conn:
-            for row in conn.execute("SELECT source_ref FROM media_sources WHERE refresh_active AND "
-                                    "query IS NOT NULL AND pool_key IS NULL "
-                                    "ORDER BY source_ref").fetchall():
-                self.pool_key_of_source_in(conn, row["source_ref"])
-            now = self.times.now_in(conn)
-            rows = conn.execute(
-                "SELECT p.pool_key FROM photo_pools p JOIN library_connections c USING "
-                f"(connection_ref) WHERE c.api_key IS NOT NULL AND {_WANTED} AND "
-                "CASE WHEN p.check_state='checking' THEN p.step_at IS NULL OR p.step_at<=%s "
-                "ELSE p.check_requested OR p.check_finished_at IS NULL OR p.check_finished_at<=%s "
-                "END ORDER BY p.pool_key",
-                (now - policy.STALE_CHECK_SECONDS, now - policy.CHECK_EVERY_SECONDS)).fetchall()
-        return tuple(row["pool_key"] for row in rows)
-
     def begin_check(self, pool_key: PoolKey) -> CheckLease | None:
+        queue = self._queue()
         with self.db.transaction() as conn:
             row = conn.execute(
                 f"SELECT p.*,{_WANTED} AS wanted,c.url,c.api_key,c.immich_user FROM photo_pools p "
                 "JOIN library_connections c USING (connection_ref) WHERE p.pool_key=%s "
                 "FOR UPDATE OF p", (pool_key,)).fetchone()
-            if row is None or not row["wanted"] or row["api_key"] is None:
+            if row is None:
                 return None
             now = self.times.now_in(conn)
+            if not row["wanted"] or row["api_key"] is None:
+                # Not checked now, but its checks go on while the pool stands: wanted again
+                # before `retire_unwanted` removes it, or its connection's key pasted (C12), it
+                # is checked at its next due time.
+                queue.enqueue_pool_check_in(conn, pool_key, due_at=policy.next_check_due(now, now))
+                return None
             if row["check_state"] != "checking":
                 row = conn.execute(
                     "UPDATE photo_pools SET check_number=check_number+1,check_state='checking',"
@@ -1107,7 +1108,7 @@ class PgPhotoLibrary:
                          "WHERE pool_key=%s",
                          (Jsonb(step.progress), step.seen_so_far, step.immich_up_to, now,
                           _CHECK_ACTOR, lease.pool_key))
-            queue.enqueue_pool_check_in(conn, lease.pool_key)
+            queue.enqueue_pool_check_in(conn, lease.pool_key, due_at=now)
             return True
 
     @staticmethod
@@ -1255,14 +1256,21 @@ class PgPhotoLibrary:
             else:
                 conn.execute("DELETE FROM photo_pool_rows WHERE pool_key=%s AND upstream_id=%s",
                              (lease.pool_key, ref))
-            queue.enqueue_pool_check_in(conn, lease.pool_key)
+            queue.enqueue_pool_check_in(conn, lease.pool_key, due_at=self.times.now_in(conn))
             return True
 
     def finish_check(self, lease: CheckLease, finish: CheckFinish) -> bool:
+        queue = self._queue()
         with self.db.transaction() as conn:
             if not self._fenced(conn, lease):
                 return False
             now = self.times.now_in(conn)
+            requested = conn.execute("SELECT check_requested FROM photo_pools WHERE pool_key=%s",
+                                     (lease.pool_key,)).fetchone()["check_requested"]
+            # The next check: at once when a Check now came while this one ran, else at its
+            # due time.
+            queue.enqueue_pool_check_in(conn, lease.pool_key, due_at=now if requested
+                                        else policy.next_check_due(now, now))
             if isinstance(finish, CheckComplete):
                 # The subtraction (design rule 2): a complete check removes what it marked (an id
                 # marked after an earlier step of it added a row). A row it did not see stays:
@@ -1285,6 +1293,18 @@ class PgPhotoLibrary:
             # However it finishes, no page outlives its check.
             conn.execute("DELETE FROM photo_check_pages WHERE pool_key=%s", (lease.pool_key,))
             return True
+
+    def check_step_failed(self, pool_key: PoolKey) -> None:
+        """A step that raised until its retries ran out: the pool's next check is queued at its
+        due time, as a completion queues it (the check resumes from its stored progress then).
+        Nothing for a pool that is gone."""
+        queue = self._queue()
+        with self.db.transaction() as conn:
+            if conn.execute("SELECT 1 FROM photo_pools WHERE pool_key=%s",
+                            (pool_key,)).fetchone() is None:
+                return
+            now = self.times.now_in(conn)
+            queue.enqueue_pool_check_in(conn, pool_key, due_at=policy.next_check_due(now, now))
 
     def frame_outputs(self) -> tuple[FrameOutput, ...]:
         with self.db.transaction() as conn:

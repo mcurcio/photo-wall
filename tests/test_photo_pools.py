@@ -32,6 +32,7 @@ from central.photo_library.model import (
     TakenLast,
     Waiting,
 )
+from central.photo_library.policy import CHECK_EVERY_SECONDS
 from central.photo_library.ports import (
     CheckComplete,
     CheckFailed,
@@ -113,7 +114,8 @@ def test_equal_queries_share_one_pool_and_a_new_query_moves_the_draft(pools):
     first = store.create_draft(query, None, by="console")
     second = store.create_draft(SourceQuery.model_validate(query.model_dump()), None, by="console")
     assert _draft_pool(store, first) == _draft_pool(store, second) == query.pool_key()
-    assert queue.pools == [query.pool_key()] * 2
+    # the new pool's first check (S3a), then each draft's request (the queue coalesces them)
+    assert queue.pools == [query.pool_key()] * 3
     other = SourceQuery(connection_ref=ref, favourites_only=True)
     store.set_draft_query(second, other, by="console")
     assert _draft_pool(store, second) == other.pool_key() and queue.pools[-1] == other.pool_key()
@@ -341,31 +343,41 @@ def test_retirement_keeps_wanted_pools_and_their_thumbnails_only(pools):
     assert keys == {shared_query.pool_key(), _draft_pool(store, fresh)}
 
 
-def test_due_pools_by_the_database_clock(pools):
-    """Case 9 (run 2: the staleness rule). Mutation probe: skip every checking pool again."""
-    store, _, ref = pools
-    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None, by="console"))
-    assert store.due_pools() == (key,)                            # requested
-    lease = store.begin_check(key)
-    assert store.due_pools() == ()                                # its step just began
-    assert store.record_step(lease, step(InPool(asset=asset(ref, 1, 100.0)), seen=1)) is True
-    _age(store, "photo_pools", "step_at", "pool_key", key, 899)
-    assert store.due_pools() == ()
-    _age(store, "photo_pools", "step_at", "pool_key", key, 900)   # its step was lost
-    assert store.due_pools() == (key,)
-    resumed = store.begin_check(key)
-    assert (resumed.check_number, resumed.progress) == (lease.check_number, {"page": 1})
-    assert store.due_pools() == ()                                # step_at moved
-    lease = resumed
-    store.finish_check(lease, CheckComplete())
-    _age(store, "photo_pools", "check_finished_at", "pool_key", key, 899)
-    assert store.due_pools() == ()
-    _age(store, "photo_pools", "check_finished_at", "pool_key", key, 900)
-    assert store.due_pools() == (key,)
-    _age(store, "photo_pools", "check_finished_at", "pool_key", key, 0)
+def _pool_times(store, key):
     with store.db.transaction() as conn:
-        conn.execute("UPDATE photo_pools SET check_requested=TRUE")
-    assert store.due_pools() == (key,)
+        return conn.execute("SELECT step_at,check_finished_at FROM photo_pools WHERE pool_key=%s",
+                            (key,)).fetchone()
+
+
+def _now(store):
+    with store.db.transaction() as conn:
+        return store.times.now_in(conn)
+
+
+def test_each_check_queues_the_next_for_its_due_time_by_the_database_clock(pools):
+    """Case 9 without a poll (S3a): a new pool's first check and each next step at once; a
+    finished check queues the next at its finish + CHECK_EVERY_SECONDS, at once when a Check now
+    came while it ran; a step whose retries ran out queues the next at its due time.
+    Mutation probe: finish without queueing the next check."""
+    store, queue, ref = pools
+    key = _draft_pool(store, store.create_draft(SourceQuery(connection_ref=ref), None, by="console"))
+    before = _now(store)
+    assert queue.pool_due[-1][0] == key and queue.pool_due[-1][1] <= before   # at once
+    lease = store.begin_check(key)
+    assert store.record_step(lease, step(InPool(asset=asset(ref, 1, 100.0)), seen=1)) is True
+    assert queue.pool_due[-1][0] == key and queue.pool_due[-1][1] <= _now(store)
+    store.finish_check(lease, CheckComplete())
+    assert queue.pool_due[-1] == (key, _pool_times(store, key)["check_finished_at"]
+                                  + CHECK_EVERY_SECONDS)
+    lease = store.begin_check(key)
+    with store.db.transaction() as conn:   # "Check now" while the check runs
+        store._request_check_in(conn, key, by="console")
+    store.finish_check(lease, CheckComplete())
+    assert queue.pool_due[-1] == (key, _pool_times(store, key)["check_finished_at"])
+    store.begin_check(key)
+    store.check_step_failed(key)
+    due = queue.pool_due[-1]
+    assert due[0] == key and _now(store) + CHECK_EVERY_SECONDS >= due[1] > _now(store) + 1
 
 
 def test_a_thumbnail_is_served_only_from_a_wanted_pool(pools):
@@ -399,16 +411,23 @@ def test_a_pre_4_source_gets_its_pool_key_once(pools):
         stored = conn.execute("SELECT pool_key FROM media_sources").fetchone()["pool_key"]
         assert store.pool_key_of_source_in(conn, "missing:1") is None
     assert stored == query.pool_key()
-    assert store.due_pools() == (query.pool_key(),)
+    assert queue.pools.count(query.pool_key()) == 1     # its first check, queued at once
 
 
-def test_due_pools_assigns_wanted_pre_4_sources(pools):
-    store, _, ref = pools
+def test_assign_pools_in_gives_each_wanted_revision_its_pool(pools):
+    """C12's cut-over, and a dormant revision wanted again, at the write that wants it
+    (MediaRepository.reconcile_source_activity_in), never by a poll (S3a)."""
+    store, queue, ref = pools
     query = SourceQuery(connection_ref=ref, partners=True)
     _save_source(store, "old:1", query, None)
     _save_source(store, "dormant:1", SourceQuery(connection_ref=ref, favourites_only=True), None,
                  active=False)
-    assert store.due_pools() == (query.pool_key(),)
+    with store.db.transaction() as conn:
+        store.assign_pools_in(conn)
+        keys = {row["source_ref"]: row["pool_key"] for row in conn.execute(
+            "SELECT source_ref,pool_key FROM media_sources").fetchall()}
+    assert keys == {"old:1": query.pool_key(), "dormant:1": None}
+    assert queue.pools == [query.pool_key()]
 
 
 # --- A pass writes what changed, plus one page per step for what it saw (decision 0033) ---------
