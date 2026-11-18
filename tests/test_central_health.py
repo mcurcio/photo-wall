@@ -183,8 +183,11 @@ def test_measurement_request_failure_is_its_own_facet_and_clears(monkeypatch):
     app = app_with(FakeDatabase(), coordinator, ManualClock(1000), monkeypatch, enabled=True)
     with TestClient(app) as client:
         assert coordinator.first_tick.wait(2)
+        # Retention runs after the first tick, on its own (`run_scheduler`): wait for its facet
+        # too, or the tick's failure can be read before the retention step has run.
         failed = wait_for(client, lambda response:
-                          response.json()["scheduler"]["status"] == "degraded")
+                          response.json()["scheduler"]["status"] == "degraded"
+                          and "node-retention" in response.json()["scheduler"]["steps"])
         assert failed.status_code == 200
         steps = failed.json()["scheduler"]["steps"]
         assert steps["measurement"]["status"] == "failing"
