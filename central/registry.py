@@ -590,7 +590,7 @@ class Registry:
                              (frame.id, name, frame.surface_id, frame.x_mm, frame.y_mm, frame.video,
                               Jsonb(calibration.model_dump(mode="json")), Jsonb(lighting.model_dump(mode="json")),
                               now, by, now, by))
-                record_created_in(conn, frame.id, created_record(position_values(calibration, lighting)))
+                record_created_in(conn, frame.id, created_record(position_values(calibration, lighting)), by=by)
                 _ensure_wall(conn, frame.surface_id, now=now, by=by)
         except UniqueViolation as exc:
             raise RegistryError(_name_or(exc, "frame_exists")) from exc

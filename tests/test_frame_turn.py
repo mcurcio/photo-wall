@@ -128,11 +128,12 @@ def test_a_turn_raises_the_generation_and_needs_the_position_checked(registry):
     # The Position history: the turn is a kept entry made for the new turn, and the Save before it,
     # made for the screen hung the other way, can no longer be restored.
     with registry.db.transaction() as conn:
-        entries = conn.execute("SELECT kind, turn FROM position_entries WHERE frame_id='kitchen' "
+        entries = conn.execute("SELECT kind, turn, by FROM position_entries WHERE frame_id='kitchen' "
                                "ORDER BY number DESC LIMIT 2").fetchall()
         saved_before = position_entries_in(conn, "kitchen", HistoryPage(None, 5))[1]
         now = frame_made_for_in(conn, "kitchen")
     assert [(row["kind"], row["turn"]) for row in entries] == [("kept-turn-changed", 90), ("kept-saved", 0)]
+    assert entries[0]["by"] == "console"                                   # who turned it (migration 126)
     assert restore_refusal(saved_before, frame_id="kitchen", now=now) is PositionRestoreRefusal.MADE_FOR_OTHER_TURN
     save_position(registry, "kitchen")      # the whole width of the screen as it now hangs (1080 x 1920)
     assert _inventory_frame(registry).readiness is Readiness.READY

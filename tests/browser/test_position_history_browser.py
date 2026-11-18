@@ -95,7 +95,8 @@ class HistorySessions(LightingSessions):
         trial = TrialHanded(self._values(), UUID(self.row["trial_id"]),
                             None if restored is None else UUID(restored)) if active else None
         with self.registry.db.transaction() as conn:
-            record_sent_in(conn, FRAME, trial=trial, saved=position_values(saved.calibration, saved.lighting))
+            record_sent_in(conn, FRAME, trial=trial, saved=position_values(saved.calibration, saved.lighting),
+                           by="central")
 
     def _restore(self, route):
         body = route.request.post_data_json
@@ -230,9 +231,9 @@ def test_a_position_kept_when_the_screen_size_changed_restores_and_one_made_upsi
     _seed(registry)
     _sql(registry, "UPDATE position_entries SET kind='kept-profile-changed' WHERE frame_id=%s AND kind='kept-saved'",
          (FRAME,))
-    _sql(registry, "INSERT INTO position_entries(id, frame_id, number, kind, at, fit, lighting, turn, display_id) "
+    _sql(registry, "INSERT INTO position_entries(id, frame_id, number, kind, at, fit, lighting, turn, display_id, by) "
                    "SELECT gen_random_uuid(), frame_id, number + 100, 'kept-saved', at - interval '1 minute', fit, "
-                   "lighting, 180, display_id FROM position_entries WHERE frame_id=%s AND kind='kept-profile-changed'",
+                   "lighting, 180, display_id, 'console' FROM position_entries WHERE frame_id=%s AND kind='kept-profile-changed'",
          (FRAME,))
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)

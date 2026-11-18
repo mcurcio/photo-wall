@@ -1,4 +1,4 @@
-"""A Frame's Position history in PostgreSQL (migrations 096 and 099: position_entries). The rules are central/fleet/position_history.py's; this module appends, trims
+"""A Frame's Position history in PostgreSQL (migrations 096, 099 and 126: position_entries). The rules are central/fleet/position_history.py's; this module appends, trims
 and reads, nothing else.
 
 Writers (each in its caller's transaction, so a history write fails only with its change):
@@ -15,7 +15,9 @@ Writers (each in its caller's transaction, so a history write fails only with it
   exchange it hands a Frame: it compares without a lock and appends only when
   `position_history.sent_record` says so, re-checking under the lock.
 Every append takes the Frame's row lock (FOR NO KEY UPDATE; a no-op under Registry's FOR UPDATE),
-numbers the entry the Frame's newest + 1, stamps `at` with `clock_timestamp()` in the INSERT, reads
+numbers the entry the Frame's newest + 1, stamps `at` with `clock_timestamp()` in the INSERT and `by`
+with the writer's actor (no default: migration 126; the change made outside Photo Wall a Save or a
+turn finds is stamped with that writer's `by` too), reads
 what it was made for (frames.turn and the Display seen on the Frame's bound port, display_store
 SEEN_DISPLAY_JOIN), and trims the Frame's kept kinds to KEPT_ENTRIES and its sent kinds to
 SENT_ENTRIES (central/tuning_history/bounds.py).
@@ -86,13 +88,13 @@ def write_position_in(conn: Any, frame_id: str, record: PositionRecord, *, calib
     unrecorded = unrecorded_record(latest_kept_position_in(conn, frame_id), position_values(
         Calibration.model_validate(stored["calibration"]), FrameLighting.model_validate(stored["lighting"])))
     if unrecorded is not None:
-        _append_in(conn, frame_id, unrecorded)
+        _append_in(conn, frame_id, unrecorded, by=by)
     generation = conn.execute(
         "UPDATE frames SET calibration=%s, lighting=%s, configuration_revision=configuration_revision+1, "
         "changed_at=%s, changed_by=%s WHERE id=%s RETURNING generation",
         (Jsonb(calibration.model_dump(mode="json")), Jsonb(record.values.lighting.model_dump(mode="json")),
          now, by, frame_id)).fetchone()["generation"]
-    _append_in(conn, frame_id, record)
+    _append_in(conn, frame_id, record, by=by)
     return generation
 
 
@@ -109,25 +111,26 @@ def write_turn_in(conn: Any, frame_id: str, turn: int, *, now: float, by: Actor)
                              FrameLighting.model_validate(stored["lighting"]))
     unrecorded = unrecorded_record(latest_kept_position_in(conn, frame_id), values)
     if unrecorded is not None:
-        _append_in(conn, frame_id, unrecorded)
+        _append_in(conn, frame_id, unrecorded, by=by)
     generation = conn.execute("UPDATE frames SET turn=%s, generation=generation+1, "
                               "configuration_revision=configuration_revision+1, changed_at=%s, changed_by=%s "
                               "WHERE id=%s RETURNING generation",
                               (turn, now, by, frame_id)).fetchone()["generation"]
-    _append_in(conn, frame_id, turn_changed_record(values))
+    _append_in(conn, frame_id, turn_changed_record(values), by=by)
     return generation
 
 
-def record_created_in(conn: Any, frame_id: str, record: PositionRecord) -> None:
+def record_created_in(conn: Any, frame_id: str, record: PositionRecord, *, by: Actor) -> None:
     """Append a new Frame's KEPT_CREATED `record`, in the caller's transaction that inserted the Frame.
     ValueError("position_history_kind") for another kind."""
     if record.kind is not PositionEntryKind.KEPT_CREATED:
         raise ValueError("position_history_kind")
-    _append_in(conn, frame_id, record)
+    _append_in(conn, frame_id, record, by=by)
 
 
-def _append_in(conn: Any, frame_id: str, record: PositionRecord) -> PositionEntry:
-    """Append `record` as the Frame's next entry, made for its turn and seen Display now, and trim."""
+def _append_in(conn: Any, frame_id: str, record: PositionRecord, *, by: Actor) -> PositionEntry:
+    """Append `record` as the Frame's next entry, made for its turn and seen Display now, stamped
+    `by` (who appended it: the audit rule of an append-only history, as picture_history), and trim."""
     conn.execute("SELECT 1 FROM frames WHERE id=%s FOR NO KEY UPDATE", (frame_id,))
     made_for = frame_made_for_in(conn, frame_id)
     if made_for is None:
@@ -135,12 +138,12 @@ def _append_in(conn: Any, frame_id: str, record: PositionRecord) -> PositionEntr
     values = record.values
     row = conn.execute(
         "INSERT INTO position_entries AS e (id, frame_id, number, kind, at, session_id, restored_from, fit, lighting, "
-        "turn, display_id) SELECT %s, %s, COALESCE(max(number), 0) + 1, %s, "
-        "clock_timestamp(), %s, %s, %s, %s, %s, %s FROM position_entries WHERE frame_id=%s "
+        "turn, display_id, by) SELECT %s, %s, COALESCE(max(number), 0) + 1, %s, "
+        "clock_timestamp(), %s, %s, %s, %s, %s, %s, %s FROM position_entries WHERE frame_id=%s "
         f"RETURNING {_COLUMNS}",
         (uuid.uuid4(), frame_id, record.kind.value, record.session_id, record.restored_from,
          Jsonb(values.fit.model_dump(mode="json")), Jsonb(values.lighting.model_dump(mode="json")),
-         made_for.turn, made_for.display_id, frame_id)).fetchone()
+         made_for.turn, made_for.display_id, by, frame_id)).fetchone()
     kinds, keep = ((_KEPT_VALUES, retention.KEPT_ENTRIES) if record.kind in KEPT_KINDS
                    else (_SENT_VALUES, retention.SENT_ENTRIES))
     conn.execute("DELETE FROM position_entries WHERE frame_id=%(frame)s AND kind = ANY(%(kinds)s) "
@@ -150,7 +153,8 @@ def _append_in(conn: Any, frame_id: str, record: PositionRecord) -> PositionEntr
     return _entry(row)
 
 
-def record_sent_in(conn: Any, frame_id: str, *, trial: TrialHanded | None, saved: PositionValues) -> None:
+def record_sent_in(conn: Any, frame_id: str, *, trial: TrialHanded | None, saved: PositionValues,
+                   by: Actor) -> None:
     """After an exchange decides what it hands the Node for the Frame (`trial`, or None: the kept
     values `saved`): append `position_history.sent_record(...)` against the Frame's newest entry when
     it is not None. Takes the Frame's row lock only to append (and re-reads the newest entry under
@@ -160,7 +164,7 @@ def record_sent_in(conn: Any, frame_id: str, *, trial: TrialHanded | None, saved
     conn.execute("SELECT 1 FROM frames WHERE id=%s FOR NO KEY UPDATE", (frame_id,))
     record = sent_record(trial=trial, saved=saved, latest=latest_position_in(conn, frame_id))
     if record is not None:
-        _append_in(conn, frame_id, record)
+        _append_in(conn, frame_id, record, by=by)
 
 
 def latest_position_in(conn: Any, frame_id: str) -> PositionEntry | None:

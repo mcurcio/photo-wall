@@ -17,6 +17,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from support.frames import frame_body
 from support.position import LIGHTING, PORTRAIT_ON_WIDE, save_position
 from test_node_calibration import LIGHTING_JSON, SHIFTED, SKEWED, begin, operate, setup_trial
 from test_registry import ADMIN, frame
@@ -123,9 +124,10 @@ def _entry(registry, *, frame_id: str = "node-f0", kind: str = "kept-saved", dis
     """An entry Photo Wall wrote at another time (another box, turn or Display), as stored; `turn`
     None: the Frame's turn now."""
     entry = uuid4()
-    _sql(registry, "INSERT INTO position_entries(id, frame_id, number, kind, at, fit, lighting, turn, display_id) "
+    _sql(registry, "INSERT INTO position_entries(id, frame_id, number, kind, at, fit, lighting, turn, display_id, by) "
                    "SELECT %s, %s, COALESCE(max(number), 0) + 1, %s, clock_timestamp(), %s, %s, "
-                   "COALESCE(%s, (SELECT turn FROM frames WHERE id=%s)), %s FROM position_entries WHERE frame_id=%s",
+                   "COALESCE(%s, (SELECT turn FROM frames WHERE id=%s)), %s, 'console' FROM position_entries "
+                   "WHERE frame_id=%s",
          (entry, frame_id, kind, fit.model_dump_json(), LIGHTING.model_dump_json(), turn, frame_id, display, frame_id))
     return entry
 
@@ -208,6 +210,30 @@ def test_a_new_frame_records_its_creation_so_no_change_reads_as_made_outside(reg
     entries = _history(registry, "spare")["entries"]
     assert [entry["kind"] for entry in entries] == ["kept-turn-changed", "kept-created"]
     assert FrameLighting.model_validate(entries[1]["lighting"]).lights == ()
+
+
+def test_every_entry_says_who_appended_it(registry):
+    """Migration 126 (decision 0034, S2f's erratum): an entry's `by` is who appended it. A Frame
+    created and turned through the routes reads the request's principal (the bearer token:
+    'api-token'); a Save reads its operator's, the change made outside Photo Wall it finds too; what
+    an exchange hands the Node reads 'central'. Mutation probes: drop `by` from `_append_in`'s INSERT
+    -> NOT NULL refuses every append; pass "central" from `create_frame` -> the created entry fails."""
+    with _client(registry) as client:
+        assert client.post("/v1/operator/frames", json=frame_body("spare"), headers=AUTH).status_code == 201
+        turned = client.put("/v1/operator/frames/spare/turn", json={"turn": 90, "expected_generation": 0},
+                            headers=AUTH)
+        assert turned.status_code == 200, turned.text
+    assert _sql(registry, "SELECT kind, by FROM position_entries WHERE frame_id='spare' ORDER BY number") == [
+        {"kind": "kept-created", "by": "api-token"}, {"kind": "kept-turn-changed", "by": "api-token"}]
+
+    node = Node(registry)
+    _sql(registry, "UPDATE frames SET lighting=%s WHERE id='node-f0'", (DEEP.model_dump_json(),))
+    before = _sql(registry, "SELECT max(number) AS number FROM position_entries WHERE frame_id='node-f0'")[0]["number"]
+    node.save(node.edit(node.begin(), SHIFTED))          # the rig's operations run as 'console'
+    assert _sql(registry, "SELECT kind, by FROM position_entries WHERE frame_id='node-f0' AND number > %s "
+                          "ORDER BY number", (before,)) == [
+        {"kind": "sent-draft", "by": "central"}, {"kind": "kept-unrecorded", "by": "console"},
+        {"kind": "kept-saved", "by": "console"}]
 
 
 def test_the_kept_write_takes_only_a_kept_kind_and_its_own_values(registry):
@@ -391,7 +417,7 @@ def test_kept_and_sent_entries_are_trimmed_apart(registry, monkeypatch):
     with registry.db.transaction() as conn:
         for depth in (1.0, 2.0, 3.0):
             record_sent_in(conn, "node-f0", trial=TrialHanded(PositionValues(SKEWED, LIGHTING.model_copy(update={"mat_depth_mm": depth})), session,
-                                                              None), saved=PositionValues(SKEWED, LIGHTING))
+                                                              None), saved=PositionValues(SKEWED, LIGHTING), by="central")
     entries = _history(registry)["entries"]
     assert [(entry["kind"], entry["number"]) for entry in entries] == [
         ("sent-draft", 8), ("sent-draft", 7), ("kept-saved", 5), ("kept-saved", 4)]
@@ -413,7 +439,7 @@ def test_a_failed_append_fails_the_save(registry, monkeypatch):
     Node(registry)
     before = _sql(registry, "SELECT calibration, lighting FROM frames WHERE id='node-f0'")
 
-    def refuse(conn, frame_id, record):
+    def refuse(conn, frame_id, record, *, by):
         raise RuntimeError("history write failed")
 
     monkeypatch.setattr(position_history_store, "_append_in", refuse)

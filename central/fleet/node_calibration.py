@@ -416,7 +416,7 @@ class NodeCalibration:
             (binding.frame_id,),
         ).fetchone()
         if row is None:
-            record_sent_in(conn, binding.frame_id, trial=None, saved=saved)
+            record_sent_in(conn, binding.frame_id, trial=None, saved=saved, by="central")
             return None
         live = _lease(row).live(now)
         if (
@@ -428,7 +428,7 @@ class NodeCalibration:
                 "UPDATE frame_trials SET state=%s,changed_at=%s,changed_by='node' WHERE trial_id=%s",
                 ("invalidated" if live else "expired", now, row["trial_id"]),
             )
-            record_sent_in(conn, binding.frame_id, trial=None, saved=saved)
+            record_sent_in(conn, binding.frame_id, trial=None, saved=saved, by="central")
             return None
         receipt = request.receipt
         if (
@@ -458,7 +458,7 @@ class NodeCalibration:
             position_values(Calibration.model_validate(row["calibration"]),
                             FrameLighting.model_validate(row["lighting"])),
             row["session_id"] or row["trial_id"], row["restored_from"])
-        record_sent_in(conn, binding.frame_id, trial=handed, saved=saved)
+        record_sent_in(conn, binding.frame_id, trial=handed, saved=saved, by="central")
         return encode_trial(candidate)
 
 
