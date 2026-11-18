@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 from support.devices import seed_device
 from support.frames import frame_create
+from support.trial_bus import worker_trials
 
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
@@ -35,6 +36,7 @@ from central.infra.display_store import (
 )
 from central.infra.node_link_store import PgLinkStores
 from central.registry import Enrollment, OutputReport, enrollment_message
+from contracts.node_calibration import trial_document_key
 from contracts.node_link import Pipe
 from contracts.node_output import (
     BEST_DETECTED,
@@ -126,7 +128,8 @@ def _sql(registry, sql: str, params=()) -> list[dict]:
 
 def _documents(registry, serial: str, pipe: Pipe = Pipe.FLEET) -> dict:
     stores = PgLinkStores(registry.db)
-    source = DisplayDocuments(stores, DisplayWakes(), times=DatabaseTransactionClock()).source(serial, pipe)
+    source = DisplayDocuments(stores, DisplayWakes(), times=DatabaseTransactionClock(),
+                              trials=worker_trials(registry.db)).source(serial, pipe)
     return asyncio.run(source.documents(DOCUMENT_STREAM))
 
 
@@ -239,7 +242,8 @@ def test_the_output_document_changes_only_when_its_body_does(registry):
     first = _documents(registry, "pi-a")
     assert sorted(first) == [output_document_key("HDMI-A-1"), output_document_key("HDMI-A-2"),
                              picture_document_key("HDMI-A-1"), picture_document_key("HDMI-A-2"),
-                             region_document_key("HDMI-A-1"), region_document_key("HDMI-A-2")]
+                             region_document_key("HDMI-A-1"), region_document_key("HDMI-A-2"),
+                             trial_document_key("HDMI-A-1"), trial_document_key("HDMI-A-2")]
     document = decode_output_document(first[output_document_key("HDMI-A-1")])
     assert (document.change, document.method, document.power.now, document.power.test) == (
         1, BEST_DETECTED, Power.ON, None)

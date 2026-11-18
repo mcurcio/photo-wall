@@ -11,8 +11,8 @@ Writers (each in its caller's transaction, so a history write fails only with it
   (central/registry.py `commit_calibration_trial_in`): it records a change made outside Photo Wall,
   updates the Frame's calibration and lighting, and appends the kept entry together, so no kept
   write can skip its entry.
-- `record_sent_in`: the trial owner's `deliver_in` (central/fleet/node_calibration.py), on every
-  exchange it hands a Frame: it compares without a lock and appends only when
+- `record_sent_in`: the trial owner's projection `trial_in` (central/fleet/node_calibration.py), on
+  every read of the Output's trial document by the worker's source: it compares without a lock and appends only when
   `position_history.sent_record` says so, re-checking under the lock.
 Every append takes the Frame's row lock (FOR NO KEY UPDATE; a no-op under Registry's FOR UPDATE),
 numbers the entry the Frame's newest + 1, stamps `at` with `clock_timestamp()` in the INSERT and `by`

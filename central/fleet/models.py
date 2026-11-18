@@ -49,7 +49,6 @@ class TrialRefusal(StrEnum):
     DISPLAY_UNAVAILABLE = "trial_display_unavailable"               # the Pi's display host is away
     CURRENT_OUTPUT_REQUIRED = "trial_current_output_required"       # the output was not reported lately
     ADMITTED_SURFACE_REQUIRED = "trial_admitted_surface_required"   # the Pi is still starting its picture
-    SURFACE_CHANGED = "trial_surface_changed"     # the Runtime no longer admits the output or app as read
     UNKNOWN_ENTRY = "unknown_entry"                                 # a Restore's entry is gone
     OPERATION_INVALID = "node_trial_operation_invalid"              # a body the routes cannot read
     BODY_TOO_LARGE = "node_body_too_large"
@@ -63,7 +62,7 @@ TRIAL_REFUSAL_STATUS: Final[dict[TrialRefusal, int]] = {
     TrialRefusal.SEQUENCE_INVALID: 422, TrialRefusal.LATEST_NOT_PRESENTED: 409,
     TrialRefusal.FRAME_UNBOUND: 409, TrialRefusal.DISPLAY_UNAVAILABLE: 409,
     TrialRefusal.CURRENT_OUTPUT_REQUIRED: 409, TrialRefusal.ADMITTED_SURFACE_REQUIRED: 409,
-    TrialRefusal.SURFACE_CHANGED: 409, TrialRefusal.UNKNOWN_ENTRY: 404,
+    TrialRefusal.UNKNOWN_ENTRY: 404,
     TrialRefusal.OPERATION_INVALID: 422, TrialRefusal.BODY_TOO_LARGE: 413,
     TrialRefusal.CALIBRATION_REVISION_CONFLICT: 409, TrialRefusal.CALIBRATION_BASELINE_CHANGED: 409,
 }

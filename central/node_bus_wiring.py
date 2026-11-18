@@ -35,9 +35,11 @@ from central.content_wiring import build_release_services
 from central.coordination import OutputLossLedger
 from central.db import Database, DatabaseTransactionClock, PoolName
 from central.fleet.node_bus_hub import HUB_LISTENERS, FleetHub
+from central.fleet.node_calibration import NodeCalibration, TrialReportJudge
 from central.fleet.node_release_catalog import NodeReleaseCatalog
 from central.fleet.node_sessions import NodeControlConfig, NodeSessions
 from central.fleet.pi_reboot import BusPiReboot, PiReboot
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.hub_api import central_state, hub_methods
 from central.infra.central_state import PgCentralStateReads, PgStateWakes
 from central.infra.display_store import (
@@ -46,7 +48,7 @@ from central.infra.display_store import (
     DisplayWakes,
     OutputReportJudge,
 )
-from central.infra.frame_lighting_store import PgHouseLock
+from central.infra.frame_lighting_store import PgFrameLighting, PgHouseLock
 from central.infra.home_assistant.states import HomeAssistantListener
 from central.infra.light_sensor_judge import HOST_STATE_STREAM, LightSensorJudge
 from central.infra.listen import listen
@@ -61,6 +63,7 @@ from central.infra.node_releases import RELEASES_CHANNEL
 from central.infra.player_state_wakes import PLAYER_STATE_CHANNEL
 from central.infra.player_versions import InstallEnds, PgPlayerVersions
 from central.infra.room_light_store import ROOM_LIGHTS_CHANNEL, PgRoomLights
+from central.registry import Registry
 from central.room_light.ports import RoomLightsDocuments
 from central.version import central_version
 from contracts.node_link import Pipe
@@ -230,9 +233,9 @@ async def serve_hub(url: str, stop: asyncio.Event, **session: object) -> None:
 def build_node_bus(dsn: str, env: Mapping[str, str]) -> NodeBus | None:
     """The worker's NodeBus over its own database pool, or None without HUB_URL_ENV (no hub
     deployed). Both pipes' links take their documents from `DisplayDocuments` (the fleet pipe's
-    Output documents; the show pipe's are empty), and the display line's Output reports are judged
-    as they are recorded (`OutputReportJudge`, which keeps each Output's loss through
-    `OutputLossLedger`); a console command in Central's API process wakes the
+    Output, region, picture and Position trial documents; the show pipe's are empty), and the display
+    line's Output reports are judged as they are recorded (`OutputReportJudge`, which keeps each
+    Output's loss through `OutputLossLedger`), then its trial reports (`TrialReportJudge`); a console command in Central's API process wakes the
     documents through `DisplayWakes.listen`. A Pi's light meter on the host line is judged as it is
     recorded (`LightSensorJudge`; each Player's drawn report is read where its line is recorded), and
     a recorded host base wakes the look that ends a Pi's install (`InstallEnds`);
@@ -247,9 +250,14 @@ def build_node_bus(dsn: str, env: Mapping[str, str]) -> NodeBus | None:
     clock = SystemClock()
     wakes = DisplayWakes()
     room_lights = PgRoomLights(db, PgHouseLock())
-    stores = PgLinkStores(db, {REPORT_STREAM: OutputReportJudge(wakes, losses=OutputLossLedger()),
+    # The output judge first: it takes Coordination and Runtime when a loss is due, then `players` and
+    # `outputs`; the trial judge locks only `frame_trials` rows, last.
+    stores = PgLinkStores(db, {REPORT_STREAM: AllJudges(OutputReportJudge(wakes, losses=OutputLossLedger()),
+                                                        TrialReportJudge()),
                                HOST_STATE_STREAM: AllJudges(LightSensorJudge(room_lights), InstallEnds())})
-    documents = DisplayDocuments(stores, wakes, times=DatabaseTransactionClock())
+    lighting = PgFrameLighting(LUT_RECIPE_ID)
+    trials = NodeCalibration(db, registry=Registry(db, clock, lighting=lighting), lighting=lighting)
+    documents = DisplayDocuments(stores, wakes, times=DatabaseTransactionClock(), trials=trials)
     links = tuple(NodeLinks(pipe, hub_url, stores, documents) for pipe in (Pipe.FLEET, Pipe.SHOW))
     wall = RoomLightsWall(room_lights)
     sessions = NodeSessions(db, clock, NodeControlConfig())

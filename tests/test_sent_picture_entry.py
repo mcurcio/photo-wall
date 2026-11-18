@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from support.trial_bus import worker_trials
 from test_fleet_attempts import DEVICE_ID
 from test_position_history_store import AUTH, Node, _client, _see_display, _sql
 
@@ -26,7 +27,7 @@ OTHER_PI = "pi-other"
 def _project(registry) -> None:
     """The worker's picture projection for the rig's Pi, at Central's time now."""
     with registry.db.transaction() as conn:
-        output_documents(conn, DEVICE_ID, DatabaseTransactionClock().now_in(conn))
+        output_documents(conn, DEVICE_ID, DatabaseTransactionClock().now_in(conn), trials=worker_trials(registry.db))
 
 
 def _entry(client, player_id: str, output_id: str, change: str | int, headers=AUTH):

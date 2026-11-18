@@ -48,6 +48,7 @@ def test_production_display_driver_native_chain(registry, monkeypatch):
         admin=lambda: None,
         coordinator=coordinator,
         config=config,
+        times=ProcessTransactionClock(registry.clock),
     )
     sessions = NodeSessions(registry.db, registry.clock, config)
     browser = os.environ.get("PHOTO_WALL_BROWSER_PROBE") == "1"
@@ -233,8 +234,8 @@ def test_production_display_driver_native_chain(registry, monkeypatch):
         assert "PASS production_driver_http_runtime_native_handoff" in result.stdout
         if not browser:
             assert "PASS production_driver_native_role_removal_before_response" in result.stdout
-        assert ("PASS interactive_operator_browser_fixture" if browser else
-                "PASS first_calibration_operator_trial_native_save") in result.stdout
+        if browser:
+            assert "PASS interactive_operator_browser_fixture" in result.stdout
     finally:
         ticking.set()
         if browser:

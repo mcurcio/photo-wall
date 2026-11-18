@@ -34,6 +34,7 @@ from appliance.kernel.display_paths import (
     SIGNAL_RANGE_REQUEST,
 )
 from appliance.kernel.unix_credentials import receive_credential_packet
+from contracts.node_calibration import decode_trial_document, trial_document_key
 from contracts.node_output import (
     OUTPUT_IDS,
     CentralCard,
@@ -50,7 +51,14 @@ from contracts.node_picture import decode_picture_document, picture_document_key
 from contracts.node_protocol import OutputKey
 from nodeapi.documents import Document
 
-from .bus import DISPLAY_SLICE, BusImpededReports, BusPictureSink, BusReportSink, display_session
+from .bus import (
+    DISPLAY_SLICE,
+    BusImpededReports,
+    BusPictureSink,
+    BusReportSink,
+    BusTrialSink,
+    display_session,
+)
 from .central_card import CentralCards
 from .ddc import DdcChannel
 from .domain import OutputState
@@ -68,7 +76,15 @@ from .picture_list import FileOfferedCache, PictureListAsker
 from .power_methods import DdcCiAdapter, HdmiCecAdapter, SignalOffAdapter, run_tool
 from .screen_turn import ScreenTurns
 from .signal_range import DrmConnectorRanges, FileRangeRequests
-from .weston import MAX_PACKET, SurfaceGrant, WestonBackend, _pairs, _surface
+from .trials import Trials
+from .weston import (
+    MAX_PACKET,
+    CompositorPresentation,
+    SurfaceGrant,
+    WestonBackend,
+    _pairs,
+    _surface,
+)
 
 log = logging.getLogger(__name__)
 
@@ -436,26 +452,31 @@ class CentralCardWiring:
 
 def settle(controller: Controller, backend: WestonBackend, wiring: CentralCardWiring) -> None:
     """The main loop's pass before it waits: every pending shell event observed, the retiring
-    service ticked, then Central's cards told what this pass changed (`tell_cards`; no change:
-    nothing sent)."""
+    service ticked, each Output's Position trial settled (`Trials.settle`: its leases on this Pi's
+    clock), then Central's cards told what this pass changed (`tell_cards`; no change: nothing
+    sent)."""
     while backend.pending:
         controller.observe()
     if controller.service is not None:
         controller.service.tick()
+    if controller.trials is not None:
+        controller.trials.settle(controller.host)
     tell_cards(wiring.cards, backend)
 
 
 def document_feed(power: OutputPowerController, picture: PictureController,
-                  turns: ScreenTurns, regions: ShellRegions) -> Callable[[str, Document], None]:
+                  turns: ScreenTurns, regions: ShellRegions, trials: Trials) -> Callable[[str, Document], None]:
     """The desired view's callback, routed by key: an Output document (`output-…`), decoded, to the
     power controller and to the screen turns (its `turn`, render redesign S3); a picture document (`picture-…`, decision 0022), decoded, to the picture
     controller (each acts on its own change number); a region document (`region-…`, issue #124),
-    decoded, its region to the shell's regions. A document that does not decode, sits under
+    decoded, its region to the shell's regions; a trial document (`trial-…`, decision 0034 S4b),
+    decoded, to the trials (`Trials.document`). A document that does not decode, sits under
     another Output's key, or under a key of none of these kinds, is logged and ignored; a refused
     region document gives its Output no region (the debug overlay on the whole Display), logged
     once per change, and touches neither power nor the turn."""
     output_keys = {output_document_key(output_id) for output_id in OUTPUT_IDS}
     picture_keys = {picture_document_key(output_id) for output_id in OUTPUT_IDS}
+    trial_keys = {trial_document_key(output_id) for output_id in OUTPUT_IDS}
     region_keys = {region_document_key(output_id): output_id for output_id in OUTPUT_IDS}
     refused: dict[str, bytes] = {}       # region key -> the refused document last logged
 
@@ -490,6 +511,11 @@ def document_feed(power: OutputPowerController, picture: PictureController,
                 if picture_document_key(wanted.output_id) != key:
                     raise ValueError("picture_document_key")
                 picture.document(wanted.output_id, wanted)
+            elif key in trial_keys:
+                trial = decode_trial_document(document.value)
+                if trial_document_key(trial.output_id) != key:
+                    raise ValueError("trial_document_key")
+                trials.document(trial.output_id, trial)
             else:
                 raise ValueError("display_document_key")
         except ValueError as error:
@@ -545,6 +571,7 @@ class Controller:
         self.host = backend.initialize()
         self.feed = Feed(256)
         self.service = None
+        self.trials: Trials | None = None
         self.reports = reports
         if reports is not None:
             reports.observe(self.host.states())
@@ -555,6 +582,8 @@ class Controller:
             self.reports.observe(self.host.states())
         if observed is None:
             return
+        if self.trials is not None and isinstance(observed, CompositorPresentation):
+            self.trials.presented(observed, self.host)
         if self.service is not None:
             self.service.observe(observed)
         self.feed.append(
@@ -677,16 +706,18 @@ def main() -> None:
         turns.start()
         regions.start()
         cards.start()
-        feed = document_feed(power, picture, turns, regions)
+        trials = Trials(backend, BusTrialSink(session))    # the Position trial (WestonBackend.trial)
+        feed = document_feed(power, picture, turns, regions, trials)
         session.desired.on_change(feed)
         for output_id in OUTPUT_IDS:     # what arrived before the callback, once more (idempotent)
             for key in (output_document_key(output_id), picture_document_key(output_id),
-                        region_document_key(output_id)):
+                        region_document_key(output_id), trial_document_key(output_id)):
                 if (present := session.desired.get(key)) is not None:
                     feed(key, present)
         controller = Controller(backend, reports=OutputReporter(PowerObservations(power, picture, turns),
                                                                 mode=backend.current_mode),
                                 power=power)
+        controller.trials = trials
         if config:
             from .service import DisplayService
 

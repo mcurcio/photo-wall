@@ -2,16 +2,16 @@
 (configuration snapshots, slice S3; owner, 2026-10-13: scope "Everything per Display+Frame", use
 "View and restore"; migration 096).
 
-Every trial runs on tests/test_node_calibration.py's rig (`setup_trial`): a Node Pi with node-f0 and
-node-f1 bound, both saved once by `save_position` at support.position's PORTRAIT_ON_WIDE (so each begins
-with one kept-saved entry). The Node's exchanges are real `NodeDisplay.exchange` calls.
+Every trial runs on tests/support/trial_bus.py's linked Pi (`bound_node`): node-f0 and node-f1
+bound, both saved once by `save_position` at support.position's PORTRAIT_ON_WIDE (so each begins
+with one kept-saved entry). What the Pi is handed is the worker's real document source reading the
+Output's trial key; what it presents goes through Central's real `TrialReportJudge`.
 (1) Save appends kept-saved; (2) a turn, and an entry of another box; (3) a change made outside Photo Wall; (4) what
 the exchanges hand the Node; (5) Restore; (6) Restore's refusals; (7) the page and time; (8) kept and
 sent retention apart; (9) a deleted Frame's history; (10) one transaction.
 """
 from __future__ import annotations
 
-import itertools
 from dataclasses import replace
 from uuid import UUID, uuid4
 
@@ -19,7 +19,8 @@ import pytest
 from fastapi.testclient import TestClient
 from support.frames import frame_body
 from support.position import LIGHTING, PORTRAIT_ON_WIDE, save_position
-from test_node_calibration import LIGHTING_JSON, SHIFTED, SKEWED, begin, operate, setup_trial
+from support.trial_bus import bound_node, present, trial_document, trials_of
+from test_node_calibration import LIGHTING_JSON, SHIFTED, SKEWED, begin, operate
 from test_registry import ADMIN, frame
 
 from central.app import create_app
@@ -35,30 +36,26 @@ from central.infra.position_history_store import record_sent_in, write_position_
 from central.tuning_history import bounds as retention
 from contracts.frame_lighting import FrameLighting
 from contracts.models import Calibration, PositionBox
-from contracts.node_calibration import parse_trial
 
 AUTH = {"Authorization": "Bearer " + ADMIN}
 DEEP = LIGHTING.model_copy(update={"mat_depth_mm": 3.0})
 
 
 class Node:
-    """The rig's Node Pi: each exchange a fresh request at a later boot time; `present` answers the
-    trial it is handed as shown, so Save may keep it."""
+    """The linked Pi: `exchange` is the worker's document source reading the Output's trial key (what
+    it hands the Pi, recorded as sent); `present` states the trial it is handed as shown, so Save may
+    keep it."""
 
     def __init__(self, registry):
-        self.trials, self.request, self._exchange = setup_trial(registry)
-        self._times = itertools.count(1500, 100)
+        self.registry = registry
+        bound_node(registry, frames=("node-f0", "node-f1"))
+        self.trials = trials_of(registry)
 
     def exchange(self):
-        self.request = replace(self.request, request_id=uuid4(), sampled_boottime_ms=next(self._times))
-        return self._exchange(self.request)
+        return trial_document(self.registry, self.trials)
 
     def present(self) -> None:
-        candidate = parse_trial(self.exchange().trial)
-        time = next(self._times)
-        self.request = replace(self.request, request_id=uuid4(), sampled_boottime_ms=time, receipt=replace(
-            self.request.receipt, sampled_boottime_ms=time, buffer_id=f"weston-{time}", frame_tag=candidate.frame_tag))
-        self._exchange(self.request)
+        present(self.registry, self.exchange())
 
     def begin(self, frame_id: str = "node-f0") -> dict:
         return begin(self.trials, frame_id)

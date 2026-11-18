@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from support.frames import frame_create
 from support.position import PORTRAIT_ON_WIDE, save_position
+from support.trial_bus import worker_trials
 from test_display_identity import enroll_pi
 
 from central.app import create_app
@@ -82,7 +83,8 @@ def _revision(registry, frame_id: str = "kitchen") -> int:
 def _documents(registry) -> dict:
     """The document source's Output documents for the Pi, decoded, at Central's time now."""
     with registry.db.transaction() as conn:
-        raw = output_documents(conn, device_id_for_serial(SERIAL), DatabaseTransactionClock().now_in(conn))
+        raw = output_documents(conn, device_id_for_serial(SERIAL), DatabaseTransactionClock().now_in(conn),
+                               trials=worker_trials(registry.db))
     return {key: decode_output_document(value) for key, value in raw.items() if key.startswith("output-")}
 
 

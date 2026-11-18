@@ -25,6 +25,7 @@ from typing import Final
 
 from fastapi.testclient import TestClient
 from support.position import PORTRAIT_ON_WIDE, save_position
+from support.trial_bus import worker_trials
 from test_display_identity import (
     _SEQ,
     ADMIN,
@@ -99,7 +100,8 @@ def _read(brightness: int, contrast: int = 50) -> tuple[HardwareSetting, ...]:
 def _documents(registry, serial: str = SERIAL, output_id: str = "HDMI-A-1") -> tuple[OutputDocument, PictureDocument]:
     """The Output's two documents as the worker's source projects (and records) them now."""
     source = DisplayDocuments(PgLinkStores(registry.db), DisplayWakes(),
-                              times=DatabaseTransactionClock()).source(serial, Pipe.FLEET)
+                              times=DatabaseTransactionClock(),
+                              trials=worker_trials(registry.db)).source(serial, Pipe.FLEET)
     documents = asyncio.run(source.documents(DOCUMENT_STREAM))
     return (decode_output_document(documents[output_document_key(output_id)]),
             decode_picture_document(documents[picture_document_key(output_id)]))
@@ -330,7 +332,8 @@ def test_the_sources_wait_ends_at_a_sessions_idle_deadline(registry):
     _sql(registry, "UPDATE displays SET picture_session = jsonb_set(picture_session, '{idle_until}', to_jsonb(EXTRACT(EPOCH FROM clock_timestamp()) + 1)) "
          "WHERE picture_session IS NOT NULL")
     source = DisplayDocuments(PgLinkStores(registry.db), DisplayWakes(),
-                              times=DatabaseTransactionClock()).source(SERIAL, Pipe.FLEET)
+                              times=DatabaseTransactionClock(),
+                              trials=worker_trials(registry.db)).source(SERIAL, Pipe.FLEET)
 
     async def ended() -> None:
         await asyncio.wait_for(source.changed(), 5)

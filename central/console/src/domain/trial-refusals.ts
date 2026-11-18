@@ -24,10 +24,8 @@ export const TRIAL_REFUSAL_WORDS: Record<TrialRefusal, string> = {
   trial_latest_not_presented: "The Pi has not presented the latest change yet. Wait a moment, then press Done again.",
   trial_frame_unbound: "Choose which Pi and HDMI output feed this Frame first (Hardware tab).",
   trial_display_unavailable: "This Frame's Pi is not connected to Photo Wall. Check that it is on.",
-  trial_current_output_required:
-    "The Pi has not reported this Display in the last few seconds. Check that the Display is on and plugged in.",
+  trial_current_output_required: "The Pi does not see this Display. Check that the Display is on and plugged in.",
   trial_admitted_surface_required: "The Pi is still starting its picture. Wait a moment.",
-  trial_surface_changed: "This Frame's Pi changed its picture while Photo Wall checked the change. It tries again in a moment.",
   unknown_entry: "That change is no longer in the history.",
   // A draft Central cannot read (a value outside what a Frame takes): the next edit fixes it.
   node_trial_operation_invalid: "Photo Wall refused this change: a value is outside what a Frame takes.",

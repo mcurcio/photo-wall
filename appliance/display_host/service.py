@@ -120,9 +120,7 @@ class DisplayService:
         states = self.controller.host.states()
         # Cold/handoff transitions poll faster. Stable operational frames need no command heartbeat.
         transitional = any(state.connected and state.diagnostic != "released" for state in states)
-        self.next_sample = now + (
-            250 if self.controller.backend.trials else (1000 if transitional else 3000)
-        )
+        self.next_sample = now + (1000 if transitional else 3000)
         sample = Sample(
             states,
             tuple(self.receipts.values()),
@@ -152,15 +150,8 @@ class DisplayService:
             return
         surface = decision.surface
         try:
-            previous_trial = self.controller.backend.trials.get(state.key.output_id)
-            self.controller.backend.trial(state.key, decision.trial)
-            current_trial = self.controller.backend.trials.get(state.key.output_id)
-            if current_trial is not None and (previous_trial is None or
-                    (previous_trial.trial_id, previous_trial.sequence) !=
-                    (current_trial.trial_id, current_trial.sequence)):
-                # A just-delivered Trial must not wait out the prior idle cadence
-                # before reporting its first real presentation.
-                self.next_sample = min(self.next_sample, boottime_ms() + 100)
+            # The Position trial rides the display line's trial-<port> key (trials.py), never this
+            # exchange (decision 0034, S4b part 3).
             if (
                 decision.operation == "candidate"
                 and state.candidate is None

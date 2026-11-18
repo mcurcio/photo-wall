@@ -262,7 +262,7 @@ def test_the_runner_s_wiring_takes_a_bus_report_to_the_shell_through_each_owner_
         central_card=shell.central_card, output_listeners=[], trials={}, pending=False,
         grants={"HDMI-A-1": (SimpleNamespace(surface=surface), UUID(GRANT))},
         host=SimpleNamespace(states=lambda: (state,)))
-    controller = SimpleNamespace(observe=lambda: None, service=None)
+    controller = SimpleNamespace(observe=lambda: None, service=None, trials=None)
     reports = BusImpededReports(url="nats://127.0.0.1:1")                    # never started: no connection
     wiring = CentralCardWiring(backend, reports)   # type: ignore[arg-type]
     sink = wiring.power_sink(SimpleNamespace(put_report=lambda _report: None, emit_attempt=lambda _attempt: None))

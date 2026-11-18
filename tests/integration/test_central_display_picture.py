@@ -22,6 +22,7 @@ import asyncio
 from fastapi.testclient import TestClient
 from integration.bus_servers import hub_server, leaf_connections, node_server, until
 from support.frames import frame_create
+from support.trial_bus import worker_trials
 from test_display_identity import ADMIN, AUTH, MODE, NO_SERIAL, enroll_pi
 
 from appliance.display_host.bus import DISPLAY_COMPONENT, DISPLAY_SLICE, DISPLAY_VERSION
@@ -127,7 +128,8 @@ def test_picture_documents_and_reports_cross_the_display_line_on_their_own_keys(
         before_listening = wakes.count(device)
         listening = asyncio.create_task(wakes.listen(database.dsn))
         stores = PgLinkStores(database, {REPORT_STREAM: OutputReportJudge(wakes, losses=OutputLossLedger())})
-        links = NodeLinks(Pipe.FLEET, hub.client_url, stores, DisplayDocuments(stores, wakes, times=DatabaseTransactionClock()))
+        links = NodeLinks(Pipe.FLEET, hub.client_url, stores, DisplayDocuments(stores, wakes, times=DatabaseTransactionClock(),
+                                                                                trials=worker_trials(database)))
         stop = asyncio.Event()
         running = asyncio.create_task(links.run(stop))
         try:

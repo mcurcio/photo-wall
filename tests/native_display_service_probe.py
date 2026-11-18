@@ -152,7 +152,6 @@ try:
     browser = os.environ.get("PHOTO_WALL_BROWSER_PROBE") == "1"
     trial = None
     withdrawing = False
-    trial_path = "/v1/operator/frames/native-frame/calibration-trials"
     end = time.monotonic() + (330 if browser else 50)
     while time.monotonic() < end:
         while backend.pending:
@@ -182,44 +181,13 @@ try:
                         print("PASS interactive_operator_browser_fixture", flush=True)
                         break
                     continue
-                if trial is None:
-                    print("PASS production_driver_http_runtime_native_handoff", flush=True)
-                    status, raw = transport.request("POST", trial_path, b"{}")
-                    if status == 409 and json.loads(raw).get("error") in (
-                        "trial_admitted_surface_required", "trial_current_output_required"
-                    ):
-                        continue  # Recovery still needs a newly uploaded original presentation.
-                    assert status == 200, (status, raw)
-                    trial = json.loads(raw)
-                    trial_path += "/" + trial["trial_id"]
-                    # A centred 9:16 box 40 % of the width: 256 x 455 pixels at (192, 13) on the
-                    # fixture's 640 x 480 Output.
-                    calibration = {**trial["calibration"], "fit": {
-                        "mode": "box", "left": 192 / 640, "top": 13 / 480, "width": 0.4, "height": 455 / 480}}
-                    status, raw = transport.request("POST", trial_path, json.dumps({
-                        "operation": "edit", "expected_sequence": 1, "calibration": calibration,
-                        "lighting": trial["lighting"],  # the whole draft, as the console sends it: the saved lighting
-                    }).encode())
-                    assert status == 200, (status, raw)
-                    trial = json.loads(raw)
-                else:
-                    status, raw = transport.request("POST", trial_path, json.dumps({
-                        "operation": "status", "expected_sequence": 2,
-                    }).encode())
-                    assert status == 200, (status, raw)
-                    trial = json.loads(raw)
-                    assert trial["state"] == "active", trial
-                    if trial["presented_sequence"] == 2:
-                        status, raw = transport.request("POST", trial_path, json.dumps({
-                            "operation": "save", "expected_sequence": 2,
-                        }).encode())
-                        assert status == 200, (status, raw)
-                        saved = json.loads(raw)
-                        assert saved["state"] == "saved" and saved["saved_calibration"]["fit"]["width"] == 0.4
-                        print("PASS first_calibration_operator_trial_native_save", flush=True)
-                        status, raw = transport.request("POST", "/fixture/unbind", b"{}")
-                        assert status == 200, (status, raw)
-                        withdrawing = True
+                # The Position trial rides the Node bus's display line (decision 0034, S4b part 3:
+                # tests/node/display/test_display_trials.py, tests/integration/test_central_display_documents.py),
+                # never this exchange: the handoff done, the Frame is unbound at once.
+                print("PASS production_driver_http_runtime_native_handoff", flush=True)
+                status, raw = transport.request("POST", "/fixture/unbind", b"{}")
+                assert status == 200, (status, raw)
+                withdrawing = True
     else:
         raise AssertionError(("production_driver_trial_timeout", trial, service.receipts, controller.host.states()))
 finally:

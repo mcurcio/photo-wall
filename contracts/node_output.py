@@ -71,7 +71,8 @@ from contracts.wire_codec import (
     whole,
 )
 
-SCHEMA_MAJOR: Final = 11                        # the display line's schema major (birth, envelope); 11 from the Frame region and the current mode (#124)
+SCHEMA_MAJOR: Final = 12                        # the display line's schema major (birth, envelope); 11 from the Frame region
+                                                # and the current mode (#124); 12 from the Position trial's keys (decision 0034, S4b)
 DISPLAY_MM_MAX: Final = 2550                    # an EDID base block states at most 255 cm a side
 
 # Every Output a Node can have: the Pi 5's two HDMI connectors, and the two virtual connectors the

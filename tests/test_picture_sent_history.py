@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+from support.trial_bus import worker_trials
 from test_display_identity import (
     AUTH,
     NO_SERIAL,
@@ -146,8 +147,8 @@ def test_a_lapsed_session_is_a_back_entry_on_time(registry):
                              "WHERE picture_session IS NOT NULL")
     with registry.db.transaction() as conn:
         now = DatabaseTransactionClock().now_in(conn)
-        assert _until_next_deadline(conn, device_id, now) <= lease["idle_until"] - now
-        output_documents(conn, device_id, lease["idle_until"] + 1)
+        assert _until_next_deadline(conn, device_id, now, trials=worker_trials(registry.db)) <= lease["idle_until"] - now
+        output_documents(conn, device_id, lease["idle_until"] + 1, trials=worker_trials(registry.db))
     assert _kinds(registry)[-1] == (3, "sent-back", session["session_id"], None)
     assert _sent_rows(registry)[-1]["picture"]["software_contrast_percent"] == 100
 

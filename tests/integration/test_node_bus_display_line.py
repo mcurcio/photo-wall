@@ -199,7 +199,7 @@ def test_the_display_line_carries_centrals_output_document(tmp_path):
                                                                           sink.put_picture(PICTURE_REPORT),
                                                                           picture.document(output_id, document)))
         ignored = SimpleNamespace(document=lambda output_id, document: None)   # power, turns, regions: not here
-        display.desired.on_change(document_feed(ignored, controller, ignored, ignored))
+        display.desired.on_change(document_feed(ignored, controller, ignored, ignored, ignored))
 
         # (1) The display line applies beside the host line, inside the store's stream count.
         names = await _names(node)

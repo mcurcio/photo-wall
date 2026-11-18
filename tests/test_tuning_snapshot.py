@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from support.position import LIGHTING
+from support.trial_bus import worker_trials
 from test_fleet_attempts import DEVICE_ID
 from test_node_calibration import SKEWED
 from test_position_history_store import AUTH, Node, _client, _see_display, _sql
@@ -65,7 +66,7 @@ def _read(registry, at) -> dict:
 def _project(registry) -> None:
     """The worker's picture projection for the rig's Pi, at Central's time now."""
     with registry.db.transaction() as conn:
-        output_documents(conn, DEVICE_ID, DatabaseTransactionClock().now_in(conn))
+        output_documents(conn, DEVICE_ID, DatabaseTransactionClock().now_in(conn), trials=worker_trials(registry.db))
 
 
 def test_the_tracer_a_picture_edit_and_a_position_edit_read_back_by_time(registry):

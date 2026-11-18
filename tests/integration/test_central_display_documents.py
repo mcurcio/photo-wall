@@ -21,6 +21,7 @@ import asyncio
 
 from integration.bus_servers import hub_server, leaf_connections, node_server, until
 from support.frames import frame_create
+from support.trial_bus import worker_trials
 from test_display_identity import enroll_pi
 
 from appliance.display_host.bus import DISPLAY_COMPONENT, DISPLAY_SLICE, DISPLAY_VERSION
@@ -110,7 +111,7 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
         listening = asyncio.create_task(wakes.listen(database.dsn))
         stores = PgLinkStores(database, {REPORT_STREAM: OutputReportJudge(wakes, losses=OutputLossLedger())})
         links = NodeLinks(Pipe.FLEET, hub.client_url, stores, 
-                         DisplayDocuments(stores, wakes, times=DatabaseTransactionClock()))
+                         DisplayDocuments(stores, wakes, times=DatabaseTransactionClock(), trials=worker_trials(database)))
         stop = asyncio.Event()
         running = asyncio.create_task(links.run(stop))
         try:
@@ -180,6 +181,117 @@ def test_a_nodes_output_documents_and_reports_cross_the_display_line(database, t
 
     try:
         asyncio.run(run())
+    finally:
+        display.stop()
+        node.stop()
+        hub.stop()
+
+
+def test_a_position_trial_crosses_the_display_line_and_its_presentation_lets_save_keep_it(
+        database, tmp_path):
+    """Decision 0034, S4b part 3, on real servers: a trial begun through the operator route reaches the
+    Pi's desired view as `trial-HDMI-A-1` (the worker's source, woken by the route's NOTIFY), its
+    leases as durations; the Pi's `trial-HDMI-A-1` state put is judged onto the trial
+    (`TrialReportJudge`, after the Output report judge) and Save keeps it. Mutation probe 3.1: never
+    write `trial-<port>` -> the desired view lacks it -> RED."""
+    from fastapi.testclient import TestClient
+    from support.position import PORTRAIT_ON_WIDE, save_position
+    from support.trial_bus import draw
+    from test_registry import ADMIN
+
+    from central.app import create_app
+    from central.fleet.node_bus_presence import record_presence_in
+    from central.fleet.node_calibration import TrialReportJudge
+    from central.infra.node_link_store import AllJudges
+    from contracts.node_calibration import (
+        PresentedTrial,
+        TrialReport,
+        decode_trial_document,
+        encode_trial_report,
+        trial_document_key,
+        trial_report_key,
+    )
+
+    registry = Registry(database, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
+    player = enroll_pi(registry, SERIAL)
+    registry.create_frame(frame_create("kitchen"), by="console")
+    registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0, by="console")
+    save_position(registry, "kitchen", PORTRAIT_ON_WIDE)
+    device = device_id_for_serial(SERIAL)
+    with database.transaction() as conn:   # Central's hub holds the Pi's fleet link (FleetHub's look)
+        record_presence_in(conn, {device: True}, 1000.0)
+    draw(registry, device)                  # the Player draws the Frame at its binding
+    hub = hub_server(tmp_path, [SERIAL])
+    node = node_server(tmp_path, SERIAL, hub)
+    display = NodeSession(DISPLAY_COMPONENT, DISPLAY_SLICE,
+                          Release(DISPLAY_VERSION, "sha256:display-test", {DISPLAY_COMPONENT: SCHEMA_MAJOR}),
+                          url=node.client_url)
+    hub.start()
+    node.start()
+    app = create_app(database, registry.clock, ADMIN, run_scheduler=False, media_times=DatabaseTransactionClock())
+    headers = {"Authorization": "Bearer " + ADMIN}
+    path = "/v1/operator/frames/kitchen/calibration-trials"
+
+    def presented_sequence() -> int | None:
+        with database.transaction() as conn:
+            return conn.execute("SELECT presented_sequence FROM frame_trials WHERE state='active'").fetchone()[
+                "presented_sequence"]
+
+    async def run(client: TestClient) -> None:
+        display.start()
+        assert await asyncio.to_thread(display.wait_attached, 15)
+
+        async def linked():
+            return account_id(SERIAL) in leaf_connections(hub)
+        await until(linked, 15, "the Node's leaf links")
+        wakes = DisplayWakes()
+        listening = asyncio.create_task(wakes.listen(database.dsn))
+        stores = PgLinkStores(database, {REPORT_STREAM: AllJudges(
+            OutputReportJudge(wakes, losses=OutputLossLedger()), TrialReportJudge())})
+        links = NodeLinks(Pipe.FLEET, hub.client_url, stores,
+                          DisplayDocuments(stores, wakes, times=DatabaseTransactionClock(), trials=worker_trials(database)))
+        stop = asyncio.Event()
+        running = asyncio.create_task(links.run(stop))
+        try:
+            await links.track([SERIAL])
+            display.state.put(output_report_key("HDMI-A-1"), _report("HDMI-A-1"))
+
+            async def connected():
+                with database.transaction() as conn:
+                    return conn.execute("SELECT connected FROM outputs WHERE player_id=%s AND output_id='HDMI-A-1'",
+                                        (player,)).fetchone()["connected"] is True
+            await until(connected, SECONDS, "the Output's report judged connected")
+
+            begun = await asyncio.to_thread(client.post, path, headers=headers)
+            assert begun.status_code == 200, begun.text
+
+            async def handed():
+                found = display.desired.get(trial_document_key("HDMI-A-1"))
+                document = None if found is None else decode_trial_document(found.value)
+                return document if document is not None and document.trial is not None else None
+            document = await until(handed, SECONDS, "trial-HDMI-A-1 on the Node")
+            trial = document.trial
+            assert str(trial.trial_id) == begun.json()["trial_id"]
+            assert 0 < trial.idle_ms <= 5000 and trial.idle_ms <= trial.hard_ms <= 110_000
+
+            display.state.put(trial_report_key("HDMI-A-1"), encode_trial_report(TrialReport("HDMI-A-1", PresentedTrial(
+                trial.trial_id, trial.generation, trial.sequence, trial.candidate_sha256))))
+
+            async def judged():
+                return presented_sequence() == 1
+            await until(judged, SECONDS, "the trial's presentation judged")
+            saved = await asyncio.to_thread(client.post, f"{path}/{trial.trial_id}", headers=headers,
+                                            json={"operation": "save", "expected_sequence": 1})
+            assert saved.status_code == 200, saved.text
+            assert saved.json()["state"] == "saved"
+        finally:
+            stop.set()
+            listening.cancel()
+            await asyncio.wait_for(running, SECONDS)
+
+    try:
+        with TestClient(app) as client:
+            asyncio.run(run(client))
     finally:
         display.stop()
         node.stop()

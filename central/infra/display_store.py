@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import threading
@@ -134,7 +135,7 @@ from central.displays.picture_history import (
     sent_record,
     unrecorded_record,
 )
-from central.displays.ports import DisplayRefused, OutputLosses
+from central.displays.ports import DisplayRefused, OutputLosses, TrialInForce, TrialProjection
 from central.displays.views import (
     ChoiceView,
     CopyOutcome,
@@ -192,6 +193,7 @@ from central.live_session import Lease, begin_lease
 from central.power.timetable import frame_timetable, unbound_timetable
 from central.transaction_locks import acquire_runtime_locks
 from contracts.models import Calibration, frame_output, frame_size_mm
+from contracts.node_calibration import TrialDocument, encode_trial_document, trial_document_key
 from contracts.node_link import Pipe
 from contracts.node_output import (
     OUTPUT_IDS,
@@ -235,7 +237,7 @@ log = logging.getLogger(__name__)
 
 REPORT_STREAM: Final = state_stream("display")       # the display line's state bucket: Output and picture reports
 DOCUMENT_STREAM: Final = desired_stream("display")   # the display line's desired bucket: Output and picture documents
-_REPORT_SUBJECT: Final = state_prefix("display")
+REPORT_SUBJECT: Final = state_prefix("display")
 _CLOCK: Final = DatabaseTransactionClock()
 _LISTEN_RETRY_SECONDS: Final = 1.0
 _LISTEN_APPLICATION: Final[PoolName] = "photo-wall-output-documents"
@@ -729,7 +731,7 @@ class OutputReportJudge:
 
     @staticmethod
     def _report_of(device_id: str, stream: str, item: Read) -> OutputReport | PictureReport | None:
-        key = item.subject.removeprefix(_REPORT_SUBJECT)
+        key = item.subject.removeprefix(REPORT_SUBJECT)
         if not key.startswith(("output-", "picture-")) or (item.headers or {}).get(KV_OPERATION_HEADER):
             return None
         try:
@@ -855,13 +857,16 @@ class DisplayWakes:
 
 class DisplayDocuments:
     """`DocumentSources` for both pipes: the fleet pipe's display desired bucket holds each Output's
-    document; every other stream, and the show pipe, is `{}`. Reads run behind the link stores'
-    gate, in one transaction each."""
+    documents; every other stream, and the show pipe, is `{}`. Reads run behind the link stores'
+    gate, in one transaction each. `trials` is what each Output's trial document carries (the
+    Position trial's projection, injected: this module imports no `central.fleet` trial code)."""
 
-    def __init__(self, stores: PgLinkStores, wakes: DisplayWakes, *, times: TransactionClock) -> None:
+    def __init__(self, stores: PgLinkStores, wakes: DisplayWakes, *, times: TransactionClock,
+                 trials: TrialProjection) -> None:
         self._stores = stores
         self._wakes = wakes
         self._times = times
+        self._trials = trials
 
     def source(self, serial: str, pipe: Pipe) -> DocumentSource:
         device_id = device_id_for_serial(serial)
@@ -869,7 +874,7 @@ class DisplayDocuments:
             raise ValueError("node_link_serial")
         if Pipe(pipe) is not Pipe.FLEET:
             return _NoDocuments()
-        return _OutputDocuments(self._stores, self._wakes, device_id, self._times)
+        return _OutputDocuments(self._stores, self._wakes, device_id, self._times, self._trials)
 
 
 class _NoDocuments:
@@ -881,36 +886,39 @@ class _NoDocuments:
 
 
 class _OutputDocuments:
-    def __init__(self, stores: PgLinkStores, wakes: DisplayWakes, device_id: str, times: TransactionClock) -> None:
+    def __init__(self, stores: PgLinkStores, wakes: DisplayWakes, device_id: str, times: TransactionClock,
+                 trials: TrialProjection) -> None:
         self._stores = stores
         self._wakes = wakes
         self._device_id = device_id
         self._times = times
+        self._trials = trials
         self._seen = wakes.count(device_id)
 
     async def documents(self, stream: str) -> Mapping[str, bytes]:
         if stream != DOCUMENT_STREAM:
             return {}
         return await self._stores.run(
-            lambda conn: output_documents(conn, self._device_id, self._times.now_in(conn)))
+            lambda conn: output_documents(conn, self._device_id, self._times.now_in(conn), trials=self._trials))
 
     async def changed(self) -> None:
         """When this Node's facts are woken, or at its next deadline (`_until_next_deadline`,
         measured from Central's clock, slept on this process's), so an ended test, an abandoned
-        session's revert and the timetable's roll forward reach the Pi with no other write and no
-        reaper."""
+        session's revert, a trial's lease and the timetable's roll forward reach the Pi with no
+        other write and no reaper."""
         seen = self._seen
         remaining = await self._stores.run(
-            lambda conn: _until_next_deadline(conn, self._device_id, self._times.now_in(conn)))
+            lambda conn: _until_next_deadline(conn, self._device_id, self._times.now_in(conn), trials=self._trials))
         try:
             self._seen = await asyncio.wait_for(self._wakes.after(self._device_id, seen), remaining)
         except TimeoutError:
             return
 
 
-def _until_next_deadline(conn: Any, device_id: str, now: float) -> float:
+def _until_next_deadline(conn: Any, device_id: str, now: float, *, trials: TrialProjection) -> float:
     """Seconds from Central's `now` until the earliest of: a live console test on the Node's
-    Outputs ends, a picture session's idle deadline on a Display last seen on them, the Node's
+    Outputs ends, a picture session's idle deadline on a Display last seen on them, an active
+    Position trial's idle or hard deadline on its Frames (`trials.next_deadline_in`), the Node's
     timetables' first change after now (a hold's end is one when it changes the power; one that
     does not changes no document), and the next house midnight (the horizon moves), which always
     comes."""
@@ -923,6 +931,9 @@ def _until_next_deadline(conn: Any, device_id: str, now: float) -> float:
         "AND p.retired_at IS NULL AND (d.picture_session->>'idle_until')::float8 > %(now)s)) AS deadline",
         {"device": device_id, "now": now}).fetchone()
     deadlines = [] if row["deadline"] is None else [row["deadline"]]
+    trial = trials.next_deadline_in(conn, device_id=device_id, now=now)
+    if trial is not None:
+        deadlines.append(trial)
     house = house_time_in(conn)
     policy = power_policy_in(conn, now)
     deadlines.append(day_start(house, house_date(house, now) + timedelta(days=1)))
@@ -951,7 +962,7 @@ _TEST_COLUMNS: Final = "r.id AS test_id, r.power AS test_power, r.for_seconds, r
 _TEST_JOIN: Final = f"LEFT JOIN power_requests r ON r.frame_id=f.id AND r.reason='{_CONSOLE_TEST}'"
 
 
-def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
+def output_documents(conn: Any, device_id: str, now: float, *, trials: TrialProjection) -> dict[str, bytes]:
     """key -> encoded document for each Output of the Node at Central's `now`: its Output document,
     raising `document_change` only when its body differs from the one recorded, and its picture
     document, raising `picture_change` only when `picture_digest` differs (each its own columns of the
@@ -964,7 +975,13 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
     Frame region document (issue #124) carries `model.frame_region` of the bound Frame's Position,
     its screen (`frame_screen_px`) and its turn, null unbound or with no screen known, raising
     `region_change` only when `region_digest` differs: a saved Position or a new mode never raises
-    the Output document's `change`."""
+    the Output document's `change`. Its trial document (decision 0034, S4b part 3) carries the bound
+    Frame's trial in force (`trials.trial_in`; None unbound), raising `trial_change` only when
+    `_trial_digest` differs (the trial's identity, sequence, candidate and Central's deadlines,
+    never its durations); on a rise it is encoded with the leases' durations from `now` and kept in
+    `outputs.trial_document`, which is served unchanged between rises, so a wake never re-arms a
+    lease on the Pi. Lock order: the Node's `players` row (FOR SHARE), then `frames` (every trial
+    projected first, `record_sent_in` appending), then `outputs`."""
     player_id = _player_of(conn, device_id, "FOR SHARE")
     if player_id is None:
         return {}
@@ -974,11 +991,14 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
         "SELECT seen.output_id, f.id AS frame_id, d.id AS d_id, d.power_method, d.switch_input_on_power_on, d.never_off_on_other_input, "
         f"{PICTURE_COLUMNS}, d.hardware_restore, {_SESSION_COLUMNS}, seen.document_change, seen.document_digest, "
         "seen.region_change, seen.region_digest, seen.picture_change, f.calibration, "
+        "seen.trial_change, seen.trial_digest, seen.trial_document, "
         f"seen.picture_digest, COALESCE(f.turn, 0) AS turn, {_TEST_COLUMNS}, {SCREEN_COLUMNS} "
         "FROM outputs seen LEFT JOIN displays d ON d.id=seen.display_id "
         "LEFT JOIN frames f ON f.player_id=seen.player_id AND f.output_id=seen.output_id "
         f"{_TEST_JOIN} WHERE seen.player_id=%(player)s ORDER BY seen.output_id",
         {"player": player_id}).fetchall()
+    in_force = {row["frame_id"]: trials.trial_in(conn, frame_id=row["frame_id"], now=now)
+                for row in rows if row["frame_id"] is not None and row["output_id"] in OUTPUT_IDS}
     documents: dict[str, bytes] = {}
     for row in rows:
         output_id = row["output_id"]
@@ -1008,6 +1028,21 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
         documents[region_document_key(output_id)] = encode_region_document(
             FrameRegionDocument(output_id, region_change, region))
 
+        trial = in_force.get(row["frame_id"])
+        digest = _trial_digest(trial)
+        if row["trial_digest"] != digest:
+            trial_change = (row["trial_change"] or 0) + 1
+            stored = json.loads(encode_trial_document(
+                TrialDocument(output_id, trial_change, None if trial is None else trial.trial)))
+            conn.execute("UPDATE outputs SET trial_change=%s, trial_digest=%s, trial_document=%s, changed_at=%s, "
+                         "changed_by='central' WHERE player_id=%s AND output_id=%s",
+                         (trial_change, digest, Jsonb(stored), now, player_id, output_id))
+        else:
+            stored = row["trial_document"]
+        # The stored document's canonical bytes, the same on every read between rises.
+        documents[trial_document_key(output_id)] = json.dumps(
+            stored, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
         picture = _picture_in_force(row, now)
         pattern = None if _no_display(row) else session_test_pattern(picture_session(row), now)
         digest = picture_digest(picture, pattern)
@@ -1027,6 +1062,16 @@ def output_documents(conn: Any, device_id: str, now: float) -> dict[str, bytes]:
                                                   test_pattern=pattern, display_id=row["d_id"]))
         documents[picture_document_key(output_id)] = encode_picture_document(wanted)
     return documents
+
+
+def _trial_digest(trial: TrialInForce | None) -> str:
+    """What raises an Output's `trial_change`: the trial's identity, sequence, candidate and
+    Central's deadlines (a keepalive moves the idle one), never the durations sent."""
+    return hashlib.sha256(json.dumps(None if trial is None else {
+        "trial_id": str(trial.trial.trial_id), "generation": trial.trial.generation,
+        "sequence": trial.trial.sequence, "candidate_sha256": trial.trial.candidate_sha256,
+        "expires_at": trial.expires_at, "hard_expires_at": trial.hard_expires_at,
+    }, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _picture_in_force(row: Mapping[str, Any], now: float) -> DisplayPicture:

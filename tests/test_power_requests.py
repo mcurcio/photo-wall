@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 from support.house_time import LONDON, at, set_house
+from support.trial_bus import worker_trials
 from test_display_identity import ADMIN, AUTH, _bind, _frame, enroll_pi
 
 from central.app import create_app
@@ -105,7 +106,8 @@ class House:
         return self.client.get(HOLDS, headers=AUTH).json()
 
     def document(self, frame_id: str) -> OutputDocument:
-        source = DisplayDocuments(PgLinkStores(self.registry.db), DisplayWakes(), times=self.clock).source(
+        source = DisplayDocuments(PgLinkStores(self.registry.db), DisplayWakes(), times=self.clock,
+                                  trials=worker_trials(self.registry.db)).source(
             SERIAL, Pipe.FLEET)
         documents = asyncio.run(source.documents(DOCUMENT_STREAM))
         return decode_output_document(documents[output_document_key(PORTS[frame_id])])

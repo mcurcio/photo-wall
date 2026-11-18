@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi.testclient import TestClient
 from support.house_time import LONDON, set_house
+from support.trial_bus import worker_trials
 from test_display_identity import ADMIN, AUTH, NO_SERIAL, _bind, _frame, _report, enroll_pi
 
 from central.app import create_app
@@ -70,7 +71,8 @@ class FixedClock:
 def _projected(registry, times=None) -> OutputDocument:
     """HDMI-A-1's document as the worker's source projects (and records) it now."""
     source = DisplayDocuments(PgLinkStores(registry.db), DisplayWakes(),
-                              times=times or DatabaseTransactionClock()).source(SERIAL, Pipe.FLEET)
+                              times=times or DatabaseTransactionClock(),
+                              trials=worker_trials(registry.db)).source(SERIAL, Pipe.FLEET)
     return decode_output_document(asyncio.run(source.documents(DOCUMENT_STREAM))[output_document_key("HDMI-A-1")])
 
 
@@ -177,8 +179,8 @@ def test_past_its_end_the_test_leaves_the_projection_and_the_change_rises(regist
 
     # The source's changed() returns at the earliest live end of its Node's tests, with no wake.
     _rows(registry, "UPDATE power_requests SET ends_at = EXTRACT(EPOCH FROM clock_timestamp()) + 1")
-    source = DisplayDocuments(PgLinkStores(registry.db), DisplayWakes(),
-                              times=DatabaseTransactionClock()).source(SERIAL, Pipe.FLEET)
+    source = DisplayDocuments(PgLinkStores(registry.db), DisplayWakes(), times=DatabaseTransactionClock(),
+                              trials=worker_trials(registry.db)).source(SERIAL, Pipe.FLEET)
 
     async def ended() -> None:
         await asyncio.wait_for(source.changed(), 5)
@@ -367,9 +369,9 @@ def test_the_document_source_wakes_at_the_next_set_time_and_at_a_hold_end_that_c
                     "jsonb_build_object('kind', 'frames', 'frame_ids', jsonb_build_array(%s::text))) WHERE name = 'power_policy'", (frame,))
     device = device_id_for_serial(SERIAL)
     with registry.db.transaction() as conn:
-        assert _until_next_deadline(conn, device, now) == 3600          # Night off at 23:00
+        assert _until_next_deadline(conn, device, now, trials=worker_trials(registry.db)) == 3600          # Night off at 23:00
         conn.execute("INSERT INTO power_holds (frame_id, hold_id, power, source, started_at, ends_at, "
                      "created_at, created_by, changed_at, changed_by) "
                      "VALUES (%s, %s, 'off', 'console', %s, %s, %s, 'console', %s, 'console')",
                      (frame, str(uuid.uuid4()), now, now + 1800, now, now))
-        assert _until_next_deadline(conn, device, now) == 1800          # the hold's end: on again
+        assert _until_next_deadline(conn, device, now, trials=worker_trials(registry.db)) == 1800          # the hold's end: on again

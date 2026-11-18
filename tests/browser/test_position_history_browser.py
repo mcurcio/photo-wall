@@ -6,7 +6,7 @@ Display+Frame", used to "View and restore"): the Frame's kept and tried position
 As in test_frame_lighting_browser.py, a real session needs a Node presenting it, so a fake Central
 answers the session routes with Central's rules (`LightingSessions`); this one adds what Central's trial
 owner does for the history (central/fleet/node_calibration.py): every exchange records what it hands
-the Pi through the real store (`position_history_store.record_sent_in`, as `deliver_in` does), and a
+the Pi through the real store (`position_history_store.record_sent_in`, as the trial projection `trial_in` does), and a
 Restore is answered with Central's own rules (`position_entry_in`, `restore_refusal`,
 `restored_draft` at the trial's base revision). Save goes through the real Registry, which keeps
 its entry; the History is read from the real route.

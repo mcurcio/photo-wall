@@ -37,7 +37,7 @@ def test_operator_node_browser(registry):
     coordinator = Coordinator(registry.db, registry.clock)
     app = FastAPI()
     mount_node_routes(app, db=registry.db, clock=registry.clock, admin=lambda: None,
-        coordinator=coordinator, config=NodeControlConfig("node-test"))
+        coordinator=coordinator, config=NodeControlConfig("node-test"), times=ProcessTransactionClock(registry.clock))
     reader = OperatorSnapshotReader(registry.db, registry.clock, registry,
         RuntimeStore(registry.db, registry.clock), MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock)), coordinator)
     done = threading.Event()

@@ -5,6 +5,7 @@ implements both over PostgreSQL; central/display_routes.py depends only on these
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 from uuid import UUID
 
@@ -27,6 +28,7 @@ from central.displays.views import (
     SoftwareEdit,
     TestPatternEdit,
 )
+from contracts.node_calibration import PositionTrial
 
 
 class DisplayRefused(Exception):
@@ -159,4 +161,31 @@ class OutputLosses(Protocol):
     def restored_in(self, conn: Any, *, player_id: str, output_id: str, at: float) -> bool:
         """Every unresolved loss of (player_id, output_id) resolved, whatever Frame or binding
         generation it names; False when there was none."""
+        ...
+
+
+@dataclass(frozen=True)
+class TrialInForce:
+    """The Frame's active trial as the document source sends it at `now`: the trial with the time
+    left on each lease from `now` (`trial`), and its deadlines on Central's clock, which the
+    document's digest covers (never the durations, so a wake that changes nothing raises no
+    change)."""
+    trial: PositionTrial
+    expires_at: float
+    hard_expires_at: float
+
+
+class TrialProjection(Protocol):
+    """What the document source puts on an Output's trial key (decision 0034, S4b part 3), and when
+    it must look again. `conn` is the source's transaction."""
+
+    def trial_in(self, conn: Any, *, frame_id: str, now: float) -> TrialInForce | None:
+        """The Frame's active trial while its lease is live at `now` and its scope is the Frame's
+        binding now (its Output, generation and configuration revision; the Player and authority
+        epoch the trial's); else None. Records the sent Position entry when what it hands differs.
+        Never marks a trial expired or invalidated: that stays lazy, in the trial's own operations."""
+        ...
+
+    def next_deadline_in(self, conn: Any, *, device_id: str, now: float) -> float | None:
+        """The earliest idle or hard deadline after `now` of an active trial on the Node's Frames."""
         ...

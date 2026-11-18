@@ -1181,7 +1181,7 @@ static bool command(struct shell *s, json_t *j) {
         bool same = id && !strcmp(id, o->trial_id) && generation == (json_int_t)o->trial_generation;
         bool ok = uuid(id) && hash && strlen(hash) == 64 && strspn(hash,"0123456789abcdef") == 64 &&
             generation > 0 && sequence > 0 && until > (json_int_t)boot_ms() && hard >= until &&
-            hard <= (json_int_t)boot_ms() + 120000 &&
+            hard <= (json_int_t)boot_ms() + 120000 &&   /* MAX_TRIAL_HARD_MS (contracts/node_calibration.py) */
             json_equal(json_object_get(trial, "baseline"), o->identity) &&
             ((!json_equal(o->trial_baseline, o->identity)) || (same && !o->trial_terminal && sequence >= (json_int_t)o->trial_sequence &&
               hard <= (json_int_t)o->trial_hard_until) || generation > (json_int_t)o->trial_generation);

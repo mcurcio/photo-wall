@@ -25,7 +25,7 @@ from central.content_routes import (
 )
 from central.content_wiring import ContentServices
 from central.coordination import Coordinator
-from central.db import Database
+from central.db import Database, TransactionClock
 from central.fleet.bytes import OfferByteReader
 from central.fleet.models import FleetError, TrialRefusal, TrialRefused
 from central.fleet.node_acceptance import NodeAcceptance
@@ -105,7 +105,7 @@ def _trial_body[T](adapter: TypeAdapter[T], raw: bytes) -> T:
 
 def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
                       admin: Callable[..., None], coordinator: Coordinator, config: NodeControlConfig,
-                      content: ContentServices | None = None) -> None:
+                      times: TransactionClock, content: ContentServices | None = None) -> None:
     sessions = NodeSessions(db, clock, config)
     ingest, observations = NodeIngest(sessions), NodeObservations(sessions)
     display = NodeDisplay(sessions, runtime=coordinator)
@@ -122,9 +122,9 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     acceptance = NodeAcceptance(sessions)
     publications = None if readiness is None else NodeReleaseCatalog(sessions, readiness=readiness)
     lighting = PgFrameLighting(LUT_RECIPE_ID)
-    trials = NodeCalibration(sessions, display=display, registry=Registry(db, clock, lighting=lighting),
-                             lighting=lighting)
-    display.trials = trials
+    # A trial's times are the database's (the document source's clock) in production; a test that
+    # injects its own clock passes its times (create_app's media_times).
+    trials = NodeCalibration(db, registry=Registry(db, clock, lighting=lighting), lighting=lighting, times=times)
     app.state.node_lifecycle = lifecycle
     app.state.node_app_links = links
     app.state.node_sessions = sessions

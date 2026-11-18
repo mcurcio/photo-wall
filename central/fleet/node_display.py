@@ -6,19 +6,14 @@ completion references an immutable earlier decision and later native presentatio
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from uuid import UUID, uuid4
 
-from central.fleet.device_fence import fence_in
-from central.fleet.models import TrialRefusal, TrialRefused
 from central.fleet.node_app_links import (
-    load_current_node_app_link_for_player_in,
     load_current_node_app_link_in,
 )
 from central.fleet.node_sessions import NodeControlError, NodeSessions
 from central.installation_repository import PostgresInstallationRepository
 from central.transaction_locks import acquire_node_lock
-from contracts.node_commands import parse_session_grant
 from contracts.node_display import (
     DisplayDecision,
     Surface,
@@ -132,7 +127,6 @@ class NodeDisplay:
         if not 1 <= decision_ms <= 5000 or not 1 <= receipt_ms <= 5000:
             raise ValueError("display_timing_bound")
         self.sessions, self.runtime = sessions, runtime
-        self.trials = None
         self.installation = PostgresInstallationRepository(sessions.clock)
         self.decision_ms, self.receipt_ms = decision_ms, receipt_ms
 
@@ -254,11 +248,6 @@ class NodeDisplay:
                 receipt,
                 fence,
             )
-            if self.trials is not None:
-                from dataclasses import replace
-
-                trial = self.trials.deliver_in(conn, principal, request, link, binding, now)
-                decision = replace(decision, trial=trial)
             response = encode_display_decision(decision)
             conn.execute(
                 "INSERT INTO node_display_exchanges(producer_id,request_id,session_id,"
@@ -320,98 +309,11 @@ class NodeDisplay:
         """The one age rule for a presentation receipt, comparing samples of one node clock only
         (Central never maps node time): sampled less than `receipt_ms` before `request` (never
         after it: the contract refuses that). Required only where a recent presentation is the
-        evidence: a handoff and its completion, a removal recognized from an issued role, a
-        calibration trial's frame presented. An older receipt stands in an exchange: a still
+        evidence: a handoff and its completion, a removal recognized from an issued role. An older receipt stands in an exchange: a still
         picture is presented once, and the shell's lease, kept by the app's answers to its pings
         and never by presenting again, says the app still holds the Output."""
         return (receipt is not None
                 and 0 <= request.sampled_boottime_ms - receipt.sampled_boottime_ms < self.receipt_ms)
-
-    def current_frame_in(self, conn, frame_id: str):
-        """Operator-side read under Runtime locks, then the Node's own lock (the display
-        admission's, so this trial orders against the Node's exchanges), the device fence and
-        session order. Lock order: Coordination, Runtime, Node; an exchange takes the Node lock
-        alone, so no cycle."""
-        row = conn.execute(
-            "SELECT f.player_id,f.output_id,p.authority_epoch,p.device_id "
-            "FROM frames f JOIN players p ON p.id=f.player_id WHERE f.id=%s "
-            "AND p.retired_at IS NULL",
-            (frame_id,),
-        ).fetchone()
-        if row is None:
-            raise TrialRefused(TrialRefusal.FRAME_UNBOUND)
-        acquire_node_lock(conn, row["device_id"])
-        generation = fence_in(conn, row["device_id"], "act").generation()
-        now = self.sessions.clock.utc()
-        session = conn.execute(
-            "SELECT s.producer_id,s.grant_payload,s.expires_at FROM node_sessions s "
-            "JOIN node_producers p USING(producer_id) JOIN node_boot_admissions b USING(admission_id) "
-            "WHERE s.device_id=%s AND s.device_generation=%s AND s.owner='display_host' "
-            "AND s.revoked_at IS NULL AND s.expires_at>%s AND b.superseded_at IS NULL FOR UPDATE OF s",
-            (row["device_id"], generation, now),
-        ).fetchone()
-        if session is None:
-            raise TrialRefused(TrialRefusal.DISPLAY_UNAVAILABLE)
-        grant = parse_session_grant(bytes(session["grant_payload"]))
-        link = load_current_node_app_link_for_player_in(
-            conn, row["player_id"], row["authority_epoch"], now
-        )
-        configuration = self.installation.configuration_in(
-            conn, row["player_id"], row["authority_epoch"]
-        )
-        binding = (
-            next((b for b in configuration["bindings"] if b.frame_id == frame_id), None)
-            if configuration
-            else None
-        )
-        observed = conn.execute(
-            "SELECT request,received_at FROM node_display_exchanges "
-            "WHERE producer_id=%s AND output_id=%s ORDER BY sampled_boottime_ms DESC LIMIT 1",
-            (session["producer_id"], row["output_id"]),
-        ).fetchone()
-        if (
-            link is None
-            or binding is None
-            or observed is None
-            or now - observed["received_at"] >= 10
-        ):
-            raise TrialRefused(TrialRefusal.CURRENT_OUTPUT_REQUIRED)
-        request = parse_display_exchange(bytes(observed["request"]))
-        expected = Surface(
-            request.output,
-            link.process,
-            link.app_epoch,
-            binding.generation,
-            binding.configuration_revision,
-            binding.frame_id,
-        )
-        if (
-            request.producer != grant.producer
-            or not request.connected
-            or request.admitted != expected
-            or request.receipt is None
-            or request.receipt.surface != expected
-        ):
-            # The admitted surface and an exchange within 10 s say the app holds the Output; its
-            # last presentation may be old (a still picture is presented once).
-            raise TrialRefused(TrialRefusal.ADMITTED_SURFACE_REQUIRED)
-        admission = self.runtime.display_admission_in(
-            conn,
-            device_id=row["device_id"],
-            player_id=link.player_id,
-            authority_epoch=link.authority_epoch,
-            output_id=binding.output_id,
-            frame_id=binding.frame_id,
-            binding_generation=binding.generation,
-            config_revision=binding.configuration_revision,
-            process=link.process,
-            app_epoch=link.app_epoch,
-            environment_sha256=link.environment_sha256,
-            phase="revision",
-        )
-        if not admission.allowed:   # its reason is the Runtime's; the trial answers in its own words
-            raise TrialRefused(TrialRefusal.SURFACE_CHANGED)
-        return CurrentDisplay(session["producer_id"], link, binding, request)
 
     def _operation(self, request, surface) -> tuple[str, str]:
         if request.admitted == surface:
@@ -493,11 +395,3 @@ class NodeDisplay:
             "VALUES(%s,%s,%s) ON CONFLICT DO NOTHING",
             (decision.decision_id, request.request_id, now),
         )
-
-
-@dataclass(frozen=True)
-class CurrentDisplay:
-    producer_id: UUID
-    link: object
-    binding: object
-    request: object

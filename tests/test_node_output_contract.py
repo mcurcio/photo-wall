@@ -88,8 +88,8 @@ CANONICAL = (b'{"change":3,"method":"ddc-ci","never_off_on_other_input":true,"ou
 REGION = FrameRegion("kitchen", (1080, 1920), OutputRect(0, 420, 1080, 1080))
 
 
-def test_the_display_line_is_schema_11():
-    assert SCHEMA_MAJOR == 11
+def test_the_display_line_is_schema_12():
+    assert SCHEMA_MAJOR == 12
 
 
 @pytest.mark.parametrize("value, encode, decode", [

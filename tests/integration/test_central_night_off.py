@@ -25,6 +25,7 @@ from integration.bus_servers import hub_server, leaf_connections, node_server, u
 from node.display.test_display_power_methods import Clock, Curtain, Display, ddc
 from support.frames import frame_create
 from support.house_time import LONDON, at, set_house
+from support.trial_bus import worker_trials
 from test_display_identity import ADMIN, AUTH, enroll_pi
 
 from appliance.display_host.bus import BusReportSink, display_session
@@ -113,7 +114,7 @@ def test_the_pi_keeps_night_off_while_central_is_away(database, tmp_path):
     async def run(client: TestClient) -> None:
         session.start()
         assert await asyncio.to_thread(session.wait_attached, 15)
-        session.desired.on_change(document_feed(power, NotUnderTest(), NotUnderTest(), NotUnderTest()))
+        session.desired.on_change(document_feed(power, NotUnderTest(), NotUnderTest(), NotUnderTest(), NotUnderTest()))
         power.start()
         power.output(OUTPUT, connected=True, identity=None, modes=())
 
@@ -126,7 +127,8 @@ def test_the_pi_keeps_night_off_while_central_is_away(database, tmp_path):
         async def central_runs(wanted_change):
             """Central's links run until the judge has recorded the Pi's report for the document
             Central holds; then they stop (Central goes away)."""
-            links = NodeLinks(Pipe.FLEET, hub.client_url, stores, DisplayDocuments(stores, wakes, times=central_clock))
+            links = NodeLinks(Pipe.FLEET, hub.client_url, stores, DisplayDocuments(stores, wakes, times=central_clock,
+                                                                                trials=worker_trials(database)))
             stop = asyncio.Event()
             running = asyncio.create_task(links.run(stop))
             try:
