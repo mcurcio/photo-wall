@@ -45,15 +45,15 @@ jobs:
       - run: npm --prefix central/console run lint
       - run: npm --prefix central/console run build-storybook
 
-  # Two shards (PHOTO_WALL_TEST_SHARD, tests/support/shards.py: a test belongs to the shard its
-  # name hashes to), each well inside its 4 minutes; `checks` succeeds only when both do.
+  # Three shards (PHOTO_WALL_TEST_SHARD, tests/support/shards.py: a test belongs to the shard its
+  # name hashes to), each well inside its 4 minutes; `checks` succeeds only when all three do.
   unit:
     runs-on: ubuntu-24.04
     timeout-minutes: 4
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: ./.github/actions/python-uv
@@ -63,7 +63,7 @@ jobs:
       - uses: ./.github/actions/subject-model
       - name: Run the unit tier, with no database
         env:
-          PHOTO_WALL_TEST_SHARD: ${{ matrix.shard }}/2
+          PHOTO_WALL_TEST_SHARD: ${{ matrix.shard }}/3
         run: |
           .venv/bin/python -m pytest -q --tb=short --durations=25 \
             -m "not db and not browser" -n 4 --dist worksteal
