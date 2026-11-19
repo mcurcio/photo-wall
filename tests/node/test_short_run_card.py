@@ -4,8 +4,8 @@ Seen in CI's PID1 `failure` leg (2026-11-19): the cold start spawned the Player,
 once; the broker's first turn found nothing current, so its run facts (`app_started`, `app_exited`)
 were never written, the health judge never raised `app_absent`, and the Frame stayed dark with no
 card. The rule (`appliance.kernel.app_facts`): a run has started once the launch names it, and a
-started run a known turn finds not current has exited; each is restated while it holds, so a
-reader's feed gap loses neither.
+started run a known turn finds not current has exited; each is stated once, and every feed page
+carries the run state, so a reader's feed gap loses neither.
 
 The real BrokerLoop turn runs the real AppEffectBroker (its real cold start) over the real
 SystemdAppProcessDriver (its real `start`); only its edges are scripted: `systemctl show` rows,
@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import itertools
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -26,11 +27,13 @@ from test_node_boot import environment
 
 from appliance.apps import process_linux as linux
 from appliance.apps.broker import AppEffectBroker, ColdStart, RunningApp
+from appliance.apps.broker_runner import answer_broker_feed
 from appliance.apps.lifecycle_storage import FileEffectJournal
 from appliance.apps.probe import SHIPPED_TIMING, UNSEEN_INVOCATION, AppRunKey
 from appliance.display_host.overlay.instruction import PULSE_DEADLINE_MS
 from appliance.health.judge import APP_ABSENT, HealthJudge
-from appliance.kernel.app_facts import APP_EXITED, APP_STARTED, RUN_RESTATE_MS
+from appliance.health.runner import BrokerFeedReader
+from appliance.kernel.app_facts import APP_EXITED, APP_STARTED
 from contracts.node_faults import FAULTS
 from contracts.node_protocol import NodeProcessIdentity
 
@@ -42,7 +45,9 @@ class Wall:
     """The broker's turn and the judge reading its feed, on one clock (`loop.now`)."""
 
     def __init__(self, loop, feed) -> None:
-        self.loop, self.feed, self.after = loop, feed, 0
+        self.loop, self.feed, self.taken = loop, feed, []
+        self.reader = BrokerFeedReader("broker", Path("/nonexistent/feed.sock"))
+        self.reader._read = self._read
         self.judge = HealthJudge(period_ms=SHIPPED_TIMING.period_ms, miss_limit=SHIPPED_TIMING.miss_limit,
                                  startup_ms=SHIPPED_TIMING.startup_ms,
                                  pulse_deadline_ms=PULSE_DEADLINE_MS, catalogue=FAULTS)
@@ -51,17 +56,26 @@ class Wall:
                                      "holding": False, "power": "on"}], 0)
 
     def turn(self, *, gap: bool = False) -> list[tuple[str, dict]]:
-        """One broker turn, then one judge read of the feed (`gap`: the read missed it, so the
-        judge forgets, as the health runner does). The run facts read."""
+        """One broker turn, then the judge reads the feed until caught up, through the health
+        runner's reader and the broker's own answer (`gap`: before the read, as many newer facts
+        as the ring holds evict what this turn wrote). The run facts read."""
         self.loop.turn()
-        page = self.feed.read(self.after, incarnation=None, limit=64)
-        self.after = page.latest
-        if gap:
-            self.judge.forget(self.loop.now)
-            return []
-        for event in page.events:
-            self.judge.observe(event, self.loop.now)
-        return [(event.kind, event.value["run"]) for event in page.events
+        while gap and self.facts():
+            self.feed.append("unrelated", {})
+        self.taken = []
+        while self.reader.cursor.after < self.feed.read(0, incarnation=None, limit=1).latest:
+            self.reader.drain(self.judge, lambda: self.loop.now)
+        return self.taken
+
+    def _read(self, request: dict) -> dict:
+        page = answer_broker_feed(self.feed, self.loop.facts, request)
+        self.taken.extend((each["kind"], each["value"]["run"]) for each in page["events"]
+                          if each["kind"] in (APP_STARTED, APP_EXITED))
+        return {"accepted": True, **page}
+
+    def facts(self) -> list[tuple[str, dict]]:
+        """Every run fact the broker wrote."""
+        return [(event.kind, event.value["run"]) for event in self.feed.read(0, incarnation=None, limit=1024).events
                 if event.kind in (APP_STARTED, APP_EXITED)]
 
     def card(self, now: int) -> tuple[str, str]:
@@ -149,15 +163,12 @@ def test_a_player_no_look_saw_still_gets_its_card(cold_start):
 
 
 def test_a_feed_gap_before_the_window_loses_no_exit(cold_start):
-    """The judge's read missed the exit (it forgets, withdrawing nothing it had): the restated
-    exit opens it again and the card shows. Mutation probe: no restatement -> no card."""
+    """The judge's read missed both facts (the ring lost them, or the broker began again): the
+    page's run state stands for them, so the exit opens `app_absent` and the card shows, though
+    the broker states nothing again. Mutation probe: the reader ignores the page's run state ->
+    no card."""
     wall, _record = cold_start(seen)
     assert wall.turn(gap=True) == []
-    wall.loop.now += RUN_RESTATE_MS - 1
-    assert wall.turn() == []
-    wall.loop.now += 1
-    (restated,) = wall.turn()
-    assert restated[0] == APP_EXITED
     wall.loop.now += RAISE
-    wall.turn()
+    assert wall.turn() == []  # the broker stated nothing again
     assert wall.card(wall.loop.now)[1] == f"{APP_ABSENT} · Output {OUTPUT}"

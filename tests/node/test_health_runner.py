@@ -15,7 +15,7 @@ from support.packet_pair import packet_pair
 from support.repo import REPO
 
 from appliance import feed_socket
-from appliance.apps.broker_runner import feed_listener
+from appliance.apps.broker_runner import RunFacts, feed_listener
 from appliance.apps.probe import AppRunKey
 from appliance.display_host import runner as display_runner
 from appliance.display_host.domain import OutputState
@@ -185,7 +185,8 @@ def test_the_reader_drains_the_brokers_real_feed_socket(tmp_path):
     feed = Feed(512)
     for _ in range(20):
         feed.append("probe_answered", {"run": RUN, "rtt_ms": 3})
-    listener = feed_listener(feed, directory / "feed.sock", owner_uid=os.getuid(), group=os.getgid(),
+    listener = feed_listener(feed, RunFacts(feed), directory / "feed.sock", owner_uid=os.getuid(),
+                             group=os.getgid(),
                              peer=lambda connection: 10006, kind=KIND)
     stop = threading.Event()
 

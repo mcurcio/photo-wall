@@ -24,8 +24,9 @@ from appliance.kernel.app_facts import (
     APP_DESCRIPTORS,
     APP_EXITED,
     APP_OBSERVATION_FAILED,
+    APP_RUN_STATE,
     APP_STARTED,
-    RUN_RESTATE_MS,
+    AppRunState,
 )
 from appliance.kernel.boot_store import BootStore
 from appliance.kernel.clock import boot_id, boottime_ms
@@ -45,12 +46,49 @@ OBSERVATION_BACKOFF_MS: Final[tuple[int, ...]] = (1_000, 2_000, 5_000, 10_000)
 LOG = logging.getLogger(__name__)
 
 
-def feed_listener(feed: Feed, path: Path = FEED_SOCKET, *, owner_uid: int = 0,
+class RunFacts:
+    """The launch's run state on the broker's node feed (`appliance.kernel.app_facts`): each fact
+    once, when it first holds (`app_started` when a launch first names a run, `app_exited` once a
+    known turn finds it not current), and the state itself (`document`, APP_RUN_STATE) on every
+    page, so a reader whose read had a gap learns it from the page, never from a fact repeated on
+    a timer. A frozen or dead run writes nothing more (issue #125)."""
+
+    def __init__(self, feed: Feed) -> None:
+        self.feed = feed
+        self.run: AppRunKey | None = None  # the launch's run last stated started
+        self.exited = False  # whether `run`'s exit has been stated
+
+    def state(self, run: AppRunKey | None, launched: AppRunKey | None) -> bool:
+        """`launched` (the current launch's run) has started; it has exited once `run` (the
+        turn's current run) is None. Whether the launch's run changed."""
+        changed = launched != self.run
+        if changed:
+            if self.run is not None and not self.exited:
+                self.feed.append(APP_EXITED, {"run": self.run.document()})
+            if launched is not None:
+                self.feed.append(APP_STARTED, {"run": launched.document()})
+            self.run, self.exited = launched, False
+        if self.run is not None and run is None and not self.exited:
+            self.feed.append(APP_EXITED, {"run": self.run.document()})
+            self.exited = True
+        return changed
+
+    def document(self) -> AppRunState | None:
+        return None if self.run is None else {"run": self.run.document(), "exited": self.exited}
+
+
+def answer_broker_feed(feed: Feed, facts: RunFacts, request: dict) -> dict:
+    """The feed's `events` answer and the run state current at the reply (APP_RUN_STATE)."""
+    return {**answer_feed_read(feed, request), APP_RUN_STATE: facts.document()}
+
+
+def feed_listener(feed: Feed, facts: RunFacts, path: Path = FEED_SOCKET, *, owner_uid: int = 0,
                   group: int = FEEDS_GROUP, **seams) -> FeedListener:
     """The broker's node feed socket: root-owned, group pw-node-feeds, read by root and
-    pw-health only (`seams`: the kernel listener's `peer` and `kind`, for tests)."""
+    pw-health only (`seams`: the kernel listener's `peer` and `kind`, for tests). Served on the
+    loop's thread (`BrokerLoop.turn`), so a page's run state and its events agree."""
     return FeedListener(path, owner_uid=owner_uid, group=group, readers=FEED_READERS,
-                        answer=lambda request: answer_feed_read(feed, request),
+                        answer=lambda request: answer_broker_feed(feed, facts, request),
                         max_reply=MAX_FEED_REPLY, **seams)
 
 
@@ -64,15 +102,13 @@ class BrokerLoop:
     the probe socket (`listener`). Nothing here kills or restarts the app (issue #125)."""
 
     def __init__(self, *, broker, store, driver, listener, probes: ProbeThread,
-                 feeds: FeedListener, display: DisplayRuns, clock: Callable[[], int] = boottime_ms,
-                 proc: Path = Path("/proc")):
+                 feeds: FeedListener, display: DisplayRuns, facts: RunFacts | None = None,
+                 clock: Callable[[], int] = boottime_ms, proc: Path = Path("/proc")):
         self.broker, self.store, self.driver = broker, store, driver
         self.listener, self.probes, self.feeds = listener, probes, feeds
         self.display = display
+        self.facts = RunFacts(probes.feed) if facts is None else facts
         self.clock, self.proc = clock, proc
-        self.last_run: AppRunKey | None = None  # the launch's run last stated started
-        self.run_exited = False  # whether `last_run`'s exit has been stated
-        self.stated_at = 0  # when `last_run`'s state was last stated
         self.sampled_at: int | None = None  # when the current run's descriptors were sampled
         self.observation_fault: str | None = None  # the boot owner's last fault, until it clears
         self.faults = 0  # consecutive observation faults
@@ -139,27 +175,13 @@ class BrokerLoop:
         return None if launch is None else AppRunKey.of_launch(launch)
 
     def _report_run(self, run: AppRunKey | None, launched: AppRunKey | None) -> None:
-        """The launch's run state and the current run's open files every DESCRIPTOR_SAMPLE_MS:
-        node-feed facts for the health judge (`appliance.kernel.app_facts`). `launched` has
-        started; it has exited once `run` (the turn's current run) is None. Each is stated when it
-        first holds, so a run no turn saw current still starts and exits, and restated every
-        RUN_RESTATE_MS while it holds."""
+        """The launch's run state (`RunFacts`: each fact once) and the current run's open files
+        every DESCRIPTOR_SAMPLE_MS: node-feed facts for the health judge
+        (`appliance.kernel.app_facts`)."""
         feed = self.probes.feed
         now = self.clock()
-        if launched != self.last_run:
-            if self.last_run is not None and not self.run_exited:
-                feed.append(APP_EXITED, {"run": self.last_run.document()})
-            if launched is not None:
-                feed.append(APP_STARTED, {"run": launched.document()})
-            self.last_run, self.run_exited, self.stated_at, self.sampled_at = launched, False, now, None
-        if self.last_run is not None:
-            if run is None and not self.run_exited:
-                feed.append(APP_EXITED, {"run": self.last_run.document()})
-                self.run_exited, self.stated_at = True, now
-            elif now - self.stated_at >= RUN_RESTATE_MS:
-                feed.append(APP_EXITED if self.run_exited else APP_STARTED,
-                            {"run": self.last_run.document()})
-                self.stated_at = now
+        if self.facts.state(run, launched):
+            self.sampled_at = None
         if run is None:
             return
         if self.sampled_at is not None and now - self.sampled_at < DESCRIPTOR_SAMPLE_MS:
@@ -207,9 +229,10 @@ def main() -> None:
     feed = Feed(FEED_CAPACITY)
     probes = ProbeThread(feed)
     listener = ProbeListener(driver, Path(PROBE_SOCKET), probes=probes)
-    feeds = feed_listener(feed)
+    facts = RunFacts(feed)
+    feeds = feed_listener(feed, facts)
     loop = BrokerLoop(broker=broker, store=store, driver=driver, listener=listener, probes=probes,
-                      feeds=feeds, display=DisplayRuns())
+                      feeds=feeds, display=DisplayRuns(), facts=facts)
     try:
         probes.start()
         if broker.journal.current() is None:
