@@ -13,6 +13,20 @@ from psycopg_pool import ConnectionPool, TooManyRequests
 from contracts.time import Clock
 
 MEDIA_LOCK = 734118325
+MIGRATION_LOCK = 734118321
+MIGRATIONS = Path(__file__).with_name("migrations")
+
+REQUEST_LOCK_TIMEOUT = "5s"
+REQUEST_STATEMENT_TIMEOUT = "10s"
+"""A request's limits: every `transaction()` gives up a lock after 5 s and cancels a statement after
+10 s, so a stalled commit answers 503 `lock_busy` instead of holding the pool."""
+
+MIGRATION_LOCK_TIMEOUT = "15min"
+"""A migration run is not a request: it runs at start, before Central serves, and one statement may
+copy a whole table (migration 119's bus record took past 10 s at production's size, so under a
+request's limits the whole chain rolled back and Central could not start). Its statements have no
+time limit, and it waits this long for a lock: the web process and the worker both migrate at
+start, and the second waits on the migration lock for as long as the first migrates."""
 
 PoolName = Literal[
     "photo-wall-web",              # central/app.py: Central's API process
@@ -147,8 +161,8 @@ class Database:
             except TooManyRequests:
                 self._pool.check()   # the refusal grows the pool when nothing else is
                 raise
-            conn.execute("SET LOCAL lock_timeout='5s'")
-            conn.execute("SET LOCAL statement_timeout='10s'")
+            conn.execute(f"SET LOCAL lock_timeout='{REQUEST_LOCK_TIMEOUT}'")
+            conn.execute(f"SET LOCAL statement_timeout='{REQUEST_STATEMENT_TIMEOUT}'")
             yield conn
 
     @contextmanager
@@ -166,13 +180,19 @@ class Database:
         return {key: value for key, value in self._pool.get_stats().items()
                 if isinstance(key, str) and type(value) is int}
 
+    @staticmethod
+    def _migration_limits(conn) -> None:
+        conn.execute("SET LOCAL statement_timeout = 0")
+        conn.execute(f"SET LOCAL lock_timeout = '{MIGRATION_LOCK_TIMEOUT}'")
+
     def migrate(self) -> None:
         with self.transaction() as conn:
-            conn.execute("SELECT pg_advisory_xact_lock(734118321)")
+            self._migration_limits(conn)
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK,))
             conn.execute("""CREATE TABLE IF NOT EXISTS schema_migrations (
                 name TEXT PRIMARY KEY, sha256 TEXT NOT NULL,
                 applied_at TIMESTAMPTZ NOT NULL DEFAULT now())""")
-            for path in sorted(Path(__file__).with_name("migrations").glob("*.sql")):
+            for path in sorted(MIGRATIONS.glob("*.sql")):
                 sql = path.read_text()
                 digest = sha256(sql.encode()).hexdigest()
                 old = conn.execute(
@@ -182,6 +202,7 @@ class Database:
                     if old["sha256"] != digest:
                         raise RuntimeError(f"migration checksum changed: {path.name}")
                     continue
+                self._migration_limits(conn)   # a migration's own SET LOCAL ends with it (113 sets 10 s)
                 conn.execute(sql)
                 conn.execute("INSERT INTO schema_migrations(name,sha256) VALUES(%s,%s)",
                              (path.name, digest))
