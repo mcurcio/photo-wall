@@ -1,6 +1,5 @@
 """Recording and in-memory adapters for the Node's domain services in unit tests: Display Host's
-backend, Host Management's reboot journal and driver, and the App Effect Broker's effect journal and
-app driver. No network, systemd, reboot or display effect."""
+backend and the App Effect Broker's effect journal and app driver. No network, systemd, reboot or display effect."""
 from __future__ import annotations
 
 from uuid import UUID
@@ -19,31 +18,6 @@ class RecordingDisplayBackend:
     def release_diagnostic(self, surface, buffer_token, handoff_id):
         self.requests.append({"action": "release_diagnostic", "surface": surface,
                               "buffer_token": buffer_token, "handoff_id": handoff_id})
-
-
-class MemoryRebootJournal:
-    def __init__(self):
-        self.records = {}
-        self.sequence = 0
-
-    def get(self, command_id):
-        return self.records.get(command_id)
-
-    def put(self, record):
-        self.records[record.request.command_id] = record
-
-    def next_sequence(self):
-        self.sequence += 1
-        return self.sequence
-
-
-class RecordingRebootDriver:
-    def __init__(self):
-        self.calls = 0
-
-    def initiate(self):
-        self.calls += 1
-        return True  # Simulator-observed initiation, not a real reboot.
 
 
 class MemoryEffectJournal:

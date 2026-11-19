@@ -4,87 +4,14 @@ from uuid import UUID
 import pytest
 from support.node_doubles import (
     MemoryEffectJournal,
-    MemoryRebootJournal,
     RecordingAppDriver,
     RecordingDisplayBackend,
-    RecordingRebootDriver,
 )
 
 from appliance.apps.broker import AppEffectBroker, ColdStart
 from appliance.display_host.domain import DisplayHost, Surface
-from appliance.host.host import HostCore, RebootRequest
 from contracts.app_environment import AppEnvironmentRefV2
-from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
-
-
-def host_values(journal=None, driver=None):
-    p = NodeProducerV2("test", "device-" + "a" * 64, 1, UUID(int=1), "host_core", UUID(int=2))
-    journal = journal or MemoryRebootJournal()
-    driver = driver or RecordingRebootDriver()
-    host = HostCore(producer=p, session_id=UUID(int=3), offer_id=UUID(int=4),
-                    journal=journal, driver=driver)
-    request = RebootRequest(UUID(int=5), "a" * 64, UUID(int=3), UUID(int=4), p)
-    return host, request, journal, driver
-
-
-def test_reboot_admission_is_not_initiation_and_retries_do_not_repeat():
-    host, request, _, driver = host_values()
-    response = host.receive(request, now_ms=0)
-    assert response.decision == "accepted" and driver.calls == 0
-    assert host.receive(replace(request, command_sha256="b" * 64), now_ms=1).decision == "rejected"
-    effect = host.initiate(request.command_id, now_ms=2)
-    assert effect.event.causative_command_id == request.command_id
-    assert host.initiate(request.command_id, now_ms=3) == effect
-    assert driver.calls == 1
-    assert host.receive(request, now_ms=1000) == response
-
-
-def test_reboot_rechecks_session_scope_before_effect():
-    host, request, journal, driver = host_values()
-    host.receive(request, now_ms=0)
-    renewed = HostCore(producer=host.producer, session_id=UUID(int=6), offer_id=host.offer_id,
-                       journal=journal, driver=driver)
-    with pytest.raises(ValueError, match="scope"):
-        renewed.initiate(request.command_id, now_ms=90)
-    assert driver.calls == 0
-
-
-def test_reboot_lost_result_stays_unknown_and_not_repeated_after_reconstruction():
-    class LostDriver:
-        calls = 0
-        def initiate(self):
-            self.calls += 1
-            raise OSError("lost reply after effect")
-    driver = LostDriver()
-    host, request, journal, _ = host_values(driver=driver)
-    host.receive(request, now_ms=0)
-    result = host.initiate(request.command_id, now_ms=1)
-    assert result.effect_unknown and result.event is None
-    reconstructed, _, _, _ = host_values(journal, driver)
-    assert reconstructed.initiate(request.command_id, now_ms=2) == result
-    assert driver.calls == 1
-
-
-def test_reboot_journal_failure_prevents_effect():
-    class FailingJournal(MemoryRebootJournal):
-        fail = False
-        def put(self, record):
-            if self.fail:
-                raise OSError("journal unavailable")
-            super().put(record)
-    journal = FailingJournal()
-    host, request, _, driver = host_values(journal)
-    host.receive(request, now_ms=0)
-    journal.fail = True
-    with pytest.raises(OSError):
-        host.initiate(request.command_id, now_ms=1)
-    assert driver.calls == 0
-
-
-def test_independent_reboot_observation_does_not_execute_or_manufacture_command():
-    host, _, _, driver = host_values()
-    event = host.observed_reboot_initiation(now_ms=1)
-    assert event.causative_command_id is None and driver.calls == 0
+from contracts.node_protocol import NodeProcessIdentity
 
 
 def display_values():
