@@ -1,7 +1,9 @@
-"""Standalone PID1 companion: real Central owners; explicitly synthetic qualification.
+"""Standalone PID1 companion: real Central owners over the bus path; synthetic qualification.
 
-Only disposable schemas and supplied exact archives. No production certification,
-process/display witness injection, operator reboot, or bound withdrawal.
+Only disposable schemas and supplied exact archives. Central is the real app (its boot offers,
+Install, the operator's reboot, the Frame binding) beside the worker's real Node bus, its hub and
+its job runtime running `RebootPi`. Every read here is one of Central's own (presence, the host
+line, the devices row, the reboot records, the Outputs), never a table of the old HTTP path.
 """
 
 from __future__ import annotations
@@ -15,70 +17,83 @@ import shutil
 import socket
 import threading
 import time
+import urllib.request
 from contextlib import contextmanager
-from dataclasses import asdict
 from pathlib import Path
+from typing import Final
 from uuid import UUID, uuid4
 
 import uvicorn
+from content_db import facts_of, put_file
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from integration.bus_servers import BusServer
-from psycopg.types.json import Jsonb
+from support.frames import frame_create
 from test_fleet_attempts import DEVICE_ID, SERIAL
-from test_node_boot import boot_service, keep_version, publish_deployment, released
+from test_node_boot import keep_version, publish_deployment, released
 
 from central.app import create_app
 from central.assets.layout import CacheLayout
 from central.assets.store import CacheStore
 from central.content_wiring import build_content_services
-from central.fleet.acceptance_evidence import current_control_receipt_matches
-from central.fleet.acceptance_query import load_current_app_control_in
-from central.fleet.node_acceptance import current_cohort_in
-from central.fleet.node_app_links import load_current_node_app_link_in
+from central.db import Database
 from central.fleet.node_boot import NodeDeployment
 from central.fleet.node_bus_hub import HUB_LISTENERS
-from central.fleet.node_lifecycle import OperatorAppStage
-from central.fleet.node_sessions import NodeControlConfig, NodeControlError
+from central.fleet.node_bus_presence import bus_links_in
+from central.fleet.node_observations import host_facts_in
+from central.fleet.pi_reboot import RebootPiHandler, reboot_records_in
 from central.infra.asset_records import PgAssetRecords
+from central.infra.node_link_latest import latest_values_in
+from central.infra.node_releases import deployment_jobs
+from central.infra.runtime import JobRuntime
 from central.infra.transactions import PgTransactions
 from central.kernel.assets import AssetKey, AssetKind
+from central.kernel.job_types import Prefetch, RebootPi
+from central.kernel.jobs import asset_key
 from central.node_bus_wiring import HUB_CONFIG_ENV, HUB_URL_ENV, build_node_bus
 from central.registry import Registry
-from central.transaction_locks import acquire_runtime_locks
 from contracts.app_environment import AppEnvironmentRefV2
-from contracts.node_boot import NodeBaseRefV2, NodeBootRequestV2, encode_node_boot_offer
-from contracts.node_host_facts import stored_fact_values
-from contracts.node_lifecycle import parse_app_effect_event, parse_stage_command
-from contracts.node_observation import parse_host_observation
-from contracts.player_control import ControlAppliedReceipt
+from contracts.node_boot import NodeBaseRefV2, NodeBootRequestV2, encode_node_boot_request
+from contracts.node_observation import decode_host_metrics_state
+from contracts.node_state import (
+    BIRTH_KEY,
+    HOST_BASE_KEY,
+    HOST_LINE,
+    HOST_METRICS_KEY,
+    decode_host_base,
+)
 from contracts.time import SystemClock
+from nodeapi.buffers import state_prefix, state_stream
 
-# The outage begins once the App Effect Broker has acknowledged the stage (its accepted
-# response is recorded) AND Central has served the target artifact to the App Manager — its
-# last contribution to a switch. The two come from independent pollers (app-commands and
-# app-desired), so neither alone proves the other. It lasts at least OUTAGE_SECONDS and until the probe has watched the node converge
-# (POST /fixture/outage-release), never longer than OUTAGE_CAP_SECONDS.
-OUTAGE_SECONDS = 35
-OUTAGE_CAP_SECONDS = 300
+REBOOT_SECONDS: Final = 60      # Install's or the operator's reboot: asked, delivered, PID1 stopping
+HANDOFF_SECONDS: Final = 60     # bound Output to the Player's surface on Virtual-1
+OUTAGE_SECONDS: Final = 35      # how long Central stays unreachable
 # The hub as Compose deploys it: the worker's client URL and the monitor, on the deployed listeners.
 HUB_URL = f"nats://127.0.0.1:{HUB_LISTENERS.client_port}"
 HUB_MONITOR_URL = f"http://127.0.0.1:{HUB_LISTENERS.monitor_port}"
 HUB_LEAF_URL = f"ws://127.0.0.1:{HUB_LISTENERS.websocket_port}/leafnode"
 HUB_CONFIG_SECONDS = 30
+BASE_TAG: Final = "v99.0.0"     # the one base every phase's release carries
+FRAME_ID: Final = "pid1-frame"
 
 
 @contextmanager
-def central_fixture(
-    registry, components_dir, extra_refs_and_archives, workdir, node_host, max_boots=1, hub=False
-):
-    """node_host: the numeric IPv4 address at which a node container reaches this host.
+def central_fixture(registry, components_dir, extra_refs_and_archives, workdir, node_host, max_boots=1,
+                    hub=True):
+    """Yields {"origin", "host_origin", "fixture_token", "admin_token", "app", "registry", "hub",
+    "tags", "frame_id"}: `tags` maps each phase ("cold" and every key of `extra_refs_and_archives`)
+    to the tag of the release whose deployment carries that phase's app root (published with an
+    explicit tag, every file of it recorded produced, so Install answers "restarting"); `frame_id`
+    is one seeded, unbound Frame.
 
-    Every URL handed to the node is built from it. A sandboxed app sees neither the container's
-    /etc/hosts nor a Docker Desktop resolver, so a name here would resolve only by accident.
+    node_host: the numeric IPv4 address at which a node container reaches this host. Every URL
+    handed to the node is built from it. A sandboxed app sees neither the container's /etc/hosts
+    nor a Docker Desktop resolver, so a name here would resolve only by accident.
 
     hub: Central has a hub, as Compose deploys it (worker_bus_and_hub): the fixture's `hub` is the
-    real hub, and Central relays every Node's leaf to it at the Node's own origin.
+    real hub, and Central relays every Node's leaf to it at the Node's own origin. Every scenario
+    runs with it: the host's facts, metrics and reboot, and the Output document's binding, travel
+    on the Node's bus alone.
     """
     node_host = str(ipaddress.IPv4Address(node_host))
     # Own the listening socket before any fallible publication/cache setup.
@@ -88,31 +103,39 @@ def central_fixture(
         with contextlib.ExitStack() as stack:
             bus_hub = (stack.enter_context(worker_bus_and_hub(registry.db.dsn, Path(workdir) / "hub"))
                        if hub else None)
-            with _central_fixture(
-                registry,
-                components_dir,
-                extra_refs_and_archives,
-                workdir,
-                listener,
-                node_host,
-                max_boots,
-                bus_hub,
-            ) as fixture:
+            with _central_fixture(registry, components_dir, extra_refs_and_archives, workdir, listener,
+                                  node_host, max_boots, bus_hub) as fixture:
                 yield fixture
+
+
+class _NoPrefetch:
+    """Install queues a Prefetch too; this runtime only takes it off the queue (every file is
+    already in the fixture's cache)."""
+
+    async def handle(self, job: Prefetch) -> None:
+        return None
 
 
 @contextmanager
 def worker_bus_and_hub(dsn, workdir):
     """The worker's side of every Node's bus and the hub beside it, as Compose runs them (E3d S5):
-    the worker's own composition, `build_node_bus`, on its own thread and event loop over this
-    database, and a real hub on the deployed listeners started from the configuration file Fleet
-    writes, once it is there (as the Compose hub waits for it). Yields the hub. NodeBus.run is driven
-    directly: `media.worker._run_workers` adds only its signal handlers, which only the main thread
-    may install. A bus failure is raised when the context ends."""
+    the worker's own composition, `build_node_bus`, and its job runtime running `RebootPi` (its
+    handler as build_job_runtime wires it, over the bus's fleet-pipe links; Prefetch taken off the
+    queue, as tests/integration/test_central_install_tracer.py composes it), on one thread and
+    event loop over this database, and a real hub on the deployed listeners started from the
+    configuration file Fleet writes, once it is there (as the Compose hub waits for it). Yields the
+    hub. NodeBus.run is driven directly: `media.worker._run_workers` adds only its signal handlers,
+    which only the main thread may install. A failure is raised when the context ends."""
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
     config = workdir / "hub.json"
     bus = build_node_bus(dsn, {HUB_URL_ENV: HUB_URL, HUB_CONFIG_ENV: str(config)})
+    clock = SystemClock()
+    database = Database(dsn, application_name="photo-wall-worker")
+    transactions = PgTransactions(database)
+    runtime = JobRuntime(dsn, (RebootPiHandler(bus.pi_reboot(), transactions), _NoPrefetch()), 1,
+                         transactions=transactions, assets=PgAssetRecords(clock), clock=clock,
+                         catalog=(RebootPi, Prefetch))
     hub = BusServer(name="hub", config=config, client_url=HUB_URL, environment={},
                     websocket_port=HUB_LISTENERS.websocket_port, monitor_url=HUB_MONITOR_URL,
                     listeners=HUB_LISTENERS)
@@ -120,9 +143,17 @@ def worker_bus_and_hub(dsn, workdir):
     stop = asyncio.Event()
     failures = []
 
+    async def both():
+        jobs = asyncio.create_task(runtime.run(), name="worker jobs")
+        try:
+            await bus.run(stop)
+        finally:
+            runtime.stop()
+            await jobs
+
     def run():
         try:
-            loop.run_until_complete(bus.run(stop))
+            loop.run_until_complete(both())
         except BaseException as error:  # noqa: BLE001 - raised on the test's thread at the end
             failures.append(error)
 
@@ -141,8 +172,9 @@ def worker_bus_and_hub(dsn, workdir):
     finally:
         if thread.is_alive():
             loop.call_soon_threadsafe(stop.set)
-        thread.join(timeout=30)
+        thread.join(timeout=60)
         hub.stop()
+        database.close()
         if not thread.is_alive():
             loop.close()
         if failures:
@@ -151,11 +183,27 @@ def worker_bus_and_hub(dsn, workdir):
             raise RuntimeError("worker_bus_stop_timeout")
 
 
+def _record_every_file(db, store, records, transactions, deployment_id, archives):
+    """Every file of the deployment recorded produced and present in the cache: each exact archive
+    the fixture copied, and stand-in bytes for the rest (the base tarball: the PXE stand-in boots
+    the image itself), so Install reads the release ready."""
+    with db.transaction() as conn:
+        jobs = deployment_jobs(conn, [deployment_id])[deployment_id]
+    for job in jobs:
+        key = asset_key(job)
+        if key.kind is AssetKind.SEALED_ENVIRONMENT and key.identity in archives:
+            facts = store.measure(archives[key.identity])
+        else:
+            data = ("fixture stand-in for " + key.identity).encode()
+            put_file(store, key, data)
+            facts = facts_of(data)
+        with transactions.begin() as tx:
+            records.record_produced(tx, key, facts)
+
+
 @contextmanager
-def _central_fixture(
-    registry, components_dir, extra_refs_and_archives, workdir, listener, node_host, max_boots,
-    hub
-):
+def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir, listener, node_host, max_boots,
+                     hub):
     """Yield real HTTP origins plus fixture token; caller owns random-schema registry.
 
     extras maps phase -> (AppEnvironmentRefV2 or reference dict, exact archive).
@@ -202,65 +250,26 @@ def _central_fixture(
         run_scheduler=True,
         cache_root=workdir,
         content=content,
-        node_control=NodeControlConfig("pid1-real-central-fixture"),
         hub_leaf_url=HUB_LEAF_URL if hub is not None else None,
     )
-    sessions, lifecycle = app.state.node_sessions, app.state.node_lifecycle
-    # Effect refusals must stay empty; app-link refusals are counted apart, because a relink
-    # recovers them, and named when a scenario's link never arrives.
-    protocol_refusals, app_link_refusals = {}, {}
-    refusal_lock = threading.Lock()
-    # Observe sanitized refusal codes without changing any production predicate.
-    def observe_refusals(name, method, refusals):
-        def observed(*args, **kwargs):
-            try:
-                return method(*args, **kwargs)
-            except NodeControlError as error:
-                with refusal_lock:
-                    key = name + ":" + error.code
-                    if len(refusals) < 32 or key in refusals:
-                        refusals[key] = refusals.get(key, 0) + 1
-                raise
-        return observed
-    lifecycle.effect = observe_refusals("effect", lifecycle.effect, protocol_refusals)
-    links = app.state.node_app_links
-    links.admit = observe_refusals("app_link", links.admit, app_link_refusals)
-    boots = boot_service(sessions)
-    base = NodeBaseRefV2(
-        "v99.0.0",
-        "8" * 64,
-        "9" * 64,
-        1024,
-        original.base_abi,
-        original.graphics_abi,
-        original.plugin_abi,
-    )
-    deployments = {}
-    for phase, ref in refs.items():
+    base = NodeBaseRefV2(BASE_TAG, "8" * 64, "9" * 64, 1024, original.base_abi, original.graphics_abi,
+                         original.plugin_abi)
+    deployments, tags = {}, {}
+    for number, (phase, ref) in enumerate(refs.items()):
         selected = released(NodeDeployment(
-            uuid4(),
-            base,
-            ref,
-            manager,
-            None,
-            {
-                r.environment_sha256: origin + "/fixture/origin/" + r.environment_sha256
-                for r in [manager, ref]
-            },
+            uuid4(), base, ref, manager, None,
+            {r.environment_sha256: origin + "/fixture/origin/" + r.environment_sha256 for r in [manager, ref]},
         ))
-        publish_deployment(registry.db, selected, sessions.clock)
+        tags[phase] = f"v99.0.{number}"
+        publish_deployment(registry.db, selected, clock, tag=tags[phase])
         deployments[phase] = selected
-    keep_version(registry.db, SERIAL, deployments["cold"].deployment_id, sessions.clock.utc())
-    for digest, path in archives.items():
-        with transactions.begin() as tx:
-            records.record_produced(
-                tx, AssetKey(AssetKind.SEALED_ENVIRONMENT, digest), store.measure(path)
-            )
-    operations = {}
-    # The outage phase drops every node exchange once the broker has acknowledged the stage AND
-    # the target artifact is in flight: the switch must converge locally and report afterwards.
-    dropped = {"outage": 0}
-    outage = {"started": None, "released": False, "last_drop": None, "accepted": False, "artifact": False}
+    keep_version(registry.db, SERIAL, deployments["cold"].deployment_id, clock.utc())
+    for deployment in deployments.values():
+        _record_every_file(registry.db, store, records, transactions, deployment.deployment_id, archives)
+    registry.create_frame(frame_create(FRAME_ID), by="console")
+    # The outage: every request but /fixture/* answers 503 while it is active and the hub is
+    # stopped beside it, so the Node has neither Central's HTTP origin nor its bus.
+    outage = {"active": False, "dropped": 0}
     state_lock = threading.Lock()
     boot_requests = {}  # kernel boot id -> the PXE boot request of that boot
 
@@ -268,64 +277,16 @@ def _central_fixture(
         if not secrets.compare_digest(request.headers.get("X-Fixture-Token", ""), token):
             raise HTTPException(403, "fixture_token_required")
 
-    def current_in(conn):
-        row = conn.execute(
-            "SELECT session_id FROM node_sessions WHERE device_id=%s "
-            "AND owner='app_effect_broker' AND revoked_at IS NULL",
-            (DEVICE_ID,),
-        ).fetchone()
-        if row is None:
-            raise NodeControlError("fixture_broker_not_enrolled", 409)
-        principal = sessions.load_operator_target_in(conn, row["session_id"])
-        link = load_current_node_app_link_in(conn, principal)
-        if link is None:
-            raise NodeControlError("fixture_real_app_link_pending", 409)
-        return principal, link
-
-    def outage_active(now):
-        started = outage["started"]
-        if started is None or now >= started + OUTAGE_CAP_SECONDS:
-            return False
-        return not outage["released"] or now < started + OUTAGE_SECONDS
-
     @app.middleware("http")
-    async def central_outage_after_accept(request, call_next):
-        entry = operations.get("outage")
-        path = request.url.path
-        if entry and path.startswith("/v2/node/") and outage_active(clock.utc()):
-            dropped["outage"] += 1
-            outage["last_drop"] = clock.utc()
+    async def central_outage(request, call_next):
+        if outage["active"] and not request.url.path.startswith("/fixture/"):
+            outage["dropped"] += 1
             return JSONResponse({"fixture": "central_unreachable"}, status_code=503)
-        response = await call_next(request)
-        if entry and outage["started"] is None and response.status_code == 200:
-            if request.method == "POST" and path == "/v2/node/app-responses":
-                outage["accepted"] = outage["accepted"] or broker_accepted(entry["operation_id"])
-            elif path.startswith("/v2/node/app-attempts/") and path.endswith("/artifacts/target"):
-                outage["artifact"] = True
-            if outage["accepted"] and outage["artifact"]:
-                # The broker holds the stage and its target is streaming: nothing else needs Central.
-                outage["started"] = clock.utc()
-        return response
-
-    def broker_accepted(operation_id):
-        """Whether Central has recorded the broker's response to this stage's command."""
-        with registry.db.transaction() as conn:
-            return conn.execute(
-                "SELECT 1 FROM node_app_responses r JOIN node_app_operations o USING (command_id) "
-                "WHERE o.operation_id=%s",
-                (operation_id,),
-            ).fetchone() is not None
-
-    @app.post("/fixture/outage-release")
-    def outage_release(request: Request):
-        authenticate(request)
-        if outage["started"] is None:
-            raise HTTPException(409, "fixture_outage_not_started")
-        outage["released"] = True
-        return {"released": True}
+        return await call_next(request)
 
     @app.post("/fixture/node-ready")
     def node_ready(request: Request, value: dict):
+        """The PXE stand-in's boot offer: the boot's request asked of Central's own route."""
         authenticate(request)
         supplied = UUID(value["boot_id"])
         with state_lock:
@@ -335,259 +296,79 @@ def _central_fixture(
                     raise HTTPException(409, "fixture_boot_changed")
                 boot_request = NodeBootRequestV2(SERIAL, supplied, secrets.token_hex(32))
                 boot_requests[supplied] = boot_request
-            offer = boots.offer(boot_request)
-        return {
-            "offer": json.loads(encode_node_boot_offer(offer)),
-            "central": origin,
-            "serial": SERIAL,
-        }
+        asked = urllib.request.Request(host_origin + "/v2/node/boot-offers",
+                                       data=encode_node_boot_request(boot_request), method="POST",
+                                       headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(asked, timeout=20) as response:
+            offer = json.load(response)
+        return {"offer": offer, "central": origin, "serial": SERIAL}
 
-    @app.post("/fixture/stage")
-    def stage(request: Request, value: dict):
+    @app.get("/fixture/pi")
+    def pi(request: Request):
+        """The Pi as Central reads it: its presence on the hub (bus_links_in), the host line's
+        birth epoch and base, the devices row's version and install, its reboot records
+        (reboot_records_in), its Outputs and the seeded Frame's binding."""
         authenticate(request)
-        phase = value["phase"]
-        if phase not in deployments or phase == "cold":
-            raise HTTPException(422, "fixture_phase_unknown")
-        with state_lock:
-            if phase in operations:
-                return operations[phase]
-            with registry.db.transaction() as conn:
-                principal, link = current_in(conn)
-                if conn.execute(
-                    "SELECT 1 FROM frames WHERE player_id=%s", (link.player_id,)
-                ).fetchone():
-                    raise HTTPException(409, "fixture_requires_unbound_player")
-                cohort = current_cohort_in(conn, DEVICE_ID, 1, clock.utc())
-                # Explicit synthetic rollback acceptance, built only around real current evidence.
-                qualification = uuid4()
-                conn.execute(
-                    "INSERT INTO node_app_qualifications VALUES(%s,%s,1,%s,%s,%s)",
-                    (
-                        qualification,
-                        DEVICE_ID,
-                        link.environment_sha256,
-                        "fixture:rollback-acceptance-not-qualified",
-                        clock.utc(),
-                    ),
-                )
-                conn.execute(
-                    "INSERT INTO node_environment_acceptances VALUES(%s,%s,%s,1,%s,%s,%s,%s,%s)",
-                    (
-                        uuid4(),
-                        qualification,
-                        DEVICE_ID,
-                        base.content_key,
-                        link.environment_sha256,
-                        Jsonb(cohort),
-                        Jsonb({"fixture": True, "not_release_qualification": True}),
-                        clock.utc(),
-                    ),
-                )
-                before = {
-                    "process": asdict(link.process),
-                    "app_epoch": link.app_epoch,
-                    "authority_epoch": link.authority_epoch,
-                    "environment_sha256": link.environment_sha256,
-                }
-            operation = uuid4()
-            result = lifecycle.stage(
-                DEVICE_ID,
-                OperatorAppStage(
-                    operation,
-                    uuid4(),
-                    principal.grant.session_id,
-                    1,
-                    deployments[phase].deployment_id,
-                    "fixture:pid1-stage-" + phase,
-                ),
-            )
-            operations[phase] = {"operation_id": str(operation), "before": before, **result}
-            return operations[phase]
-
-    def effect_diagnostics(conn, operation):
-        """Read exact owner predicates and reported effects; never ACK or report here."""
-        result = {}
-        try:
-            row = conn.execute(
-                "SELECT * FROM node_app_operations WHERE operation_id=%s", (operation,)
-            ).fetchone()
-            result["operation_present"] = row is not None
-            if row is None:
-                return result
-            command = parse_stage_command(bytes(row["command_payload"]))
-            current = conn.execute(
-                "SELECT session_id FROM node_sessions WHERE device_id=%s "
-                "AND device_generation=%s AND owner='app_effect_broker' AND revoked_at IS NULL",
-                (command.producer.device_id, command.producer.device_generation),
-            ).fetchone()
-            result["current_session_present"] = current is not None
-            if current is None:
-                return result
-            principal = sessions.load_operator_target_in(conn, current["session_id"])
-            result["producer_matches_command"] = principal.grant.producer == command.producer
-            result["session_matches_command"] = (
-                principal.grant.session_id == command.command_session_id
-            )
-            result["command_authority_epoch"] = row["authority_epoch"]
-            effects = conn.execute(
-                "SELECT payload FROM node_app_effects WHERE operation_id=%s ORDER BY sequence",
-                (operation,),
-            ).fetchall()
-            events = [parse_app_effect_event(bytes(e["payload"])) for e in effects]
-            event = events[-1] if events else None
-            result["terminal_effect"] = event is not None and event.phase == "running"
-            cuts = {
-                phase: min((e.sequence for e in events if e.phase == phase), default=0)
-                for phase in ("intent_stop", "stopped")
-            }
-            result["ordered_stop_before_terminal"] = bool(
-                event and 0 < cuts["intent_stop"] < cuts["stopped"] < event.sequence
-            )
-            link = load_current_node_app_link_in(conn, principal)
-            result["current_link_present"] = link is not None
-            if link is None:
-                return result
-            result.update(
-                link_authority_epoch=link.authority_epoch,
-                authority_advanced=link.authority_epoch > row["authority_epoch"],
-                process_matches_event=bool(event and link.process == event.process),
-                app_epoch_matches_event=bool(event and link.app_epoch == event.app_epoch),
-                environment_matches_event=bool(
-                    event and link.environment_sha256 == event.environment_sha256
-                ),
-                unbound=not bool(
-                    conn.execute(
-                        "SELECT 1 FROM frames WHERE player_id=%s", (link.player_id,)
-                    ).fetchone()
-                ),
-            )
-            control = load_current_app_control_in(conn, command.producer.device_id, lock=True)
-            result["current_control_present"] = control is not None
-            if control is None:
-                return result
-            receipt = ControlAppliedReceipt.model_validate_json(link.control_receipt)
-            result["receipt_matches_current_control"] = current_control_receipt_matches(
-                receipt, control
-            )
-            result["control"] = dict(
-                status=control.status,
-                issued_sequence=control.issued_sequence,
-                applied_sequence=control.applied_sequence,
-                receipt_sequence=receipt.delivery_sequence,
-                last_result_sequence=control.last_result_sequence,
-                negotiated=control.status == "negotiated",
-                applied_at_present=control.applied_at is not None,
-                last_result_at_present=control.last_result_at is not None,
-                last_result_applied=control.last_result == "applied",
-                issued_equals_applied=control.issued_sequence == control.applied_sequence,
-                no_pending_id=control.pending_id is None,
-                no_pending_digest=control.pending_digest is None,
-                no_pending_expiry=control.pending_expires is None,
-                last_result_sequence_matches=control.last_result_sequence
-                == control.applied_sequence,
-                last_delivery_matches=control.last_delivery_id == control.applied_delivery_id,
-                last_digest_matches=control.last_result_digest == control.applied_digest,
-                receipt_authority_matches=receipt.authority_epoch == control.authority_epoch,
-                receipt_delivery_matches=receipt.delivery_id == control.applied_delivery_id,
-                receipt_sequence_matches=receipt.delivery_sequence == control.applied_sequence,
-                receipt_digest_matches=receipt.state_digest == control.applied_digest,
-                receipt_nonce_matches=receipt.ack_nonce == control.applied_ack_nonce,
-            )
-        except NodeControlError as error:
-            result["owner_refusal"] = error.code
-        except (ValueError, TypeError, KeyError) as error:
-            result["diagnostic_error_type"] = type(error).__name__
-        return result
-
-    @app.get("/fixture/status")
-    def status(request: Request):
-        authenticate(request)
-        # Central's own projection, read before this diagnostic cut takes its locks.
-        projected = {item["operation_id"]: item["state"]
-                     for item in lifecycle.status(DEVICE_ID)["operations"]}
         with registry.db.transaction() as conn:
-            acquire_runtime_locks(conn)
-            try:
-                _, link = current_in(conn)
-                current = {
-                    "process": asdict(link.process),
-                    "app_epoch": link.app_epoch,
-                    "authority_epoch": link.authority_epoch,
-                    "environment_sha256": link.environment_sha256,
-                }
-            except NodeControlError:
-                current = None
-            rows = []
-            for phase, entry in operations.items():
-                operation = entry["operation_id"]
-                effects = conn.execute(
-                    "SELECT phase,sequence,payload FROM node_app_effects "
-                    "WHERE operation_id=%s ORDER BY sequence",
-                    (operation,),
-                ).fetchall()
-                rows.append(
-                    {
-                        "phase": phase,
-                        "operation_id": operation,
-                        "before": entry["before"],
-                        "effects": [
-                            {"phase": e["phase"], "sequence": e["sequence"]} for e in effects
-                        ],
-                        "state": projected.get(operation),
-                        "effect_diagnostics": effect_diagnostics(conn, operation),
-                    }
-                )
-            # Each kernel boot's admission and its unrevoked sessions, oldest first.
-            admissions = conn.execute(
-                "SELECT b.kernel_boot_id, b.superseded_at IS NOT NULL AS superseded, "
-                "count(s.session_id) FILTER (WHERE s.revoked_at IS NULL) AS live_sessions "
-                "FROM node_boot_admissions b LEFT JOIN node_producers p USING(admission_id) "
-                "LEFT JOIN node_sessions s USING(producer_id) WHERE b.device_id=%s "
-                "GROUP BY b.admission_id ORDER BY b.admitted_at",
-                (DEVICE_ID,),
-            ).fetchall()
-            return {
-                "current": current,
-                "operations": rows,
-                "admissions": [
-                    {
-                        "kernel_boot_id": str(a["kernel_boot_id"]),
-                        "superseded": a["superseded"],
-                        "live_sessions": a["live_sessions"],
-                    }
-                    for a in admissions
-                ],
-                "response_losses": dict(dropped),
-                "outage": {
-                    "started": outage["started"] is not None,
-                    "active": outage_active(clock.utc()),
-                    "dropped_seconds": (outage["last_drop"] - outage["started"])
-                    if outage["last_drop"] is not None else 0,
-                },
-                "protocol_refusals": dict(protocol_refusals),
-                "app_link_refusals": dict(app_link_refusals),
-                "fixture_qualification": True,
-            }
+            presence = bus_links_in(conn, [DEVICE_ID])[DEVICE_ID]
+            birth = conn.execute("SELECT epoch FROM node_states WHERE device_id=%s AND stream=%s AND subject=%s",
+                                 (DEVICE_ID, state_stream(HOST_LINE), state_prefix(HOST_LINE) + BIRTH_KEY)
+                                 ).fetchone()
+            [base_value] = latest_values_in(conn, HOST_LINE, HOST_BASE_KEY, device_id=DEVICE_ID,
+                                            of_players=False) or [None]
+            stated = None if base_value is None else base_value.decoded(decode_host_base, "host base")
+            device = conn.execute(
+                "SELECT d.install, r.tag FROM devices d LEFT JOIN node_releases r USING(deployment_id) "
+                "WHERE d.device_id=%s", (DEVICE_ID,)).fetchone()
+            reboots = reboot_records_in(conn, DEVICE_ID)
+            outputs = conn.execute(
+                "SELECT o.player_id, o.output_id FROM outputs o JOIN players p ON p.id=o.player_id "
+                "WHERE p.device_id=%s AND p.retired_at IS NULL ORDER BY o.output_id", (DEVICE_ID,)).fetchall()
+            frame = conn.execute("SELECT generation, player_id, output_id FROM frames WHERE id=%s",
+                                 (FRAME_ID,)).fetchone()
+        return {
+            "linked": presence["linked"] is True,
+            "host_epoch": None if birth is None else str(birth["epoch"]),
+            "base_tag": None if stated is None else stated.base_tag,
+            "version": None if device is None else device["tag"],
+            "install": None if device is None else device["install"],
+            "reboots": [{"request_id": record["command_id"], "reason": record["reason"], "by": record["by"],
+                         "delivered": record["delivered"]} for record in reboots],
+            "output_ids": [row["output_id"] for row in outputs],
+            "outputs": [dict(row) for row in outputs],
+            "frame": None if frame is None else dict(frame),
+        }
 
     @app.get("/fixture/host")
     def host(request: Request):
-        """The device's newest stored host facts, as Central serves them (stored_fact_values),
-        and the metric rows of its newest host observation."""
+        """The device's host line as Central keeps it: its facts (host_facts_in) and the metric
+        rows of its newest metrics state."""
         authenticate(request)
-        joined = ("JOIN node_producers p USING(producer_id) "
-                  "JOIN node_boot_admissions b USING(admission_id) WHERE b.device_id=%s "
-                  "ORDER BY t.received_at DESC LIMIT 1")
         with registry.db.transaction() as conn:
-            facts = conn.execute("SELECT t.payload FROM node_host_facts t " + joined,
-                                 (DEVICE_ID,)).fetchone()
-            observed = conn.execute("SELECT t.payload FROM node_host_observations t " + joined,
-                                    (DEVICE_ID,)).fetchone()
-        metrics = (parse_host_observation(bytes(observed["payload"])).metrics
-                   if observed is not None else ())
-        return {
-            "facts": stored_fact_values(bytes(facts["payload"])) if facts is not None else None,
-            "metrics": [[metric.name, metric.value] for metric in metrics],
-        }
+            facts = host_facts_in(conn).get(DEVICE_ID)
+            [metrics_value] = latest_values_in(conn, HOST_LINE, HOST_METRICS_KEY, device_id=DEVICE_ID,
+                                               of_players=False) or [None]
+        metrics = None if metrics_value is None else metrics_value.decoded(decode_host_metrics_state,
+                                                                            "host metrics")
+        return {"facts": facts,
+                "metrics": [] if metrics is None else [[row.name, row.value] for row in metrics.metrics]}
+
+    @app.post("/fixture/outage")
+    def set_outage(request: Request, value: dict):
+        """active: every request but /fixture/* answers 503 and the hub is stopped; inactive: the
+        hub is started again and requests pass."""
+        authenticate(request)
+        active = value["active"] is True
+        with state_lock:
+            if active and not outage["active"]:
+                outage["active"] = True
+                if hub is not None:
+                    hub.stop()
+            elif not active and outage["active"]:
+                if hub is not None:
+                    hub.start()
+                outage["active"] = False
+            return {"active": outage["active"], "dropped": outage["dropped"]}
 
     server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
     thread = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
@@ -605,9 +386,12 @@ def _central_fixture(
             "origin": origin,
             "host_origin": host_origin,
             "fixture_token": token,
+            "admin_token": token,
             "app": app,
             "registry": registry,
             "hub": hub,
+            "tags": tags,
+            "frame_id": FRAME_ID,
         }
     finally:
         server.should_exit = True
@@ -617,62 +401,3 @@ def _central_fixture(
         shutil.rmtree(workdir / "cache", ignore_errors=True)
         if thread.is_alive():
             raise RuntimeError("fixture_central_stop_timeout")
-
-
-def assert_phase_completed(status, phase, target_reference):
-    """Assert reported-effect and actual-link consequences; never infer physical completion.
-
-    `failure` (a target whose entry exits) completes as target_failed then effect_unknown, with
-    no fallback start of the old release (issue #125): a person recovers the Frame."""
-    entries = [entry for entry in status["operations"] if entry["phase"] == phase]
-    assert len(entries) == 1, status
-    entry = entries[0]
-    before, current = entry["before"], status["current"]
-    assert current is not None, status
-    phases = [effect["phase"] for effect in entry["effects"]]
-    if phase == "failure":
-        assert entry["state"] == "effect_unknown", status
-        order = ["intent_stop", "stopped", "target_failed", "effect_unknown"]
-        positions = [phases.index(name) for name in order]
-        assert all(left < right for left, right in zip(positions, positions[1:])), status
-        assert not {"fallback_starting", "fallback_running"} & set(phases), status
-        assert status["protocol_refusals"] == {}, status
-        return {
-            "phase": phase,
-            "state": entry["state"],
-            "operation_id": entry["operation_id"],
-            "physical_output": "unqualified",
-            "rollback_acceptance": "none: a failed release stays down until a person acts",
-        }
-    assert entry["state"] == "target_running", status
-    assert current["environment_sha256"] == target_reference.environment_sha256, status
-    assert current["process"] != before["process"], status
-    assert current["app_epoch"] > before["app_epoch"], status
-    assert current["authority_epoch"] > before["authority_epoch"], status
-    order = ["intent_stop", "stopped", "starting_new", "running"]
-    positions = [phases.index(name) for name in order]
-    assert all(left < right for left, right in zip(positions, positions[1:])), status
-    assert "effect_unknown" not in phases, status
-    # The reported terminal effect is the exact current process, after an ordered stop.
-    diagnostics = entry["effect_diagnostics"]
-    for predicate in ("terminal_effect", "ordered_stop_before_terminal", "process_matches_event",
-                      "app_epoch_matches_event", "environment_matches_event",
-                      "authority_advanced"):
-        assert diagnostics.get(predicate) is True, (predicate, status)
-    # Nothing held: every effect report was accepted and no control delivery is pending.
-    assert status["protocol_refusals"] == {}, status
-    control = diagnostics.get("control", {})
-    for predicate in ("issued_equals_applied", "no_pending_id", "no_pending_digest",
-                      "no_pending_expiry", "last_result_applied"):
-        assert control.get(predicate) is True, (predicate, status)
-    if phase == "outage":
-        assert status["response_losses"]["outage"] > 0, status
-        assert not status["outage"]["active"], status
-        assert status["outage"]["dropped_seconds"] >= OUTAGE_SECONDS - 5, status
-    return {
-        "phase": phase,
-        "state": entry["state"],
-        "operation_id": entry["operation_id"],
-        "physical_output": "unqualified",
-        "rollback_acceptance": "explicit_fixture_not_qualification",
-    }

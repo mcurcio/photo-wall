@@ -1,20 +1,20 @@
 # Real PID1 and Central node lifecycle scenarios
 
 [`tests/test_node_pid1.py`](../../../tests/test_node_pid1.py) (marker `node_pid1`) runs the
-actual sealed Player and manager, production base units and effect driver, real HTTP Central
-owners and a disposable test database. Each scenario boots a fresh privileged arm64 container
-with systemd as PID 1, masks host and reboot actions, and removes only its own containers,
-database and archive copies. The [node-pid1 workflow](../../../.github/workflows/node-pid1.yml)
-runs the six scenarios as a parallel matrix whenever the release plan finds a node package,
+actual sealed Player and manager, production base units, real HTTP Central owners with Central's
+hub and the worker's bus side, and a disposable test database. Each scenario boots a fresh
+privileged arm64 container with systemd as PID 1, masks host actions (and reboot, except on a
+boot the scenario reboots over the bus), and removes only its own containers, database and
+archive copies. The [node-pid1 workflow](../../../.github/workflows/node-pid1.yml)
+runs the seven scenarios as a parallel matrix whenever the release plan finds a node package,
 a file the harness imports (Central's Python included) or the scenarios' own paths changed; the
 pipeline gate requires it. Every leg boots the one component set and fixture the run's
 [node-components workflow](../../../.github/workflows/node-components.yml) built.
 
 The hardware seam is explicit: read-only synthetic CPU serial and DRM inventory,
 a separately compiled headless Weston Virtual-1 module, and fixture cohort and
-TTY drop-ins. Release/base provenance and fallback qualification are configured
-fixtures. The harness does not inject process, app-link, control or Display
-witnesses. It cannot certify physical DRM/tty1/HDMI, a serving deployment, rollback
+TTY drop-ins. Release/base provenance is a configured fixture. The harness does
+not inject process, control or Display witnesses. It cannot certify physical DRM/tty1/HDMI, a serving deployment, rollback
 acceptance, PXE boot or the absolute U1 graphics/kernel/panel/pre-display cases.
 
 ## Inputs and exact image checks
@@ -50,6 +50,7 @@ done
 .venv/bin/python -m scripts.node_release_writer write --repo "$WORK/debs" --images "$WORK/roots" \
   --output "$WORK/components" --revision "$REVISION" --inputs-sha256 "$INPUTS_SHA256"
 tests/node_pid1_fixture/build.sh --repo "$WORK/debs" --components "$WORK/components" --output "$WORK/fixture"
+PHOTO_WALL_NATS_SERVER=$(python3 scripts/nats_server.py fetch --dest "$WORK/nats") \
 PHOTO_WALL_NODE_PID1_FIXTURE="$WORK/fixture" PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1 \
   .venv/bin/python scripts/test_local.py -q -m node_pid1 -k "$SCENARIO" \
   --basetemp "$WORK/run" tests/test_node_pid1.py
@@ -62,48 +63,54 @@ with about 10 GB free. Collection alone does not execute privileged Docker work.
 
 ## Scenarios, evidence and limits
 
-- **success**: the durable effect order `intent_stop`, `stopped`, `starting_new`, `running`,
-  Central's projected `target_running`, the exact selected process/environment and higher
-  app/authority epochs.
-- **success** also runs three signal range restarts of Weston under the running Player (the
-  broker starts it again each time, the one restart Display's mark allows), and after its stage a
-  crashed Player and then a crashed Weston leave the Player down (issue #125: no automatic
-  restarts).
-- **failure**: `intent_stop`, `stopped`, `target_failed`, then `effect_unknown`; no fallback start
-  (the old release stays stopped), and the debug overlay's card shows (issue #125).
+Every scenario runs with Central's hub and the worker's bus side, its job runtime running
+`RebootPi` ([`tests/node_pid1_central_fixture.py`](../../../tests/node_pid1_central_fixture.py)),
+and reads only what Central reads of the bus path (decision 0034, S4c): presence on the hub,
+the host line, the device's version, its reboot records and its Outputs (`GET /fixture/pi`,
+`GET /fixture/host`). The fixture's Central half runs without Docker in
+[`tests/test_node_pid1_fixture.py`](../../../tests/test_node_pid1_fixture.py).
+
+- **success**: cold (the roots are image mounts, the bus and its memory reach Central on the host
+  line, and three signal range restarts of Weston under the running Player each see the broker
+  start it again); the seeded Frame is bound to Virtual-1 and the Pi alone hands the Output to the
+  Player (its MainPID's surface in Weston's scene graph). Install of the success release answers
+  "restarting" and reboots the Pi over the bus (one reboot record, delivered). Boot B of the same
+  device runs the target root from its next boot offer and the Frame is handed off again with no
+  operator action; the memory lines hold, an induced bus OOM is reported on the host line, and a
+  crashed Player then a crashed Weston leave the Player down (issue #125).
+- **failure**: cold, then Install of a target whose entry exits reboots the Pi over the bus; boot
+  B's Player exits at start and stays down, and the debug overlay's card reads `app_absent`.
+- **outage**: cold and the Frame handed off; then Central is unreachable for 35 s (every request
+  but the fixture's answers 503 and the hub is stopped): the Player's MainPID, InvocationID and
+  launch epoch never change, no unit fails and its surface stays on Virtual-1; once Central is
+  back it reads the Pi linked again.
+- **reboot**: cold, then the operator's reboot (`POST /v1/operator/node/devices/{id}/reboots`)
+  asks the Pi's host over the bus; boot B, a new bind-mounted kernel `boot_id` for the same
+  device and database, boots without operator action, its Player runs, and Central lists the
+  reboot asked and delivered.
 - **dark** (issues #123, #125, #126): the cold Player's open-file limit is lowered just above what
   it holds open, then it is frozen (SIGSTOP), then killed (kill -9). Each time the debug overlay's
   card on Virtual-1 shows within the leg's limit, naming the cause (`app_descriptor_limit`,
   `app_unresponsive`, `app_absent`) and its Pi-clock time, read on `health.sock`; afterwards
-  nothing starts the Player again, and a crashed Weston starts nothing either. With Central's hub,
-  Central's database then holds the judge's verdict from the Pi's `health` line, Virtual-1 dark
-  with `app_absent`.
-- **outage**: once Central has served the target artifact, every node exchange is dropped for
-  at least 35 s and until the test has watched the node's own Player unit run the target
-  root with no effect yet reported. Afterwards every effect must be reported in order.
-- **reboot**: boot A links, then powers off (container removed); boot B, a new bind-mounted
-  kernel `boot_id` for the same device and database, enrolls without operator action. A's
-  admission is superseded with no live session, A's actual broker credential is refused
-  `node_session_superseded` on a real node route, and a stage then completes on B.
+  nothing starts the Player again, and a crashed Weston starts nothing either. Central's database
+  then holds the judge's verdict from the Pi's `health` line, Virtual-1 dark with `app_absent`.
 - **refused**: a drop-in binds a 2 GiB `/proc/meminfo` (read-only) into the storage unit
-  alone, below the smallest memory class. Handoff runs, then storage, prepare, Host Management,
-  the broker and the manager supervisor start as one PID1 transaction. Storage must fail;
-  prepare, the broker and the manager supervisor must never start (their `Requires=`); Central
-  must receive the host facts `boot` report with storage `refused`, fault `node_memory_class`,
-  required 3584 MiB and room the fake total, and an observation with `memcg_present` 1 and a
-  `memory_peak:` row. The fake is valid for this leg only: the bind gives the unit its own
-  mount namespace, so a store it mounted would not reach the host. No app is linked or staged.
+  alone, below the smallest memory class. Handoff and the Node bus run, then storage, prepare,
+  Host Management, the broker and the manager supervisor start as one PID1 transaction. Storage
+  must fail; prepare, the broker and the manager supervisor must never start (their `Requires=`);
+  Central must read on the host line the facts `boot` report with storage `refused`, fault
+  `node_memory_class`, required 3584 MiB and room the fake total, and metrics with
+  `memcg_present` 1 and a `memory_peak:` row. The fake is valid for this leg only: the bind gives
+  the unit its own mount namespace, so a store it mounted would not reach the host.
+- **join**: the Node API whole (E3b design §16.2): the new serial's leaf links through Central's
+  origin, a kill -9 of the bus and a reboot each end an epoch Central records with its gap rows,
+  and after a hub restart WALL is current on the Node and its leaf relinked.
 
-Every completed scenario also requires the reported terminal effect to name the exact current
-process, epochs and environment, no refused effect report, and no pending control delivery
-(nothing held). Every phase captures real cold process linkage and private health publication,
-immutable commands, repeated read-only reconciliation predicates, real owner records, final
-scheduler health, PID1 properties and journal. Owners are then stopped and all three full
-runtime roots are reverified before container deletion. Before intentional teardown, a live
-PID1 active/running observation and `/proc` birth ticks must match the exact admitted current
-process. Removal is attempted even if diagnostic capture fails; absence is independently
-checked. A failure leaves truthful unknown effects; the harness never repairs journals or
-forces ACK.
+Before intentional teardown, a live PID1 active/running observation and `/proc` birth ticks must
+match the broker's launch record of the running Player. Owners are then stopped and the boot's
+roots are reverified before container deletion. A container that rebooted is captured as far as
+it still answers. Removal is attempted even if diagnostic capture fails; absence is independently
+checked.
 
 The separate fixture configuration token is random and its local file is 0600;
 do not publish that file. Predicate diagnostics contain counters and booleans,

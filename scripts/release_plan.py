@@ -441,7 +441,7 @@ SUITES: Final = (
                  "scripts/run_display_harness.py",
                  "tests/content_db.py", "tests/runtime_fakes.py", "tests/test_assets_handlers.py",
                  "tests/test_fleet_attempts.py",
-                 "tests/test_node_boot.py", "tests/test_registry.py",
+                 "tests/test_node_boot.py", "tests/test_registry.py", "tests/support/frames.py",
                  # the join's hub harness and its pinned nats-server
                  "tests/integration/bus_servers.py", "tests/systemd_environment.py",
                  "scripts/nats_server.py", "scripts/pinned_fetch.py",

@@ -1,25 +1,37 @@
 """Real PID1 + full sealed Player + real Central: the node lifecycle scenarios, automated.
 
 Each scenario boots the actual sealed node in a privileged arm64 systemd container against a
-real HTTP Central on its own database: success (ordered stop-before-start, natural completion;
-before its stage, three signal range restarts of Weston under the running Player: the broker alone
-starts the Player again, never exits, and no unit fails; after it, a crashed Player and then a
-crashed Weston leave the Player down, issue #125), failure (the target exits: target_failed and
-effect_unknown, no fallback start, and the debug overlay's card shows), dark (a Player at its
-open-file limit, then a frozen one, then a killed one: the card names the cause and the Pi-clock
-time, and nothing starts the Player again; issues #123, #125), outage (Central unreachable for 35 s once the broker holds its stage),
-reboot (a second kernel boot of the same device re-enrolls, supersedes the first and is
-commandable), refused (a board below the smallest memory class: storage refuses, nothing
-after it runs, and Host Management reports the refusal with its numbers) and join (the Node API
-whole, E3b design §16.2: Central with its hub and the worker's bus side; the new serial's leaf
-links, a kill -9 of the bus and a reboot each end an epoch that Central records with its gap rows,
-and after a hub restart WALL is current on the Node and its leaf relinked). Hardware is synthetic
-(sysfs Virtual-1, headless Weston, a 2 GiB meminfo seen by the storage stage alone); no
-DRM/HDMI/PXE claim.
+real HTTP Central on its own database, with Central's hub and the worker's bus side (its job
+runtime running `RebootPi`). Every scenario reads only the bus path (decision 0034, S4c):
 
-Inputs: PHOTO_WALL_NODE_PID1_FIXTURE names a tests/node_pid1_fixture/build.sh output. Without
-it these tests skip, unless PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1 (the node-pid1 CI job), where
-they fail. Each test removes its own containers, database and archive copies.
+- success: cold (image mounts, the bus and its memory on the host line, three signal range
+  restarts of Weston under the running Player: the broker alone starts the Player again), the
+  Frame bound and the Output handed to the Player by the Pi alone, then Install of the success
+  release reboots the Pi over the bus; boot B of the same device runs the target root from its
+  next boot offer and the Frame is handed off again with no operator action; memory lines, an
+  induced bus OOM reported on the host line, and a crashed Player then a crashed Weston leave the
+  Player down (issue #125).
+- failure: cold, then Install of a target whose entry exits reboots the Pi; boot B's Player exits
+  at start and stays down, and the debug overlay's card reads app_absent.
+- outage: cold, the Frame handed off, then Central unreachable (HTTP and hub) for 35 s: the
+  Player's run never changes and its surface stays; Central reads the Pi linked again after.
+- reboot: cold, the operator's reboot over the bus; boot B of the same device boots without
+  operator action, its Player runs, and Central lists the reboot asked and delivered.
+- refused: a board below the smallest memory class: storage refuses, nothing after it runs, and
+  Central reads the refusal with its numbers on the host line.
+- dark: a Player at its open-file limit, then a frozen one, then a killed one: the card names the
+  cause and the Pi-clock time, and nothing starts the Player again (issues #123, #125).
+- join: the Node API whole (E3b design §16.2): the new serial's leaf links, a kill -9 of the bus
+  and a reboot each end an epoch that Central records with its gap rows, and after a hub restart
+  WALL is current on the Node and its leaf relinked.
+
+Hardware is synthetic (sysfs Virtual-1, headless Weston, a 2 GiB meminfo seen by the storage
+stage alone); no DRM/HDMI/PXE claim.
+
+Inputs: PHOTO_WALL_NODE_PID1_FIXTURE names a tests/node_pid1_fixture/build.sh output, and
+PHOTO_WALL_NATS_SERVER the hub's nats-server. Without the fixture these tests skip, unless
+PHOTO_WALL_TEST_REQUIRE_NODE_PID1=1 (the node-pid1 CI job), where they fail. Each test removes
+its own containers, database and archive copies.
 """
 
 import asyncio
@@ -29,6 +41,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -42,9 +55,11 @@ import pytest
 from integration.bus_servers import NATS_SERVER_VARIABLE, leaf_connections
 from node_pid1_bus_probe import WALL_KEY
 from node_pid1_central_fixture import (
+    HANDOFF_SECONDS,
     HUB_MONITOR_URL,
     HUB_URL,
-    assert_phase_completed,
+    OUTAGE_SECONDS,
+    REBOOT_SECONDS,
     central_fixture,
 )
 from node_pid1_container import BOOTED, HOST_ACTING_UNITS, Container, cpuinfo_text, docker_run_argv
@@ -56,8 +71,6 @@ from central.fleet.node_bus_presence import bus_links_in
 from central.infra.health_report_store import HEALTH_REPORT_SUBJECT, HEALTH_STATE_STREAM
 from central.infra.node_link_store import PgWallMarks
 from central.node_bus_wiring import WALL_TABLE
-from contracts.app_environment import AppEnvironmentRefV2
-from contracts.node_commands import parse_session_claim
 from contracts.node_health import decode_health_report
 from contracts.node_link import (
     NODE_BUS_GOMEMLIMIT,
@@ -177,6 +190,11 @@ def node_pid1_inputs():
             f"set {FIXTURE_VARIABLE} (tests/node_pid1_fixture/build.sh) for the "
             "real PID1 node scenarios; the node-pid1 CI job runs them"
         )
+    if os.environ.get(REQUIRE_VARIABLE) == "1" and not os.environ.get(NATS_SERVER_VARIABLE):
+        # Every scenario runs with Central's hub: the host line, the reboot and the binding travel
+        # on the Node's bus alone (decision 0034, S4c).
+        pytest.fail(f"{REQUIRE_VARIABLE}=1 but {NATS_SERVER_VARIABLE} is unset: every scenario needs the hub",
+                    pytrace=False)
     root = Path(location).resolve(strict=True)
     fixture = json.loads((root / "fixture.json").read_text())
     image = fixture["image"]
@@ -214,28 +232,43 @@ def file_sha(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
-def request(origin, token, path, body=None):
+def request(origin, token, path, body=None, *, method=None):
+    """One call at Central's origin as the fixture and the operator (the fixture's token is
+    Central's admin token too)."""
     req = urllib.request.Request(
         origin + path,
         data=json.dumps(body).encode() if body is not None else None,
-        headers={"Content-Type": "application/json", "X-Fixture-Token": token},
-        method="POST" if body is not None else "GET",
+        headers={"Content-Type": "application/json", "X-Fixture-Token": token,
+                 "Authorization": "Bearer " + token},
+        method=method or ("POST" if body is not None else "GET"),
     )
     with urllib.request.urlopen(req, timeout=20) as response:
         return json.load(response)
 
 
-def status_of(fixture, work):
-    status = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/status")
-    (work / "status-latest.json").write_text(json.dumps(status, sort_keys=True))
-    return status
+def pi_of(fixture, work):
+    """GET /fixture/pi: the Pi as Central reads it (presence, the host line, its version, its
+    reboots, its Outputs, the seeded Frame), kept as pi-latest.json."""
+    pi = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/pi")
+    (work / "pi-latest.json").write_text(json.dumps(pi, sort_keys=True))
+    return pi
+
+
+def operator(fixture, method, path, body):
+    """An operator route of the real Central, with its admin token."""
+    return request(fixture["host_origin"], fixture["admin_token"], path, body, method=method)
 
 
 class Node:
     """One disposable PID1 container: one kernel boot of the same synthetic device."""
 
-    def __init__(self, image, work, phase, boot_id=None):
+    def __init__(self, image, work, phase, boot_id=None, *, rebootable=False):
+        """rebootable: reboot.target is not masked (poweroff.target, halt.target stay masked), so
+        the host's `systemctl --no-block reboot` (appliance/host/host_linux.py SystemdRebootDriver)
+        succeeds. The container has its own PID namespace (never --pid=host): reboot(2) there ends
+        only the container's init (the kernel's reboot_pid_ns)."""
         self.work, self.boot_id = work, boot_id
+        self.masks = tuple(unit for unit in MASKS if not (rebootable and unit == "reboot.target"))
         work.mkdir(exist_ok=True)
         cpuinfo = work / "cpuinfo"
         cpuinfo.write_text(cpuinfo_text("abcdef1234567890"))
@@ -255,7 +288,7 @@ class Node:
         i = argv.index(image) + 1
         binary = argv[i]
         argv[i : i + 1] = ["sh", "-ec", mounts + "exec " + binary + ' "$@"', "sh"]
-        argv.extend("systemd.mask=" + unit for unit in MASKS if "systemd.mask=" + unit not in argv)
+        argv.extend("systemd.mask=" + unit for unit in self.masks if "systemd.mask=" + unit not in argv)
         self.argv = argv
 
     def run(self, *args, timeout=180, stderr=False):
@@ -274,7 +307,7 @@ class Node:
         run, work, container = self.run, self.work, self.container
         subprocess.run(self.argv, check=True, capture_output=True)
         assert container.wait_booted() in BOOTED
-        for unit in MASKS:
+        for unit in self.masks:
             assert run("systemctl", "show", unit, "-p", "LoadState", "--value").strip() == "masked"
         if self.boot_id is not None:
             assert run("cat", "/proc/sys/kernel/random/boot_id").strip() == str(self.boot_id)
@@ -575,42 +608,85 @@ class Node:
         assert unit_properties_of(self, PLAYER_UNIT, "MainPID")["MainPID"] == pid, "the Player restarted"
         return {"instruction": instruction, "open": held, "limit": lowered}
 
+    def launched(self):
+        """The broker's launch record's running Player ({"process", "environment_sha256",
+        "app_epoch"}) when PLAYER_UNIT runs it: its MainPID is the record's pid and its
+        RootDirectory the record's app root; None otherwise."""
+        result = self.container.exec("cat", BROKER_LAUNCH, timeout=10)
+        if result.returncode:
+            return None
+        running = json.loads(result.stdout).get("running")
+        if not running:
+            return None
+        unit = unit_properties_of(self, PLAYER_UNIT, "SubState,MainPID,RootDirectory")
+        sha = running["environment"]["environment_sha256"]
+        if (unit.get("SubState") != "running" or unit.get("MainPID") != str(running["process"]["pid"])
+                or unit.get("RootDirectory") != f"{NODE_STORE}/app-roots/{sha}/rootfs"):
+            return None
+        return {"process": running["process"], "environment_sha256": sha, "app_epoch": running["app_epoch"]}
+
     def cold(self, fixture, components_dir, previous=None):
-        """Boot PID1, bind the exact packages, start real units; return the cold app-link."""
+        """Boot; return the broker's launch record's running process once PLAYER_UNIT runs with
+        RootDirectory in the offer's app root, the record's pid is its MainPID, and Central reads
+        the Pi linked on its hub; after `previous`, a process other than it. Evidence
+        cold-current.json and cold-link-timing.json (boot to linked)."""
         run, work = self.run, self.work
         booted = time.monotonic()
         self.boot(fixture, components_dir)
         started = time.monotonic()  # the units are started; the Player starts within seconds
         deadline = started + 120
+        current, pi = None, {}
         while time.monotonic() < deadline:
-            status = status_of(fixture, work)
-            # After a reboot the previous boot's link stays current until this boot links.
-            if status["current"] and (
-                previous is None or status["current"]["process"] != previous["process"]
-            ):
-                break
-            unit_state = run(
-                "systemctl",
-                "show",
-                "photo-wall-node-player.service",
-                "-p",
-                "Result,ExecMainStatus",
-            )
+            current = self.launched()
+            if current is not None and previous is not None and current["process"] == previous["process"]:
+                current = None
+            if current is not None:
+                pi = pi_of(fixture, work)
+                if fixture["hub"] is None or pi["linked"]:
+                    break
+            unit_state = run("systemctl", "show", PLAYER_UNIT, "-p", "Result,ExecMainStatus")
             if "ExecMainStatus=200" in unit_state:
                 raise AssertionError("actual Player unit CHDIR failed: " + str(work))
             time.sleep(0.5)
         else:
-            raise AssertionError("real cold Player app-link absent: " + str(work) + " app-link "
-                                 "refusals: " + json.dumps(status.get("app_link_refusals")))
-        before = status["current"]
-        (work / "cold-current.json").write_text(json.dumps(before, sort_keys=True))
-        # Startup responsiveness evidence: boot to Central recording this boot's app link.
+            raise AssertionError(f"no broker-launched Player linked on the hub: {work} launched "
+                                 f"{current} pi {json.dumps(pi, sort_keys=True)}")
+        (work / "cold-current.json").write_text(json.dumps(current, sort_keys=True))
+        # Startup responsiveness evidence: boot to Central reading the Pi linked on its hub.
         (work / "cold-link-timing.json").write_text(json.dumps({
             "boot_to_link_seconds": round(time.monotonic() - booted, 1),
-            "units_to_link_seconds": round(time.monotonic() - started, 1),
-            "app_link_refusals": status.get("app_link_refusals")}, sort_keys=True))
-        print("COLD actual app-link observed", str(work), flush=True)
-        return before
+            "units_to_link_seconds": round(time.monotonic() - started, 1)}, sort_keys=True))
+        print("COLD broker-launched Player linked", str(work), flush=True)
+        return current
+
+    def await_reboot(self, seconds=REBOOT_SECONDS):
+        """PID1's SystemState is "stopping" or the container is no longer running, within
+        `seconds`; returns docker's State. The caller then capture_and_remove()s it."""
+        deadline = time.monotonic() + seconds
+        while True:
+            state = json.loads(subprocess.run(
+                ["docker", "inspect", "--format", "{{json .State}}", self.name],
+                check=True, capture_output=True, text=True, timeout=30).stdout)
+            if not state.get("Running"):
+                break
+            shown = self.container.exec("systemctl", "is-system-running", timeout=10).stdout.strip()
+            if shown == "stopping":
+                state["SystemState"] = shown
+                break
+            assert time.monotonic() < deadline, ("the Pi did not reboot", self.work, state, shown)
+            time.sleep(0.5)
+        (self.work / "reboot-state.json").write_text(json.dumps(state, sort_keys=True))
+        return state
+
+    def shows_player(self, pid):
+        """Whether Weston's scene graph has a view of client PID `pid` on DARK_OUTPUT (each view's
+        block names its PID and the Outputs it is on), and the scene graph."""
+        wayland = "WAYLAND_DISPLAY=" + str(WAYLAND_SOCKET)
+        result = self.container.exec("env", wayland, "weston-debug", "scene-graph", timeout=30)
+        scene = result.stdout if result.returncode == 0 else ""
+        blocks = re.split(r"(?m)^(?=\s*View \d+ )", scene)
+        return any(re.search(rf"\bPID {pid}\b", block) and f"({DARK_OUTPUT})" in block
+                   for block in blocks), scene
 
     def _bus_answers(self, deadline):
         """The bus's INFO and LISTEN rows, once it answers before `deadline`."""
@@ -740,13 +816,9 @@ class Node:
             )
         )
 
-    def broker_claim(self):
-        """The broker's own session claim, held in memory only; never logged or written."""
-        result = self.container.exec("cat", "/run/photo-wall-app-broker/session.json", timeout=10)
-        assert result.returncode == 0, "broker session state absent"
-        return parse_session_claim(json.loads(result.stdout)["claim"].encode())
-
-    def stop_and_verify_roots(self, components_dir, reference):
+    def stop_and_verify_roots(self, components_dir, references):
+        """Stop the units, then verify every app root in `references` (this boot's) and the
+        manager root as the Node's own predicate stages them, each pool image re-hashed."""
         run = self.run
         assert "health_storage" not in run(
             "journalctl", "--no-pager", "-u", "photo-wall-node-player.service"
@@ -783,11 +855,8 @@ for kind,ref in refs:
  assert file_sha256(images/(sha+IMAGE_SUFFIX))==sha,sha
  count+=1
 print(json.dumps({'verified_runtime_roots_after_stop':count}))"""
-        refs = [
-            ("app-roots", components["app_environment"]),
-            ("manager-roots", components["manager_primary"]),
-            ("app-roots", reference),
-        ]
+        refs = [("manager-roots", components["manager_primary"]),
+                *(("app-roots", reference) for reference in references)]
         verified = run(
             "/usr/bin/python3",
             "-c",
@@ -837,14 +906,11 @@ print(json.dumps(out,sort_keys=True))"""
         self._assert_player_root(app)
 
     def verify_target_mount(self, reference):
-        """After an online switch (E2c B2): the target root is an image mount of its pool image,
-        the broker (a propagation consumer, A17) launched the Player over it, and AppManager's
-        download was adopted by rename, so preparation/downloads/ holds nothing."""
+        """After Install's reboot: the target root, taken from the boot's offer, is an image mount
+        of its pool image, and the broker launched the Player over it."""
         sha = reference["environment_sha256"]
         self._assert_image_mounts([("app-roots", sha)], "target-image-mount.json")
         self._assert_player_root(sha)
-        left = self.run("find", f"{NODE_STORE}/preparation/downloads", "-mindepth", "1").split()
-        assert left == [], left
 
     def capture_and_remove(self, fixture, primary_error):
         """Capture diagnostics, then remove only this owned container and prove it absent."""
@@ -852,10 +918,8 @@ print(json.dumps(out,sort_keys=True))"""
         diagnostic_error = None
         try:
             try:
-                final_status = request(
-                    fixture["host_origin"], fixture["fixture_token"], "/fixture/status"
-                )
-                (work / "status-terminal.json").write_text(json.dumps(final_status, sort_keys=True))
+                final = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/pi")
+                (work / "pi-terminal.json").write_text(json.dumps(final, sort_keys=True))
                 with urllib.request.urlopen(
                     fixture["host_origin"] + "/healthz", timeout=10
                 ) as response:
@@ -878,15 +942,7 @@ print(json.dumps(out,sort_keys=True))"""
             (work / "terminal-unit-properties.txt").write_text(
                 properties.stdout + properties.stderr
             )
-            for state_name in [
-                "online",
-                "import-worker",
-                "effects",
-                "launch",
-                "selected",
-                "process-evidence",
-                "observed-app",
-            ]:
+            for state_name in ["import-worker", "launch", "selected", "process-evidence", "observed-app"]:
                 state = container.exec(
                     "cat", "/run/photo-wall-app-broker/" + state_name + ".json", timeout=10
                 )
@@ -894,11 +950,6 @@ print(json.dumps(out,sort_keys=True))"""
                     state_dir = work / "owner-state"
                     state_dir.mkdir(exist_ok=True)
                     (state_dir / (state_name + ".json")).write_text(state.stdout)
-                elif state_name == "online":
-                    # No online record: the broker never accepted a stage, so none could switch.
-                    (work / "broker_never_accepted.txt").write_text(
-                        "/run/photo-wall-app-broker/online.json absent\n"
-                    )
             prepared = container.exec(
                 "cat", "/run/photo-wall-node-storage/preparation/prepared.json", timeout=10
             )
@@ -960,79 +1011,110 @@ print(json.dumps(out,sort_keys=True))"""
             raise diagnostic_error
 
 
-def converge_during_outage(fixture, node, reference):
-    """With Central unreachable, the node's own units must run the target; then reconnect."""
-    deadline = time.monotonic() + 240
-    while not status_of(fixture, node.work)["outage"]["started"]:
-        assert time.monotonic() < deadline, "target artifact never requested: " + str(node.work)
-        time.sleep(0.5)
-    root = "/" + reference["environment_sha256"] + "/rootfs"
+def _reboot_recorded(fixture, node, reason):
+    """Within REBOOT_SECONDS Central lists exactly one reboot with `reason`, answered (delivered
+    true: the Pi's host was asked over its link and accepted), and the Pi is stopping or gone."""
+    deadline = time.monotonic() + REBOOT_SECONDS
     while True:
-        assert time.monotonic() < deadline, "no local convergence: " + str(node.work)
-        unit = node.run(
-            "systemctl",
-            "show",
-            "photo-wall-node-player.service",
-            "-p",
-            "ActiveState,SubState,RootDirectory",
-        )
-        rows = dict(line.split("=", 1) for line in unit.splitlines() if "=" in line)
-        if rows.get("SubState") == "running" and rows.get("RootDirectory", "").endswith(root):
+        pi = pi_of(fixture, node.work)
+        matching = [record for record in pi["reboots"] if record["reason"] == reason]
+        if matching and all(record["delivered"] is not None for record in matching):
             break
+        assert time.monotonic() < deadline, ("no reboot answered", reason, pi)
         time.sleep(0.5)
-    status = status_of(fixture, node.work)
-    # Converged while every node exchange was still being dropped: nothing waited on Central.
-    assert status["outage"]["active"], status
-    assert not [e for e in status["operations"][0]["effects"]], status
-    (node.work / "outage-convergence.json").write_text(
-        json.dumps({"unit": rows, "outage": status["outage"]}, sort_keys=True)
-    )
-    request(fixture["host_origin"], fixture["fixture_token"], "/fixture/outage-release", {})
+    state = node.await_reboot()
+    (node.work / "reboot.json").write_text(json.dumps({"pi": pi, "state": state}, sort_keys=True))
+    # A false here with the Pi gone is the host's answer lost to PID1's stop (S4c's named risk).
+    assert len(matching) == 1 and matching[0]["delivered"] is True, ("the host's reboot answer", pi, state)
+    return matching[0]
 
 
-def stage_and_complete(fixture, node, phase, reference):
-    """Issue the operator stage, then wait for Central's reported-effect completion."""
-    deadline = time.monotonic() + 30
+def install_and_reboot(fixture, node, phase):
+    """POST /v1/operator/players/{SERIAL}/install {"version": fixture["tags"][phase]} answers
+    install "restarting"; within REBOOT_SECONDS Central lists exactly one reboot with reason
+    "install:<tag>", delivered, and node.await_reboot() holds. Returns that record."""
+    tag = fixture["tags"][phase]
+    started = operator(fixture, "POST", f"/v1/operator/players/{SERIAL}/install", {"version": tag})
+    (node.work / "install.json").write_text(json.dumps(started, sort_keys=True))
+    assert started["install"] == "restarting", started
+    return _reboot_recorded(fixture, node, "install:" + tag)
+
+
+def operator_reboot(fixture, node):
+    """The console's reboot: POST /v1/operator/node/devices/{DEVICE_ID}/reboots answers duplicate
+    false; within REBOOT_SECONDS the record is delivered and node.await_reboot() holds."""
+    asked = operator(fixture, "POST", f"/v1/operator/node/devices/{DEVICE_ID}/reboots",
+                     {"command_id": str(uuid.uuid4()), "reason": "console/pid1"})
+    assert asked == {"duplicate": False}, asked
+    return _reboot_recorded(fixture, node, "console/pid1")
+
+
+def bind_and_hand_off(fixture, node, name):
+    """The seeded Frame bound to the Pi's Virtual-1 (PUT /v1/operator/frames/{frame_id}/binding,
+    skipped when it is already bound: after a reboot the Player keeps its id by serial); within
+    HANDOFF_SECONDS Weston's scene graph shows a surface of the Player's MainPID on DARK_OUTPUT,
+    handed off by the Pi alone. Evidence <name>.json + .png (introspect)."""
+    deadline = time.monotonic() + HANDOFF_SECONDS
     while True:
-        try:
-            issued = request(
-                fixture["host_origin"], fixture["fixture_token"], "/fixture/stage", {"phase": phase}
-            )
+        pi = pi_of(fixture, node.work)
+        outputs = [output for output in pi["outputs"] if output["output_id"] == DARK_OUTPUT] or pi["outputs"]
+        if len(outputs) == 1:
             break
-        except urllib.error.HTTPError as error:
-            if error.code != 409 or time.monotonic() >= deadline:
-                raise
-            time.sleep(0.5)
-    (node.work / "issued.json").write_text(json.dumps(issued, sort_keys=True))
-    if phase == "outage":
-        converge_during_outage(fixture, node, reference)
-    deadline = time.monotonic() + 240
-    while time.monotonic() < deadline:
-        status = status_of(fixture, node.work)
-        try:
-            assert_phase_completed(status, phase, AppEnvironmentRefV2(**reference))
-            break
-        except (AssertionError, KeyError):
-            pass
+        assert time.monotonic() < deadline, ("the Pi's Virtual-1 never reached Central", pi)
         time.sleep(0.5)
+    [output] = outputs
+    frame = pi["frame"]
+    if frame["player_id"] is None:
+        operator(fixture, "PUT", f"/v1/operator/frames/{fixture['frame_id']}/binding",
+                 {"player_id": output["player_id"], "output_id": output["output_id"],
+                  "expected_generation": frame["generation"]})
     else:
-        (node.work / "status-failed.json").write_text(json.dumps(status, sort_keys=True))
-        raise AssertionError("real online phase did not complete: " + str(node.work))
-    # A failed switch has no current process to observe: nothing runs (issue #125).
-    observation = None if phase == "failure" else node.verify_process(status["current"])
-    (node.work / "result.json").write_text(
-        json.dumps(
-            {
-                "phase": phase,
-                "qualification_fixture": True,
-                "status": status,
-                "pid1_properties": observation,
-                "hardware": "synthetic sysfs Virtual-1 and actual headless Weston; no physical DRM/HDMI claim",
-            },
-            sort_keys=True,
-        )
-    )
-    return status
+        assert (frame["player_id"], frame["output_id"]) == (output["player_id"], output["output_id"]), pi
+    while True:
+        pid = unit_properties_of(node, PLAYER_UNIT, "MainPID")["MainPID"]
+        shown, scene = node.shows_player(pid)
+        if shown:
+            break
+        assert time.monotonic() < deadline, ("the Player's surface never on " + DARK_OUTPUT, pid, scene)
+        time.sleep(0.5)
+    introspected = node.introspect(name + "-introspect")
+    (node.work / (name + ".json")).write_text(json.dumps(
+        {"output": output, "frame": frame, "player_pid": pid, "scene_graph": scene,
+         "capture": introspected["capture"]}, sort_keys=True))
+    return {"output": output, "pid": pid}
+
+
+def survives_outage(fixture, node):
+    """Central unreachable for OUTAGE_SECONDS (POST /fixture/outage: its HTTP origin answers 503
+    and its hub is stopped): the Player's MainPID and InvocationID never change, the broker never
+    relaunches it (launch epoch unchanged), no photo-wall unit fails, and the scene graph still
+    shows its surface; then Central comes back and within JOIN_SECONDS reads the Pi linked again.
+    Evidence outage.json."""
+    before = unit_properties_of(node, PLAYER_UNIT, "MainPID,InvocationID")
+    epoch = json.loads(node.run("cat", BROKER_LAUNCH))["epoch"]
+    request(fixture["host_origin"], fixture["fixture_token"], "/fixture/outage", {"active": True})
+    seen_unlinked = False
+    try:
+        until = time.monotonic() + OUTAGE_SECONDS
+        while time.monotonic() < until:
+            now = unit_properties_of(node, PLAYER_UNIT, "MainPID,InvocationID")
+            assert now == before, ("the Player's run changed during the outage", before, now)
+            assert json.loads(node.run("cat", BROKER_LAUNCH))["epoch"] == epoch, "a new launch epoch"
+            failed = node.run("systemctl", "list-units", "--state=failed", "--plain", "--no-legend",
+                              "photo-wall-*").split()
+            assert failed == [], failed
+            seen_unlinked = seen_unlinked or not pi_of(fixture, node.work)["linked"]
+            time.sleep(1)
+        shown, scene = node.shows_player(before["MainPID"])
+        assert shown, ("the Player's surface left " + DARK_OUTPUT + " during the outage", scene)
+    finally:
+        ended = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/outage", {"active": False})
+    pi = await_true(lambda: (found := pi_of(fixture, node.work))["linked"] and found, JOIN_SECONDS,
+                    "Central reads the Pi linked again after the outage")
+    evidence = {"player": before, "epoch": epoch, "dropped": ended["dropped"],
+                "seen_unlinked": seen_unlinked, "pi": pi}
+    (node.work / "outage.json").write_text(json.dumps(evidence, sort_keys=True))
+    return evidence
 
 
 def assert_memory_lines(node):
@@ -1099,119 +1181,96 @@ def assert_bus_oom_reported(fixture, node, before):
 
 @pytest.mark.parametrize("phase", [name for name in SCENARIOS if name in ("success", "failure", "outage")])
 def test_node_pid1_lifecycle(node_pid1_inputs, node_host, registry, tmp_path, phase):
+    """success and failure: Install reboots the Pi over the bus and boot B takes the target from
+    its next boot offer; outage: the Pi keeps playing while Central is away."""
     components_dir, fixture_targets, image = node_pid1_inputs
-    # outage: a successful switch while Central drops every node exchange after accept.
-    role = "success" if phase == "outage" else phase
-    reference = json.loads((fixture_targets / (role + "-reference.json")).read_text())
+    cold_app = json.loads((components_dir / "components.json").read_text())["app_environment"]
+    extras, reference = {}, None
+    if phase != "outage":
+        reference = json.loads((fixture_targets / (phase + "-reference.json")).read_text())
+        extras = {phase: (reference, fixture_targets / (phase + ".squashfs"))}
     work = tmp_path
-    with central_fixture(
-        registry,
-        components_dir,
-        {phase: (reference, fixture_targets / (role + ".squashfs"))},
-        work / "central",
-        node_host,
-    ) as fixture:
-        node = Node(image, work, phase)
+    with central_fixture(registry, components_dir, extras, work / "central", node_host,
+                         max_boots=2) as fixture:
+        first = Node(image, work / "boot-a", phase, uuid.uuid4(), rebootable=True)
         try:
-            node.cold(fixture, components_dir)
+            linked_a = first.cold(fixture, components_dir)
             if phase == "success":
-                node.verify_image_mounts(components_dir)
-                node.verify_bus()
-                reported = assert_bus_memory_reported(fixture, node)
-                node.player_survives_display_restarts(DISPLAY_RESTARTS)
-            stage_and_complete(fixture, node, phase, reference)
+                first.verify_image_mounts(components_dir)
+                first.verify_bus()
+                reported = assert_bus_memory_reported(fixture, first)
+                first.player_survives_display_restarts(DISPLAY_RESTARTS)
+            if phase in ("success", "outage"):
+                bind_and_hand_off(fixture, first, "handoff")
+            if phase == "outage":
+                survives_outage(fixture, first)
+                assert_memory_lines(first)
+                first.stop_and_verify_roots(components_dir, [cold_app])
+                print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
+                return
+            install_and_reboot(fixture, first, phase)
+        finally:
+            first.capture_and_remove(fixture, sys.exc_info()[1])
+        second = Node(image, work / "boot-b", phase, uuid.uuid4())
+        try:
             if phase == "success":
-                node.verify_target_mount(reference)
-            if phase == "failure":
-                # No fallback start: the old release stays stopped, the target is gone, and the
+                linked_b = second.cold(fixture, components_dir, previous=linked_a)
+                assert linked_b["environment_sha256"] == reference["environment_sha256"], linked_b
+                assert pi_of(fixture, second.work)["version"] == fixture["tags"][phase]
+                second.verify_target_mount(reference)
+                (second.work / "pid1-properties.json").write_text(
+                    json.dumps(second.verify_process(linked_b), sort_keys=True))
+                # The Frame is handed off again with no operator action: the binding stands.
+                bind_and_hand_off(fixture, second, "handoff-after-install")
+            else:
+                # No fallback start: the target's Player exits at start and stays down, and the
                 # debug overlay's card says the Player stopped.
-                node.card("app_absent", ABSENT_LINE, time.monotonic(), "failure-card")
-                assert unit_properties_of(node, PLAYER_UNIT, "SubState")["SubState"] != "running"
-            assert_memory_lines(node)
+                second.boot(fixture, components_dir)
+                second.card("app_absent", ABSENT_LINE, time.monotonic(), "failure-card")
+                assert unit_properties_of(second, PLAYER_UNIT, "SubState")["SubState"] != "running"
+            assert_memory_lines(second)
             if phase == "success":
                 # After assert_memory_lines, whose every slice reads oom_kill 0.
-                node.induce_bus_oom()
-                assert_bus_oom_reported(fixture, node, reported)
-                node.player_stays_down_after_crashes()
-            node.stop_and_verify_roots(components_dir, reference)
+                second.copy_bus_probe()
+                second.induce_bus_oom()
+                assert_bus_oom_reported(fixture, second, reported)
+                second.player_stays_down_after_crashes()
+            second.stop_and_verify_roots(components_dir, [reference])
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
-            node.capture_and_remove(fixture, sys.exc_info()[1])
+            second.capture_and_remove(fixture, sys.exc_info()[1])
 
 
 def test_node_pid1_reboot(node_pid1_inputs, node_host, registry, tmp_path):
-    """Boot A links, powers off; boot B of the same device enrolls without operator action.
-
-    B must supersede A (A's real broker session is refused) and accept a stage at once.
-    """
+    """Boot A links and the operator reboots it over the bus; boot B of the same device boots
+    without operator action, its Player runs, and Central lists the reboot asked and delivered."""
     phase = "reboot"
-    components_dir, fixture_targets, image = node_pid1_inputs
-    reference = json.loads((fixture_targets / "success-reference.json").read_text())
+    components_dir, _, image = node_pid1_inputs
+    cold_app = json.loads((components_dir / "components.json").read_text())["app_environment"]
     work = tmp_path
     boot_a, boot_b = uuid.uuid4(), uuid.uuid4()
-    with central_fixture(
-        registry,
-        components_dir,
-        {phase: (reference, fixture_targets / "success.squashfs")},
-        work / "central",
-        node_host,
-        max_boots=2,
-    ) as fixture:
-        first = Node(image, work / "boot-a", phase, boot_a)
+    with central_fixture(registry, components_dir, {}, work / "central", node_host, max_boots=2) as fixture:
+        first = Node(image, work / "boot-a", phase, boot_a, rebootable=True)
         try:
             linked_a = first.cold(fixture, components_dir)
             (first.work / "pid1-properties.json").write_text(
-                json.dumps(first.verify_process(linked_a), sort_keys=True)
-            )
-            claim_a = first.broker_claim()
-            assert claim_a.kernel_boot_id == boot_a
+                json.dumps(first.verify_process(linked_a), sort_keys=True))
+            asked = operator_reboot(fixture, first)
         finally:
-            # Abrupt power-off of boot A: the container and every process in it end here.
             first.capture_and_remove(fixture, sys.exc_info()[1])
         second = Node(image, work / "boot-b", phase, boot_b)
         try:
             linked_b = second.cold(fixture, components_dir, previous=linked_a)
-            status = status_of(fixture, second.work)
-            boots = {entry["kernel_boot_id"]: entry for entry in status["admissions"]}
-            assert boots[str(boot_a)]["superseded"] and boots[str(boot_a)]["live_sessions"] == 0, (
-                status
-            )
-            assert (
-                not boots[str(boot_b)]["superseded"] and boots[str(boot_b)]["live_sessions"] > 0
-            ), status
-            # Boot A's actual broker credential, presented to the real node route.
-            refused = urllib.request.Request(
-                fixture["host_origin"] + "/v2/node/app-commands",
-                headers={
-                    "Authorization": "Bearer " + claim_a.credential,
-                    "X-Node-Session": str(claim_a.session_id),
-                },
-            )
-            with pytest.raises(urllib.error.HTTPError) as caught:
-                urllib.request.urlopen(refused, timeout=20)
-            old_session = {"status": caught.value.code, **json.load(caught.value)}
-            assert old_session == {"status": 403, "error": "node_session_superseded"}, old_session
-            stage_and_complete(fixture, second, phase, reference)
+            (second.work / "pid1-properties.json").write_text(
+                json.dumps(second.verify_process(linked_b), sort_keys=True))
+            pi = pi_of(fixture, second.work)
+            assert [(r["request_id"], r["reason"], r["delivered"]) for r in pi["reboots"]] == [
+                (asked["request_id"], "console/pid1", True)], pi
             assert_memory_lines(second)
-            final = status_of(fixture, second.work)
-            (work / "reboot.json").write_text(
-                json.dumps(
-                    {
-                        "boot_a": str(boot_a),
-                        "boot_b": str(boot_b),
-                        "linked_a": linked_a,
-                        "linked_b": linked_b,
-                        "admissions_after_reenroll": status["admissions"],
-                        "old_broker_session": old_session,
-                        "staged_after_reboot": [
-                            entry for entry in final["operations"] if entry["phase"] == phase
-                        ],
-                        "protocol_refusals": final["protocol_refusals"],
-                    },
-                    sort_keys=True,
-                )
-            )
-            second.stop_and_verify_roots(components_dir, reference)
+            (work / "reboot.json").write_text(json.dumps(
+                {"boot_a": str(boot_a), "boot_b": str(boot_b), "linked_a": linked_a, "linked_b": linked_b,
+                 "reboots": pi["reboots"]}, sort_keys=True))
+            second.stop_and_verify_roots(components_dir, [cold_app])
             print("PASS real PID1/Central phase", phase, "evidence", work, flush=True)
         finally:
             second.capture_and_remove(fixture, sys.exc_info()[1])
@@ -1235,8 +1294,9 @@ def test_node_pid1_refused(node_pid1_inputs, node_host, registry, tmp_path):
     """A board below the smallest memory class: the storage stage refuses with its numbers.
 
     Prepare (Requires= storage) never runs, so neither do the broker or the manager supervisor
-    (Requires= prepare). Handoff runs independently and writes host.json, so Host Management
-    runs and Central receives the refusal in the host facts `boot` report.
+    (Requires= prepare). Handoff runs independently and writes host.json and the bus's
+    environment, so Host Management and the Node bus run and Central reads the refusal in the host
+    line's facts `boot` report.
     """
     phase = "refused"
     components_dir, _, image = node_pid1_inputs
@@ -1319,13 +1379,10 @@ def test_node_pid1_dark(node_pid1_inputs, node_host, registry, tmp_path):
 
     With the frozen Player's card up, Weston as the packaged unit runs it is introspected over its
     Wayland socket: debug scopes, the scene graph and a PNG capture (`Node.introspect`)."""
-    if os.environ.get(REQUIRE_VARIABLE) == "1" and not os.environ.get(NATS_SERVER_VARIABLE):
-        pytest.fail(f"{REQUIRE_VARIABLE}=1 but {NATS_SERVER_VARIABLE} is unset: the dark leg needs the hub",
-                    pytrace=False)
     phase = "dark"
     components_dir, _, image = node_pid1_inputs
     work = tmp_path
-    with central_fixture(registry, components_dir, {}, work / "central", node_host, hub=True) as fixture:
+    with central_fixture(registry, components_dir, {}, work / "central", node_host) as fixture:
         node = Node(image, work, phase)
         try:
             node.cold(fixture, components_dir)
@@ -1485,14 +1542,10 @@ def test_node_pid1_join(node_pid1_inputs, node_host, registry, tmp_path):
        WALL past Central's mark, and within HUB_RESTART_SECONDS of the restart a wall write made
        after it is in the Node's mirror and the restarted hub holds the Node's leaf again.
     """
-    if os.environ.get(REQUIRE_VARIABLE) == "1" and not os.environ.get(NATS_SERVER_VARIABLE):
-        pytest.fail(f"{REQUIRE_VARIABLE}=1 but {NATS_SERVER_VARIABLE} is unset: the join needs the hub",
-                    pytrace=False)
     phase = "join"
     components_dir, _, image = node_pid1_inputs
     work = tmp_path
-    with central_fixture(registry, components_dir, {}, work / "central", node_host, max_boots=2,
-                         hub=True) as fixture:
+    with central_fixture(registry, components_dir, {}, work / "central", node_host, max_boots=2) as fixture:
         db, hub = fixture["registry"].db, fixture["hub"]
         evidence = {"serial": SERIAL, "account": account_id(SERIAL)}
         first = Node(image, work / "boot-a", phase, uuid.uuid4())
