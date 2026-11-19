@@ -14,7 +14,7 @@ from appliance.apps.broker import AppEffectBroker, ColdStart, ForeignAppUnit
 from appliance.apps.descriptors import DESCRIPTOR_SAMPLE_MS, descriptor_use
 from appliance.apps.display_runs import DisplayRuns
 from appliance.apps.lifecycle_storage import FileEffectJournal
-from appliance.apps.probe import AppRunKey
+from appliance.apps.probe import UNSEEN_INVOCATION, AppRunKey
 from appliance.apps.probe_channel import ProbeThread
 from appliance.apps.probe_listener import ProbeListener
 from appliance.apps.process_linux import SystemdAppProcessDriver
@@ -60,7 +60,14 @@ class RunFacts:
 
     def state(self, run: AppRunKey | None, launched: AppRunKey | None) -> bool:
         """`launched` (the current launch's run) has started; it has exited once `run` (the
-        turn's current run) is None. Whether the launch's run changed."""
+        turn's current run) is None. Whether the launch's run changed.
+
+        One run, one name: a launch's epoch alone (`UNSEEN_INVOCATION`, the launch record of a
+        spawn `start` never saw) names the run a turn already saw of that launch, so the turn that
+        finds it gone states its exit under the name it started with, never a second start."""
+        if (launched is not None and self.run is not None and launched.invocation_id == UNSEEN_INVOCATION
+                and launched.app_epoch == self.run.app_epoch):
+            launched = self.run
         changed = launched != self.run
         if changed:
             if self.run is not None and not self.exited:

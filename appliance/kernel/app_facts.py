@@ -9,7 +9,9 @@ live here, the lowest layer both reach. Stdlib only.
   spawn or adoption: the run the driver saw, else the launch's epoch alone,
   `appliance.apps.probe.AppRunKey.of_launch`); a started run that a known turn finds not current
   has exited. So a run that began and ended between two turns (a Player that exits within the
-  broker's first turn after a cold start) still starts and exits. Each is a fact, stated once
+  broker's first turn after a cold start) still starts and exits. A run is named once: a turn
+  that saw it names it, and the launch's epoch alone (a record `start` wrote before it saw the
+  spawn) is that same run, never a second one (`RunFacts.state`). Each is a fact, stated once
   when it first holds and never again: a run that is frozen, or stays down, writes nothing more
   (issue #125: `app_started` means a run started). Judged on every known turn, Central session
   or not.

@@ -172,3 +172,26 @@ def test_a_feed_gap_before_the_window_loses_no_exit(cold_start):
     wall.loop.now += RAISE
     assert wall.turn() == []  # the broker stated nothing again
     assert wall.card(wall.loop.now)[1] == f"{APP_ABSENT} · Output {OUTPUT}"
+
+
+
+def test_a_run_first_seen_after_its_start_gave_up_keeps_its_name_when_it_exits(cold_start):
+    """No look in `start`'s 5 s saw the spawn (its launch record names no run), a later turn sees
+    it, and then it exits: one run, named once. Before the rule, the exit turn read the launch
+    record's unseen name, which differs from the seen one, and stated `app_exited` (seen),
+    `app_started` (unseen), `app_exited` (unseen): a false start, which withdraws a pending
+    `app_absent`. Mutation probe: drop RunFacts' same-launch rule -> the three facts."""
+    spawned = {}
+    wall, record = cold_start(lambda unit, command: spawned.update(unit=unit, command=command))
+    assert record.phase == "effect_unknown"
+    unit, command = spawned["unit"], spawned["command"]
+    late = RunningApp(command.environment, NodeProcessIdentity(324, 11195, uuid4()), 1, command.operation_id)
+    unit.active(late)                                   # the spawn shows itself after `start` gave up
+    run = AppRunKey.of(late).document()
+    assert wall.turn() == [(APP_STARTED, run)]
+    unit.state("inactive", pid="0", load="not-found")   # then it exits
+    wall.loop.now += 1_000
+    assert wall.turn() == [(APP_EXITED, run)]
+    wall.loop.now += RAISE
+    assert wall.turn() == []
+    assert wall.card(wall.loop.now)[1] == f"{APP_ABSENT} · Output {OUTPUT}"
