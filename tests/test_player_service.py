@@ -1487,6 +1487,66 @@ def test_a_blocked_main_loop_keeps_its_session_and_resumes_once_the_loop_runs(
     asyncio.run(check())
 
 
+def test_a_cycle_ends_though_a_library_swallows_its_cancel(monkeypatch):
+    """CI 2026-11-19: Central closed the session's socket while the control loop's readiness post
+    was connecting; anyio's connect_tcp (under httpx) was cancelling its own happy-eyeballs scope
+    at that moment, took run()'s cancel for its own and swallowed it, so the control loop ran on
+    and run() waited on it for good: no next cycle ever reached Central. Here the post swallows
+    its first cancel the same way (returns as if connected); the cycle must still end and the
+    next one open a socket."""
+    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+    monkeypatch.setattr("player.cancellation.CANCEL_AGAIN", .05)
+
+    async def check():
+        clock = ManualClock(100)
+        server = Server(clock)
+
+        def handle(request):
+            result = server(request)
+            if request.url.path == "/v1/enrollment/register":
+                server.offer()
+            return result
+
+        service, _ = await finder_rig(finding("http://central"), handle, server)
+        connecting, swallowed = asyncio.Event(), []
+        request = service.request
+
+        async def readiness_connecting(method, path, **options):
+            if path != "/v1/player/readiness":
+                return await request(method, path, **options)
+            if not swallowed:
+                connecting.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    swallowed.append(asyncio.current_task())    # as anyio's cancel scope does
+                return {"accepted": True}
+            if asyncio.current_task() in swallowed:
+                # Its later posts answer too, so no failed request ends that loop by chance.
+                await asyncio.sleep(0)
+                return {"accepted": True}
+            return await request(method, path, **options)
+
+        monkeypatch.setattr(service, "request", readiness_connecting)
+
+        async def until(predicate):
+            while not predicate():
+                await asyncio.sleep(.005)
+
+        task = asyncio.create_task(service.run())
+        try:
+            await asyncio.wait_for(connecting.wait(), 5)
+            connects = len(server.connects)
+            server.close_sockets()          # Central ends the session while the post connects
+            await asyncio.wait_for(until(lambda: len(server.connects) > connects), 5)
+            assert swallowed, "the post never met run()'s cancel"
+        finally:
+            service.stop()
+            await asyncio.wait_for(task, 5)
+            await close(service)
+    asyncio.run(check())
+
+
 def test_stale_feedback_on_a_late_loop_keeps_the_session(tmp_path, monkeypatch):
     """Central refuses readiness as stale (409) and the turn that follows misses the dispatch
     deadline: the Player raises main_loop_late and the control loop carries on (the next turn

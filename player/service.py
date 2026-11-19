@@ -63,6 +63,7 @@ from contracts.room_light import (
 from contracts.time import Monotonic, SystemClock
 from nodeapi.node import WallReader
 from player.cache import Cache, CacheError
+from player.cancellation import cancel_and_wait
 from player.central_link import CentralLink, Session, read_refusal
 from player.executor import AcquisitionStopped, AuthorityError, Executor, may_still_play
 from player.geometry import light_lux_on_frame
@@ -1270,8 +1271,7 @@ class PlayerService:
                     except MainLoopLate:
                         self._main_loop_late()
             finally:
-                if not arriving.done():
-                    arriving.cancel()
+                await cancel_and_wait((arriving,))   # the read never outlives its socket
             raise ServiceError("session_closed")
 
     async def run(self):
@@ -1324,10 +1324,10 @@ class PlayerService:
                 finally:
                     if session_started is not None and self._loop.time() - session_started >= 30:
                         attempt = 0
-                    for task in tasks:
-                        task.cancel()
-                    if tasks:
-                        await asyncio.gather(*tasks, return_exceptions=True)
+                    # Cancelled until each has ended: one cancel can be swallowed below httpx
+                    # (player/cancellation.py), and a task that outlived its cycle would hold
+                    # run() here for good.
+                    await cancel_and_wait(tasks)
                     # Decision 0032: the held plan's downloads outlive the session; the next
                     # `_feedback` rebuilds them from that plan (`_offered` follows Central's state).
                     await self.link.aclose()
