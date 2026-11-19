@@ -641,7 +641,11 @@ class PrefixProxy:
             writer.transport.abort()
 
     async def start(self) -> None:
-        self._server = await asyncio.start_server(self._handle, "127.0.0.1", self.port, ssl=self.tls)
+        # Every address `localhost` resolves to (127.0.0.1 and ::1), as an ingress behind a name
+        # answers on each: nats-server dials one address of a remote's host drawn at random on every
+        # attempt, so a Node whose origin is `localhost` dials ::1 about half the time, and a proxy on
+        # 127.0.0.1 alone left a run whose every attempt drew ::1 unlinked (the wss test, CI node-bus).
+        self._server = await asyncio.start_server(self._handle, "localhost", self.port, ssl=self.tls)
 
     async def close(self) -> None:
         if self._server is not None:
