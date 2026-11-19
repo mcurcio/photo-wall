@@ -12,7 +12,7 @@ The operator's reboot (`OperatorReboots`, S4c) is the same job: the route fences
 `RebootPi` with the console's command id as its `request_id`, and writes an ask row (kind
 'reboot-asked', body {"request_id", "reason", "by"}) in that transaction, so a queued ask is listed
 before the worker runs it. `reboot_records_in` folds the two by `request_id` for the device read.
-Both are `events` rows, kept a week: the old `node_reboot_commands` kept every reboot forever.
+Both are `events` rows, kept a week: the old path's reboot commands table kept every reboot forever.
 """
 from __future__ import annotations
 

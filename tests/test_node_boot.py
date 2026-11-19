@@ -1,4 +1,4 @@
-"""Frozen cold offers, superseding boot enrollment, and weak legacy adoption. Each Pi boots its own
+"""Frozen cold offers and their artifacts. Each Pi boots its own
 version (central/infra/player_versions.py).
 
 The boot's test helpers, importable from tests/ (the e2e tracers use them too): `enroll` (a Pi's device
@@ -27,8 +27,14 @@ from test_fleet_attempts import (
 from central.content_catalog.catalog import device_id_for_serial
 from central.content_catalog.ports import NodeReleaseRefused
 from central.db import Database
-from central.fleet.node_boot import NodeBootService, NodeDeployment, claim_new_device
-from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
+from central.fleet.models import NodeControlError
+from central.fleet.node_boot import (
+    NODE_AUDIENCE,
+    NodeBootConfig,
+    NodeBootService,
+    NodeDeployment,
+    claim_new_device,
+)
 from central.infra.player_versions import PgPlayerVersions
 from central.kernel.ports import AssetReadiness, Readiness
 from contracts.app_environment import AppEnvironmentRefV2
@@ -38,7 +44,7 @@ from contracts.node_boot import (
     encode_node_boot_offer,
     parse_node_boot_offer,
 )
-from contracts.node_commands import NodeSessionClaim
+from contracts.time import Clock
 
 
 def environment(digest="d", name="photo-wall-player"):
@@ -153,18 +159,18 @@ def keep_version(db: Database, serial: str, deployment_id: UUID, now: float) -> 
     return device_id
 
 
-def player_versions(sessions: NodeSessions, *, readiness: AssetReadiness = NOTHING_READY,
+def player_versions(db: Database, clock: Clock, *, readiness: AssetReadiness = NOTHING_READY,
                     publisher=None) -> PgPlayerVersions:
-    return PgPlayerVersions(sessions.db, sessions.clock, readiness, publisher)
+    return PgPlayerVersions(db, clock, readiness, publisher)
 
 
-def boot_service(sessions: NodeSessions, *, readiness: AssetReadiness = NOTHING_READY) -> NodeBootService:
-    return NodeBootService(sessions, versions=player_versions(sessions, readiness=readiness))
+def boot_service(db: Database, clock: Clock, *, readiness: AssetReadiness = NOTHING_READY) -> NodeBootService:
+    return NodeBootService(db, clock, NodeBootConfig(), versions=player_versions(db, clock, readiness=readiness))
 
 
 def cold_setup(registry, *, app=True):
+    """(the boot offer, the deployment the Pi `SERIAL` keeps as its version)."""
     _seed(registry)
-    sessions = NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test"))
     manager = environment("2", "photo-wall-app-manager")
     selected = environment() if app else None
     refs = [manager] + ([selected] if selected else [])
@@ -173,19 +179,15 @@ def cold_setup(registry, *, app=True):
         {ref.environment_sha256: "https://example.invalid/" + ref.environment_sha256 for ref in refs}))
     publish_deployment(registry.db, deployment, registry.clock)
     keep_version(registry.db, SERIAL, deployment.deployment_id, registry.clock.utc())   # as Install keeps it
-    return boot_service(sessions), sessions, deployment
-
-
-def claim_for(offer, *, owner="host_core"):
-    return NodeSessionClaim(offer.serial, offer.offer_id, offer.kernel_boot_id, owner, uuid4(), uuid4(),
-                            uuid4().hex + uuid4().hex)
+    return boot_service(registry.db, registry.clock), deployment
 
 
 def test_frozen_offer_selection_exact_retry_and_no_app(registry):
-    service, sessions, deployment = cold_setup(registry, app=False)
+    service, deployment = cold_setup(registry, app=False)
     request = NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64)
     offer = service.offer(request)
     assert parse_node_boot_offer(encode_node_boot_offer(offer)) == offer
+    assert offer.installation_audience == NODE_AUDIENCE == "photo-wall"
     assert offer.app_status == "unconfigured" and offer.manager_fallback is None
     assert publish_deployment(registry.db, deployment, registry.clock)  # a duplicate
     assert service.offer(request) == offer
@@ -195,12 +197,9 @@ def test_frozen_offer_selection_exact_retry_and_no_app(registry):
         service.asset(offer.offer_id, "app")
     with pytest.raises(NodeControlError, match="nonce_conflict"):
         service.offer(replace(request, boot_nonce="b" * 64))
-    assert sessions.enroll(claim_for(offer)).command_eligible
     registry.clock.advance(3601)
-    # Offer age never refuses its own boot: a re-offer replays the frozen offer
-    # and a first enrollment after a long Central outage is still admitted.
+    # Offer age never refuses its own boot: a re-offer replays the frozen offer.
     assert service.offer(request) == offer
-    assert sessions.enroll(claim_for(offer, owner="app_effect_broker")).command_eligible
     # Nor does it refuse the offer's frozen artifacts: identity and generation gate them.
     assert service.asset(offer.offer_id, "base").sha256 == BASE_SHA
     with pytest.raises(NodeControlError, match="offer_unknown"):
@@ -213,7 +212,7 @@ def test_frozen_offer_selection_exact_retry_and_no_app(registry):
 
 
 def test_manager_pins_and_environment_identity_are_immutable(registry):
-    service, _, deployment = cold_setup(registry)
+    service, deployment = cold_setup(registry)
     changed = environment("3", "photo-wall-app-manager")
     sources = {**deployment.environment_sources, changed.environment_sha256: "https://example.invalid/new"}
     del sources[deployment.manager_primary.environment_sha256]
@@ -226,36 +225,9 @@ def test_manager_pins_and_environment_identity_are_immutable(registry):
             generation=1, revision=1, now=1)
 
 
-def test_new_boot_supersedes_prior_boot_and_revokes_its_sessions(registry):
-    service, sessions, _ = cold_setup(registry)
-    first = service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
-    claim = claim_for(first)
-    grant = sessions.enroll(claim)
-
-    def authenticate(session_id, credential):
-        with registry.db.transaction() as conn:
-            return sessions.authenticate_in(conn, session_id, credential)
-
-    authenticate(grant.session_id, claim.credential)
-    # A second boot of the same serial needs no knowledge of its predecessor.
-    second = service.offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))
-    second_claim = claim_for(second)
-    second_grant = sessions.enroll(second_claim)
-    assert second_grant.command_eligible
-    assert sessions.enroll(claim_for(second, owner="app_effect_broker")).command_eligible
-    with pytest.raises(NodeControlError, match="superseded"):
-        authenticate(grant.session_id, claim.credential)
-    authenticate(second_grant.session_id, second_claim.credential)
-    # The old boot's frozen offer still enrolls; it supersedes in turn (duplicate serials flap visibly).
-    assert sessions.enroll(claim_for(first)).command_eligible
-    with pytest.raises(NodeControlError, match="superseded"):
-        authenticate(second_grant.session_id, second_claim.credential)
-
-
 def test_refusal_is_frozen_and_never_retargeted(registry):
     _seed(registry)
-    sessions = NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test"))
-    service = boot_service(sessions)   # no version kept and no release ready
+    service = boot_service(registry.db, registry.clock)   # no version kept and no release ready
     request = NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64)
     for _ in range(2):
         with pytest.raises(NodeControlError, match="node_boot_policy_unconfigured"):
@@ -268,11 +240,10 @@ def test_a_first_boot_offer_creates_its_device_at_generation_one(registry):
     """No trigger and no default writes a device's generation: the boot offer's own insert does
     (decision 0034, S2e). Probe: leave `generation` out of `claim_new_device`'s insert -> NOT NULL
     refuses the offer."""
-    sessions = NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test"))
     serial = "0123456789abcdef"
     device_id = device_id_for_serial(serial)
     with pytest.raises(NodeControlError, match="node_boot_policy_unconfigured"):  # no version yet
-        boot_service(sessions).offer(NodeBootRequestV2(serial, BOOT_ID, "a" * 64))
+        boot_service(registry.db, registry.clock).offer(NodeBootRequestV2(serial, BOOT_ID, "a" * 64))
     now = registry.clock.utc()
     with registry.db.transaction() as conn:
         assert conn.execute("SELECT serial, generation, retired_at, created_at, created_by, changed_at, "
@@ -346,7 +317,7 @@ def test_every_pis_version_and_previous_are_desired_and_older_ones_are_not(regis
     """The keep set holds every Pi's version and every Pi's previous one (boot_policy.kept), so
     Undo on any Pi needs no download. Mutation probe: kept() drops `previous` -> this fails."""
     from central.kernel.job_types import FetchOsImage
-    _, _, first = cold_setup(registry)
+    _, first = cold_setup(registry)
     second, third, fourth = _other(first, "4"), _other(first, "5"), _other(first, "6")
     for deployment in (second, third, fourth):
         publish_deployment(registry.db, deployment, registry.clock)
@@ -371,7 +342,7 @@ def test_a_pi_is_never_refused_for_volume(registry):
     serial in one UTC day, past the old per-device cap of 128, each answer an offer. Mutation
     probe (C1): reinstate a 128-a-day per-device offer cap in `NodeBootService.offer` -> the 129th
     offer is refused."""
-    boots, _, _ = cold_setup(registry)
+    boots, _ = cold_setup(registry)
     for _ in range(130):
         offer = boots.offer(NodeBootRequestV2(SERIAL, uuid4(), uuid4().hex + uuid4().hex))
         assert offer.serial == SERIAL

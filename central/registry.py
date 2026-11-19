@@ -20,7 +20,6 @@ from pydantic import Field, StrictBool
 from central.actor import Actor
 from central.central_errors.ports import BoundOutput
 from central.db import Database
-from central.fleet.acceptance_evidence import applied_is_latest
 from central.fleet.device_fence import fence_in, retire_in
 from central.fleet.frame_dark import frame_dark
 from central.fleet.models import TrialRefusal, TrialRefused
@@ -224,6 +223,24 @@ def _control_document(epoch: int, status: str) -> dict:
             "applied_digest": None, "applied_ack_nonce": None, "last_delivery_id": None,
             "last_result_sequence": None, "last_result_digest": None, "last_result": None,
             "last_result_at": None}
+
+
+def applied_is_latest(row: Mapping[str, object]) -> bool:
+    """The applied delivery is still the latest: nothing issued, pending or rejected since.
+
+    One home for the rule Registry uses to re-send (and replay the receipt of) an applied
+    delivery; `row` is a Player's control session (`players.control_session`).
+    """
+    return (row["status"] == "negotiated"
+            and row["pending_id"] is None and row["pending_digest"] is None
+            and row["pending_expires"] is None
+            and row["issued_sequence"] == row["applied_sequence"]
+            and row["last_result_sequence"] == row["applied_sequence"]
+            and row["last_result"] == "applied"
+            and row["applied_at"] is not None and row["last_result_at"] is not None
+            and row["last_delivery_id"] == row["applied_delivery_id"]
+            and row["last_result_digest"] == row["applied_digest"]
+            and row["applied_ack_nonce"] is not None)
 
 
 # The control session's facts `control_fact` reads (an operator's provenance read).
@@ -791,13 +808,13 @@ class Registry:
 
     @staticmethod
     def calibration_mode_in(conn, frame_id: str) -> str:
-        """`native_trial` when the Frame's bound Player runs on a Node Central admitted (its
-        device holds a node boot admission, current or past); otherwise `not_admitted`: a Player
+        """`native_trial` when the Frame's bound Player's device has had a boot offer answered with
+        an offer (node_boot_offers.offer_payload IS NOT NULL); otherwise `not_admitted`: a Player
         that never booted from a node offer (a Compose or demo Player) has no calibration
-        protocol. A revoked admission does not withdraw the capability."""
+        protocol. A later refused offer does not withdraw the capability."""
         row = conn.execute(
             "SELECT EXISTS(SELECT 1 FROM frames f JOIN players p ON p.id=f.player_id "
-            "JOIN node_boot_admissions a ON a.device_id=p.device_id "
+            "JOIN node_boot_offers o ON o.device_id=p.device_id AND o.offer_payload IS NOT NULL "
             "WHERE f.id=%s) AS native",
             (frame_id,),
         ).fetchone()

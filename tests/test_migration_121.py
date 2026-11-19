@@ -38,7 +38,6 @@ MIGRATION_B = MIGRATIONS / "121b_releases.sql"
 AT_121 = """
 ALTER TABLE devices DROP CONSTRAINT devices_deployment_id_fkey,
     DROP CONSTRAINT devices_previous_deployment_id_fkey;
-ALTER TABLE node_app_operations DROP CONSTRAINT node_app_operations_deployment_id_fkey;
 DROP TABLE node_releases;
 CREATE TABLE node_release_catalog (
     manifest_sha256 TEXT PRIMARY KEY, tag TEXT NOT NULL, revision TEXT NOT NULL,
@@ -66,13 +65,15 @@ ALTER TABLE devices ADD CONSTRAINT devices_deployment_id_fkey FOREIGN KEY (deplo
         REFERENCES node_deployments(deployment_id),
     ADD CONSTRAINT devices_previous_deployment_id_fkey FOREIGN KEY (previous_deployment_id)
         REFERENCES node_deployments(deployment_id);
-ALTER TABLE node_app_operations ADD CONSTRAINT node_app_operations_deployment_id_fkey
-    FOREIGN KEY (deployment_id) REFERENCES node_deployments(deployment_id);
-ALTER TABLE node_app_qualifications ADD CONSTRAINT node_app_qualifications_environment_sha256_fkey
-    FOREIGN KEY (environment_sha256) REFERENCES node_environment_catalog(environment_sha256);
-ALTER TABLE node_environment_acceptances
-    ADD CONSTRAINT node_environment_acceptances_environment_sha256_fkey
-    FOREIGN KEY (environment_sha256) REFERENCES node_environment_catalog(environment_sha256);
+-- The three app-operation tables 121b points at (128 drops them), with the keys it moves.
+CREATE TABLE node_app_operations (deployment_id UUID
+    CONSTRAINT node_app_operations_deployment_id_fkey REFERENCES node_deployments(deployment_id));
+CREATE TABLE node_app_qualifications (environment_sha256 TEXT
+    CONSTRAINT node_app_qualifications_environment_sha256_fkey
+    REFERENCES node_environment_catalog(environment_sha256));
+CREATE TABLE node_environment_acceptances (environment_sha256 TEXT
+    CONSTRAINT node_environment_acceptances_environment_sha256_fkey
+    REFERENCES node_environment_catalog(environment_sha256));
 ALTER TABLE assets DROP COLUMN created_by, DROP COLUMN changed_at, DROP COLUMN changed_by;
 ALTER TABLE job_outcomes DROP COLUMN created_at, DROP COLUMN created_by, DROP COLUMN changed_by;
 ALTER TABLE job_outcomes RENAME COLUMN changed_at TO updated_at;
@@ -249,7 +250,7 @@ def _at_121(conn):
 
 
 def test_121b_folds_each_release_into_one_row(registry):
-    from central.infra.node_releases import deployment_jobs, environment_reference_in
+    from central.infra.node_releases import deployment_jobs
     with registry.db.transaction() as conn:
         with_app, without_app = _at_121(conn)
         conn.execute(MIGRATION_B.read_text())
@@ -278,8 +279,6 @@ def test_121b_folds_each_release_into_one_row(registry):
         # Every deployment asset is still an asset reference, found by its owner.
         jobs = deployment_jobs(conn, [with_app.deployment_id, without_app.deployment_id])
         assert {len(jobs[with_app.deployment_id]), len(jobs[without_app.deployment_id])} == {3, 2}
-        for item in with_app.environments():
-            assert environment_reference_in(conn, item.environment_sha256) == item
         assert {row["created_by"] for row in conn.execute(
             "SELECT created_by FROM asset_references UNION SELECT created_by FROM assets")} == {"unknown"}
         assert conn.execute("SELECT created_at, changed_at, created_by, changed_by FROM job_outcomes"

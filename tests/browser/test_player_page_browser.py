@@ -2,7 +2,7 @@
 records (console DDD §9-§10, beads B1 to B3; Console by Domain E1 U1).
 
 The CI-gated fleet browser suite (R11): the production app on the loopback harness with node
-management mounted (`operator_server(..., node_control=...)`), the box's boot offer through
+management mounted (`operator_server`), the box's boot offer through
 Central's real boot service, its host line recorded through Central's real link store (decision
 0034) and a real Registry Player enrolled on the same device. It proves the device-keyed join,
 the node read (only on an open Pi page), the facts' labels and their Unknowns, the per-section
@@ -36,7 +36,6 @@ from test_node_boot import cold_setup
 from test_node_fleet_hosts import on_line
 from test_registry import enroll
 
-from central.fleet.node_sessions import NodeControlConfig
 from contracts.node_boot import NodeBootRequestV2
 from contracts.node_observation import HostMetricsState, HostMetricV2, encode_host_metrics_state
 from contracts.node_state import BIRTH_KEY, HOST_METRICS_KEY
@@ -46,7 +45,6 @@ pytestmark = pytest.mark.skipif(
     reason="set PHOTO_WALL_BROWSER_TESTS=1 and install Playwright Chromium",
 )
 
-NODE = NodeControlConfig("node-test")
 NAME = f"Player …{SERIAL[-6:]}"
 DEVICE_READ = f"**/v1/operator/node/devices/{DEVICE_ID}"
 HOSTS_READ = "/v1/operator/node/hosts"
@@ -58,7 +56,7 @@ class Box:
 
     def __init__(self, registry, *, enrolled=True):
         self.registry = registry
-        boots, self.sessions, _ = cold_setup(registry)
+        boots, _ = cold_setup(registry)
         self.offer = boots.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
         self.sequence = 0
         self.player_id = enroll(registry, count=1, device_id=DEVICE_ID)[0]["player_id"] if enrolled else None
@@ -103,7 +101,7 @@ def _software(page, name=NAME):
 def test_the_tracer_reaches_a_pi_page_from_the_list_with_standing_and_host_age(page, registry):
     box = Box(registry)
     box.host_sample()
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+    with operator_server(registry.db, registry.clock) as origin:
         sent = _node_reads(page)
         connect(page, origin, "hardware")
         row = hardware_list(page).get_by_role("table", name="Not driving a Frame", exact=True).get_by_role(
@@ -134,7 +132,7 @@ def test_one_layer_and_no_app_section_on_the_software_page(page, registry):
     box = Box(registry)
     report_readiness(registry, box.player_id)
     box.host_sample()
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+    with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         open_player(page, NAME)
         layers = page.get_by_role("region", name="Layers", exact=True).get_by_role("listitem")
@@ -162,7 +160,7 @@ def test_a_missing_field_reads_unknown_naming_it(page, registry):
         route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
 
     page.route(DEVICE_READ, without_host_value)
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+    with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         open_pi(page, NAME)
         expect(_host(page)).to_contain_text(
@@ -179,7 +177,7 @@ def test_a_malformed_read_blanks_one_section_only(page, registry):
         route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
 
     page.route(DEVICE_READ, drifted)
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+    with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         player = open_player(page, NAME)
         expect(page.get_by_role("region", name="Boot", exact=True).get_by_role("alert")).to_have_text(
@@ -195,7 +193,7 @@ def test_a_malformed_read_blanks_one_section_only(page, registry):
 def test_the_boot_section_holds_node_records_only(page, registry):
     box = Box(registry)
     box.host_sample()
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+    with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         open_player(page, NAME)
         boot = page.get_by_role("region", name="Boot", exact=True)
@@ -211,7 +209,7 @@ def test_the_boot_section_holds_node_records_only(page, registry):
 def test_a_failed_device_read_keeps_its_rows_marked_refresh_failed(page, registry):
     box = Box(registry)
     box.host_sample()
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+    with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, paused_at=registry.clock.utc())
         open_pi(page, NAME)
         host = _host(page)
@@ -237,7 +235,7 @@ def test_a_reboot_render_error_leaves_the_header_and_health_standing(page, regis
         route.fulfill(status=200, content_type="application/json", body=json.dumps(data))
 
     page.route(DEVICE_READ, drifted)
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+    with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         pi = open_pi(page, NAME)
         header = pi.locator("header")
@@ -255,7 +253,7 @@ def test_health_follows_reboot_from_the_fleet_host_read_and_link_keeps_only_the_
     Host Management's "Last reported" and its line's start."""
     box = Box(registry)
     box.host_sample()
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+    with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         pi = open_pi(page, NAME)
         sections = pi.locator("section[aria-label]").evaluate_all("(all) => all.map((s) => s.ariaLabel)")
@@ -277,7 +275,7 @@ def test_health_follows_reboot_from_the_fleet_host_read_and_link_keeps_only_the_
 def test_a_box_seen_only_at_boot_is_listed_not_enrolled(page, registry):
     box = Box(registry, enrolled=False)
     box.host_sample()
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+    with operator_server(registry.db, registry.clock) as origin:
         sent = _node_reads(page)
         connect(page, origin, "hardware")
         row = hardware_list(page).get_by_role("table", name="Not driving a Frame", exact=True).get_by_role(
@@ -297,7 +295,7 @@ def test_a_retired_player_page_reads_no_node_records(page, registry):
     box = Box(registry)
     box.host_sample()
     registry.retire(box.player_id, by="console")
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+    with operator_server(registry.db, registry.clock) as origin:
         sent = _node_reads(page)
         connect(page, origin)
         for visit_hash in (f"#/hardware/{DEVICE_ID}", f"#/players/{DEVICE_ID}"):
@@ -335,7 +333,7 @@ RUN_STAYS = "The Run stays active. Central sends no command to other Frames or A
 
 def _node_server(registry):
     reboot_queue(registry.db)   # the reboot route queues S4a's RebootPi
-    return operator_server(registry.db, registry.clock, node_control=NODE)
+    return operator_server(registry.db, registry.clock)
 
 
 def _asks(registry) -> int:

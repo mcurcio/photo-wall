@@ -224,18 +224,13 @@ DEPLOYED = "node_releases WHERE deployment_id IS NOT NULL"
 CATALOGUED = "node_releases WHERE manifest_sha256 IS NOT NULL"
 
 
-def sessions_for(registry):
-    from central.fleet.node_sessions import NodeControlConfig, NodeSessions
-    return NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test"))
-
-
 def read(registry, world=None):
     """The Releases page's read (`NodeReleaseCatalog.view`), as its route answers it: over the world's
     cache, or a cache with nothing ready."""
     from test_node_boot import NOTHING_READY
 
     from central.fleet.node_release_catalog import NodeReleaseCatalog
-    return NodeReleaseCatalog(sessions_for(registry),
+    return NodeReleaseCatalog(registry.db, registry.clock,
                               readiness=world.stored if world else NOTHING_READY).view().model_dump(mode="json")
 
 
@@ -244,7 +239,7 @@ def offer_for(registry, world, serial="abcdef1234567890"):
     from test_node_boot import boot_service
 
     from contracts.node_boot import NodeBootRequestV2
-    return boot_service(sessions_for(registry), readiness=world.stored).offer(
+    return boot_service(registry.db, registry.clock, readiness=world.stored).offer(
         NodeBootRequestV2(serial, uuid4(), uuid4().hex + uuid4().hex))
 
 
@@ -276,7 +271,7 @@ def test_tracer_one_valid_one_malformed_one_conflicting_release_in_one_run(regis
         ("v2.1.0", "v2.1.0", None),
         ("v2.0.0", "v2.0.0", "node_release_identity_conflict")]
     enroll(registry.db, "abcdef1234567890", registry.clock.utc())
-    player_versions(sessions_for(registry), readiness=world.stored).install("abcdef1234567890", "v2.1.0", by="console")
+    player_versions(registry.db, registry.clock, readiness=world.stored).install("abcdef1234567890", "v2.1.0", by="console")
     offer = offer_for(registry, world)
     assert offer.base == valid.release.base
     assert offer.app_environment == valid.release.app_environment
@@ -379,7 +374,7 @@ def test_another_pin_for_a_known_base_or_reference_for_a_known_digest_is_refused
     from test_node_boot import cold_setup, environment, publish_deployment, released
 
     from central.content_catalog.ports import NodeReleaseRefused
-    _, _, first = cold_setup(registry)
+    _, first = cold_setup(registry)
     if change == "manager_pin":  # the same base, another manager
         manager = environment("3", "photo-wall-app-manager")
         sources = {**first.environment_sources, manager.environment_sha256: "https://example.invalid/3"}
@@ -435,7 +430,7 @@ def test_a_pi_with_no_version_boots_the_newest_ready_stable_release(registry, sy
 
 
 def test_with_no_version_and_nothing_ready_no_boot_is_offered(registry, sync_world):
-    from central.fleet.node_sessions import NodeControlError
+    from central.fleet.models import NodeControlError
     upstream, upload = Upstream(), node_upload("v2.0.0")
     upstream.put(upload)
     world = sync_world(upstream)

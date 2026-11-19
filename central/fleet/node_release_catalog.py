@@ -14,19 +14,21 @@ from uuid import UUID
 
 from central.content_catalog.boot_policy import newest_first
 from central.content_catalog.views import PlayerVersionView, ReleasesView, ReleaseView
+from central.db import Database
 from central.fleet.node_observations import host_facts_in
 from central.infra.node_releases import deployment_jobs, wanted_deployments
 from central.infra.player_versions import pi_versions_in
 from central.infra.transactions import PgTransaction
 from central.kernel.ports import AssetReadiness
 from contracts.node_release import parse_node_release
+from contracts.time import Clock
 
 MAX_RELEASES = 100
 
 
 class NodeReleaseCatalog:
-    def __init__(self, sessions, *, readiness: AssetReadiness) -> None:
-        self.sessions = sessions
+    def __init__(self, db: Database, clock: Clock, *, readiness: AssetReadiness) -> None:
+        self.db, self.clock = db, clock
         self.readiness = readiness
 
     def view(self) -> ReleasesView:
@@ -35,8 +37,8 @@ class NodeReleaseCatalog:
         in the window and its readiness; every enrolled Pi's version (`pi_versions_in`) with the base
         tag its host line states (`running`, its `facts`); and `default`, the release a
         Pi with no version boots."""
-        with self.sessions.db.read_snapshot() as conn:
-            read_at = self.sessions.clock.utc()
+        with self.db.read_snapshot() as conn:
+            read_at = self.clock.utc()
             observed = conn.execute(
                 "SELECT tag,is_prerelease,problem,manifest_sha256,document,discovered_at,deployment_id "
                 "FROM node_releases").fetchall()
@@ -52,7 +54,7 @@ class NodeReleaseCatalog:
                 readiness = None if deployment is None else self.readiness.readiness(
                     tx, jobs.get(deployment, frozenset()), wanted=deployment in wanted.deployments)
                 releases.append(_release(row, deployment, deployment in window, readiness))
-            versions = pi_versions_in(conn, self.sessions.clock, self.readiness)
+            versions = pi_versions_in(conn, self.clock, self.readiness)
             players = {row["device_id"]: row["id"] for row in conn.execute(
                 "SELECT id, device_id FROM players WHERE retired_at IS NULL").fetchall()}
             facts = host_facts_in(conn)

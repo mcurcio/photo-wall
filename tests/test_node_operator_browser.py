@@ -13,14 +13,14 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from support.pi_reboots import reboot_queue
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
-from test_node_boot import claim_for, cold_setup
+from test_node_boot import cold_setup
 from test_registry import enroll
 
 from central.content_wiring import build_content_services
 from central.coordination import Coordinator
 from central.db import ProcessTransactionClock
+from central.fleet.node_boot import NodeBootConfig
 from central.fleet.node_routes import mount_node_routes
-from central.fleet.node_sessions import NodeControlConfig
 from central.media_repository import MediaRepository
 from central.operator_snapshot import OperatorSnapshotReader
 from central.runtime_store import RuntimeStore
@@ -31,16 +31,14 @@ def test_operator_node_browser(registry, tmp_path):
     if os.environ.get("PHOTO_WALL_NODE_BROWSER") != "1":
         pytest.skip("interactive local fixture only")
     reboot_queue(registry.db)   # the reboot route queues S4a's RebootPi; no worker runs it here
-    boots, sessions, _ = cold_setup(registry)
+    boots, _ = cold_setup(registry)
     boots.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
-    second = boots.offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))
-    # The later boot supersedes the earlier one; no operator selection exists.
-    sessions.enroll(claim_for(second))
+    second = boots.offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64))   # a later boot of the same box
     enroll(registry, count=1, device_id=DEVICE_ID)
     coordinator = Coordinator(registry.db, registry.clock)
     app = FastAPI()
     mount_node_routes(app, db=registry.db, clock=registry.clock, admin=lambda: None,
-        config=NodeControlConfig("node-test"), times=ProcessTransactionClock(registry.clock),
+        config=NodeBootConfig(), times=ProcessTransactionClock(registry.clock),
         content=build_content_services(registry.db, registry.clock, cache_root=tmp_path))
     reader = OperatorSnapshotReader(registry.db, registry.clock, registry,
         RuntimeStore(registry.db, registry.clock), MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock)), coordinator)

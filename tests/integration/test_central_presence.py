@@ -3,8 +3,8 @@ Deferrals "Presence for the console"; 0017 Open item "Presence", leaf state only
 
 S2's bed with one enrolled Node: `FleetHub` writes the hub's configuration, a real nats-server hub
 starts from it, and the Node is a real bus on the shipped configuration whose leaf dials the hub.
-Central's read is the fleet host read (the Hardware pages' one source, erratum E-CDS-FIX-10) with an
-injected read clock, and its `bus_link` is rendered by the console's own `busLinkFact` (facts.js,
+Central's read is the fleet host read (the Hardware pages' one source, erratum E-CDS-FIX-10), and
+its `bus_link` is rendered by the console's own `busLinkFact` (facts.js,
 under Node). Presence and the hub's reachability are written only when they change (decision
 0034); how fresh they are comes from the worker's queue heartbeat (a `procrastinate_workers` row,
 inserted here as a running worker's would be). 1: the leaf links: the hub reachable, linked, the
@@ -17,7 +17,6 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
-import time
 from pathlib import Path
 
 from integration.bus_servers import BusServer, _free_port, node_server, until
@@ -29,7 +28,6 @@ from central.db import Database
 from central.fleet.node_bus_accounts import HubListeners
 from central.fleet.node_bus_hub import FleetHub
 from central.fleet.node_observations import NodeObservations
-from central.fleet.node_sessions import NodeControlConfig, NodeSessions
 from central.infra.node_link_store import PgWallMarks
 from nodeapi.buffers import KeyTable
 
@@ -43,16 +41,6 @@ const { busLinkFact, factText } = await import(process.argv[1]);
 const value = busLinkFact(JSON.parse(process.argv[2]), JSON.parse(process.argv[3]));
 console.log(JSON.stringify([value.kind, factText(value)]));
 """
-
-
-class _ReadClock:
-    """Central's process clock (the read's `read_at` is the database's)."""
-
-    def utc(self) -> float:
-        return time.time()
-
-    def monotonic(self) -> float:
-        return time.monotonic()
 
 
 def _worker_beat(db: Database, seconds_ago: float) -> None:
@@ -93,8 +81,7 @@ def test_the_console_reads_whether_a_node_is_linked(database, tmp_path):
     node = node_server(tmp_path, SERIAL, hub)
     fleet = FleetHub(database, hub.client_url, config_path, listeners, WALL_TABLE,
                      PgWallMarks(database, lambda: None), [])
-    clock = _ReadClock()
-    hosts = NodeObservations(NodeSessions(database, clock, NodeControlConfig("presence-test")))
+    hosts = NodeObservations(database)
 
     def hardware_read() -> dict:
         """The fleet host read, the Hardware pages' one source of the link (E-CDS-FIX-10)."""

@@ -30,18 +30,17 @@ from contracts.node_host_facts import encode_host_facts_state
 from contracts.node_state import HOST_FACTS_KEY
 
 
-def _reads(registry, sessions=None) -> tuple[PgCentralStateReads, PgRoomLights]:
+def _reads(registry, *, seeded: bool = False) -> tuple[PgCentralStateReads, PgRoomLights]:
     lights = PgRoomLights(registry.db, PgHouseLock())
-    if sessions is None:
-        _, sessions = _rig(registry)
+    if not seeded:
+        _rig(registry)
     versions = PgPlayerVersions(registry.db, registry.clock, ALL_READY, None)
     return PgCentralStateReads(registry.db, registry.clock, versions, lights, lambda: None), lights
 
 
 def test_the_installation_lists_each_pi_at_the_address_its_host_line_states(registry):
-    boots, sessions = _rig(registry)
-    Host(registry, sessions, boots)
-    reads, _ = _reads(registry, sessions)
+    Host(registry, _rig(registry))
+    reads, _ = _reads(registry, seeded=True)
     assert [(each.serial, each.address) for each in reads.installation().players] == [(SERIAL, None)]
     on_line(registry, SERIAL, HOST_FACTS_KEY, encode_host_facts_state(FACTS), 1)
     assert [(each.serial, each.address) for each in reads.installation().players] == [(SERIAL, "192.168.1.40")]

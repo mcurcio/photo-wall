@@ -19,7 +19,6 @@ from test_registry import ADMIN, enroll
 
 from central.app import create_app
 from central.displays.model import Readiness
-from central.fleet.node_sessions import NodeControlConfig
 from central.fleet.position_history import PositionEntryKind
 from central.infra.display_store import frame_outputs_in
 from central.infra.position_history_store import latest_kept_position_in, latest_position_in
@@ -73,8 +72,7 @@ def test_a_cover_or_corners_save_body_is_refused_422_before_any_write(registry, 
     with registry.db.transaction() as conn:
         latest = latest_position_in(conn, "lounge")
     calibration = {"revision": 1, "fit": fit}
-    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
-                               node_control=NodeControlConfig("node-test"))) as client:
+    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         begun = client.post("/v1/operator/frames/lounge/calibration-trials", headers=AUTH,
                             json={"calibration": calibration})
         edited = client.post(f"/v1/operator/frames/lounge/calibration-trials/{uuid4()}", headers=AUTH,

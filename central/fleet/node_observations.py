@@ -5,11 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, Final
 
-from central.db import DatabaseTransactionClock
+from central.db import Database, DatabaseTransactionClock
 from central.fleet.device_fence import standing_in
 from central.fleet.host_thresholds import thresholds_document
 from central.fleet.node_bus_presence import bus_links_in
-from central.fleet.node_sessions import NodeSessions
 from central.fleet.pi_reboot import reboot_records_in
 from central.infra.node_link_latest import latest_values_in
 from contracts.node_boot import parse_node_boot_offer
@@ -102,13 +101,13 @@ def host_line_in(conn, device_id: str) -> dict | None:
 
 
 class NodeObservations:
-    def __init__(self, sessions: NodeSessions):
-        self.sessions = sessions
+    def __init__(self, db: Database) -> None:
+        self.db = db
 
     def fleet_hosts(self) -> dict:
         """G12 (`fleet_hosts_in`) under one read-only snapshot. No fleet or device lock is taken, so
         a held lock never blocks this read."""
-        with self.sessions.db.read_snapshot() as conn:
+        with self.db.read_snapshot() as conn:
             return fleet_hosts_in(conn)
 
     def status(self, device_id: str) -> dict:
@@ -116,7 +115,7 @@ class NodeObservations:
         claims (its boot offers) and its reboot records; no session, producer, admission,
         observation sample, manager preparation or display exchange. `read_at` is
         the database's clock, the one the host line and the reboot records were stamped by (R10)."""
-        with self.sessions.db.read_snapshot() as conn:
+        with self.db.read_snapshot() as conn:
             generation = standing_in(conn, device_id).active_generation()
             now = _CLOCK.now_in(conn)
             claims = conn.execute("SELECT kernel_boot_id,offer_id,created_at,refusal FROM node_boot_offers "

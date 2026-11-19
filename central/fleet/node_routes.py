@@ -26,16 +26,13 @@ from central.content_routes import (
 from central.content_wiring import ContentServices
 from central.db import Database, TransactionClock
 from central.fleet.bytes import OfferByteReader
-from central.fleet.models import FleetError, TrialRefusal, TrialRefused
-from central.fleet.node_app_links import NodeAppLinks
-from central.fleet.node_boot import NodeBootService
+from central.fleet.models import FleetError, NodeControlError, TrialRefusal, TrialRefused
+from central.fleet.node_boot import NodeBootConfig, NodeBootService
 from central.fleet.node_calibration import NodeCalibration, TrialBegin, TrialOperation
 from central.fleet.node_observations import NodeObservations
 from central.fleet.node_release_catalog import NodeReleaseCatalog
-from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
 from central.fleet.pi_reboot import OperatorReboots, parse_operator_reboot
 from central.fleet.position_views import PositionRestore
-from central.fleet.principal import PrincipalError
 from central.frame_lighting.model import FrameLightingRefused
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.infra.frame_lighting_store import PgFrameLighting
@@ -43,23 +40,10 @@ from central.infra.player_versions import PgPlayerVersions
 from central.registry import Registry
 from central.request_body import capped_body
 from contracts.central_api import InstallRefusal, InstallStarted
-from contracts.node_app_link import MAX_NODE_LINK_BYTES
 from contracts.node_boot import MAX_NODE_BOOT_BYTES, encode_node_boot_offer, parse_node_boot_request
-from contracts.node_commands import MAX_COMMAND_BYTES, encode_session_grant, parse_session_claim
 from contracts.node_link import SERIAL_PATTERN
 from contracts.strict_json import loads_object
 from contracts.time import Clock
-
-
-def _credentials(request: Request) -> tuple[UUID, str]:
-    try:
-        authorization = request.headers.get("authorization", "")
-        if not authorization.startswith("Bearer "):
-            raise ValueError("missing_bearer")
-        return UUID(request.headers["x-node-session"]), authorization.removeprefix("Bearer ")
-    except (KeyError, ValueError) as exc:
-        raise NodeControlError("node_credential_required", 401) from exc
-
 
 # The Releases routes' refusals: one status per InstallRefusal (central/content_catalog/views.py).
 VERSION_REFUSAL_STATUS: dict[InstallRefusal, int] = {
@@ -85,10 +69,9 @@ def _trial_body[T](adapter: TypeAdapter[T], raw: bytes) -> T:
 
 
 def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
-                      admin: Callable[..., None], config: NodeControlConfig,
+                      admin: Callable[..., None], config: NodeBootConfig,
                       times: TransactionClock, content: ContentServices | None = None) -> None:
-    sessions = NodeSessions(db, clock, config)
-    observations = NodeObservations(sessions)
+    observations = NodeObservations(db)
     bytes_reader = OfferByteReader(content.reader if content else None)
     reboots = OperatorReboots(db, content.publisher if content else None)
     # Each Pi's version needs the cache's readiness: without content services (a fake database) no
@@ -96,15 +79,12 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     readiness = content.readiness if content else None
     versions = (None if readiness is None
                 else PgPlayerVersions(db, clock, readiness, content.publisher if content else None))
-    boots = None if versions is None else NodeBootService(sessions, versions=versions)
-    links = NodeAppLinks(sessions)
-    publications = None if readiness is None else NodeReleaseCatalog(sessions, readiness=readiness)
+    boots = None if versions is None else NodeBootService(db, clock, config, versions=versions)
+    publications = None if readiness is None else NodeReleaseCatalog(db, clock, readiness=readiness)
     lighting = PgFrameLighting(LUT_RECIPE_ID)
     # A trial's times are the database's (the document source's clock) in production; a test that
     # injects its own clock passes its times (create_app's media_times).
     trials = NodeCalibration(db, registry=Registry(db, clock, lighting=lighting), lighting=lighting, times=times)
-    app.state.node_app_links = links
-    app.state.node_sessions = sessions
     app.state.player_versions = versions
 
     @app.middleware("http")
@@ -134,8 +114,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     async def invoke(function, *args):
         try:
             return await asyncio.to_thread(function, *args)
-        except PrincipalError as exc:
-            raise NodeControlError(str(exc), 503) from exc
         except NodeControlError:
             raise
         except ValueError as exc:
@@ -174,21 +152,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
 
     if versions is not None and publications is not None:
         _mount_releases(app, admin, versions, publications)
-
-    @app.post("/v2/node/sessions")
-    async def enroll(request: Request):
-        raw = await body(request, MAX_COMMAND_BYTES)
-        try:
-            claim = parse_session_claim(raw)
-        except ValueError as exc:
-            raise NodeControlError("invalid_node_session_claim", 422) from exc
-        grant = await invoke(sessions.enroll, claim)
-        return Response(encode_session_grant(grant), media_type="application/json")
-
-    @app.post("/v2/node/app-links")
-    async def app_link(request: Request):
-        raw = await body(request, MAX_NODE_LINK_BYTES)
-        return await invoke(links.admit, *_credentials(request), raw)
 
     @app.get("/v1/operator/frames/{frame_id}/calibration-capability", dependencies=[Depends(admin)])
     async def calibration_capability(frame_id: str):

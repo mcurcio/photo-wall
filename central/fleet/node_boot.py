@@ -11,6 +11,7 @@ mutable manager policy. No offer receipt proves download, boot, or playback.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Final
 from uuid import UUID, uuid4
 
@@ -25,9 +26,9 @@ from central.content_catalog.deployment import (
     parse_node_deployment as parse_node_deployment,
 )
 from central.content_catalog.ports import PlayerVersions
+from central.db import Database
 from central.fleet.device_fence import fence_in, standing_in
-from central.fleet.models import OfferAsset
-from central.fleet.node_sessions import NodeControlError, NodeSessions
+from central.fleet.models import NodeControlError, OfferAsset
 from central.infra.transactions import PgTransaction
 from contracts.node_boot import (
     NodeBootOfferV2,
@@ -36,6 +37,11 @@ from contracts.node_boot import (
     encode_node_boot_request,
     parse_node_boot_offer,
 )
+from contracts.node_protocol import token
+from contracts.time import Clock
+
+# One Central per wall, so the audience is the product, not an installation name.
+NODE_AUDIENCE: Final = "photo-wall"
 
 # The offer's policy revision (contracts/node_boot.py): a wall-wide selection's revision once; with a
 # version per Pi there is no such revision, and the field stays on the wire at 1.
@@ -52,14 +58,23 @@ def claim_new_device(conn, *, device_id: str, serial: str, now: float) -> None:
                  (device_id, serial, now, now, now, now))
 
 
+@dataclass(frozen=True, slots=True)
+class NodeBootConfig:
+    """The boot offer's audience: the product, one Central per wall."""
+    installation_audience: str = NODE_AUDIENCE
+
+    def __post_init__(self) -> None:
+        token(self.installation_audience, 256)
+
+
 class NodeBootService:
     """The boot offer: each Pi's version (`versions`) chooses its deployment."""
 
-    def __init__(self, sessions: NodeSessions, *, versions: PlayerVersions):
-        self.sessions, self.versions = sessions, versions
+    def __init__(self, db: Database, clock: Clock, config: NodeBootConfig, *, versions: PlayerVersions) -> None:
+        self.db, self.clock, self.config, self.versions = db, clock, config, versions
 
     def offer(self, request: NodeBootRequestV2) -> NodeBootOfferV2:
-        config = self.sessions.config
+        config = self.config
         serial = sanitize_serial(request.serial)
         device_id = device_id_for_serial(serial)
         if serial != request.serial or device_id is None:
@@ -67,9 +82,9 @@ class NodeBootService:
         canonical = encode_node_boot_request(request)
         refusal = None
         result = None
-        with self.sessions.db.transaction() as conn:
+        with self.db.transaction() as conn:
             fenced = fence_in(conn, device_id, "change")
-            now = self.sessions.clock.utc()
+            now = self.clock.utc()
             claim_new_device(conn, device_id=device_id, serial=serial, now=now)
             generation = fenced.generation()
             prior = conn.execute("SELECT * FROM node_boot_offers WHERE device_id=%s AND "
@@ -107,7 +122,7 @@ class NodeBootService:
         return result
 
     def asset(self, offer_id: UUID, role: str) -> OfferAsset:
-        with self.sessions.db.read_snapshot() as conn:
+        with self.db.read_snapshot() as conn:
             row = conn.execute("SELECT * FROM node_boot_offers WHERE offer_id=%s", (offer_id,)).fetchone()
             if row is None or row["offer_payload"] is None:
                 raise NodeControlError("node_boot_offer_unknown", 404)

@@ -19,12 +19,8 @@ from test_registry import ADMIN
 
 from central.app import create_app
 from central.coordination import Coordinator
-from central.fleet.node_sessions import NodeControlConfig
 from central.installation_models import InstallationInventory
 from contracts.models import Readiness
-
-# Central always runs node control (console DDD Part E, R20); tests pick its audience.
-NODE_CONTROL = NodeControlConfig("node-test")
 
 # How long a stopping server waits for open connections before it closes them (uvicorn's
 # timeout_graceful_shutdown); the thread join below allows it and the lifespan's shutdown.
@@ -48,13 +44,10 @@ _IDLE_CONNECTION_SECONDS = 600
 
 
 @contextmanager
-def operator_server(db, clock, *, cache_root=None, media_queue=None, admin_token=ADMIN,
-                    node_control=NODE_CONTROL):
-    """Run the production app on an ephemeral loopback listener with real lifespan.
-
-    `node_control` is the node control configuration (node-test by default)."""
+def operator_server(db, clock, *, cache_root=None, media_queue=None, admin_token=ADMIN):
+    """Run the production app on an ephemeral loopback listener with real lifespan."""
     app = create_app(db, clock, admin_token, run_scheduler=False,
-                     cache_root=cache_root, media_queue=media_queue, node_control=node_control,
+                     cache_root=cache_root, media_queue=media_queue,
                      central_version=CENTRAL_VERSION)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))

@@ -29,9 +29,8 @@ from playwright.sync_api import expect
 from test_console_frame_page_browser import FRAME, PRESENTED, FakeSessions, _bar, _seed
 from test_frame_picture_browser import _off_thread
 
-from central.fleet.models import TrialRefused
+from central.fleet.models import NodeControlError, TrialRefused
 from central.fleet.node_routes import _OPERATION, _trial_body
-from central.fleet.node_sessions import NodeControlError
 from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.room_light_store import PgRoomLights
 from central.room_light.model import SensorRef

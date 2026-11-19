@@ -57,9 +57,8 @@ from central.actor import Actor
 from central.db import Database, DatabaseTransactionClock, TransactionClock
 from central.displays.ports import TrialInForce
 from central.fleet.device_fence import fence_in
-from central.fleet.models import TrialRefusal, TrialRefused
+from central.fleet.models import NodeControlError, TrialRefusal, TrialRefused
 from central.fleet.node_bus_presence import bus_links_in
-from central.fleet.node_sessions import NodeControlError
 from central.fleet.position_history import (
     TrialHanded,
     position_values,

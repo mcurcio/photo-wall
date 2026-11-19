@@ -24,7 +24,7 @@ from test_node_calibration import LIGHTING_JSON, SHIFTED, SKEWED, begin, operate
 from test_registry import ADMIN, frame
 
 from central.app import create_app
-from central.fleet.node_sessions import NodeControlConfig, NodeControlError
+from central.fleet.models import NodeControlError
 from central.fleet.position_history import (
     PositionEntryKind,
     PositionValues,
@@ -81,8 +81,7 @@ class Node:
 
 
 def _client(registry) -> TestClient:
-    return TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
-                                 node_control=NodeControlConfig("node-test")))
+    return TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False))
 
 
 def _history(registry, frame_id: str = "node-f0", **params) -> dict:

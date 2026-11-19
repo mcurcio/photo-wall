@@ -41,15 +41,11 @@ def test_117_leaves_no_immutability_trigger_and_no_central_function(registry):
 
 
 @pytest.mark.db
-def test_117_drops_the_dead_tables_and_points_an_admission_at_its_boot_offer(registry):
+def test_117_drops_the_dead_tables(registry):
+    """(117 also pointed a boot admission at its boot offer; 128 drops the admissions.)"""
     with registry.db.transaction() as conn:
         for name in DROPPED:
             assert conn.execute("SELECT to_regclass(%s) AS t", (name,)).fetchone()["t"] is None, name
-        [fk] = conn.execute(
-            "SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE contype='f' "
-            "AND conrelid='node_boot_admissions'::regclass AND conname='node_boot_admissions_offer_id_fkey'"
-        ).fetchall()
-    assert fk["d"] == "FOREIGN KEY (offer_id) REFERENCES node_boot_offers(offer_id)"
 
 
 def _sources():

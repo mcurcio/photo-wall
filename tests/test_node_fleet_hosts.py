@@ -11,7 +11,7 @@ from uuid import uuid4
 from fastapi.testclient import TestClient
 from support.devices import seed_device
 from test_fleet_attempts import DEVICE_ID, SERIAL
-from test_node_boot import claim_for, cold_setup
+from test_node_boot import cold_setup
 from test_registry import ADMIN, enroll
 
 from central.app import create_app
@@ -24,7 +24,6 @@ from central.fleet.node_bus_presence import (
     record_presence_in,
 )
 from central.fleet.node_observations import NodeObservations, host_facts_in
-from central.fleet.node_sessions import NodeControlConfig, NodeSessions
 from central.infra.node_link_store import PgLinkStores
 from contracts.node_boot import NodeBootRequestV2
 from contracts.node_host_facts import HostFactsState, encode_host_facts_state
@@ -35,17 +34,13 @@ from nodeapi.buffers import state_prefix, state_stream
 from nodeapi.epoch import Token
 from nodeapi.pull import Batch, Read
 
-NODE = NodeControlConfig("node-test")
-
 
 class Host:
-    """Host Management on one boot of the fixture box: Central's boot offer and its session."""
+    """Host Management on one boot of the fixture box: Central's boot offer."""
 
-    def __init__(self, registry, sessions, boots, boot_id=None):
-        self.registry, self.sessions = registry, sessions
+    def __init__(self, registry, boots, boot_id=None):
+        self.registry = registry
         self.offer = boots.offer(NodeBootRequestV2(SERIAL, boot_id or uuid4(), uuid4().hex + uuid4().hex))
-        self.claim = claim_for(self.offer)
-        self.grant = sessions.enroll(self.claim)
 
 
 def on_line(registry, serial, key, value, seq):
@@ -69,11 +64,10 @@ FACTS = HostFactsState(kernel_release="6.6.51+rpt-rpi-v8", interface="eth0", lin
                        wall_clock="synchronised", boot=None)
 
 
-def _rig(registry, *, session_seconds=3600):
-    boots, _, _ = cold_setup(registry)
-    sessions = NodeSessions(registry.db, registry.clock,
-                            NodeControlConfig("node-test", session_seconds=session_seconds))
-    return boots, sessions
+def _rig(registry):
+    """Central's boot offer, the fixture box's version kept (cold_setup)."""
+    boots, _ = cold_setup(registry)
+    return boots
 
 
 def _device(read, device_id=DEVICE_ID):
@@ -82,9 +76,9 @@ def _device(read, device_id=DEVICE_ID):
 
 def test_g12_serves_what_the_host_line_states(registry):
     """Criterion 4. Mutation probe: serve no metrics from the line -> `host` stays None, fails."""
-    boots, sessions = _rig(registry)
-    observations = NodeObservations(sessions)
-    Host(registry, sessions, boots)
+    boots = _rig(registry)
+    observations = NodeObservations(registry.db)
+    Host(registry, boots)
     served = _device(observations.fleet_hosts())
     assert served["host"] is None and served["facts"] is None
     assert "previous_boot_received_at" not in served
@@ -123,9 +117,9 @@ def test_the_device_read_states_the_host_line_and_nothing_of_the_old_path(regist
     creation and when Central recorded the birth and the newest metrics or facts); no session,
     producer, admission, host sample, App Manager preparation or display exchange is served.
     Mutation probe: serve `sessions` again -> the key set differs, fails."""
-    boots, sessions = _rig(registry)
-    observations = NodeObservations(sessions)
-    Host(registry, sessions, boots)
+    boots = _rig(registry)
+    observations = NodeObservations(registry.db)
+    Host(registry, boots)
     assert observations.status(DEVICE_ID)["host"] is None   # no birth on the line yet
     on_line(registry, SERIAL, BIRTH_KEY, b"{}", 1)
     metrics_on_line(registry, SERIAL, 50.0, 2)
@@ -142,16 +136,16 @@ def test_the_device_read_states_the_host_line_and_nothing_of_the_old_path(regist
 
 def test_a_pi_heard_only_on_its_line_is_served(registry):
     """A Pi with no old-path session at all (enrolled, never posted): its line alone is its host."""
-    boots, sessions = _rig(registry)
-    Host(registry, sessions, boots)
+    boots = _rig(registry)
+    Host(registry, boots)
     metrics_on_line(registry, SERIAL, 50.0, 1)
-    served = _device(NodeObservations(sessions).fleet_hosts())
+    served = _device(NodeObservations(registry.db).fleet_hosts())
     assert served["host"]["metrics"][0]["value"] == 50.0
 
 
 def test_g12_omits_retired_boxes_and_lists_active_ones_without_a_boot(registry):
-    boots, sessions = _rig(registry)
-    Host(registry, sessions, boots)
+    boots = _rig(registry)
+    Host(registry, boots)
     metrics_on_line(registry, SERIAL, 50.0, 1)
     spare_id = "device-" + "e" * 64
     with registry.db.transaction() as conn:
@@ -159,7 +153,7 @@ def test_g12_omits_retired_boxes_and_lists_active_ones_without_a_boot(registry):
     retired_id = "device-" + "f" * 64
     retired = enroll(registry, count=1, device_id=retired_id)[0]["player_id"]
     registry.retire(retired, by="console")
-    read = NodeObservations(sessions).fleet_hosts()
+    read = NodeObservations(registry.db).fleet_hosts()
     assert _device(read, retired_id) is None
     assert _device(read)["serial"] == SERIAL  # the box's claim at boot, for the console's names
     assert _device(read, spare_id) == {"device_id": spare_id, "serial": None, "host": None,
@@ -169,8 +163,8 @@ def test_g12_omits_retired_boxes_and_lists_active_ones_without_a_boot(registry):
 
 
 def test_g12_serves_each_boxs_own_bus_link_linked_unlinked_and_never_seen(registry):
-    boots, sessions = _rig(registry)
-    Host(registry, sessions, boots)
+    boots = _rig(registry)
+    Host(registry, boots)
     unlinked_id, unseen_id = "device-" + "d" * 64, "device-" + "e" * 64
     with registry.db.transaction() as conn:
         for device_id in (unlinked_id, unseen_id):
@@ -181,7 +175,7 @@ def test_g12_serves_each_boxs_own_bus_link_linked_unlinked_and_never_seen(regist
         record_presence_in(conn, {unlinked_id: False}, 130.0)   # unchanged: not rewritten
         record_hub_reachable_in(conn, True, times=ProcessTransactionClock(registry.clock))
         conn.execute("INSERT INTO procrastinate_workers (last_heartbeat) VALUES (now())")
-    read = NodeObservations(sessions).fleet_hosts()
+    read = NodeObservations(registry.db).fleet_hosts()
     assert _device(read)["bus_link"] == {"linked": True, "changed_at": 100.0, "hub": "reachable"}
     assert _device(read, unlinked_id)["bus_link"] == {"linked": False, "changed_at": 120.0,
                                                       "hub": "reachable"}
@@ -214,8 +208,8 @@ def _device_hub(registry) -> str:
 
 
 def test_a_held_device_fence_does_not_block_g12(registry):
-    boots, sessions = _rig(registry)
-    Host(registry, sessions, boots)
+    boots = _rig(registry)
+    Host(registry, boots)
     metrics_on_line(registry, SERIAL, 50.0, 1)
     held, release = threading.Event(), threading.Event()
 
@@ -231,7 +225,7 @@ def test_a_held_device_fence_does_not_block_g12(registry):
     try:
         assert held.wait(10)
         started = time.monotonic()
-        read = NodeObservations(sessions).fleet_hosts()
+        read = NodeObservations(registry.db).fleet_hosts()
         assert time.monotonic() - started < 2
         assert _device(read)["host"] is not None
     finally:
@@ -240,14 +234,13 @@ def test_a_held_device_fence_does_not_block_g12(registry):
 
 
 def test_g12_route_access(registry):
-    boots, sessions = _rig(registry)
-    host = Host(registry, sessions, boots)
+    boots = _rig(registry)
+    Host(registry, boots)
     metrics_on_line(registry, SERIAL, 50.0, 1)
-    app = create_app(registry.db, registry.clock, ADMIN, node_control=NODE)
+    app = create_app(registry.db, registry.clock, ADMIN)
     with TestClient(app) as client:
         assert client.get("/v1/operator/node/hosts").status_code == 401
-        player = {"Authorization": "Bearer " + host.claim.credential,
-                  "X-Node-Session": str(host.claim.session_id)}
+        player = {"Authorization": "Bearer " + uuid4().hex + uuid4().hex}   # not the operator's token
         assert client.get("/v1/operator/node/hosts", headers=player).status_code == 401
         response = client.get("/v1/operator/node/hosts", headers={"Authorization": "Bearer " + ADMIN})
         assert response.status_code == 200, response.text

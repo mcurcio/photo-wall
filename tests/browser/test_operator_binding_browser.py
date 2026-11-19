@@ -49,7 +49,6 @@ from support.frames import frame_create
 from test_registry import ADMIN, enroll
 
 from central.content_catalog.catalog import device_id_for_serial
-from central.fleet.node_sessions import NodeControlConfig
 from central.runtime import Contribution, Scene
 from central.runtime_store import RuntimeStore
 
@@ -644,7 +643,6 @@ def test_a_refresh_failure_after_an_unbind_is_not_a_refusal(page, registry):
 
 SERIAL = "10000000c0ffee42"
 HOSTS = "**/v1/operator/node/hosts"
-NODE = NodeControlConfig("node-test")
 
 
 def _netbooted_player(registry, serial=SERIAL):
@@ -664,7 +662,7 @@ def _serial_option(scope, serial=SERIAL, output_id="HDMI-A-1"):
 def test_the_devices_serial_shows_in_the_chooser_and_on_the_player_page(page, registry):
     _netbooted_player(registry)
     _placed_frame(registry, "boot-1")
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+    with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         inspector = open_frame(page, "boot-1", "hardware")
         # The handle is the serial's suffix (joined on device_id, not the Player id).
@@ -680,7 +678,7 @@ def test_the_devices_serial_shows_in_the_chooser_and_on_the_player_page(page, re
 def test_the_hardware_list_names_boxes_by_their_distinct_serial_handles(page, registry):
     first_player = _netbooted_player(registry, SERIAL)
     second_player = _netbooted_player(registry, "10000000c0ffee93")
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+    with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "hardware")
         players = hardware_list(page)
         first = players.get_by_role("link", name="Player …ffee42", exact=True)
@@ -709,7 +707,7 @@ def test_missing_boot_facts_do_not_show_a_fallback_serial_handle(page, registry)
     name = player_name(registry, player_id)
     page.route(HOSTS, lambda route: route.fulfill(
         status=503, content_type="application/json", body='{"error": "content_unavailable"}'))
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+    with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "hardware")
         listing = hardware_list(page)
         expect(listing).to_contain_text("Boot records unavailable")
@@ -725,7 +723,7 @@ def test_missing_boot_facts_do_not_show_a_fallback_serial_handle(page, registry)
 def test_a_player_that_never_netbooted_is_named_by_its_player_id_handle(page, registry):
     identity, _, _ = enroll(registry, count=1)
     _placed_frame(registry, "boot-2")
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+    with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         open_player(page, player_name(registry, identity["player_id"]))
         # Its Boot section holds node records only, once read.
@@ -740,7 +738,7 @@ def test_a_player_that_never_netbooted_is_named_by_its_player_id_handle(page, re
 def test_a_failed_boot_facts_read_keeps_the_serials(page, registry):
     _netbooted_player(registry)
     _placed_frame(registry, "boot-3")
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+    with operator_server(registry.db, registry.clock) as origin:
         pause_page_clock(page, registry.clock.utc())
         sign_in(page, origin)
         inspector = open_frame(page, "boot-3", "hardware")
@@ -762,7 +760,7 @@ def test_a_401_from_the_boot_facts_read_does_not_log_the_operator_out(page, regi
     name = player_name(registry, identity["player_id"])
     page.route(HOSTS, lambda route: route.fulfill(
         status=401, content_type="application/json", body='{"error": "unauthorized"}'))
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+    with operator_server(registry.db, registry.clock) as origin:
         with page.expect_response(HOSTS):
             sign_in(page, origin)
         go(page, "hardware")

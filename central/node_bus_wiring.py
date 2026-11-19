@@ -37,7 +37,6 @@ from central.db import Database, DatabaseTransactionClock, PoolName
 from central.fleet.node_bus_hub import HUB_LISTENERS, FleetHub
 from central.fleet.node_calibration import NodeCalibration, TrialReportJudge
 from central.fleet.node_release_catalog import NodeReleaseCatalog
-from central.fleet.node_sessions import NodeControlConfig, NodeSessions
 from central.fleet.pi_reboot import BusPiReboot, PiReboot
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.hub_api import central_state, hub_methods
@@ -260,12 +259,11 @@ def build_node_bus(dsn: str, env: Mapping[str, str]) -> NodeBus | None:
     documents = DisplayDocuments(stores, wakes, times=DatabaseTransactionClock(), trials=trials)
     links = tuple(NodeLinks(pipe, hub_url, stores, documents) for pipe in (Pipe.FLEET, Pipe.SHOW))
     wall = RoomLightsWall(room_lights)
-    sessions = NodeSessions(db, clock, NodeControlConfig())
     readiness, publisher = build_release_services(db, clock, cache_root=cache_layout.cache_root())
     versions = PgPlayerVersions(db, clock, readiness, publisher)
     state_wakes = PgStateWakes()
     reads = PgCentralStateReads(db, clock, versions, room_lights,
-                                NodeReleaseCatalog(sessions, readiness=readiness).view)
+                                NodeReleaseCatalog(db, clock, readiness=readiness).view)
     fleet = FleetHub(db, hub_url, Path(env.get(HUB_CONFIG_ENV) or DEFAULT_HUB_CONFIG), HUB_LISTENERS,
                      WALL_TABLE, PgWallMarks(db, wall.wall_created), links, each_look=(versions.advance_installs,))
 

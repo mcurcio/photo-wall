@@ -10,7 +10,6 @@ from support.trial_bus import bound_node, present, trial_document, trials_of
 from test_registry import ADMIN, frame
 
 from central.app import create_app
-from central.fleet.node_sessions import NodeControlConfig
 from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.room_light_store import PgRoomLights
 from central.room_light.model import (
@@ -39,8 +38,7 @@ def _lighting(*lights: dict, depth: float = 2.0) -> dict:
 
 
 def _client(registry) -> TestClient:
-    return TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
-                                 node_control=NodeControlConfig("node-test")))
+    return TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False))
 
 
 def _present(registry):

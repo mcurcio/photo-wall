@@ -16,7 +16,7 @@ import pytest
 from console_tasks import connect, open_frame
 from operator_harness import operator_server, tile_health
 from playwright.sync_api import expect
-from test_central_silent_player import FRAME, NODE, Incident
+from test_central_silent_player import FRAME, Incident
 from test_fleet_attempts import SERIAL
 
 pytestmark = pytest.mark.skipif(
@@ -31,7 +31,7 @@ def test_the_wall_marks_a_silent_players_frame_and_its_pages_show_the_apps_age_a
         page, registry):
     incident = Incident(registry)
     silent_for = int(incident.read_at - incident.last_report_at)
-    with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
+    with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         label = tile_health(page, FRAME)
         expect(label).to_have_text("Player app silent")

@@ -20,9 +20,8 @@ from support.trial_bus import (
     trials_of,
 )
 
-from central.fleet.models import TrialRefusal
+from central.fleet.models import NodeControlError, TrialRefusal
 from central.fleet.node_calibration import TrialBegin, TrialOperation
-from central.fleet.node_sessions import NodeControlError
 from central.installation_repository import PostgresInstallationRepository
 from contracts.models import Calibration, PositionBox
 from contracts.node_calibration import (
@@ -216,25 +215,32 @@ def test_a_trial_needs_the_pi_linked_its_output_connected_and_the_frame_drawn(re
     assert refused.value.code == refusal
 
 
-def test_native_capability_survives_session_loss(registry):
+def test_a_frame_on_a_device_central_offered_a_boot_is_native(registry):
+    """`native_trial` once the bound Player's device has had a boot offer answered with an offer
+    (`node_boot_offers.offer_payload`, S4c-2a-v); neither a later generation nor a refused offer
+    withdraws it. Mutation probe: read `node_boot_admissions` again -> the table is gone (128)."""
     from support.node_rig import rig
 
     rig(registry)
     assert registry.calibration_capability("node-f0")["mode"] == "native_trial"
     with registry.db.transaction() as conn:
-        conn.execute("UPDATE node_sessions SET revoked_at=999 WHERE owner='display_host'")
-    assert registry.calibration_capability("node-f0")["mode"] == "native_trial"
-
-
-def test_native_capability_survives_generation_revocation_without_current_boot(registry):
-    from support.node_rig import rig
-
-    rig(registry)
-    with registry.db.transaction() as conn:
-        conn.execute("UPDATE node_sessions SET revoked_at=999")
-        conn.execute("UPDATE node_boot_admissions SET superseded_at=999")
         conn.execute("UPDATE devices SET generation=generation+1")
+        conn.execute("INSERT INTO node_boot_offers(offer_id, device_id, device_generation, kernel_boot_id, "
+                     "boot_nonce, request_payload, refusal, created_at, created_by, changed_at, changed_by) "
+                     "SELECT gen_random_uuid(), device_id, generation, gen_random_uuid(), 'refused', '\\x00', "
+                     "'node_boot_policy_unconfigured', 1, 'node', 1, 'node' FROM devices")
     assert registry.calibration_capability("node-f0")["mode"] == "native_trial"
+
+
+def test_a_device_whose_every_boot_was_refused_is_not_admitted(registry):
+    """A refused boot offer (no `offer_payload`) admits nothing. Mutation probe: drop the
+    `offer_payload IS NOT NULL` condition -> native_trial, fails."""
+    from support.node_rig import rig
+
+    rig(registry)
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE node_boot_offers SET offer_payload=NULL, refusal='node_boot_policy_unconfigured'")
+    assert registry.calibration_capability("node-f0")["mode"] == "not_admitted"
 
 
 def test_a_frame_whose_player_never_booted_a_node_is_not_admitted(registry):
@@ -345,14 +351,12 @@ def test_the_operator_routes_begin_at_a_draft_and_renew(registry):
     from test_registry import ADMIN
 
     from central.app import create_app
-    from central.fleet.node_sessions import NodeControlConfig
 
     trials = setup_trial(registry)
     saved = begin(trials, FRAME)
     operate(trials, FRAME, UUID(saved["trial_id"]), operation="end", expected_sequence=1)
     draft = dict(saved["calibration"], fit=SHIFTED.model_dump(mode="json"))
-    app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
-                     node_control=NodeControlConfig("node-test"))
+    app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     path = f"/v1/operator/frames/{FRAME}/calibration-trials"
     with TestClient(app) as client:
         headers = {"Authorization": "Bearer " + ADMIN}

@@ -30,7 +30,6 @@ from websockets.sync.client import connect as websocket_connect
 
 from central.app import create_app
 from central.db import Database
-from central.fleet.node_sessions import NodeControlConfig
 from central.node_bus_wiring import HUB_CONFIG_ENV, HUB_URL_ENV
 from contracts.central_api import DOOR_PATH, CentralStateValue, decode_central_state
 from contracts.models import OutputBinding, PlayerConfiguration
@@ -56,7 +55,6 @@ class CentralOrigin:
     def __init__(self, database: Database, clock: Clock, hub: BusServer, *, cache_root: Path | None = None) -> None:
         self.port = _free_port()
         self._app = create_app(database, clock, ADMIN, run_scheduler=False, cache_root=cache_root,
-                               node_control=NodeControlConfig("node-test"),
                                hub_leaf_url=f"ws://127.0.0.1:{hub.websocket_port}/leafnode")
         self._server: uvicorn.Server | None = None
         self._thread: threading.Thread | None = None

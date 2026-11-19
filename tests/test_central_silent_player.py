@@ -24,13 +24,11 @@ from test_registry import ADMIN, enroll
 
 from central.app import create_app
 from central.coordination import Coordinator
-from central.fleet.node_sessions import NodeControlConfig
 from contracts.liveness import SILENT_AFTER_SECONDS
 from contracts.node_boot import NodeBootRequestV2
 from contracts.node_observation import HostMetricsState, HostMetricV2, encode_host_metrics_state
 from contracts.node_state import BIRTH_KEY, HOST_METRICS_KEY
 
-NODE = NodeControlConfig("node-test")
 OPERATOR = {"Authorization": "Bearer " + ADMIN}
 FRAME = "incident"
 OUTPUT = "HDMI-A-1"
@@ -46,7 +44,7 @@ class Incident:
 
     def __init__(self, registry, *, bound=True):
         self.registry = registry
-        boots, _, _ = cold_setup(registry)
+        boots, _ = cold_setup(registry)
         boots.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
         self.host_sequence = 0
         identity, _, _ = enroll(registry, count=2, device_id=DEVICE_ID)
@@ -80,8 +78,7 @@ class Incident:
 
 def _reads(registry):
     """The production operator API's three reads the console classifies from."""
-    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
-                               node_control=NODE)) as client:
+    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         reads = [client.get(path, headers=OPERATOR) for path in (
             "/v1/operator/snapshot", "/v1/operator/node/hosts", f"/v1/operator/node/devices/{DEVICE_ID}")]
     for response in reads:

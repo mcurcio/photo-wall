@@ -3,7 +3,7 @@
 A per-device reader/writer lock, PostgreSQL's transaction-scoped advisory locks in the two-int key
 space (class `DEVICE_FENCE_CLASS`, the device's key): `act` is shared, so any number of requests act
 on one device at once and none waits on another's slow COMMIT; `change` is exclusive (a boot offer,
-a node enrolment, retirement), and PostgreSQL queues new `act`s behind a waiting `change`, so a
+retirement), and PostgreSQL queues new `act`s behind a waiting `change`, so a
 change is never starved. The lock is memory only: no row write, no transaction id, no WAL.
 
 Rules (design r2, rule 1): a transaction holds at most one device fence, at the strength it took;
@@ -14,8 +14,7 @@ mistakes a busy device for an unavailable one. No fence is taken inside a SAVEPO
 back would forget the held fence while PostgreSQL keeps its lock. Reads take no fence: they read
 `standing_in` from one READ ONLY snapshot (`Database.read_snapshot`).
 
-Lock order: Coordination -> Runtime -> device fence -> offer quota row -> devices insert ->
-session -> producer -> evidence/commands. The release writer's lock is taken alone.
+Lock order: Coordination -> Runtime -> device fence -> devices insert. The release writer's lock is taken alone.
 
 Every writer of `devices.retired_at` and `devices.generation` holds `change` (`retire_in` here;
 the device row an offer inserts); `act` holders therefore read both without row locks.

@@ -54,7 +54,6 @@ from central.kernel.assets import AssetKey, AssetKind, AssetReference, OriginLoc
 from central.kernel.job_types import AssetJob, FetchOsImage, FetchSealedEnvironment
 from central.kernel.ports import NODE_RELEASE_INVALID, PublishedRelease
 from central.kernel.transactions import Transaction
-from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_release import NodeReleaseV2, parse_node_release
 from contracts.time import Clock
 
@@ -126,16 +125,6 @@ def _stored_deployments(conn: Any) -> list[NodeDeployment]:
     """Every stored deployment, parsed from its release row's document."""
     return [parse_node_deployment(bytes(row["deployment_document"])) for row in conn.execute(
         "SELECT deployment_document FROM node_releases WHERE deployment_document IS NOT NULL").fetchall()]
-
-
-def environment_reference_in(conn: Any, environment_sha256: str) -> AppEnvironmentRefV2 | None:
-    """The reference any stored deployment names for this digest (`write_deployment` holds every
-    deployment to one reference per digest); None when none names it."""
-    for deployment in _stored_deployments(conn):
-        for item in deployment.environments():
-            if item.environment_sha256 == environment_sha256:
-                return item
-    return None
 
 
 def _release_of(conn: Any, deployment: NodeDeployment) -> str | None:

@@ -14,7 +14,6 @@ from test_registry import ADMIN, enroll
 
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
-from central.fleet.node_sessions import NodeControlConfig
 from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.node_link_store import PgLinkStores
 from central.infra.room_light_store import PgRoomLights
@@ -50,8 +49,7 @@ WHITE = {"kind": "typed", "kelvin": 4000}
 
 
 def _client(registry) -> TestClient:
-    return TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
-                                 node_control=NodeControlConfig("node-test")))
+    return TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False))
 
 
 def _reported(address: str, source: str = "home-assistant") -> dict:
@@ -132,12 +130,11 @@ def test_the_app_builds_without_the_distribution_and_states_the_version_it_was_g
         raise PackageNotFoundError(name)
 
     monkeypatch.setattr("central.version.distribution_version", no_distribution)
-    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
-                               node_control=NodeControlConfig("node-test"), central_version="9.8.7")) as client:
+    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False, central_version="9.8.7")) as client:
         page = client.get("/v1/operator/integrations/home-assistant", headers=AUTH).json()
     assert page["galleria"]["central_version"] == "9.8.7"
     with pytest.raises(PackageNotFoundError):
-        create_app(registry.db, registry.clock, ADMIN, run_scheduler=False, node_control=NodeControlConfig("node-test"))
+        create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
 
 
 SERIAL = "10000000c0ffee03"

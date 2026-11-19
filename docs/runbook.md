@@ -965,8 +965,8 @@ The pid, application name, transaction age, state and the first 200 characters o
 
 **Upgrading across lost grants (migration 095).** Readiness reports now carry `lost_grants`; a Player built before it is refused (422) by a Central after it, and the other way round. An older Player does not sit quietly through this: the 422 ends its control loop, so it drops its Central session, is marked retrying, and locates and reconnects again and again (`player/service.py`, the session loop), each cycle another Coordination transaction; no new cue starts. The window lasts until the Pi runs the new release: the release sync has ingested it, it is selected (Pis never follow a release on their own) and the Pi has rebooted. Deploy Central, select the new release and reboot every Pi at once.
 
-The node session audience is the product constant `photo-wall` (`NODE_AUDIENCE` in
-`central/fleet/node_sessions.py`), one Central per wall; no environment variable sets it.
+The boot offer's audience is the product constant `photo-wall` (`NODE_AUDIENCE` in
+`central/fleet/node_boot.py`), one Central per wall; no environment variable sets it.
 Every Pi boots by the node path: the V1 boot offer
 and the `photowall.node=v2` switch are gone ([0019](decisions/0019-debian-packaging-with-debhelper.md)),
 so the command line needs no flag. Do not add `cgroup_enable=memory`: every release's

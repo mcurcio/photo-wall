@@ -18,7 +18,6 @@ from test_node_boot import enroll
 from test_registry import ADMIN
 
 from central.app import create_app
-from central.fleet.node_sessions import NodeControlConfig
 from central.infra.transactions import PgTransaction
 from central.kernel.job_types import RebootPi
 
@@ -36,7 +35,7 @@ def pi(registry):
     def run(delivered: bool = True) -> RebootPi:
         return run_queued(registry.db, device, delivered=delivered, pi=recording)
 
-    app = create_app(registry.db, registry.clock, ADMIN, node_control=NodeControlConfig("node-test"))
+    app = create_app(registry.db, registry.clock, ADMIN)
     with TestClient(app) as client:
         yield client, device, run, recording
 

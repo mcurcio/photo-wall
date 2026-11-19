@@ -37,7 +37,7 @@ SHORT = "Output interrupted · the Run continues"
 def _seed(registry):
     """rig's two bound Frames, placed on the plan, with Output 0's loss recorded, and the Player
     heard (its session socket: liveness, central/infra/player_contact_store.py)."""
-    _, player, _, _, _, _, surfaces, _ = rig(registry)
+    _, player, _, surfaces = rig(registry)
     with registry.db.transaction() as conn:
         heard_in(conn, player["player_id"], player["authority_epoch"], registry.clock.utc())
     for index, frame_id in enumerate((LOST, KEPT)):

@@ -204,7 +204,6 @@ def test_home_assistants_door_through_centrals_origin(registry, tmp_path, monkey
 
     from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER
     from central.fleet.node_release_catalog import NodeReleaseCatalog
-    from central.fleet.node_sessions import NodeControlConfig, NodeSessions
     from central.hub_api import central_state, hub_methods
     from central.infra.central_state import PgCentralStateReads, PgStateWakes
     from central.infra.frame_lighting_store import PgHouseLock
@@ -248,11 +247,10 @@ def test_home_assistants_door_through_centrals_origin(registry, tmp_path, monkey
     hub = hub_server(tmp_path, ["pi-a", "pi-b"])
     central = _Central(registry.db, _free_port(), f"ws://127.0.0.1:{hub.websocket_port}/leafnode")
     door = f"ws://127.0.0.1:{central.port}/{DOOR_PATH}"
-    sessions = NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test"))
     versions = PgPlayerVersions(registry.db, registry.clock, world.stored, None)
     lights = PgRoomLights(registry.db, PgHouseLock())
     reads = PgCentralStateReads(registry.db, registry.clock, versions, lights,
-                                NodeReleaseCatalog(sessions, readiness=world.stored).view)
+                                NodeReleaseCatalog(registry.db, registry.clock, readiness=world.stored).view)
 
     async def run() -> None:
         stop = asyncio.Event()

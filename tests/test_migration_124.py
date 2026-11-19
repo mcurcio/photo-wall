@@ -132,13 +132,4 @@ def test_124_merges_the_photo_library_into_one_row_per_photo_source_and_connecti
                    "items": []}}
     for row, at in ((connection, 5), (pool, 3), (recipe, 11)):
         assert (row["created_by"], row["changed_at"], row["changed_by"]) == ("unknown", at, "unknown")
-    assert not tables & set(GONE)
-    assert len({table for table in tables if not table.startswith("procrastinate_")}) == 61
-
-
-def test_after_124_central_has_61_tables(registry):
-    """Decision 0034's count after S2h: 40 domain tables, the 20 S4c drops and `schema_migrations`
-    (Procrastinate's four not counted)."""
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM pg_tables WHERE schemaname='public' "
-                            "AND tablename NOT LIKE 'procrastinate%%'").fetchone()["n"] == 61
+    assert not tables & set(GONE)   # Central's whole table list: tests/test_migration_128.py

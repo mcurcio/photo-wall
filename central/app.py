@@ -36,8 +36,8 @@ from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database, DatabaseTransactionClock, ProcessTransactionClock, TransactionClock
 from central.display_routes import mount_display_routes, mount_picture_routes
 from central.fleet.leaf_bridge import mount_bus_bridges
+from central.fleet.node_boot import NodeBootConfig
 from central.fleet.node_routes import mount_node_routes
-from central.fleet.node_sessions import NodeControlConfig
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.home_assistant_routes import mount_home_assistant_routes
 from central.house_routes import mount_house_routes
@@ -194,7 +194,7 @@ def create_app(
     cache_root: Path | None = None,
     media_queue: MediaTaskQueue | None = None,
     content: ContentServices | None = None,
-    node_control: NodeControlConfig = NodeControlConfig(),
+    node_boot: NodeBootConfig = NodeBootConfig(),
     media_times: TransactionClock | None = None,
     hub_leaf_url: str | None = None,
     central_version: str | None = None,
@@ -921,7 +921,7 @@ def create_app(
                                profiles=PgPaperProfiles(db, clock, house_lock))
     if content is not None:
         mount_content_routes(app, content)
-    mount_node_routes(app, db=db, clock=clock, admin=admin, config=node_control,
+    mount_node_routes(app, db=db, clock=clock, admin=admin, config=node_boot,
                       times=media_times, content=content)
     app.state.scheduler = Scheduler(coordinator, media_application.request_measurements, clock,
                                     retentions={"node-retention": NodeRecordRetention(db.transaction).prune})

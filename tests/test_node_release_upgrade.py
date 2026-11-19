@@ -23,16 +23,13 @@ from test_node_release_ingest import (
     make_sync_world,
     node_upload,
     observations,
-    sessions_for,
     sync,
 )
 from test_registry import ADMIN
 
 import contracts.node_boot
 from central.app import create_app
-from central.fleet.node_sessions import NodeControlConfig
 from contracts.node_boot import NodeBootRequestV2, parse_node_boot_offer
-from contracts.node_commands import NodeSessionClaim, encode_session_claim
 
 EARLIER_MANAGER = "photo-wall-node-manager"  # the manager root's package before decision 0019
 HEADERS = {"Authorization": "Bearer " + ADMIN}
@@ -56,8 +53,7 @@ def _published(sync_world):
 
 
 def _client(registry):
-    return TestClient(create_app(registry.db, registry.clock, ADMIN,
-                                 node_control=NodeControlConfig("node-test")))
+    return TestClient(create_app(registry.db, registry.clock, ADMIN))
 
 
 def _boot(client, request: NodeBootRequestV2):
@@ -90,10 +86,10 @@ def test_a_release_the_earlier_central_ingested_is_listed_and_offered(
     assert offer.app_environment == upload.release.app_environment
 
 
-def test_an_offer_the_earlier_central_stored_replays_enrolls_and_serves_its_artifacts(
+def test_an_offer_the_earlier_central_stored_replays_and_serves_its_artifacts(
         registry, sync_world, monkeypatch):
     request = NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64)
-    boots = boot_service(sessions_for(registry))
+    boots = boot_service(registry.db, registry.clock)
     with monkeypatch.context() as earlier:
         _as_earlier_central(earlier)
         upload, world = _published(sync_world)
@@ -110,10 +106,6 @@ def test_an_offer_the_earlier_central_stored_replays_enrolls_and_serves_its_arti
         assert replay.status_code == 200, replay.text
         assert replay.content == stored
         offer = parse_node_boot_offer(stored)
-        claim = NodeSessionClaim(SERIAL, offer.offer_id, BOOT_ID, "host_core", UUID(int=1),
-                                 UUID(int=2), "d" * 64)
-        enrolled = client.post("/v2/node/sessions", content=encode_session_claim(claim))
-        assert enrolled.status_code == 200, enrolled.text
         fresh = _boot(client, NodeBootRequestV2(SERIAL, UUID(int=902), "b" * 64))
         assert fresh.status_code == 200, fresh.text  # a new boot: the stored deployment's offer
         page = client.get("/v1/operator/releases", headers=HEADERS)
