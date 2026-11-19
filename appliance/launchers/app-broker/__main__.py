@@ -10,7 +10,6 @@ PATH: tuple[str, ...] = (
     "/usr/lib/photo-wall/common",
     "/usr/lib/photo-wall/node-apps",
     "/usr/lib/photo-wall/node-kernel",
-    "/usr/lib/photo-wall/node-manager",
 )
 ENTRY: str = "appliance.apps.broker_runner"
 
