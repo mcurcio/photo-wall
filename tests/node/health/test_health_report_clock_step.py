@@ -36,7 +36,7 @@ def _raised() -> tuple[runner.HealthRunner, _Sink, list[int], list[int]]:
                         startup_ms=SHIPPED_TIMING.startup_ms,
                         pulse_deadline_ms=PULSE_DEADLINE_MS, catalogue=FAULTS)
     judge.observe_outputs([{"output_id": "HDMI-A-1", "connected": True, "admitted": RUN,
-                            "holding": True, "power": "on"}], 0)
+                            "offered": RUN, "holding": True, "not_handed_off": None, "power": "on"}], 0)
     judge.observe(FeedEvent(0, APP_EXITED, {"run": RUN}, "node"), OPENED_MS)
     boot, wall = [RAISED_MS], [FLOOR_WALL_MS]
     sink = _Sink()

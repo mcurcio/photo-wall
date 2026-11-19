@@ -166,7 +166,9 @@ class FakePower:
 
 def test_every_events_read_carries_each_output_and_its_admission():
     """Each entry carries the shell's `holding` and the power in force (issue #123), None for an
-    Output the power controller has no report of."""
+    Output the power controller has no report of; the run it is offered to and why it is handed to
+    no run (no document has bound a Frame to Virtual-1 here; a disconnected Output has no cause).
+    Nothing the judge does not read: the Output's diagnostic and fault are the `outputs` op's."""
     backend = FakeBackend()
     controller = Controller(backend, power=FakePower())
     host = backend.host
@@ -176,14 +178,13 @@ def test_every_events_read_carries_each_output_and_its_admission():
         OutputState(key(host, "HDMI-A-2"), connected=False, diagnostic="unknown",
                     fault="output_disconnected"),
     )
+    run = {"pid": 4242, "start_ticks": 777, "invocation_id": str(admitted.process.invocation_id),
+           "app_epoch": 5, "frame_id": "frame-1"}
     expected = [
-        {"output_id": "Virtual-1", "connected": True,
-         "admitted": {"pid": 4242, "start_ticks": 777,
-                      "invocation_id": str(admitted.process.invocation_id),
-                      "app_epoch": 5, "frame_id": "frame-1"},
-         "diagnostic": "released", "fault": None, "holding": True, "power": "off"},
-        {"output_id": "HDMI-A-2", "connected": False, "admitted": None,
-         "diagnostic": "unknown", "fault": "output_disconnected", "holding": False, "power": None},
+        {"output_id": "Virtual-1", "connected": True, "admitted": run, "offered": None,
+         "holding": True, "not_handed_off": "no_frame", "power": "off"},
+        {"output_id": "HDMI-A-2", "connected": False, "admitted": None, "offered": None,
+         "holding": False, "not_handed_off": None, "power": None},
     ]
     # Ingress and feed socket alike; with no event at all (a reader that lapped the ring, or a
     # restarted judge, still learns the Output set from one read).

@@ -41,7 +41,7 @@ def states(subject, now):
 def connected(subject, now):
     """HDMI-A-1 on, the run admitted and holding it (a picture plane: it shows something)."""
     subject.observe_outputs([{"output_id": "HDMI-A-1", "connected": True, "admitted": RUN,
-                              "holding": True, "power": "on"}], now)
+                              "offered": RUN, "holding": True, "not_handed_off": None, "power": "on"}], now)
 
 
 def test_app_exit_raises_app_absent_until_a_new_run_starts():

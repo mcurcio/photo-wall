@@ -135,6 +135,7 @@ UNRESPONSIVE_LINE = "Photos paused — the player stopped responding"
 ABSENT_LINE = "Photos paused — the player stopped"
 LIMIT_LINE = "Photos paused — the player ran out of open files"
 NOTHING_LINE = "Nothing to show on this Frame"
+NO_RENDERER_LINE = "Photos paused — the player could not start drawing"
 # Issue #123's lowered limit: this many above what the Player holds open, inside the judge's
 # DESCRIPTOR_LIMIT_HEADROOM (16), so its next descriptor sample (every 10 s) is at the limit.
 LIMIT_ABOVE_OPEN = 8
@@ -603,7 +604,8 @@ class Node:
     def at_open_file_limit(self, name):
         """Issue #123, the fireplace's 2026-10-20 in a minute: the Player's open-file limit lowered
         to LIMIT_ABOVE_OPEN above what it holds open (`prlimit` on its MainPID). Within
-        CARD_SECONDS the card shows app_descriptor_limit (or nothing_to_show) with its time. The
+        CARD_SECONDS the card shows app_descriptor_limit (or nothing_to_show, or frame_no_renderer
+        where the fixture's Player could not make its renderer and says so) with its time. The
         limit is then put back, so the same run is there for the cases that follow; the cause stays
         on the card until another run starts (below the run causes, by the judge's precedence)."""
         pid = unit_properties_of(self, PLAYER_UNIT, "MainPID")["MainPID"]
@@ -617,7 +619,8 @@ class Node:
         since = time.monotonic()
         try:
             instruction = self.card("app_descriptor_limit", LIMIT_LINE, since, name + "-card",
-                                    alternatives=(("nothing_to_show", NOTHING_LINE),))
+                                    alternatives=(("nothing_to_show", NOTHING_LINE),
+                                                  ("frame_no_renderer", NO_RENDERER_LINE)))
         finally:
             self.run("prlimit", "--pid", pid, f"--nofile={soft}:{hard}")
         assert unit_properties_of(self, PLAYER_UNIT, "MainPID")["MainPID"] == pid, "the Player restarted"

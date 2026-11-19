@@ -2,7 +2,9 @@
 
 Pure. The Player's executor gathers the facts (player/executor.py `frames_black`); this is the one
 rule that reads them. A Frame draws no statement when it shows something, when the Output is
-drawing its own pattern, when a black layer is in force, or when nothing was wanted of it.
+drawing its own pattern, when a black layer is in force, or when nothing was wanted of it; but a
+Player whose renderer was never made (player/renderer_root.py `UnavailableRenderer`) draws nothing
+at all, so every Frame of it says so, whatever was wanted.
 """
 
 from __future__ import annotations
@@ -26,12 +28,15 @@ class DueLayer:
     failure: str | None
 
 
-def frame_black(*, showing: bool, own_drawing: bool, has_plan: bool, clock_ok: bool,
+def frame_black(*, showing: bool, own_drawing: bool, renderer_ok: bool, has_plan: bool, clock_ok: bool,
                 due: Sequence[DueLayer], unfilled: bool) -> FrameBlackCause | None:
-    """Why this Frame is black, or None when it is not, or is black on purpose. The topmost due
-    layer decides; with none due, an unfilled span says a photo was wanted and none placed."""
+    """Why this Frame is black, or None when it is not, or is black on purpose. No renderer
+    (`renderer_ok` false: it can draw nothing) decides first; then the topmost due layer; with none
+    due, an unfilled span says a photo was wanted and none placed."""
     if showing or own_drawing:
         return None
+    if not renderer_ok:
+        return FrameBlackCause.NO_RENDERER
     if not has_plan:
         return FrameBlackCause.NO_PLAN
     if not due:

@@ -74,6 +74,7 @@ class FrameBlackCause(StrEnum):
     CANNOT_DRAW = "cannot_draw"
     NOT_STARTED = "not_started"
     NO_CONTENT = "no_content"
+    NO_RENDERER = "no_renderer"     # the Player's renderer could not be made: it draws nothing
 
 
 @dataclass(frozen=True, slots=True)

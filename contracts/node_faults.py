@@ -35,6 +35,7 @@ _FRAME_BLACK_LINES: Final[Mapping[FrameBlackCause, str]] = MappingProxyType({
     FrameBlackCause.CANNOT_DRAW: "Photos paused — the photo could not be drawn",
     FrameBlackCause.NOT_STARTED: "Photos paused — waiting for Central to start it",
     FrameBlackCause.NO_CONTENT: "Photos paused — no photo for this Frame",
+    FrameBlackCause.NO_RENDERER: "Photos paused — the player could not start drawing",
 })
 FRAME_BLACK_CODES: Final[Mapping[FrameBlackCause, str]] = MappingProxyType(
     {cause: f"frame_{cause.value}" for cause in FrameBlackCause})
@@ -93,6 +94,15 @@ FAULTS: Mapping[str, Fault] = _catalogue(
     # outcome window lets a healthy run find its first photo untinted (a placeholder of r2's). It
     # clears at once when the Output is held again, powered off or gone.
     Fault("nothing_to_show", True, "Nothing to show on this Frame",
+          raise_window_ms=FIRST_PHOTO_WINDOW_MS, clear_hold_ms=0),
+    # The same per-Output condition as nothing_to_show, with its cause known from Display's own
+    # handoff (appliance/display_host/handoff.py `not_handed_off`): the Output is handed to no run
+    # because Display holds no current run (the app broker could not tell it, or told it none)...
+    Fault("screen_not_told", True, "Photos paused — the screen software has not heard from the player",
+          raise_window_ms=FIRST_PHOTO_WINDOW_MS, clear_hold_ms=0),
+    # ...or because its Output document binds no Frame. Same window and clears as nothing_to_show:
+    # a cold start learns both within it, untinted.
+    Fault("no_frame_placed", True, "No Frame is placed on this screen",
           raise_window_ms=FIRST_PHOTO_WINDOW_MS, clear_hold_ms=0),
     # Issue #123: the run at its open-file limit (within the judge's DESCRIPTOR_LIMIT_HEADROOM)
     # can open no photo, so it tints at once, unlike the pressure above; a run cause, it stays

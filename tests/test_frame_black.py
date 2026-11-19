@@ -16,8 +16,9 @@ def layer(order=1, *, presentation="media", secured=True, prepared=True, granted
                     failure=failure)
 
 
-def judged(*due, showing=False, own_drawing=False, has_plan=True, clock_ok=True, unfilled=False):
-    return frame_black(showing=showing, own_drawing=own_drawing, has_plan=has_plan,
+def judged(*due, showing=False, own_drawing=False, renderer_ok=True, has_plan=True, clock_ok=True,
+           unfilled=False):
+    return frame_black(showing=showing, own_drawing=own_drawing, renderer_ok=renderer_ok, has_plan=has_plan,
                        clock_ok=clock_ok, due=due, unfilled=unfilled)
 
 
@@ -28,6 +29,19 @@ def judged(*due, showing=False, own_drawing=False, has_plan=True, clock_ok=True,
 def test_a_frame_showing_or_drawing_its_own_says_nothing(kept_black):
     """Mutation probes: ignore `showing`; ignore `own_drawing`."""
     assert judged(layer(), has_plan=False, clock_ok=False, unfilled=True, **kept_black) is None
+
+
+@pytest.mark.parametrize("wanted", [
+    {},                                                         # a due photo
+    {"has_plan": False},                                        # no plan
+    {"clock_ok": False},                                        # no time
+    {"unfilled": True},                                         # a photo wanted, none placed
+])
+def test_a_player_with_no_renderer_says_so_for_every_frame_first(wanted):
+    """No renderer draws nothing, whatever was wanted: it outranks every other cause, and even
+    nothing due is a statement. Mutation probe: drop the `renderer_ok` check."""
+    assert judged(layer(), renderer_ok=False, **wanted) is FrameBlackCause.NO_RENDERER
+    assert judged(renderer_ok=False) is FrameBlackCause.NO_RENDERER
 
 
 def test_no_current_plan_outranks_everything_a_plan_would_say():

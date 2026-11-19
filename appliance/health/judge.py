@@ -38,19 +38,27 @@ Pressure alone (`app_resource_exhausted`) never tints.
 Output's name: a connected Output whose power in force is not off (Display's snapshot `power`:
 Night off and Resting are power off) and that no run holds (nothing admitted, or the shell's
 `holding` false: no picture plane and no drawing of Display's own) opens it pending; it is raised
-after the catalogue's window and withdrawn (pending) or cleared (raised) once the Output is held
+after its code's window and withdrawn (pending) or cleared (raised) once the Output is held
 again, powered off or gone. Its transitions name the Output as their `run` (`{"output": name}`).
 Authored black is the Player's black layer, a picture plane, so it holds; so is a Frame with
 nothing kept and nothing playing, drawn as the Player's dark plane (player/planes.py `compose`).
+The condition takes the cause Display states for the Output (its snapshot's `not_handed_off`,
+appliance/display_host/handoff.py `not_handed_off`), never re-deriving the handoff: `no_frame`
+is `no_frame_placed` (its Output document binds no Frame), `no_run` is `screen_not_told` (Display
+holds no current run: the broker could not tell it); with no cause stated it stays
+`nothing_to_show`. A changed cause keeps the condition's since and takes the new code
+(`cause_changed`).
 
 The Frame-black codes (`FRAME_BLACK_CODES`, display-affecting, one per `FrameBlackCause`) are per
 Output too, in `_black`, from the Player's own statement (`app_frames_black`, the probe channel's
-run): a Frame black while content is wanted, drawing only its fallback. The latest report of each
-run stands until a newer one (a feed gap keeps it, pending and raised); it counts only for the run
-admitted on the Output, while the Output is connected and its power not off. A named Output opens
-pending and is raised after its row's window; a changed cause keeps the condition's since and takes
-the new code. An Output the report no longer names is withdrawn or cleared at once (`drawing`); a
-run's exit, another run's start, power off, disconnection or lost admission end it (`released`).
+run): a Frame black while content is wanted, drawing only its fallback, or drawing nothing at all
+(`frame_no_renderer`). The latest report of each run stands until a newer one (a feed gap keeps
+it, pending and raised); it counts only for the run admitted on the Output, else the run it is
+offered to (the snapshot's `offered`: a run that never draws is never admitted), while the Output
+is connected and its power not off. A named Output opens pending and is raised after its row's
+window; a changed cause keeps the condition's since and takes the new code. An Output the report
+no longer names is withdrawn or cleared at once (`drawing`); a run's exit, another run's start,
+power off, disconnection or the run's loss of the Output end it (`released`).
 Authored black, Night off, a pattern and Central's card are the Player's or Display's to tell apart
 (player/frame_black.py); the judge only judges the statement.
 
@@ -62,12 +70,13 @@ Every other feed kind (channel, link and relink facts) is recorded or ignored, n
 A code outside the catalogue is refused (`ValueError`).
 
 Per Output (B10b): Display's `outputs` snapshot (every display feed read carries one) names the
-connected Outputs and each one's admitted app run; display events only refine it until the next
-snapshot (an invalidation drops that Output's admission). Each connected Output's underlay is
-`slate` (nothing admitted), `held` (the admitted run is the raised unresponsive run) or `live`;
-its codes are the raised codes (node-wide in M1: one app drives every Output) and its own
-`nothing_to_show`. The underlay is taken from `admitted` only, never from the snapshot's `fault`
-(E-B10a-7). Its card is the first display-affecting raised code in CARD_PRECEDENCE, with its age.
+connected Outputs and each one's admitted app run, the run it is offered to while none is
+admitted, its hold, why it is handed to no run and its power; display events only refine it until
+the next snapshot (an invalidation drops that Output's admission and offer). Each connected
+Output's underlay is `slate` (nothing admitted), `held` (the admitted run is the raised
+unresponsive run) or `live`; its codes are the raised codes (node-wide in M1: one app drives every
+Output) and its own `nothing_to_show` (or that condition's cause) and Frame-black code. The
+underlay is taken from `admitted` only (E-B10a-7: the snapshot carries no Display fault). Its card is the first display-affecting raised code in CARD_PRECEDENCE, with its age.
 The projection to Display's `OverlayInstruction` per connected Output: tint on iff it has a card;
 line 1 `"{household line} · since {HH:MM}"`, the time the condition's evidence began on
 the Pi's own clock (`evidence_wall_s`, `card_time`), line 2
@@ -84,6 +93,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Final, Literal
 
+from appliance.display_host.handoff_cause import NotHandedOff
 from appliance.display_host.overlay.instruction import (
     MAX_TEXT,
     OverlayInstruction,
@@ -100,12 +110,17 @@ APP_ABSENT = "app_absent"  # 1b P1b: no app process (the broker's app_exited .. 
 APP_RESOURCE_EXHAUSTED = "app_resource_exhausted"  # 1b P1b: the run near its open-file limit
 APP_DESCRIPTOR_LIMIT = "app_descriptor_limit"  # #123: the run at its open-file limit
 NOTHING_TO_SHOW = "nothing_to_show"  # #123: an Output on that no run holds, per Output
+NO_FRAME_PLACED = "no_frame_placed"  # nothing_to_show's cause: the Output binds no Frame
+SCREEN_NOT_TOLD = "screen_not_told"  # nothing_to_show's cause: Display holds no current run
+# The code of each cause Display states for an Output it hands to no run.
+_NOT_HANDED_OFF_CODES: Final = {NotHandedOff.NO_FRAME: NO_FRAME_PLACED, NotHandedOff.NO_RUN: SCREEN_NOT_TOLD}
 # A run within this many descriptors of its soft limit is at it (#123, a placeholder of r2's): it
 # can open nothing a photo needs, so its Frame shows nothing new.
 DESCRIPTOR_LIMIT_HEADROOM = 16
 # Which raised display-affecting code an Output's card shows: the first of these it has.
+# The causes of a dark Output come before `nothing_to_show`, which says only that it is dark.
 CARD_PRECEDENCE: Final = (APP_ABSENT, APP_UNRESPONSIVE, APP_DESCRIPTOR_LIMIT, *FRAME_BLACK_CODES.values(),
-                          NOTHING_TO_SHOW)
+                          *_NOT_HANDED_OFF_CODES.values(), NOTHING_TO_SHOW)
 # A run holding at least this share of its soft open-file limit raises app_resource_exhausted
 # (1b P1b). At the leak root-caused in 1b (about 240 an hour against 1,024), 80 % left ~50 minutes.
 RESOURCE_PRESSURE_PERCENT = 80
@@ -150,7 +165,9 @@ class DisplayOutput:
     output: str
     connected: bool
     admitted: dict | None  # the admitted app run's AppRunKey document
+    offered: dict | None  # the AppRunKey document of the run it is offered to (not yet drawn on)
     holding: bool  # the shell's hold: a picture plane or Display's own drawing keeps the Output
+    not_handed_off: NotHandedOff | None  # why Display hands it to no run (None: no such cause)
     power: Literal["on", "off"] | None  # the power in force (None: no report or none in force)
 
 
@@ -184,11 +201,16 @@ class _Open:
 
 
 @dataclass(slots=True)
-class _Black(_Open):
-    """One Output's Frame-black condition: `run` names the Output (as `nothing_to_show`),
-    `holder` the app run whose report it stands on."""
+class _Unheld(_Open):
+    """One Output's dark condition: `run` names the Output (`{"output": name}`), `code` its cause."""
 
     code: str = field(kw_only=True)
+
+
+@dataclass(slots=True)
+class _Black(_Unheld):
+    """One Output's Frame-black condition, `holder` the app run whose report it stands on."""
+
     holder: dict = field(kw_only=True)
 
 
@@ -274,28 +296,42 @@ def _positive(*values: object) -> bool:
     return all(type(value) is int and value > 0 for value in values)
 
 
+_REASONS = frozenset(reason.value for reason in NotHandedOff)
+# Every field the judge reads from a snapshot entry; an entry missing any one is refused.
+_SNAPSHOT_FIELDS = ("output_id", "connected", "admitted", "offered", "holding", "not_handed_off", "power")
+
+
+def _snapshot_run(value: object) -> dict | None:
+    """A snapshot entry's `admitted` or `offered`: None, or its AppRunKey document
+    (`ValueError("display_snapshot")` when malformed)."""
+    if value is None:
+        return None
+    run = _run({key: value.get(key) for key in _RUN_KEYS} if isinstance(value, dict) else None)
+    if run is None:
+        raise ValueError("display_snapshot")
+    return run
+
+
 def display_outputs(snapshot: object) -> tuple[DisplayOutput, ...]:
     """Display's `outputs` snapshot, checked: `ValueError("display_snapshot")` if malformed (an
-    entry without `holding` or `power` included)."""
+    entry without any of `_SNAPSHOT_FIELDS`, or a `not_handed_off` outside `NotHandedOff`,
+    included)."""
     if not isinstance(snapshot, list) or len(snapshot) > MAX_OUTPUTS:
         raise ValueError("display_snapshot")
     outputs: dict[str, DisplayOutput] = {}
     for entry in snapshot:
-        if not isinstance(entry, dict) or "holding" not in entry or "power" not in entry:
+        if not isinstance(entry, dict) or not all(key in entry for key in _SNAPSHOT_FIELDS):
             raise ValueError("display_snapshot")
-        name, connected, admitted = (entry.get("output_id"), entry.get("connected"),
-                                     entry.get("admitted"))
-        holding, power = entry["holding"], entry["power"]
+        name, connected, holding, power = (entry["output_id"], entry["connected"], entry["holding"],
+                                           entry["power"])
+        reason = entry["not_handed_off"]
         if (not (isinstance(name, str) and name and type(connected) is bool) or name in outputs
-                or type(holding) is not bool or power not in ("on", "off", None)):
+                or type(holding) is not bool or power not in ("on", "off", None)
+                or not (reason is None or (type(reason) is str and reason in _REASONS))):
             raise ValueError("display_snapshot")
-        run = None
-        if admitted is not None:
-            run = _run({key: admitted.get(key) for key in _RUN_KEYS}
-                       if isinstance(admitted, dict) else None)
-            if run is None:
-                raise ValueError("display_snapshot")
-        outputs[name] = DisplayOutput(name, connected, run, holding, power)
+        outputs[name] = DisplayOutput(name, connected, _snapshot_run(entry["admitted"]),
+                                      _snapshot_run(entry["offered"]), holding,
+                                      None if reason is None else NotHandedOff(reason), power)
     return tuple(outputs.values())
 
 
@@ -309,12 +345,13 @@ class HealthJudge:
             raise ValueError("fault_catalogue")
         self.catalogue = catalogue
         self._fault(APP_UNRESPONSIVE)
-        self._fault(NOTHING_TO_SHOW)  # judged every turn (`_advance`)
+        for code in (NOTHING_TO_SHOW, *_NOT_HANDED_OFF_CODES.values()):  # judged every turn (`_advance`)
+            self._fault(code)
         for code in FRAME_BLACK_CODES.values():
             self._fault(code)
         self.sequence = 0
         self._open: dict[str, _Open] = {}
-        self._nothing: dict[str, _Open] = {}  # nothing_to_show, by Output name
+        self._nothing: dict[str, _Unheld] = {}  # nothing_to_show or its cause, by Output name
         self._black: dict[str, _Black] = {}  # the Frame-black codes, by Output name
         self._reports: dict[tuple, dict[str, str]] = {}  # each run's latest {Output: code}
         self._outputs: dict[str, DisplayOutput] = {}  # the latest snapshot, refined by events
@@ -372,8 +409,8 @@ class HealthJudge:
             self._tick(now_ms)
             return
         self._display(now_ms, lambda: {**self._outputs,
-                                       name: DisplayOutput(name, known.connected, None, False,
-                                                           known.power)})
+                                       name: DisplayOutput(name, known.connected, None, None, False,
+                                                           known.not_handed_off, known.power)})
 
     def forget(self, now_ms: int) -> None:
         """The publisher's feed had a gap (or a new incarnation): drop what the missed facts
@@ -475,7 +512,7 @@ class HealthJudge:
             shown = dict(raised)
             nothing = self._nothing.get(output.output)
             if nothing is not None and nothing.raised:
-                shown[NOTHING_TO_SHOW] = nothing
+                shown[nothing.code] = nothing
             black = self._black.get(output.output)
             if black is not None and black.raised:
                 shown[black.code] = black
@@ -497,12 +534,14 @@ class HealthJudge:
                       f"{output.card} · Output {output.output}"[:MAX_TEXT])
 
     def _held(self, now: int) -> None:
-        """Open, withdraw or clear each Output's `nothing_to_show` from the latest Output set."""
+        """Open, withdraw, clear or re-code each Output's `nothing_to_show` (or the cause Display
+        states for it) from the latest Output set."""
         for name, output in self._outputs.items():
             if (name not in self._nothing and output.connected and output.power != "off"
                     and (output.admitted is None or not output.holding)):
-                self._nothing[name] = _Open({"output": name}, now)
-                self._record(NOTHING_TO_SHOW, {"output": name}, "pending", "not_held", now)
+                code = _NOT_HANDED_OFF_CODES.get(output.not_handed_off, NOTHING_TO_SHOW)
+                self._nothing[name] = _Unheld({"output": name}, now, code=code)
+                self._record(code, {"output": name}, "pending", "not_held", now)
         for name, condition in list(self._nothing.items()):
             output = self._outputs.get(name)
             if output is None or not output.connected:
@@ -512,9 +551,14 @@ class HealthJudge:
             elif output.admitted is not None and output.holding:
                 reason = "held"
             else:
+                code = _NOT_HANDED_OFF_CODES.get(output.not_handed_off, NOTHING_TO_SHOW)
+                if code != condition.code:
+                    condition.code = code
+                    self._record(code, condition.run, "raised" if condition.raised else "pending",
+                                 "cause_changed", now)
                 continue
             del self._nothing[name]
-            self._record(NOTHING_TO_SHOW, condition.run,
+            self._record(condition.code, condition.run,
                          "cleared" if condition.raised else "withdrawn", reason, now)
 
     def _frames_black(self, run: dict, frames: object, now: int) -> None:
@@ -524,18 +568,25 @@ class HealthJudge:
             self._reports[_run_key(run)] = codes
             self._judge_black(now)
 
+    @staticmethod
+    def _reporting_run(output: DisplayOutput) -> dict | None:
+        """The run whose report counts on `output`: the admitted run, else the run it is offered to
+        (a run whose renderer was never made draws nothing, so it is never admitted)."""
+        return output.admitted if output.admitted is not None else output.offered
+
     def _admitted_report(self, output: DisplayOutput) -> dict[str, str] | None:
-        """The report that counts on `output`: its admitted run's, while it is connected and its
+        """The report that counts on `output`: its reporting run's, while it is connected and its
         power is not off; None when none does."""
-        if not output.connected or output.power == "off" or output.admitted is None:
+        run = self._reporting_run(output)
+        if not output.connected or output.power == "off" or run is None:
             return None
-        return self._reports.get(_run_key(output.admitted))
+        return self._reports.get(_run_key(run))
 
     def _judge_black(self, now: int) -> None:
         """Bring `_black` in line with the reports and the latest Output set."""
         for name, condition in list(self._black.items()):
             output = self._outputs.get(name)
-            codes = None if output is None or output.admitted != condition.holder else (
+            codes = None if output is None or self._reporting_run(output) != condition.holder else (
                 self._admitted_report(output))
             if codes is None:
                 self._end_black(name, condition, "released", now)
@@ -547,7 +598,8 @@ class HealthJudge:
                 continue
             condition = self._black.get(name)
             if condition is None:
-                self._black[name] = _Black({"output": name}, now, code=code, holder=output.admitted)
+                self._black[name] = _Black({"output": name}, now, code=code,
+                                           holder=self._reporting_run(output))
                 self._record(code, {"output": name}, "pending", "frame_black", now)
             elif condition.code != code:
                 condition.code = code
@@ -652,12 +704,7 @@ class HealthJudge:
                 condition.clearing_ms = now
 
     def _advance(self, now: int) -> None:
-        window = self._fault(NOTHING_TO_SHOW).raise_window_ms
-        for condition in self._nothing.values():
-            if not condition.raised and now - condition.since_ms >= window:
-                condition.raised = True
-                self._record(NOTHING_TO_SHOW, condition.run, "raised", "window_elapsed", now)
-        for condition in self._black.values():
+        for condition in (*self._nothing.values(), *self._black.values()):
             if not condition.raised and now - condition.since_ms >= self._fault(condition.code).raise_window_ms:
                 condition.raised = True
                 self._record(condition.code, condition.run, "raised", "window_elapsed", now)
@@ -691,6 +738,7 @@ class HealthJudge:
 
 __all__ = ["APP_ABSENT", "APP_DESCRIPTOR_LIMIT", "APP_RESOURCE_EXHAUSTED", "APP_UNRESPONSIVE",
            "CARD_PRECEDENCE", "DESCRIPTOR_LIMIT_HEADROOM", "FRAME_BLACK_CODES", "MAX_OUTPUTS", "NOTHING_TO_SHOW",
+           "NO_FRAME_PLACED", "SCREEN_NOT_TOLD",
            "RESOURCE_PRESSURE_PERCENT", "RING_CAPACITY", "SOFTWARE_RENDERER", "Condition",
            "DisplayOutput", "HealthJudge", "OutputVerdict", "Presented", "Transition", "Verdict",
            "card_time", "descriptor_at_limit", "descriptor_pressure", "display_outputs",

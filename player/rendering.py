@@ -88,6 +88,7 @@ class PresentationResult:
 
 class Renderer(Protocol):
     gl_renderer: str | None  # GL_RENDERER once a GL context exists; None without GL
+    can_draw: bool  # False only for UnavailableRenderer: no picture can ever be made
 
     def set_player(self, player_id: str | None) -> None: ...   # the Player's registered id; None: none yet
 
@@ -121,6 +122,7 @@ class UnavailableRenderer:
     falsely acknowledging native output."""
 
     gl_renderer = None  # no GL context: nothing to report
+    can_draw = False    # every Frame it is given stays black (player/frame_black.py NO_RENDERER)
 
     def set_player(self, player_id: str | None) -> None:
         pass
@@ -163,6 +165,7 @@ class RecordingRenderer:
             raise ValueError("capacity must be a nonnegative integer")
         self.limit = capacity
         self.gl_renderer: str | None = None
+        self.can_draw = True
         self.pending: set[str] = set()
         self.prepare_failures: set[str] = set()
         self.presentation_failures: set[str] = set()
