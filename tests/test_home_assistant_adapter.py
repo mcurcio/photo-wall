@@ -257,7 +257,8 @@ def test_an_entity_heard_again_within_a_minute_is_written_once(registry):
 
     def row() -> dict:
         with registry.db.transaction() as conn:
-            return conn.execute("SELECT xmin::text AS xmin, name, EXTRACT(EPOCH FROM heard_at) AS heard_at "
+            return conn.execute("SELECT xmin::text AS xmin, name, EXTRACT(EPOCH FROM heard_at) AS heard_at, "
+                                "created_at, created_by, changed_at, changed_by "
                                 "FROM home_assistant_entities WHERE entity='light.hall'").fetchone()
 
     def heard_ago(seconds: float) -> dict:
@@ -270,8 +271,13 @@ def test_an_entity_heard_again_within_a_minute_is_written_once(registry):
     first = heard_ago(10)                                   # the next state comes 10 s later
     heard.record_heard("light.hall", "light", "Hall")
     assert row() == first                                   # not written
+    assert (first["created_by"], first["changed_by"]) == ("home-assistant", "home-assistant")
     stale = heard_ago(HEARD_WRITE_SECONDS + 1)
     heard.record_heard("light.hall", "light", "Hall")
-    assert row()["heard_at"] > stale["heard_at"]
+    again = row()
+    assert again["heard_at"] > stale["heard_at"]
+    # The audit fields: created once, changed at the instant it was heard again.
+    assert again["created_at"] == first["created_at"] and again["changed_at"] > first["changed_at"]
+    assert float(again["heard_at"]) == pytest.approx(again["changed_at"])
     heard.record_heard("light.hall", "light", "Hall lamp")  # a new name is written at once
     assert row()["name"] == "Hall lamp"

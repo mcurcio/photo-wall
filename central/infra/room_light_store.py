@@ -134,8 +134,10 @@ REFUSALS_SHOWN: Final = 20                     # the newest refused reports show
 HEARD_WRITE_SECONDS: Final = 60.0              # an unchanged report or entity rewrites when it was heard at most this often
 # Who writes, for the audit fields: a facts row, its reference's own source for what it stated and
 # Central for a doubt it set itself (a refused report, a closed link); the setup, the request's
-# principal for a House › Lights edit and Central for a change a report raised; Galleria's birth, Central.
+# principal for a House › Lights edit and Central for a change a report raised; Galleria's birth, Central;
+# an entity Home Assistant published, Home Assistant.
 CENTRAL: Final[Actor] = "central"
+HOME_ASSISTANT: Final[Actor] = "home-assistant"
 
 FactsKind = Literal["light", "reading", "colour"]
 _Reference = ReporterRef | SensorRef | ColourSensorRef
@@ -419,16 +421,20 @@ class PgRoomLights:
 
     def record_heard(self, entity: str, kind: str, name: str) -> None:
         """Written only on change: a new entity, its kind or name changed, or when it was heard older
-        than HEARD_WRITE_SECONDS. The newest HOME_ASSISTANT_ENTITIES_MAX are kept."""
+        than HEARD_WRITE_SECONDS, stamped `home-assistant` (its audit fields). The newest
+        HOME_ASSISTANT_ENTITIES_MAX are kept."""
         with self._db.transaction() as conn:
             row = conn.execute("SELECT kind, name, EXTRACT(EPOCH FROM clock_timestamp() - heard_at) AS age "
                                "FROM home_assistant_entities WHERE entity=%s", (entity,)).fetchone()
             if row is not None and (row["kind"], row["name"]) == (kind, name) and float(row["age"]) < HEARD_WRITE_SECONDS:
                 return
-            conn.execute("INSERT INTO home_assistant_entities(entity, kind, name, heard_at) "
-                         "VALUES (%s, %s, %s, clock_timestamp()) ON CONFLICT (entity) DO UPDATE "
-                         "SET kind=EXCLUDED.kind, name=EXCLUDED.name, heard_at=EXCLUDED.heard_at",
-                         (entity, kind, name))
+            conn.execute("INSERT INTO home_assistant_entities(entity, kind, name, heard_at, created_at, created_by, "
+                         "changed_at, changed_by) VALUES (%(entity)s, %(kind)s, %(name)s, to_timestamp(%(now)s), "
+                         "%(now)s, %(by)s, %(now)s, %(by)s) ON CONFLICT (entity) DO UPDATE SET kind=EXCLUDED.kind, "
+                         "name=EXCLUDED.name, heard_at=EXCLUDED.heard_at, changed_at=EXCLUDED.changed_at, "
+                         "changed_by=EXCLUDED.changed_by",
+                         {"entity": entity, "kind": kind, "name": name, "now": _CLOCK.now_in(conn),
+                          "by": HOME_ASSISTANT})
             if row is None:
                 conn.execute("DELETE FROM home_assistant_entities WHERE entity NOT IN (SELECT entity FROM "
                              "home_assistant_entities ORDER BY heard_at DESC, entity LIMIT %s)",

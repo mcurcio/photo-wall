@@ -267,7 +267,7 @@ Recorded 2026-11-19, after the last code slice (S4c-2b-ii). The design above sta
 
 ### The tables after each migration
 
-Counted on a fresh database migrated one file at a time, 2026-11-19 (Procrastinate's four are not in these counts). At 129 it holds **41 tables**: the 40 domain tables of [the target](#the-target-40-tables-21-kinds-of-thing) and `schema_migrations`; 45 with Procrastinate's four.
+Counted on a fresh database migrated one file at a time, 2026-11-19 (Procrastinate's four are not in these counts). At 130 it holds **41 tables**: the 40 domain tables of [the target](#the-target-40-tables-21-kinds-of-thing) and `schema_migrations`; 45 with Procrastinate's four.
 
 | Migration | Slice | Central's tables after |
 |---|---|---|
@@ -283,6 +283,7 @@ Counted on a fresh database migrated one file at a time, 2026-11-19 (Procrastina
 | 127 | S4b part 3 (`frame_trials` on the bus, `outputs.trial_*`) | 61 |
 | `128_old_node_path` | S4c-2a-v (the old path's 20 tables) | 41 |
 | `129_releases_without_the_manager_root` | S4c-2b-i (data only: every stored release, deployment reference and boot offer cleared) | 41 |
+| `130_home_assistant_entities_audit` | End review (`home_assistant_entities` gains its audit fields, stamped `home-assistant`) | 41 |
 
 Slices landed in parts, each its own commit and green alone: S2e, S2f, S2g, S3b and S4a in two; S4b in four (126 and `by`; Output losses from the `display` line; the Position trial on the bus; the handoff on the Pi); S4c in eight (part 1, the operator's reboot over the bus; 2a-i, the PID1 scenarios on the bus path; 2a-ii, the Pi stops speaking the old path; 2a-iii, what the console showed of it; 2a-iv, the old node routes behind no page; 2a-v, node sessions, app links and the 20 tables; 2b-i, releases and boot offers without the manager root; 2b-ii, the App Manager and `appliance/node` deleted). `Actor` gained `home-assistant` (Galleria's `installPlayer`, S2e).
 
