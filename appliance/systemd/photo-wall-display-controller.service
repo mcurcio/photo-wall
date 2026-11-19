@@ -53,4 +53,4 @@ ReadWritePaths=/run/photo-wall-display /run/photo-wall-display-feed
 RuntimeDirectory=photo-wall-display-controller
 RuntimeDirectoryMode=0700
 RuntimeDirectoryPreserve=yes
-InaccessiblePaths=-/run/photo-wall-host-core -/run/photo-wall-app-broker -/run/photo-wall-manager-supervisor
+InaccessiblePaths=-/run/photo-wall-host-core -/run/photo-wall-app-broker

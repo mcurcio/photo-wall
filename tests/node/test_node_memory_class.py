@@ -29,8 +29,8 @@ from appliance.kernel.capacity import (
 )
 
 SYSTEMD = REPO / "appliance/systemd"
-BASE_SERVICES = ("photo-wall-app-broker.service", "photo-wall-manager-supervisor.service",
-                 "photo-wall-display.service", "photo-wall-display-controller.service")
+BASE_SERVICES = ("photo-wall-app-broker.service", "photo-wall-display.service",
+                  "photo-wall-display-controller.service")
 SIZES = {"K": 1024, "M": MIB, "G": GIB}
 
 
@@ -51,8 +51,9 @@ def _meminfo(tmp_path, total_kb: int) -> Path:
 # --- the device class ---------------------------------------------------------------------
 
 def test_classes_are_the_4gb_and_8gb_classes_in_ascending_order_with_the_image_store():
-    # The store holds the image lines and its residue (E2c): 320 + 320 + 96 + 32 MiB.
-    assert STORE_BYTES == 768 * MIB
+    # The store holds the image lines and its residue (E2c; no manager image since S4c-2b-ii):
+    # 320 + 320 + 32 MiB.
+    assert STORE_BYTES == 672 * MIB
     assert CLASSES == (DeviceClass("pi5-4gb", 3584 * MIB, STORE_BYTES),
                        DeviceClass("pi5-8gb", 7168 * MIB, STORE_BYTES))
     for name in ("MIN_MEMORY", "RESERVE", "MAX_STORE", "storage_budget", "OVERHEAD",
@@ -113,37 +114,37 @@ def _image(digest: str, size: int) -> SimpleNamespace:
 
 
 def test_cold_admission_on_a_4gb_board_counts_each_image_once_and_refuses_with_numbers():
-    app, manager = _image("a", 288 * MIB), _image("b", 62 * MIB)
-    # Today's images: bytes are counted once (no unpack, no second copy).
-    assert admit_cold([app, manager, app], total=4045 * MIB, available=3 * GIB, free=4 * GIB) == 350 * MIB
-    assert admit_cold([app, manager], total=4045 * MIB, available=3 * GIB, free=4 * GIB,
-                      resident=frozenset({"a" * 64})) == 62 * MIB
+    app = _image("a", 288 * MIB)
+    # The offer's one image: its bytes are counted once (no unpack, no second copy).
+    assert admit_cold([app, app], total=4045 * MIB, available=3 * GIB, free=4 * GIB) == 288 * MIB
+    assert admit_cold([app], total=4045 * MIB, available=3 * GIB, free=4 * GIB,
+                      resident=frozenset({"a" * 64})) == 0
     big = _image("c", 720 * MIB)
     with pytest.raises(StorageShort, match="^node_storage_capacity$") as refused:
-        admit_cold([big, manager], total=4045 * MIB, available=3 * GIB, free=4 * GIB)
-    assert (refused.value.required, refused.value.room) == (782 * MIB, 768 * MIB)
+        admit_cold([big], total=4045 * MIB, available=3 * GIB, free=4 * GIB)
+    assert (refused.value.required, refused.value.room) == (720 * MIB, 672 * MIB)
     with pytest.raises(StorageShort) as short:
-        admit_cold([app, manager], total=8 * GIB, available=800 * MIB, free=4 * GIB)
-    assert (short.value.required, short.value.room) == (350 * MIB, 288 * MIB)
+        admit_cold([app], total=8 * GIB, available=700 * MIB, free=4 * GIB)
+    assert (short.value.required, short.value.room) == (288 * MIB, 188 * MIB)
     with pytest.raises(StorageShort, match="^node_memory_class$"):
         admit_cold([app], total=3 * GIB, available=3 * GIB, free=4 * GIB)
 
 
 def test_preparation_room_is_bounded_by_the_class_store():
-    assert preparation_room(total=4045 * MIB, available=8 * GIB, free=8 * GIB, used=350 * MIB) == 418 * MIB
+    assert preparation_room(total=4045 * MIB, available=8 * GIB, free=8 * GIB, used=288 * MIB) == 384 * MIB
     assert preparation_room(total=8 * GIB, available=8 * GIB, free=8 * GIB, used=0) == STORE_BYTES
 
 
 def test_online_admission_on_4gb_admits_one_target_beside_the_cold_images_and_refuses_a_third_app():
     roomy = {"total": 4045 * MIB, "available": 3 * GIB, "free": 4 * GIB}
-    # Today's sizes: cold app 288 + manager 62 resident; an online target of 288 is admitted.
-    assert admit_preparation(288 * MIB, **roomy, used=350 * MIB) == 288 * MIB
+    # Today's size: the cold app 288 resident; an online target of 288 is admitted.
+    assert admit_preparation(288 * MIB, **roomy, used=288 * MIB) == 288 * MIB
     # A third distinct app image in one boot is refused with both numbers (eviction is E5).
     with pytest.raises(StorageShort, match="^node_storage_capacity$") as refused:
-        admit_preparation(288 * MIB, **roomy, used=638 * MIB)
-    assert (refused.value.required, refused.value.room) == (288 * MIB, 130 * MIB)
-    # At the line caps: app 320 + manager 96 resident plus one 16 KiB store file, a 320 target fits.
-    at_caps = line("app-image").cap_bytes + line("manager-image").cap_bytes + 16 * 1024
+        admit_preparation(288 * MIB, **roomy, used=576 * MIB)
+    assert (refused.value.required, refused.value.room) == (288 * MIB, 96 * MIB)
+    # At the line caps: app 320 resident plus one 16 KiB store file, a 320 target fits.
+    at_caps = line("app-image").cap_bytes + 16 * 1024
     assert admit_preparation(line("app-image-rollback").cap_bytes, **roomy, used=at_caps) == 320 * MIB
 
 
@@ -185,9 +186,9 @@ def test_storage_mounts_the_class_store_and_checks_its_size_with_or_without_memc
     storage_mount.mount_storage(controllers=path, meminfo=_meminfo(tmp_path, 4045 * 1024))
     [mount] = calls["mount"]
     assert mount[:3] == ["/usr/bin/mount", "-t", "tmpfs"] and mount[-1] == str(store)
-    assert f"size={768 * MIB}" in mount[mount.index("-o") + 1].split(",")
-    assert calls["sized"] == [(store, 768 * MIB)]
-    assert {child.name for child in store.iterdir()} == {"app-roots", "manager-roots", "root-images", "downloads", "preparation"}
+    assert f"size={672 * MIB}" in mount[mount.index("-o") + 1].split(",")
+    assert calls["sized"] == [(store, 672 * MIB)]
+    assert {child.name for child in store.iterdir()} == {"app-roots", "root-images", "downloads"}
     absent = "memory controller absent: memory limits not enforced" in caplog.text
     assert absent == (controllers is None or "memory" not in controllers.split())
 
@@ -220,30 +221,12 @@ def _bytes(value: str) -> int:
 
 def test_the_preparation_slice_cap_is_its_members_sum():
     members = sum(item.cap_bytes for item in capacity.LINES if item.parent == "preparation")
-    assert line("preparation").cap_bytes == members == 960 * MIB
+    assert line("preparation").cap_bytes == members == 864 * MIB
     assert _bytes(_unit("photowallpreparation.slice")["Slice"]["MemoryMax"][-1]) == line("preparation").cap_bytes
 
 
-def test_preparation_transients_inherit_the_slice_cap_and_the_app_manager_scores_300(monkeypatch, tmp_path):
+def test_preparation_transients_inherit_the_slice_cap():
     from appliance.apps import import_worker
-    from appliance.node import manager_launcher
-    launcher = manager_launcher.SystemdManagerLauncher(tmp_path, {"d": SimpleNamespace(entry_point="/entry")},
-                                                       base_abi="b", graphics_abi="g", plugin_abi="p")
-    monkeypatch.setattr(launcher, "verify", lambda digest: True)
-    monkeypatch.setattr(launcher, "observed", lambda digest: False)
-    launched = []
-
-    def run(args, **kwargs):
-        launched.append(args)
-        raise RuntimeError("stop")
-
-    monkeypatch.setattr(manager_launcher.subprocess, "run", run)
-    with pytest.raises(RuntimeError, match="stop"):
-        launcher.start("d")
-    [args] = launched
-    properties = [args[i + 1] for i, word in enumerate(args) if word == "--property"]
-    assert "Slice=photowallpreparation.slice" in properties and "OOMScoreAdjust=300" in properties
-    assert not [p for p in properties if p.startswith("MemoryMax=")]
     source = Path(import_worker.__file__).read_text()
     assert "Slice=photowallpreparation.slice" in source and "MemoryMax=" not in source
 
@@ -260,10 +243,9 @@ def test_prepare_requires_handoff_and_storage_and_the_owners_require_prepare():
     prepare = _unit("photo-wall-node-prepare.service")["Unit"]
     assert {"photo-wall-node-handoff.service", "photo-wall-node-storage.service"} <= set(_words(prepare["Requires"]))
     assert {"photo-wall-node-handoff.service", "photo-wall-node-storage.service"} <= set(_words(prepare["After"]))
-    for name in ("photo-wall-app-broker.service", "photo-wall-manager-supervisor.service"):
-        unit = _unit(name)["Unit"]
-        assert "photo-wall-node-prepare.service" in _words(unit.get("Requires", [])), name
-        assert "photo-wall-node-prepare.service" in _words(unit["After"]), name
+    unit = _unit("photo-wall-app-broker.service")["Unit"]
+    assert "photo-wall-node-prepare.service" in _words(unit.get("Requires", []))
+    assert "photo-wall-node-prepare.service" in _words(unit["After"])
 
 
 @pytest.mark.parametrize("name", BASE_SERVICES)

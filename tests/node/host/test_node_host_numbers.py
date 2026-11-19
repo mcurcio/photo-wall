@@ -3,7 +3,6 @@ sampler's firmware throttle flags, `cpu_busy` and `link_speed` (each omitted whe
 never zero, each name once), `preparation_room` as the one admission decision, and the throttle
 flags on the host line. No database."""
 from types import SimpleNamespace
-from uuid import uuid4
 
 import pytest
 
@@ -116,12 +115,9 @@ def test_each_name_is_emitted_once_and_the_largest_sample_fits_the_contract(tmp_
     host = sampler.sample() + sampler.throttling()
     names = [row[0] for row in host]
     assert len(names) == len(set(names)) == 16
-    # The largest sample: every host row, the full base supervisor summary, every memory row
-    # (memcg, CMA, four peaks, three OOM counts) (32), with the longest
-    # names and values, plus the appended drop count, all kept by `valid_metrics`.
-    monkeypatch.setattr("appliance.host.host_linux.read_supervisor_status", lambda *a, **k: {
-        "running": True, "attempts": 3, "fault": None, "sampled_boottime_ms": 1})
-    monkeypatch.setattr("appliance.host.host_linux.boot_id", lambda: uuid4())
+    # The largest sample: every host row and every memory row (memcg, CMA, four peaks, three OOM
+    # counts) (26), with the longest names and values, plus the appended drop count, all kept by
+    # `valid_metrics`.
     (proc / "meminfo").write_text("MemTotal: 1000 kB\nMemAvailable: 500 kB\nCmaTotal: 524288 kB\n"
                                   "CmaFree: 1024 kB\n")
     cgroup = sys_root / "fs/cgroup"
@@ -131,10 +127,10 @@ def test_each_name_is_emitted_once_and_the_largest_sample_fits_the_contract(tmp_
         (cgroup / f"{name}.slice").mkdir()
         (cgroup / f"{name}.slice/memory.peak").write_text("123456789\n")
         (cgroup / f"{name}.slice/memory.events").write_text("low 0\nhigh 0\nmax 4\noom 2\noom_kill 2\n")
-    rows = host + sampler.supervision() + sampler.memory_rows()
-    assert len(rows) == 32
+    rows = host + sampler.memory_rows()
+    assert len(rows) == 26
     metrics = valid_metrics((name, 1.0e15 + 0.123456789, unit, *source) for name, _, unit, *source in rows)
-    assert len(metrics) == 33 and metrics[-1] == HostMetricV2("metrics_dropped", 0, "count", "host_core")
+    assert len(metrics) == 27 and metrics[-1] == HostMetricV2("metrics_dropped", 0, "count", "host_core")
     raw = encode_host_metrics_state(HostMetricsState(metrics, fault_code="sampler_partial_" + "x" * 48))
     assert len(raw) <= MAX_OBSERVATION_BYTES and len(metrics) <= 64
 

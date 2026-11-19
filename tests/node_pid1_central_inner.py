@@ -101,7 +101,7 @@ if scenario == "refused":
     subprocess.run(["systemctl", "start", "photo-wall-node-handoff.service"], check=True)
     subprocess.run(["systemctl", "start", "photo-wall-bus.service"], check=True)
     # One transaction, as photo-wall-node.target pulls them in: storage refuses, so prepare
-    # (Requires= storage) and the broker and manager supervisor (Requires= prepare) fail as
+    # (Requires= storage) and the broker (Requires= prepare) fail as
     # dependencies without running; Host Management (After= handoff only) runs and reports.
     started = subprocess.run(
         [
@@ -111,7 +111,6 @@ if scenario == "refused":
             "photo-wall-node-prepare.service",
             "photo-wall-host-core.service",
             "photo-wall-app-broker.service",
-            "photo-wall-manager-supervisor.service",
         ],
         timeout=120,
     )
@@ -135,7 +134,6 @@ subprocess.run(
         "start",
         "photo-wall-display-controller.service",
         "photo-wall-host-core.service",
-        "photo-wall-manager-supervisor.service",
         "photo-wall-app-broker.service",
         "photo-wall-health.service",
         "photo-wall-bus.service",

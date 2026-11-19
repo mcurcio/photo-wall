@@ -1,6 +1,7 @@
 """The Pi's old HTTP path is gone from the code (decision 0034, S4c): no file Central, the Pi or the
 build ships names a removed route or a table migration 128 dropped, and the Pi's Central session
-package is deleted. Migrations (history) and tests are not scanned. A module named like a table
+package is deleted. The App Manager is gone too (S4c-2b-ii): `appliance/node` does not exist, and no
+such file, nor the package list or a unit, names the manager root, its packages or its supervisor. Migrations (history) and tests are not scanned. A module named like a table
 (`contracts/node_host_facts.py`, the host line's facts) is not the table: a name reached through a
 `.` or a `/` is a path, not a table.
 
@@ -34,8 +35,16 @@ TABLES = (
     "node_environment_acceptances", "node_app_qualification_samples", "node_app_qualifications",
     "node_app_operations",
 )
+# What named the App Manager: its root's role, its two packages, the package-name constant and its
+# supervisor (launcher, unit and memory line).
+MANAGER = ("manager-primary", "photo-wall-app-manager", "photo-wall-node-manager", "MANAGER_PACKAGE",
+           "manager-supervisor")
+# Where the build and the Pi's units name packages and launchers, besides the scanned code.
+MANAGER_SCANNED = ("debian", "appliance/systemd", ".github/workflows", "debian-packaging")
+
 _ROUTE = re.compile("(?:" + "|".join(re.escape(route) for route in ROUTES) + r")(?![\w-])")
 _TABLE = re.compile(r"(?<![\w./])(?:" + "|".join(TABLES) + r")(?!\w|\.py)")
+_MANAGER = re.compile("|".join(re.escape(name) for name in MANAGER))
 
 
 def _sources():
@@ -56,6 +65,17 @@ def test_no_code_names_a_removed_route_or_a_dropped_table():
 
 def test_the_pis_central_session_package_is_gone():
     assert not (ROOT / "appliance/central_session").exists()
+
+
+def test_the_app_manager_is_gone():
+    """Mutation probe: keep the `appliance.node` package (its `__init__`) -> fails."""
+    assert not (ROOT / "appliance/node").exists()
+    found = []
+    extra = (path for top in MANAGER_SCANNED for path in (ROOT / top).rglob("*") if path.is_file())
+    for path in (*_sources(), *extra):
+        for number, line in enumerate(path.read_text(errors="replace").splitlines(), 1):
+            found += [f"{path.relative_to(ROOT)}:{number}: {match.group(0)}" for match in _MANAGER.finditer(line)]
+    assert found == []
 
 
 def test_the_scan_finds_a_route_and_a_table_and_passes_over_a_module_path():

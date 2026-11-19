@@ -243,9 +243,7 @@ export const HOST_CATALOG = Object.freeze({
  */
 export const NOT_SHOWN = Object.freeze([
   "uptime", "load_1m", "memory_total", "memory_available", "cma_total", "cma_free",
-  "memory_peak:", "manager_summary_known", "manager_running", "manager_attempts",
-  "manager_recovery_required", "manager_start_unknown", "manager_summary_age",
-  "metrics_dropped",
+  "memory_peak:", "metrics_dropped",
 ]);
 
 

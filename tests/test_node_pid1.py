@@ -850,18 +850,12 @@ class Node:
         assert "health_storage" not in run(
             "journalctl", "--no-pager", "-u", "photo-wall-node-player.service"
         )
-        run(
-            "systemctl",
-            "stop",
-            "photo-wall-app-broker.service",
-            "photo-wall-manager-supervisor.service",
-        )
-        # The Player and the App Manager are collected transient units (`systemd-run --collect`):
-        # once one has ended and nothing started it again (issue #125: the failure phase's
-        # stopped release, the success phase's crash; an App Manager with nothing to prepare),
-        # systemd has unloaded it and `systemctl stop` would fail on it.
+        run("systemctl", "stop", "photo-wall-app-broker.service")
+        # The Player is a collected transient unit (`systemd-run --collect`): once it has ended and
+        # nothing started it again (issue #125: the failure phase's stopped release, the success
+        # phase's crash), systemd has unloaded it and `systemctl stop` would fail on it.
         units = []
-        for unit in ("photo-wall-node-manager.service", PLAYER_UNIT):
+        for unit in (PLAYER_UNIT,):
             shown = unit_properties_of(self, unit, "LoadState,ActiveState")
             if shown["LoadState"] == "loaded":
                 units.append(unit)
@@ -930,9 +924,9 @@ print(json.dumps(out,sort_keys=True))"""
         components = json.loads((components_dir / "components.json").read_text())
         app = components["app_environment"]["environment_sha256"]
         self._assert_image_mounts([("app-roots", app)], "image-mounts.json")
-        # The boot stage stages no manager root and writes no manager configuration (S4c-2b-i).
-        assert self.run("/bin/sh", "-c", "ls -A /run/photo-wall-node-storage/manager-roots; "
-                        "ls /run/photo-wall-node/manager.json /run/photo-wall-node/manager-client.json "
+        # No manager root, its directory or its configuration (S4c-2b-i, S4c-2b-ii).
+        assert self.run("/bin/sh", "-c", "ls -d /run/photo-wall-node-storage/manager-roots "
+                        "/run/photo-wall-node/manager.json /run/photo-wall-node/manager-client.json "
                         "2>/dev/null; true").strip() == "", "a manager root or its configuration"
         self._assert_player_root(app)
 
@@ -961,7 +955,6 @@ print(json.dumps(out,sort_keys=True))"""
                 "systemctl",
                 "show",
                 "photo-wall-node-player.service",
-                "photo-wall-node-manager.service",
                 "photo-wall-node-prepare.service",
                 "photo-wall-node-storage.service",
                 "photo-wall-app-broker.service",
@@ -1329,7 +1322,7 @@ def unit_properties(node, unit):
 def test_node_pid1_refused(node_pid1_inputs, node_host, registry, tmp_path):
     """A board below the smallest memory class: the storage stage refuses with its numbers.
 
-    Prepare (Requires= storage) never runs, so neither do the broker or the manager supervisor
+    Prepare (Requires= storage) never runs, so neither does the broker
     (Requires= prepare). Handoff runs independently and writes host.json and the bus's
     environment, so Host Management and the Node bus run and Central reads the refusal in the host
     line's facts `boot` report.
@@ -1346,7 +1339,6 @@ def test_node_pid1_refused(node_pid1_inputs, node_host, registry, tmp_path):
             for unit in (
                 "photo-wall-node-prepare.service",
                 "photo-wall-app-broker.service",
-                "photo-wall-manager-supervisor.service",
             ):
                 properties = unit_properties(node, unit)
                 # Never started: no main process was ever forked for it this boot.

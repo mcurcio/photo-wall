@@ -297,13 +297,9 @@ name = "Node contexts point down"
 type = "layers"
 containers = ["appliance"]
 # Siblings are `|` (independent), never `:`: a real dependency is its own layer.
-layers = ["node", "boot | netboot_init", "bootstrap | central_post | node_boot_handoff",
+layers = ["boot | netboot_init", "bootstrap | central_post | node_boot_handoff",
           "apps", "health", "display_host | host", "kernel | feed | feed_socket"]
 exhaustive = true
-ignore_imports = [
-  # Retiring (r3 §10): each line leaves with the module it names.
-  "appliance.apps.lifecycle_storage -> appliance.node.manager",
-]
 exhaustive_ignores = ["process_identity"]
 
 [[tool.importlinter.contracts]]

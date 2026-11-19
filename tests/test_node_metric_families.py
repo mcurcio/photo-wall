@@ -22,13 +22,13 @@ def _dropped(metrics):
 
 
 def test_the_declared_families_fit_one_observation():
-    assert sum(family.max_rows for family in METRIC_FAMILIES) == 36 <= MAX_HOST_METRICS
+    assert sum(family.max_rows for family in METRIC_FAMILIES) == 30 <= MAX_HOST_METRICS
     keys = {family.key: family.max_rows for family in METRIC_FAMILIES}
     # memory_peak: hostcore, base, preparation, app, display (Weston's own service) and bus;
     # oom_kill: base, preparation, app and bus.
     assert (keys["memory_peak:"], keys["oom_kill:"], keys["metrics_dropped"]) == (6, 4, 1)
-    # The retired per-unit rows are undeclared; the manager summary rows stay.
-    assert "broker_failed" not in keys and "manager_summary_known" in keys
+    # The retired per-unit rows and the App Manager's summary (S4c-2b-ii) are undeclared.
+    assert "broker_failed" not in keys and "manager_summary_known" not in keys
 
 
 @pytest.mark.parametrize(("families", "code"), [

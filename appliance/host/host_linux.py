@@ -10,7 +10,6 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from appliance.host.base_status import STATUS, read_supervisor_status
 from appliance.kernel.capacity import cgroup_path, memory_controller_present
 from appliance.kernel.clock import (  # noqa: F401
     WallClockState,
@@ -235,25 +234,6 @@ class LinuxHostSampler:
                 ("memory_available", memory["MemAvailable"], "bytes"),
                 ("runtime_available", disk.f_bavail * disk.f_frsize, "bytes"))
         return metrics + self._soc_temperature() + self._cpu_busy() + self._link_speed()
-
-    def supervision(self) -> tuple:
-        """The base supervisor's App Manager summary (the per-unit rows are retired: PID1's
-        failed units ride in the facts record, `failed_units`)."""
-        rows = []
-        try:
-            value = read_supervisor_status(STATUS, kernel_boot_id=boot_id(), now_ms=boottime_ms())
-        except (OSError, ValueError):
-            rows.append(("manager_summary_known", 0, "boolean", "base_supervisor"))
-        else:
-            rows.extend((("manager_summary_known", 1, "boolean", "base_supervisor"),
-                         ("manager_running", int(value["running"]), "boolean", "base_supervisor"),
-                         ("manager_attempts", value["attempts"], "count", "base_supervisor"),
-                         ("manager_recovery_required", int(value["fault"] == "manager_recovery_required"), "boolean", "base_supervisor"),
-                         ("manager_start_unknown", int(value["fault"] == "manager_start_unknown"), "boolean", "base_supervisor"),
-                         ("manager_summary_age", boottime_ms() - value["sampled_boottime_ms"], "milliseconds", "base_supervisor")))
-        return tuple(rows)
-
-
 
     def failed_units(self) -> tuple[tuple[str, ...], int]:
         """PID1's failed `photo-wall-*` units on this boot, from one bounded `systemctl` call:

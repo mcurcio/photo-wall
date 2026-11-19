@@ -4,6 +4,7 @@ shrink; layers stay exact; forbidden contracts only grow.
 lint-imports proves the contracts hold; this test proves nobody loosened them to make it pass.
 """
 
+import re
 import sys
 import tomllib
 from collections.abc import Mapping
@@ -33,7 +34,6 @@ KERNEL_MAY_IMPORT: Final = ("contracts", "uplink", KERNEL)
 # One directory per Node context, in import order (node redesign r3 §3.4). Exact: a change is a
 # design change, not a lint fix.
 FROZEN_NODE_LAYERS: Final[list[str]] = [
-    "node",
     "boot | netboot_init",
     "bootstrap | central_post | node_boot_handoff",
     "apps",
@@ -58,9 +58,6 @@ FROZEN_FEED_EXEMPTIONS: Final[frozenset[str]] = frozenset({
 # Every contract's ignore lines when E1 froze them. A contract absent here may have none. Removing
 # a line is the ratchet turning; adding one fails.
 FROZEN_EXEMPTIONS: Final[Mapping[str, frozenset[str]]] = {
-    LAYERS_CONTRACT: frozenset({
-        "appliance.apps.lifecycle_storage -> appliance.node.manager",
-    }),
     "Boot is an island": frozenset({
         "appliance.boot.node_bootstrap -> appliance.apps.environment",
     }),
@@ -101,13 +98,6 @@ FROZEN_FORBIDDEN_CONTRACTS: Final[Mapping[str, tuple[frozenset[str], frozenset[s
         frozenset({"player"}),
     ),
 }
-
-# The retiring packages (r3 §10): their files only leave; new code goes in a context.
-RETIRING_FILES: Final[frozenset[str]] = frozenset({
-    *(f"appliance/node/{name}.py" for name in (
-        "__init__", "manager", "manager_launcher", "manager_runner")),
-})
-
 
 def _importlinter() -> dict:
     return tomllib.loads(PYPROJECT.read_text())["tool"]["importlinter"]
@@ -167,12 +157,11 @@ def test_no_node_contract_silences_unmatched_exemptions() -> None:
     assert not silenced, f"unmatched exemptions must stay loud: {silenced}"
 
 
-def test_retiring_packages_only_shrink() -> None:
-    files = {path.relative_to(REPO).as_posix()
-             for package in ("appliance/node",)
-             for path in (REPO / package).glob("*.py")}
-    added = files - RETIRING_FILES
-    assert not added, f"new code in a retiring package is not allowed: {sorted(added)}"
+def test_the_app_manager_is_gone() -> None:
+    """The retiring `appliance.node` left with the App Manager (decision 0034, S4c-2b-ii): no package,
+    layer or exemption names it."""
+    assert not (REPO / "appliance/node").exists()
+    assert not re.search(r"appliance\.node(?!\w)", PYPROJECT.read_text())
 
 
 def test_root_packages_are_every_first_party_package() -> None:

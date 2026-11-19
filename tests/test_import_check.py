@@ -205,19 +205,18 @@ def test_a_module_two_packages_install_is_an_error(tmp_path):
         import_check.installed_modules(staged, INSTALLS)
 
 
-def test_the_repositorys_exemption_list_is_the_node_layers_ignore_lines():
-    exempt = import_check.exemptions(REPO / "pyproject.toml")
-    assert exempt and all(importer.startswith("appliance.") and imported.startswith("appliance.node.")
-                          for importer, imported in exempt)
+def test_the_repositorys_exemption_list_is_empty():
+    """The retiring edges left with appliance.node (decision 0034, S4c-2b-ii): no upward edge is
+    exempt."""
+    assert import_check.exemptions(REPO / "pyproject.toml") == frozenset()
 
 
-# The release roots' packages (decision 0019): the Player, a launcher and a module package on
-# lib, beside a module-less sibling it loads by path (the frame client); the AppManager launcher.
+# The release root's package (decision 0019): the Player, a launcher and a module package on
+# lib, beside a module-less sibling it loads by path (the frame client).
 PLAYER_DEPENDS = {
     "photo-wall-player": ("python3, photo-wall-lib (= ${pw-version:photo-wall-lib}),\n"
                           " photo-wall-frame-client (= ${pw-version:photo-wall-frame-client})"),
     "photo-wall-frame-client": "${shlibs:Depends}",
-    "photo-wall-app-manager": "python3, photo-wall-top (= ${pw-version:photo-wall-top})",
 }
 
 
@@ -226,9 +225,7 @@ def launcher(path: tuple[str, ...], entry: str) -> str:
 
 
 def roots(tmp_path, *, player_path=("/usr/lib/photo-wall/lib", "/usr/lib/photo-wall/player"),
-          player_source="import lib.wire\n",
-          manager_path=("/usr/lib/photo-wall/lib", "/usr/lib/photo-wall/low",
-                        "/usr/lib/photo-wall/top"), source=None):
+          player_source="import lib.wire\n", source=None):
     repo, staged = build(tmp_path, source={"player/__init__.py": "",
                                            "player/service.py": player_source} | (source or {}),
                          depends=DEPENDS | PLAYER_DEPENDS)
@@ -238,25 +235,24 @@ def roots(tmp_path, *, player_path=("/usr/lib/photo-wall/lib", "/usr/lib/photo-w
         (player / "player" / name).write_bytes((repo / "player" / name).read_bytes())
     (player / "__main__.py").write_text(launcher(player_path, "player.service"))
     (staged / "photo-wall-frame-client/usr/lib/photo-wall/frame-client").mkdir(parents=True)
-    manager = staged / "photo-wall-app-manager/usr/lib/photo-wall/app-manager"
-    manager.mkdir(parents=True)
-    (manager / "__main__.py").write_text(launcher(manager_path, "appliance.top.run"))
     return import_check.check(repo=repo, staged=staged, control=tmp_path / "control",
                               pyproject=tmp_path / "pyproject.toml", owner=OWNERS.get,
                               roots_of=ROOTS.get)
 
 
-def test_the_release_roots_launchers_pass_with_their_reached_path(tmp_path):
+def test_the_release_roots_launcher_passes_with_its_reached_path(tmp_path):
     """A root launcher's __main__.py is no module, its PATH is its entry's reach, and a sibling
     that installs no module (the frame client) is not judged."""
     assert roots(tmp_path) == []
-    assert set(import_check.launchers(tmp_path / "staged")) == {"player", "app-manager"}
+    assert set(import_check.launchers(tmp_path / "staged")) == {"player"}
 
 
 def test_a_root_launcher_path_that_is_not_its_reach_is_refused(tmp_path):
-    refusals = roots(tmp_path, manager_path=("/usr/lib/photo-wall/lib", "/usr/lib/photo-wall/top"))
-    assert kinds(refusals) == {("photo-wall-app-manager", "launcher-path",
-                                "/usr/lib/photo-wall/low (missing from PATH)", "app-manager")}
+    refusals = roots(tmp_path, player_path=("/usr/lib/photo-wall/player",))
+    # lib, then on no launcher's PATH, is also a Depends no launcher uses.
+    assert kinds(refusals) == {("photo-wall-player", "launcher-path",
+                                "/usr/lib/photo-wall/lib (missing from PATH)", "player"),
+                               ("photo-wall-player", "unused-depends", "photo-wall-lib", "debian/control")}
 
 
 def test_the_app_root_holds_no_node_context(tmp_path):

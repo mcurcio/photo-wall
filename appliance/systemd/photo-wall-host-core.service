@@ -36,4 +36,4 @@ RestrictSUIDSGID=yes
 RestrictNamespaces=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadWritePaths=/run/photo-wall-host-core
-InaccessiblePaths=-/run/photo-wall-node-storage/app-roots -/run/photo-wall-node-storage/manager-roots -/run/photo-wall-node-storage/root-images -/run/photo-wall-preparation -/run/photo-wall-app-broker
+InaccessiblePaths=-/run/photo-wall-node-storage/app-roots -/run/photo-wall-node-storage/root-images -/run/photo-wall-app-broker

@@ -172,55 +172,6 @@ def test_broker_ambiguous_start_blocks_second_mutation_but_can_observe_survivor(
     assert driver.calls.count("start_simulated_process") == 1
 
 
-def test_manager_restart_retains_charged_ambiguous_start_and_bounded_fallback():
-    from appliance.node.manager import ManagerRecovery, ManagerRecoveryState
-    class Store:
-        state = ManagerRecoveryState()
-        def load(self):
-            return self.state
-        def save(self, state):
-            self.state = state
-    class Launcher:
-        calls = []
-        def verify(self, root):
-            return True
-        def start(self, root):
-            assert store.state.fault == "manager_start_unknown"
-            self.calls.append(root)
-            raise OSError("ambiguous start")
-    store, launcher = Store(), Launcher()
-    def supervisor():
-        return ManagerRecovery(launcher, primary="a" * 64, fallback="b" * 64, store=store)
-    first = supervisor().recover()
-    assert first.attempts == 1 and first.fault == "manager_start_unknown"
-    second = supervisor()
-    assert second.recover() == first and len(launcher.calls) == 1
-    second.observed_start_result("a" * 64, running=False)
-    assert second.recover().attempts == 2
-    second.observed_start_result("b" * 64, running=False)
-    assert second.recover().fault == "manager_recovery_required"
-    assert supervisor().recover().attempts == 2 and len(launcher.calls) == 2
-
-
-def test_manager_store_failure_prevents_launch():
-    from appliance.node.manager import ManagerRecovery, ManagerRecoveryState
-    class Store:
-        def load(self):
-            return ManagerRecoveryState()
-        def save(self, state):
-            raise OSError("store failed")
-    class Launcher:
-        def verify(self, root):
-            pytest.fail("verification must follow durable charge")
-        def start(self, root):
-            pytest.fail("launch must follow durable charge")
-    manager = ManagerRecovery(Launcher(), primary="a" * 64, fallback="b" * 64, store=Store())
-    with pytest.raises(OSError):
-        manager.recover()
-    with pytest.raises(ValueError, match="store_unavailable"):
-        manager.recover()
-
-
 def test_late_diagnostic_release_cannot_ack_new_handoff_even_with_same_buffer():
     display, surface, _ = display_values()
     display.offer(surface)

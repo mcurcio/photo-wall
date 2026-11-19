@@ -451,15 +451,6 @@ def test_memory_rows_omit_each_unreadable_or_malformed_file(tmp_path):
                      "oom_kill:preparation", "oom_kill:app", "memory_peak:bus", "oom_kill:bus"]
 
 
-def test_supervision_carries_no_per_unit_rows(monkeypatch):
-    monkeypatch.setattr("appliance.host.host_linux.read_supervisor_status",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("absent")))
-    monkeypatch.setattr("appliance.host.host_linux.boot_id", lambda: uuid4())
-    monkeypatch.setattr("appliance.host.host_linux.boottime_ms", lambda: 1)
-    _systemctl(monkeypatch, error=AssertionError("supervision runs no systemctl"))
-    assert LinuxHostSampler().supervision() == (("manager_summary_known", 0, "boolean", "base_supervisor"),)
-
-
 # The host line puts the facts when the whole state changes, boot included.
 def test_a_boot_change_states_new_facts_and_an_unchanged_boot_states_nothing(tmp_path, monkeypatch):
     from node.host.test_node_host_facts import VALUES, _run

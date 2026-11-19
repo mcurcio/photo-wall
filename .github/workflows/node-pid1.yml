@@ -16,7 +16,7 @@ name: Player node real-PID1 lifecycle scenarios
 #   reboot    the operator's reboot over the bus; boot B of the same device boots without
 #             operator action and Central lists the reboot delivered
 #   refused   a board below the smallest memory class (a 2 GiB meminfo bound into the storage
-#             unit alone): storage refuses, prepare, broker and manager supervisor never run,
+#             unit alone): storage refuses, prepare and the broker never run,
 #             and Central reads the refusal with its numbers on the host line
 #   join      the Node API whole (E3b design §16.2): the new serial's leaf links
 #             through Central's origin, a kill -9 of the bus and a reboot each end an epoch that

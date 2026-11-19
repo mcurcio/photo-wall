@@ -127,25 +127,6 @@ def test_node_base_units_have_no_boot_switch():
     assert not any(path.name.endswith(".d") for path in (REPO / "appliance/systemd").iterdir())
 
 
-def test_manager_no_fallback_exhausts_primary_once():
-    from appliance.node.manager import ManagerRecovery, ManagerRecoveryState
-    class Store:
-        value = ManagerRecoveryState()
-        def load(self): return self.value
-        def save(self, value): self.value = value
-    class Launcher:
-        calls = 0
-        def verify(self, root): return True
-        def start(self, root):
-            self.calls += 1
-            return False
-    launcher = Launcher()
-    recovery = ManagerRecovery(launcher, primary="a" * 64, fallback=None, store=Store())
-    assert recovery.recover().fault == "manager_recovery_required"
-    recovery.recover()
-    assert launcher.calls == 1
-
-
 def test_safe_dangling_and_ancestor_alias_inventory_preserved(tmp_path):
     (tmp_path / "usr/share/X11").mkdir(parents=True)
     (tmp_path / "usr/share/X11/X11").symlink_to(".")

@@ -1,9 +1,9 @@
 [Unit]
-Description=Prepare frozen exact V2 app and manager environments
+Description=Prepare the frozen exact app environment
 ConditionPathExists=/etc/photo-wall/node-boot.json
 Requires=photo-wall-node-storage.service photo-wall-node-handoff.service
 After=photo-wall-node-handoff.service photo-wall-node-storage.service network-online.target
-Before=photo-wall-app-broker.service photo-wall-manager-supervisor.service
+Before=photo-wall-app-broker.service
 
 [Service]
 Type=oneshot

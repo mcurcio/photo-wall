@@ -51,8 +51,6 @@ METRIC_FAMILIES: Final[tuple[MetricFamily, ...]] = (
         "soc_temperature", "cpu_busy", "link_speed",
         *(f"{flag}_{when}" for when in ("now", "occurred")
           for flag in ("under_voltage", "frequency_capped", "throttled", "soft_temperature_limit")),
-        "manager_summary_known", "manager_running", "manager_attempts",
-        "manager_recovery_required", "manager_start_unknown", "manager_summary_age",
         "memcg_present", "cma_total", "cma_free")),
     MetricFamily("memory_peak:", 6),  # hostcore, base, preparation, app, display (Weston), bus
     MetricFamily("oom_kill:", 4),  # base, preparation, app, bus

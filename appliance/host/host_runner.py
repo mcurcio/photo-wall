@@ -59,8 +59,7 @@ class HostRunner:
 
     def tick(self) -> None:
         """This tick's metrics onto the host line, and the facts once per HOST_METRICS_EVERY."""
-        metrics = (self.sampler.sample() + self.sampler.throttling() + self.sampler.supervision()
-                   + self.sampler.memory_rows())
+        metrics = self.sampler.sample() + self.sampler.throttling() + self.sampler.memory_rows()
         self.line.metrics(HostMetricsState(valid_metrics(metrics)))
         if self._line_facts_at is None or self.monotonic() - self._line_facts_at >= HOST_METRICS_EVERY:
             self._line_facts_at = self.monotonic()

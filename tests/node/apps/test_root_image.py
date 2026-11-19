@@ -489,13 +489,7 @@ def test_no_node_module_parses_tar():
 
 
 def test_a_pooled_image_stages_with_no_incoming_file(world):
-    """B2 AC6, Base half: AppManager downloaded nothing; the held, mounted image is staged."""
+    """B2 AC6, Base half: nothing downloaded; the held, mounted image is staged."""
     world.stage(world.incoming())
     assert world.stage(world.roots.parent / "downloads" / world.sha) == world.roots / world.sha
     assert len(world.mounter.mount_calls) == 1 and len(world.hashes) == 1
-
-
-def test_app_manager_sees_the_image_pool_read_only():
-    from appliance.node import manager_launcher
-    source = Path(manager_launcher.__file__).read_text()
-    assert '"BindReadOnlyPaths=/run/photo-wall-node-storage/root-images:/run/photo-wall-root-images"' in source
