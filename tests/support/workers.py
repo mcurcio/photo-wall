@@ -13,7 +13,7 @@ from central.infra.runtime import STALLED_WORKER_SECONDS
 from media.subject_map import MODEL_VARIABLE
 from support.subject_model import subject_model_path
 
-JOB_LOOPS = 3  # the runtime's loops per process: fetch, upkeep and transcode
+JOB_LOOPS = 1  # the runtime's one worker per process, over every queue (decision 0034, S3a)
 MEDIA_LOOP = 1  # the library checks' and measurements' loop: one per process (no writer lock)
 
 
@@ -59,6 +59,15 @@ def live_worker_ids(db) -> set[int]:
             "WHERE last_heartbeat > now() - make_interval(secs => %s)",
             (STALLED_WORKER_SECONDS,)).fetchall()
     return {row["id"] for row in rows}
+
+
+def heartbeat(db, *, age: float = 0.0) -> None:
+    """One Procrastinate worker that last beat `age` seconds ago by the database's clock, and no
+    other: whether the media worker runs (central/infra/runtime.py `worker_running_in`)."""
+    with db.transaction() as conn:
+        conn.execute("DELETE FROM procrastinate_workers")
+        conn.execute("INSERT INTO procrastinate_workers (last_heartbeat) "
+                     "VALUES (now() - make_interval(secs => %s))", (age,))
 
 
 def live_workers(db) -> int:

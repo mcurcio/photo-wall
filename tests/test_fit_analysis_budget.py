@@ -34,9 +34,9 @@ def _wall(registry) -> None:
         for output in range(2):
             index = 2 * pi + output
             frame_id = f"frame-{index}"
-            registry.create_frame(frame_create(frame_id))
+            registry.create_frame(frame_create(frame_id), by="console")
             registry.bind(frame_id, player["player_id"], f"HDMI-A-{output + 1}",
-                          expected_generation=0)
+                          expected_generation=0, by="console")
             save_position(registry, frame_id, PORTRAIT_ON_WIDE)
 
 
@@ -57,8 +57,8 @@ def _pool(registry) -> None:
     assert library.finish_check(lease, CheckComplete())
     stored = key_content(4000, 3000).model_dump(mode="json")
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO photo_key_content(asset_id,analysis_version,status,key,"
-                     "measured_at) SELECT asset_id,%s,'measured',%s,0 FROM asset_revisions",
+        conn.execute("UPDATE library_assets SET key_analysis_version=%s,key_status='measured',"
+                     "key=%s,key_measured_at=0 WHERE asset_id IS NOT NULL",
                      (stored["analysis_version"], Jsonb(stored)))
         conn.execute("ANALYZE")
 

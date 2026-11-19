@@ -99,8 +99,8 @@ def test_health_counts_preparations_by_their_latest_outcome_and_variant_bytes(re
     with registry.db.transaction() as conn:
         for item, status, reason in ((ready, "ok", None), (failed, "terminal", "unsupported_media")):
             conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,reason,"
-                         "retry_not_before,seq,updated_at) VALUES(%s,%s,%s,%s,NULL,"
-                         "nextval('job_outcome_seq'),1000)",
+                         "retry_not_before,seq,changed_at,created_at,created_by,changed_by) VALUES(%s,%s,%s,%s,NULL,"
+                         "nextval('job_outcome_seq'),1000,1000,'central','central')",
                          (prepare_lock(repo.variant_key_in(conn, item.asset_id)),
                           PrepareMedia.job_name, status, reason))
     health = repo.health()
@@ -123,8 +123,8 @@ def test_a_failed_preparation_is_reported_until_its_retry_window_ends(registry):
     with registry.db.transaction() as conn:
         key = repo.variant_key_in(conn, held.asset_id)
         conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,reason,retry_not_before,"
-                     "seq,updated_at) VALUES(%s,%s,'transient','asset_missing',1010,"
-                     "nextval('job_outcome_seq'),1000)", (prepare_lock(key), PrepareMedia.job_name))
+                     "seq,changed_at,created_at,created_by,changed_by) VALUES(%s,%s,'transient','asset_missing',1010,"
+                     "nextval('job_outcome_seq'),1000,1000,'central','central')", (prepare_lock(key), PrepareMedia.job_name))
     registry.clock.wall = 1000  # the repository's media times follow this clock
     with registry.db.transaction() as conn:
         pool = repo.source_pools_in(conn, {"family:1"})["family:1"]

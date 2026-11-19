@@ -101,7 +101,7 @@ def test_the_tier_jobs_partition_the_suite_and_fail_closed():
     selections = {job: _job(workflow, job) for job in ('unit', 'db', 'browser')}
     assert '-m "not db and not browser" -n 4 --dist worksteal' in selections['unit']
     # The sharded legs: every shard of the count each sets (tests/support/shards.py partitions).
-    for job, count in (('unit', 2), ('browser', 3)):
+    for job, count in (('unit', 3), ('browser', 3)):
         assert f'shard: {list(range(1, count + 1))}' in selections[job], job
         assert f'PHOTO_WALL_TEST_SHARD=${{{{ matrix.shard }}}}/{count}' in selections[job].replace(
             'PHOTO_WALL_TEST_SHARD: ', 'PHOTO_WALL_TEST_SHARD='), job

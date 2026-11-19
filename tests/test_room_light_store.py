@@ -1,14 +1,18 @@
 """Room lights over PostgreSQL (central/infra/room_light_store.py, central/infra/light_sensor_judge.py,
-the entities Home Assistant published, and the WALL marks): every word is kept by its reference and
-resolved when the document is built, the Pi sensor's judge never rolls back the host line, the Home
-Assistant page reads when Central last heard each entity, and ensuring WALL only wakes the room-lights
-writer."""
+the entities Home Assistant published, and the WALL marks): facts are kept for named references
+only and judged before they are stored (decision 0034's class B: an unchanged report or one no setup
+item names writes nothing; the house's lock is taken only when the document changes), the Pi
+sensor's judge never rolls back the host line, the Home Assistant page reads when Central last heard
+each entity, and ensuring WALL only wakes the room-lights writer."""
 from __future__ import annotations
 
 import asyncio
+import threading
 
+import psycopg
 import pytest
 from psycopg.conninfo import make_conninfo
+from support.devices import seed_device
 from test_registry import enroll
 
 from central.content_catalog.catalog import device_id_for_serial
@@ -74,18 +78,86 @@ def _sql(registry, sql: str, params=()) -> list[dict]:
         return cursor.fetchall() if cursor.description else []
 
 
-def test_a_word_heard_before_its_light_exists_shows_at_once(registry):
-    """A2. Mutation probe M1: entry_of ignoring the word -> the light reads not reported."""
+def test_a_report_for_a_reference_no_light_names_writes_nothing(registry):
+    """S2d #2. Mutation probe: `_report_in` without step 1 (the setup names it?) -> a facts row appears."""
     lights = PgRoomLights(registry.db, PgHouseLock())
     change = lights.current().change
-    assert lights.record_light_state(X, _said(True, 0.5)) == "unchanged"     # no light names it yet
-    assert lights.current().change == change
-    view = lights.save_room_light("x", ReportedLight(name="X", reporter=X, colour=WHITE))
-    assert view.entry == ReportedEntry(colour=KELVIN, state=Dimmer(on=True, brightness=0.5), doubt=None) and view.heard_at is not None
-    assert lights.current().lights["x"] == view.entry and lights.current().change == change + 1
-    assert lights.record_light_state(X, _said(True, 0.5)) == "unchanged"     # a repeat
+    with registry.db.transaction() as conn:
+        assert room_light_store._light_in(conn, PgHouseLock(), X, _said(True, 0.5)) == "unchanged"
+        assert _xid(conn) is None
+    assert _sql(registry, "SELECT * FROM room_light_facts") == []
+    view = lights.save_room_light("x", ReportedLight(name="X", reporter=X, colour=WHITE), by="console")
+    assert view.entry == ReportedEntry(colour=KELVIN, state=NotReported(), doubt=None) and view.heard_at is None
+    assert lights.current().change == change + 1
+    assert lights.record_light_state(X, _said(True, 0.5)) == "recorded"
+    assert lights.current().lights["x"].state == Dimmer(on=True, brightness=0.5)
     assert lights.record_light_state(X, _said(False, 0.0)) == "recorded"
-    assert lights.current().change == change + 2
+    assert lights.current().change == change + 3
+
+
+def test_an_unchanged_report_writes_nothing(registry):
+    """S2d #1. Mutation probe: step 3 removed (always write the facts) -> the repeat takes a
+    transaction id. Its heard time is written again only once it is HEARD_WRITE_SECONDS old."""
+    lights = PgRoomLights(registry.db, PgHouseLock())
+    lights.save_room_light("x", ReportedLight(name="X", reporter=X, colour=WHITE), by="console")
+    assert lights.record_light_state(X, _said(True, 0.5)) == "recorded"
+    with registry.db.transaction() as conn:
+        assert room_light_store._light_in(conn, PgHouseLock(), X, _said(True, 0.5)) == "unchanged"
+        assert _xid(conn) is None
+    _sql(registry, "UPDATE room_light_facts SET heard_at = heard_at - %s", (room_light_store.HEARD_WRITE_SECONDS,))
+    [before] = _sql(registry, "SELECT heard_at, changed_at FROM room_light_facts")
+    assert lights.record_light_state(X, _said(True, 0.5)) == "unchanged"
+    [after] = _sql(registry, "SELECT heard_at, changed_at FROM room_light_facts")
+    assert after["heard_at"] > before["heard_at"] and after["changed_at"] == before["changed_at"]
+
+
+def test_a_facts_change_the_document_does_not_see_takes_no_house_lock(registry):
+    """S2d #3. A Sensor no light measures: its new reading is written while another transaction holds
+    the house's lock; a report that changes the document waits for it. Mutation probe: take the lock
+    before judging -> the first report waits too (lock_timeout)."""
+    lights = PgRoomLights(registry.db, PgHouseLock())
+    lux = SensorRef(source="home-assistant", address="sensor.lux")
+    lights.save_sensor("lux", Sensor(name="Lux", at=lux), by="console")
+    lights.save_room_light("x", ReportedLight(name="X", reporter=X, colour=WHITE), by="console")
+    holding, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with psycopg.connect(registry.db.dsn) as holder, holder.transaction():
+            holder.execute("SELECT 1 FROM singletons WHERE name='room_light_setup' FOR UPDATE")
+            holding.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert holding.wait(10)
+        with registry.db.transaction() as conn:
+            conn.execute("SET LOCAL lock_timeout = '1s'")
+            assert room_light_store._reading_in(conn, PgHouseLock(), lux, Measured(lux=70.0)) == "unchanged"
+        with pytest.raises(psycopg.errors.LockNotAvailable), registry.db.transaction() as conn:
+            conn.execute("SET LOCAL lock_timeout = '1s'")
+            room_light_store._light_in(conn, PgHouseLock(), X, _said(True, 0.5))
+    finally:
+        release.set()
+        holder.join()
+    assert lights.lights().sensors[0].reading == Measured(lux=70.0)
+
+
+def test_a_document_change_raises_the_change_and_notifies_once(registry):
+    lights = PgRoomLights(registry.db, PgHouseLock())
+    lights.save_room_light("x", ReportedLight(name="X", reporter=X, colour=WHITE), by="console")
+    change = lights.current().change
+    with psycopg.connect(registry.db.dsn, autocommit=True) as listener:
+        listener.execute(f"LISTEN {room_light_store.ROOM_LIGHTS_CHANNEL}")
+        assert lights.record_light_state(X, _said(True, 0.5)) == "recorded"
+        assert lights.record_light_state(X, _said(True, 0.5)) == "unchanged"
+        heard = list(listener.notifies(timeout=1.0))
+    assert len(heard) == 1 and lights.current().change == change + 1
+
+
+def _xid(conn) -> object:
+    """The transaction's id, None while it has written nothing."""
+    return conn.execute("SELECT pg_current_xact_id_if_assigned() AS xid").fetchone()["xid"]
 
 
 def test_a_pi_reading_heard_before_its_sensor_exists_shows_at_once(registry):
@@ -95,25 +167,31 @@ def test_a_pi_reading_heard_before_its_sensor_exists_shows_at_once(registry):
         LightSensorReading(reading=Measured(lux=180.0))))
     lights = PgRoomLights(registry.db, PgHouseLock())
     sensor = lights.save_sensor("pi-meter", Sensor(name="Pi meter", at=SensorRef(source=PI_SOURCE,
-                                                                                address=player["player_id"])))
+                                                                                address=player["player_id"])),
+                              by="console")
     assert sensor.reading == Measured(lux=180.0) and sensor.heard_at is not None and sensor.reports is None
-    window = lights.save_room_light("window", MeasuredLight(name="Window", sensor="pi-meter", colour=WHITE))
+    window = lights.save_room_light("window", MeasuredLight(name="Window", sensor="pi-meter", colour=WHITE),
+                                    by="console")
     assert window.entry == MeasuredEntry(colour=KELVIN, state=Measured(lux=180.0), doubt=None)
     assert next(each for each in lights.lights().sensors if each.id == "pi-meter").reports == "window"
 
 
-def test_a_changed_reporter_reads_its_new_references_last_word(registry):
-    """A3: no reset; the light takes whatever its new reference last said."""
+def test_a_changed_reporter_reads_its_new_reference_from_its_next_report(registry):
+    """A3: no reset; a reference named after its source last spoke reads "never heard" until its next
+    report (decision 0034: facts for named references only), and the old one's facts are forgotten."""
     lights = PgRoomLights(registry.db, PgHouseLock())
+    lights.save_room_light("x", ReportedLight(name="X", reporter=X, colour=WHITE), by="console")
+    lights.record_light_state(X, _said(True, 0.5))
     lights.record_light_state(Y, _said(True, 0.25))
-    lights.save_room_light("x", ReportedLight(name="X", reporter=X, colour=WHITE))
+    lights.save_room_light("x", ReportedLight(name="X", reporter=Y, colour=WHITE), by="console")
     assert lights.current().lights["x"].state == NotReported()
-    lights.save_room_light("x", ReportedLight(name="X", reporter=Y, colour=WHITE))
+    assert _sql(registry, "SELECT address FROM room_light_facts") == []
+    lights.record_light_state(Y, _said(True, 0.25))
     assert lights.current().lights["x"].state == Dimmer(on=True, brightness=0.25)
 
 
-def test_refused_reports_are_one_log_cut_and_kept_per_source(registry, monkeypatch):
-    monkeypatch.setattr(room_light_store, "REFUSALS_KEPT", 2)
+def test_refused_reports_are_events_cut_and_newest_first(registry, monkeypatch):
+    monkeypatch.setattr(room_light_store, "REFUSALS_SHOWN", 3)
     lights = PgRoomLights(registry.db, PgHouseLock())
     for index in range(3):
         lights.record_refused("home-assistant", f"photowall/x/{index}", ReportRefusal.UNREADABLE)
@@ -121,12 +199,14 @@ def test_refused_reports_are_one_log_cut_and_kept_per_source(registry, monkeypat
     refused = lights.refused().refused
     assert [(each.source, each.address) for each in refused] == [
         ("pi", "p" * ADDRESS_MAX), ("home-assistant", "photowall/x/2"), ("home-assistant", "photowall/x/1")]
+    assert _sql(registry, "SELECT count(*) AS n FROM events WHERE kind='refusal'") == [{"n": 4}]
 
 
 def _pi(registry) -> dict:
     """A Pi enrolled with the device id its serial names (the link store's key)."""
     device = device_id_for_serial(SERIAL)
-    _sql(registry, "INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)", (device, SERIAL))
+    with registry.db.transaction() as conn:
+        seed_device(conn, device, SERIAL)
     return enroll(registry, device_id=device)[0]
 
 
@@ -142,6 +222,9 @@ def test_a_reading_that_fails_never_rolls_back_the_host_lines_record(registry, m
     record stays the source: the next build of the document takes the reading the failed savepoint
     lost (mutation: `current` without `missed_readings_in` -> the Pi's reading is never kept)."""
     player = _pi(registry)
+    lights = PgRoomLights(registry.db, PgHouseLock())
+    lights.save_sensor("pi-meter", Sensor(name="Pi meter", at=SensorRef(source=PI_SOURCE, address=player["player_id"])),
+                       by="console")
 
     def failing(conn, *_):
         conn.execute("SELECT 1/0")
@@ -149,15 +232,15 @@ def test_a_reading_that_fails_never_rolls_back_the_host_lines_record(registry, m
     monkeypatch.setattr(room_light_store, "_reading_in", failing)
     _record_host_line(registry, LightSensorJudge(PgRoomLights(registry.db, PgHouseLock())),
                       encode_light_sensor(LightSensorReading(reading=Measured(lux=5.0))))
-    assert _sql(registry, "SELECT seq FROM node_link_records WHERE stream=%s", (HOST_STATE_STREAM,)) == [{"seq": 1}]
+    assert _sql(registry, "SELECT seq FROM node_states WHERE stream=%s", (HOST_STATE_STREAM,)) == [{"seq": 1}]
     monkeypatch.undo()
-    assert _sql(registry, "SELECT reading FROM reading_words WHERE source=%s", (PI_SOURCE,)) == []
-    lights = PgRoomLights(registry.db, PgHouseLock())
+    assert _sql(registry, "SELECT facts FROM room_light_facts WHERE source=%s", (PI_SOURCE,)) == []
     lights.current()
-    assert _sql(registry, "SELECT address, reading FROM reading_words WHERE source=%s", (PI_SOURCE,)) == [
-        {"address": player["player_id"], "reading": {"kind": "measured", "lux": 5.0}}]
+    [kept] = _sql(registry, "SELECT address, facts FROM room_light_facts WHERE kind='reading' AND source=%s",
+                  (PI_SOURCE,))
+    assert (kept["address"], kept["facts"]["reading"]["value"]) == (player["player_id"], {"kind": "measured", "lux": 5.0})
     change = lights.current().change
-    assert lights.current().change == change           # taken once: the word is now newer than the record
+    assert lights.current().change == change           # taken once: the facts are now newer than the record
     _record_host_line(registry, LightSensorJudge(lights), b"not a reading", seq=2)
     [refused] = lights.refused().refused
     assert (refused.source, refused.address, refused.reason) == (PI_SOURCE, player["player_id"], ReportRefusal.UNREADABLE)
@@ -173,7 +256,7 @@ def test_a_refusal_that_fails_never_rolls_back_the_host_lines_record(registry, m
 
     monkeypatch.setattr(room_light_store, "_refusal_in", failing)
     _record_host_line(registry, LightSensorJudge(PgRoomLights(registry.db, PgHouseLock())), b"not a reading")
-    assert _sql(registry, "SELECT seq FROM node_link_records WHERE stream=%s", (HOST_STATE_STREAM,)) == [{"seq": 1}]
+    assert _sql(registry, "SELECT seq FROM node_states WHERE stream=%s", (HOST_STATE_STREAM,)) == [{"seq": 1}]
 
 
 def test_the_home_assistant_page_reads_when_each_entity_was_heard_and_its_name(registry):
@@ -184,7 +267,7 @@ def test_the_home_assistant_page_reads_when_each_entity_was_heard_and_its_name(r
     assert settings.view().heard_at is None
     lights.save_room_light("spot", ReportedLight(name="Spot", reporter=ReporterRef(source="home-assistant",
                                                                                    address="light.unheard"),
-                                                 colour=TypedColour(kelvin=4000)))
+                                                 colour=TypedColour(kelvin=4000)), by="console")
     lights.record_heard("light.hall", "light", "Hall")
     lights.record_heard("sensor.lux", "illuminance", "Hall lux")
     view = settings.view()
@@ -201,42 +284,31 @@ def test_ensuring_wall_only_wakes_the_room_lights_writer():
     assert asyncio.run(marks.wall_documents()) == {} and woken == [1]
 
 
-def test_words_are_kept_per_source_newest_first(registry, monkeypatch):
-    monkeypatch.setattr(room_light_store, "WORDS_KEPT_PER_SOURCE", 2)
+def test_facts_are_kept_for_named_references_only(registry):
+    """A room light's, Sensor's or colour sensor's reference keeps its facts; any other reference's
+    report is dropped, and an item's removal forgets its reference's facts."""
     lights = PgRoomLights(registry.db, PgHouseLock())
-    for name in ("a", "b", "c"):
-        lights.record_light_state(ReporterRef(source="home-assistant", address=f"light.{name}"), _said(True, 1.0))
-    lights.record_light_state(ReporterRef(source="other", address="light.a"), _said(True, 1.0))
-    kept = _sql(registry, "SELECT source, address FROM light_words ORDER BY source, address")
-    assert [(row["source"], row["address"]) for row in kept] == [
-        ("home-assistant", "light.b"), ("home-assistant", "light.c"), ("other", "light.a")]
-
-
-
-def test_a_named_reference_is_never_trimmed(registry, monkeypatch):
-    """A room light's, Sensor's or colour sensor's reference keeps its facts however many others speak."""
-    monkeypatch.setattr(room_light_store, "WORDS_KEPT_PER_SOURCE", 1)
-    lights = PgRoomLights(registry.db, PgHouseLock())
-    lights.save_room_light("x", ReportedLight(name="X", reporter=X, colour=WHITE))
-    lights.save_sensor("lux", Sensor(name="Lux", at=SensorRef(source="home-assistant", address="sensor.lux")))
-    lights.save_colour_sensor("sky", ColourSensor(name="Sky", at=SKY_AT))
+    lights.save_room_light("x", ReportedLight(name="X", reporter=X, colour=WHITE), by="console")
+    lights.save_sensor("lux", Sensor(name="Lux", at=SensorRef(source="home-assistant", address="sensor.lux")),
+                       by="console")
+    lights.save_colour_sensor("sky", ColourSensor(name="Sky", at=SKY_AT), by="console")
     lights.record_light_state(X, _said(True, 0.5))
     lights.record_reading(SensorRef(source="home-assistant", address="sensor.lux"), Measured(lux=70.0))
     lights.record_colour_reading(SKY_AT, KelvinColour(kelvin=4100.0))
-    for name in ("a", "b", "c"):
+    for name in ("a", "b"):
         lights.record_light_state(ReporterRef(source="home-assistant", address=f"light.{name}"), _said(True, 1.0))
         lights.record_reading(SensorRef(source="home-assistant", address=f"sensor.{name}"), Measured(lux=1.0))
         lights.record_colour_reading(ColourSensorRef(source="home-assistant", address=f"sensor.k{name}"),
                                      KelvinColour(kelvin=3000.0))
-    assert [row["address"] for row in _sql(registry, "SELECT address FROM light_words ORDER BY address")] == [
-        "light.c", "light.x"]
-    assert [row["address"] for row in _sql(registry, "SELECT address FROM reading_words ORDER BY address")] == [
-        "sensor.c", "sensor.lux"]
-    assert [row["address"] for row in _sql(registry, "SELECT address FROM colour_words ORDER BY address")] == [
-        "sensor.kc", "sensor.sun_sky_color_temperature"]
+    assert [(row["kind"], row["address"]) for row in _sql(
+        registry, "SELECT kind, address FROM room_light_facts ORDER BY kind, address")] == [
+        ("colour", SKY_AT.address), ("light", "light.x"), ("reading", "sensor.lux")]
     view = lights.lights()
     assert next(each for each in view.lights if each.id == "x").entry.state == Dimmer(on=True, brightness=0.5)
     assert view.sensors[0].reading == Measured(lux=70.0) and view.colour_sensors[0].colour == KelvinColour(kelvin=4100.0)
+    lights.remove_sensor("lux", by="console")
+    assert [row["kind"] for row in _sql(registry, "SELECT kind FROM room_light_facts ORDER BY kind")] == [
+        "colour", "light"]
 
 
 SKY_AT = ColourSensorRef(source="home-assistant", address="sensor.sun_sky_color_temperature")
@@ -246,9 +318,10 @@ def test_kept_brightness_and_colour_survive_cant_tell_and_a_restart(registry):
     """Owner, 2026-10-25 Q1 and Q3: the last stated brightness and colour stand through "unavailable",
     and a Central restart (a new PgRoomLights over the same database) keeps them."""
     lights = PgRoomLights(registry.db, PgHouseLock())
-    lights.save_colour_sensor("sky", ColourSensor(name="Sky", at=SKY_AT))
-    lights.save_room_light("x", ReportedLight(name="X", reporter=X, colour=BulbColour(typed_kelvin=2700)))
-    lights.save_room_light("sun", FixedLight(name="Sun", colour=SensedColour(sensor="sky", typed_kelvin=5500)))
+    lights.save_colour_sensor("sky", ColourSensor(name="Sky", at=SKY_AT), by="console")
+    lights.save_room_light("x", ReportedLight(name="X", reporter=X, colour=BulbColour(typed_kelvin=2700)), by="console")
+    lights.save_room_light("sun", FixedLight(name="Sun", colour=SensedColour(sensor="sky", typed_kelvin=5500)),
+                           by="console")
     red = RgbColour(rgb=(1.0, 0.0, 0.0))
     assert lights.record_light_state(X, LightStated(state=Dimmer(on=True, brightness=0.4), colour=red)) == "recorded"
     assert lights.record_colour_reading(SKY_AT, KelvinColour(kelvin=3456.5)) == "recorded"
@@ -274,23 +347,25 @@ def test_kept_brightness_and_colour_survive_cant_tell_and_a_restart(registry):
 
 def test_colour_sensors_are_saved_and_kept_while_followed(registry):
     lights = PgRoomLights(registry.db, PgHouseLock())
-    saved = lights.save_colour_sensor("sky", ColourSensor(name="Sky", at=SKY_AT))
+    saved = lights.save_colour_sensor("sky", ColourSensor(name="Sky", at=SKY_AT), by="console")
     assert (saved.colour, saved.heard_at, saved.followed_by) == (None, None, ())
-    lights.save_room_light("sun", FixedLight(name="Sun", colour=SensedColour(sensor="sky", typed_kelvin=5500)))
+    lights.save_room_light("sun", FixedLight(name="Sun", colour=SensedColour(sensor="sky", typed_kelvin=5500)),
+                           by="console")
     with pytest.raises(RoomLightRefused) as followed:
-        lights.remove_colour_sensor("sky")
+        lights.remove_colour_sensor("sky", by="console")
     assert followed.value.code is RoomLightRefusal.COLOUR_SENSOR_FOLLOWED
     with pytest.raises(RoomLightRefused) as taken:
-        lights.save_colour_sensor("other", ColourSensor(name="Other", at=SKY_AT))
+        lights.save_colour_sensor("other", ColourSensor(name="Other", at=SKY_AT), by="console")
     assert taken.value.code is RoomLightRefusal.REFERENCE_TAKEN
     with pytest.raises(RoomLightRefused) as unknown:
-        lights.save_room_light("lamp", FixedLight(name="Lamp", colour=SensedColour(sensor="nope", typed_kelvin=5500)))
+        lights.save_room_light("lamp", FixedLight(name="Lamp", colour=SensedColour(sensor="nope", typed_kelvin=5500)),
+                               by="console")
     assert unknown.value.code is RoomLightRefusal.UNKNOWN_COLOUR_SENSOR
-    lights.save_room_light("sun", FixedLight(name="Sun", colour=TypedColour(kelvin=5500)))
-    lights.remove_colour_sensor("sky")
+    lights.save_room_light("sun", FixedLight(name="Sun", colour=TypedColour(kelvin=5500)), by="console")
+    lights.remove_colour_sensor("sky", by="console")
     assert lights.lights().colour_sensors == ()
     with pytest.raises(RoomLightRefused) as gone:
-        lights.remove_colour_sensor("sky")
+        lights.remove_colour_sensor("sky", by="console")
     assert gone.value.code is RoomLightRefusal.UNKNOWN_COLOUR_SENSOR
 
 
@@ -318,35 +393,40 @@ def ticking_db(registry):
         conn.execute("CREATE SEQUENCE ticking.tick")
         conn.execute("CREATE FUNCTION ticking.clock_timestamp() RETURNS timestamptz VOLATILE LANGUAGE sql AS "
                      "$$ SELECT pg_catalog.clock_timestamp() + nextval('ticking.tick') * interval '1 second' $$")
-    db = Database(make_conninfo(registry.db.dsn, options="-c search_path=ticking,pg_catalog,public"))
+    db = Database(make_conninfo(registry.db.dsn, options="-c search_path=ticking,pg_catalog,public"), application_name="photo-wall-test")
     try:
         yield db
     finally:
         db.close()
 
 
-def test_the_new_tables_carry_their_audit_fields(ticking_db):
-    """A colour sensor, a colour sensor's facts and Galleria's birth each keep when and by whom they
-    were created and last changed, a new record's two times one instant (one clock read per write,
-    held under a clock that moves at every read): a second write moves only when it changed and by whom."""
+def test_the_setup_facts_and_galleria_s_birth_carry_their_audit_fields(ticking_db):
+    """The setup (a colour sensor saved), a colour sensor's facts and Galleria's birth each keep when
+    and by whom they were created and last changed, a new record's two times one instant (one clock
+    read per write, held under a clock that moves at every read): a second write moves only when it
+    changed and by whom."""
     lights = PgRoomLights(ticking_db, PgHouseLock())
 
-    def audit(table: str) -> dict:
+    def audit(sql: str) -> dict:
         with ticking_db.transaction() as conn:
-            return conn.execute(f"SELECT created_at, created_by, changed_at, changed_by FROM {table}").fetchone()  # noqa: S608
+            return conn.execute(f"SELECT created_at, created_by, changed_at, changed_by FROM {sql}").fetchone()  # noqa: S608
 
     writes = {
-        "colour_sensors": lambda name: lights.save_colour_sensor("sky", ColourSensor(name=name, at=SKY_AT)),
-        "colour_words": lambda name: lights.record_colour_reading(SKY_AT, KelvinColour(kelvin=len(name) * 1000.0)),
-        "galleria_birth": lambda name: lights.record_galleria_birth(GalleriaBirth(version=name, kinds=("light",),
-                                                                                     connection=_CONNECTION)),
+        "singletons WHERE name='room_light_setup'":
+            lambda name: lights.save_colour_sensor("sky", ColourSensor(name=name, at=SKY_AT), by="console"),
+        "room_light_facts": lambda name: lights.record_colour_reading(SKY_AT, KelvinColour(kelvin=len(name) * 1000.0)),
+        "singletons WHERE name='galleria_birth'":
+            lambda name: lights.record_galleria_birth(GalleriaBirth(version=name, kinds=("light",), connection=_CONNECTION)),
     }
-    by = {"colour_sensors": "operator", "colour_words": "home-assistant", "galleria_birth": "galleria"}
+    by = {"singletons WHERE name='room_light_setup'": ("unknown", "console"),
+          "room_light_facts": ("home-assistant", "home-assistant"),
+          "singletons WHERE name='galleria_birth'": ("central", "central")}
     for table, write in writes.items():
         write("Sky")
         first = audit(table)
-        assert first["created_at"] == first["changed_at"] and first["created_by"] == first["changed_by"] == by[table]
+        if table == "room_light_facts" or table.endswith("'galleria_birth'"):
+            assert first["created_at"] == first["changed_at"] and first["created_by"] == by[table][0], table
         write("Daylight")
         second = audit(table)
         assert second["created_at"] == first["created_at"] and second["changed_at"] > first["changed_at"], table
-        assert (second["created_by"], second["changed_by"]) == (by[table], by[table])
+        assert (second["created_by"], second["changed_by"]) == by[table], table

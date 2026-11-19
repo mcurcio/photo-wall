@@ -1,4 +1,4 @@
-import { ageAt, formatAge, frameHealth, gigabytes } from "./health.js";
+import { frameHealth, gigabytes } from "./health.js";
 import { fact, factText, plannedNothing, words } from "./facts.js";
 import { isBound, LIVE_PHASES, plannedFact, rankedContributions, toTarget } from "./join.js";
 import { cycleWording, runScene } from "./showState.js";
@@ -20,13 +20,6 @@ import { captureDay, clockTime, countWords } from "./timeWords.js";
  * @typedef {{state: string, severity: Severity, label: string}} Classified
  */
 
-// The worker's maintenance runs every 5 min (media/task_queue.py MAINTENANCE_CRON)
-// and each run records that it checked in (media_settings.worker_seen).
-export const WORKER_CHECK_IN_SECONDS = 300;
-// Past this, a missed beat is not jitter: two intervals plus slack. A pytest pins it to the
-// worker container's healthcheck window (media/task_queue.py WORKER_FRESH_SECONDS).
-export const WORKER_QUIET_AFTER = 2 * WORKER_CHECK_IN_SECONDS + 60;
-
 /**
  * The read time media ages are taken against: `media.read_at`, the database's
  * time of the read (G11). Never `inventory.read_at` (Central's process clock):
@@ -34,11 +27,6 @@ export const WORKER_QUIET_AFTER = 2 * WORKER_CHECK_IN_SECONDS + 60;
  */
 export function mediaNow(snapshot) {
   return snapshot?.media?.read_at;
-}
-
-/** "4 min" for a known age; fails closed to "an unknown time" (no read time). */
-function age(seconds) {
-  return Number.isFinite(seconds) ? formatAge(Math.max(0, seconds)) : "an unknown time";
 }
 
 /** A code as words: "storage_pressure" → "storage pressure" (the one helper, facts.js `words`). */
@@ -67,41 +55,32 @@ export function workerLoad(health) {
 }
 
 /**
- * The worker's state, first match (§14): never checked in, reported an error,
- * quiet past {@link WORKER_QUIET_AFTER}, ok.
+ * The worker's state, first match (§14): not running, reported an error, ok. Whether it runs is
+ * Central's reading of the worker's queue heartbeat on the database's clock
+ * (central/infra/runtime.py `worker_running_in`, served as `worker_running`); the worker writes
+ * its error code only when it changes, so there is no check-in time to age.
  *
  * @param {object|null} health `/v1/operator/media` `health`
- * @param {number} now `media.read_at`, the database's clock (G11)
- * @param {boolean} includeFilters include the Source's criteria in the label (default true)
  * @returns {Classified|null} null when the media read carried no health
  */
-export function workerState(health, now) {
+export function workerState(health) {
   if (health == null) {
     return null;
   }
-  if (health.worker_seen == null) {
-    return { state: "never", severity: "alarm", label: "never checked in" };
+  if (health.worker_running !== true) {
+    return { state: "stopped", severity: "alarm", label: "not running" };
   }
   if (health.worker_error) {
     const words = WORKER_ERRORS[health.worker_error] ?? codeWords(health.worker_error);
     return { state: "error", severity: "alarm", label: `reported: ${words}` };
   }
-  const since = ageAt(now, health.worker_seen);
-  if (!(since <= WORKER_QUIET_AFTER)) {
-    return { state: "quiet", severity: "alarm", label: `quiet for ${age(since)}` };
-  }
   return {
     state: "ok",
     severity: "ok",
-    // The worker's own check-in, received and read on the database's clock (G11, §39).
     label: factText(fact({
-      kind: "reported",
-      source: "Media worker",
-      receipt: "latest",
-      value: workerLoad(health),
-      receivedAt: health.worker_seen,
-      readAt: now,
-      field: "the media worker's check-in time",
+      kind: "derived",
+      value: `running · ${workerLoad(health)}`,
+      basis: "its queue heartbeat is recent",
     })),
   };
 }
@@ -297,7 +276,7 @@ export function whyNothingNew(snapshot, frameId, check = null, pools = {}) {
     steps.push(skip("The Source"), skip("Check this frame"));
   }
 
-  const worker = workerState(snapshot?.media?.health, now);
+  const worker = workerState(snapshot?.media?.health);
   steps.push({
     title: "The worker",
     state: worker?.severity === "ok" ? "ok" : "stop",

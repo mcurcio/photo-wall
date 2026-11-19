@@ -2,12 +2,14 @@
 
 from psycopg.types.json import Jsonb
 from support.frames import frame_create
+from support.player_state import heard_in
 from support.position import PORTRAIT_ON_WIDE, save_position
 from test_registry import enroll
 
 from central.coordination import Coordinator
-from central.infra.player_contact_store import heard_in, player_reports_in
+from central.infra.player_contact_store import player_reports_in
 from central.readiness_diagnostics import project_readiness_diagnostics
+from contracts.liveness import SILENT_AFTER_SECONDS
 from contracts.models import Failure, Layer, Plan, Readiness
 
 
@@ -16,9 +18,9 @@ def _seed(registry):
     player_id, epoch = identity["player_id"], identity["authority_epoch"]
     for index in range(2):
         frame_id = f"diagnostic-frame-{index}"
-        registry.create_frame(frame_create(frame_id))
+        registry.create_frame(frame_create(frame_id), by="console")
         output_id = f"HDMI-A-{index + 1}"
-        registry.bind(frame_id, player_id, output_id, expected_generation=0)
+        registry.bind(frame_id, player_id, output_id, expected_generation=0, by="console")
         save_position(registry, frame_id, PORTRAIT_ON_WIDE)
     bindings = tuple(registry.configuration_for(player_id, epoch)["bindings"])
     Coordinator(registry.db, registry.clock).configuration(player_id, epoch)
@@ -53,10 +55,12 @@ def _offer(registry, identity, bindings, layers, *, revision=1, valid_until=1200
     )
     with registry.db.transaction() as conn:
         conn.execute(
-            "INSERT INTO plan_offers VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+            "INSERT INTO plan_offers(player_id,authority_epoch,revision,plan_id,manifest,groups,"
+            "created_at,valid_until,created_by,changed_at,changed_by) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,'scheduler',%s,'scheduler')",
             (plan.player_id, plan.authority_epoch, plan.revision, plan.plan_id,
              Jsonb(plan.model_dump(mode="json")), Jsonb({layer.assignment_id: "group" for layer in layers}),
-             plan.issued_at, plan.valid_until),
+             plan.issued_at, plan.valid_until, plan.issued_at),
         )
     return plan
 
@@ -74,12 +78,12 @@ def _report(registry, plan, failures, *, sequence=1):
         failures=tuple(failures),
     )
     with registry.db.transaction() as conn:
+        # As Coordination writes it: on the show state `_seed`'s configuration made, this epoch's.
         conn.execute(
-            "INSERT INTO player_feedback VALUES(%s,%s,%s,%s,%s) "
-            "ON CONFLICT(player_id,authority_epoch) DO UPDATE SET sequence=EXCLUDED.sequence,"
-            "received_at=EXCLUDED.received_at,readiness=EXCLUDED.readiness",
-            (plan.player_id, plan.authority_epoch, sequence, registry.clock.utc(),
-             Jsonb(report.model_dump(mode="json"))),
+            "UPDATE player_show_state SET readiness_sequence=%s,readiness_received_at=%s,"
+            "readiness=%s,changed_at=%s,changed_by='node' WHERE player_id=%s AND authority_epoch=%s",
+            (sequence, registry.clock.utc(), Jsonb(report.model_dump(mode="json")),
+             registry.clock.utc(), plan.player_id, plan.authority_epoch),
         )
         heard_in(conn, plan.player_id, plan.authority_epoch, registry.clock.utc())
 
@@ -134,7 +138,7 @@ def test_projection_suppresses_stale_frame_generation(registry):
     identity, bindings, layers, _, _ = _seed(registry)
     plan = _offer(registry, identity, bindings, layers)
     _report(registry, plan, [Failure(assignment_id=layers[0].assignment_id, code="decode")])
-    registry.unbind(layers[0].frame_id, expected_generation=1)
+    registry.unbind(layers[0].frame_id, expected_generation=1, by="console")
     assert _project(registry) == ()
 
 
@@ -152,7 +156,7 @@ def test_projection_suppresses_a_silent_players_failures_and_keeps_a_heard_ones(
     assert len(_project(registry)) == 1
     with registry.db.transaction() as conn:
         conn.execute("UPDATE player_contacts SET heard_at=%s WHERE player_id=%s",
-                     (registry.clock.utc() - 40, identity["player_id"]))
+                     (registry.clock.utc() - SILENT_AFTER_SECONDS - 1, identity["player_id"]))
     assert _project(registry) == ()
 
 

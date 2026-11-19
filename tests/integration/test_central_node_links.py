@@ -31,6 +31,7 @@ from integration.bus_servers import (
     until,
 )
 from nats.js.errors import NotFoundError
+from support.devices import seed_device
 
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import Database
@@ -80,24 +81,29 @@ async def _rows(db: Database, sql: str, params: Sequence[object] = ()) -> list[d
 
 
 async def _records(db: Database, stream: str, epoch: str | None = None) -> list[dict]:
-    """The stream's recorded rows, by (epoch, seq); one epoch's when named."""
-    rows = await _rows(db, "SELECT epoch, seq, subject, message_id, data FROM node_link_records "
-                           "WHERE device_id=%s AND stream=%s ORDER BY epoch, seq", (DEVICE_ID, stream))
+    """The stream's recorded rows, by (epoch, seq); one epoch's when named. An event stream's are its
+    `events` records; a state bucket's are its newest value per key (`node_states`)."""
+    table = ("SELECT epoch, seq, subject, NULL AS message_id, data FROM node_states" if stream.startswith("KV_")
+             else "SELECT epoch, seq, subject, message_id, data FROM events WHERE kind='record' AND")
+    where = " WHERE" if stream.startswith("KV_") else ""
+    rows = await _rows(db, f"{table}{where} device_id=%s AND stream=%s ORDER BY epoch, seq", (DEVICE_ID, stream))
     return [{**row, "data": bytes(row["data"])} for row in rows if epoch is None or row["epoch"] == epoch]
 
 
 async def _gaps(db: Database) -> list[tuple]:
-    rows = await _rows(db, "SELECT stream, epoch, after_seq, lost FROM node_link_gaps WHERE device_id=%s "
-                           "ORDER BY stream, epoch, after_seq", (DEVICE_ID,))
+    rows = await _rows(db, "SELECT stream, epoch, seq AS after_seq, (body->>'lost')::bigint AS lost FROM events "
+                           "WHERE kind='gap' AND device_id=%s ORDER BY stream, epoch, seq", (DEVICE_ID,))
     return [(row["stream"], row["epoch"], row["after_seq"], row["lost"]) for row in rows]
 
 
 async def _cursors(db: Database) -> dict[str, dict[str, tuple[str, int]]]:
-    """pipe -> stream -> (epoch, seq)."""
-    rows = await _rows(db, "SELECT pipe, stream, epoch, seq FROM node_link_cursors WHERE device_id=%s", (DEVICE_ID,))
+    """pipe -> stream -> (epoch, seq), as each pipe's own link store answers them (S2c #4: a pipe's
+    cursors never reach the other's reconcile)."""
+    stores = PgLinkStores(db)
     cursors: dict[str, dict[str, tuple[str, int]]] = {}
-    for row in rows:
-        cursors.setdefault(row["pipe"], {})[row["stream"]] = (row["epoch"], row["seq"])
+    for pipe in (Pipe.FLEET, Pipe.SHOW):
+        for stream, token in (await stores.store(SERIAL, pipe).cursors()).items():
+            cursors.setdefault(pipe.value, {})[stream] = (token.epoch, token.seq)
     return cursors
 
 
@@ -121,9 +127,8 @@ async def _document_on_node(db: Database, node_client, value: bytes) -> str | No
     except NotFoundError:
         return None
     epoch = await _epoch(node_client, DESIRED)
-    own = await _rows(db, "SELECT epoch, seq FROM node_link_documents WHERE device_id=%s AND stream=%s AND key=%s",
-                      (DEVICE_ID, DESIRED, "show"))
-    if message.data != value or not own or (own[0]["epoch"], own[0]["seq"]) != (epoch, message.seq):
+    own = (await PgLinkStores(db).store(SERIAL, Pipe.FLEET).own_tokens(DESIRED)).get("show")
+    if message.data != value or own is None or tuple(own[1]) != (epoch, message.seq):
         return None
     return epoch
 
@@ -137,8 +142,7 @@ def _central_connections(hub: BusServer) -> int:
 
 def test_central_records_every_node_fact_once(database, tmp_path):
     with database.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (DEVICE_ID, SERIAL))
+        seed_device(conn, DEVICE_ID, SERIAL)
     hub = hub_server(tmp_path, [SERIAL])
     node = node_server(tmp_path, SERIAL, hub)
     slices = line_slices()
@@ -201,7 +205,7 @@ def test_central_records_every_node_fact_once(database, tmp_path):
 
             # 2. Away and overflow: the links stop and the records stay; the buffer drops its oldest.
             await worker.track([])
-            total = "SELECT count(*) AS n FROM node_link_records WHERE device_id=%s"
+            total = "SELECT count(*) AS n FROM events WHERE kind='record' AND device_id=%s"
             held = (await _rows(database, total, (DEVICE_ID,)))[0]["n"]
             last = max(row["seq"] for row in await _records(database, RECORDS, epoch))
             gaps = await _gaps(database)
@@ -231,7 +235,7 @@ def test_central_records_every_node_fact_once(database, tmp_path):
             assert None not in ids and len(set(ids)) == len(ids)
 
             # 3. Two workers overlap (rolling deploy): each event is recorded once.
-            second_db = Database(database.dsn)
+            second_db = Database(database.dsn, application_name="photo-wall-test")
             second = _Worker(second_db, hub, projection)
             await second.track([SERIAL])
 

@@ -70,4 +70,4 @@ ProtectControlGroups=yes
 CapabilityBoundingSet=
 RestrictSUIDSGID=yes
 ReadWritePaths=/run/photo-wall-display /run/photo-wall-display-wayland
-InaccessiblePaths=-/run/photo-wall-host-core -/run/photo-wall-app-broker -/run/photo-wall-manager-supervisor
+InaccessiblePaths=-/run/photo-wall-host-core -/run/photo-wall-app-broker

@@ -41,8 +41,8 @@ FRAME = "lobby-left"
 def _bound_frame(registry, frame_id=FRAME, *, x_mm=100, commissioned=True):
     """A placed frame bound to a fresh Player's connected HDMI-A-1; returns the Player id."""
     identity, _key, _request = enroll(registry, count=1)
-    registry.create_frame(frame_create(frame_id, x_mm=x_mm, y_mm=100))
-    registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create(frame_id, x_mm=x_mm, y_mm=100), by="console")
+    registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     if commissioned:
         save_position(registry, frame_id, PORTRAIT_ON_WIDE)
     return identity["player_id"]
@@ -93,13 +93,13 @@ def test_a_reporting_player_reads_last_heard_with_centrals_age(page, registry):
 def test_a_player_not_heard_past_the_threshold_reads_silent(page, registry):
     player_id = _bound_frame(registry)
     report_readiness(registry, player_id)
-    registry.clock.advance(40)
+    registry.clock.advance(60)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         # The tile shows the fact without its age, so it fits; the age is in its name.
         label = _health(page)
         expect(label).to_have_text("Player app silent")
-        expect(label).to_have_accessible_name("Player app silent · last reported 40 s ago")
+        expect(label).to_have_accessible_name("Player app silent · last reported 1 min ago")
         expect(label).to_have_class(_severity("alarm"))
         text = label.bounding_box()
         tile = page.get_by_role("button", name=f"Frame {FRAME}", exact=True).bounding_box()
@@ -109,7 +109,7 @@ def test_a_player_not_heard_past_the_threshold_reads_silent(page, registry):
 def test_a_silent_players_binding_line_links_to_its_player_page_without_a_node_read(page, registry):
     player_id = _bound_frame(registry)
     report_readiness(registry, player_id)
-    registry.clock.advance(40)
+    registry.clock.advance(60)
     with operator_server(registry.db, registry.clock) as origin:
         # The shell's one fleet host read is not a page's node record read.
         node_reads = []
@@ -127,8 +127,8 @@ def test_a_silent_players_binding_line_links_to_its_player_page_without_a_node_r
 
 def test_an_enrolled_player_without_a_report_never_reads_ok(page, registry):
     _bound_frame(registry, "fresh", x_mm=100)
-    registry.clock.advance(40)
-    _bound_frame(registry, "overdue-pending", x_mm=500)  # enrolled 40 s after "fresh"
+    registry.clock.advance(50)
+    _bound_frame(registry, "overdue-pending", x_mm=500)  # enrolled 50 s after "fresh"
     registry.clock.advance(5)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
@@ -137,9 +137,9 @@ def test_an_enrolled_player_without_a_report_never_reads_ok(page, registry):
         expect(recent).to_have_accessible_name("Enrolled 5 s ago, no report yet")
         expect(recent).to_have_text("No report yet")
         expect(recent).to_have_class(_severity("todo"))
-        # Enrolled 45 s ago and still no report: past the threshold it is an alarm.
+        # Enrolled 55 s ago and still no report: past the threshold it is an alarm.
         stale = _health(page, "fresh")
-        expect(stale).to_have_accessible_name("Enrolled 45 s ago, no report yet")
+        expect(stale).to_have_accessible_name("Enrolled 55 s ago, no report yet")
         expect(stale).to_have_class(_severity("alarm"))
 
 
@@ -181,18 +181,18 @@ def test_a_never_commissioned_frame_is_a_todo_not_an_alarm(page, registry):
 
 
 def test_the_threshold_is_centrals_not_a_constant_in_the_console(page, registry):
-    """33 s sits between the old 31.5 s threshold and the served 36.5 s."""
+    """45 s sits between the old 36.5 s threshold and the served 51 s."""
     older = _bound_frame(registry, "older", x_mm=100)
     newer = _bound_frame(registry, "newer", x_mm=500)
     report_readiness(registry, older)
     registry.clock.advance(7)
     report_readiness(registry, newer)
-    registry.clock.advance(33)
+    registry.clock.advance(45)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        expect(_health(page, "newer")).to_have_accessible_name("Player app last reported 33 s ago")
+        expect(_health(page, "newer")).to_have_accessible_name("Player app last reported 45 s ago")
         expect(_health(page, "older")).to_have_accessible_name(
-            "Player app silent · last reported 40 s ago")
+            "Player app silent · last reported 52 s ago")
 
 
 # --- Polling and the write fence (pass 2 §7). The page clock is paused, so the 5 s poll
@@ -288,7 +288,7 @@ def test_a_stale_401_does_not_log_the_operator_out(page, registry):
 
 def test_a_poll_in_flight_when_a_bind_completes_is_dropped_and_polling_continues(
         page, registry):
-    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100), by="console")
     identity, _key, _request = enroll(registry, count=1)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall", paused_at=registry.clock.utc())
@@ -358,7 +358,7 @@ def _seed_attention(registry):
     fine = _bound_frame(registry, "all-good", x_mm=1300)
     for player_id in (heard, fine):
         report_readiness(registry, player_id)
-    registry.create_frame(frame_create("no-player", x_mm=1700, y_mm=100))
+    registry.create_frame(frame_create("no-player", x_mm=1700, y_mm=100), by="console")
 
 
 def test_the_strip_counts_incidents_and_leaves_to_dos_to_the_wall(page, registry):
@@ -531,7 +531,7 @@ LONG_ID = "reception-" + "north-wall-left-of-the-main-entrance-" * 2 + "panel"
 def _seed_layout(registry):
     _seed_attention(registry)
     enroll(registry, count=1)  # a pending Player on the rail
-    registry.create_frame(frame_create(LONG_ID, x_mm=0, y_mm=0))
+    registry.create_frame(frame_create(LONG_ID, x_mm=0, y_mm=0), by="console")
 
 
 @pytest.mark.parametrize("viewport", [{"width": 1440, "height": 900}, {"width": 390, "height": 844}])

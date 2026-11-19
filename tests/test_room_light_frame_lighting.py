@@ -5,15 +5,11 @@ room light does not take, is refused 422 with the Frame-lighting code; a body ou
 refused 422 node_trial_operation_invalid; a new Frame views a fixed room light that is there."""
 from __future__ import annotations
 
-from dataclasses import replace
-from uuid import uuid4
-
 from fastapi.testclient import TestClient
-from test_node_calibration import setup_trial
+from support.trial_bus import bound_node, present, trial_document, trials_of
 from test_registry import ADMIN, frame
 
 from central.app import create_app
-from central.fleet.node_sessions import NodeControlConfig
 from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.room_light_store import PgRoomLights
 from central.room_light.model import (
@@ -26,7 +22,7 @@ from central.room_light.model import (
     TypedColour,
 )
 from contracts.frame_lighting import FrameLighting
-from contracts.node_calibration import candidate_hash, parse_trial
+from contracts.node_calibration import candidate_hash
 
 FRAME = "node-f0"
 HEADERS = {"Authorization": "Bearer " + ADMIN}
@@ -42,28 +38,24 @@ def _lighting(*lights: dict, depth: float = 2.0) -> dict:
 
 
 def _client(registry) -> TestClient:
-    return TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
-                                 node_control=NodeControlConfig("node-test")))
+    return TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False))
 
 
-def _present(request, exchange, sampled: int):
-    """The Node is handed the trial and reports it presented (its frame tag on the receipt)."""
-    request = replace(request, request_id=uuid4(), sampled_boottime_ms=sampled)
-    candidate = parse_trial(exchange(request).trial)
-    exchange(replace(request, request_id=uuid4(), sampled_boottime_ms=sampled + 100, receipt=replace(
-        request.receipt, sampled_boottime_ms=sampled + 100, buffer_id=f"weston-{sampled}",
-        frame_tag=candidate.frame_tag)))
-    return candidate
+def _present(registry):
+    """The Pi is handed the trial on its Output's trial key and states it presents it."""
+    document = trial_document(registry, trials_of(registry))   # the app's clock: the registry's
+    present(registry, document)
+    return document.trial
 
 
 def test_a_frames_lighting_through_positions_trial(registry):
     """Mutation probe: the check accepting a reference mismatch -> the window at-full draft is begun."""
-    _, request, exchange = setup_trial(registry)
+    bound_node(registry)
     lights = PgRoomLights(registry.db, PgHouseLock())
     lights.save_room_light("bookshelf-spot", ReportedLight(
-        name="Spot", colour=TypedColour(kelvin=4000), reporter=ReporterRef(source="home-assistant", address="light.spot")))
-    lights.save_sensor("meter", Sensor(name="Meter", at=SensorRef(source="home-assistant", address="sensor.lux")))
-    lights.save_room_light("window", MeasuredLight(name="Window", colour=TypedColour(kelvin=6500), sensor="meter"))
+        name="Spot", colour=TypedColour(kelvin=4000), reporter=ReporterRef(source="home-assistant", address="light.spot")), by="console")
+    lights.save_sensor("meter", Sensor(name="Meter", at=SensorRef(source="home-assistant", address="sensor.lux")), by="console")
+    lights.save_room_light("window", MeasuredLight(name="Window", colour=TypedColour(kelvin=6500), sensor="meter"), by="console")
     with _client(registry) as client:
         for body, code in (({"lighting": _lighting({**SPOT, "light": "cellar"})}, "unknown_room_light"),
                            ({"lighting": _lighting({**SPOT, "light": "window"})}, "reference_mismatch"),
@@ -88,9 +80,9 @@ def test_a_frames_lighting_through_positions_trial(registry):
             "operation": "edit", "expected_sequence": 1, "calibration": trial["calibration"], "lighting": draft})
         assert edited.status_code == 200, edited.text
 
-        candidate = _present(request, exchange, 1500)
+        candidate = _present(registry)
         assert candidate.lighting == FrameLighting.model_validate(draft)
-        other = candidate_hash(candidate.trial_id, candidate.generation, candidate.sequence, candidate.baseline,
+        other = candidate_hash(candidate.trial_id, candidate.generation, candidate.sequence, candidate.scope,
                                candidate.calibration_json, FrameLighting.model_validate(_lighting(SPOT)))
         assert other != candidate.candidate_sha256          # the hash covers the lighting
         saved = client.post(path, headers=HEADERS, json={"operation": "save", "expected_sequence": 2})
@@ -112,9 +104,9 @@ def test_a_new_frame_names_a_fixed_room_light_that_is_there(registry):
     order, or none. Mutation probe: insert the upgrade's lighting (naming "room") -> the bare Frame
     names a light the house no longer has."""
     lights = PgRoomLights(registry.db, PgHouseLock())
-    lights.remove_room_light("room")
+    lights.remove_room_light("room", by="console")
     frame(registry, "bare")
-    lights.save_room_light("lamp", FixedLight(name="Lamp", colour=TypedColour(kelvin=3000)))
+    lights.save_room_light("lamp", FixedLight(name="Lamp", colour=TypedColour(kelvin=3000)), by="console")
     frame(registry, "lit")
     frames = {each.id: each for each in registry.inventory().frames}
     assert frames["bare"].lighting.lights == ()

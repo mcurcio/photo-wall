@@ -4,20 +4,24 @@ service the console's route for it calls, and none writes.
 
 | Key | Read |
 |---|---|
-| installation | the registry's inventory (GET /v1/installation), each bound Frame's Pi by its device's serial, and every enrolled Pi with the IPv4 address HostCore last reported (GET /v1/operator/node/hosts) |
+| installation | the registry's inventory (GET /v1/installation), each bound Frame's Pi by its device's serial, and every enrolled Pi with the IPv4 address its host line states (`facts`, central/fleet/node_observations.py `host_facts_in`) |
 | listening | the room-light setup's references of Home Assistant's source (House › Lights) |
 | room-lights | each room light in House › Lights order, its name, and the room-lights document's entry, at the document's change (the WALL writer's `RoomLightsDocuments.current`) |
 | releases | the Releases page's read (GET /v1/operator/releases), its newest RELEASES_LISTED deployable releases |
 | versions | `PlayerVersions.versions` |
 
-The wakes: the room-lights document's NOTIFY (handed in by the worker's one LISTEN, `wake`), else a
-look every CENTRAL_STATE_LOOK_SECONDS, which covers every other change (a bind, an enrolment, a
-download, an install) within that time, in any Central process.
+The wakes (`wake`, from the worker's LISTENs, central/node_bus_wiring.py): the room-lights
+document's NOTIFY, a Player state commit's (PLAYER_STATE_CHANNEL: a bind, an enrolment, a
+retirement, every Coordination and Registry write) and a release's (RELEASES_CHANNEL: a release, a
+deployment, an Install), from any Central process; else a look every CENTRAL_STATE_LOOK_SECONDS,
+which bounds a missed wake and covers what sends none (a download finishing, an address HostCore
+reports).
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
 from collections.abc import Callable
 from typing import Final
 
@@ -25,8 +29,7 @@ from central.content_catalog.ports import PlayerVersions
 from central.content_catalog.views import ReleasesView
 from central.db import Database
 from central.fleet.node_bus_hub import enrolled_devices_in
-from central.fleet.node_observations import NodeObservations, host_facts_of
-from central.fleet.node_sessions import NodeControlConfig, NodeSessions
+from central.fleet.node_observations import host_facts_in
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.infra.frame_lighting_store import PgFrameLighting
 from central.infra.home_assistant.references import SOURCE
@@ -49,7 +52,7 @@ from contracts.central_api import (
 )
 from contracts.time import Clock
 
-CENTRAL_STATE_LOOK_SECONDS: Final = 2.0   # how often Central's hub session looks again with no wake
+CENTRAL_STATE_LOOK_SECONDS: Final = 60.0   # how long Central's hub session waits for a wake before it looks again
 
 
 class PgCentralStateReads:
@@ -63,14 +66,13 @@ class PgCentralStateReads:
         self._documents = documents
         self._releases = releases
         self._registry = Registry(db, clock, lighting=PgFrameLighting(LUT_RECIPE_ID))
-        self._hosts = NodeObservations(NodeSessions(db, clock, NodeControlConfig()))
 
     def installation(self) -> Installation:
         with self._db.read_snapshot() as conn:
             now = self._clock.utc()
             inventory = self._registry.inventory_in(conn, now)
             serials = {device_id: serial for serial, device_id in enrolled_devices_in(conn).items()}
-            facts = host_facts_of(self._hosts.fleet_hosts_in(conn, now))
+            facts = host_facts_in(conn)
         device_of = {player.id: player.device_id for player in inventory.players if player.retired_at is None}
         addresses = {device_id: each.get("address") for device_id, each in facts.items()}
 
@@ -109,27 +111,38 @@ class PgCentralStateReads:
 
 
 class PgStateWakes:
-    """hub_api.StateWakes: `changed` returns at a `wake` (the room-lights document changed, from any
-    thread) or after CENTRAL_STATE_LOOK_SECONDS, whichever is first."""
+    """hub_api.StateWakes: `changed` returns at a `wake` (something Central's state is read from
+    changed, from any thread) or after CENTRAL_STATE_LOOK_SECONDS, whichever is first. A wake is
+    kept until the next `changed` takes it, whenever it came: before the first `changed` (the loop
+    not known yet) or while the caller reads, so a commit's NOTIFY is never lost to the ceiling."""
 
     def __init__(self, look_seconds: float = CENTRAL_STATE_LOOK_SECONDS) -> None:
         self._look = look_seconds
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._event: asyncio.Event | None = None
+        self._lock = threading.Lock()
+        self._woken = False   # a wake no `changed` has returned for yet
+        self._waiter: tuple[asyncio.AbstractEventLoop, asyncio.Event] | None = None
 
     def wake(self) -> None:
         """Something Central's state reads may have changed: look again now. Safe from any thread."""
-        loop, event = self._loop, self._event
-        if loop is not None and event is not None:
+        with self._lock:
+            self._woken = True
+            waiter, self._waiter = self._waiter, None
+        if waiter is not None:
+            loop, event = waiter
             with contextlib.suppress(RuntimeError):   # that loop is closed: nobody waits there any more
                 loop.call_soon_threadsafe(event.set)
 
     async def changed(self) -> None:
-        if self._event is None:
-            self._loop, self._event = asyncio.get_running_loop(), asyncio.Event()
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(self._event.wait(), self._look)
-        self._event.clear()
+        event = asyncio.Event()
+        with self._lock:
+            waiting = not self._woken
+            if waiting:
+                self._waiter = (asyncio.get_running_loop(), event)
+        if waiting:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(event.wait(), self._look)
+        with self._lock:   # every wake until now is covered by the read that follows this return
+            self._woken, self._waiter = False, None
 
 
 __all__ = ["CENTRAL_STATE_LOOK_SECONDS", "PgCentralStateReads", "PgStateWakes"]

@@ -32,7 +32,7 @@ ROTATED = "rotated-operator-" + "r" * 40
 
 
 def _seed(registry):
-    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100), by="console")
 
 
 def _frame(page):

@@ -22,6 +22,7 @@ from central.kernel.job_types import (
     Prefetch,
     PrepareMedia,
     PurgeFinishedJobs,
+    RebootPi,
     RescueStalledJobs,
     SyncReleases,
 )
@@ -78,17 +79,24 @@ class PurgeStub:
         return None
 
 
+class RebootPiStub:
+    async def handle(self, job: RebootPi) -> None:
+        return None
+
+
 def catalog_stubs() -> list[Any]:
     return [FetchOsImageStub(), FetchSealedEnvironmentStub(),
             FetchLibraryThumbnailStub(), PrepareMediaStub(), SyncReleasesStub(),
-            PrefetchStub(), MaintainCacheStub(), RescueStub(), PurgeStub()]
+            PrefetchStub(), MaintainCacheStub(), RescueStub(), PurgeStub(), RebootPiStub()]
 
 
 def catalog_instances() -> list[Job]:
     samples = {FetchOsImage: FetchOsImage(tarball_sha256="cd" * 32),
                FetchSealedEnvironment: FetchSealedEnvironment(sha256="12" * 32),
                FetchLibraryThumbnail: FetchLibraryThumbnail(asset_id="asset-" + "34" * 32),
-               PrepareMedia: PrepareMedia(key=MEDIA_KEY)}
+               PrepareMedia: PrepareMedia(key=MEDIA_KEY),
+               RebootPi: RebootPi(request_id="9" * 32, device_id="device-" + "ab" * 32, reason="install:v2.0.0",
+                                  by="console")}
     return [samples.get(job_type) or job_type() for job_type in CATALOG]
 
 

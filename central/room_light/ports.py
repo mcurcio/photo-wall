@@ -1,19 +1,21 @@
 """What room lights' edges depend on: one plain method per question, never a generic apply.
 central/infra/room_light_store.py `PgRoomLights` implements them over PostgreSQL.
 
-Every report is kept by its reference whether or not a room light, Sensor or colour sensor names it
-yet, and is resolved when the document is built, so one set up after its source last spoke shows
-that word at once. What a report keeps is policy.py's (`light_facts_after`, `reading_facts_after`,
-`colour_facts_after`: a stated value replaces the last, "can't tell" leaves it standing and marks
-since when). A named reference's facts are never trimmed. Every write that changes the room-lights document raises its `change` in the same
-transaction and wakes the worker's WALL writer, so a House › Lights edit in the API process reaches
-every Pi without waiting.
+A report is kept only for a reference a room light, Sensor or colour sensor names (decision 0034): a
+report for any other is judged and dropped, so one named after its source last spoke reads "never
+heard" until its next report (a Pi's reading is taken from its host line's record at once). What a
+report keeps is policy.py's (`light_facts_after`, `reading_facts_after`, `colour_facts_after`: a
+stated value replaces the last, "can't tell" leaves it standing and marks since when); an unchanged
+report writes nothing. Every write that changes the room-lights document raises its `change` in the
+same transaction and wakes the worker's WALL writer, so a House › Lights edit in the API process
+reaches every Pi without waiting.
 """
 from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Protocol
 
+from central.actor import Actor
 from central.kernel.transactions import Transaction
 from central.room_light.model import (
     ColourReading,
@@ -43,7 +45,6 @@ from central.room_light.views import (
 from contracts.room_light import (
     Reading,
     RoomLightsDocument,
-    RoomLightsDrawn,
 )
 
 
@@ -54,21 +55,21 @@ class RoomLightReports(Protocol):
 
     def record_light_state(self, reporter: ReporterRef, report: LightReport) -> Recorded:
         """Keep what `report` states as `reporter`'s facts (policy.light_facts_after), heard now
-        (Central's clock), whether or not a room light names `reporter` yet. "recorded" when the
-        document changed (its change rises and the WALL writer wakes at commit), else "unchanged" (a
-        repeat, "can't tell" over a kept value, or no light names it)."""
+        (Central's clock), when a room light names `reporter`. "recorded" when the document changed
+        (its change rises and the WALL writer wakes at commit), else "unchanged" (a repeat, "can't
+        tell" over a kept doubt, or no light names it)."""
         ...
 
     def record_reading(self, sensor: SensorRef, reading: Reading) -> Recorded:
         """Keep what `reading` states as `sensor`'s facts (policy.reading_facts_after), heard now,
-        whether or not a Sensor is there yet; the room light that Sensor measures takes it when the
-        document is built. "recorded" when the document changed, else "unchanged"."""
+        when a Sensor names `sensor`; the room light that Sensor measures takes it when the document
+        is built. "recorded" when the document changed, else "unchanged"."""
         ...
 
     def record_colour_reading(self, sensor: ColourSensorRef, reading: ColourReading) -> Recorded:
         """Keep what `reading` states as `sensor`'s facts (policy.colour_facts_after), heard now,
-        whether or not a colour sensor is there yet; every room light following that colour sensor
-        takes it when the document is built. "recorded" when the document changed, else "unchanged"."""
+        when a colour sensor names `sensor`; every room light following that colour sensor takes it
+        when the document is built. "recorded" when the document changed, else "unchanged"."""
         ...
 
     def record_reading_within(self, tx: Transaction, sensor: SensorRef, reading: Reading) -> Recorded:
@@ -78,7 +79,7 @@ class RoomLightReports(Protocol):
 
     def record_refused(self, source: Source, address: str, reason: ReportRefusal) -> None:
         """Keep a report `source` could not record, with what it was about (`address`, the source's
-        own text, cut to ADDRESS_MAX) and why, in the one refusal log; the newest REFUSALS_KEPT stay.
+        own text, cut to ADDRESS_MAX) and why, in the one refusal log (`events`, kept a week).
         Of the refusals, only UNREADABLE also sets a doubt (DoubtReason.CANT_READ, policy.doubt_after)
         on every reference at (`source`, `address`); a doubt set or changed raises the document's
         change and wakes its writer at commit, as a new word does. A store failure is raised."""
@@ -99,39 +100,41 @@ class RoomLightReports(Protocol):
 
 
 class RoomLightSetup(Protocol):
-    """Injected into the House › Lights routes. The six writers raise RoomLightRefused."""
+    """Injected into the House › Lights routes. The six writers raise RoomLightRefused and take `by`,
+    the request's principal, for the setup's audit fields."""
 
     def lights(self) -> RoomLightsView:
         """Every room light, Sensor and colour sensor with its reference's kept facts and colour line."""
         ...
 
-    def save_room_light(self, light_id: RoomLightId, light: RoomLight) -> RoomLightView:
+    def save_room_light(self, light_id: RoomLightId, light: RoomLight, *, by: Actor) -> RoomLightView:
         """Create or replace room light `light_id` (policy.check_room_light)."""
         ...
 
-    def remove_room_light(self, light_id: RoomLightId) -> None:
+    def remove_room_light(self, light_id: RoomLightId, *, by: Actor) -> None:
         """Remove it (policy.check_room_light_removal)."""
         ...
 
-    def save_sensor(self, sensor_id: SensorId, sensor: Sensor) -> SensorView:
+    def save_sensor(self, sensor_id: SensorId, sensor: Sensor, *, by: Actor) -> SensorView:
         """Create or replace Sensor `sensor_id` (policy.check_sensor)."""
         ...
 
-    def remove_sensor(self, sensor_id: SensorId) -> None:
+    def remove_sensor(self, sensor_id: SensorId, *, by: Actor) -> None:
         """Remove it (policy.check_sensor_removal)."""
         ...
 
-    def save_colour_sensor(self, sensor_id: ColourSensorId, sensor: ColourSensor) -> ColourSensorView:
+    def save_colour_sensor(self, sensor_id: ColourSensorId, sensor: ColourSensor, *, by: Actor) -> ColourSensorView:
         """Create or replace colour sensor `sensor_id` (policy.check_colour_sensor; its reference's
         source and form: ReportSources.colour_address_refusal, checked by the route)."""
         ...
 
-    def remove_colour_sensor(self, sensor_id: ColourSensorId) -> None:
+    def remove_colour_sensor(self, sensor_id: ColourSensorId, *, by: Actor) -> None:
         """Remove it (policy.check_colour_sensor_removal: refused while a room light follows it)."""
         ...
 
     def drawn(self) -> DrawnView:
-        """What each Player last said it drew with, judged against the document now (policy.drawn_state)."""
+        """What each Player last said it drew with (its newest value on its line), judged against the
+        document now (policy.drawn_state)."""
         ...
 
     def refused(self) -> RefusedReportsView:
@@ -153,20 +156,11 @@ class ReportSources(Protocol):
         ...
 
 
-class DrawnReports(Protocol):
-    """Injected into the Player line's judge (central/infra/drawn_report_judge.py)."""
-
-    def record_drawn_within(self, tx: Transaction, player_id: str, report: RoomLightsDrawn) -> None:
-        """Keep `report` as the Player's latest, stamped with Central's clock, inside the caller's open
-        transaction under a savepoint of its own: a failure rolls back only this report and is raised."""
-        ...
-
-
 class RoomLightsDocuments(Protocol):
     """Injected into the worker's WALL writer."""
 
     def current(self) -> RoomLightsDocument:
-        """The document now (policy.room_lights_document over the stored lights, words and change);
+        """The document now (policy.room_lights_document over the stored setup and facts);
         the same for every Pi. A reading a source recorded and its word did not take (a failed
         savepoint) is taken first, so a failed derivation never outlives the next build."""
         ...
@@ -184,5 +178,5 @@ class HouseClockChanges(Protocol):
         ...
 
 
-__all__ = ["DrawnReports", "HouseClockChanges", "ReportSources", "RoomLightReports", "RoomLightSetup",
+__all__ = ["HouseClockChanges", "ReportSources", "RoomLightReports", "RoomLightSetup",
            "RoomLightsDocuments"]

@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Iterator
 from contextlib import suppress
 from typing import BinaryIO, Final, TypeVar
 
@@ -85,16 +85,10 @@ def repr_digest(sha256_hex: str) -> str:
     return "sha-256=:" + base64.b64encode(bytes.fromhex(sha256_hex)).decode() + ":"
 
 
-def stream_frame_media(opened: Opened, *, release: Callable[[], None]) -> StreamingResponse:
-    """A media variant's body with its `Repr-Digest` (RFC 9530) and `Content-Length`; `release`
-    (blocking) runs once the body ends or the client goes, after the fd is closed."""
+def stream_frame_media(opened: Opened) -> StreamingResponse:
+    """A media variant's body with its `Repr-Digest` (RFC 9530) and `Content-Length`; the fd is
+    closed once the body ends or the client goes."""
     source = os.fdopen(opened.fd, "rb")  # owns the fd from here on, even if never iterated
-
-    def finish() -> None:
-        try:
-            source.close()
-        finally:
-            release()
 
     return StreamingResponse(
         _chunks(source),
@@ -102,7 +96,7 @@ def stream_frame_media(opened: Opened, *, release: Callable[[], None]) -> Stream
         headers={"Content-Length": str(opened.size), "Repr-Digest": repr_digest(opened.sha256),
                  "ETag": f'"{opened.sha256}"', "Cache-Control": "private, no-store",
                  "Accept-Ranges": "none", "X-Content-Type-Options": "nosniff"},
-        background=BackgroundTask(finish),
+        background=BackgroundTask(source.close),  # also after a disconnect mid-stream
     )
 
 

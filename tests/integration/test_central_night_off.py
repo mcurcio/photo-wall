@@ -25,12 +25,14 @@ from integration.bus_servers import hub_server, leaf_connections, node_server, u
 from node.display.test_display_power_methods import Clock, Curtain, Display, ddc
 from support.frames import frame_create
 from support.house_time import LONDON, at, set_house
+from support.trial_bus import worker_trials
 from test_display_identity import ADMIN, AUTH, enroll_pi
 
 from appliance.display_host.bus import BusReportSink, display_session
 from appliance.display_host.output_power import OutputPowerController
 from appliance.display_host.runner import document_feed
 from central.app import create_app
+from central.coordination import OutputLossLedger
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.infra.display_store import (
     REPORT_STREAM,
@@ -74,7 +76,7 @@ class NotUnderTest:
 
 def _stored_report(database) -> Any:
     with database.transaction() as conn:
-        row = conn.execute("SELECT report FROM output_displays WHERE output_id=%s", (OUTPUT,)).fetchone()
+        row = conn.execute("SELECT display_report AS report FROM outputs WHERE output_id=%s", (OUTPUT,)).fetchone()
     if row is None or row["report"] is None:
         return None
     return decode_output_report(json.dumps(row["report"]).encode())
@@ -82,7 +84,8 @@ def _stored_report(database) -> Any:
 
 def _latest_change(database) -> int:
     with database.transaction() as conn:
-        return conn.execute("SELECT change FROM output_documents WHERE output_id=%s", (OUTPUT,)).fetchone()["change"]
+        return conn.execute("SELECT document_change FROM outputs WHERE output_id=%s",
+                            (OUTPUT,)).fetchone()["document_change"]
 
 
 def test_the_pi_keeps_night_off_while_central_is_away(database, tmp_path):
@@ -91,10 +94,10 @@ def test_the_pi_keeps_night_off_while_central_is_away(database, tmp_path):
     registry = Registry(database, ManualClock(FOUR_PM), lighting=PgFrameLighting(LUT_RECIPE_ID))
     set_house(database, LONDON)
     player = enroll_pi(registry, SERIAL)
-    registry.create_frame(frame_create("bedroom"))
-    registry.bind("bedroom", player, OUTPUT, expected_generation=0)
+    registry.create_frame(frame_create("bedroom"), by="console")
+    registry.bind("bedroom", player, OUTPUT, expected_generation=0, by="console")
     with database.transaction() as conn:   # Night off on every Frame (the seed chose the Frames there were)
-        conn.execute("""UPDATE night_off SET settings = jsonb_set(settings, '{frames}', '{"kind": "all-frames"}')""")
+        conn.execute("""UPDATE singletons SET document = jsonb_set(document, '{night_off,frames}', '{"kind": "all-frames"}') WHERE name = 'power_policy'""")
 
     display = Display(tmp_path)
     pi_clock = Clock()
@@ -111,7 +114,8 @@ def test_the_pi_keeps_night_off_while_central_is_away(database, tmp_path):
     async def run(client: TestClient) -> None:
         session.start()
         assert await asyncio.to_thread(session.wait_attached, 15)
-        session.desired.on_change(document_feed(power, NotUnderTest(), NotUnderTest(), NotUnderTest()))
+        session.desired.on_change(document_feed(power, NotUnderTest(), NotUnderTest(), NotUnderTest(), NotUnderTest(),
+                                                    NotUnderTest()))
         power.start()
         power.output(OUTPUT, connected=True, identity=None, modes=())
 
@@ -119,12 +123,13 @@ def test_the_pi_keeps_night_off_while_central_is_away(database, tmp_path):
             return account_id(SERIAL) in leaf_connections(hub)
         await until(linked, 15, "the Node's leaf links")
         wakes = DisplayWakes()
-        stores = PgLinkStores(database, {REPORT_STREAM: OutputReportJudge(wakes)})
+        stores = PgLinkStores(database, {REPORT_STREAM: OutputReportJudge(wakes, losses=OutputLossLedger())})
 
         async def central_runs(wanted_change):
             """Central's links run until the judge has recorded the Pi's report for the document
             Central holds; then they stop (Central goes away)."""
-            links = NodeLinks(Pipe.FLEET, hub.client_url, stores, DisplayDocuments(stores, wakes, times=central_clock))
+            links = NodeLinks(Pipe.FLEET, hub.client_url, stores, DisplayDocuments(stores, wakes, times=central_clock,
+                                                                                trials=worker_trials(database)))
             stop = asyncio.Event()
             running = asyncio.create_task(links.run(stop))
             try:

@@ -39,7 +39,7 @@ NO_SIZE = "Size on the wall: Not known (this display does not state its size)"
 
 
 def _frame(registry, frame_id="lobby") -> str:
-    registry.create_frame(frame_create(frame_id, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(frame_id, x_mm=100, y_mm=100), by="console")
     return frame_id
 
 
@@ -100,7 +100,7 @@ def test_a_turned_frame_reads_its_pixels_and_size_as_it_hangs(page, registry):
     """A box half the width and a quarter of the height of a screen hung top to the right: 540 x 480
     pixels of the 1080 x 1920 screen as it hangs, and of a 950 x 540 mm display 27 x 23.75 cm."""
     frame_id = _bound(registry, (950, 540))
-    registry.turn_frame(frame_id, 90, expected_generation=_generation(registry, frame_id))
+    registry.turn_frame(frame_id, 90, expected_generation=_generation(registry, frame_id), by="console")
     save_position(registry, frame_id, Calibration(fit=PositionBox(left=0.25, top=0.5, width=0.5, height=0.25)))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")

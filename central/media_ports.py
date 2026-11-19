@@ -7,7 +7,6 @@ use named operations. Media remains the only owner of media persistence details.
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
 from typing import Any, Protocol
 
 from central.catalog import Candidate
@@ -16,13 +15,6 @@ from central.wall_plan.fit import FitTarget
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import SceneLines
 from contracts.models import Variant
-
-
-@dataclass(frozen=True, slots=True)
-class MediaPin:
-    owner: str
-    variant: Variant
-    expires_at: float
 
 
 class CoordinationMedia(Protocol):
@@ -36,8 +28,9 @@ class CoordinationMedia(Protocol):
         .ScenePoolReader, hydrated; never a whole pool)."""
         ...
 
-    def authored_in(self, conn: Any) -> dict[str, Candidate]:
-        """Every authored candidate, hydrated with its variant."""
+    def authored_in(self, conn: Any, asset_ids: frozenset[str]) -> dict[str, Candidate]:
+        """The current facts of the photos authored Scenes name, hydrated with their variants;
+        a photo no longer in the library is absent."""
         ...
 
     def authored_candidates_in(
@@ -48,11 +41,9 @@ class CoordinationMedia(Protocol):
         self, conn: Any, source_ref: str, asset_ids: tuple[str, ...],
     ) -> dict: ...
 
-    def pin_variants_in(
-        self, conn: Any, pins: Iterable[MediaPin], *, require_ready: bool,
-    ) -> None: ...
-
-    def expire_pins_in(self, conn: Any, now: float) -> None: ...
+    def require_ready_in(self, conn: Any, variants: Iterable[Variant]) -> None:
+        """Refuse (`media_unavailable`) a batch naming a variant that is not ready."""
+        ...
 
     def request_preparations_in(self, conn: Any, requests: Sequence[AcquisitionRequest]) -> int:
         """Publish `PrepareMedia` for each planned photo with no variant, in coordination's

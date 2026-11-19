@@ -47,12 +47,18 @@ def test_stored_media_layers_without_a_crop_read_back_centred(registry):
     with registry.db.transaction() as conn:
         for table in ("plan_offers", "assignment_locks"):
             conn.execute(f"CREATE TEMP TABLE {table} (LIKE {table} INCLUDING DEFAULTS)")
-        conn.execute("INSERT INTO plan_offers VALUES('p',1,1,'plan-1',%s,'{}',0,20)",
+        conn.execute("INSERT INTO plan_offers(player_id,authority_epoch,revision,plan_id,manifest,groups,"
+                     "created_at,valid_until,created_by,changed_at,changed_by) "
+                     "VALUES('p',1,1,'plan-1',%s,'{}',0,20,'scheduler',0,'scheduler')",
                      (Jsonb(plan),))
-        conn.execute("INSERT INTO plan_offers VALUES('p',1,2,'plan-2',%s,'{}',0,20)",
+        conn.execute("INSERT INTO plan_offers(player_id,authority_epoch,revision,plan_id,manifest,groups,"
+                     "created_at,valid_until,created_by,changed_at,changed_by) "
+                     "VALUES('p',1,2,'plan-2',%s,'{}',0,20,'scheduler',0,'scheduler')",
                      (Jsonb({**plan, "plan_id": "plan-2", "layers": []}),))
         for layer in (layers[0], layers[3]):
-            conn.execute("INSERT INTO assignment_locks VALUES('p',1,%s,%s,0,10)",
+            conn.execute("INSERT INTO assignment_locks(player_id,authority_epoch,assignment_id,layer,"
+                         "secured_at,valid_until,created_at,created_by,changed_at,changed_by) "
+                         "VALUES('p',1,%s,%s,0,10,0,'central',0,'central')",
                          (layer["assignment_id"], Jsonb(layer)))
         conn.execute(MIGRATION.read_text())
         manifests = [row["manifest"] for row in conn.execute(

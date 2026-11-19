@@ -86,10 +86,10 @@ def _seed(registry, portrait=False, turn=0):
     # A fixed device id gives a fixed Player id: the page shows its last six hex digits, and a
     # random one could hold the digits a Hardware tab check reads.
     identity, _key, _request = enroll(registry, count=1, device_id=DEVICE)
-    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
-    registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100), by="console")
+    registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0, by="console")
     if turn:
-        registry.turn_frame(FRAME, turn, expected_generation=1)
+        registry.turn_frame(FRAME, turn, expected_generation=1, by="console")
     if not portrait:
         position = Calibration(fit=_box(SAVED_X))
     else:
@@ -382,7 +382,7 @@ def test_a_pi_that_did_not_start_from_photo_wall_says_so_and_offers_no_controls(
 
 
 def test_an_unbound_frame_is_sent_to_its_hardware_tab(page, registry):
-    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         for tab in ("position", "picture"):
@@ -421,15 +421,15 @@ def test_a_rebound_frame_keeps_its_turn_whatever_its_readiness(page, registry):
     (its Position to check again) still hangs as it did, so its size on screen is its box on the
     screen as it hangs there; hung upright again, the same box is another shape."""
     player_id = _seed(registry, portrait=True, turn=90)
-    registry.unbind(FRAME, expected_generation=2)
-    registry.bind(FRAME, player_id, OUTPUT, expected_generation=3)
+    registry.unbind(FRAME, expected_generation=2, by="console")
+    registry.bind(FRAME, player_id, OUTPUT, expected_generation=3, by="console")
     stored = next(frame for frame in registry.inventory().frames if frame.id == FRAME)
     assert stored.readiness is not Readiness.READY
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         facts = open_frame(page, FRAME, "hardware").get_by_role("region", name="Frame", exact=True)
         expect(facts).to_contain_text("270 × 480 pixels, 9:16")
-        registry.turn_frame(FRAME, 0, expected_generation=stored.generation)
+        registry.turn_frame(FRAME, 0, expected_generation=stored.generation, by="console")
         expect(facts).to_contain_text("480 × 270 pixels, 16:9", timeout=15_000)
 
 
@@ -679,8 +679,8 @@ def test_the_frames_physical_size_is_its_share_of_the_displays_own_size(page, re
     """The Display states 950 x 540 mm (its EDID, on the display line's Output report): the whole
     screen is 95 x 54 cm, half its width and height 48 x 27 cm."""
     player = enroll_pi(registry, "pi-frame-size")
-    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
-    registry.bind(FRAME, player, OUTPUT, expected_generation=0)
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100), by="console")
+    registry.bind(FRAME, player, OUTPUT, expected_generation=0, by="console")
     report = OutputReport(OUTPUT, True, NO_SERIAL, MODE, (), None, None, None, None, (950, 540))
     with ThreadPoolExecutor(1) as pool:  # the report's commit runs its own event loop, off Playwright's
         pool.submit(_report, registry, "pi-frame-size", OUTPUT, NO_SERIAL, data=encode_output_report(report)).result()
@@ -705,10 +705,10 @@ def test_a_frame_turned_a_quarter_draws_a_portrait_screen_and_its_draft_is_in_fr
     """A Frame on a 1920 x 1080 Output hung top to the right: the screen as it hangs is 1080 x 1920,
     so a 10 px step across is 10/1080 of its width, and Fill the screen is its whole width and height."""
     identity, _key, _request = enroll(registry, count=1, device_id=DEVICE)
-    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
-    registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100), by="console")
+    registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0, by="console")
     generation = next(frame for frame in registry.inventory().frames if frame.id == FRAME).generation
-    registry.turn_frame(FRAME, 90, expected_generation=generation)
+    registry.turn_frame(FRAME, 90, expected_generation=generation, by="console")
     save_position(registry, FRAME, Calibration(fit=_centred(0.5, 9 / 16, (1080, 1920))), expected_revision=1)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)

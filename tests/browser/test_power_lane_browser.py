@@ -46,9 +46,9 @@ def seed_house(registry, frame="bedroom"):
     """A London house at Wednesday noon, one Frame, Night off 23:00-07:00 on All Frames."""
     registry.clock.wall = NOON
     set_house(registry.db, LONDON)
-    registry.create_frame(frame_create(frame))
+    registry.create_frame(frame_create(frame), by="console")
     with registry.db.transaction() as conn:   # the seed chose the Frames there were at deploy: none
-        conn.execute("""UPDATE night_off SET settings = jsonb_set(settings, '{frames}', '{"kind": "all-frames"}')""")
+        conn.execute("""UPDATE singletons SET document = jsonb_set(document, '{night_off,frames}', '{"kind": "all-frames"}') WHERE name = 'power_policy'""")
 
 
 @pytest.mark.browser_context_args(timezone_id="Pacific/Auckland")
@@ -99,10 +99,10 @@ def test_each_frames_hold_ends_at_its_own_next_change_and_the_setting_sits_besid
     -> the study's row reads 23:00; (P-banner-newest-end) title the banner by the newest view's end
     alone -> it reads "Held off until 23:00"."""
     seed_house(registry)
-    registry.create_frame(frame_create("study"))
+    registry.create_frame(frame_create("study"), by="console")
     with registry.db.transaction() as conn:   # Night off on the bedroom only
-        conn.execute("""UPDATE night_off SET settings = jsonb_set(settings, '{frames}',
-                        '{"kind": "frames", "frame_ids": ["bedroom"]}')""")
+        conn.execute("""UPDATE singletons SET document = jsonb_set(document, '{night_off,frames}',
+                        '{"kind": "frames", "frame_ids": ["bedroom"]}') WHERE name = 'power_policy'""")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "schedule")
         expect(hold_lasts_choice(page, "holdLastsNext")).to_be_checked()

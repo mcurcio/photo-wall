@@ -34,7 +34,6 @@ LAUNCHERS = {
     "display-signal-range": "appliance.display_host.signal_range",
     "host-core": "appliance.host.host_runner",
     "app-broker": "appliance.apps.broker_runner",
-    "manager-supervisor": "appliance.node.manager_launcher",
     "health-judge": "appliance.health.runner",
 }
 
@@ -113,7 +112,7 @@ report["wants"] = str(wants.resolve()) if wants.is_symlink() else None
 report["sysusers"] = Path("/usr/lib/sysusers.d/photo-wall-node.conf").read_text()
 report["tmpfiles"] = Path("/usr/lib/tmpfiles.d/photo-wall-node.conf").read_text()
 report["users"] = {name: pwd.getpwnam(name).pw_uid for name in
-                   ("pw-manager", "pw-player", "pw-display", "pw-health", "pw-bus")}
+                   ("pw-player", "pw-display", "pw-health", "pw-bus")}
 report["feeds"] = [grp.getgrnam("pw-node-feeds").gr_gid, grp.getgrnam("pw-node-feeds").gr_mem]
 report["abi"] = json.loads(Path("/usr/lib/photo-wall/node/abi.json").read_text())
 report["depends"] = subprocess.run(["dpkg-query", "-W", "-f", "${Depends}", "photo-wall-node"],
@@ -136,7 +135,7 @@ def report() -> dict:
     return json.loads(run.stdout)
 
 
-def test_the_eight_launchers_run_their_frozen_entries(report):
+def test_the_seven_launchers_run_their_frozen_entries(report):
     assert {name: each["entry"] for name, each in report["launchers"].items()} == LAUNCHERS
 
 
@@ -145,13 +144,8 @@ def test_each_entry_imports_from_its_launchers_path_alone(report, launcher):
     assert report["launchers"][launcher]["failed"] == [], report["launchers"][launcher]["path"]
 
 
-def test_an_exempt_edge_puts_its_target_on_the_launchers_path(report):
-    """HostCore's retiring host_runner -> node.recovery reaches node-manager's directory."""
-    assert "/usr/lib/photo-wall/node-manager" in report["launchers"]["host-core"]["path"]
-
-
 def test_every_unit_starts_an_installed_launcher_or_binary(report):
-    assert len(report["units"]) == 18 and "photo-wall-node.target" in report["units"]
+    assert len(report["units"]) == 17 and "photo-wall-node.target" in report["units"]
     assert "photo-wall-display-signal.path" in report["units"]
     assert {path for path, present in report["paths"].items() if not present} == set()
     launched = {path.removeprefix("/usr/lib/photo-wall/node/") for path in report["paths"]
@@ -167,7 +161,7 @@ def test_the_target_is_enabled_for_multi_user(report):
 def test_the_system_users_and_runtime_directories_are_installed(report):
     assert report["sysusers"] == (REPO / "debian/photo-wall-node.sysusers").read_text()
     assert report["tmpfiles"] == (REPO / "debian/photo-wall-node.tmpfiles").read_text()
-    assert report["users"] == {"pw-manager": 10003, "pw-player": 10004, "pw-display": 10005,
+    assert report["users"] == {"pw-player": 10004, "pw-display": 10005,
                                "pw-health": 10006, "pw-bus": 10008}
     assert report["feeds"] == [10007, ["pw-health"]]
 
@@ -189,5 +183,6 @@ def test_the_base_abi_is_the_installed_depends_and_the_image_format(report):
     identity = hashlib.sha256(("Depends: " + report["depends"] + "\n"
                                + "".join(line + "\n" for line in format_lines)).encode())
     assert report["abi"] == {"base_abi": "node-v2-" + identity.hexdigest()}
-    for sibling in ("photo-wall-common", "photo-wall-node-display", "photo-wall-node-manager"):
+    assert "photo-wall-node-manager" not in report["depends"]
+    for sibling in ("photo-wall-common", "photo-wall-node-display", "photo-wall-node-boot"):
         assert f"{sibling} (= 0+" in report["depends"]

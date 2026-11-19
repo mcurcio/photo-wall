@@ -1,10 +1,18 @@
 """Transactional current Runtime ownership; never persist a future projection.
 
 Every write names its actor (`central/actor.py`) and its command, and `edit`, the one writer of
-runtime_state, audits it (migration 111): it stamps runtime_state's audit fields, and appends one
-runtime_changes row for each Scene, Program, Run and Default Scene the command changed, found by
-comparing the state before and after it (`_changes`). No caller writes the audit, so none can
-skip it."""
+runtime_state, stamps runtime_state's audit fields (`created_by`, `changed_by` and their times) with
+that actor. No caller writes the audit fields, so none can skip them.
+
+The row is written only when the Runtime changed apart from its processed instant `now` (decision
+0034, class A): a tick that only moved time writes nothing, takes no transaction id and so wakes
+no Player. The stored `now` is therefore the time of the last change, possibly hours old; the one
+reader that depends on its freshness, `Runtime._pending_windows`, is kept right by Settings ›
+House, which saves the processed instant (`save_processed_in`) before it moves the house's time.
+
+A save wakes the scheduler and every Player socket when it commits (`notify_if_written_in`,
+central/infra/player_state_wakes.py), whoever wrote it: an operator's Scene, Program or activation
+is planned at once, not at the scheduler's next rest (central/scheduler.py)."""
 
 from contextlib import contextmanager
 
@@ -13,6 +21,7 @@ from psycopg.types.json import Jsonb
 from central.actor import Actor
 from central.db import Database
 from central.infra.house_store import house_time_in
+from central.infra.player_state_wakes import notify_if_written_in
 from central.runtime import Runtime
 from central.transaction_locks import RUNTIME_LOCK as RUNTIME_LOCK
 from central.transaction_locks import acquire_runtime_locks
@@ -26,37 +35,11 @@ _TIMED_COMMANDS = frozenset({
     "save_scene", "save_scene_and_apply_now", "create_program", "save_program", "save_program_and_apply_now", "remove_program",
     "set_default_scene", "activate", "finish", "cancel", "advance",
 })
-_NO_IDS = {"scene_id": None, "run_id": None, "program_id": None, "scene_revision": None}
 
 
-def _changes(before: dict, after: dict) -> list[dict]:
-    """What one write changed, as runtime_changes rows: each Scene, Program and Default Scene
-    whose stored form differs, and each Run admitted, moved to another phase or removed (a Run's
-    turns moving on is not a change). A command that changed only admissions or the queue is one
-    row naming none of them."""
-    rows: list[dict] = []
-    for scene_id in sorted(before["scenes"].keys() | after["scenes"].keys()):
-        old, new = before["scenes"].get(scene_id), after["scenes"].get(scene_id)
-        if old != new:
-            rows.append({**_NO_IDS, "scene_id": scene_id,
-                         "scene_revision": (new or old)["revision"]})
-    for program_id in sorted(before["programs"].keys() | after["programs"].keys()):
-        old, new = before["programs"].get(program_id), after["programs"].get(program_id)
-        if old != new:
-            rows.append({**_NO_IDS, "program_id": program_id,
-                         "scene_id": (new or old)["scene_id"]})
-    if before.get("default_scene") != after.get("default_scene"):
-        chosen = after.get("default_scene") or before.get("default_scene")
-        rows.append({**_NO_IDS, "scene_id": chosen["scene_id"]})
-    for run_id in sorted(before["runs"].keys() | after["runs"].keys()):
-        old, new = before["runs"].get(run_id), after["runs"].get(run_id)
-        if old is None or new is None or old["phase"] != new["phase"]:
-            scene = (new or old)["scene"]
-            rows.append({**_NO_IDS, "run_id": run_id, "scene_id": scene["scene_id"],
-                         "scene_revision": scene["revision"]})
-    if not rows and any(before.get(key) != after.get(key) for key in ("admissions", "queue")):
-        rows.append(dict(_NO_IDS))
-    return rows
+def _apart_from_now(state: dict) -> dict:
+    """`state` (an `export_state()`) without its `now`: what a save compares."""
+    return {key: value for key, value in state.items() if key != "now"}
 
 
 class RuntimeStore:
@@ -65,9 +48,12 @@ class RuntimeStore:
 
     @contextmanager
     def edit(self, conn=None, *, by: Actor, command: str):
-        """The one writer of runtime_state: the Runtime as stored, saved on exit with its audit
-        fields, and one runtime_changes row per thing `command` changed (`_changes`), all in the
-        caller's transaction."""
+        """The one writer of runtime_state: the Runtime as stored, saved on exit in the caller's
+        transaction with its audit fields stamped by `by`. `command` names the write; nothing
+        stores it (decision 0034 dropped the per-change log). The row is written only when the state after differs from the state
+        before apart from `now` (`_apart_from_now`); then the whole state, `now` included, is
+        saved. An edit that moved only `now` writes nothing, takes no transaction id, and so fires
+        no Player wake (central/infra/player_state_wakes.py)."""
         if conn is None:
             with self.db.transaction() as transaction, self.edit(
                     transaction, by=by, command=command) as runtime:
@@ -78,6 +64,22 @@ class RuntimeStore:
         before = runtime.export_state()
         yield runtime
         after = runtime.export_state()
+        if _apart_from_now(after) != _apart_from_now(before):
+            self._save_in(conn, after, by=by)
+
+    def save_processed_in(self, conn, *, by: Actor) -> None:
+        """Advance the stored Runtime to Central's clock (`self.clock.utc()`, read after the
+        locks) and save it with `now` even when nothing else changed: the one write of the
+        processed instant alone, in the caller's transaction (takes the Coordination and Runtime
+        locks, `acquire_runtime_locks`). Settings › House calls it before it stores a new zone or
+        place, under the house still stored, so `Runtime._pending_windows` never admits a window
+        the change moved before the processed instant (R10)."""
+        acquire_runtime_locks(conn)
+        runtime = self.read_in(conn)
+        runtime.advance(self.clock.utc())
+        self._save_in(conn, runtime.export_state(), by=by)
+
+    def _save_in(self, conn, after: dict, *, by: Actor) -> None:
         at = self.clock.utc()
         conn.execute(
             "INSERT INTO runtime_state(singleton,revision,snapshot,created_at,created_by,"
@@ -87,12 +89,7 @@ class RuntimeStore:
             "changed_by=EXCLUDED.changed_by",
             {"snapshot": Jsonb(after), "at": at, "by": by},
         )
-        for change in _changes(before, after):
-            conn.execute(
-                "INSERT INTO runtime_changes(at,by,command,scene_id,run_id,program_id,"
-                "scene_revision) VALUES(to_timestamp(%(at)s),%(by)s,%(command)s,%(scene_id)s,"
-                "%(run_id)s,%(program_id)s,%(scene_revision)s)",
-                {"at": at, "by": by, "command": command, **change})
+        notify_if_written_in(conn)
 
     def read(self) -> Runtime:
         with self.db.transaction() as conn:

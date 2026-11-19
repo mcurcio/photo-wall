@@ -1,5 +1,7 @@
 # Player fleet implementation map
 
+> **The old HTTP lane is gone** ([0034](decisions/0034-central-schema-consolidation.md), 2026-11-19): node sessions (`central/fleet/node_sessions.py`), the app links, the evidence, observation, host facts and display posts, the command poll, the app operations (`node_lifecycle.py`, `node_acceptance.py`), the reconciler and every intake quota, with their 22 `node_*` tables. A Pi now speaks to Central only for its boot offer and on its Node bus; HostCore's metrics, facts and `reboot` method are on the bus's `host` line. The rest of this page is the record of that lane as staged; [Fleet host health](#fleet-host-health-batch-4-2026-10-02) is current as rewritten there.
+
 
 ## Node integration status, 2026-09-30
 
@@ -21,9 +23,9 @@ node lane. Legacy V1 paths and their limitations remain separate.
 
 **Operator reads and the reboot fence (2026-10-02).** Three read-side additions serve the console's Player page and Frame health ([console DDD §16](operator-console-ddd.md#16-backend-reads-the-pass-2-gate-q3-and-q4)); none adds a migration, a route or a lock:
 
-- `GET /v1/operator/snapshot` serves `output_interruptions[]` (`Coordinator.output_interruptions_in`, `central/coordination.py`): the unresolved `node_output_losses` that fence a current Binding (the Player's current `authority_epoch`, and the same Frame, Player, Output and binding generation Runtime reconciles against), with `cause_layer` from the producer's owner, read in the snapshot's REPEATABLE READ transaction.
+- `GET /v1/operator/snapshot` serves `output_interruptions[]` (`Coordinator.output_interruptions_in`, `central/coordination.py`): the unresolved `output_losses` that fence a current Binding (the Player's current `authority_epoch`, and the same Frame, Player, Output and binding generation Runtime reconciles against), with their `cause_layer` (the reporting producer's owner, kept on the row since migration 123), read in the snapshot's REPEATABLE READ transaction.
 - `GET /v1/operator/node/devices/{device_id}` serves `display_outputs[]` (`display_outputs_in`, `central/fleet/node_display.py`): Display Host's newest display exchange per Output across the current boot admission's `display_host` producers, ordered by `sampled_boottime_ms`, with the compositor receipt's age on that producer's clock. It also serves `outstanding` per reboot command.
-- `outstanding` has one definition, `OUTSTANDING_REBOOT_SQL` in `central/fleet/node_commands.py`: unexpired on Central's clock and no `rejected` response. `request_reboot` uses it under its existing gate, fleet and session locks to refuse a new command id with 409 `node_reboot_outstanding` while another command on the same session is outstanding; a retry of the same id is unaffected.
+- The operator's reboot is S4a's `RebootPi` job (decision 0034 S4c, `central/fleet/pi_reboot.py` `OperatorReboots`): one pending copy per Pi, so a new command id while a reboot of the Pi is queued answers 409 `node_reboot_outstanding`; a retry of the same id answers `duplicate`. The device read's `outstanding` is an ask not yet run whose job is still on the queue.
 
 **Release publish removed (2026-10-04).** The synchronous `POST /v1/operator/node/releases/{manifest_sha256}/deployments`, which downloaded and verified every release asset inside the request, is deleted with `NodeReleaseCatalog.publish`. The release sync ingests each valid release into its deployment, and Prefetch downloads the wanted releases in the background; the console reads each release's readiness ([console DDD Part E](operator-console-ddd.md#25-screens)). The earlier client-disconnect probe of that route no longer applies.
 
@@ -69,42 +71,25 @@ The handoff records repaired standalone PID1 and packaged native/GTK evidence wi
 
 ### Fleet host health (batch 4, 2026-10-02)
 
-The console's host-health surfaces read one admin route; Host Management gains one ingest route and one cadence rule. The design, wordings and failure table are owned by [console DDD Part H](operator-console-ddd.md#63-contract-and-model-shapes); this section maps the code.
+The console's host-health surfaces read one admin route; Host Management states its metrics and facts on its line of the Node bus ([0034](decisions/0034-central-schema-consolidation.md), S4a part 2; before it, an ingest route with intake caps, gone). The design, wordings and failure table are owned by [console DDD Part H](operator-console-ddd.md#63-contract-and-model-shapes); this section maps the code.
 
-**One interval constant.** `HOST_OBSERVATION_INTERVAL_SECONDS = 15` (`contracts/node_observation.py`) is the only number; everything below derives from it:
+**One interval constant.** `HOST_METRICS_EVERY = 15` s (`contracts/node_state.py`) bounds how often Host Management puts its metrics, and the host-silence limit derives from it:
 
-| Derived | Where | Value at 15 s |
+| Derived | Where | Value |
 |---|---|---|
-| Node posting cadence: one observation per interval on Host Management's own monotonic clock, the first at once after each new session (it still samples, journals and polls commands every 2 s) | `appliance/host/host_runner.py` `_observation_due` | about one post per 16 s (the first 2 s tick at or after 15 s) |
-| Central's coalescing window | `central/fleet/node_observations.py` `_coalesced_in` | 15 s |
-| `observation` daily intake cap, 2 × ⌈86,400 / interval⌉ | `central/fleet/node_sessions.py` `OBSERVATION_DAILY_CAP` | 11,520 (was 20,000) |
-| `host_facts` daily intake cap, the same formula | `node_sessions.py` `HOST_FACTS_DAILY_CAP` | 11,520 |
-| `preparation` daily intake cap, 4 × ⌈86,400 / interval⌉ (two alternating states, two boxes per serial) | `node_sessions.py` `PREPARATION_DAILY_CAP` | 23,040 (was 20,000) |
+| Node cadence: metrics put on the `host` line's `metrics` key only when a band of `HOST_METRIC_BANDS`, a flag, a count, the set of metrics or the fault changes, never more often than every interval; facts on the `facts` key when they change | `appliance/host/bus.py` `HostLine` | at most one put per 15 s |
 | Host-silence limit, 4 × interval, served as `host_silent_after_seconds` | `central/fleet/host_thresholds.py` `HOST_SILENT_AFTER_SECONDS` | 60 s |
 
-**Central coalesces host observations.** `POST /v2/node/observations` stores at most one host sample per producer per interval, judged on the producer's own boot clock: when the post's `sampled_boottime_ms` minus that of the producer's newest stored sample (read by sequence through the primary key) satisfies 0 ≤ difference < interval, Central stores nothing, claims no intake and answers 200 `{"stored": false, "disposition": "coalesced", …}`. Both readings are one kernel's boot clock (a producer is one boot), so no Central receipt clock, of any replica, enters the judgement. A duplicate sequence is still judged first (`duplicate` or 409). A negative difference (a sample older than the stored one) stores. So a node on an older base that still posts every 2 s cannot reach the cap, and no node cadence is trusted for the guarantee. Deployed nodes ignore the answer. `POST /v2/node/app-preparation` coalesces the same way, keyed per (state, operation, fault): a post is stored only when the producer stored no sample with that key within the interval, so App Manager's `preparing`/`refused` alternation on every poll cannot fill the cap; G12 serves `preparation_intake_full`, and while it is true the console does not judge the (possibly frozen) newest sample ([console DDD §64](operator-console-ddd.md#64-storage-ingest-and-lifecycle)).
+Central records each value through the link store (`node_states`, the newest per key); a restated value is a no-op. No intake cap, no coalescing and no `intake_full`: the bus carries only changes.
 
-**`POST /v2/node/host-facts`** (`NodeObservations.record_facts`) takes the Host Management session credential and a `HostFactsV2` body of at most 2,048 bytes (`contracts/node_host_facts.py`: kernel release, default-route interface, link state, IPv4 address, and `base_tag`, the base this boot runs as the node records it from its boot handoff). A same-values resend at a higher sequence claims no intake. Historical sessions are accepted. One row per producer, and a producer is one boot:
+**G12 · `GET /v1/operator/node/hosts`** (`central/fleet/node_observations.py` `fleet_hosts_in`), admin only, one read-only snapshot taking no fleet or device lock; retired and revoked devices are omitted. It serves `read_at` (the database's clock, the one every receipt here was stamped by), the numbers-only `thresholds` document, and per device:
 
-| Case | Answer |
-|---|---|
-| First document for the producer | `recorded`; `first_received_at` = `received_at` = now |
-| Higher sequence, same four values | `recorded`; sequence, payload and `received_at` move, `first_received_at` stays |
-| Higher sequence, a changed value | `recorded`; both receipts renewed |
-| Same sequence, same payload / different payload | `duplicate` / 409 `node_observation_identity_conflict` |
-| Lower sequence | `stale` |
-| Another session's producer / malformed / over the cap | 403 `node_producer_mismatch` / 422 / 429 `node_intake_capacity` |
+- `host`: the newest metrics its host line states, with when Central recorded them (`received_at`).
+- `facts`: the newest facts its host line states, with `first_received_at` (when Central recorded these values).
+- `boot`: `{base_tag}` from the device's newest node boot offer, served by the console as a `claimed` fact.
+- `bus_link`: whether Central's hub holds the box's leaf, and the hub's reachability; the console reads a box silent only when the reachable hub does not hold its leaf and its newest receipt is older than the limit.
 
-**Migration `062_node_host_facts.sql`** (forward-only) adds `node_host_facts` (`producer_id` primary key referencing `node_producers`, `sequence`, `payload` ≤ 2,048 bytes, `first_received_at`, `received_at`) and the `host_facts` kind on `node_intake_quotas`. No index is added.
-
-**G12 · `GET /v1/operator/node/hosts`** (`NodeObservations.fleet_hosts`), admin only. One statement in one transaction at `REPEATABLE READ READ ONLY`, taking no fleet or device lock; retired and revoked devices are omitted. It serves `read_at` (Central's clock), the numbers-only `thresholds` document, and per device:
-
-- `host`: the newest sample of the **current boot's** `host_core` producer (the admission in the current generation with no `superseded_at`, then its newest-admitted producer, then `ORDER BY sequence DESC LIMIT 1` on the primary key). A superseded or duplicate-serial boot's sample is never served.
-- `previous_boot_received_at`: only when `host` is null, the newest receipt of the most recently superseded admission's `host_core` producer. No older boot is seen.
-- `intake_full`: today's `observation` quota (Central's UTC day) has reached the cap.
-- `boot`: `{base_tag}` from the current admission's node boot offer, served by the console as a `claimed` fact; null with no current boot.
-- `facts`: the current boot's `host_core` facts row only.
-- `preparation`: the newest sample of the current boot's `app_manager` producer (`state`, `fault`, `available_bytes`, `required_bytes`), so a `refused` storage sample carries its numbers.
+No `previous_boot_received_at` (the line has no boots), no `intake_full` and no `preparation` (AppManager is gone).
 
 The console polls G12 once, from the shell, every 15 s, and only while the node status read says `on`. It ages every receipt against `read_at` and never against the browser's clock.
 
@@ -159,7 +144,7 @@ Final verification includes focused domain/fault traces, the repository's pytest
 
 ### Current implementation boundary
 
-The M1 software sources now exist: N1's neutral values/codec and pure evidence reducer; N2's portable HostCore, cold-start broker, preparation coordinator and manager recovery policy; N3's Output admission/lease domain; and N6's [opt-in software composition](../scripts/node_control_demo.py). The CLI emits a structured simulator trace with separate requested actions, injected observations and Central projections. It performs no network, systemd, reboot, package-installation or compositor effects. After contract and implementation stabilization, the verification phase exercised the actual 13-step CLI and 46 focused tests successfully. Those results establish simulated/software behavior only; the M1 evidence record (pruned; in Git history) held the final whole-suite results, commands, skips and environment limits. Independent review corrected stale candidate handoff, mutation before presentation validation, repeated exit reconciliation, manager recovery persistence before effects, and delayed handoff acknowledgment correlation. The final callback carries the exact handoff UUID; an old acknowledgment cannot release a later handoff.
+The M1 software sources now exist: N1's neutral values/codec and pure evidence reducer; N2's portable HostCore, cold-start broker, preparation coordinator and manager recovery policy; N3's Output admission/lease domain; and N6's opt-in software composition (`scripts/node_control_demo.py`, removed in S4c-2a-iii; its adapters live on in `tests/support/node_doubles.py`). The CLI emits a structured simulator trace with separate requested actions, injected observations and Central projections. It performs no network, systemd, reboot, package-installation or compositor effects. After contract and implementation stabilization, the verification phase exercised the actual 13-step CLI and 46 focused tests successfully. Those results establish simulated/software behavior only; the M1 evidence record (pruned; in Git history) held the final whole-suite results, commands, skips and environment limits. Independent review corrected stale candidate handoff, mutation before presentation validation, repeated exit reconciliation, manager recovery persistence before effects, and delayed handoff acknowledgment correlation. The final callback carries the exact handoff UUID; an old acknowledgment cannot release a later handoff.
 
 N4 durable sessions/ingestion, N5 release-built Debian closure/base composition, and M2–M4 Linux/compositor integration remain unimplemented by this slice. The in-memory journals and explicit simulator producer admission must not be composed into production. Boot-scoped credentials, durable transaction fences, actual artifact verification, process supervision and protected compositor callbacks remain adapter requirements. No production gate is opened.
 

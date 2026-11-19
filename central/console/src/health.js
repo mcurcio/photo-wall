@@ -16,14 +16,15 @@ export { isBound };
  * docs/operator-console-ddd.md §3) lives here too: a Player's standing, each
  * Output's state, the bindable set, and the one Output wording.
  *
- * LIVENESS is Central's record of the last readiness report it ACCEPTED from a
- * Player on that Player's current authority epoch (`last_report_at`). Enrollment
- * is not a report (`last_seen` is enrollment time). Every age is taken from the
+ * LIVENESS is Central's record of its contact with a Player on that Player's
+ * current authority epoch (`last_report_at`: the read time while its session
+ * socket is open, else the socket's close). Enrollment is not contact
+ * (`last_seen` is enrollment time). Every age is taken from the
  * inventory's `read_at` — Central's clock, frozen when the snapshot was read — so
  * no browser clock is involved and nothing ticks between reads. The silence
  * threshold is served by Central (`silent_after_seconds`, contracts/liveness.py),
- * never hard-coded here; so is the Player's report interval
- * (`report_interval_seconds`), from which the enrollment grace below is derived.
+ * never hard-coded here; so is the session socket's keepalive
+ * (`socket_keepalive_seconds`), from which the enrollment grace below is derived.
  *
  * Honesty rules: a label states a fact and its age, nothing more; `ok` never
  * implies playback (R2); nothing here says "LIVE", "online" or "connected".
@@ -51,13 +52,10 @@ export { isBound };
  * (display-changed: another display is on the Frame's port, resolved on the Hardware tab),
  * "calibration" (needs-calibration); null when ok. `label` is the full fact with its age;
  * `tileLabel` is the same fact without the age, short enough for a plan tile.
- * `settling` marks an awaiting-report frame enrolled within the grace (two
- * report intervals): it is still never ok, but the attention strip does not
- * count the moment between a Player's (re)enrollment and its first report.
+ * `settling` marks an awaiting-report frame enrolled within the grace (one
+ * socket keepalive): it is still never ok, but the attention strip does not
+ * count the moment between a Player's (re)enrollment and its socket's open.
  */
-
-// Enrolled this many report intervals ago or less, a Player is still settling.
-const SETTLING_INTERVALS = 2;
 
 /**
  * "N s" / "N min" / "N h" / "N d" for a non-negative age in seconds: the one age
@@ -109,7 +107,7 @@ export function playerLiveness(snapshot, playerId) {
       state: "awaiting-report",
       age,
       overdue: !(age <= limit),
-      settling: age <= SETTLING_INTERVALS * inventory.report_interval_seconds,
+      settling: age <= inventory.socket_keepalive_seconds,
       label: Number.isNaN(age)
         ? "Enrolled, no report yet"
         : `Enrolled ${formatAge(age)} ago, no report yet`,
@@ -287,7 +285,7 @@ export const RUN_CONTINUES = "the Run continues";
 
 /**
  * What each layer actually reported when Central records an Output loss from it
- * (node_runtime_reconciliation.py; the owner of each fact kind is fixed in
+ * (central/coordination.py `OutputLossLedger`; the owner of each fact kind is fixed in
  * contracts/node_protocol.py `owners`): the App Effect Broker reports an app process
  * exit, which Central applies to every Output linked to that process; Display Host
  * reports one Output's app surface invalidated or withdrawn. Any other served layer gets

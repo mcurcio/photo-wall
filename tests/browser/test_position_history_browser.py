@@ -6,7 +6,7 @@ Display+Frame", used to "View and restore"): the Frame's kept and tried position
 As in test_frame_lighting_browser.py, a real session needs a Node presenting it, so a fake Central
 answers the session routes with Central's rules (`LightingSessions`); this one adds what Central's trial
 owner does for the history (central/fleet/node_calibration.py): every exchange records what it hands
-the Pi through the real store (`position_history_store.record_sent_in`, as `deliver_in` does), and a
+the Pi through the real store (`position_history_store.record_sent_in`, as the trial projection `trial_in` does), and a
 Restore is answered with Central's own rules (`position_entry_in`, `restore_refusal`,
 `restored_draft` at the trial's base revision). Save goes through the real Registry, which keeps
 its entry; the History is read from the real route.
@@ -95,7 +95,8 @@ class HistorySessions(LightingSessions):
         trial = TrialHanded(self._values(), UUID(self.row["trial_id"]),
                             None if restored is None else UUID(restored)) if active else None
         with self.registry.db.transaction() as conn:
-            record_sent_in(conn, FRAME, trial=trial, saved=position_values(saved.calibration, saved.lighting))
+            record_sent_in(conn, FRAME, trial=trial, saved=position_values(saved.calibration, saved.lighting),
+                           by="central")
 
     def _restore(self, route):
         body = route.request.post_data_json
@@ -230,9 +231,9 @@ def test_a_position_kept_when_the_screen_size_changed_restores_and_one_made_upsi
     _seed(registry)
     _sql(registry, "UPDATE position_entries SET kind='kept-profile-changed' WHERE frame_id=%s AND kind='kept-saved'",
          (FRAME,))
-    _sql(registry, "INSERT INTO position_entries(id, frame_id, number, kind, at, fit, lighting, turn, display_id) "
+    _sql(registry, "INSERT INTO position_entries(id, frame_id, number, kind, at, fit, lighting, turn, display_id, by) "
                    "SELECT gen_random_uuid(), frame_id, number + 100, 'kept-saved', at - interval '1 minute', fit, "
-                   "lighting, 180, display_id FROM position_entries WHERE frame_id=%s AND kind='kept-profile-changed'",
+                   "lighting, 180, display_id, 'console' FROM position_entries WHERE frame_id=%s AND kind='kept-profile-changed'",
          (FRAME,))
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)

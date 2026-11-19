@@ -480,7 +480,13 @@ def main() -> None:
     )
     from contracts.display_turn import hanging
     from contracts.models import Calibration, PositionBox
-    from contracts.node_calibration import TrialCandidate, candidate_hash, canonical, encode_trial
+    from contracts.node_calibration import (
+        TrialCandidate,
+        TrialScope,
+        candidate_hash,
+        canonical,
+        encode_trial,
+    )
     from contracts.node_display import Surface
     from contracts.node_frame import encode_picture_operations, neutral_operations
     from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
@@ -668,7 +674,7 @@ def main() -> None:
             return TrialCandidate(
                 trial_id=trial_id, generation=1, sequence=sequence, baseline=admitted,
                 calibration_json=calibration,
-                candidate_sha256=candidate_hash(trial_id, 1, sequence, admitted, calibration, lighting),
+                candidate_sha256=candidate_hash(trial_id, 1, sequence, TrialScope.of(admitted), calibration, lighting),
                 expires_boottime_ms=boot_ms + 30_000, hard_expires_boottime_ms=boot_ms + 60_000,
                 lighting=lighting)
 

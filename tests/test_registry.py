@@ -72,7 +72,7 @@ def hello(registry, identity, capabilities=()):
 
 
 def frame(registry, frame_id="portrait"):
-    registry.create_frame(frame_create(frame_id))
+    registry.create_frame(frame_create(frame_id), by="console")
 
 
 def test_serial_enroll_creates_an_unbound_pending_record(registry):
@@ -89,7 +89,7 @@ def test_serial_enroll_creates_an_unbound_pending_record(registry):
 def test_reboot_reassociates_by_serial_preserving_frame_binding_no_duplicate(registry):
     identity, _, request = enroll(registry)
     frame(registry)
-    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, "portrait", PORTRAIT_ON_WIDE)
     rebooted, _, _ = enroll(registry, device_id=request.device_id)
     assert rebooted["player_id"] == identity["player_id"]
@@ -112,7 +112,7 @@ def test_unbound_player_gets_no_execution_bindings_until_operator_binds(registry
     frame(registry)
     identity, _, _ = enroll(registry)
     bound_identity, _, _ = enroll(registry)
-    registry.bind("portrait", bound_identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("portrait", bound_identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, "portrait", PORTRAIT_ON_WIDE)
     bound_config = registry.configuration_for(bound_identity["player_id"], bound_identity["authority_epoch"])
     assert len(bound_config["execution_bindings"]) == 1
@@ -123,7 +123,7 @@ def test_unbound_player_gets_no_execution_bindings_until_operator_binds(registry
 
 def test_retired_serial_is_refused_reenrollment(registry):
     identity, _, request = enroll(registry)
-    registry.retire(identity["player_id"])
+    registry.retire(identity["player_id"], by="console")
     with pytest.raises(RegistryError, match="retired"):
         enroll(registry, device_id=request.device_id)
 
@@ -161,7 +161,7 @@ def test_stateless_player_can_be_bound_and_recovers_binding_with_a_fresh_key(reg
     assert inventory.players[0].health["boot_id"] == first.boot_id
     assert len(inventory.outputs) == 2
     frame(registry)
-    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, "portrait", PORTRAIT_ON_WIDE)
     restarted, _, _ = enroll(registry, device_id=first.device_id)
     assert restarted["player_id"] == identity["player_id"]
@@ -172,7 +172,7 @@ def test_stateless_player_can_be_bound_and_recovers_binding_with_a_fresh_key(reg
 def test_boot_context_is_signed_and_stale_ticket_cannot_reenroll(registry):
     identity, _, request = enroll(registry)
     frame(registry)
-    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, "portrait", PORTRAIT_ON_WIDE)
     forged = request.model_copy(update={"boot_id": str(uuid.uuid4())})
     with pytest.raises(RegistryError, match="invalid_proof"):
@@ -201,22 +201,51 @@ def test_expired_challenge_and_invalid_proof_do_not_create_player(registry):
     assert registry.inventory().players == ()
 
 
+def test_enrolment_nonce_is_held_in_memory_and_refused_after_a_restart(registry):
+    """Decision 0034 (S2g): the challenge lives in the Registry's memory, not a table. A fresh one
+    enrols once; one used, expired, or issued by a Central that restarted since (a new Registry)
+    is refused as expired, and the Player asks again. Mutation probe: accept any nonce in
+    `_EnrolmentNonces.take` (the restart case is admitted, this fails)."""
+    def signed(issuer):
+        key = Ed25519PrivateKey.generate()
+        public = key.public_key().public_bytes_raw().hex()
+        nonce = issuer.challenge(public)["nonce"]
+        outputs = (OutputReport(output_id="HDMI-A-1", width_px=1920, height_px=1080),)
+        device_id = "device-" + hashlib.sha256(bytes.fromhex(public)).hexdigest()
+        boot_id = str(uuid.uuid4())
+        return Enrollment(public_key=public, nonce=nonce, outputs=outputs, device_id=device_id,
+                          boot_id=boot_id, signature=base64.b64encode(key.sign(enrollment_message(
+                              nonce, outputs, device_id, boot_id))).decode())
+
+    fresh = signed(registry)
+    assert registry.enroll(fresh)["authority_epoch"] == 1
+    with pytest.raises(RegistryError, match="expired_or_used_challenge"):
+        registry.enroll(fresh)
+    restarted = Registry(registry.db, registry.clock, lighting=registry.lighting)
+    before_restart = signed(registry)
+    with pytest.raises(RegistryError, match="expired_or_used_challenge"):
+        restarted.enroll(before_restart)
+    assert restarted.enroll(signed(restarted))["authority_epoch"] == 1
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT to_regclass('enrollment_nonces') AS t").fetchone()["t"] is None
+
+
 def test_replacement_preserves_frame_rejects_retired_identity_and_revalidates(registry):
     old, _, old_enrollment = enroll(registry)
     new, _, _ = enroll(registry)
     frame(registry)
-    first = registry.bind("portrait", old["player_id"], "HDMI-A-1", expected_generation=0)
+    first = registry.bind("portrait", old["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     assert first["generation"] == 1
     save_position(registry, "portrait", SKEWED)
     assert len(registry.bindings_for(old["player_id"], 1)) == 1
     # Replacement is unbind, then retire: a Player with a bound Output cannot be retired.
-    registry.unbind("portrait", expected_generation=1)
-    registry.retire(old["player_id"])
+    registry.unbind("portrait", expected_generation=1, by="console")
+    registry.retire(old["player_id"], by="console")
     with pytest.raises(RegistryError, match="unauthorized"):
         registry.authenticate(old["token"])
     with pytest.raises(RegistryError, match="retired"):
         enroll(registry, device_id=old_enrollment.device_id)
-    assert registry.bind("portrait", new["player_id"], "HDMI-A-2", expected_generation=2)["generation"] == 3
+    assert registry.bind("portrait", new["player_id"], "HDMI-A-2", expected_generation=2, by="console")["generation"] == 3
     assert registry.bindings_for(new["player_id"], 1) == []
     location = registry.inventory().frames[0]
     assert (location.id, location.calibration.fit) == ("portrait", SKEWED.fit)
@@ -227,10 +256,10 @@ def test_replacement_preserves_frame_rejects_retired_identity_and_revalidates(re
 def test_unbind_withdraws_execution_binding_generation_fenced_and_allows_rebind(registry):
     identity, _, _ = enroll(registry)
     frame(registry)
-    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, "portrait", PORTRAIT_ON_WIDE)
     assert len(registry.bindings_for(identity["player_id"], 1)) == 1
-    result = registry.unbind("portrait", expected_generation=1)
+    result = registry.unbind("portrait", expected_generation=1, by="console")
     # The generation bump (mirroring bind/retire) is what a stale caller is fenced on below;
     # deleting the binding row alone withdraws execution bindings regardless of generation.
     assert result == {"generation": 2, "changed": True}
@@ -238,29 +267,29 @@ def test_unbind_withdraws_execution_binding_generation_fenced_and_allows_rebind(
     assert registry.configuration_for(identity["player_id"], 1)["bindings"] == []
     assert registry.inventory().frames[0].player_id is None
     with pytest.raises(RegistryError, match="generation_conflict"):
-        registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=1)
-    rebound = registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=2)
+        registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=1, by="console")
+    rebound = registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=2, by="console")
     assert rebound == {"generation": 3, "changed": True}
 
 
 def test_unbind_without_active_binding_or_unknown_frame_raises(registry):
     frame(registry)
     with pytest.raises(RegistryError, match="not_bound"):
-        registry.unbind("portrait", expected_generation=0)
+        registry.unbind("portrait", expected_generation=0, by="console")
     with pytest.raises(RegistryError, match="unknown_frame"):
-        registry.unbind("nonexistent", expected_generation=0)
+        registry.unbind("nonexistent", expected_generation=0, by="console")
 
 
 def test_unbind_stays_reversible_while_retire_stays_permanent(registry):
     identity, _, enrollment = enroll(registry)
     frame(registry)
-    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.unbind("portrait", expected_generation=1)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
+    registry.unbind("portrait", expected_generation=1, by="console")
     # Reversible: the player record survives and re-binds; nothing is retired.
     assert registry.inventory().players[0].retired_at is None
-    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=2)
-    registry.unbind("portrait", expected_generation=3)
-    registry.retire(identity["player_id"])
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=2, by="console")
+    registry.unbind("portrait", expected_generation=3, by="console")
+    registry.retire(identity["player_id"], by="console")
     with pytest.raises(RegistryError, match="unauthorized"):
         registry.authenticate(identity["token"])
     with pytest.raises(RegistryError, match="retired"):
@@ -270,9 +299,9 @@ def test_unbind_stays_reversible_while_retire_stays_permanent(registry):
 def test_retire_refuses_a_player_with_a_bound_output_and_leaves_it_unretired(registry):
     identity, _, _ = enroll(registry)
     frame(registry)
-    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     with pytest.raises(RegistryError, match="player_bound") as refused:
-        registry.retire(identity["player_id"])
+        registry.retire(identity["player_id"], by="console")
     assert refused.value.status == 409
     player = registry.inventory().players[0]
     assert player.retired_at is None and player.authority_epoch == identity["authority_epoch"]
@@ -284,7 +313,7 @@ def test_retire_route_answers_409_player_bound_for_a_bound_player(registry):
     identity, _, _ = enroll(registry)
     pending, _, _ = enroll(registry)
     frame(registry)
-    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     operator = {"Authorization": "Bearer " + ADMIN}
     with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         refused = client.post(f"/v1/operator/players/{identity['player_id']}/retire", headers=operator)
@@ -301,7 +330,7 @@ def test_retire_route_answers_409_player_bound_for_a_bound_player(registry):
 
 def test_retire_waiting_on_a_bind_in_flight_sees_it_and_refuses(registry):
     """The retire race is closed by the Player row lock both verbs take first, under READ
-    COMMITTED (central/db.py sets no isolation): the bindings check is a new statement after
+    COMMITTED (central/db.py sets no isolation): the binding check is a new statement after
     the lock wait, so it sees the bind that committed during it. Under REPEATABLE READ the
     check's snapshot would predate the wait and this test fails."""
     identity, _, _ = enroll(registry)
@@ -312,9 +341,9 @@ def test_retire_waiting_on_a_bind_in_flight_sees_it_and_refuses(registry):
         with registry.db.transaction() as holder:
             # A bind in flight: the Player row lock first (as Registry.bind), then its row.
             holder.execute("SELECT 1 FROM players WHERE id=%s FOR UPDATE", (player_id,))
-            holder.execute("INSERT INTO bindings VALUES(%s,%s,%s)",
-                           ("portrait", player_id, "HDMI-A-1"))
-            retiring = pool.submit(registry.retire, player_id)
+            holder.execute("UPDATE frames SET player_id=%s, output_id=%s WHERE id=%s",
+                           (player_id, "HDMI-A-1", "portrait"))
+            retiring = pool.submit(registry.retire, player_id, by="console")
             blocker = holder.info.backend_pid
             deadline = time.monotonic() + 5
             while True:
@@ -338,14 +367,14 @@ def test_retire_waiting_on_a_bind_in_flight_sees_it_and_refuses(registry):
 def test_unbind_leaves_session_token_and_epoch_valid_unlike_retire(registry):
     identity, _, _ = enroll(registry)
     frame(registry)
-    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.unbind("portrait", expected_generation=1)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
+    registry.unbind("portrait", expected_generation=1, by="console")
     # Unlike retire, unbind withdraws only the execution binding: the player's
     # session token and authority_epoch survive, so the existing session keeps working.
     authenticated = registry.authenticate(identity["token"])
     assert authenticated["id"] == identity["player_id"]
     assert authenticated["authority_epoch"] == identity["authority_epoch"]
-    rebound = registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=2)
+    rebound = registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=2, by="console")
     assert rebound == {"generation": 3, "changed": True}
 
 
@@ -354,8 +383,8 @@ def test_pending_queue_lists_enrolled_unbound_non_retired_players_only(registry)
     bound, _, _ = enroll(registry)
     retired, _, _ = enroll(registry)
     frame(registry)
-    registry.bind("portrait", bound["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.retire(retired["player_id"])
+    registry.bind("portrait", bound["player_id"], "HDMI-A-1", expected_generation=0, by="console")
+    registry.retire(retired["player_id"], by="console")
     inventory = registry.inventory()
     by_id = {p.id: p for p in inventory.players}
     assert by_id[pending["player_id"]].is_bound is False
@@ -372,7 +401,7 @@ def test_two_outputs_and_concurrent_conflicting_binding_are_atomic(registry):
 
     def claim(frame_id):
         try:
-            registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0)
+            registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
             return "ok"
         except RegistryError as exc:
             return exc.code
@@ -382,7 +411,7 @@ def test_two_outputs_and_concurrent_conflicting_binding_are_atomic(registry):
     assert sorted(outcomes) == ["ok", "output_already_bound"]
     frames = registry.inventory().frames
     unbound = next(f for f in frames if f.player_id is None)
-    registry.bind(unbound.id, identity["player_id"], "HDMI-A-2", expected_generation=0)
+    registry.bind(unbound.id, identity["player_id"], "HDMI-A-2", expected_generation=0, by="console")
     assert len(registry.bindings_for(identity["player_id"], 1, include_unvalidated=True)) == 2
     assert all(f.generation == 1 for f in registry.inventory().frames)
 
@@ -391,21 +420,21 @@ def test_delayed_binding_retry_cannot_undo_a_newer_transfer(registry):
     first, _, _ = enroll(registry)
     second, _, _ = enroll(registry)
     frame(registry)
-    registry.bind("portrait", first["player_id"], "HDMI-A-1", expected_generation=0)
-    duplicate = registry.bind("portrait", first["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("portrait", first["player_id"], "HDMI-A-1", expected_generation=0, by="console")
+    duplicate = registry.bind("portrait", first["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     assert duplicate == {"generation": 1, "changed": False}
-    registry.bind("portrait", second["player_id"], "HDMI-A-1", expected_generation=1)
+    registry.bind("portrait", second["player_id"], "HDMI-A-1", expected_generation=1, by="console")
     with pytest.raises(RegistryError, match="generation_conflict"):
-        registry.bind("portrait", first["player_id"], "HDMI-A-1", expected_generation=0)
+        registry.bind("portrait", first["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     assert registry.inventory().frames[0].player_id == second["player_id"]
 
 
 def test_a_saved_position_survives_restart(registry):
     identity, _, _ = enroll(registry)
     frame(registry)
-    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, "portrait", SKEWED)
-    restarted = Registry(Database(registry.db.dsn), registry.clock, lighting=registry.lighting)
+    restarted = Registry(Database(registry.db.dsn, application_name="photo-wall-test"), registry.clock, lighting=registry.lighting)
     restarted.db.migrate()  # Idempotent migration on a fresh connection.
     saved = restarted.bindings_for(identity["player_id"], 1)[0]
     assert (saved.calibration.revision, saved.calibration.fit) == (2, SKEWED.fit)
@@ -431,7 +460,7 @@ def test_http_operator_and_player_authority_are_separate_and_errors_are_sanitize
 def test_typed_inventory_preserves_the_complete_operator_json_response(registry):
     identity, _, _ = enroll(registry)
     frame(registry)
-    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     with registry.db.transaction() as conn:
         reports = player_reports_in(conn, registry.clock.utc())
     expected = registry.inventory().with_liveness(reports)
@@ -445,8 +474,8 @@ def test_typed_inventory_preserves_the_complete_operator_json_response(registry)
 
 
 def test_place_frame_merges_only_supplied_fields_and_echoes_result(registry):
-    registry.create_frame(frame_create("portrait", surface_id="hall", x_mm=5, y_mm=6))
-    result = registry.place_frame("portrait", FramePlacement(x_mm=10, y_mm=20))
+    registry.create_frame(frame_create("portrait", surface_id="hall", x_mm=5, y_mm=6), by="console")
+    result = registry.place_frame("portrait", FramePlacement(x_mm=10, y_mm=20), by="console")
     assert result == {"id": "portrait", "surface_id": "hall", "x_mm": 10, "y_mm": 20}
     location = registry.inventory().frames[0]
     assert (location.surface_id, location.x_mm, location.y_mm) == ("hall", 10, 20)
@@ -461,17 +490,17 @@ def test_a_frame_moves_only_where_it_hangs():
 
 def test_place_frame_on_unknown_frame_is_404(registry):
     with pytest.raises(RegistryError) as excinfo:
-        registry.place_frame("nope", FramePlacement(x_mm=1))
+        registry.place_frame("nope", FramePlacement(x_mm=1), by="console")
     assert (excinfo.value.code, excinfo.value.status) == ("unknown_frame", 404)
 
 
 def test_place_frame_never_touches_generation_revision_or_calibration(registry):
     identity, _, _ = enroll(registry)
     frame(registry)
-    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("portrait", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, "portrait", SKEWED)
     before = registry.inventory().frames[0]
-    registry.place_frame("portrait", FramePlacement(x_mm=42))
+    registry.place_frame("portrait", FramePlacement(x_mm=42), by="console")
     after = registry.inventory().frames[0]
     assert after.x_mm == 42
     assert after.generation == before.generation
@@ -510,7 +539,7 @@ def test_a_frame_is_created_with_an_id_and_a_place_and_never_a_typed_shape(regis
     """A Frame starts with the whole-screen box and Shows videos on; a profile, a wall size or a
     diagonal is no field of a new Frame (owner, 2026-10-19: "diagonal inches is a weird concept
     when we already have width and height")."""
-    registry.create_frame(FrameCreate(id="hall", x_mm=120, y_mm=40))
+    registry.create_frame(FrameCreate(id="hall", x_mm=120, y_mm=40), by="console")
     [hall] = registry.inventory().frames
     assert (hall.id, hall.x_mm, hall.y_mm, hall.video) == ("hall", 120, 40, True)
     assert hall.calibration.fit == PositionBox()
@@ -535,7 +564,7 @@ def test_delete_frame_requires_a_complete_runtime_reference_snapshot(registry, m
     monkeypatch.undo()
     with registry.db.transaction() as conn:
         with pytest.raises(RegistryError) as excinfo:
-            registry.delete_frame("portrait", conn=conn, references={})
+            registry.delete_frame("portrait", conn=conn, references={}, by="console")
     assert (excinfo.value.code, excinfo.value.status) == (
         "frame_reference_snapshot_required", 500)
     with registry.db.transaction() as conn:
@@ -543,7 +572,7 @@ def test_delete_frame_requires_a_complete_runtime_reference_snapshot(registry, m
             registry.delete_frame("portrait", conn=conn, references={
                 "scene_ids": (), "program_ids": (),
                 "queued_activation_ids": (), "run_ids": (),
-            })
+            }, by="console")
     assert (excinfo.value.code, excinfo.value.status) == (
         "frame_reference_snapshot_required", 500)
     assert [f.id for f in registry.inventory().frames] == ["portrait"]

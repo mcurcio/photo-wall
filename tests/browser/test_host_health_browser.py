@@ -39,15 +39,19 @@ def _players(registry, *, bound=True):
     and names."""
     bound_identity, _, bound_request = enroll(registry, count=1)
     spare_identity, _, spare_request = enroll(registry, count=1)
-    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100), by="console")
     if bound:
-        registry.bind(FRAME, bound_identity["player_id"], "HDMI-A-1", expected_generation=0)
+        registry.bind(FRAME, bound_identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     return ((bound_request.device_id, player_name(registry, bound_identity["player_id"])),
             (spare_request.device_id, player_name(registry, spare_identity["player_id"])))
 
 
-def _row(device_id, received_at, temperature):
-    return {"device_id": device_id, "previous_boot_received_at": None, "intake_full": False,
+def _row(device_id, received_at, temperature, *, off_hub=None):
+    # A host whose receipt is old (before 990) is off Central's reachable hub unless the case says
+    # otherwise: with an old receipt, silence (decision 0034). Else no link is served.
+    off_hub = received_at < 990 if off_hub is None else off_hub
+    link = {"linked": False, "changed_at": 800.0, "hub": "reachable"} if off_hub else None
+    return {"device_id": device_id, "bus_link": link,
             "host": {"received_at": received_at, "fault_code": None,
                      "metrics": [{"name": "soc_temperature", "value": temperature,
                                   "unit": "celsius", "source": "host_sampler"}]}}
@@ -145,7 +149,7 @@ def test_the_served_limit_composes_and_moves_the_silence_judgement(page, registr
         expect(_card(page, bound_name)).to_contain_text("· 50 °C at last report")
         expect(_card(page, bound_name)).to_contain_text(
             "Host Management: Host Management silent · last reported 2 min ago "
-            "(Central's inference: no report for over 90 s, Central's limit)")
+            "(Central's inference: off Central's hub, no report for over 90 s, Central's limit)")
 
 
 # N1 (console DDD §62-§63): the firmware flags, CPU and storage lines on the Players card.
@@ -174,10 +178,7 @@ def test_throttling_bands_cpu_unbanded_and_unknowns(page, registry):
     cpu = {"name": "cpu_busy", "value": 23, "unit": "percent", "source": "host_sampler"}
     run = {"name": "runtime_available", "value": 1.2e9, "unit": "bytes", "source": "host_sampler"}
     document = {"read_at": 1000.0, "thresholds": N1_THRESHOLDS, "devices": [
-        {**_n1_row(bound, 0x50005, [cpu, run]),
-         "preparation": {"received_at": 994.0, "state": "refused", "fault": "node_storage_capacity",
-                         "available_bytes": 9e8, "required_bytes": 1.4e9}},
-        _n1_row(spare, 0x10000, [cpu, cpu])]}
+        _n1_row(bound, 0x50005, [cpu, run]), _n1_row(spare, 0x10000, [cpu, cpu])]}
     _stub(page, document)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "hardware")
@@ -194,9 +195,9 @@ def test_throttling_bands_cpu_unbanded_and_unknowns(page, registry):
         # The same cataloged name twice in one sample reads Unknown.
         expect(_line(page, spare_name, "CPU")).to_contain_text("CPU: Unknown: two values reported")
         storage = _line(page, bound_name, "Storage")
-        expect(storage.first).to_contain_text("Storage: Host Management last reported 4 s ago · 1.2 GB free in /run")
-        expect(storage.nth(1)).to_contain_text("App Manager last reported 6 s ago · App Manager refused a "
-                                               "preparation: needs 1.4 GB, room 0.9 GB")
+        # One Storage line: App Manager's storage refusal left with the Pi's old path (S4c-2a-iii).
+        expect(storage).to_have_count(1)
+        expect(storage).to_contain_text("Storage: Host Management last reported 4 s ago · 1.2 GB free in /run")
         expect(_line(page, spare_name, "Storage")).to_contain_text("Storage: Unknown: not reported")
         # One flag missing: the Throttling item reads Unknown.
         document["devices"][0]["host"]["metrics"] = [
@@ -283,9 +284,9 @@ def test_spares_are_never_alarms_and_retired_boxes_sort_below_healthy_players(pa
     ((spare, spare_name),) = _enrolled(registry, 1)
     retired_identity, _, _ = enroll(registry, count=1)
     retired_name = player_name(registry, retired_identity["player_id"])
-    registry.retire(retired_identity["player_id"])
+    registry.retire(retired_identity["player_id"], by="console")
     _stub(page, {"read_at": 1000.0, "thresholds": THRESHOLDS,
-                 "devices": [_row(bound, 999.0, 50), _row(spare, 100.0, 95)]})
+                 "devices": [_row(bound, 999.0, 50), _row(spare, 100.0, 95, off_hub=False)]})
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "hardware")
         expect(_card(page, retired_name)).to_contain_text("Not read: Player retired")
@@ -413,8 +414,8 @@ def _frames_with_players(registry, frame_ids, device_ids=None):
     boxes = []
     for index, frame_id in enumerate(frame_ids):
         identity, _, request = enroll(registry, count=1, device_id=device_ids[index] if device_ids else None)
-        registry.create_frame(frame_create(frame_id, x_mm=100 + 400 * index, y_mm=100))
-        registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0)
+        registry.create_frame(frame_create(frame_id, x_mm=100 + 400 * index, y_mm=100), by="console")
+        registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
         boxes.append((identity["player_id"], request.device_id, player_name(registry, identity["player_id"])))
     return boxes
 

@@ -10,7 +10,7 @@ written where its state converges and never by an editor:
   A kept write that finds the stored values differ from the Frame's newest kept entry, or that finds
   no kept entry, first appends an unrecorded one (`unrecorded_record`).
 - **Sent** entries: what the trial owner handed the Node (central/fleet/node_calibration.py
-  `deliver_in`), appended only when the handed values differ from the Frame's newest entry
+  `trial_in`, the Output's trial document), appended only when the handed values differ from the Frame's newest entry
   (`sent_record`): a trial's draft, or the kept values back once a draft went.
 
 Each entry says what it was made for (`MadeFor`: the turn of the screen as it hung, whose
@@ -91,7 +91,7 @@ class PositionEntry:
 
 @dataclass(frozen=True)
 class TrialHanded:
-    """What `deliver_in` hands the Node for the Frame's active trial: its draft's values, its session
+    """What `trial_in` hands the Node for the Frame's active trial: its draft's values, its session
     and the entry its draft was last restored from."""
     values: PositionValues
     session_id: UUID

@@ -72,7 +72,7 @@ def test_the_overview_names_the_winner_and_resting_and_a_display_that_did_not_an
     set_house(registry.db, LONDON)
     frame, player = _bound_frame(registry)
     with registry.db.transaction() as conn:
-        conn.execute("""UPDATE night_off SET settings = jsonb_set(settings, '{frames}', '{"kind": "all-frames"}')""")
+        conn.execute("""UPDATE singletons SET document = jsonb_set(document, '{night_off,frames}', '{"kind": "all-frames"}') WHERE name = 'power_policy'""")
     runtime = RuntimeStore(registry.db, registry.clock)
     runtime.command("set_scene", _scene("evening", frame), by="console")
     runtime.command("set_scene", _scene("calm", frame), by="console")

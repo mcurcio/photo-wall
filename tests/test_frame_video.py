@@ -36,21 +36,14 @@ def _client(registry) -> TestClient:
 
 def _ready_frame(registry, *, video: bool = True) -> None:
     player, _, _ = enroll(registry, count=1, size=DISPLAY)
-    registry.create_frame(frame_create("hall", video=video))
-    registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("hall", video=video), by="console")
+    registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, "hall")
 
 
 def _hall(registry):
     (hall,) = registry.inventory().frames
     return hall
-
-
-def _audits(registry) -> list[dict]:
-    with registry.db.transaction() as conn:
-        return [row["detail"] for row in conn.execute(
-            "SELECT detail FROM audit_events WHERE kind='frame_video_changed' AND subject='hall' "
-            "ORDER BY occurred_at").fetchall()]
 
 
 def test_switching_off_a_bound_ready_frame_saves_at_once_and_keeps_it_ready(registry):
@@ -66,14 +59,13 @@ def test_switching_off_a_bound_ready_frame_saves_at_once_and_keeps_it_ready(regi
     assert after.video is False
     assert (after.readiness, after.generation, after.configuration_revision, after.calibration) == (
         Readiness.READY, before.generation, before.configuration_revision, before.calibration)
-    assert _audits(registry) == [{"video": False}]
 
 
-def test_the_same_value_changes_nothing_and_audits_nothing(registry):
+def test_the_same_value_changes_nothing(registry):
     _ready_frame(registry)
     answer = _client(registry).put("/v1/operator/frames/hall/video", headers=AUTH, json={"video": True})
     assert answer.json() == {"frame_id": "hall", "video": True, "changed": False}
-    assert _audits(registry) == []
+    assert _hall(registry).video is True
 
 
 def test_an_unknown_frame_is_404_and_a_non_boolean_is_422(registry):
@@ -135,8 +127,8 @@ def before_105(registry, profiles: dict[str, dict]) -> None:
 
 
 def test_105_carries_each_profiles_video_onto_its_frame(registry):
-    registry.create_frame(frame_create("still-only", video=True))
-    registry.create_frame(frame_create("moving", video=False))
+    registry.create_frame(frame_create("still-only", video=True), by="console")
+    registry.create_frame(frame_create("moving", video=False), by="console")
     shape = {"width_px": 1920, "height_px": 1080, "diagonal_inches": 24}
     # The profiles as stored before 105; one stored before `video` was written: shows videos.
     before_105(registry, {"still-only": {**shape, "video": False}, "moving": shape})

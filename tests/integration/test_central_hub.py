@@ -10,8 +10,10 @@ reads WALL. 1: worker start: the file lists the enrolled Node, its leaf links, i
 WALL starts at mark 0 + 1 + K and the Node's wall view holds Central's `timing`. 2: a device enrolled
 while running is in the file, linked, recorded and receives WALL (the second reload wires its
 account's WALL consumer API, X6). 3: the hub is killed and starts empty from the same file: WALL is
-re-created at the recorded mark + 1 + K with Central's current `timing` on both Nodes, and the drains
-resume in the Nodes' unchanged epochs. 4: a retired device leaves the file and the hub (its leaf is closed:
+re-created at the recorded mark + 1 + K with Central's current `timing` on both Nodes (Fleet sees the
+hub's new server id when it next asks the hub, no wake), and the drains resume in the Nodes' unchanged
+epochs. An enrolment and a retirement are looked at when their commit wakes Fleet (`wake`, here
+called as the worker's LISTEN would). 4: a retired device leaves the file and the hub (its leaf is closed:
 a reload keeps it), its links stop, and its records stay.
 """
 from __future__ import annotations
@@ -33,11 +35,12 @@ from integration.bus_servers import (
     until,
     wall_writer,
 )
+from support.devices import seed_device
 
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import Database
 from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER, HubListeners
-from central.fleet.node_bus_hub import HUB_LOOK_SECONDS, FleetHub
+from central.fleet.node_bus_hub import HUB_PING_SECONDS, FleetHub
 from central.infra.node_link_store import PgLinkStores, PgWallMarks
 from central.infra.node_links import NodeLinks
 from contracts.node_link import WALL_STREAM, Pipe, account_id, central_user
@@ -79,8 +82,7 @@ class _TimingWall:
 
 def _enrol(db: Database, serial: str) -> None:
     with db.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (device_id_for_serial(serial), serial))
+        seed_device(conn, device_id_for_serial(serial), serial)
 
 
 async def _rows(db: Database, sql: str, params: tuple = ()) -> list[dict]:
@@ -91,7 +93,9 @@ async def _rows(db: Database, sql: str, params: tuple = ()) -> list[dict]:
 
 
 async def _records(db: Database, serial: str, stream: str) -> list[dict]:
-    rows = await _rows(db, "SELECT epoch, seq, subject, data FROM node_link_records WHERE device_id=%s AND stream=%s "
+    """An event stream's `events` records, or a state bucket's newest value per key (`node_states`)."""
+    source = "node_states WHERE" if stream.startswith("KV_") else "events WHERE kind='record' AND"
+    rows = await _rows(db, f"SELECT epoch, seq, subject, data FROM {source} device_id=%s AND stream=%s "
                            "ORDER BY epoch, seq", (device_id_for_serial(serial), stream))
     return [{**row, "data": bytes(row["data"])} for row in rows]
 
@@ -180,6 +184,7 @@ def test_fleet_keeps_the_hub_with_the_enrolled_set(database, tmp_path):
             # Node starts once the hub holds its account (Central's links are in): a leaf that dials
             # before then delays the Node's first WALL by about 40 s (nats-server; erratum E-E3D-S2-3).
             _enrol(database, SECOND)
+            fleet.wake()   # the enrolment's commit wakes the look (the worker's LISTEN, central/node_bus_wiring.py)
             enrolled = time.monotonic()
             left = lambda: ENROL_SECONDS - (time.monotonic() - enrolled)  # noqa: E731
 
@@ -198,8 +203,8 @@ def test_fleet_keeps_the_hub_with_the_enrolled_set(database, tmp_path):
 
             # 3. Hub restart, empty: WALL past the recorded mark, Central's current wall documents on
             # both Nodes, and the drains resume in the Nodes' unchanged epochs.
-            [mark] = await _rows(database, "SELECT mark FROM node_bus_wall")
-            assert mark["mark"] >= 1 + WALL_MARGIN
+            mark = await PgWallMarks(database, lambda: None).mark()
+            assert mark >= 1 + WALL_MARGIN
             documents.timing = b"timing-2"   # Central's projection changes while the hub is away
             hub.crash()
             hub.start()
@@ -207,7 +212,7 @@ def test_fleet_keeps_the_hub_with_the_enrolled_set(database, tmp_path):
             left = lambda: RESTART_SECONDS - (time.monotonic() - restarted)  # noqa: E731
 
             async def recreated():
-                return await _wall_first_seq(hub) == mark["mark"] + 1 + WALL_MARGIN
+                return await _wall_first_seq(hub) == mark + 1 + WALL_MARGIN
             await until(recreated, left(), "Fleet re-creates WALL at the recorded mark + 1 + K")
             for serial in (FIRST, SECOND):
                 await until(walled(serial, b"timing-2"), left(), f"{serial}'s wall view holds the re-put timing")
@@ -216,12 +221,13 @@ def test_fleet_keeps_the_hub_with_the_enrolled_set(database, tmp_path):
             async def recorded():
                 return any(row["data"] == b"after-restart" for row in await _records(database, FIRST, RECORDS))
             await until(recorded, left(), "an event emitted after the restart is recorded")
-            assert await _rows(database, "SELECT * FROM node_link_gaps WHERE lost IS NULL") == []
+            assert await _rows(database, "SELECT * FROM events WHERE kind='gap' AND body->>'lost' IS NULL") == []
 
             # 4. Retire: the account leaves the file and the hub; the links stop; the records stay.
             held = await _records(database, SECOND, STATE)
             with database.transaction() as conn:
                 conn.execute("UPDATE devices SET retired_at=2 WHERE device_id=%s", (device_id_for_serial(SECOND),))
+            fleet.wake()   # the retirement's commit wakes the look
             admin = await HubAdmin.connect(hub.client_url, FLEET_SYSTEM_USER)
             try:
                 async def retired():
@@ -231,7 +237,7 @@ def test_fleet_keeps_the_hub_with_the_enrolled_set(database, tmp_path):
             finally:
                 await admin.close()
             sessions[SECOND].events.emit("record.shown", b"after-retirement", schema_major=1)
-            await asyncio.sleep(3 * HUB_LOOK_SECONDS)   # three looks and a drain's worth
+            await asyncio.sleep(3 * HUB_PING_SECONDS)   # three of Fleet's asks of the hub and a drain's worth
             assert not any(row["data"] == b"after-retirement" for row in await _records(database, SECOND, RECORDS))
             assert await _records(database, SECOND, STATE) == held
             assert not any(task.done() for task in running)

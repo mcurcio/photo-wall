@@ -23,7 +23,7 @@ const out = {};
 const player = (id, extra = {}) => ({ id, device_id: `device-${id}`, authority_epoch: 4,
   registered_at: 10, last_seen: 940, retired_at: null, last_report_at: 995, ...extra });
 const snapshot = { inventory: {
-  read_at: 1000, silent_after_seconds: 30, report_interval_seconds: 5,
+  read_at: 1000, silent_after_seconds: 30, socket_keepalive_seconds: 10,
   players: [player("p-bound"), player("p-retired", { retired_at: 900 })],
   outputs: [
     { player_id: "p-bound", output_id: "HDMI-A-1", observation: { connected: true } },

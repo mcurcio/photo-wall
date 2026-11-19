@@ -119,12 +119,13 @@ class PhotoLibraryQueries(Protocol):
 
 
 class PhotoLibraryCommands(Protocol):
-    def add_connection(self, write: ConnectionWrite) -> ConnectionRef:
+    def add_connection(self, write: ConnectionWrite, *, by: Actor) -> ConnectionRef:
         """Store a new connection (key write-only) and queue its check in the same transaction.
         LibraryRefused("invalid_url", 422), ("key_required", 422)."""
         ...
 
-    def change_connection(self, connection_ref: ConnectionRef, write: ConnectionWrite) -> None:
+    def change_connection(self, connection_ref: ConnectionRef, write: ConnectionWrite, *,
+                          by: Actor) -> None:
         """Rename, re-point or re-key; `write.key` None keeps the key. Queues a check.
         The bound Immich user stays (a key for another user reads Needs a look, other_user).
         LibraryRefused("connection_unknown", 404), ("invalid_url", 422), ("connection_managed",
@@ -176,12 +177,13 @@ class ManagedConnectionCommands(Protocol):
 
 
 class PhotoSourceCommands(Protocol):
-    def create_draft(self, query: SourceQuery, editing: SourceRef | None) -> DraftRef:
+    def create_draft(self, query: SourceQuery, editing: SourceRef | None, *,
+                     by: Actor) -> DraftRef:
         """An unsaved Source whose check starts at once (C8). LibraryRefused
         ("connection_unknown", 404), ("source_unknown", 404) for an unknown `editing`."""
         ...
 
-    def set_draft_query(self, draft: DraftRef, query: SourceQuery) -> None:
+    def set_draft_query(self, draft: DraftRef, query: SourceQuery, *, by: Actor) -> None:
         """Point the draft at the new query's pool (cleared from the console's view: a different
         pool), queueing its check. ("draft_unknown", 404), ("connection_unknown", 404)."""
         ...
@@ -194,7 +196,7 @@ class PhotoSourceCommands(Protocol):
         ("invalid_source_name", 422)."""
         ...
 
-    def check_source(self, source_ref: SourceRef) -> None:
+    def check_source(self, source_ref: SourceRef, *, by: Actor) -> None:
         """Check now (#12's button): queue the Source's pool check. ("source_unknown", 404)."""
         ...
 
@@ -266,12 +268,10 @@ class LibraryWorkerStore(Protocol):
     checks). Implemented by central.infra.photo_library_store.PgPhotoLibrary; media tests use
     tests/support/library_store_fake.py, held to the same behaviour by the conformance suite."""
 
-    def due_contacts(self) -> tuple[ConnectionRef, ...]:
-        """Connections with a key whose last contact started CHECK_EVERY_SECONDS ago or more."""
-        ...
-
     def begin_contact(self, connection_ref: ConnectionRef) -> ContactTicket | None:
-        """Take the next contact number and the secret; None for an unknown or keyless one."""
+        """Take the next contact number and the secret, and queue the connection's next check at
+        `policy.next_check_due(now, now)` in the same transaction (so a contact that raises still
+        leaves its next one queued); None, and nothing queued, for an unknown or keyless one."""
         ...
 
     def connection_secret(self, connection_ref: ConnectionRef) -> ConnectionSecret | None:
@@ -291,19 +291,13 @@ class LibraryWorkerStore(Protocol):
         age. Exactly one of `items` and `error`. No count cap (owner 2026-10-09)."""
         ...
 
-    def due_pools(self) -> tuple[PoolKey, ...]:
-        """Wanted pools (a live draft, or a Source revision Runtime or a name needs) whose
-        connection has a key, and either: no check running, and the last check finished
-        CHECK_EVERY_SECONDS ago or more, or never ran, or a Check now asked for one; or a check
-        running whose latest step began STALE_CHECK_SECONDS ago or more (database time), so a
-        step lost with its worker never leaves a pool checking."""
-        ...
-
     def begin_check(self, pool_key: PoolKey) -> CheckLease | None:
         """Resume the pool's running check from its stored progress, or start the next check
         number; either way the latest step's start (`step_at`) becomes now. Starting a check
         deletes the pages an earlier check of this pool left (one that never finished). None
-        when the pool is gone, unwanted, or its connection has no key."""
+        when the pool is gone, unwanted, or its connection has no key; an unwanted or keyless
+        pool that still stands has its next check queued at its due time
+        (`policy.next_check_due(now, now)`), so its checks go on should it be wanted again."""
         ...
 
     def known_revisions(self, connection_ref: ConnectionRef,
@@ -323,9 +317,9 @@ class LibraryWorkerStore(Protocol):
         - The step's marks are stored as one page per mark kind, and the upstream ids of the
           entries it records as one `seen` page (`photo_check_pages`: one row holding the ids),
           never a row per id.
-        - A row of `library_assets`, `asset_revisions` or `photo_pool_rows` is written only when
-          it is new or a stored fact differs. Compared: an asset's kind, taken time and, when
-          the step read them (an InPool), the original's five facts; a revision's width, height,
+        - A row of `library_assets` or `photo_pool_rows` is written only when it is new or a
+          stored fact differs. Compared: an asset's kind, taken time and, when the step read
+          them (an InPool), the original's five facts and its revision's id, width, height,
           duration and `updated_at`; a pool row's outcome, reason and revision.
         - A written row's `changed_at` is now and its `changed_by` is `library-check`; a new
           row's `created_at` and `created_by` too, and they never change after.
@@ -335,8 +329,9 @@ class LibraryWorkerStore(Protocol):
         `changed_at`. So the stored facts are read without a lock and only the rows that differ
         are upserted, in Immich-id order (two pools' steps lock shared rows in one order).
 
-        Errors: a database error propagates with nothing written; the check resumes from its
-        stored progress once its step is stale (`due_pools`)."""
+        Errors: a database error propagates with nothing written; the step is retried, and once
+        its retries run out `check_step_failed` queues the next check (which resumes from the
+        stored progress)."""
         ...
 
     def unseen_rows(self, lease: CheckLease, limit: int) -> tuple[LibraryRef, ...]:
@@ -361,7 +356,15 @@ class LibraryWorkerStore(Protocol):
         """Complete: remove the rows this check marked (the subtraction) and record the time; a
         row it did not see stays, since only `record_recheck` removes one (follow-up S4).
         Incomplete or failed: remove nothing (design rule 2). Fenced as `record_step`.
-        However it finishes, the check's pages are deleted: none outlives its check."""
+        However it finishes, the check's pages are deleted: none outlives its check, and the
+        pool's next check is queued in the same transaction: at once when a Check now came while
+        this check ran (`check_requested`), else at `policy.next_check_due(now, now)`."""
+        ...
+
+    def check_step_failed(self, pool_key: PoolKey) -> None:
+        """A step that raised until its retries ran out: queue the pool's next check at
+        `policy.next_check_due(now, now)`, as a completion does, so a failure never stops a
+        pool's checks. Nothing for a pool that is gone."""
         ...
 
     def frame_outputs(self) -> tuple[FrameOutput, ...]:
@@ -370,15 +373,15 @@ class LibraryWorkerStore(Protocol):
         ...
 
     def copy_sizes(self, asset_id: str) -> dict[MeasurableCopy, CopySize]:
-        """Every copy of this revision Photo Wall has measured (its `asset_copies` rows; slice
-        A2). Empty for an unknown asset id."""
+        """Every copy of this revision Photo Wall has measured (its photo row's `copies`).
+        Empty for an id that is no photo's current revision."""
         ...
 
     def record_copies(self, asset_id: str, measured: Sequence[MeasuredCopy]) -> None:
-        """After a fetch: upsert each measured copy's type and size at the database's time, one
-        `asset_copies` row per (asset_id, copy). Idempotent; a cache of Immich, never the source
-        of truth (a fetch always measures what it downloads). An asset id with no
-        `asset_revisions` row writes nothing (slice A2)."""
+        """After a fetch: keep each measured copy's type and size at the database's time, one
+        entry per copy in the photo row's `copies`. Idempotent; a cache of Immich, never the
+        source of truth (a fetch always measures what it downloads). An id that is no photo's
+        current revision writes nothing."""
         ...
 
     def pool_thumbnail(self, asset_id: str) -> PoolThumbnail | None:

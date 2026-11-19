@@ -4,33 +4,12 @@ import { useConfirm } from "./ConfirmAction.jsx";
 import { FactLine } from "./domain/fact-line.tsx";
 import { readinessWords, wallOn, wallPrevious } from "./domain/releases/model";
 import { fact, words } from "./facts.js";
-import {
-  appOperationState,
-  heldReboot,
-  rebootCommandState,
-  rebootRequest,
-  rebootTarget,
-  sendReboot,
-} from "./fleetCommands.js";
-import { frameHealth } from "./health.js";
-import { liveRunsFor } from "./join.js";
-import { currentSessionBoot, useNodeDevice } from "./nodeRead.js";
+import { heldReboot, rebootRequest, rebootTarget, sendReboot } from "./fleetCommands.js";
+import { useNodeDevice } from "./nodeRead.js";
 import { playerPageHref } from "./players.js";
-import { QualifiedFallback } from "./QualifiedFallback.jsx";
 import { sendWallVersion, useReleaseRead, WALL_SCOPE, wallSettled, wallVersionWords } from "./releases.js";
 import { formatRoute } from "./routes.js";
 import { SectionBoundary } from "./SectionBoundary.jsx";
-import { BoundRule } from "./StageApp.jsx";
-import {
-  deploymentOf,
-  pendingStage,
-  sendStage,
-  STAGE_SCOPE,
-  stageBlocker,
-  stageReplaces,
-  stageRequest,
-  useHeldStage,
-} from "./stage.js";
 import {
   downloadWait,
   freezeRollout,
@@ -45,25 +24,19 @@ import {
   putConfirmation,
   rolloutMembers,
   rowSettled,
+  runningBase,
   SELECT_ALONE,
-  stageFollowUp,
-  tryWithdrawn,
 } from "./updateWall.js";
 
 // The verbs' homes (Part E §25): this page is their client, never their replacement.
 const RELEASES = formatRoute({ section: "releases" });
-const SHOW_NOW = formatRoute({ section: "now", flow: "show", step: "scene" });
 const KEEP_ACTIVE_MS = 5000;
 const KEEP_IDLE_MS = 15000;
-const NOT_READ = Object.freeze({ read: null, operations: null, readAt: null, error: null });
+const NOT_READ = Object.freeze({ read: null, readAt: null, error: null });
 
-/** The steps in the order the operator meets them (§25a); Try is optional. */
-const STEP_LABELS = Object.freeze([
-  ["choose", "Choose"], ["qualifying", "Qualify (if needed)"], ["staging", "Try on one Frame"],
-  ["looking", "Look"], ["keeping", "Put on the wall"], ["done", "Done"],
-]);
-// Back out branches from Look; only journeyStep's done (the boot ended or interrupted the stage) is Done.
-const STEP_OF = Object.freeze({ paused: "keeping", backing_out: "looking" });
+/** The steps in the order the operator meets them (§25a). */
+const STEP_LABELS = Object.freeze([["choose", "Choose"], ["keeping", "Put on the wall"], ["done", "Done"]]);
+const STEP_OF = Object.freeze({ paused: "keeping" });
 
 const pausedWords = (version) => "Paused means this page sends no more reboots. Every Player already boots "
   + `${version} from its next boot: any Player that restarts for any reason, a power cut included, boots it then.`;
@@ -75,8 +48,8 @@ const HIDDEN = "the tab was hidden; this page sends no reboots while it is not s
 const KEEP_THEN = "When you confirm, this page reboots these Players one at a time, each after the "
   + "previous one rejoins:";
 const COUNT_FACT = fact({ kind: "derived", value: "each Rejoined row is this page's judgement",
-  basis: "a later kernel boot than this page's reboot, or a linked app that identifies this release, and every bound "
-    + "Output's Frame live with no current readiness failure; see each row's Evidence" });
+  basis: "a later start of its host line than this page's reboot, or a running base that identifies this release, "
+    + "and every bound Output's Frame live with no current readiness failure; see each row's Evidence" });
 
 /** The step strip: where the journey is, re-derived from the reads on every render. */
 function Steps({ step }) {
@@ -90,36 +63,6 @@ function Steps({ step }) {
   );
 }
 
-/** The bound Frames of the tried Player, each with its health and live Runs (snapshot facts). */
-function FramesNow({ snapshot, frames }) {
-  return (
-    <ul className="player__commands" aria-label="Frames this Player drives">
-      {frames.map(({ frameId }) => {
-        const runs = liveRunsFor(snapshot?.runtime, frameId);
-        return (
-          <li key={frameId} className="player__command">
-            <p className="player__state">{`Frame ${frameId}: ${frameHealth(snapshot, frameId)?.label ?? "not in the inventory"}`}</p>
-            <p className="roster__note">{runs.length === 0 ? "No live Run"
-              : `Live Run ${runs.map((run) => `${run.scene_id} (${run.phase})`).join(", ")}`}</p>
-          </li>
-        );
-      })}
-    </ul>
-  );
-}
-
-/** One app operation's named state and evidence (fleetCommands.js `appOperationState`). */
-function OperationLine({ operation, readAt }) {
-  if (operation == null) return null;
-  const state = appOperationState(operation, readAt);
-  return (
-    <>
-      <p className="player__state">{state.label}</p>
-      <FactLine label="Evidence" fact={state.fact} />
-    </>
-  );
-}
-
 /**
  * One Keep row's node read: mounted per planned Player while the target is selected, each its
  * own polled read (5 s for the active row, 15 s otherwise), reported up to the page.
@@ -130,36 +73,22 @@ function KeepProbe({ entry, active, register, onRead }) {
     register(entry.playerId, node);
   });
   useEffect(() => {
-    onRead(entry.playerId, { read: node.read, operations: node.operations, readAt: node.readAt, error: node.error });
-  }, [entry.playerId, node.read, node.operations, node.readAt, node.error, onRead]);
+    onRead(entry.playerId, { read: node.read, readAt: node.readAt, error: node.error });
+  }, [entry.playerId, node.read, node.readAt, node.error, onRead]);
   return null;
 }
 
 /**
- * The journey for one target release and one tried Player (or none). Its memory is only what
- * Central cannot serve (updateWall.js); everything else is derived on each render.
+ * The journey for one target release. Its memory is only what Central cannot serve
+ * (updateWall.js); everything else is derived on each render.
  */
-function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, message, withdrawnBy, withdraw }) {
+function Journey({ tag, skippedIds, snapshot, bootFacts, navigate, say, message }) {
   const releases = useReleaseRead();
-  const heldStage = useHeldStage();
   const { open, confirmation } = useConfirm(null);
   const read = releases.read;
   const target = read == null ? null : journeyTarget(read, tag);
   const selected = target !== null && target.deployable && wallOn(read, tag);
-  const plan = keepPlan(snapshot, bootFacts, tried);
-  const triedEntry = tried == null ? null : plan.find((entry) => entry.playerId === tried && entry.frames.length > 0) ?? null;
-  const triedNode = useNodeDevice(triedEntry?.deviceId ?? "none", { skip: triedEntry === null || selected });
-
-  const [memory, setMemory] = useState({ sampling: false, qualified: false, needQualify: false, refusals: 0,
-    backingOut: false, stageId: null });
-  const remember = (change) => setMemory((previous) => ({ ...previous, ...change }));
-  const [stageWords, setStageWords] = useState(/** @type {string|null} */ (null));
-  const stageIds = useRef(/** @type {{operationId: string, commandId: string}|null} */ (null));
-  const [backOut, setBackOut] = useState(/** @type {object|null} */ (null));
-  // Back out's in-flight hold: set synchronously before the await, so a second click before the
-  // first answer lands sends nothing (as `sendStage`'s held "in_flight" and `rebootNext`'s sendingRef).
-  const backOutSending = useRef(false);
-  const [backOutInFlight, setBackOutInFlight] = useState(false);
+  const plan = keepPlan(snapshot, bootFacts);
 
   // Keep: rolling, the reboots this page sent, the operator's skips, each row's read.
   const [rolling, setRolling] = useState(false);
@@ -173,8 +102,7 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
   const [frozen, setFrozen] = useState(/** @type {ReadonlyArray<import("./updateWall.js").PlanEntry>|null} */ (null));
   const frozenRef = useRef(frozen);
   frozenRef.current = frozen;
-  const routeOf = (change = {}) => ({ section: "releases", flow: "update", id: tag,
-    ...(tried == null ? {} : { tried }), skipped: [...skipped], ...change });
+  const routeOf = (change = {}) => ({ section: "releases", flow: "update", id: tag, skipped: [...skipped], ...change });
   const sentRef = useRef(/** @type {Map<string, import("./updateWall.js").SentReboot>} */ (new Map()));
   const [, setSentVersion] = useState(0);
   const sendingRef = useRef(false);
@@ -193,11 +121,10 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
   const rows = selected && snapshot != null ? members.map(({ entry, member }) => {
     const sent = sentRef.current.get(entry.playerId) ?? null;
     return keepRow({ node: probeReads[entry.playerId] ?? NOT_READ, snapshot, playerId: entry.playerId, target,
-      sent, skipped: member === "skipped", outside: member === "outside",
+      running: runningBase(read, entry.playerId), sent, skipped: member === "skipped", outside: member === "outside",
       waitedMs: sent !== null ? nowMs - sent.atMs : rolling && rollingSince.current !== null ? nowMs - rollingSince.current : 0 });
   }) : null;
-  const step = journeyStep({ releases: read, tried: triedEntry === null || selected ? null : { operations: triedNode.operations }, rows },
-    { tag, tried: triedEntry?.playerId ?? null }, { ...memory, rolling });
+  const step = journeyStep({ releases: read, rows }, { tag }, { rolling });
 
   const stop = useCallback((reason, extra = {}) => {
     setRolling(false);
@@ -384,82 +311,10 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
     });
   };
 
-  // Try (§25a): stage the target on the tried Player through `sendStage`.
-  const onStage = async () => {
-    const pending = pendingStage(heldStage.get(), triedNode.operations);
-    stageIds.current ??= { operationId: crypto.randomUUID(), commandId: crypto.randomUUID() };
-    const deploymentId = deploymentOf(read, tag);
-    if (pending?.state !== "unknown" && deploymentId === null) {
-      setStageWords(`Stage unavailable: Central's Releases read lists no deployment for release ${tag}.`);
-      return;
-    }
-    const request = pending?.state === "unknown" ? pending.request
-      : stageRequest(triedNode, deploymentId, stageIds.current);
-    if ("refused" in request) {
-      setStageWords(`Stage unavailable: ${request.refused}.`);
-      return;
-    }
-    const outcome = await sendStage(triedEntry.deviceId, request, { node: triedNode }, heldStage);
-    void triedNode.refresh();
-    // Keyed on Central's served code (updateWall.js `stageFollowUp`), never on the words.
-    const next = stageFollowUp(outcome, memory.refusals);
-    if (next === "stay") {
-      setStageWords(outcome.message);
-      return;
-    }
-    stageIds.current = null;
-    setStageWords(null);
-    if (next === "held") {
-      remember({ stageId: request.body.operation_id });
-    } else if (next === "qualify") {
-      remember({ needQualify: true, qualified: false, refusals: 1 });
-      setStageWords(outcome.message);
-    } else {
-      if (next === "withdraw") withdraw(outcome.message);
-      say(outcome.message);
-      navigate(routeOf({ tried: undefined }));
-    }
-  };
-
-  const onQualifyPhase = (phase, words) => {
-    if (phase === "sampling") remember({ sampling: true });
-    if (phase === "accepted") remember({ sampling: false, qualified: true, needQualify: false });
-    if (phase === "stopped") {
-      say(words);
-      navigate(routeOf({ tried: undefined }));
-    }
-  };
-
-  // Back out (§25a): reboot the tried Player through `sendReboot`; no version is sent.
-  const onBackOut = async () => {
-    if (backOutSending.current) return;
-    const latest = triedNode.latest();
-    const request = backOut ?? rebootRequest(rebootTarget(latest), latest.read?.reboot_commands ?? null,
-      snapshot, latest.readAt, { playerId: tried, commandId: crypto.randomUUID(), reason: "update-wall-back-out" });
-    if ("refused" in request) {
-      say(`Back out unavailable: ${request.refused}.`);
-      return;
-    }
-    backOutSending.current = true;
-    setBackOutInFlight(true);
-    try {
-      const result = await sendReboot(triedEntry.deviceId, request, triedNode);
-      void triedNode.refresh();
-      setBackOut(heldReboot(request, result));
-      if (result.outcome === "done" || result.outcome === "already") remember({ backingOut: true });
-      else say(result.message);
-    } finally {
-      backOutSending.current = false;
-      setBackOutInFlight(false);
-    }
-  };
-
   if (read === null) {
     return releases.error === null ? <p className="player__read-time">Release read: not read yet</p>
       : <FactLine label="Release read" fact={fact({ kind: "unknown", why: `Central did not answer (${releases.error.code})` })} />;
   }
-  const triedName = triedEntry?.name ?? "";
-
   const putButton = target?.deployable === true && !selected && (
     <button type="button" onClick={onPut}>{`Put ${tag} on the wall…`}</button>
   );
@@ -478,27 +333,6 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
       )}
       {step.step === "choose" && (
         <SectionBoundary title="Choose" resetKey={releases.readAt}>
-          {tried != null && triedEntry === null && (
-            <p className="roster__note">{`Player ${tried} is not a bound Player this console knows; choose another.`}</p>
-          )}
-          <h3 className="player__layer-title">Try it on one Frame (optional)</h3>
-          {(() => {
-            const why = withdrawnBy ?? tryWithdrawn(read, step.target);
-            if (why !== null) return <p className="roster__note">{`Try unavailable: ${why}.`}</p>;
-            const triable = plan.filter((entry) => entry.frames.length > 0);
-            if (triable.length === 0) return <p className="roster__note">No Player drives a Frame.</p>;
-            return (
-              <ul className="player__commands" aria-label="Players to try it on">
-                {triable.map((entry) => (
-                  <li key={entry.playerId}>
-                    <a href={formatRoute(routeOf({ tried: entry.playerId }))}>
-                      {`Try on ${entry.name} (Frames ${entry.frames.map((frame) => frame.frameId).join(", ")})`}
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            );
-          })()}
           <h3 className="player__layer-title">Put it on the wall</h3>
           {(() => {
             const value = readinessWords(step.target.release);
@@ -508,76 +342,6 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
           <p className="roster__note">{KEEP_SCOPE}</p>
           <PlanChoice plan={plan} skipped={skipped} onToggle={toggleSkip} />
           {putButton}
-        </SectionBoundary>
-      )}
-      {step.step === "qualifying" && triedEntry !== null && (
-        <SectionBoundary title="Qualify" resetKey={null}>
-          <p className="roster__note">
-            {`${triedName} needs a qualified fallback first: one steady photo or looping video on every Output of this `
-              + "Player for 30 s. "}
-            <a href={SHOW_NOW}>Show now</a>
-            {` on Frames ${triedEntry.frames.map((frame) => frame.frameId).join(", ")}.`}
-          </p>
-          {stageWords !== null && <p className="roster__status-line" role="status">{stageWords}</p>}
-          <QualifiedFallback deviceId={triedEntry.deviceId} node={triedNode} snapshot={snapshot} playerId={tried}
-            onPhase={onQualifyPhase} />
-        </SectionBoundary>
-      )}
-      {step.step === "staging" && triedEntry !== null && (
-        <SectionBoundary title="Try on one Frame" resetKey={null}>
-          <p>{STAGE_SCOPE}</p>
-          {(() => {
-            const replaces = stageReplaces(triedNode.operations);
-            return replaces !== null && step.stage == null ? <p>{replaces}</p> : null;
-          })()}
-          <BoundRule />
-          <FramesNow snapshot={snapshot} frames={triedEntry.frames} />
-          {step.stage != null ? (
-            <OperationLine operation={step.stage} readAt={triedNode.operations?.read_at ?? null} />
-          ) : (() => {
-            const blocker = stageBlocker(triedNode, triedNode.operations,
-              snapshot?.inventory?.players?.find((player) => player.id === tried) ?? null);
-            const held = pendingStage(heldStage.get(), triedNode.operations);
-            return (
-              <>
-                <button type="button" onClick={onStage}
-                  disabled={(blocker !== null && held?.state !== "unknown") || (held !== null && held.state !== "unknown")}>
-                  {held?.state === "unknown" ? "Send the same stage again" : `Stage release ${tag} on ${triedName}`}
-                </button>
-                {blocker !== null && held === null && (
-                  <p className="roster__note">{`Stage unavailable: ${blocker.reason}.`}</p>
-                )}
-              </>
-            );
-          })()}
-          {stageWords !== null && <p className="roster__status-line" role="status">{stageWords}</p>}
-          <p><a href={formatRoute(routeOf({ tried: undefined }))}>Choose again</a></p>
-        </SectionBoundary>
-      )}
-      {step.step === "looking" && triedEntry !== null && (
-        <SectionBoundary title="Look" resetKey={null}>
-          <p>{`Look at the Frames ${triedName} drives.`}</p>
-          <FramesNow snapshot={snapshot} frames={triedEntry.frames} />
-          <OperationLine operation={step.stage} readAt={triedNode.operations?.read_at ?? null} />
-          {putButton}
-          <button type="button" onClick={onBackOut} disabled={backOutInFlight}>{backOut !== null ? "Send the same back-out reboot again" : `Back out: reboot ${triedName}`}</button>
-          <p className="roster__note">{`Back out reboots ${triedName}; its next boot is offered its own version. No version changes.`}</p>
-        </SectionBoundary>
-      )}
-      {step.step === "backing_out" && triedEntry !== null && (
-        <SectionBoundary title="Back out" resetKey={null}>
-          {(() => {
-            const record = backOut === null ? undefined
-              : (triedNode.read?.reboot_commands ?? []).find((entry) => entry.command_id === backOut.body.command_id);
-            const boot = currentSessionBoot(triedNode);
-            return (
-              <>
-                <p className="player__state">{record === undefined ? "Reboot sent; Central has not listed it yet"
-                  : rebootCommandState(record, triedNode.readAt, { nodeDevice: triedNode }).label}</p>
-                <FactLine label="Current node session's boot" fact={boot.fact ?? boot.none} />
-              </>
-            );
-          })()}
         </SectionBoundary>
       )}
       {(step.step === "keeping" || step.step === "paused") && (
@@ -608,19 +372,11 @@ function Journey({ tag, tried, skippedIds, snapshot, bootFacts, navigate, say, m
       )}
       {step.step === "done" && (
         <SectionBoundary title="Done" resetKey={null}>
-          {step.how === "backed_out" ? (
-            <FactLine label="Backed out" fact={fact({ kind: "derived", value: `${triedName}'s Stage ended by a later boot`,
-              basis: "its stage reads interrupted or ended by a later boot; that boot is offered its own version, and "
-                + "which app it runs is the Player's fact" })} />
-          ) : (
-            <>
-              <p className="player__state">{`Done · ${keepCount(rows)}`}</p>
-              <FactLine label="On this release" fact={COUNT_FACT} />
-              <KeepRows members={members} rows={rows} snapshot={snapshot} pause={null} sent={sentRef.current} />
-              {wallPrevious(read) !== null && wallPrevious(read) !== tag && (
-                <button type="button" onClick={onUndo}>{`Undo: put release ${wallPrevious(read)} back…`}</button>
-              )}
-            </>
+          <p className="player__state">{`Done · ${keepCount(rows)}`}</p>
+          <FactLine label="On this release" fact={COUNT_FACT} />
+          <KeepRows members={members} rows={rows} snapshot={snapshot} pause={null} sent={sentRef.current} />
+          {wallPrevious(read) !== null && wallPrevious(read) !== tag && (
+            <button type="button" onClick={onUndo}>{`Undo: put release ${wallPrevious(read)} back…`}</button>
           )}
         </SectionBoundary>
       )}
@@ -699,24 +455,22 @@ function KeepRows({ members, rows, snapshot, pause, sent, onSkip, onRetry }) {
 
 /**
  * Fleet › Releases › Update the wall (Part E §25a, bead NU1):
- * `#/releases/update/<tag>[/try/<player>][/skip/<player>…]`.
- * A client of the verbs' homes that adds no Central state and no verb. The words of a stopped
- * step survive a change of the tried Player (the journey below is keyed on it).
+ * `#/releases/update/<tag>[/skip/<player>…]`.
+ * A client of the verbs' homes that adds no Central state and no verb.
  *
- * @param {{tag: string, tried: string|null, skipped: string[], snapshot: object|null,
+ * @param {{tag: string, skipped: string[], snapshot: object|null,
  *          bootFacts: object|null, navigate: (route: import("./routes.js").Route) => void}} props
  */
-export function UpdateWallPage({ tag, tried, skipped, snapshot, bootFacts, navigate }) {
+export function UpdateWallPage({ tag, skipped, snapshot, bootFacts, navigate }) {
   const [message, setMessage] = useState(/** @type {string|null} */ (null));
-  const [withdrawn, setWithdrawn] = useState(/** @type {string|null} */ (null));
   return (
     <div className="player">
       <header className="player__header">
         <p><a href={RELEASES}>Releases</a></p>
         <h2 className="player__name">{`Update the wall with release ${tag}`}</h2>
       </header>
-      <Journey key={tried ?? ""} tag={tag} tried={tried} skippedIds={skipped} snapshot={snapshot} bootFacts={bootFacts} navigate={navigate}
-        say={setMessage} message={message} withdrawnBy={withdrawn} withdraw={setWithdrawn} />
+      <Journey tag={tag} skippedIds={skipped} snapshot={snapshot} bootFacts={bootFacts} navigate={navigate}
+        say={setMessage} message={message} />
     </div>
   );
 }

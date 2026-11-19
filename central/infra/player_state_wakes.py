@@ -6,13 +6,14 @@ The event: a transaction that holds the Coordination lock and wrote (`notify_if_
 last statement of the Coordinator's and the Registry's writing transactions). Everything a
 Player's state is projected from (its configuration, plan offers, grants, revocations, the
 Identify cue, its enrollment) is written under that lock, so its commit is the one moment a state
-can change. A transaction that wrote nothing (a state poll of an unchanged state) notifies nothing,
+can change. A transaction that wrote nothing (a read of an unchanged state) notifies nothing,
 so a delivery that wakes a socket never wakes it again. PostgreSQL sends the NOTIFY only when the
 transaction commits; one rolled back sends none. Every Central process hears it on one LISTEN
 (`PlayerStateWakes.listen`), whichever process wrote.
 
-Each woken socket reads its Player's state again and sends it only when its delivery changed;
-a Player's state poll still reads it every REPORT_INTERVAL, so a missed wake costs at most one poll.
+Each woken socket reads its Player's state again and sends it only when its delivery changed. The
+Player never polls (decision 0034): the LISTEN wakes every socket on each (re)connect, since a
+NOTIFY sent while none listened is lost.
 """
 from __future__ import annotations
 
@@ -21,11 +22,12 @@ import contextlib
 import threading
 from typing import Any, Final
 
+from central.db import PoolName
 from central.infra.listen import listen
 
 PLAYER_STATE_CHANNEL: Final = "photo_wall_player_state"     # payload: empty (every Player)
 _LISTEN_RETRY_SECONDS: Final = 1.0
-_LISTEN_APPLICATION: Final = "photo-wall-player-state"
+_LISTEN_APPLICATION: Final[PoolName] = "photo-wall-player-state"
 
 
 def notify_if_written_in(conn: Any) -> None:

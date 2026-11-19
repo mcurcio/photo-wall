@@ -6,7 +6,6 @@ from typing import NamedTuple
 
 from fastapi.testclient import TestClient
 from media_queue import RecordingMediaQueue
-from psycopg.types.json import Jsonb
 from support.house_time import UTC_HOUSE
 from support.photo_pools import FIXTURE_CONNECTION, seed_pool
 
@@ -57,7 +56,7 @@ def test_authored_api_is_neutral_idempotent_and_membership_bound(registry):
         response = client.post("/v1/operator/authored-candidates", headers=headers,
                                json={"source_ref": spec.source_ref, "asset_ids": [originals[0].asset_id]})
         assert response.status_code == 200
-        assert response.json() == {"asset_refs": [originals[0].asset_id], "created": 1}
+        assert response.json() == {"asset_refs": [originals[0].asset_id], "created": 0}
         assert client.post("/v1/operator/authored-candidates", headers=headers,
                            json={"source_ref": spec.source_ref, "asset_ids": [originals[0].asset_id]}).json()["created"] == 0
         source = client.get(f"/v1/operator/sources/{spec.source_ref}/candidates", headers=headers)
@@ -93,24 +92,20 @@ def test_a_pool_member_authors_while_its_check_has_not_completed(registry):
                                headers={"Authorization": "Bearer " + ADMIN},
                                json={"source_ref": spec.source_ref,
                                      "asset_ids": [originals[0].asset_id]})
-        assert response.status_code == 200 and response.json()["created"] == 1
+        assert response.status_code == 200 and response.json()["created"] == 0
 
 
-def test_authored_snapshot_is_immutable_with_no_count_limit(registry):
+def test_authoring_checks_membership_with_no_count_limit_and_stores_nothing(registry):
+    """Decision 0034: authoring validates that the photos are in the Source's pool and writes
+    nothing (a Scene keeps their ids); asked again it answers the same."""
     repo, spec, originals = setup_source(registry, count=3)
+    body = {"source_ref": spec.source_ref,
+            "asset_ids": [original.asset_id for original in originals]}
     with client_for(registry) as client:
         headers = {"Authorization": "Bearer " + ADMIN}
-        assert client.post("/v1/operator/authored-candidates", headers=headers, json={
-            "source_ref": spec.source_ref,
-            "asset_ids": [original.asset_id for original in originals]}).json()["created"] == 3
-        with repo.transaction() as conn:
-            changed = repo.authored_candidates_in(conn, (originals[0].asset_id,))[
-                originals[0].asset_id].model_copy(update={"captured_at": 1})
-            conn.execute("UPDATE authored_candidates SET candidate=%s WHERE asset_id=%s",
-                         (Jsonb(changed.model_dump(mode="json")), originals[0].asset_id))
-        assert client.post("/v1/operator/authored-candidates", headers=headers,
-                           json={"source_ref": spec.source_ref, "asset_ids": [originals[0].asset_id]}).json() == {
-            "error": "authored_candidate_immutable"}
+        first = client.post("/v1/operator/authored-candidates", headers=headers, json=body)
+        again = client.post("/v1/operator/authored-candidates", headers=headers, json=body)
+    assert first.json() == again.json() == {"asset_refs": body["asset_ids"], "created": 0}
 
 
 def test_a_made_variant_and_a_failure_cooldown_hydrate_authored_refs(registry):
@@ -129,15 +124,16 @@ def test_a_made_variant_and_a_failure_cooldown_hydrate_authored_refs(registry):
     with repo.db.transaction() as conn:
         key = repo.variant_key_in(conn, failing.asset_id)
         conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,reason,retry_not_before,"
-                     "seq,updated_at) VALUES(%s,%s,'transient','asset_missing',1010,"
-                     "nextval('job_outcome_seq'),1000)", (prepare_lock(key), PrepareMedia.job_name))
+                     "seq,changed_at,created_at,created_by,changed_by) VALUES(%s,%s,'transient','asset_missing',1010,"
+                     "nextval('job_outcome_seq'),1000,1000,'central','central')", (prepare_lock(key), PrepareMedia.job_name))
     registry.clock.wall = 1000  # the repository's media times follow this clock
     with repo.db.transaction() as conn:
-        authored = repo.authored_in(conn)
+        ids = frozenset({made.asset_id, failing.asset_id})
+        authored = repo.authored_in(conn, ids)
         assert authored[made.asset_id].variant == variant
         assert authored[failing.asset_id].preparation_failure == "asset_missing"
         registry.clock.advance(11)
-        assert repo.authored_in(conn)[failing.asset_id].preparation_failure is None
+        assert repo.authored_in(conn, ids)[failing.asset_id].preparation_failure is None
 
 
 def test_scene_asset_refs_are_per_frame_and_admitted_runs_are_immutable():

@@ -17,12 +17,8 @@ from appliance.apps.environment import (
     inventory,
     verify_root,
 )
-from appliance.host.host import HostCore, RebootRequest
-from appliance.host.host_storage import FileRebootJournal
 from appliance.kernel.boot_store import BootStore
 from contracts.app_environment import AppEnvironmentRefV2
-from contracts.node_commands import reboot_digest
-from contracts.node_protocol import NodeProducerV2
 
 # A fixed replacement identity: a parameter value must be the same in every collection (xdist
 # workers each collect, and must agree).
@@ -63,33 +59,6 @@ def test_boot_store_rejects_symlink_and_corrupt_json(tmp_path):
     current.close()
 
 
-def test_reboot_unknown_effect_cannot_repeat_after_service_restart(tmp_path):
-    boot, session, offer = uuid4(), uuid4(), uuid4()
-    producer = NodeProducerV2("site", "device-" + "a" * 64, 1, boot, "host_core", uuid4())
-    request = RebootRequest(uuid4(), "0" * 64, session, offer, producer)
-    request = replace(request, command_sha256=reboot_digest(request))
-
-    class Driver:
-        calls = 0
-        def initiate(self):
-            self.calls += 1
-            raise OSError("reply lost")
-
-    driver = Driver()
-    journal_store = store(tmp_path, boot)
-    core = HostCore(producer=producer, session_id=session, offer_id=offer,
-                    journal=FileRebootJournal(journal_store), driver=driver)
-    assert core.receive(request, now_ms=1).decision == "accepted"
-    assert core.initiate(request.command_id, now_ms=2).effect_unknown
-    journal_store.close()
-    recovered = store(tmp_path, boot)
-    core = HostCore(producer=producer, session_id=session, offer_id=offer,
-                    journal=FileRebootJournal(recovered), driver=driver)
-    assert core.initiate(request.command_id, now_ms=3).effect_unknown
-    assert driver.calls == 1
-    recovered.close()
-
-
 def fixture_root(directory: Path, *, deb_name: str = "player"):
     """A sealed release root as the image's mount shows it (rootfs/ and the three metadata files),
     and its reference, the digest and size placeholders standing for the image's."""
@@ -125,25 +94,6 @@ def test_node_base_units_have_no_boot_switch():
     assert NODE_UNITS and not any("ConditionKernelCommandLine" in path.read_text()
                                   for path in NODE_UNITS)
     assert not any(path.name.endswith(".d") for path in (REPO / "appliance/systemd").iterdir())
-
-
-def test_manager_no_fallback_exhausts_primary_once():
-    from appliance.node.manager import ManagerRecovery, ManagerRecoveryState
-    class Store:
-        value = ManagerRecoveryState()
-        def load(self): return self.value
-        def save(self, value): self.value = value
-    class Launcher:
-        calls = 0
-        def verify(self, root): return True
-        def start(self, root):
-            self.calls += 1
-            return False
-    launcher = Launcher()
-    recovery = ManagerRecovery(launcher, primary="a" * 64, fallback=None, store=Store())
-    assert recovery.recover().fault == "manager_recovery_required"
-    recovery.recover()
-    assert launcher.calls == 1
 
 
 def test_safe_dangling_and_ancestor_alias_inventory_preserved(tmp_path):
@@ -424,7 +374,7 @@ def test_a_start_records_its_boottime_and_the_unit_dumps_python_stacks(stop_driv
         monkeypatch.setattr(linux.subprocess, "run", lambda command, **kwargs: (
             commands.append(command), observed.append(expected)))
         assert driver.start(expected.environment, expected.operation_id) == expected
-        assert driver.launched() == Launch(1, "weston-7", 424_242)
+        assert driver.launched() == Launch(1, "weston-7", 424_242, expected)  # the run it saw
         (command,) = commands
         environment = next(value for value in command if value.startswith("Environment="))
         assert "PYTHONFAULTHANDLER=1" in environment.split()

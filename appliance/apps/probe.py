@@ -26,6 +26,10 @@ from appliance.kernel.probe_timing import (
     ProbeTiming,
 )
 
+# The invocation of a launch's run that no observation saw (`AppRunKey.of_launch`): systemd
+# names none it could have had, so a run document naming it is never another run's.
+UNSEEN_INVOCATION = UUID(int=0)
+
 
 @dataclass(frozen=True, slots=True)
 class AppRunKey:
@@ -42,18 +46,18 @@ class AppRunKey:
         process = running.process
         return cls(process.invocation_id, process.pid, process.start_ticks, running.app_epoch)
 
+    @classmethod
+    def of_launch(cls, launch) -> AppRunKey:
+        """The run a launch (`appliance.apps.broker.Launch`) started: the run the driver saw it
+        spawn or adopt, else its epoch alone (`UNSEEN_INVOCATION`, pid 0, start ticks 0): a
+        spawn no observation saw still started a run, one that is not running."""
+        if launch.run is not None:
+            return cls.of(launch.run)
+        return cls(UNSEEN_INVOCATION, 0, 0, launch.epoch)
+
     def document(self) -> dict:
         return {"invocation_id": str(self.invocation_id), "pid": self.pid,
                 "start_ticks": self.start_ticks, "app_epoch": self.app_epoch}
-
-
-@dataclass(frozen=True, slots=True)
-class OwedRelink:
-    """The outbox owes `run`'s Player a relink; `episode` names the refusal that owed it, so
-    each new refusal of the same run is a new relink (once per channel instance per episode)."""
-
-    run: AppRunKey
-    episode: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +119,6 @@ class ProbeClock:
 
 
 __all__ = [
-    "MISS_LIMIT", "PROBE_PERIOD_MS", "SHIPPED_TIMING", "STARTUP_BUDGET_MS", "AppRunKey", "OwedRelink",
-    "ProbeClock", "ProbeFact", "ProbeTiming",
+    "MISS_LIMIT", "PROBE_PERIOD_MS", "SHIPPED_TIMING", "STARTUP_BUDGET_MS", "AppRunKey",
+    "UNSEEN_INVOCATION", "ProbeClock", "ProbeFact", "ProbeTiming",
 ]

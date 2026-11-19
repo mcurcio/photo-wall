@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from uuid import UUID
 
-import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 from support.migrations import migrate_before
@@ -30,6 +29,7 @@ from central.photo_library.model import (
     SourceQuery,
     TakenBetween,
 )
+from central.photo_library.policy import CHECK_EVERY_SECONDS
 from central.photo_library.views import ConnectionWrite
 
 ANNA = ImmichUser(user_ref=str(UUID(int=1)), name="Anna", email="anna@example.test")
@@ -42,16 +42,20 @@ class RecordingLibraryQueue:
 
     def __init__(self):
         self.connections, self.pools, self.fail = [], [], False
+        self.connection_due: list[tuple[str, float]] = []
+        self.pool_due: list[tuple[str, float]] = []
 
-    def enqueue_connection_check_in(self, conn, connection_ref):
+    def enqueue_connection_check_in(self, conn, connection_ref, *, due_at):
         coalesced = connection_ref in self.connections
         self.connections.append(connection_ref)
+        self.connection_due.append((connection_ref, due_at))
         return QueueReceipt(coalesced=coalesced)
 
-    def enqueue_pool_check_in(self, conn, pool_key):
+    def enqueue_pool_check_in(self, conn, pool_key, *, due_at):
         if self.fail:
             raise RuntimeError("queue down")
         self.pools.append(pool_key)
+        self.pool_due.append((pool_key, due_at))
         return QueueReceipt(coalesced=False)
 
 
@@ -74,15 +78,8 @@ def health_of(store, ref):
 def store(registry):
     library = store_of(registry.db)
     ref = library.add_connection(ConnectionWrite(name="Home", url="http://immich.invalid:2283",
-                                                 key="PUBLIC-FIXTURE-KEY-1234"))
+                                                 key="PUBLIC-FIXTURE-KEY-1234"), by="console")
     return library, ref
-
-
-def _set_contact_age(db, ref, seconds):
-    with db.transaction() as conn:
-        conn.execute("UPDATE library_connections SET contact_started_at="
-                     "EXTRACT(EPOCH FROM clock_timestamp())-%s WHERE connection_ref=%s",
-                     (seconds, ref))
 
 
 # -- contacts: newest wins, the user binds once, health over time --------------------------------
@@ -138,18 +135,26 @@ def test_needs_a_look_keeps_its_since_then_clears(store):
     assert health_of(library, ref).health.state == "ok"
 
 
-def test_due_contacts_use_the_database_clock_and_skip_keyless_rows(store, registry):
-    """Case 9."""
+def test_a_contact_queues_the_next_one_by_the_database_clock_and_a_keyless_row_none(store,
+                                                                                    registry):
+    """Case 9, without a poll (S3a): a contact queues the connection's next check for
+    CHECK_EVERY_SECONDS after it began, by the database clock; a keyless row is never contacted
+    and queues nothing."""
     library, ref = store
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO library_connections(connection_ref,name,created_at) "
-                     "VALUES('family-library','family-library',0)")
-    assert library.due_contacts() == (ref,)                  # never contacted
-    _set_contact_age(registry.db, ref, 899)
-    assert library.due_contacts() == ()
-    _set_contact_age(registry.db, ref, 900)
-    assert library.due_contacts() == (ref,)
+        conn.execute("INSERT INTO library_connections(connection_ref,name,created_at,created_by,"
+                     "changed_at,changed_by) VALUES('family-library','family-library',0,'console',"
+                     "0,'console')")
+    queue = library.queue
+    assert queue.connection_due[-1][0] == ref                # the new connection, at once
+    library.begin_contact(ref)
+    with registry.db.transaction() as conn:
+        started = conn.execute("SELECT contact_started_at FROM library_connections WHERE "
+                               "connection_ref=%s", (ref,)).fetchone()["contact_started_at"]
+    assert queue.connection_due[-1] == (ref, started + CHECK_EVERY_SECONDS)
+    queued = len(queue.connection_due)
     assert library.begin_contact("family-library") is None
+    assert len(queue.connection_due) == queued
     assert library.connection_secret("family-library") is None
 
 
@@ -204,7 +209,7 @@ def test_reads_of_an_unknown_connection_are_refused(store):
 
 def test_migration_080_converts_pre_4_sources_and_makes_cut_over_rows(empty_database):
     """Case 11. Mutation probe: map `favorites: false` to `favourites_only: true`."""
-    db = Database(empty_database)
+    db = Database(empty_database, application_name="photo-wall-test")
     try:
         migrate_before(db, "080")
         tag = str(UUID(int=9))
@@ -243,88 +248,3 @@ def test_migration_080_converts_pre_4_sources_and_makes_cut_over_rows(empty_data
         assert SourceQuery.model_validate(rows[ref]["query"]) == query
         assert rows[ref]["pool_key"] is None
         assert rows[ref]["spec"] == specs[ref]
-
-
-# -- migration 112: the pool check's audit fields and pages (decision 0033) ---------------------
-
-
-def test_migration_112_renames_in_the_catalog_ends_running_checks_and_drops_the_defaults(
-        empty_database):
-    """No table of the pool check is rewritten (each keeps its file), a row's first and last
-    sighting become its created and changed times, and a running check ends so the next one
-    starts with pages. Mutation probes: leave a default in place -> the unstamped insert
-    succeeds; drop step 3 -> the pool stays checking."""
-    db = Database(empty_database)
-    upstream = str(UUID(int=1))
-    pools = {name: f"{number:064x}" for number, name in enumerate(
-        ("resumed", "first", "done"), start=1)}
-    try:
-        migrate_before(db, "112")
-        with db.transaction() as conn:
-            conn.execute("INSERT INTO library_connections(connection_ref,name,created_at) "
-                         "VALUES('library-000000000001','Home',0)")
-            for name, key in pools.items():
-                conn.execute(
-                    "INSERT INTO photo_pools(pool_key,connection_ref,query,check_number,"
-                    "check_state,last_complete_at,check_finished_at,progress,check_requested,"
-                    "created_at) VALUES(%s,'library-000000000001','{}',2,%s,%s,%s,%s,FALSE,0)",
-                    (key, "complete" if name == "done" else "checking",
-                     None if name == "first" else 50.0, None if name == "first" else 50.0,
-                     None if name == "done" else Jsonb({"page": 3})))
-            conn.execute("INSERT INTO library_assets(connection_ref,upstream_id,kind,taken_at,"
-                         "first_seen,last_seen) VALUES('library-000000000001',%s,'image',1,10,20)",
-                         (upstream,))
-            conn.execute("INSERT INTO asset_revisions(asset_id,connection_ref,upstream_id,"
-                         "revision,width,height,first_seen,last_seen) "
-                         "VALUES('asset-1','library-000000000001',%s,'r',4,3,11,21)", (upstream,))
-            conn.execute("INSERT INTO photo_pool_rows(pool_key,upstream_id,outcome,asset_id,"
-                         "seen_check) VALUES(%s,%s,'in_pool','asset-1',2)",
-                         (pools["resumed"], upstream))
-            conn.execute("INSERT INTO photo_check_marks VALUES(%s,2,%s,'excluded')",
-                         (pools["resumed"], upstream))
-            files = _files(conn)
-        db.migrate()
-        with db.transaction() as conn:
-            migrated_at = conn.execute(
-                "SELECT EXTRACT(EPOCH FROM applied_at)::float8 AS at FROM schema_migrations "
-                "WHERE name='112_pool_check_changed_only.sql'").fetchone()["at"]
-            assert _files(conn) == files
-            states = {row["pool_key"]: (row["check_state"], row["check_requested"],
-                                        row["progress"]) for row in conn.execute(
-                "SELECT pool_key,check_state,check_requested,progress FROM photo_pools")}
-            parent = conn.execute("SELECT created_at,changed_at,created_by,changed_by "
-                                  "FROM library_assets").fetchone()
-            revision = conn.execute("SELECT created_at,changed_at,created_by,changed_by "
-                                    "FROM asset_revisions").fetchone()
-            row = conn.execute("SELECT created_at,changed_at,created_by,changed_by "
-                               "FROM photo_pool_rows").fetchone()
-            tables = {row["name"] for row in conn.execute(
-                "SELECT table_name AS name FROM information_schema.tables "
-                "WHERE table_schema='public'").fetchall()}
-            defaults = conn.execute(
-                "SELECT table_name,column_name FROM information_schema.columns WHERE "
-                "table_name IN ('library_assets','asset_revisions','photo_pool_rows') AND "
-                "column_name IN ('created_at','changed_at','created_by','changed_by') AND "
-                "column_default IS NOT NULL").fetchall()
-        with pytest.raises(psycopg.errors.NotNullViolation), db.transaction() as conn:
-            conn.execute("INSERT INTO library_assets(connection_ref,upstream_id,kind,taken_at,"
-                         "created_at,changed_at) VALUES('library-000000000001',%s,'image',1,1,1)",
-                         (str(UUID(int=2)),))
-    finally:
-        db.close()
-    assert states == {pools["resumed"]: ("complete", True, None),
-                      pools["first"]: ("never_checked", True, None),
-                      pools["done"]: ("complete", False, None)}
-    assert tuple(parent.values()) == (10, 20, "library-check", "library-check")
-    assert tuple(revision.values()) == (11, 21, "library-check", "library-check")
-    assert row["created_at"] == row["changed_at"] == pytest.approx(migrated_at, abs=1)
-    assert (row["created_by"], row["changed_by"]) == ("library-check", "library-check")
-    assert "photo_check_marks" not in tables and "photo_check_pages" in tables
-    assert defaults == []
-
-
-def _files(conn) -> dict[str, int]:
-    """Each pool-check table's file: a rewrite gives it a new one."""
-    return {row["name"]: row["file"] for row in conn.execute(
-        "SELECT relname AS name,relfilenode AS file FROM pg_class WHERE relname IN "
-        "('library_assets','asset_revisions','photo_pool_rows')").fetchall()}

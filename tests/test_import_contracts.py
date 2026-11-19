@@ -4,6 +4,7 @@ shrink; layers stay exact; forbidden contracts only grow.
 lint-imports proves the contracts hold; this test proves nobody loosened them to make it pass.
 """
 
+import re
 import sys
 import tomllib
 from collections.abc import Mapping
@@ -18,7 +19,6 @@ REPO = Path(__file__).resolve().parents[1]
 PYPROJECT = REPO / "pyproject.toml"
 
 LAYERS_CONTRACT: Final = "Node contexts point down"
-SESSION_CONTRACT: Final = "The Central session is retiring: only the listed workers import it"
 NATS_CONTRACT: Final = "Only the Node API library talks to NATS"
 FEED_CONTRACT: Final = "The feed is retiring: it gains no importer"
 NODE_API_PACKAGE: Final = "nodeapi"
@@ -34,13 +34,11 @@ KERNEL_MAY_IMPORT: Final = ("contracts", "uplink", KERNEL)
 # One directory per Node context, in import order (node redesign r3 §3.4). Exact: a change is a
 # design change, not a lint fix.
 FROZEN_NODE_LAYERS: Final[list[str]] = [
-    "node",
     "boot | netboot_init",
     "bootstrap | central_post | node_boot_handoff",
     "apps",
     "health",
     "display_host | host",
-    "central_session",
     "kernel | feed | feed_socket",
 ]
 
@@ -52,7 +50,6 @@ FROZEN_FEED_EXEMPTIONS: Final[frozenset[str]] = frozenset({
     "appliance.health.judge -> appliance.feed",
     "appliance.health.runner -> appliance.feed",
     "appliance.health.runner -> appliance.feed_socket",
-    "appliance.node.app_link -> appliance.feed",
     "appliance.apps.broker_runner -> appliance.feed",
     "appliance.apps.broker_runner -> appliance.feed_socket",
     "appliance.apps.probe_channel -> appliance.feed",
@@ -61,27 +58,8 @@ FROZEN_FEED_EXEMPTIONS: Final[frozenset[str]] = frozenset({
 # Every contract's ignore lines when E1 froze them. A contract absent here may have none. Removing
 # a line is the ratchet turning; adding one fails.
 FROZEN_EXEMPTIONS: Final[Mapping[str, frozenset[str]]] = {
-    LAYERS_CONTRACT: frozenset({
-        "appliance.apps.broker_runner -> appliance.node.app_link",
-        "appliance.apps.broker_runner -> appliance.node.recovery_linux",
-        "appliance.apps.online_broker -> appliance.node.recovery",
-        "appliance.apps.stop_linux -> appliance.node.recovery",
-        "appliance.apps.lifecycle_storage -> appliance.node.manager",
-        "appliance.host.host_runner -> appliance.node.recovery",
-        "appliance.host.host_runner -> appliance.node.recovery_linux",
-        "appliance.boot.node_bootstrap -> appliance.node.preparer",
-    }),
     "Boot is an island": frozenset({
         "appliance.boot.node_bootstrap -> appliance.apps.environment",
-        "appliance.node.preparer -> appliance.apps.environment",
-    }),
-    SESSION_CONTRACT: frozenset({
-        "appliance.host.host_runner -> appliance.central_session.*",
-        "appliance.node.manager_desired -> appliance.central_session.*",
-        "appliance.display_host.service -> appliance.central_session.*",
-        "appliance.apps.broker_runner -> appliance.central_session.*",
-        "appliance.node.app_link -> appliance.central_session.*",
-        "appliance.apps.online_broker -> appliance.central_session.*",
     }),
     FEED_CONTRACT: FROZEN_FEED_EXEMPTIONS,
 }
@@ -95,8 +73,7 @@ FROZEN_FORBIDDEN_CONTRACTS: Final[Mapping[str, tuple[frozenset[str], frozenset[s
     "Boot is an island": (
         frozenset({"appliance.boot", "appliance.netboot_init", "appliance.bootstrap",
                    "appliance.central_post", "appliance.node_boot_handoff"}),
-        frozenset({"appliance.apps", "appliance.health", "appliance.display_host", "appliance.host",
-                   "appliance.central_session"}),
+        frozenset({"appliance.apps", "appliance.health", "appliance.display_host", "appliance.host"}),
     ),
     "App lifecycle reaches no sibling context": (
         frozenset({"appliance.apps"}),
@@ -122,15 +99,6 @@ FROZEN_FORBIDDEN_CONTRACTS: Final[Mapping[str, tuple[frozenset[str], frozenset[s
     ),
 }
 
-# The retiring packages (r3 §10): their files only leave; new code goes in a context.
-RETIRING_FILES: Final[frozenset[str]] = frozenset({
-    *(f"appliance/node/{name}.py" for name in (
-        "__init__", "app_link", "manager", "manager_desired", "manager_launcher",
-        "manager_observation", "manager_runner", "preparer", "recovery", "recovery_linux")),
-    *(f"appliance/central_session/{name}.py" for name in ("__init__", "http", "session")),
-})
-
-
 def _importlinter() -> dict:
     return tomllib.loads(PYPROJECT.read_text())["tool"]["importlinter"]
 
@@ -149,10 +117,13 @@ def test_exemptions_only_shrink() -> None:
         assert not added, f"{contract['name']}: new exemptions are not allowed: {sorted(added)}"
     added = set(_contract(LAYERS_CONTRACT).get("exhaustive_ignores", ())) - FROZEN_EXHAUSTIVE_IGNORES
     assert not added, f"new unlayered appliance modules are not allowed: {sorted(added)}"
-    session = _contract(SESSION_CONTRACT)
-    assert session["type"] == "protected"
-    assert session["protected_modules"] == ["appliance.central_session"]
-    assert session["allowed_importers"] == ["appliance.central_session"]
+
+
+def test_the_central_session_is_gone() -> None:
+    """The Pi's old HTTP path left with its last importer (decision 0034, S4c): no package and no
+    contract names it."""
+    assert not (REPO / "appliance/central_session").exists()
+    assert "central_session" not in PYPROJECT.read_text()
 
 
 def test_node_layers_are_the_frozen_list() -> None:
@@ -186,12 +157,11 @@ def test_no_node_contract_silences_unmatched_exemptions() -> None:
     assert not silenced, f"unmatched exemptions must stay loud: {silenced}"
 
 
-def test_retiring_packages_only_shrink() -> None:
-    files = {path.relative_to(REPO).as_posix()
-             for package in ("appliance/node", "appliance/central_session")
-             for path in (REPO / package).glob("*.py")}
-    added = files - RETIRING_FILES
-    assert not added, f"new code in a retiring package is not allowed: {sorted(added)}"
+def test_the_app_manager_is_gone() -> None:
+    """The retiring `appliance.node` left with the App Manager (decision 0034, S4c-2b-ii): no package,
+    layer or exemption names it."""
+    assert not (REPO / "appliance/node").exists()
+    assert not re.search(r"appliance\.node(?!\w)", PYPROJECT.read_text())
 
 
 def test_root_packages_are_every_first_party_package() -> None:

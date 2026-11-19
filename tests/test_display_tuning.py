@@ -108,7 +108,8 @@ def _pattern(client, session: dict, pattern: str | None, expected: int):
 
 
 def _end_lease(registry) -> None:
-    _sql(registry, "UPDATE picture_sessions SET idle_until = EXTRACT(EPOCH FROM clock_timestamp()) - 1")
+    _sql(registry, "UPDATE displays SET picture_session = jsonb_set(picture_session, '{idle_until}', to_jsonb(EXTRACT(EPOCH FROM clock_timestamp()) - 1)) "
+         "WHERE picture_session IS NOT NULL")
 
 
 # --- Pure rules ----------------------------------------------------------------------------------
@@ -235,7 +236,7 @@ def test_the_edits_refuse_like_the_other_edits():
 
 def test_a_new_display_reads_auto_and_its_document_carries_auto_and_no_pattern(registry):
     """(1) Mutation probe: default_picture() returns FULL -> the Output with no Display reads full;
-    the displays column's default is 094's (tests/test_migration_094.py)."""
+    the displays column's default is 094's (central/migrations/094_display_tuning.sql)."""
     player = _bound(registry)
     assert _picture(registry, "pi-picture", "HDMI-A-2").signal_range is AUTO     # no Display seen there
     document = _picture(registry)
@@ -313,7 +314,9 @@ def test_the_test_pattern_is_the_sessions_and_done_revert_and_the_lease_end_take
             asked = _pattern(client, session, "white", 1).json()
             document = _picture(registry)
             assert document.test_pattern == TestPatternAsk(WHITE, asked["sequence"])
-            [row] = _sql(registry, "SELECT draft, test_pattern, test_pattern_ask FROM picture_sessions")
+            [row] = _sql(registry, "SELECT picture_session->'draft' AS draft, picture_session->>'test_pattern' AS test_pattern, "
+                                   "(picture_session->>'test_pattern_ask')::bigint AS test_pattern_ask FROM displays "
+                                   "WHERE picture_session IS NOT NULL")
             assert "test_pattern" not in row["draft"] and (row["test_pattern"], row["test_pattern_ask"]) == (
                 "white", asked["sequence"])
             if end == "done":
@@ -330,7 +333,8 @@ def test_the_test_pattern_is_the_sessions_and_done_revert_and_the_lease_end_take
 
 def _silent(registry, seconds: float) -> None:
     """`seconds` of console silence: the session's idle deadline moved that much closer."""
-    _sql(registry, f"UPDATE picture_sessions SET idle_until = idle_until - {seconds}")
+    _sql(registry, f"UPDATE displays SET picture_session = jsonb_set(picture_session, '{{idle_until}}', to_jsonb((picture_session->>'idle_until')::float8 - {seconds})) "
+                   "WHERE picture_session IS NOT NULL")
 
 
 def test_a_pattern_survives_30_s_without_a_keepalive_and_a_session_without_one_ends_at_5_s(registry):

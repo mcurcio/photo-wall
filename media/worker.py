@@ -22,6 +22,7 @@ from central.assets.maintenance import CacheSettings, MediaCacheBudget
 from central.assets.store import CacheStore
 from central.content_wiring import build_job_runtime
 from central.db import Database, DatabaseTransactionClock
+from central.fleet.pi_reboot import NoHubReboot
 from central.infra.house_store import seed_house
 from central.infra.key_content_store import PgKeyContent
 from central.infra.media_cache_records import PgMediaVariantUse
@@ -54,11 +55,7 @@ from media.media_maker import MediaMaker, PreparationClient
 from media.models import MediaError
 from media.prepare import PreparationLimits, Preparer
 from media.subject_map import SubjectMap, subject_map_from
-from media.task_queue import (
-    ProcrastinateCheckQueue,
-    RetryableMediaTask,
-    create_worker_app,
-)
+from media.task_queue import RetryableMediaTask, create_worker_app
 
 logger = logging.getLogger("photo_wall.worker")
 
@@ -215,8 +212,9 @@ class MediaWorker:
                           preparer=self.preparer, job_seconds=self.limits.job_seconds)
 
     async def maintain(self) -> None:
-        """The thumbnail sweep, the guaranteed check-in, then the media cache's budget
-        (`MediaCacheBudget`: pinned variants kept, the others least recently served first)."""
+        """The thumbnail sweep, the worker's error code (written only when it changes), then the
+        media cache's budget (`MediaCacheBudget`: pinned variants kept, the others least recently
+        served first)."""
         # Listed BEFORE the purge: a file written after it is never discarded by this pass.
         files = await _blocking(self._thumbnail_files)
         recorded = await _blocking(self.library.retire_unwanted)
@@ -266,8 +264,7 @@ async def _media_queue(app, additional_context: dict) -> None:
 
 async def _media_loop(worker: MediaWorker, run_queue: Callable[[], Awaitable[None]]) -> None:
     """The library checks' and measurements' queue, after one boot pass of maintenance (the
-    thumbnail sweep, the guaranteed check-in, `WORKER_CHECK_IN_SECONDS`, and the media cache's
-    budget). Media variants are
+    thumbnail sweep, the worker's error code, and the media cache's budget). Media variants are
     the job runtime's (`PrepareMedia`), so no process waits for a media writer lock."""
     await worker.maintain()
     await run_queue()
@@ -316,7 +313,7 @@ def build_repository(dsn: str, clock: Clock | None = None, *,
     G11: media times on the database's clock in every worker process; `clock` stays for the
     worker's monotonic budgets and process-local decisions.
     """
-    return MediaRepository(Database(dsn), clock or SystemClock(),
+    return MediaRepository(Database(dsn, application_name="photo-wall-worker"), clock or SystemClock(),
                            times=DatabaseTransactionClock(), queue=queue)
 
 
@@ -351,11 +348,14 @@ async def _entry():
         lambda secret: ImmichClient.for_connection(secret, clock=clock))
     # The one worker kind (design §10.5): every asset handler behind JobRuntime, in EVERY worker
     # process; only the legacy media loop is single-writer. Its boot checks run here, so a wiring
-    # mistake fails before any job is claimed.
+    # mistake fails before any job is claimed. The Node bus is built first: its fleet-pipe links
+    # are where `RebootPi` asks a Pi's host to reboot (no hub deployed: no Pi is asked).
+    bus = build_node_bus(dsn, os.environ)
     runtime = build_job_runtime(
         db, clock, cache_root=cache_root, env=os.environ, thumbnails=thumbnails,
         media_maker=worker.media_maker(store=media_store,
-                                       transactions=PgTransactions(db)))
+                                       transactions=PgTransactions(db)),
+        reboot=NoHubReboot() if bus is None else bus.pi_reboot())
     await _blocking(repository.db.migrate)
     # Settings › House starts from this process's zone when Central has not seeded it yet: the
     # worker reads Runtime (the Planner's Program windows) in house time, as Central does.
@@ -363,13 +363,12 @@ async def _entry():
     await _blocking(ProcrastinateMediaQueue.apply_schema, dsn)
     app = create_worker_app(dsn)
     checks = LibraryChecks(
-        library, lambda secret: ImmichClient.for_connection(secret, clock=clock), clock,
-        queue=ProcrastinateCheckQueue(app))
+        library, lambda secret: ImmichClient.for_connection(secret, clock=clock), clock)
     additional_context = {"media_worker": worker, "library_checks": checks}
     media = _media_loop(worker, lambda: _media_queue(app, additional_context))
     try:
         async with app.open_async():
-            await _run_workers(media, runtime, build_node_bus(dsn, os.environ))
+            await _run_workers(media, runtime, bus)
     finally:
         await worker._close_clients()
         await checks.close()

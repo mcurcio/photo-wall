@@ -17,14 +17,18 @@ import pytest
 from console_tasks import connect, open_frame, open_pi, player_name
 from operator_harness import operator_server
 from playwright.sync_api import expect
-from test_console_frame_page_browser import FRAME, _seed
+from support.devices import seed_device
+from test_console_frame_page_browser import DEVICE, FRAME, _seed
 from test_frame_picture_browser import _off_thread
 
 from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.light_sensor_judge import PI_SOURCE
 from central.infra.room_light_store import PgRoomLights
 from central.room_light.model import ReportRefusal
-from contracts.room_light import RoomLightsDrawn
+from contracts.node_state import PLAYER_LINE, ROOM_LIGHTS_DRAWN_KEY
+from contracts.room_light import ROOM_LIGHTS_DRAWN_BYTES, RoomLightsDrawn
+from contracts.wire_codec import encode
+from nodeapi.buffers import state_prefix, state_stream
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -33,20 +37,32 @@ pytestmark = pytest.mark.skipif(
 
 BEHIND = "Behind: it still draws with an older copy of the house's lights."
 OLDER = "0" * 64     # a digest no room-lights document Central holds now has
+DRAWN_SERIAL = "10000000c0ffee0d"   # the Pi's devices row, which its line's record needs, names its box
+
+
+def _drawn_on_line(registry, report: RoomLightsDrawn) -> None:
+    """The Player's `room-lights-drawn` value on its line, as Central's link records it (node_states):
+    Central judges it on read."""
+    with registry.db.transaction() as conn:
+        seed_device(conn, DEVICE, DRAWN_SERIAL)
+        conn.execute("INSERT INTO node_states(device_id, stream, subject, epoch, seq, removed, headers, data, "
+                     "recorded_at) VALUES (%s, %s, %s, 'epoch', 1, false, '{}', %s, "
+                     "EXTRACT(EPOCH FROM clock_timestamp()))",
+                     (DEVICE, state_stream(PLAYER_LINE), state_prefix(PLAYER_LINE) + ROOM_LIGHTS_DRAWN_KEY,
+                      encode(report.model_dump(mode="json"), ROOM_LIGHTS_DRAWN_BYTES, "room_lights_drawn_too_large")))
 
 
 def test_a_pi_central_judges_behind_says_so_on_its_frames_lighting_tab_and_its_hardware_page(page, registry):
     """Acceptance C3: the Player reports it drew with an older document while following; Central
     judges it behind, and both the Frame's Lighting tab and its Pi's Hardware page say so."""
     player_id = _seed(registry)
-    lights = PgRoomLights(registry.db, PgHouseLock())
-    _off_thread(lambda: lights.record_drawn(player_id, RoomLightsDrawn(drawn=OLDER, following=True)))
+    _off_thread(lambda: _drawn_on_line(registry, RoomLightsDrawn(drawn=OLDER, following=True)))
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
         open_frame(page, FRAME, "lighting")
         expect(page.get_by_role("region", name="Lighting", exact=True)).to_contain_text(BEHIND)
 
-        hardware = open_pi(page, player_name(registry, player_id))
+        hardware = open_pi(page, player_name(registry, player_id, DRAWN_SERIAL))
         expect(hardware.get_by_role("region", name="Light", exact=True)).to_contain_text(BEHIND)
         expect(hardware.get_by_role("region", name="Light", exact=True)).to_contain_text(
             "No light Sensor is wired to this Pi.")

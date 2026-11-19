@@ -36,8 +36,9 @@ TAGS = (tag(1, "Family"), tag(2, "Family/Christmas", 1), tag(3, "Holidays/Family
 def _seed_connection(db, connection_ref):
     """A connection row as C12's cut-over makes it (no URL or key yet): lists need only the row."""
     with db.transaction() as conn:
-        conn.execute("INSERT INTO library_connections(connection_ref,name,created_at) "
-                     "VALUES(%s,%s,0)", (connection_ref, connection_ref))
+        conn.execute("INSERT INTO library_connections(connection_ref,name,created_at,created_by,"
+                     "changed_at,changed_by) VALUES(%s,%s,0,'unknown',0,'unknown')",
+                     (connection_ref, connection_ref))
 
 
 @pytest.fixture
@@ -92,11 +93,14 @@ def test_an_unknown_connection_is_404_and_signed_out_is_401(client):
 def test_the_tag_get_is_read_only_even_for_a_stale_list(client):
     test_client, library = client
     with library.db.transaction() as conn:
-        conn.execute("UPDATE library_lists SET checked_at=checked_at-3600")
+        conn.execute("UPDATE library_connections SET lists=jsonb_set(lists,'{tags,checked_at}',"
+                     "to_jsonb((lists->'tags'->>'checked_at')::float8-3600))")
 
     def state():
         with library.db.transaction() as conn:
-            row = conn.execute("SELECT checked_at, observed_at FROM library_lists").fetchone()
+            row = conn.execute("SELECT lists->'tags'->'checked_at' AS checked_at,"
+                               "lists->'tags'->'observed_at' AS observed_at "
+                               "FROM library_connections").fetchone()
             jobs = conn.execute("SELECT count(*) AS n FROM procrastinate_jobs").fetchone()["n"]
         return row, jobs
 

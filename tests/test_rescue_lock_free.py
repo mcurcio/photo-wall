@@ -22,7 +22,7 @@ from central.infra.job_queue import (
     job_kwargs,
     task_name,
 )
-from central.infra.queue_ops import QueueAdmin, RescueStalledJobsHandler
+from central.infra.queue_ops import QueueRescue, RescueStalledJobsHandler
 from central.infra.transactions import PgTransactions, pg_connection
 from central.kernel.job_types import (
     CATALOG,
@@ -59,7 +59,7 @@ class Queue:
 
     def tick(self, job_type, timestamp):
         """Defer one periodic tick exactly as procrastinate's periodic deferrer does."""
-        app = build_app(async_connector(self.dsn), CATALOG, None)
+        app = build_app(async_connector(self.dsn, application_name="photo-wall-test"), CATALOG, None)
         (entry,) = [pt for pt in app.periodic_registry.periodic_tasks.values()
                     if pt.task.name == task_name(job_type)]
 
@@ -86,10 +86,10 @@ class Queue:
 
 
 def run_rescue(queue, row):
-    """Run the fetched rescue row through the production handler and a real `QueueAdmin`."""
+    """Run the fetched rescue row through the production handler and a real `QueueRescue`."""
     job, attempt = decode(row["task_name"], row["args"])
     assert (job, attempt) == (RescueStalledJobs(), 0)
-    admin = QueueAdmin(queue.dsn)
+    admin = QueueRescue(queue.dsn)
 
     async def scenario():
         try:

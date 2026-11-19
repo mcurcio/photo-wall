@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any, Protocol
 
+from central.actor import Actor
 from central.installation_models import FrameOutput
 from central.photo_library.model import LibraryAsset
 from central.wall_plan.fit import MediaKind
@@ -22,15 +23,16 @@ from central.wall_plan.order import PhotoShowing, WallHistory
 class ShownHistory(Protocol):
     """Coordination's side of shown history (slice O1)."""
 
-    def record_selected_in(self, conn: Any, showings: Iterable[PhotoShowing]) -> None:
+    def record_selected_in(self, conn: Any, showings: Iterable[PhotoShowing], *, by: Actor) -> None:
         """Record what each newly offered layer shows: one row per assignment id, the first
-        write wins (a re-offer of a locked layer changes nothing)."""
+        write wins (a re-offer of a locked layer changes nothing); `by` its writer."""
         ...
 
-    def record_presented_in(self, conn: Any, assignment_id: str, presented_at: float) -> bool:
+    def record_presented_in(self, conn: Any, assignment_id: str, presented_at: float, *,
+                            by: Actor) -> bool:
         """Append the shown row for a layer its Player reported presented, from its recorded
-        selection; idempotent per assignment id. False when no selection names it (a layer
-        offered before 5a, or a black layer): nothing is written."""
+        selection, `by` its writer; idempotent per assignment id. False when no selection names
+        it (a layer offered before 5a, or a black layer): nothing is written."""
         ...
 
     def wall_history_in(self, conn: Any, scene_ids: Iterable[str], *, now: float,
@@ -89,9 +91,9 @@ class FitSettingsStore(Protocol):
         """The saved settings, in its own transaction (the routes and the analysis)."""
         ...
 
-    def save_fit_settings(self, settings: FitSettings) -> None:
-        """Replace the row (a complete, validated FitSettings; last write wins). The next
-        planning pass reads it; nothing is measured again."""
+    def save_fit_settings(self, settings: FitSettings, *, by: Actor) -> None:
+        """Replace the stored settings (a complete, validated FitSettings; last write wins; an
+        equal save writes nothing). The next planning pass reads it; nothing is measured again."""
         ...
 
 

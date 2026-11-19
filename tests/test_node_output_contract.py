@@ -37,6 +37,7 @@ from contracts.node_output import (
     FrameRegionDocument,
     InForce,
     InForceKind,
+    OutputBinding,
     OutputDocument,
     OutputPower,
     OutputRect,
@@ -69,7 +70,8 @@ TIMETABLE = OutputPower(Power.ON, (PowerChange("2026-10-12T22:00:00Z", Power.OFF
                                    PowerChange("2026-10-13T06:00:00Z", Power.ON)),
                         "2026-10-20T23:00:00Z", Darkness.DISPLAY_OFF, None)
 WITH_TEST = OutputPower(Power.ON, TIMETABLE.changes, TIMETABLE.until, Darkness.DISPLAY_OFF, TEST_OFF)
-DOCUMENT = OutputDocument("HDMI-A-1", 3, WITH_TEST, PowerMethod.DDC_CI, True, True, 0)
+BINDING = OutputBinding("kitchen", 4, 7)
+DOCUMENT = OutputDocument("HDMI-A-1", 3, WITH_TEST, PowerMethod.DDC_CI, True, True, 0, BINDING)
 IDENTITY = DisplayIdentity("XYM", 5475, "MNN", None)
 TESTING = InForce(InForceKind.TEST, Power.OFF, "req-7", 120, None)
 REPORT = OutputReport(
@@ -78,7 +80,7 @@ REPORT = OutputReport(
     (PowerMethod.DDC_CI, PowerMethod.SIGNAL_OFF), PowerMethod.DDC_CI, 3, PowerResult.CONFIRMED, TESTING,
     (950, 540), (3840, 2160))
 ATTEMPT = PowerAttempt("HDMI-A-1", 3, TESTING, PowerMethod.DDC_CI, PowerResult.CONFIRMED, 840)
-CANONICAL = (b'{"change":3,"method":"ddc-ci","never_off_on_other_input":true,"output_id":"HDMI-A-1",'
+CANONICAL = (b'{"binding":{"configuration_revision":7,"frame_id":"kitchen","generation":4},"change":3,"method":"ddc-ci","never_off_on_other_input":true,"output_id":"HDMI-A-1",'
              b'"power":{"changes":[{"at":"2026-10-12T22:00:00Z","power":"off"},'
              b'{"at":"2026-10-13T06:00:00Z","power":"on"}],"darkness":"display-off","now":"on",'
              b'"test":{"for_seconds":300,"power":"off","request_id":"req-7"},"until":"2026-10-20T23:00:00Z"},'
@@ -88,15 +90,16 @@ CANONICAL = (b'{"change":3,"method":"ddc-ci","never_off_on_other_input":true,"ou
 REGION = FrameRegion("kitchen", (1080, 1920), OutputRect(0, 420, 1080, 1080))
 
 
-def test_the_display_line_is_schema_11():
-    assert SCHEMA_MAJOR == 11
+def test_the_display_line_is_schema_12():
+    assert SCHEMA_MAJOR == 12
 
 
 @pytest.mark.parametrize("value, encode, decode", [
     (DOCUMENT, encode_output_document, decode_output_document),
-    (OutputDocument("Virtual-2", 1, TIMETABLE, BEST_DETECTED, False, False, 0),
+    (OutputDocument("Virtual-2", 1, TIMETABLE, BEST_DETECTED, False, False, 0, None),
      encode_output_document, decode_output_document),
-    (OutputDocument("HDMI-A-2", 4, TIMETABLE, BEST_DETECTED, True, True, 90),
+    (OutputDocument("HDMI-A-2", 4, TIMETABLE, BEST_DETECTED, True, True, 90,
+                    OutputBinding("f" * 96, 2**63 - 1, 1)),
      encode_output_document, decode_output_document),
     (REPORT, encode_output_report, decode_output_report),
     (OutputReport("HDMI-A-2", False, None, (), (), None, None, None, None, None),
@@ -241,7 +244,8 @@ def test_the_largest_document_fits_the_bus():
                     for index in range(MAX_POWER_CHANGES))
     power = OutputPower(Power.ON, changes, encode_set_time(start + 3600 * MAX_POWER_CHANGES), Darkness.BLACK_PICTURE,
                         PowerRequest("0" * 64, Power.OFF, MAX_REQUEST_SECONDS))
-    document = OutputDocument("Virtual-1", 2**31, power, BEST_DETECTED, True, True, 270)
+    document = OutputDocument("Virtual-1", 2**31, power, BEST_DETECTED, True, True, 270,
+                              OutputBinding("f" * 96, 2**63 - 1, 2**63 - 1))
     raw = encode_output_document(document)
     assert len(raw) <= OUTPUT_DOCUMENT_BYTES
     assert decode_output_document(raw) == document
@@ -264,18 +268,33 @@ def _power(**changes) -> dict:
 
 
 @pytest.mark.parametrize("build", [
-    lambda: OutputDocument("HDMI-A-3", 1, TIMETABLE, BEST_DETECTED, True, True, 0),
-    lambda: OutputDocument("HDMI-A-1", 0, TIMETABLE, BEST_DETECTED, True, True, 0),
-    lambda: OutputDocument("HDMI-A-1", 1, (TEST_OFF,), BEST_DETECTED, True, True, 0),
-    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, "smart-plug", True, True, 0),
-    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, BEST_DETECTED, 1, True, 0),
-    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, BEST_DETECTED, True, True, False),
-    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, BEST_DETECTED, True, True, 45),
-    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, BEST_DETECTED, True, True, 90.0),
+    lambda: OutputDocument("HDMI-A-3", 1, TIMETABLE, BEST_DETECTED, True, True, 0, None),
+    lambda: OutputDocument("HDMI-A-1", 0, TIMETABLE, BEST_DETECTED, True, True, 0, None),
+    lambda: OutputDocument("HDMI-A-1", 1, (TEST_OFF,), BEST_DETECTED, True, True, 0, None),
+    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, "smart-plug", True, True, 0, None),
+    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, BEST_DETECTED, 1, True, 0, None),
+    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, BEST_DETECTED, True, True, False, None),
+    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, BEST_DETECTED, True, True, 45, None),
+    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, BEST_DETECTED, True, True, 90.0, None),
+    lambda: OutputDocument("HDMI-A-1", 1, TIMETABLE, BEST_DETECTED, True, True, 0, ("kitchen", 1, 1)),
 ], ids=["unknown-output", "change-0", "a-request-stack", "unknown-method", "int-switch", "bool-turn",
-        "turn-45", "float-turn"])
+        "turn-45", "float-turn", "tuple-binding"])
 def test_a_document_refuses(build):
     with pytest.raises(ValueError, match="^output_document$"):
+        build()
+
+
+@pytest.mark.parametrize("build", [
+    lambda: OutputBinding("", 1, 1),
+    lambda: OutputBinding("f" * 97, 1, 1),
+    lambda: OutputBinding("kitchen den", 1, 1),
+    lambda: OutputBinding("kitchen", 0, 1),
+    lambda: OutputBinding("kitchen", 1, 0),
+    lambda: OutputBinding("kitchen", True, 1),
+    lambda: OutputBinding("kitchen", 1, 1.0),
+], ids=["empty-id", "long-id", "space-id", "generation-0", "revision-0", "bool-generation", "float-revision"])
+def test_a_binding_refuses(build):
+    with pytest.raises(ValueError, match="^output_binding$"):
         build()
 
 
@@ -403,6 +422,11 @@ _AT_UNTIL = _power(until=_power()["changes"][-1]["at"])
     json.dumps(_document(change=True)).encode(),
     json.dumps(_document(switch_input_on_power_on=1)).encode(),
     json.dumps({key: value for key, value in _document().items() if key != "turn"}).encode(),   # schema 8's
+    json.dumps({key: value for key, value in _document().items() if key != "binding"}).encode(),  # S4b's E2
+    json.dumps(_document(binding={"frame_id": "kitchen", "generation": 4})).encode(),
+    json.dumps(_document(binding={**_document()["binding"], "extra": 1})).encode(),
+    json.dumps(_document(binding={**_document()["binding"], "generation": 0})).encode(),
+    json.dumps(_document(binding="kitchen")).encode(),
     json.dumps(_document(turn=4)).encode(),
     json.dumps(_document(turn=False)).encode(),
     json.dumps(_document(turn=90.0)).encode(),
@@ -416,7 +440,8 @@ _AT_UNTIL = _power(until=_power()["changes"][-1]["at"])
                                                     "contrast": {"acts_on": "display", "value": 50}})).encode(),
 ], ids=["unknown-output", "request-stack", "unsorted", "change-at-until", "bad-set-time", "untimed-test",
         "schema-2-reason", "unknown-field", "missing-field", "string-change", "bool-change", "int-switch",
-        "no-turn", "turn-4", "bool-turn", "float-turn", "duplicate-key", "nan", "too-large", "not-object",
+        "no-turn", "no-binding", "binding-missing-field", "binding-unknown-field", "binding-generation-0",
+        "binding-string", "turn-4", "bool-turn", "float-turn", "duplicate-key", "nan", "too-large", "not-object",
         "not-utf8", "schema-3-picture-part"])
 def test_decoding_a_document_refuses(raw):
     with pytest.raises(ValueError, match="^output_document$"):

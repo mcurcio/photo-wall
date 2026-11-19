@@ -29,6 +29,7 @@ import procrastinate
 import psycopg_pool
 from procrastinate.exceptions import AlreadyEnqueued
 
+from central.db import PoolName, with_application_name
 from central.kernel.jobs import PERIODIC_CADENCES, Job, job_keys, registered_job_type
 
 TASK_PREFIX: Final = "photo_wall."
@@ -93,10 +94,12 @@ def _pool_without_check(**pool_args: Any) -> psycopg_pool.AsyncConnectionPool:
     return psycopg_pool.AsyncConnectionPool(**{**pool_args, "check": None})
 
 
-def async_connector(dsn: str, **pool_args: Any) -> procrastinate.PsycopgConnector:
-    """An async procrastinate connector whose pool a cancel always stops (no getconn check)."""
-    return procrastinate.PsycopgConnector(conninfo=dsn, pool_factory=_pool_without_check,
-                                          **pool_args)
+def async_connector(dsn: str, *, application_name: PoolName,
+                    **pool_args: Any) -> procrastinate.PsycopgConnector:
+    """An async procrastinate connector whose pool a cancel always stops (no getconn check),
+    connecting as `application_name` (`with_application_name`)."""
+    return procrastinate.PsycopgConnector(conninfo=with_application_name(dsn, application_name),
+                                          pool_factory=_pool_without_check, **pool_args)
 
 
 def _publish_only(job_type: type[Job[Any]]) -> TaskBody:
@@ -165,6 +168,17 @@ def defer(app: procrastinate.App, job: Job[Any], *, attempt: int, connection: An
     except AlreadyEnqueued:
         return False
     return True
+
+
+_PENDING_SQL: Final = ("SELECT task_name, args, status FROM procrastinate_jobs WHERE queueing_lock = %s "
+                       "AND task_name = %s AND status IN ('todo', 'doing') ORDER BY id")
+
+
+def pending_in(connection: Any, job: Job[Any]) -> tuple[tuple[Job[Any], str], ...]:
+    """The copies of `job`'s type under its queueing lock not yet finished, oldest first, each
+    with its status ('todo': the one pending copy; 'doing': running), as `connection` sees them."""
+    rows = connection.execute(_PENDING_SQL, (job_keys(job).queueing_lock, task_name(type(job)))).fetchall()
+    return tuple((decode(row["task_name"], row["args"])[0], str(row["status"])) for row in rows)
 
 
 async def defer_async(app: procrastinate.App, job: Job[Any], *, attempt: int,

@@ -31,9 +31,9 @@ def save_position(registry, frame_id: str, calibration: Calibration | None = Non
     TrialRefused as Save's."""
     with registry.db.transaction() as conn:
         acquire_runtime_locks(conn)
-        row = conn.execute("SELECT f.calibration, f.generation, f.configuration_revision, b.player_id, b.output_id, "
-                           "p.authority_epoch FROM frames f JOIN bindings b ON b.frame_id=f.id "
-                           "JOIN players p ON p.id=b.player_id WHERE f.id=%s", (frame_id,)).fetchone()
+        row = conn.execute("SELECT f.calibration, f.generation, f.configuration_revision, f.player_id, f.output_id, "
+                           "p.authority_epoch FROM frames f "
+                           "JOIN players p ON p.id=f.player_id WHERE f.id=%s", (frame_id,)).fetchone()
         if row is None:
             raise LookupError("frame_unbound")
         return registry.commit_calibration_trial_in(
@@ -43,4 +43,4 @@ def save_position(registry, frame_id: str, calibration: Calibration | None = Non
             calibration_revision=(Calibration.model_validate(row["calibration"]).revision
                                   if expected_revision is None else expected_revision),
             calibration=WHOLE_SCREEN if calibration is None else calibration, lighting=lighting,
-            session_id=None, restored_from=None)
+            session_id=None, restored_from=None, by="console")

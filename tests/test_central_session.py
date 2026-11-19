@@ -159,8 +159,13 @@ def test_live_session_rejects_retired_or_wrong_epoch_authority(registry):
         assert unauthorized.value.code == 1008
         with client.websocket_connect("/v1/player/session", headers={"Authorization": "Bearer " + player["token"]}) as connection:
             assert connection.receive_json()["configuration"]["authority_epoch"] == 1
-            registry.unbind("frame-0", expected_generation=1)
-            registry.retire(player["player_id"])
+            # Two commits, each a wake: the unbind's pushes the Player's state (no binding left),
+            # since it is still enrolled; only the retirement's closes the socket. Read the unbind's
+            # push before retiring, or which wake the socket reads first decides what it sends.
+            registry.unbind("frame-0", expected_generation=1, by="console")
+            unbound = connection.receive_json()
+            assert (unbound["type"], unbound["configuration"]["bindings"]) == ("state", [])
+            registry.retire(player["player_id"], by="console")
             with pytest.raises(WebSocketDisconnect) as retired:
                 connection.receive_json()
             assert retired.value.code == 1008

@@ -13,7 +13,7 @@ Two kinds of entry, each written where its state converges and never by an edito
   Display seen there and the Frame bound to it then (`sent_record` decides the kind).
 
 An entry is a record of what was, never a second source of current state: the stored picture
-(displays) and the picture document (picture_documents) stay the truth. Every `at` is PostgreSQL's
+(displays) and the picture document (outputs.picture_document) stay the truth. Every `at` is PostgreSQL's
 clock at the append. The Picture tab's Restore is a session edit and lives with the session's rules
 (central/displays/picture.py `restored`); a test pattern is never restored.
 """

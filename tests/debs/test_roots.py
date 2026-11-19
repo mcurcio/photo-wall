@@ -23,14 +23,13 @@ from pathlib import Path
 
 import pytest
 
-from contracts.node_boot import APP_PACKAGE, MANAGER_PACKAGE
+from contracts.node_boot import APP_PACKAGE
 from scripts.seal_root import ENTRY_POINT, ROLES
 
 ENABLE_VARIABLE = "PHOTO_WALL_IMAGE_MOUNT_TESTS"
 COMPONENTS_VARIABLE = "PHOTO_WALL_NODE_COMPONENTS"
-# role -> (components.json field, the root package, its launcher directory)
-ROOTS = {"app": ("app_environment", APP_PACKAGE, "/usr/lib/photo-wall/player"),
-         "manager-primary": ("manager_primary", MANAGER_PACKAGE, "/usr/lib/photo-wall/app-manager")}
+# The release's one root: role -> (components.json field, the root package, its launcher directory)
+ROOTS = {"app": ("app_environment", APP_PACKAGE, "/usr/lib/photo-wall/player")}
 
 pytestmark = pytest.mark.skipif(
     os.environ.get(ENABLE_VARIABLE) != "1",
@@ -164,13 +163,17 @@ def test_the_entry_runs_the_roles_launcher(mounted) -> None:
 
 def test_the_app_root_holds_the_player_and_no_node_context(mounted) -> None:
     role, mount = mounted
-    private = _walk(mount)["private"]
-    if role == "app":
-        # Players are Immich-unaware and hold no Node context: the Player, its wire library,
-        # uplink and the frame client only.
-        assert private == ["common", "frame-client", "player", "uplink"]
-    else:
-        assert "app-manager" in private and "player" not in private
+    assert role == "app"
+    # Players are Immich-unaware and hold no Node context: the Player, its wire library,
+    # uplink and the frame client only.
+    assert _walk(mount)["private"] == ["common", "frame-client", "player", "uplink"]
+
+
+def test_the_set_ships_the_app_root_alone(components, metadata) -> None:
+    """The build seals one root (S4c-2b-i): no manager root, its .deb or its reference."""
+    assert sorted(path.name for path in components.glob("*.squashfs")) == ["app.squashfs"]
+    assert not any(components.glob("manager*"))
+    assert set(metadata) == {"schema", "abi", "app_environment"}
 
 
 def test_the_reference_names_the_shipped_root_package(mounted, components, metadata) -> None:

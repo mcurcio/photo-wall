@@ -297,20 +297,9 @@ name = "Node contexts point down"
 type = "layers"
 containers = ["appliance"]
 # Siblings are `|` (independent), never `:`: a real dependency is its own layer.
-layers = ["node", "boot | netboot_init", "bootstrap | central_post | node_boot_handoff",
-          "apps", "health", "display_host | host", "central_session", "kernel | feed | feed_socket"]
+layers = ["boot | netboot_init", "bootstrap | central_post | node_boot_handoff",
+          "apps", "health", "display_host | host", "kernel | feed | feed_socket"]
 exhaustive = true
-ignore_imports = [
-  # Retiring (r3 §10): each line leaves with the module it names.
-  "appliance.apps.broker_runner -> appliance.node.app_link",
-  "appliance.apps.broker_runner -> appliance.node.recovery_linux",
-  "appliance.apps.online_broker -> appliance.node.recovery",
-  "appliance.apps.stop_linux -> appliance.node.recovery",
-  "appliance.apps.lifecycle_storage -> appliance.node.manager",
-  "appliance.host.host_runner -> appliance.node.recovery",
-  "appliance.host.host_runner -> appliance.node.recovery_linux",
-  "appliance.boot.node_bootstrap -> appliance.node.preparer",
-]
 exhaustive_ignores = ["process_identity"]
 
 [[tool.importlinter.contracts]]
@@ -327,7 +316,7 @@ type = "forbidden"
 source_modules = ["appliance.boot", "appliance.netboot_init", "appliance.bootstrap",
                   "appliance.central_post", "appliance.node_boot_handoff"]
 forbidden_modules = ["appliance.apps", "appliance.health", "appliance.display_host",
-                     "appliance.host", "appliance.central_session"]
+                     "appliance.host"]
 ignore_imports = [
   # Boot's only edges out: the retiring prepare verb's apps.environment (r3 §10); E6 removes them.
   "appliance.boot.node_bootstrap -> appliance.apps.environment",
@@ -356,7 +345,7 @@ forbidden_modules = ["contracts.node_impeded", "appliance.display_host.central_c
 
 [[tool.importlinter.contracts]]
 # The host-core launcher ships alone. Like the apps fence, this has no ignore lines, so a path
-# through a retiring module the layers contract exempts (host_runner -> node.recovery) still fails.
+# through a retiring module the layers contract exempts still fails.
 name = "Host core reaches no sibling context"
 type = "forbidden"
 source_modules = ["appliance.host"]
@@ -378,21 +367,6 @@ name = "Display never reads the fault catalogue"
 type = "forbidden"
 source_modules = ["appliance.display_host"]
 forbidden_modules = ["contracts.node_faults"]
-
-[[tool.importlinter.contracts]]
-# Retiring (r3 §10): the programme deletes each worker and its line with it.
-name = "The Central session is retiring: only the listed workers import it"
-type = "protected"
-protected_modules = ["appliance.central_session"]
-allowed_importers = ["appliance.central_session"]
-ignore_imports = [
-  "appliance.host.host_runner -> appliance.central_session.*",
-  "appliance.node.manager_desired -> appliance.central_session.*",
-  "appliance.display_host.service -> appliance.central_session.*",
-  "appliance.apps.broker_runner -> appliance.central_session.*",
-  "appliance.node.app_link -> appliance.central_session.*",
-  "appliance.apps.online_broker -> appliance.central_session.*",
-]
 
 [[tool.importlinter.contracts]]
 name = "The base never imports the guest"
@@ -449,7 +423,6 @@ ignore_imports = [
   "appliance.health.judge -> appliance.feed",
   "appliance.health.runner -> appliance.feed",
   "appliance.health.runner -> appliance.feed_socket",
-  "appliance.node.app_link -> appliance.feed",
   "appliance.apps.broker_runner -> appliance.feed",
   "appliance.apps.broker_runner -> appliance.feed_socket",
   "appliance.apps.probe_channel -> appliance.feed",

@@ -131,7 +131,7 @@ def test_an_added_profile_is_listed_chosen_as_a_frames_paper_and_kept_while_a_fr
 def test_a_file_that_is_not_a_paper_profile_is_refused_in_plain_words_and_nothing_changes(page, registry):
     """A monitor's profile and a file that is no colour profile are each refused with the reason;
     the list and Central's paper profiles stay as they were."""
-    kept, _ = _profiles(registry).add_paper_profile(_as_printer(_monitor()))
+    kept, _ = _profiles(registry).add_paper_profile(_as_printer(_monitor()), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "paper-profiles")
         expect(_rows(page)).to_have_count(1)

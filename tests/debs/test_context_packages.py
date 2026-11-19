@@ -28,13 +28,11 @@ CONTENTS = {
     "photo-wall-common": ("contracts", "nodeapi"),
     "photo-wall-uplink": ("uplink",),
     "photo-wall-node-kernel": ("appliance.kernel", "appliance.feed", "appliance.feed_socket"),
-    "photo-wall-node-central-session": ("appliance.central_session",),
     "photo-wall-node-host": ("appliance.host",),
     "photo-wall-node-display": ("appliance.display_host",),
     "photo-wall-node-health": ("appliance.health",),
     "photo-wall-node-apps": ("appliance.apps", "appliance.process_identity"),
     "photo-wall-node-boot": ("appliance.boot", "appliance.node_boot_handoff"),
-    "photo-wall-node-manager": ("appliance.node",),
 }
 
 pytestmark = pytest.mark.skipif(not BUILT, reason="set PHOTO_WALL_LOCAL_REPO to a "
@@ -117,12 +115,6 @@ def test_each_context_package_holds_its_import_roots(report):
 @pytest.mark.parametrize("package", sorted(CONTENTS))
 def test_each_module_imports_from_the_runtime_directories_alone(report, package):
     assert report[package]["failed"] == [], report[package]["directories"]
-
-
-def test_an_exempt_edge_puts_its_target_on_the_path_without_a_depends(report):
-    """HostCore's retiring host_runner -> node.recovery: node-manager's directory is on the
-    host's path although photo-wall-node-host does not Depend on it."""
-    assert "/usr/lib/photo-wall/node-manager" in report["photo-wall-node-host"]["directories"]
 
 
 def test_the_installed_nats_is_the_locked_nats_py(report):

@@ -5,18 +5,15 @@ import pytest
 from test_node_boot import environment
 
 from contracts.node_lifecycle import (
-    AppEffectEventV2,
     StageCommandV2,
-    encode_app_effect_event,
     encode_stage_command,
-    parse_app_effect_event,
     parse_stage_command,
     stage_digest,
 )
 from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
 
 
-def test_stage_effect_roundtrip_and_exact_digest():
+def test_stage_roundtrip_and_exact_digest():
     producer = NodeProducerV2("node-test", "device-" + "a" * 64, 1, uuid4(), "app_effect_broker", uuid4())
     process = NodeProcessIdentity(123, 456, uuid4())
     command = StageCommandV2(uuid4(), uuid4(), "0" * 64, producer, uuid4(), uuid4(),
@@ -28,14 +25,5 @@ def test_stage_effect_roundtrip_and_exact_digest():
     # A stage is executable only with a qualified fallback; absence is unrepresentable.
     with pytest.raises(ValueError, match="app_environment_required"):
         replace(command, fallback=None)
-    event = AppEffectEventV2(producer, command.operation_id, command.command_id, command.command_sha256,
-        command.command_session_id, uuid4(), 1, 1001, "intent_stop")
-    assert parse_app_effect_event(encode_app_effect_event(event)) == event
-    with pytest.raises(ValueError, match="process_required"):
-        replace(event, phase="running")
-    # Issue #125: no Node starts the old release on its own, so no fallback phase is reported.
-    for retired in ("no_stop_quiescent", "cancelled_before_stop", "fallback_starting", "fallback_running"):
-        with pytest.raises(ValueError, match="phase_invalid"):
-            replace(event, phase=retired)
     with pytest.raises(ValueError, match="app_effect_producer_required"):
         replace(command, producer=replace(producer, owner="host_core"))

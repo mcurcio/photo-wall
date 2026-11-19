@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable
-from typing import Protocol
 
 from central.photo_library.model import ConnectionSecret, ContactAnswer, LibraryProblem
 from central.photo_library.ports import (
@@ -37,13 +36,6 @@ from media.pool_check import CheckProgress
 logger = logging.getLogger("photo_wall.library")
 
 
-class LibraryCheckQueue(Protocol):
-    """Queues one check task (media/task_queue.py implements it over Procrastinate)."""
-
-    async def connection(self, connection_ref: str) -> None: ...
-    async def pool(self, pool_key: str) -> None: ...
-
-
 def _code(problem: LibraryProblem) -> str:
     """A failed list's error code: the problem's kind, which the store's list status reads."""
     return problem.kind
@@ -55,9 +47,11 @@ async def _blocking(function, *args):
 
 class LibraryChecks:
     def __init__(self, store: LibraryWorkerStore,
-                 client_for: Callable[[ConnectionSecret], LibraryClient], clock: Clock, *,
-                 queue: LibraryCheckQueue | None = None) -> None:
-        self.store, self.client_for, self.clock, self.queue = store, client_for, clock, queue
+                 client_for: Callable[[ConnectionSecret], LibraryClient], clock: Clock) -> None:
+        """No poll finds due checks (decision 0034, S3a): each check queues its next one through
+        the store, in the transaction that starts (a contact) or finishes (a pool check) it, at
+        `policy.next_check_due`; a change or a Check now queues one at once."""
+        self.store, self.client_for, self.clock = store, client_for, clock
         self._clients = LibraryClients(client_for, self._close)
 
     async def _client(self, secret: ConnectionSecret) -> LibraryClient:
@@ -158,16 +152,10 @@ class LibraryChecks:
         return CheckStep(progress=after.model_dump(mode="json"), marks=marks, entries=entries,
                          seen_so_far=after.seen_so_far)
 
-    # the periodic tick -----------------------------------------------------------------------
-
-    async def tick(self) -> None:
-        """Queue every due connection check and every due pool check."""
-        if self.queue is None:
-            raise RuntimeError("library checks have no queue")
-        for connection_ref in await _blocking(self.store.due_contacts):
-            await self.queue.connection(connection_ref)
-        for pool_key in await _blocking(self.store.due_pools):
-            await self.queue.pool(pool_key)
+    async def check_step_failed(self, pool_key: str) -> None:
+        """A pool step that raised until its retries ran out (media/task_queue.py): the pool's
+        next check is queued at its due time, so a failure never stops its checks."""
+        await _blocking(self.store.check_step_failed, pool_key)
 
     @staticmethod
     async def _close(client: LibraryClient) -> None:

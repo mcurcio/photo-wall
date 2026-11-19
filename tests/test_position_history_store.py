@@ -2,27 +2,29 @@
 (configuration snapshots, slice S3; owner, 2026-10-13: scope "Everything per Display+Frame", use
 "View and restore"; migration 096).
 
-Every trial runs on tests/test_node_calibration.py's rig (`setup_trial`): a Node Pi with node-f0 and
-node-f1 bound, both saved once by `save_position` at support.position's PORTRAIT_ON_WIDE (so each begins
-with one kept-saved entry). The Node's exchanges are real `NodeDisplay.exchange` calls.
+Every trial runs on tests/support/trial_bus.py's linked Pi (`bound_node`): node-f0 and node-f1
+bound, both saved once by `save_position` at support.position's PORTRAIT_ON_WIDE (so each begins
+with one kept-saved entry). What the Pi is handed is the worker's real document source reading the
+Output's trial key; what it presents goes through Central's real `TrialReportJudge`.
 (1) Save appends kept-saved; (2) a turn, and an entry of another box; (3) a change made outside Photo Wall; (4) what
 the exchanges hand the Node; (5) Restore; (6) Restore's refusals; (7) the page and time; (8) kept and
 sent retention apart; (9) a deleted Frame's history; (10) one transaction.
 """
 from __future__ import annotations
 
-import itertools
 from dataclasses import replace
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
+from support.frames import frame_body
 from support.position import LIGHTING, PORTRAIT_ON_WIDE, save_position
-from test_node_calibration import LIGHTING_JSON, SHIFTED, SKEWED, begin, operate, setup_trial
+from support.trial_bus import bound_node, present, trial_document, trials_of
+from test_node_calibration import LIGHTING_JSON, SHIFTED, SKEWED, begin, operate
 from test_registry import ADMIN, frame
 
 from central.app import create_app
-from central.fleet.node_sessions import NodeControlConfig, NodeControlError
+from central.fleet.models import NodeControlError
 from central.fleet.position_history import (
     PositionEntryKind,
     PositionValues,
@@ -34,30 +36,26 @@ from central.infra.position_history_store import record_sent_in, write_position_
 from central.tuning_history import bounds as retention
 from contracts.frame_lighting import FrameLighting
 from contracts.models import Calibration, PositionBox
-from contracts.node_calibration import parse_trial
 
 AUTH = {"Authorization": "Bearer " + ADMIN}
 DEEP = LIGHTING.model_copy(update={"mat_depth_mm": 3.0})
 
 
 class Node:
-    """The rig's Node Pi: each exchange a fresh request at a later boot time; `present` answers the
-    trial it is handed as shown, so Save may keep it."""
+    """The linked Pi: `exchange` is the worker's document source reading the Output's trial key (what
+    it hands the Pi, recorded as sent); `present` states the trial it is handed as shown, so Save may
+    keep it."""
 
     def __init__(self, registry):
-        self.trials, self.request, self._exchange = setup_trial(registry)
-        self._times = itertools.count(1500, 100)
+        self.registry = registry
+        bound_node(registry, frames=("node-f0", "node-f1"))
+        self.trials = trials_of(registry)
 
     def exchange(self):
-        self.request = replace(self.request, request_id=uuid4(), sampled_boottime_ms=next(self._times))
-        return self._exchange(self.request)
+        return trial_document(self.registry, self.trials)
 
     def present(self) -> None:
-        candidate = parse_trial(self.exchange().trial)
-        time = next(self._times)
-        self.request = replace(self.request, request_id=uuid4(), sampled_boottime_ms=time, receipt=replace(
-            self.request.receipt, sampled_boottime_ms=time, buffer_id=f"weston-{time}", frame_tag=candidate.frame_tag))
-        self._exchange(self.request)
+        present(self.registry, self.exchange())
 
     def begin(self, frame_id: str = "node-f0") -> dict:
         return begin(self.trials, frame_id)
@@ -79,12 +77,11 @@ class Node:
 
     def restore(self, trial: dict, entry_id, expected: int | None = None) -> dict:
         return self.trials.restore("node-f0", UUID(trial["trial_id"]), entry_id=UUID(str(entry_id)),
-                                   expected_sequence=trial["sequence"] if expected is None else expected)
+                                   expected_sequence=trial["sequence"] if expected is None else expected, by="console")
 
 
 def _client(registry) -> TestClient:
-    return TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
-                                 node_control=NodeControlConfig("node-test")))
+    return TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False))
 
 
 def _history(registry, frame_id: str = "node-f0", **params) -> dict:
@@ -107,11 +104,12 @@ def _sql(registry, sql: str, params=()) -> list[dict]:
 def _see_display(registry, frame_id: str = "node-f0") -> UUID:
     """A Display seen on the Frame's port and named by its Position, so the Frame stays ready."""
     display = uuid4()
-    _sql(registry, "INSERT INTO displays(id, maker, product, name, serial, first_seen_at, matched_lux, panel_black) "
-                   "VALUES (%s, 'SAM', 1, 'Samsung QN43Q8F', %s, 0, 1000.0, 0.0003)", (display, display.hex))
-    _sql(registry, "INSERT INTO output_displays(player_id, output_id, connected, display_id, report, reported_at) "
-                   "SELECT player_id, output_id, true, %s, '{}', 0 FROM bindings WHERE frame_id=%s "
-                   "ON CONFLICT (player_id, output_id) DO UPDATE SET display_id=EXCLUDED.display_id",
+    _sql(registry, "INSERT INTO displays(id, maker, product, name, serial, matched_lux, panel_black, created_at, "
+                   "created_by, changed_at, changed_by) "
+                   "VALUES (%s, 'SAM', 1, 'Samsung QN43Q8F', %s, 1000.0, 0.0003, 0, 'node', 0, 'node')",
+         (display, display.hex))
+    _sql(registry, "UPDATE outputs o SET connected=true, display_id=%s, display_report='{}', display_reported_at=0 "
+                   "FROM frames f WHERE f.id=%s AND o.player_id=f.player_id AND o.output_id=f.output_id",
          (display, frame_id))
     _sql(registry, "UPDATE frames SET position_display_id=%s WHERE id=%s", (display, frame_id))
     return display
@@ -122,16 +120,17 @@ def _entry(registry, *, frame_id: str = "node-f0", kind: str = "kept-saved", dis
     """An entry Photo Wall wrote at another time (another box, turn or Display), as stored; `turn`
     None: the Frame's turn now."""
     entry = uuid4()
-    _sql(registry, "INSERT INTO position_entries(id, frame_id, number, kind, at, fit, lighting, turn, display_id) "
+    _sql(registry, "INSERT INTO position_entries(id, frame_id, number, kind, at, fit, lighting, turn, display_id, by) "
                    "SELECT %s, %s, COALESCE(max(number), 0) + 1, %s, clock_timestamp(), %s, %s, "
-                   "COALESCE(%s, (SELECT turn FROM frames WHERE id=%s)), %s FROM position_entries WHERE frame_id=%s",
+                   "COALESCE(%s, (SELECT turn FROM frames WHERE id=%s)), %s, 'console' FROM position_entries "
+                   "WHERE frame_id=%s",
          (entry, frame_id, kind, fit.model_dump_json(), LIGHTING.model_dump_json(), turn, frame_id, display, frame_id))
     return entry
 
 
 def _turn(registry, frame_id: str, turn: int) -> None:
     generation = _sql(registry, "SELECT generation FROM frames WHERE id=%s", (frame_id,))[0]["generation"]
-    registry.turn_frame(frame_id, turn, expected_generation=generation)
+    registry.turn_frame(frame_id, turn, expected_generation=generation, by="console")
 
 
 def test_save_appends_a_kept_entry_made_for_the_turn_and_the_display_seen(registry):
@@ -200,13 +199,37 @@ def test_a_new_frame_records_its_creation_so_no_change_reads_as_made_outside(reg
     `unrecorded_record` -> a kept-unrecorded entry appears."""
     from central.infra.frame_lighting_store import PgHouseLock
     from central.infra.room_light_store import PgRoomLights
-    PgRoomLights(registry.db, PgHouseLock()).remove_room_light("room")
+    PgRoomLights(registry.db, PgHouseLock()).remove_room_light("room", by="console")
     frame(registry, "spare")
     assert _history(registry, "spare")["unrecorded_change"] is False
     _turn(registry, "spare", 90)
     entries = _history(registry, "spare")["entries"]
     assert [entry["kind"] for entry in entries] == ["kept-turn-changed", "kept-created"]
     assert FrameLighting.model_validate(entries[1]["lighting"]).lights == ()
+
+
+def test_every_entry_says_who_appended_it(registry):
+    """Migration 126 (decision 0034, S2f's erratum): an entry's `by` is who appended it. A Frame
+    created and turned through the routes reads the request's principal (the bearer token:
+    'api-token'); a Save reads its operator's, the change made outside Photo Wall it finds too; what
+    an exchange hands the Node reads 'central'. Mutation probes: drop `by` from `_append_in`'s INSERT
+    -> NOT NULL refuses every append; pass "central" from `create_frame` -> the created entry fails."""
+    with _client(registry) as client:
+        assert client.post("/v1/operator/frames", json=frame_body("spare"), headers=AUTH).status_code == 201
+        turned = client.put("/v1/operator/frames/spare/turn", json={"turn": 90, "expected_generation": 0},
+                            headers=AUTH)
+        assert turned.status_code == 200, turned.text
+    assert _sql(registry, "SELECT kind, by FROM position_entries WHERE frame_id='spare' ORDER BY number") == [
+        {"kind": "kept-created", "by": "api-token"}, {"kind": "kept-turn-changed", "by": "api-token"}]
+
+    node = Node(registry)
+    _sql(registry, "UPDATE frames SET lighting=%s WHERE id='node-f0'", (DEEP.model_dump_json(),))
+    before = _sql(registry, "SELECT max(number) AS number FROM position_entries WHERE frame_id='node-f0'")[0]["number"]
+    node.save(node.edit(node.begin(), SHIFTED))          # the rig's operations run as 'console'
+    assert _sql(registry, "SELECT kind, by FROM position_entries WHERE frame_id='node-f0' AND number > %s "
+                          "ORDER BY number", (before,)) == [
+        {"kind": "sent-draft", "by": "central"}, {"kind": "kept-unrecorded", "by": "console"},
+        {"kind": "kept-saved", "by": "console"}]
 
 
 def test_the_kept_write_takes_only_a_kept_kind_and_its_own_values(registry):
@@ -222,7 +245,7 @@ def test_the_kept_write_takes_only_a_kept_kind_and_its_own_values(registry):
              "position_history_kind"),
             (saved, Calibration(fit=SHIFTED), "position_history_values")):
         with registry.db.transaction() as conn, pytest.raises(ValueError, match=code):
-            write_position_in(conn, "node-f0", record, calibration=calibration)
+            write_position_in(conn, "node-f0", record, calibration=calibration, now=0.0, by="console")
     assert _sql(registry, "SELECT calibration, lighting, generation FROM frames WHERE id='node-f0'") == before
 
 
@@ -336,8 +359,9 @@ def test_restore_refusals_in_order(registry):
     trial = node.begin()
     own = _history(registry)["entries"][0]["entry_id"]
     other_frame = _history(registry, "node-f1")["entries"][0]["entry_id"]
-    _sql(registry, "INSERT INTO displays(id, maker, product, name, serial, first_seen_at, matched_lux, panel_black) "
-                   "VALUES (%s, 'DEL', 2, 'Dell', 'other', 0, 1000.0, 0.0003)", (dell := uuid4(),))
+    _sql(registry, "INSERT INTO displays(id, maker, product, name, serial, matched_lux, panel_black, created_at, "
+                   "created_by, changed_at, changed_by) "
+                   "VALUES (%s, 'DEL', 2, 'Dell', 'other', 1000.0, 0.0003, 0, 'node', 0, 'node')", (dell := uuid4(),))
     other_turn = _entry(registry, turn=180)               # made for the screen hung upside down
     other_display = _entry(registry, display=dell)
     with pytest.raises(NodeControlError) as invalid:
@@ -349,7 +373,7 @@ def test_restore_refusals_in_order(registry):
                                       (UUID(trial["trial_id"]), other_display, 1),
                                       (UUID(trial["trial_id"]), own, 7)):
         with pytest.raises(NodeControlError) as refused:
-            node.trials.restore("node-f0", trial_id, entry_id=UUID(str(entry)), expected_sequence=expected)
+            node.trials.restore("node-f0", trial_id, entry_id=UUID(str(entry)), expected_sequence=expected, by="console")
         refusals.append((refused.value.code, refused.value.status))
     assert refusals == [("trial_sequence_invalid", 422), ("trial_unknown", 404), ("unknown_entry", 404),
                         ("other_frame", 409), ("made_for_other_turn", 409), ("made_for_other_display", 409),
@@ -389,7 +413,7 @@ def test_kept_and_sent_entries_are_trimmed_apart(registry, monkeypatch):
     with registry.db.transaction() as conn:
         for depth in (1.0, 2.0, 3.0):
             record_sent_in(conn, "node-f0", trial=TrialHanded(PositionValues(SKEWED, LIGHTING.model_copy(update={"mat_depth_mm": depth})), session,
-                                                              None), saved=PositionValues(SKEWED, LIGHTING))
+                                                              None), saved=PositionValues(SKEWED, LIGHTING), by="central")
     entries = _history(registry)["entries"]
     assert [(entry["kind"], entry["number"]) for entry in entries] == [
         ("sent-draft", 8), ("sent-draft", 7), ("kept-saved", 5), ("kept-saved", 4)]
@@ -411,7 +435,7 @@ def test_a_failed_append_fails_the_save(registry, monkeypatch):
     Node(registry)
     before = _sql(registry, "SELECT calibration, lighting FROM frames WHERE id='node-f0'")
 
-    def refuse(conn, frame_id, record):
+    def refuse(conn, frame_id, record, *, by):
         raise RuntimeError("history write failed")
 
     monkeypatch.setattr(position_history_store, "_append_in", refuse)
@@ -432,7 +456,7 @@ def test_restore_refuses_an_entry_whose_lighting_names_a_room_light_gone_since(r
     from contracts.frame_lighting import AT_FULL, WashLight
 
     lights = PgRoomLights(registry.db, PgHouseLock())
-    lights.save_room_light("spot", FixedLight(name="Spot", colour=TypedColour(kelvin=2700)))
+    lights.save_room_light("spot", FixedLight(name="Spot", colour=TypedColour(kelvin=2700)), by="console")
     spotlit = LIGHTING.model_copy(update={"lights": (WashLight(light="spot", lux=500.0, reference=AT_FULL),)})
     node = Node(registry)
     trial = node.edit(node.begin(), SKEWED, spotlit)
@@ -440,7 +464,7 @@ def test_restore_refuses_an_entry_whose_lighting_names_a_room_light_gone_since(r
     tried = _history(registry)["entries"][0]
     assert tried["kind"] == "sent-draft"
     node.end(trial)
-    lights.remove_room_light("spot")
+    lights.remove_room_light("spot", by="console")
     with pytest.raises(FrameLightingRefused) as refused:
         node.restore(node.begin(), tried["entry_id"])
     assert (refused.value.code, refused.value.status) == ("unknown_room_light", 422)

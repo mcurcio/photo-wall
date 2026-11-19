@@ -4,7 +4,7 @@
 Run by debian-packaging/seal-hook.sh, last, over a root mmdebstrap built from the snapshot pin
 and the local repo:
 
-    python3 -I -B scripts/seal_root.py --root ROOT --role app|manager-primary --deb DEB \
+    python3 -I -B scripts/seal_root.py --root ROOT --role app --deb DEB \
         --abi BASE_ABI_JSON DISPLAY_ABI_JSON --output DIR
 
 It writes the role's entry (`ENTRY_POINT`, the one program the Node runs from the root), strips
@@ -48,15 +48,14 @@ from appliance.apps.environment import (  # noqa: E402
     normalize_rootfs_directories,
 )
 from contracts.app_environment import AppEnvironmentRefV2  # noqa: E402
-from contracts.node_boot import APP_PACKAGE, MANAGER_PACKAGE  # noqa: E402
+from contracts.node_boot import APP_PACKAGE  # noqa: E402
 
-# Each role -> its root package (contracts.node_boot) and what its entry runs.
+# The release's one role -> its root package (contracts.node_boot) and what its entry runs.
 ROLES: Final = {
     "app": (APP_PACKAGE,
             "/usr/bin/python3 -I -B /usr/lib/photo-wall/player --config /etc/photo-wall/public.json"),
-    "manager-primary": (MANAGER_PACKAGE, "/usr/bin/python3 -I -B /usr/lib/photo-wall/app-manager"),
 }
-# The program the Node runs from a root, whatever its role.
+# The program the Node runs from the root.
 ENTRY_POINT: Final = "/usr/lib/photo-wall-environment/entry"
 SOURCES: Final = "etc/apt/sources.list.d"
 LOCK: Final = "dependency-lock.json"

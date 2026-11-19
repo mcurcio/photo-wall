@@ -1,6 +1,6 @@
 """The catalog's seams: the release listing's records and the node half of a release sync.
 
-`ReleaseRecords` covers the release listing's ETag (`app_release_poll`) and the wanted node
+`ReleaseRecords` covers the release listing's ETag (`singletons` 'release_sync') and the wanted node
 deployments' files. It takes the kernel's opaque `Transaction`, so the domain never sees psycopg
 (`central/infra/catalog_records.py` implements it).
 `NodeReleaseRecords` is the node half of a release sync (`central/infra/node_releases.py`).
@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Protocol
 
+from central.actor import Actor
 from central.kernel.job_types import AssetJob
 from central.kernel.ports import PublishedRelease
 from central.kernel.transactions import Transaction
@@ -50,12 +51,12 @@ class StableDeployment:
 
 
 class NodeReleaseRecords(Protocol):
-    """The node half of a release sync (`node_release_observations`, the release catalog and the
-    deployment writer). Every method runs in the caller's transaction."""
+    """The node half of a release sync (each tag's `node_releases` row and the deployment
+    writer). Every method runs in the caller's transaction."""
 
     def ingest(self, tx: Transaction, release: PublishedRelease, *, now: float) -> bool:
-        """Turn `release.node_publication` into its catalog row, deployment and asset references,
-        and point the tag's observation at it, unless the observation is older than the stored
+        """Turn `release.node_publication` into its release row's manifest, deployment and asset
+        references, with the tag's observation, unless the observation is older than the stored
         one (False: nothing written). Raises `NodeReleaseRefused`
         for the release's own refusals (identity, pins, environment conflicts); the caller then
         rolls the transaction back and records the problem in another."""
@@ -116,14 +117,14 @@ class PlayerVersions(Protocol):
         progress."""
         ...
 
-    def install(self, serial: str, version: str) -> InstallStarted:
+    def install(self, serial: str, version: str, *, by: Actor) -> InstallStarted:
         """Set the Pi `serial`'s version to `version` (its old one becomes its previous), download the
         release if it is not ready (a Prefetch in the same transaction), then restart that Pi onto it
         once it is ready (a reboot command to its current host session); answers once the version is
         set. VersionRefused(UNKNOWN_PLAYER | UNKNOWN_VERSION | NOT_DEPLOYABLE) before any write."""
         ...
 
-    def set_wall_version(self, version: str) -> Versions:
+    def set_wall_version(self, version: str, *, by: Actor) -> Versions:
         """Update the wall: set every enrolled Pi's version to `version` in one transaction (each old
         one becomes its previous) and download it; restarts no Pi (the console's rollout does).
         VersionRefused(UNKNOWN_VERSION | NOT_DEPLOYABLE) before any write."""

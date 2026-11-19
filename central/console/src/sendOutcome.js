@@ -1,11 +1,9 @@
-import { useMemo, useRef, useState } from "react";
-
 /**
  * The one home of a sent write's outcome pattern (design rule 3: done / already / changed /
  * refused / unknown), shared by the equipment writes (equipmentApi.js), Reboot
- * (fleetCommands.js), Stage (stage.js), Select and its sibling verbs (releases.js) and the
+ * (fleetCommands.js), Select and its sibling verbs (releases.js) and the
  * Show side's writes. Each verb keeps its own code table; what they share lives here: when an
- * answer leaves the outcome unknown, the held-request store, and the words for "unknown",
+ * answer leaves the outcome unknown, and the words for "unknown",
  * "changed" and re-sending a frozen request.
  */
 
@@ -63,29 +61,4 @@ export function answerOutcome(result, done, codes) {
   const known = Object.hasOwn(codes, code) ? codes[code] : undefined;
   return known === undefined ? { outcome: "refused", message: `Central refused: ${code}.`, code }
     : { outcome: known.outcome, message: `${known.message}.`, code };
-}
-
-/**
- * The requests one page holds, by id (`HeldRequests`): a ref, so a send marks its request
- * held in the same step as its check, and a render after each change. `state` is
- * "in_flight", "recorded" or "unknown"; `frozen` is the request body this page sent, so a
- * re-send ({@link RESEND_LABEL}) sends exactly that body. Each page holds its own.
- *
- * @typedef {"in_flight"|"recorded"|"unknown"} HeldState
- * @typedef {{get: (id: string) => HeldState|null, frozen: (id: string) => object|null,
- *            set: (id: string, state: HeldState|null, request?: object|null) => void}} HeldRequests
- * @returns {HeldRequests}
- */
-export function useHeldRequests() {
-  const heldRef = useRef(/** @type {Map<string, {state: HeldState, request: object|null}>} */ (new Map()));
-  const [, setVersion] = useState(0);
-  return useMemo(() => ({
-    get: (id) => heldRef.current.get(id)?.state ?? null,
-    frozen: (id) => heldRef.current.get(id)?.request ?? null,
-    set: (id, state, request = null) => {
-      if (state === null) heldRef.current.delete(id);
-      else heldRef.current.set(id, { state, request });
-      setVersion((version) => version + 1);
-    },
-  }), []);
 }

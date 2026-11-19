@@ -52,24 +52,26 @@ class PostgresInstallationRepository:
 
     @staticmethod
     def bound_player_count_in(conn) -> int:
-        """Number of players adopted into a frame (owning a `bindings` row).
+        """Number of players adopted into a frame (named by a Frame's binding, `frames.player_id`).
 
-        A `bindings` row is the sole "bound" signal: a player that netboots or
-        enrolls but is never adopted into a frame has no row and is excluded, and
-        `Registry.retire` deletes a retired player's bindings, so retired players
-        are excluded too. This is the same table `configuration_in`/`inventory`
+        A Frame's binding is the sole "bound" signal: a player that netboots or
+        enrolls but is never adopted into a frame is named by none and is excluded, and
+        `Registry.retire` unbinds a retired player's Frames, so retired players
+        are excluded too. These are the same columns `configuration_in`/`inventory`
         derive `is_bound` from -- the count is not re-deriving that logic, it
         aggregates the same rows.
         """
         return conn.execute(
-            "SELECT count(DISTINCT player_id) AS n FROM bindings"
+            "SELECT count(DISTINCT player_id) AS n FROM frames"
         ).fetchone()["n"]
 
     def active_sessions_in(self, conn) -> tuple[dict, ...]:
+        """Every unretired Player's id and authority_epoch, ordered by id, read without a row lock
+        (it guards no write: each Player's configuration takes its own locks only when it writes,
+        `Coordinator._configuration`)."""
         return tuple(
             conn.execute(
-                "SELECT id,authority_epoch FROM players WHERE retired_at IS NULL "
-                "ORDER BY id FOR SHARE"
+                "SELECT id,authority_epoch FROM players WHERE retired_at IS NULL ORDER BY id"
             ).fetchall()
         )
 
@@ -91,16 +93,16 @@ class PostgresInstallationRepository:
         self, conn, player_id: str, authority_epoch: int, *, lock: bool = True
     ) -> dict[str, list[OutputBinding]] | None:
         """The Player's bindings (`output_binding` of each), and those whose Frame is ready, under
-        a share lock on its session, Frames and bindings; None when the session is not current.
+        a share lock on its session and Frames; None when the session is not current.
         The one query of a Player's configuration (Registry.configuration_in delegates here).
         `lock=False` reads the same without the share locks, for a caller that writes nothing
         from it (a row lock takes a transaction id: a WAL flush at commit)."""
         if not self.session_is_current_in(conn, player_id, authority_epoch, lock=lock):
             return None
         rows = conn.execute(
-            f"SELECT f.*,b.output_id,{POSITION_COLUMNS},{DISPLAY_SIZE_COLUMNS} FROM bindings b "  # noqa: S608
-            f"JOIN frames f ON f.id=b.frame_id {SEEN_DISPLAY_JOIN} {DISPLAY_SIZE_JOIN} "
-            "WHERE b.player_id=%s ORDER BY b.output_id" + (" FOR SHARE OF f,b" if lock else ""),
+            f"SELECT f.*,{POSITION_COLUMNS},{DISPLAY_SIZE_COLUMNS} FROM frames f "  # noqa: S608
+            f"{SEEN_DISPLAY_JOIN} {DISPLAY_SIZE_JOIN} "
+            "WHERE f.player_id=%s ORDER BY f.output_id" + (" FOR SHARE OF f" if lock else ""),
             (player_id,),
         ).fetchall()
         bindings = [output_binding(row) for row in rows]

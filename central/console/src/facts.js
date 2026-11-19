@@ -186,32 +186,34 @@ export function factText(value, { receipt = true } = {}) {
   }
 }
 
-/** Seconds after Central's last look at its hub when presence reads unknown (node_bus_hub.py
- *  PRESENCE_STALE_SECONDS). */
-export const BUS_LINK_STALE_SECONDS = 30;
+/** What Central serves of its hub with each `bus_link` (node_bus_presence.py `HubState`), worded. */
+const HUB_WORDS = {
+  no_hub: "Central runs no hub",
+  worker_stopped: "Central's worker is not running",
+  unreachable: "Central cannot reach its hub",
+};
 
 /**
  * The Node API link fact (E3d presence; leaf state only): whether Central's hub holds this Node's
- * leaf, from a read's served `bus_link` ({linked, changed_at, looked_at}, all Central's clock) and
- * that read's `read_at`. Derived "linked for <age>" / "not linked for <age>" (Central's inference:
- * Central's hub holds / does not hold this Node's leaf), aged from `changed_at`; unknown "Central
- * runs no hub" when `looked_at` is null, and "Central has not looked at its hub for <age>" when the
- * look is more than BUS_LINK_STALE_SECONDS older than the read. Rendered under the label "Node API
- * link". Never throws; it informs and never gates.
+ * leaf, from a read's served `bus_link` ({linked, changed_at, hub}; `changed_at` Central's clock)
+ * and that read's `read_at`. The hub's state first: hub "no_hub" → unknown "Central runs no hub";
+ * "worker_stopped" → unknown "Central's worker is not running"; "unreachable" → unknown "Central
+ * cannot reach its hub"; any other value but "reachable" → unknown "the hub's state is not served".
+ * Then derived "linked for <age>" / "not linked for <age>" (Central's inference: Central's hub holds
+ * / does not hold this Node's leaf), aged from `changed_at`, or unknown "Central's hub has not
+ * looked for this Node yet". Rendered under the label "Node API link". Never throws; it informs and
+ * never gates.
  *
- * @param {{linked: boolean|null, changed_at: number|null, looked_at: number|null}|null|undefined} busLink
+ * @param {{linked: boolean|null, changed_at: number|null, hub: "no_hub"|"worker_stopped"|"unreachable"|"reachable"}|null|undefined} busLink
  * @param {number|null|undefined} readAt
  * @returns {Fact}
  */
 export function busLinkFact(busLink, readAt) {
   if (typeof busLink !== "object" || busLink === null) return unknown("the Node API link is not served");
-  const { linked, changed_at: changedAt, looked_at: lookedAt } = busLink;
-  if (lookedAt === null || lookedAt === undefined) return unknown("Central runs no hub");
-  if (!isTime(lookedAt)) return unknown("when Central last looked at its hub is not served");
+  const { linked, changed_at: changedAt, hub } = busLink;
+  if (Object.hasOwn(HUB_WORDS, hub)) return unknown(HUB_WORDS[hub]);
+  if (hub !== "reachable") return unknown("the hub's state is not served");
   if (!isTime(readAt)) return unknown("Central's read time is not served");
-  if (readAt - lookedAt > BUS_LINK_STALE_SECONDS) {
-    return unknown(`Central has not looked at its hub for ${formatAge(readAt - lookedAt)}`);
-  }
   if (typeof linked !== "boolean" || !isTime(changedAt)) return unknown("Central's hub has not looked for this Node yet");
   const age = formatAge(Math.max(0, readAt - changedAt));
   return linked

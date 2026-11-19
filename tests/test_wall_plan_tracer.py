@@ -217,11 +217,11 @@ def wall_players(registry):
     players = []
     for frame_id, turn in (("frame-wide", 0), ("frame-tall", 90)):
         player, _, _ = enroll(registry)
-        registry.create_frame(frame_create(frame_id))
-        registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
+        registry.create_frame(frame_create(frame_id), by="console")
+        registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
         if turn:
             generation = next(frame for frame in registry.inventory().frames if frame.id == frame_id).generation
-            registry.turn_frame(frame_id, turn, expected_generation=generation)
+            registry.turn_frame(frame_id, turn, expected_generation=generation, by="console")
         save_position(registry, frame_id, Calibration(fit=PositionBox()))
         players.append(player)
     return players

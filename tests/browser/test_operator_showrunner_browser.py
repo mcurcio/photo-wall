@@ -62,10 +62,12 @@ from support.frames import Screen, frame_create
 from support.house_time import UTC_HOUSE, set_house, window_program
 from support.photo_pools import FIXTURE_CONNECTION, fixture_connection
 from support.position import save_position
+from support.workers import heartbeat
 from test_registry import ADMIN, enroll
 
 from central.db import ProcessTransactionClock
 from central.infra.photo_library_store import library_assets_in
+from central.infra.runtime import STALLED_WORKER_SECONDS
 from central.kernel.job_types import PrepareMedia
 from central.media_repository import MediaRepository, prepare_lock
 from central.photo_library.model import InPool, SourceQuery, TakenBetween
@@ -171,16 +173,16 @@ def _seed(registry):
     id_a, _key_a, _req_a = enroll(registry, count=1, size=size)
     id_b, _key_b, _req_b = enroll(registry, count=1, size=size)
 
-    registry.create_frame(frame_create(VALID_FRAME, x_mm=100, y_mm=100))
-    registry.create_frame(frame_create(INVALID_FRAME, x_mm=500, y_mm=100))
+    registry.create_frame(frame_create(VALID_FRAME, x_mm=100, y_mm=100), by="console")
+    registry.create_frame(frame_create(INVALID_FRAME, x_mm=500, y_mm=100), by="console")
 
     # VALID_FRAME: bind (generation 0->1, position needed) then commit
     # (ready, revision 2).
-    registry.bind(VALID_FRAME, id_a["player_id"], OUTPUT, expected_generation=0)
+    registry.bind(VALID_FRAME, id_a["player_id"], OUTPUT, expected_generation=0, by="console")
     save_position(registry, VALID_FRAME)
 
     # INVALID_FRAME: bind only -> it still needs its position.
-    registry.bind(INVALID_FRAME, id_b["player_id"], OUTPUT, expected_generation=0)
+    registry.bind(INVALID_FRAME, id_b["player_id"], OUTPUT, expected_generation=0, by="console")
     # A Program's windows are on the house clock: UTC, so the test clock's instants read plainly.
     set_house(registry.db, UTC_HOUSE)
     return id_a["player_id"], id_b["player_id"]
@@ -907,7 +909,7 @@ LOBBY_FRAME = "lobby-left"
 
 
 def _add_lobby_frame(registry):
-    registry.create_frame(frame_create(LOBBY_FRAME, surface_id="lobby", x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(LOBBY_FRAME, surface_id="lobby", x_mm=100, y_mm=100), by="console")
 
 
 def _refused_by_guard(registry):
@@ -1596,55 +1598,34 @@ def test_the_media_pipeline_states_each_source(page, registry):
 
 
 def test_the_media_pipeline_states_each_worker_state(page, registry):
+    """Whether the worker runs is Central's reading of its queue heartbeat (decision 0034: the
+    check-in is no longer a stamp); an error code the worker reported reads until it clears."""
     _seed(registry)
     repository = MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(), times=ProcessTransactionClock(registry.clock))
-    repository.health()  # the settings row, as Central's first media read makes it
+    with registry.db.transaction() as conn:
+        conn.execute("DELETE FROM procrastinate_workers")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now", paused_at=registry.clock.utc())
         worker = _pipeline(page).get_by_label("Media worker", exact=True)
-        expect(worker).to_have_text("never checked in")
+        expect(worker).to_have_text("not running")
         expect(worker).to_have_class(re.compile(r"\bhealth--alarm\b"))
 
+        heartbeat(registry.db)
         repository.worker_status("storage_pressure")
         page.clock.run_for(5000)
         expect(worker).to_have_text("reported: storage is full")
         expect(_pipeline(page)).to_contain_text("preparing 0 · waiting 0 · failed 0 · cache 0 of")
 
         repository.worker_status(None)
-        registry.clock.advance(20)
         page.clock.run_for(5000)
         expect(worker).to_have_text(re.compile(
-            r"^Media worker last reported 20 s ago · preparing 0 · waiting 0 · failed 0 · cache 0 of 4\.3 GB$"))
+            r"^running · preparing 0 · waiting 0 · failed 0 · cache 0 of 4\.3 GB "
+            r"\(Central's inference: its queue heartbeat is recent\)$"))
         expect(worker).to_have_class(re.compile(r"\bhealth--ok\b"))
 
-        registry.clock.advance(2 * 300 + 60 - 20 + 1)
+        heartbeat(registry.db, age=STALLED_WORKER_SECONDS + 5)
         page.clock.run_for(5000)
-        expect(worker).to_have_text("quiet for 11 min")
-
-
-def test_media_ages_are_taken_against_the_media_read_time_not_the_inventory_read_time(page, registry):
-    """G11: media times are the database's, so the worker fact ages against `media.read_at`.
-    The stub moves `inventory.read_at` (Central's process clock) an hour away from it."""
-    _seed(registry)
-    repository = MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(),
-                                 times=ProcessTransactionClock(registry.clock))
-    repository.worker_status(None)
-    seen = registry.clock.utc()
-
-    def skewed(route):
-        response = route.fetch()
-        body = response.json()
-        body["media"]["read_at"] = seen + 30
-        body["inventory"]["read_at"] = seen + 3600
-        route.fulfill(response=response, json=body)
-
-    with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "now", paused_at=registry.clock.utc())
-        page.route("**/v1/operator/snapshot", skewed)
-        page.clock.run_for(5000)
-        worker = _pipeline(page).get_by_label("Media worker", exact=True)
-        expect(worker).to_have_text(re.compile(r"^Media worker last reported 30 s ago · "))
-        expect(worker).to_have_class(re.compile(r"\bhealth--ok\b"))
+        expect(worker).to_have_text("not running")
 
 
 def _why_chain(page, frame_id=VALID_FRAME):
@@ -1767,16 +1748,16 @@ def test_check_this_frame_counts_as_the_planner_does(page, registry, tmp_path):
             "Check this frame Nothing usable yet: 2 still preparing.")
 
         repository = MediaRepository(registry.db, registry.clock, queue=queue, times=ProcessTransactionClock(registry.clock))
-        repository.worker_status(None)  # the worker checks in
+        heartbeat(registry.db)  # the worker runs
         cache = MediaCache(repository, tmp_path)
         request_photo(cache, portrait_a.asset.asset_id)
         publish_photo(cache, portrait_a)
         failed = request_photo(cache, portrait_b.asset.asset_id)
         with registry.db.transaction() as conn:   # its preparation failed for good
             conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,reason,"
-                         "retry_not_before,seq,updated_at) VALUES(%s,%s,'terminal',"
-                         "'asset_missing',NULL,nextval('job_outcome_seq'),%s)",
-                         (prepare_lock(failed), PrepareMedia.job_name, now))
+                         "retry_not_before,seq,changed_at,created_at,created_by,changed_by) VALUES(%s,%s,'terminal',"
+                         "'asset_missing',NULL,nextval('job_outcome_seq'),%s,%s,'central','central')",
+                         (prepare_lock(failed), PrepareMedia.job_name, now, now))
         response = page.request.get(
             origin + f"/v1/operator/sources/{quote(SOURCE, safe='')}/candidates"
             f"?frame_id={VALID_FRAME}", headers={"Authorization": "Bearer " + ADMIN})

@@ -45,6 +45,8 @@ from integration.room_light_rig import (
     Worker,
     light_sensor_root,
 )
+from support.devices import seed_device
+from support.player_state import player_state
 from test_registry import ADMIN, enroll, frame, hello
 
 from appliance.host.host_runner import start_host_bus
@@ -130,12 +132,11 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
     database = registry.db
     device_id = device_id_for_serial(SERIAL)
     with database.transaction() as conn:   # the Node's device, as its boot offer records it
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (device_id, SERIAL))
+        seed_device(conn, device_id, SERIAL)
     player, _, _ = enroll(registry, device_id=device_id)
     hello(registry, player)
     frame(registry, "hall")
-    registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("hall", player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     player_headers = {"Authorization": "Bearer " + player["token"]}
 
     hub = hub_server(tmp_path, [SERIAL])
@@ -153,8 +154,8 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
             return answer.json() if answer.content else {}
 
         def control_state() -> dict:
-            """The Player's control State, as its control link reads it, and acknowledged applied."""
-            state = call("GET", "/v1/player/state", headers=player_headers)
+            """The Player's control State, as its session socket sends it, and acknowledged applied."""
+            state = player_state(client, player["token"])
             call("POST", "/v1/player/control-acks", headers=player_headers, json={
                 "authority_epoch": player["authority_epoch"], "delivery_id": state["delivery_id"],
                 "result": "applied"})
@@ -188,7 +189,8 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
             worker.start()
             stoppers.append(worker.stop)
             nonlocal host
-            host = start_host_bus("base-room-light", url=node.client_url, iio_root=light_sensor_root(tmp_path, LUX))
+            host = start_host_bus("base-room-light", reboot=lambda _reason: None, url=node.client_url,
+                                  iio_root=light_sensor_root(tmp_path, LUX))
             followed = Player(tmp_path / "player", node.client_url)
             followed.start()
             stoppers.append(followed.stop)
@@ -241,7 +243,7 @@ def test_room_light_reaches_the_player_through_the_real_composition(registry, tm
                 def read() -> bool:
                     with database.transaction() as conn:
                         return conn.execute(
-                            "SELECT 1 FROM node_link_records WHERE device_id=%s AND stream=%s AND subject=%s",
+                            "SELECT 1 FROM node_states WHERE device_id=%s AND stream=%s AND subject=%s",
                             (device_id, state_stream("host"), state_prefix("host") + LIGHT_SENSOR_KEY),
                         ).fetchone() is not None
                 return await asyncio.to_thread(read)

@@ -19,6 +19,9 @@ recovers the run. Rules for `app_unresponsive`:
 run), raised after the catalogue's raise window; `app_started` for any other run withdraws a
 pending one (Display's purposeful Weston restart inside the window is never shown) or clears a
 raised one at once. Whether the new run answers is `app_unresponsive`'s question (E-1B-16).
+The broker states each once; after a feed gap the reader hands the judge the run state the
+broker's page carries (`appliance.health.runner.BrokerFeedReader`) as the fact it stands for: a
+repeat changes nothing, and a pending condition the gap withdrew opens again.
 
 `app_resource_exhausted` (degraded) follows `app_descriptors` for the run that holds it, or for
 any run while none is open: a run holding at least RESOURCE_PRESSURE_PERCENT of its soft
@@ -55,9 +58,8 @@ Authored black, Night off, a pattern and Central's card are the Player's or Disp
 a software rasterizer (llvmpipe, softpipe, swrast) raises it at once for that run; a GPU
 renderer reported by any later run clears it. A feed gap keeps it, like any raised condition.
 
-Every other feed kind (channel, link and relink facts) is recorded or ignored, never a fault;
-`app_link_accepted` is kept for its `player_id`. A code outside the catalogue is refused
-(`ValueError`).
+Every other feed kind (channel, link and relink facts) is recorded or ignored, never a fault.
+A code outside the catalogue is refused (`ValueError`).
 
 Per Output (B10b): Display's `outputs` snapshot (every display feed read carries one) names the
 connected Outputs and each one's admitted app run; display events only refine it until the next
@@ -69,7 +71,7 @@ its codes are the raised codes (node-wide in M1: one app drives every Output) an
 The projection to Display's `OverlayInstruction` per connected Output: tint on iff it has a card;
 line 1 `"{household line} · since {HH:MM}"`, the time the condition's evidence began on
 the Pi's own clock (`evidence_wall_s`, `card_time`), line 2
-`"{code} · Player {player_id} · Output {output}"`; the serial (one judge-wide counter) bumps
+`"{code} · Output {output}"`; the serial (one judge-wide counter) bumps
 whenever an Output's tint or lines change. A
 `PresentedReport` for a serial the judge projected is kept in the ring as `presented`.
 """
@@ -311,7 +313,6 @@ class HealthJudge:
         for code in FRAME_BLACK_CODES.values():
             self._fault(code)
         self.sequence = 0
-        self.player: tuple[dict, str] | None = None  # (run, player_id) from app_link_accepted
         self._open: dict[str, _Open] = {}
         self._nothing: dict[str, _Open] = {}  # nothing_to_show, by Output name
         self._black: dict[str, _Black] = {}  # the Frame-black codes, by Output name
@@ -341,8 +342,6 @@ class HealthJudge:
                 self._unanswered(APP_UNRESPONSIVE, run, now)
             elif event.kind == "probe_answered":
                 self._answered(APP_UNRESPONSIVE, run, now)
-            elif event.kind == "app_link_accepted" and isinstance(value.get("player_id"), str):
-                self.player = (run, value["player_id"])
             elif event.kind == "app_renderer" and isinstance(value.get("renderer"), str):
                 self._renderer(run, value["renderer"], now)
             elif event.kind == APP_EXITED:
@@ -494,9 +493,8 @@ class HealthJudge:
             return False, ("", "")
         fault = self._fault(output.card)
         since = card_time(evidence_wall_s(now - output.card_age_ms, now, wall_ms), zone)
-        player = "" if self.player is None else f" · Player {self.player[1]}"
         return True, (f"{fault.household_line} · since {since}"[:MAX_TEXT],
-                      f"{output.card}{player} · Output {output.output}"[:MAX_TEXT])
+                      f"{output.card} · Output {output.output}"[:MAX_TEXT])
 
     def _held(self, now: int) -> None:
         """Open, withdraw or clear each Output's `nothing_to_show` from the latest Output set."""

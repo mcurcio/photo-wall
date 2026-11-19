@@ -78,7 +78,7 @@ def test_before(page, registry, scheme, suffix):
     from central.photo_library.views import ConnectionWrite
 
     library = library_of(registry)
-    ref = library.add_connection(ConnectionWrite(name="Immich", url=URL, key=KEY))
+    ref = library.add_connection(ConnectionWrite(name="Immich", url=URL, key=KEY), by="console")
     _checked(library, ref)
     _sized(page, scheme, WIDTHS[suffix])
     with operator_server(registry.db, registry.clock) as origin:

@@ -30,6 +30,7 @@ from integration.bus_servers import (
     node_server,
     until,
 )
+from support.devices import seed_device
 from test_registry import ADMIN
 from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
@@ -100,14 +101,14 @@ class _WallMarks:
 
 def _enrol(db: Database, serial: str) -> None:
     with db.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (device_id_for_serial(serial), serial))
+        seed_device(conn, device_id_for_serial(serial), serial)
 
 
 async def _records(db: Database, stream: str) -> list[dict]:
     def run() -> list[dict]:
         with db.transaction() as conn:
-            return conn.execute("SELECT subject, data FROM node_link_records WHERE device_id=%s AND stream=%s "
+            source = "node_states WHERE" if stream.startswith("KV_") else "events WHERE kind='record' AND"
+            return conn.execute(f"SELECT subject, data FROM {source} device_id=%s AND stream=%s "
                                 "ORDER BY epoch, seq", (device_id_for_serial(SERIAL), stream)).fetchall()
     return [{**row, "data": bytes(row["data"])} for row in await asyncio.to_thread(run)]
 
@@ -202,9 +203,7 @@ def test_home_assistants_door_through_centrals_origin(registry, tmp_path, monkey
     from test_node_release_ingest import Upstream, make_sync_world, node_upload, sync
 
     from central.fleet.node_bus_accounts import FLEET_SYSTEM_USER
-    from central.fleet.node_commands import NodeCommands
     from central.fleet.node_release_catalog import NodeReleaseCatalog
-    from central.fleet.node_sessions import NodeControlConfig, NodeSessions
     from central.hub_api import central_state, hub_methods
     from central.infra.central_state import PgCentralStateReads, PgStateWakes
     from central.infra.frame_lighting_store import PgHouseLock
@@ -248,11 +247,10 @@ def test_home_assistants_door_through_centrals_origin(registry, tmp_path, monkey
     hub = hub_server(tmp_path, ["pi-a", "pi-b"])
     central = _Central(registry.db, _free_port(), f"ws://127.0.0.1:{hub.websocket_port}/leafnode")
     door = f"ws://127.0.0.1:{central.port}/{DOOR_PATH}"
-    sessions = NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test"))
-    versions = PgPlayerVersions(registry.db, registry.clock, world.stored, None, NodeCommands(sessions))
+    versions = PgPlayerVersions(registry.db, registry.clock, world.stored, None)
     lights = PgRoomLights(registry.db, PgHouseLock())
     reads = PgCentralStateReads(registry.db, registry.clock, versions, lights,
-                                NodeReleaseCatalog(sessions, readiness=world.stored).view)
+                                NodeReleaseCatalog(registry.db, registry.clock, readiness=world.stored).view)
 
     async def run() -> None:
         stop = asyncio.Event()

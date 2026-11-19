@@ -29,10 +29,10 @@ def add_frame(registry, frame_id: str, *, portrait: bool = True, bound: bool = T
     """A Frame, by default bound full screen to an Output of its own pixels (its Frame output:
     frame box run fb-8, a Frame with no known screen has no shape and takes no photo)."""
     width_px, height_px = (1080, 1920) if portrait else (1920, 1080)
-    registry.create_frame(frame_create(frame_id))
+    registry.create_frame(frame_create(frame_id), by="console")
     if bound:
         player, _, _ = enroll(registry, count=1, size=(width_px, height_px))
-        registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
+        registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
 
 
 def authored_scene(*contributions, scene_id="authored-scene"):
@@ -40,8 +40,11 @@ def authored_scene(*contributions, scene_id="authored-scene"):
 
 
 def count_authored(registry):
-    with registry.db.transaction() as conn:
-        return conn.execute("SELECT count(*) AS n FROM authored_candidates").fetchone()["n"]
+    """How many library photo ids the saved Runtime's Scenes name (decision 0034: authoring
+    stores nothing else)."""
+    from central.runtime_store import RuntimeStore
+
+    return len(RuntimeStore(registry.db, registry.clock).read().authored_asset_ids())
 
 
 def test_source_candidates_filters_originals_with_the_planner_policy(registry):
@@ -72,7 +75,7 @@ def _prepared(registry, asset_id, *, variant=None, failure=None, retry_not_befor
     with registry.db.transaction() as conn:
         key = repository.variant_key_in(conn, asset_id)
         conn.execute("INSERT INTO job_outcomes(lock_key,job_name,status,reason,retry_not_before,"
-                     "seq,updated_at) VALUES(%s,%s,%s,%s,%s,nextval('job_outcome_seq'),0)",
+                     "seq,changed_at,created_at,created_by,changed_by) VALUES(%s,%s,%s,%s,%s,nextval('job_outcome_seq'),0,0,'central','central')",
                      (prepare_lock(key), PrepareMedia.job_name,
                       "terminal" if retry_not_before is None else "transient", failure,
                       retry_not_before))
@@ -165,7 +168,7 @@ def test_authored_scene_accepts_an_eligible_alternative_for_each_frame(registry)
 
     result = coordinator.configure_authored_scene(scene, spec.source_ref,
                                                   tuple(item.asset_id for item in originals), by="console")
-    assert result["created"] == 2
+    assert result["created"] == 0
     assert count_authored(registry) == 2
 
 
@@ -224,7 +227,7 @@ def test_the_candidates_route_lists_what_fits_and_counts_what_it_skips(registry)
         unbound = client.get(route, params={"frame_id": "wide"}, headers=headers)
         assert (unbound.status_code, unbound.json()) == (409, {"error": "frame_size_unknown"})
         player, _, _ = enroll(registry)
-        registry.bind("wide", player["player_id"], "HDMI-A-1", expected_generation=0)
+        registry.bind("wide", player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
         save_position(registry, "wide")
         answer = client.get(route, params={"frame_id": "wide"}, headers=headers).json()
         assert {c["asset_id"]: c["fit"] for c in answer["candidates"]} == {

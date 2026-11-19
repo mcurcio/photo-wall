@@ -36,8 +36,7 @@ A *launcher package* installs programs (`LAUNCHERS`): the composition, photo-wal
 directory each under its own, /usr/lib/photo-wall/node/<launcher>/__main__.py, run as
 `python3 -I -B /usr/lib/photo-wall/node/<launcher>`; each release root's package (decision 0019,
 debian-packaging/build-root.sh), one at its own directory, /usr/lib/photo-wall/<name>/__main__.py,
-run as `python3 -I -B /usr/lib/photo-wall/<name>`: photo-wall-player (the app root) and
-photo-wall-app-manager (the manager root). A launcher's __main__.py is no module. Each launcher
+run as `python3 -I -B /usr/lib/photo-wall/<name>`: photo-wall-player (the app root). A launcher's __main__.py is no module. Each launcher
 declares two module-level literals, `ENTRY` (the module it runs as __main__) and `PATH` (the
 absolute directories it prepends to sys.path, sorted), read here with ast (`launchers`). A
 launcher package is judged by the launcher rule, besides the module rule when it installs
@@ -110,12 +109,10 @@ PRIVATE_ROOT: Final = PurePosixPath("/usr/lib/photo-wall")
 DIST_PACKAGES: Final = PurePosixPath("/usr/lib/python3/dist-packages")
 # The composition, whose directory holds the base's launchers, one subdirectory each.
 COMPOSITION: Final = "photo-wall-node"
-# The release roots' packages: one launcher each, at its directory (debian-packaging/build-root.sh).
+# The release root's package: one launcher, at its directory (debian-packaging/build-root.sh).
 APP_ROOT: Final = "photo-wall-player"
-MANAGER_ROOT: Final = "photo-wall-app-manager"
 # Each launcher package -> where its launchers' __main__.py lie, as a glob under its directory.
-LAUNCHERS: Final = {COMPOSITION: "*/__main__.py", APP_ROOT: "__main__.py",
-                    MANAGER_ROOT: "__main__.py"}
+LAUNCHERS: Final = {COMPOSITION: "*/__main__.py", APP_ROOT: "__main__.py"}
 # Stage 1's package, its entry and its path file, under its directory (the stage-1 rule).
 STAGE1: Final = "photo-wall-netboot-init"
 STAGE1_ENTRY: Final = "appliance.netboot_init"
@@ -328,7 +325,7 @@ def _reached(entry: str, *, edges: frozenset[Edge],
 def _launcher_files(staged: Path, package: str) -> list[tuple[str, Path]]:
     """(name, __main__.py) of each launcher `package`'s staged tree installs, named by its own
     directory. A launcher name is unique across packages, so the composition's launchers never
-    include one named like a release root's directory (`player`, `app-manager`)."""
+    include one named like a release root's directory (`player`)."""
     root = staged / package / directory(package).relative_to("/")
     roots = {directory(each).name for each in LAUNCHERS if each != COMPOSITION}
     return sorted((path.parent.name, path) for path in root.glob(LAUNCHERS[package])

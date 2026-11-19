@@ -12,7 +12,6 @@ from test_node_release_ingest import Upstream, make_sync_world, node_upload, rea
 
 from central.db import Database
 from central.fleet.node_release_catalog import NodeReleaseCatalog
-from central.fleet.node_sessions import NodeControlConfig, NodeSessions
 from central.infra.node_releases import deployment_jobs
 from central.kernel.jobs import asset_key
 
@@ -88,8 +87,7 @@ def test_release_read_is_one_repeatable_read_read_only_snapshot(registry, sync_w
     upstream.put(node_upload("v2.0.0"))
     sync(sync_world(upstream))
     recording = _Recording(registry.db)
-    sessions = NodeSessions(recording, registry.clock, NodeControlConfig("node-test"))
-    result = NodeReleaseCatalog(sessions, readiness=NOTHING_READY).view()
+    result = NodeReleaseCatalog(recording, registry.clock, readiness=NOTHING_READY).view()
     # One transaction: the snapshot is fixed before its first data query, and it writes nothing.
     assert recording.statements[0] == "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
     assert all(sql.lstrip().upper().startswith("SELECT") for sql in recording.statements[1:])
@@ -132,12 +130,12 @@ def test_readiness_is_derived_from_the_cache_for_each_row(registry, sync_world):
     world = sync_world(upstream)
     sync(world)
     store_files(world, ready)
-    store_files(world, partial, missing={partial.release.manager_primary.environment_sha256})
+    store_files(world, partial, missing={partial.release.app_environment.environment_sha256})
     by_tag = {row["version"]: row for row in read(registry, world)["releases"]}
     assert (by_tag["v2.1.0"]["readiness"], by_tag["v2.1.0"]["missing_bytes"]) == ("ready", 0)
     # Wanted (in the window) with a file absent: downloading, with the absent file's size left.
     assert by_tag["v2.2.0"]["readiness"] == "downloading"
-    assert by_tag["v2.2.0"]["missing_bytes"] == partial.release.manager_primary.size_bytes
+    assert by_tag["v2.2.0"]["missing_bytes"] == partial.release.app_environment.size_bytes
     # Not wanted (out of the window, never selected): not downloaded.
     assert by_tag["v2.0.0"]["in_window"] is False
     assert by_tag["v2.0.0"]["readiness"] == "not_downloaded"
@@ -178,10 +176,9 @@ def test_each_pi_reads_its_own_version_and_its_previous_one(registry, sync_world
     store_files(world, first)
     for serial in ("pi-a", "pi-b"):
         enroll(registry.db, serial, registry.clock.utc())
-    versions = player_versions(NodeSessions(registry.db, registry.clock, NodeControlConfig("node-test")),
-                               readiness=world.stored)
-    versions.install("pi-a", "v2.0.0")
-    versions.install("pi-a", "v2.1.0")
+    versions = player_versions(registry.db, registry.clock, readiness=world.stored)
+    versions.install("pi-a", "v2.0.0", by="console")
+    versions.install("pi-a", "v2.1.0", by="console")
     players = {pi["serial"]: pi for pi in read(registry, world)["players"]}
     assert {key: players["pi-a"][key] for key in ("version", "chosen", "previous", "install")} == {
         "version": "v2.1.0", "chosen": True, "previous": "v2.0.0", "install": "downloading"}

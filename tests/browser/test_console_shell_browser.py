@@ -97,14 +97,14 @@ def _expect_on(page, section):
 
 
 def _frame(registry, frame_id, *, x_mm=100):
-    registry.create_frame(frame_create(frame_id, x_mm=x_mm, y_mm=100))
+    registry.create_frame(frame_create(frame_id, x_mm=x_mm, y_mm=100), by="console")
 
 
 def _bound_commissioned(registry, frame_id, *, x_mm=100, commissioned=True):
     """A placed frame bound to a fresh, heard Player's HDMI-A-1."""
     identity, _key, _request = enroll(registry, count=1)
     _frame(registry, frame_id, x_mm=x_mm)
-    registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     if commissioned:
         save_position(registry, frame_id, PORTRAIT_ON_WIDE)
     report_readiness(registry, identity["player_id"])
@@ -282,7 +282,7 @@ def test_back_and_forward_move_between_sections(page, registry):
 def test_the_poll_keeps_running_across_sections(page, registry):
     identity, _key, _request = enroll(registry, count=1)
     _frame(registry, "first")
-    registry.bind("first", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("first", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     reads = []
     legacy_reads = []
 

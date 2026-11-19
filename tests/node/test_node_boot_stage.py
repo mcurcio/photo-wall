@@ -24,7 +24,7 @@ from appliance.host.host_linux import LinuxHostSampler
 from appliance.kernel import boot_stage
 from appliance.kernel.boot_stage import fault_token, read_boot_report, run_stage, write_stage
 from appliance.kernel.capacity import StorageShort
-from contracts.node_host_facts import BootReportV2, BootStageV2, parse_host_facts
+from contracts.node_host_facts import BootReportV2, BootStageV2
 
 
 def _record(directory, stage):
@@ -237,7 +237,7 @@ def test_host_configuration_is_written_before_the_marker_and_abi_checks(tmp_path
     with pytest.raises(ValueError, match="node_base_marker_ownership|node_measured_base_abi_mismatch"):
         bootstrap.materialize_handoff(root=tmp_path)
     host = json.loads((tmp_path / "run/photo-wall-node/host.json").read_bytes())
-    assert host["offer_id"] == str(selected.offer_id)
+    assert host == {"base_tag": selected.base.tag}
     # The bus's environment is written before the checks too: it needs only the origin and serial.
     assert read_environment_file(tmp_path / BUS_ENVIRONMENT) == bus_environment(ROOT, selected.serial)
 
@@ -326,10 +326,27 @@ def test_failed_units_over_4096_bytes_raises(monkeypatch):
         LinuxHostSampler().failed_units()
 
 
-def test_the_runner_reuses_the_last_failed_units_read_and_sends_none_before_any(tmp_path, monkeypatch):
-    from node.host.test_node_host_facts import INTERVAL, VALUES, _run, _runner
+def _line_runner(monkeypatch, clock, facts):
+    """A HostRunner on a real HostLine (it puts only what changed) whose puts are recorded:
+    `stated` holds each facts state put, decoded."""
+    from node.host.test_node_host_facts import _runner
+
+    from appliance.host.bus import HostLine
+    from contracts.node_host_facts import decode_host_facts_state
+    from contracts.node_state import HOST_FACTS_KEY
+    runner, _ = _runner(monkeypatch, clock, facts)
+    stated = []
+    runner.line = HostLine(lambda key, value: stated.append(decode_host_facts_state(value))
+                           if key == HOST_FACTS_KEY else None, monotonic=lambda: clock[0])
+    return runner, stated
+
+
+def test_the_runner_reuses_the_last_failed_units_read_and_states_none_before_any(tmp_path, monkeypatch):
+    from node.host.test_node_host_facts import VALUES, _run
+
+    from contracts.node_state import HOST_METRICS_EVERY
     clock = [100.0]
-    runner, sent = _runner(monkeypatch, clock, dict(VALUES), {})
+    runner, stated = _line_runner(monkeypatch, clock, dict(VALUES))
     runner.boot_stage_directory = tmp_path
     run_stage("prepare", lambda: None, directory=tmp_path)
     readings = [ValueError("failed_units_unreadable")]
@@ -340,17 +357,17 @@ def test_the_runner_reuses_the_last_failed_units_read_and_sends_none_before_any(
         return readings[0]
 
     runner.sampler.failed_units = failed_units
-    _run(runner, clock, 100 + INTERVAL)
+    _run(runner, clock, 100 + HOST_METRICS_EVERY)
     # Never read on this process: None, not the empty list.
-    assert parse_host_facts(sent[-1][1]).boot.failed_units is None
+    assert stated[-1].boot.failed_units is None
     readings[0] = (("photo-wall-app-broker.service",), 0)
-    _run(runner, clock, clock[0] + 2 * INTERVAL)
-    assert parse_host_facts(sent[-1][1]).boot.failed_units == ("photo-wall-app-broker.service",)
-    # A slow systemctl reuses the last reading: the failed unit is not cleared, nothing is resent.
-    count = len(sent)
+    _run(runner, clock, clock[0] + 2 * HOST_METRICS_EVERY)
+    assert stated[-1].boot.failed_units == ("photo-wall-app-broker.service",)
+    # A slow systemctl reuses the last reading: the failed unit is not cleared, nothing is put.
+    count = len(stated)
     readings[0] = ValueError("failed_units_unreadable")
-    _run(runner, clock, clock[0] + 3 * INTERVAL)
-    assert len(sent) == count
+    _run(runner, clock, clock[0] + 3 * HOST_METRICS_EVERY)
+    assert len(stated) == count
 
 
 # memory_rows.
@@ -434,55 +451,47 @@ def test_memory_rows_omit_each_unreadable_or_malformed_file(tmp_path):
                      "oom_kill:preparation", "oom_kill:app", "memory_peak:bus", "oom_kill:bus"]
 
 
-def test_supervision_carries_no_per_unit_rows(monkeypatch):
-    monkeypatch.setattr("appliance.host.host_linux.read_supervisor_status",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("absent")))
-    monkeypatch.setattr("appliance.host.host_linux.boot_id", lambda: uuid4())
-    monkeypatch.setattr("appliance.host.host_linux.boottime_ms", lambda: 1)
-    _systemctl(monkeypatch, error=AssertionError("supervision runs no systemctl"))
-    assert LinuxHostSampler().supervision() == (("manager_summary_known", 0, "boolean", "base_supervisor"),)
+# The host line puts the facts when the whole state changes, boot included.
+def test_a_boot_change_states_new_facts_and_an_unchanged_boot_states_nothing(tmp_path, monkeypatch):
+    from node.host.test_node_host_facts import VALUES, _run
 
-
-# The facts sender compares whole documents, boot included.
-def test_a_boot_change_sends_a_new_document_and_an_unchanged_boot_sends_nothing(tmp_path, monkeypatch):
-    from node.host.test_node_host_facts import INTERVAL, VALUES, _run, _runner
-    clock, facts = [100.0], dict(VALUES)
-    runner, sent = _runner(monkeypatch, clock, facts, {})
+    from contracts.node_state import HOST_METRICS_EVERY
+    clock = [100.0]
+    runner, stated = _line_runner(monkeypatch, clock, dict(VALUES))
     units = [((), 0)]
     runner.sampler.failed_units = lambda: units[0]
     runner.boot_stage_directory = tmp_path
     run_stage("storage", lambda: None, directory=tmp_path)
-    _run(runner, clock, 100 + 4 * INTERVAL)
-    assert len(sent) == 1
-    first = parse_host_facts(sent[0][1])
-    assert first.boot == BootReportV2((BootStageV2("storage", "done", None, None, None),), (), 0)
+    _run(runner, clock, 100 + 4 * HOST_METRICS_EVERY)
+    assert len(stated) == 1
+    assert stated[0].boot == BootReportV2((BootStageV2("storage", "done", None, None, None),), (), 0)
     write_stage(BootStageV2("prepare", "running", None, None, None), directory=tmp_path)
-    _run(runner, clock, clock[0] + 2 * INTERVAL)
+    _run(runner, clock, clock[0] + 2 * HOST_METRICS_EVERY)
     units[0] = (("photo-wall-app-broker.service",), 0)
-    _run(runner, clock, clock[0] + 2 * INTERVAL)
-    assert len(sent) == 3
-    second, third = (parse_host_facts(body) for _, body in sent[1:])
-    assert [stage.stage for stage in second.boot.stages] == ["storage", "prepare"]
-    assert third.boot.failed_units == ("photo-wall-app-broker.service",)
-    assert first.sequence < second.sequence < third.sequence
-    count = len(sent)
-    _run(runner, clock, clock[0] + 4 * INTERVAL)
-    assert len(sent) == count
+    _run(runner, clock, clock[0] + 2 * HOST_METRICS_EVERY)
+    assert len(stated) == 3
+    assert [stage.stage for stage in stated[1].boot.stages] == ["storage", "prepare"]
+    assert stated[2].boot.failed_units == ("photo-wall-app-broker.service",)
+    count = len(stated)
+    _run(runner, clock, clock[0] + 4 * HOST_METRICS_EVERY)
+    assert len(stated) == count
 
 
-def test_observation_rows_pass_through_valid_metrics(monkeypatch):
-    from test_node_host_cadence import _runner
-    clock = [100.0]
-    runner, posts, session_for = _runner(monkeypatch, clock)
-    runner.sampler.memory_rows = lambda: (("memcg_present", 1, "boolean", "cgroup"),
-                                          ("memcg_present", 0, "boolean", "cgroup"),
-                                          ("broker_failed", 0, "boolean", "pid1"))
-    session_for(uuid4())
+def test_metrics_rows_pass_through_valid_metrics():
+    from appliance.host.host_runner import HostRunner
+    stated = []
+    runner = HostRunner(SimpleNamespace(metrics=stated.append, facts=lambda state: None),
+                        monotonic=lambda: 100.0)
+    runner._line_facts_at = 100.0    # facts are not this test's
+    runner.sampler = SimpleNamespace(sample=lambda: (), throttling=lambda: (), supervision=lambda: (),
+                                     memory_rows=lambda: (("memcg_present", 1, "boolean", "cgroup"),
+                                                          ("memcg_present", 0, "boolean", "cgroup"),
+                                                          ("broker_failed", 0, "boolean", "pid1")))
     runner.tick()
-    [(_, observation)] = posts
-    rows = {(metric.name, metric.value) for metric in observation.metrics}
+    [state] = stated
+    rows = {(metric.name, metric.value) for metric in state.metrics}
     assert ("memcg_present", 1) in rows and ("memcg_present", 0) not in rows
-    assert observation.metrics[-1].name == "metrics_dropped" and observation.metrics[-1].value == 2
+    assert state.metrics[-1].name == "metrics_dropped" and state.metrics[-1].value == 2
 
 
 # The HostCore closure and the record directory's package line.

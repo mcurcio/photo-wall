@@ -4,6 +4,7 @@ A row, and a projected Commit, changes only when its meaning changes: a Player r
 readiness every half second gets the same control delivery back, and Central writes no grant or
 configuration row for it."""
 from fastapi.testclient import TestClient
+from support.player_state import player_state
 from test_coordination import report, schedule, setup_players
 from test_registry import ADMIN, hello
 
@@ -14,12 +15,14 @@ from contracts.models import LostGrant, Readiness
 
 
 def _rows(registry, player_id):
-    """Each grant, configuration and committed group row's own version (`xmin` changes on every
-    rewrite)."""
+    """Each grant and committed group row's own version (`xmin` changes on every rewrite), and the
+    stored configuration."""
     with registry.db.transaction() as conn:
         grants = conn.execute("SELECT assignment_id,xmin::text AS version FROM execution_commits "
                               "WHERE player_id=%s ORDER BY assignment_id", (player_id,)).fetchall()
-        configuration = conn.execute("SELECT xmin::text AS version FROM player_configurations "
+        # The configuration shares the show state's row with readiness (each new readiness number
+        # is written), so its own meaning is what must stand: its revision and its document.
+        configuration = conn.execute("SELECT configuration_revision,configuration FROM player_show_state "
                                      "WHERE player_id=%s", (player_id,)).fetchall()
         groups = conn.execute("SELECT id,xmin::text AS version FROM coordination_groups "
                               "WHERE status='committed' ORDER BY id").fetchall()
@@ -43,7 +46,7 @@ def test_unchanged_readiness_reports_rewrite_nothing_and_resend_the_applied_deli
             assert answer.json() == {"accepted": True}, answer.text
 
         ready(1)
-        state = client.get("/v1/player/state", headers=headers).json()
+        state = player_state(client, player["token"])
         assert state["commits"], state
         acked = client.post("/v1/player/control-acks", headers=headers, json={
             "authority_epoch": player["authority_epoch"], "delivery_id": state["delivery_id"],
@@ -53,7 +56,7 @@ def test_unchanged_readiness_reports_rewrite_nothing_and_resend_the_applied_deli
         assert all(before)
         for sequence in range(2, 12):
             ready(sequence)
-            again = client.get("/v1/player/state", headers=headers).json()
+            again = player_state(client, player["token"])
             assert (again["delivery_id"], again["commits"]) == (state["delivery_id"], state["commits"])
         assert _rows(registry, player["player_id"]) == before
 

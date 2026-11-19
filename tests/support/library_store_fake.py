@@ -6,10 +6,12 @@ fenced by their number and judged by `policy.contact_health`; a check's steps ar
 check number; marks subtract (an id marked in a check never becomes a row of that check); a
 complete finish removes the rows the check marked, and a row it did not see leaves only through
 `record_recheck` (follow-up S4); any other finish removes nothing. What a check saw or marked is
-kept as its pages (decision 0033), gone when it finishes or the pool's next check starts.
-Photos are held as PostgreSQL holds them (slice A2): one `assets` record per Immich asset, its
-`revisions` by asset id, and each revision's measured `copies`; a record's `changed_at` moves
-only when a fact it holds differs.
+kept as its pages (decision 0033), gone when it finishes or the pool's next check starts. Each
+check queues the next one where the PostgreSQL store does (decision 0034, S3a): `next_due` holds
+the due time of the last check queued per connection or pool, as `MediaTaskQueue` would be asked.
+Photos are held as PostgreSQL holds them (decision 0034): one `assets` record per Immich asset
+and its one current revision (in `revisions` by asset id; a new revision replaces the old one
+and its measured `copies`); a record's `changed_at` moves only when a fact it holds differs.
 
 Time is `clock.utc()` (a ManualClock in tests), standing in for the database's clock.
 """
@@ -43,11 +45,7 @@ from central.photo_library.model import (
     PoolThumbnail,
     SourceQuery,
 )
-from central.photo_library.policy import (
-    CHECK_EVERY_SECONDS,
-    STALE_CHECK_SECONDS,
-    contact_health,
-)
+from central.photo_library.policy import contact_health, next_check_due
 from central.photo_library.ports import (
     CheckComplete,
     CheckFinish,
@@ -83,7 +81,7 @@ class LibraryAssetRecord:
 
 @dataclass
 class RevisionRecord:
-    """An `asset_revisions` row: the revision's own facts, keyed by its asset id."""
+    """A revision's facts on its photo's `library_assets` row, keyed by its asset id."""
     connection_ref: str
     upstream_id: str
     revision: str
@@ -125,17 +123,29 @@ class FakeLibraryStore:
         self.revisions: dict[str, RevisionRecord] = {}
         self.copies: dict[str, dict[str, CopySize]] = {}
         self.queued: list[str] = []               # pool keys whose next step was queued
+        self.next_due: dict[str, float] = {}      # by connection ref or pool key: the last queued
         self.outputs: tuple[FrameOutput, ...] = ()   # what `frame_outputs` answers
 
     # seeding and reading (tests only) --------------------------------------------------------
 
     def add_connection(self, ref: str, url: str, key: str | None) -> None:
+        """As the console adds one: a keyed connection's first check queued at once."""
         self.connections[ref] = _Connection(url=url, key=key)
+        if key is not None:
+            self.next_due[ref] = self._now()
 
     def add_pool(self, query: SourceQuery) -> str:
+        """A pool as a draft makes it: a new pool's first check queued at once."""
         key = query.pool_key()
-        self.pools.setdefault(key, _Pool(query=query))
+        if key not in self.pools:
+            self.pools[key] = _Pool(query=query)
+            self.next_due[key] = next_check_due(None, self._now())
         return key
+
+    def request_check(self, pool_key: str) -> None:
+        """Check now: requested, and a check queued at once."""
+        self.pools[pool_key].requested = True
+        self.next_due[pool_key] = self._now()
 
     def rows(self, pool_key: str) -> dict[str, PoolEntry]:
         return dict(self.pools[pool_key].rows)
@@ -160,11 +170,6 @@ class FakeLibraryStore:
 
     # contacts and lists ----------------------------------------------------------------------
 
-    def due_contacts(self) -> tuple[str, ...]:
-        now = self._now()
-        return tuple(sorted(ref for ref, c in self.connections.items() if c.key is not None and (
-            c.contact_started is None or now - c.contact_started >= CHECK_EVERY_SECONDS)))
-
     def begin_contact(self, connection_ref: str) -> ContactTicket | None:
         secret = self._secret(connection_ref)
         if secret is None:
@@ -172,6 +177,7 @@ class FakeLibraryStore:
         connection = self.connections[connection_ref]
         connection.taken += 1
         connection.contact_started = self._now()
+        self.next_due[connection_ref] = next_check_due(connection.contact_started, self._now())
         return ContactTicket(contact_number=connection.taken, connection=secret)
 
     def connection_secret(self, connection_ref: str) -> ConnectionSecret | None:
@@ -202,24 +208,13 @@ class FakeLibraryStore:
 
     # checks ----------------------------------------------------------------------------------
 
-    def due_pools(self) -> tuple[str, ...]:
-        now = self._now()
-        def due(pool: _Pool) -> bool:
-            if pool.checking:
-                return pool.step_at is None or now - pool.step_at >= STALE_CHECK_SECONDS
-            return (pool.requested or pool.finished_at is None
-                    or now - pool.finished_at >= CHECK_EVERY_SECONDS)
-
-        return tuple(sorted(key for key, pool in self.pools.items() if pool.wanted
-                            and self._secret(pool.query.connection_ref) is not None
-                            and due(pool)))
-
     def begin_check(self, pool_key: str) -> CheckLease | None:
         pool = self.pools.get(pool_key)
-        if pool is None or not pool.wanted:
+        if pool is None:
             return None
         secret = self._secret(pool.query.connection_ref)
-        if secret is None:
+        if not pool.wanted or secret is None:
+            self.next_due[pool_key] = next_check_due(self._now(), self._now())
             return None
         if not pool.checking:
             pool.check_number += 1
@@ -275,6 +270,10 @@ class FakeLibraryStore:
         if stored is not None and (stored.width, stored.height, stored.duration,
                                    stored.updated_at) == facts:
             return
+        for asset_id, other in list(self.revisions.items()):   # the photo's one revision
+            if (other.connection_ref, other.upstream_id) == (asset.connection_ref,
+                                                             asset.upstream_id):
+                self.delete_revision(asset_id)
         self.revisions[asset.asset_id] = RevisionRecord(
             asset.connection_ref, asset.upstream_id, asset.revision, *facts, now)
 
@@ -315,6 +314,7 @@ class FakeLibraryStore:
         if step.immich_up_to is not None:
             pool.up_to = step.immich_up_to
         self.queued.append(lease.pool_key)
+        self.next_due[lease.pool_key] = self._now()
         return True
 
     @staticmethod
@@ -338,6 +338,7 @@ class FakeLibraryStore:
         else:
             pool.rows.pop(ref, None)
         self.queued.append(lease.pool_key)
+        self.next_due[lease.pool_key] = self._now()
         return True
 
     def finish_check(self, lease: CheckLease, finish: CheckFinish) -> bool:
@@ -351,7 +352,12 @@ class FakeLibraryStore:
             pool.last_complete_at = now
         pool.pages = []
         pool.checking, pool.progress, pool.finished_at, pool.outcome = False, None, now, finish
+        self.next_due[lease.pool_key] = now if pool.requested else next_check_due(now, now)
         return True
+
+    def check_step_failed(self, pool_key: str) -> None:
+        if pool_key in self.pools:
+            self.next_due[pool_key] = next_check_due(self._now(), self._now())
 
     def frame_outputs(self) -> tuple[FrameOutput, ...]:
         return self.outputs

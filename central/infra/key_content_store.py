@@ -2,8 +2,10 @@
 
 `PgKeyContent` implements central.wall_plan.ports.KeyContentReader (Central: hydration and the
 scheduler's measurement requests) and KeyContentWriter (the media worker), and is the one home of
-migration 082's `photo_key_content` table: one row per asset id (the id already pins the photo's
-revision) at one analysis version. Every time written or compared here is `times`' (the
+a photo's key content columns on its `library_assets` row (`key_*`; decision 0034, migration 124,
+was migration 082's `photo_key_content`): one measurement per photo's current revision (the asset
+id pins the revision, and a new revision clears the measurement, central/infra/
+photo_library_store.py) at one analysis version. Every time written or compared here is `times`' (the
 database's, G11): the worker writes `retry_at`, Central compares it. A stored key that no longer
 reads as KeyContent counts as not measured, so it is measured again and replaced.
 
@@ -55,10 +57,10 @@ FACELESS_REMEASURE_SECONDS: Final = 6 * 3600
 
 
 def due_sql(alias: str) -> str:
-    """The due rule (module docstring) over `photo_key_content` row `alias`, as an SQL boolean;
-    its parameters are `due_params`'."""
-    return (f"COALESCE({alias}.retry_at <= %(due_now)s, "
-            f"{alias}.analysis_version <> %(due_version)s)")
+    """The due rule (module docstring) over `library_assets` row `alias`'s key content, as an
+    SQL boolean; its parameters are `due_params`'."""
+    return (f"COALESCE({alias}.key_retry_at <= %(due_now)s, "
+            f"{alias}.key_analysis_version <> %(due_version)s)")
 
 
 def due_params(now: float) -> dict[str, Any]:
@@ -77,12 +79,10 @@ def usable_key(stored: object) -> KeyContent | None:
         return None
 
 
-# One row per asset, replaced by each new measurement; nothing when the asset row is gone.
-_WRITE = ("INSERT INTO photo_key_content(asset_id,analysis_version,status,key,failure,"
-          "measured_at,retry_at) SELECT asset_id,%s,%s,%s,%s,%s,%s FROM asset_revisions "
-          "WHERE asset_id=%s ON CONFLICT (asset_id) DO UPDATE SET "
-          "analysis_version=EXCLUDED.analysis_version,status=EXCLUDED.status,key=EXCLUDED.key,"
-          "failure=EXCLUDED.failure,measured_at=EXCLUDED.measured_at,retry_at=EXCLUDED.retry_at")
+# One measurement per revision, replaced by each new one; nothing when the revision is no
+# photo's current one.
+_WRITE = ("UPDATE library_assets SET key_analysis_version=%s,key_status=%s,key=%s,key_failure=%s,"
+          "key_measured_at=%s,key_retry_at=%s WHERE asset_id=%s")
 
 
 class PgKeyContent:
@@ -103,8 +103,9 @@ class PgKeyContent:
               now: float) -> dict[str, tuple[Analysis | None, bool]]:
         """Each stored row's analysis (None: none to use) and whether it is due a measurement."""
         rows = conn.execute(
-            "SELECT k.asset_id,k.status,k.key,k.failure," + due_sql("k") + " AS due "
-            "FROM photo_key_content k WHERE k.asset_id = ANY(%(ids)s)",
+            "SELECT k.asset_id,k.key_status AS status,k.key,k.key_failure AS failure,"
+            + due_sql("k") + " AS due FROM library_assets k WHERE k.asset_id = ANY(%(ids)s) "
+            "AND k.key_status IS NOT NULL",
             {"ids": list(dict.fromkeys(asset_ids))} | due_params(now)).fetchall()
         found: dict[str, tuple[Analysis | None, bool]] = {}
         for row in rows:
@@ -125,7 +126,7 @@ class PgKeyContent:
         if not wanted:
             return 0
         present = {row["asset_id"] for row in conn.execute(
-            "SELECT asset_id FROM asset_revisions WHERE asset_id = ANY(%s)", (wanted,)).fetchall()}
+            "SELECT asset_id FROM library_assets WHERE asset_id = ANY(%s)", (wanted,)).fetchall()}
         stored = self._read(conn, present, now=now)
         due = [asset_id for asset_id in wanted
                if asset_id in present and (asset_id not in stored or stored[asset_id][1])]
@@ -148,7 +149,7 @@ class PgKeyContent:
         with self.db.transaction() as conn:
             now = self.times.now_in(conn)
             earlier = conn.execute(
-                "SELECT 1 FROM photo_key_content WHERE asset_id=%s AND status='measured'",
+                "SELECT 1 FROM library_assets WHERE asset_id=%s AND key_status='measured'",
                 (asset_id,)).fetchone()
             again = None if key.faces or earlier else now + FACELESS_REMEASURE_SECONDS
             conn.execute(_WRITE, (key.analysis_version, "measured",
@@ -161,10 +162,10 @@ class PgKeyContent:
         with self.db.transaction() as conn:
             now = self.times.now_in(conn)
             stored = conn.execute(
-                "SELECT key FROM photo_key_content WHERE asset_id=%s AND status='measured' "
+                "SELECT key FROM library_assets WHERE asset_id=%s AND key_status='measured' "
                 "FOR UPDATE", (asset_id,)).fetchone()
             if stored is not None and usable_key(stored["key"]) is not None:
-                conn.execute("UPDATE photo_key_content SET retry_at=%s WHERE asset_id=%s",
+                conn.execute("UPDATE library_assets SET key_retry_at=%s WHERE asset_id=%s",
                              (now + MEASURE_RETRY_SECONDS, asset_id))
             else:
                 conn.execute(_WRITE, (ANALYSIS_VERSION, "failed", None, reason, now,

@@ -4,7 +4,7 @@ Q3, 2026-10-17: the turn belongs to the spot on the wall).
 Pure: the turn's pydantic form (`FrameTurnChange`, `ExactTurn`) takes only the four ints, and the
 Output document's digest covers the turn. Through the Registry, the operator route and the
 document source on a test database: the turn command's refusals, its idempotency, the generation
-it raises (a ready Frame needs its Position checked again), its audit row and the inventory; and
+it raises (a ready Frame needs its Position checked again) and the inventory; and
 the Output document of the Output the Frame is bound to carries the turn, 0 when unbound.
 """
 from __future__ import annotations
@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from support.frames import frame_create
 from support.position import PORTRAIT_ON_WIDE, save_position
+from support.trial_bus import worker_trials
 from test_display_identity import enroll_pi
 
 from central.app import create_app
@@ -27,6 +28,7 @@ from central.registry import FrameTurnChange, RegistryError
 from central.tuning_history.bounds import HistoryPage
 from contracts.node_output import (
     Darkness,
+    OutputBinding,
     OutputPower,
     Power,
     decode_output_document,
@@ -55,16 +57,27 @@ def test_a_turn_change_takes_each_quarter_turn():
 
 def test_the_documents_digest_covers_the_turn():
     def projected(turn):
-        return ProjectedOutput("HDMI-A-1", POWER, DEFAULT_SETTINGS, turn)
+        return ProjectedOutput("HDMI-A-1", POWER, DEFAULT_SETTINGS, turn, None)
     assert projected(0).digest() != projected(90).digest()
     assert projected(90).digest() == projected(90).digest()
     assert projected(90).at_change(4).turn == 90
 
 
+def test_the_documents_digest_covers_the_binding():
+    """Decision 0034, S4b part 4 (E1): a bind, an unbind, a rebind, a new generation and a new
+    configuration revision each move the digest, so the projector raises `change` for each."""
+    def projected(binding):
+        return ProjectedOutput("HDMI-A-1", POWER, DEFAULT_SETTINGS, 0, binding)
+    bindings = (None, OutputBinding("kitchen", 1, 1), OutputBinding("hall", 1, 1),
+                OutputBinding("kitchen", 2, 1), OutputBinding("kitchen", 1, 2))
+    assert len({projected(binding).digest() for binding in bindings}) == len(bindings)
+    assert projected(OutputBinding("kitchen", 2, 3)).at_change(5).binding == OutputBinding("kitchen", 2, 3)
+
+
 # Through the Registry, the route and the document source.
 
 def _frame(registry, frame_id: str = "kitchen") -> str:
-    registry.create_frame(frame_create(frame_id))
+    registry.create_frame(frame_create(frame_id), by="console")
     return frame_id
 
 
@@ -79,22 +92,17 @@ def _revision(registry, frame_id: str = "kitchen") -> int:
                             (frame_id,)).fetchone()["configuration_revision"]
 
 
-def _audits(registry, kind: str) -> list[dict]:
-    with registry.db.transaction() as conn:
-        return [row["detail"] for row in conn.execute(
-            "SELECT detail FROM audit_events WHERE kind=%s ORDER BY sequence", (kind,)).fetchall()]
-
-
 def _documents(registry) -> dict:
     """The document source's Output documents for the Pi, decoded, at Central's time now."""
     with registry.db.transaction() as conn:
-        raw = output_documents(conn, device_id_for_serial(SERIAL), DatabaseTransactionClock().now_in(conn))
+        raw = output_documents(conn, device_id_for_serial(SERIAL), DatabaseTransactionClock().now_in(conn),
+                               trials=worker_trials(registry.db))
     return {key: decode_output_document(value) for key, value in raw.items() if key.startswith("output-")}
 
 
 def test_turning_an_unknown_frame_is_404(registry):
     with pytest.raises(RegistryError) as refused:
-        registry.turn_frame("nowhere", 90, expected_generation=0)
+        registry.turn_frame("nowhere", 90, expected_generation=0, by="console")
     assert (refused.value.code, refused.value.status) == ("unknown_frame", 404)
 
 
@@ -102,7 +110,7 @@ def test_a_stale_generation_is_refused_even_for_the_same_turn(registry):
     _frame(registry)
     for turn in (0, 90):
         with pytest.raises(RegistryError) as refused:
-            registry.turn_frame("kitchen", turn, expected_generation=7)
+            registry.turn_frame("kitchen", turn, expected_generation=7, by="console")
         assert (refused.value.code, refused.value.status) == ("binding_generation_conflict", 409)
     assert _inventory_frame(registry).turn == 0
 
@@ -110,37 +118,36 @@ def test_a_stale_generation_is_refused_even_for_the_same_turn(registry):
 def test_the_same_turn_writes_nothing(registry):
     _frame(registry)
     revision = _revision(registry)
-    assert registry.turn_frame("kitchen", 0, expected_generation=0) == {
+    assert registry.turn_frame("kitchen", 0, expected_generation=0, by="console") == {
         "frame_id": "kitchen", "turn": 0, "generation": 0, "changed": False}
     assert (_inventory_frame(registry).generation, _revision(registry)) == (0, revision)
-    assert _audits(registry, "frame_turned") == []
 
 
 def test_a_turn_raises_the_generation_and_needs_the_position_checked(registry):
     player = enroll_pi(registry, SERIAL)
     _frame(registry)
-    registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0)
+    registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, "kitchen", PORTRAIT_ON_WIDE)
     ready = _inventory_frame(registry)
     assert (ready.readiness, ready.turn) == (Readiness.READY, 0)
     revision = _revision(registry)
 
-    turned = registry.turn_frame("kitchen", 90, expected_generation=ready.generation)
+    turned = registry.turn_frame("kitchen", 90, expected_generation=ready.generation, by="console")
 
     assert turned == {"frame_id": "kitchen", "turn": 90, "generation": ready.generation + 1, "changed": True}
     frame = _inventory_frame(registry)
     assert (frame.turn, frame.generation, frame.readiness) == (90, ready.generation + 1, Readiness.POSITION_NEEDED)
     assert _revision(registry) == revision + 1
-    assert _audits(registry, "frame_turned") == [{"turn": 90, "generation": ready.generation + 1}]
     assert frame.calibration == ready.calibration and frame.player_id == player   # never the Position or binding
     # The Position history: the turn is a kept entry made for the new turn, and the Save before it,
     # made for the screen hung the other way, can no longer be restored.
     with registry.db.transaction() as conn:
-        entries = conn.execute("SELECT kind, turn FROM position_entries WHERE frame_id='kitchen' "
+        entries = conn.execute("SELECT kind, turn, by FROM position_entries WHERE frame_id='kitchen' "
                                "ORDER BY number DESC LIMIT 2").fetchall()
         saved_before = position_entries_in(conn, "kitchen", HistoryPage(None, 5))[1]
         now = frame_made_for_in(conn, "kitchen")
     assert [(row["kind"], row["turn"]) for row in entries] == [("kept-turn-changed", 90), ("kept-saved", 0)]
+    assert entries[0]["by"] == "console"                                   # who turned it (migration 126)
     assert restore_refusal(saved_before, frame_id="kitchen", now=now) is PositionRestoreRefusal.MADE_FOR_OTHER_TURN
     save_position(registry, "kitchen")      # the whole width of the screen as it now hangs (1080 x 1920)
     assert _inventory_frame(registry).readiness is Readiness.READY
@@ -165,17 +172,17 @@ def test_the_route_turns_the_frame_and_refuses_a_bool(registry):
 def test_the_bound_outputs_document_carries_the_turn_and_an_unbound_one_zero(registry):
     player = enroll_pi(registry, SERIAL)
     _frame(registry)
-    registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0)
+    registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0, by="console")
     first = _documents(registry)
     bound, unbound = output_document_key("HDMI-A-1"), output_document_key("HDMI-A-2")
     assert (first[bound].turn, first[unbound].turn) == (0, 0)
 
-    turned = registry.turn_frame("kitchen", 90, expected_generation=1)
+    turned = registry.turn_frame("kitchen", 90, expected_generation=1, by="console")
     second = _documents(registry)
     assert (second[bound].turn, second[bound].change) == (90, first[bound].change + 1)
     assert second[unbound] == first[unbound]                        # the other Output is untouched
     assert _documents(registry)[bound] == second[bound]             # an unchanged body keeps its change
 
-    registry.unbind("kitchen", expected_generation=turned["generation"])
+    registry.unbind("kitchen", expected_generation=turned["generation"], by="console")
     assert _documents(registry)[bound].turn == 0
     assert _inventory_frame(registry).turn == 90                    # the turn stays with the Frame

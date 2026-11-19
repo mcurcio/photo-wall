@@ -18,7 +18,7 @@ import httpx
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosedError, InvalidHandshake, InvalidStatus
 
-from contracts.liveness import REQUEST_TIMEOUT
+from contracts.liveness import KEEPALIVE_SECONDS, REQUEST_TIMEOUT
 from uplink.causes import Cause, Phase, UplinkError, classify
 from uplink.fetch import MAX_ERROR_BODY, refusal
 from uplink.locate import LocatedCentral
@@ -217,8 +217,7 @@ class CentralLink:
 
     `unauthorized(code)` builds the caller's exception for a 401 answer or an authenticated
     request on a Session with no registration. `client`/`time_client`/`websocket_connect` may
-    be injected (tests, fixtures); any client given is guarded too. `websocket_connect=False`
-    is the caller's own "no websocket" switch and is kept as given.
+    be injected (tests, fixtures); any client given is guarded too.
 
     The clients it builds live for one session cycle: run() opens them as a cycle starts and
     closes them once that cycle's tasks are cancelled, so no pooled connection outlives a
@@ -226,8 +225,9 @@ class CentralLink:
     a slot for good (incident 2026-10-13: the clock probe's one slot, so the Player never
     reached Central again); a fresh pool per cycle makes that state unable to survive."""
 
-    WEBSOCKET_OPTIONS: Final = dict(max_queue=4, compression=None, proxy=None, open_timeout=15,
-                                    close_timeout=3, ping_interval=10, ping_timeout=10)
+    WEBSOCKET_OPTIONS: Final = dict(max_queue=4, compression=None, proxy=None,
+                                    open_timeout=REQUEST_TIMEOUT, close_timeout=3,
+                                    ping_interval=KEEPALIVE_SECONDS, ping_timeout=KEEPALIVE_SECONDS)
 
     def __init__(self, trust: Trust, *, unauthorized: Callable[[str], Exception],
                  client: httpx.AsyncClient | None = None,

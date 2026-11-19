@@ -1,9 +1,9 @@
 """Each Pi's newest health verdict, read from what Central already records (issue #126).
 
-Central records every value it reads from a Node's bus (node_link_records, migration 066), the
-`health` line's included; the record is the one source, so nothing here keeps a copy. The newest
-record of the health line's HEALTH_REPORT_KEY per enrolled Player (by Central's `recorded_at`, then
-sequence) is decoded; a KV operation (a removed key) or a value that does not decode reads as no
+Central records every value it reads from a Node's bus (node_states, migration 119), the
+`health` line's included, the newest value per state key; the record is the one source, so nothing
+here keeps a copy. The newest value of the health line's HEALTH_REPORT_KEY per enrolled Player is
+decoded; a KV operation (a removed key) or a value that does not decode reads as no
 report for that Player (logged once per read).
 """
 from __future__ import annotations

@@ -23,7 +23,10 @@ One home each for:
   (central/power/timetable.py: Central's decision now, the set times it changes at, `until`, the
   darkness), with the Frame's live console test on top; method and switches come from the Display
   last seen on the Output (defaults when none); its turn is the bound Frame's (frames.turn), 0 for
-  an unbound Output, so `change` rises for a turn as for power. The console's one test is Test: turn off. It
+  an unbound Output, so `change` rises for a turn as for power; its binding is the bound Frame's id,
+  generation and configuration revision (contracts/node_output.py `OutputBinding`, None unbound;
+  decision 0034, S4b), so `change` rises on a bind, an unbind, a rebind, a new generation and a
+  Position Save, and the Pi hands the Output to its Player from the document alone. The console's one test is Test: turn off. It
   lasts TEST_SECONDS, "or less if you press Turn on. When the test ends, the request underneath
   takes over" (owner q1, 2026-10-10): Turn on ends the live test, so the timetable is underneath
   again. The Pi counts a test on its own clock, and Central drops it from the document at its own
@@ -54,6 +57,7 @@ from contracts.node_output import (
     DisplayMode,
     FrameRegion,
     InForceKind,
+    OutputBinding,
     OutputDocument,
     OutputPower,
     OutputRect,
@@ -135,7 +139,7 @@ def display_key(identity: DisplayIdentity, *, serial_counts: bool, bound_frame_i
 
 @dataclass(frozen=True)
 class FramePosition:
-    """The facts readiness is worked out from (frames, bindings, output_displays)."""
+    """The facts readiness is worked out from (frames, bindings, outputs)."""
     bound: bool
     generation: int
     position_generation: int | None          # the Frame generation its latest Position commit was made at
@@ -160,7 +164,7 @@ def readiness(position: FramePosition) -> Readiness:
 def screen_px(current_mode: OutputSize | None, modes: Sequence[DisplayMode]) -> OutputSize | None:
     """The mode as built of a Frame's screen (frame box run, .claude/runs/frame-box/page.md; issue
     #124): `current_mode` (the mode Weston runs, from the bound Output's Output report,
-    output_displays.report's `current_mode`) when both sides are >= 1, else the first preferred mode
+    outputs.display_report's `current_mode`) when both sides are >= 1, else the first preferred mode
     of `modes` (the Display seen on that Output, displays.modes; Weston, given no mode, runs the
     preferred one), else None. The Player's enrolment report (outputs.observation) is not read. The
     one home of a Frame's screen size: central/infra/display_store.py `frame_outputs_in`, the Frame
@@ -189,7 +193,7 @@ def frame_region(frame_id: str | None, fit: PositionBox | None, screen: OutputSi
 def region_digest(region: FrameRegion | None) -> str:
     """sha256 hex of `region`'s canonical encoding (contracts.node_output `encode_frame_region`), or
     of b"null" for None: the region document's change rises exactly when this differs from the
-    digest recorded with the last change (output_documents.region_digest). Pure."""
+    digest recorded with the last change (outputs.region_digest). Pure."""
     return hashlib.sha256(b"null" if region is None else encode_frame_region(region)).hexdigest()
 
 
@@ -221,13 +225,14 @@ class PowerTest:
 
 @dataclass(frozen=True)
 class ProjectedOutput:
-    """One Output's document, all but its change number: the power part and the turn (picture rides
+    """One Output's document, all but its change number: the power part, the turn and the binding (picture rides
     its own key with its own change number, central/displays/picture.py; decision 0022), so a
     picture edit never raises `change` and never re-runs power."""
     output_id: str
     power: OutputPower
     settings: DisplaySettings
     turn: DisplayTurn
+    binding: OutputBinding | None
 
     def digest(self) -> str:
         """sha256 hex of the canonical document but its change number; the projector raises `change`
@@ -241,7 +246,7 @@ class ProjectedOutput:
         return OutputDocument(self.output_id, change, self.power,
                               BEST_DETECTED if settings.power_method is None else settings.power_method,
                               settings.switch_input_on_power_on, settings.never_off_on_other_input,
-                              self.turn)
+                              self.turn, self.binding)
 
 
 def _sha256(value: object) -> str:
@@ -260,11 +265,13 @@ def output_power(timetable: Timetable, test: PowerTest | None, now: float) -> Ou
 
 
 def project_output(output_id: str, *, timetable: Timetable, test: PowerTest | None,
-                   settings: DisplaySettings | None, turn: DisplayTurn, now: float) -> ProjectedOutput:
+                   settings: DisplaySettings | None, turn: DisplayTurn, binding: OutputBinding | None,
+                   now: float) -> ProjectedOutput:
     """The Output's document body at Central's `now`: its power part (`output_power`); `settings`
-    or DEFAULT_SETTINGS; `turn`, the bound Frame's (0 unbound)."""
+    or DEFAULT_SETTINGS; `turn`, the bound Frame's (0 unbound); `binding`, the bound Frame's (None
+    unbound)."""
     return ProjectedOutput(output_id, output_power(timetable, test, now),
-                           DEFAULT_SETTINGS if settings is None else settings, turn)
+                           DEFAULT_SETTINGS if settings is None else settings, turn, binding)
 
 
 def power_status(*, bound: bool, test: PowerTest | None, document: OutputDocument | None,

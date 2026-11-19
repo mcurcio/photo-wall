@@ -1,5 +1,6 @@
-"""The PostgreSQL `FrameMediaGrants` (central/assets/frame_media.py): sessions, the media lock, a
-variant's pins (`media_references`, re-keyed by name in 087) and the execution's authorization."""
+"""The PostgreSQL `FrameMediaGrants` (central/assets/frame_media.py): sessions, the media lock and
+the execution's authorization. A variant's pin is derived (decision 0034): a current offer or
+secured lock naming it (`PostgresExecutionRepository.media_authorized_in`); nothing is stored."""
 
 from __future__ import annotations
 
@@ -46,21 +47,7 @@ class PgFrameMediaGrants:
     def lock_media(self, tx: Transaction) -> None:
         pg_connection(tx).execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
 
-    def live_references(self, tx: Transaction, key: str, now: float) -> set[str]:
-        return {row["owner"] for row in pg_connection(tx).execute(
-            "SELECT owner FROM media_references WHERE variant_key=%s AND expires_at>%s",
-            (key, now)).fetchall()}
-
-    def authorized(self, tx: Transaction, grantee: Grantee, key: str, references: set[str],
-                   now: float) -> bool:
+    def authorized(self, tx: Transaction, grantee: Grantee, key: str, now: float) -> bool:
         return self._execution.media_authorized_in(
             pg_connection(tx), grantee.player_id, grantee.authority_epoch, grantee.configuration,
-            key, references, now)
-
-    def pin(self, tx: Transaction, owner: str, key: str, expires_at: float) -> None:
-        pg_connection(tx).execute(
-            "INSERT INTO media_references(owner,variant_key,expires_at) VALUES(%s,%s,%s)",
-            (owner, key, expires_at))
-
-    def release(self, tx: Transaction, owner: str) -> None:
-        pg_connection(tx).execute("DELETE FROM media_references WHERE owner=%s", (owner,))
+            key, now)

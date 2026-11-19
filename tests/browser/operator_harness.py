@@ -14,17 +14,13 @@ from contextlib import contextmanager
 
 import uvicorn
 from playwright.sync_api import expect
+from support.player_state import heard_in
 from test_registry import ADMIN
 
 from central.app import create_app
 from central.coordination import Coordinator
-from central.fleet.node_sessions import NodeControlConfig
-from central.infra.player_contact_store import heard_in
 from central.installation_models import InstallationInventory
 from contracts.models import Readiness
-
-# Central always runs node control (console DDD Part E, R20); tests pick its audience.
-NODE_CONTROL = NodeControlConfig("node-test")
 
 # How long a stopping server waits for open connections before it closes them (uvicorn's
 # timeout_graceful_shutdown); the thread join below allows it and the lifespan's shutdown.
@@ -48,13 +44,10 @@ _IDLE_CONNECTION_SECONDS = 600
 
 
 @contextmanager
-def operator_server(db, clock, *, cache_root=None, media_queue=None, admin_token=ADMIN,
-                    node_control=NODE_CONTROL):
-    """Run the production app on an ephemeral loopback listener with real lifespan.
-
-    `node_control` is the node control configuration (node-test by default)."""
+def operator_server(db, clock, *, cache_root=None, media_queue=None, admin_token=ADMIN):
+    """Run the production app on an ephemeral loopback listener with real lifespan."""
     app = create_app(db, clock, admin_token, run_scheduler=False,
-                     cache_root=cache_root, media_queue=media_queue, node_control=node_control,
+                     cache_root=cache_root, media_queue=media_queue,
                      central_version=CENTRAL_VERSION)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
@@ -116,7 +109,7 @@ def report_readiness(registry, player_id):
     """Have Central accept one readiness report from a Player at the current (controlled)
     clock, as a live Player's control loop does: advance() offers the Player a plan (an empty
     one when it is unbound or idle) and the Player reports on it; and Central hears the Player
-    then, as its state poll makes it heard (liveness, central/infra/player_contact_store.py)."""
+    then, as its session socket makes it heard (liveness, central/infra/player_contact_store.py)."""
     coordinator = Coordinator(registry.db, registry.clock)
     coordinator.advance()
     epoch = next(p.authority_epoch for p in registry.inventory().players if p.id == player_id)

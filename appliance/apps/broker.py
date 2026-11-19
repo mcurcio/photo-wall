@@ -129,25 +129,30 @@ class AppProcessDriver(Protocol):
 @dataclass(frozen=True)
 class Launch:
     """The driver's record of the current launch (its boot-store `launch`): the app epoch it
-    started, the display incarnation current at the spawn, and the spawn's boottime in ms
-    (`appliance.kernel.clock.boottime_ms`)."""
+    started, the display incarnation current at the spawn, the spawn's boottime in ms
+    (`appliance.kernel.clock.boottime_ms`), and the run the driver saw it spawn or adopt (None
+    while no observation has seen one: the process exited, or never ran, before the first look).
+    The record outlives the run, so it names a run that began and ended between two turns
+    (`appliance.kernel.app_facts`)."""
 
     epoch: int
     display: str | None
     started_ms: int
+    run: RunningApp | None = None
 
     def __post_init__(self) -> None:
         """ValueError("launch_invalid") unless epoch >= 1, display is None or a non-empty str,
-        and started_ms is an int >= 0."""
+        started_ms is an int >= 0, and run is None or a RunningApp."""
         if not (type(self.epoch) is int and self.epoch >= 1
                 and (self.display is None or (type(self.display) is str and self.display))
-                and type(self.started_ms) is int and self.started_ms >= 0):
+                and type(self.started_ms) is int and self.started_ms >= 0
+                and (self.run is None or type(self.run) is RunningApp)):
             raise ValueError("launch_invalid")
 
 
 # -- Issue #125: no automatic Player restart ---------------------------------------------------
 # The owner, 2026-10-20: "a human. dont do automated reboots yet. i want to see every time it fails
-# for now"; asked whether that covers the Player program alone: "No auto-restarts at all". Three
+# for now"; asked whether that covers the Player program alone: "No auto-restarts at all". Two
 # causes start a run, and nothing else does: an exit, a missed ping, open files, a Weston crash, a
 # failed release or a foreign unit never starts one (a foreign unit is stopped, nothing in its place).
 # systemd's Restart= is not used, and no dependency lets a job on another unit start the app
@@ -155,8 +160,7 @@ class Launch:
 StartCause = Literal[
     "cold_start",                    # once per boot (AppEffectBroker.cold_start)
     "display_restarted_on_purpose",  # Display restarted Weston itself (a signal range change) under a live run
-    "release_switch",                # a person applied a release: the new release starts once (online_broker)
-]
+]  # a release a person applies starts at the Pi's next boot (decision 0034, S4c)
 _INVOCATION_ID = re.compile(r"[0-9a-f]{32}")
 
 

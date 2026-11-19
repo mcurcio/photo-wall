@@ -1,5 +1,7 @@
 # Operator Console UX Redesign — Wall-First Canvas + Showrunner Mode
 
+> **Since [0034](decisions/0034-central-schema-consolidation.md) (2026-11-19)** Central's tables are consolidated and the Pi's old HTTP path (node sessions and producers, its posts, the app link, AppManager and the app operations) is gone. The tables and modules this page names are as they stood; [0034's table map](decisions/0034-central-schema-consolidation.md#table-map) says where each table went.
+
 **Date:** 2026-09-13
 **Status:** Design-gate artifact. This is the single self-contained design
 document for the Photo Wall operator-console UX redesign. It is the artifact the

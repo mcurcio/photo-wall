@@ -37,8 +37,8 @@ CONFLICT = "This Frame changed while you chose. Choose again."
 def _seed(registry):
     """A portrait Frame bound to a 1920 x 1080 Output, hung upright, its Position saved (ready)."""
     identity, _key, _request = enroll(registry, count=1, device_id=DEVICE)
-    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
-    registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0)
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100), by="console")
+    registry.bind(FRAME, identity["player_id"], OUTPUT, expected_generation=0, by="console")
     save_position(registry, FRAME, PORTRAIT_ON_WIDE)
 
 
@@ -117,7 +117,7 @@ def test_a_choice_against_a_stale_generation_is_refused_and_changes_nothing(page
         page.route("**/v1/operator/snapshot", lambda route: route.fulfill(
             status=200, content_type="application/json", body=stale))
         before = _stored(registry)
-        registry.turn_frame(FRAME, 180, expected_generation=before.generation)  # another window
+        registry.turn_frame(FRAME, 180, expected_generation=before.generation, by="console")  # another window
 
         _choice(section, "Top to the right").click()
         problem = section.get_by_role("alert")
@@ -131,7 +131,7 @@ def test_a_choice_against_a_stale_generation_is_refused_and_changes_nothing(page
 
 
 def test_an_unbound_frame_shows_the_control_and_takes_a_turn(page, registry):
-    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         frame = open_frame(page, FRAME, "hardware")

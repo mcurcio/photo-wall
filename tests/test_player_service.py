@@ -243,11 +243,45 @@ def media_headers(data: bytes, **headers) -> dict:
             "Repr-Digest": repr_digest(data), **headers}
 
 
+class PushSocket:
+    """The fake Central's session socket (`Server.connect`): it sends the State first and again
+    whenever `Server.state` is replaced, as Central's socket pushes on each change (central/app.py
+    `session`); `Server.close_sockets` ends it as Central's close does."""
+
+    def __init__(self, server: "Server", *, once: bool = False) -> None:
+        self.server = server
+        self.sent = None
+        self.closed = False
+        self.once = once
+
+    async def __aenter__(self):
+        self.server.sockets.append(self)
+        return self
+
+    async def __aexit__(self, *_):
+        self.server.sockets.remove(self)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        while not self.closed:
+            state = self.server.state
+            if state is not None and state is not self.sent:
+                self.sent = state
+                self.closed = self.once
+                return json.dumps({"type": "state", **self.server.state_body()})
+            await asyncio.sleep(.005)
+        raise StopAsyncIteration
+
+
 class Server:
     def __init__(self, clock):
         self.clock = clock
         self.epoch = 0
         self.requests = []
+        self.sockets: list[PushSocket] = []
+        self.connects = []
         self.proofs = []
         self.state = None
         self.data = b"picture"
@@ -277,10 +311,6 @@ class Server:
                 "authority_epoch": self.time_epoch or self.epoch,
                 "server_time": self.clock.utc() + self.time_offset,
             })
-        if path == "/v1/player/state":
-            # Central's clock read as it answers, as central/app.py `timed_state` does.
-            return httpx.Response(200, json={**self.state.model_dump(mode="json"),
-                                             "server_time": self.clock.utc() + self.time_offset})
         if path == "/v1/player/hello":
             offer = json.loads(request.content)
             return httpx.Response(200, json={"authority_epoch": offer["authority_epoch"],
@@ -288,7 +318,41 @@ class Server:
         if path.startswith("/v1/media/"):
             return self.media_response or httpx.Response(200, content=self.data,
                 headers=media_headers(self.data))
+        if path == "/v1/player/state":    # no such route: Central pushes the state (decision 0034)
+            return httpx.Response(404, json={"error": "not_found"})
         return httpx.Response(200, json={"accepted": True})
+
+    def state_body(self) -> dict:
+        """The State as Central's socket sends it: Central's clock read as it sends, as
+        central/app.py `timed_state` does."""
+        return {**self.state.model_dump(mode="json"),
+                "server_time": self.clock.utc() + self.time_offset}
+
+    def connect(self, uri, **options):
+        """The Player's websocket connector, onto this fake's session socket."""
+        self.connects.append((uri, options))
+        return PushSocket(self)
+
+    def close_sockets(self) -> None:
+        for socket in self.sockets:
+            socket.closed = True
+
+    async def through_socket(self, service) -> None:
+        """The State over the Player's own socket loop (`_websocket_loop`): sent once, then the
+        socket closes, which ends the loop as a session's close does."""
+        connect = service.link.websocket_connect
+        service.link.websocket_connect = lambda uri, **options: PushSocket(self, once=True)
+        try:
+            with pytest.raises(ServiceError, match="session_closed"):
+                await service._websocket_loop()
+        finally:
+            service.link.websocket_connect = connect
+
+    async def push(self, service) -> None:
+        """The session socket sending the State now, as the Player's `_websocket_loop` receives
+        it (a show-clock sample on the Player's own clock)."""
+        now = service.clock.monotonic()
+        await service.receive_state(self.state_body(), now, now)
 
     def offer(self, *, revision=1, layers=None, commits=(), revocations=(), absent=False,
               bindings=None, configuration_revision=1, continuations=()):
@@ -318,7 +382,7 @@ async def rig(tmp_path, *, server=None, negotiate=False, clock=None, probe=True,
     service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
         find_central=finding("http://central"), trust=TRUST, clock=clock,
         client=client, time_client=client,
-        websocket_connect=False, boot_context=boot_context(), luts=PlayerLuts(), **options)
+        websocket_connect=server.connect, boot_context=boot_context(), luts=PlayerLuts(), **options)
     await service.locate_central()
     await service.enroll()
     if negotiate:
@@ -327,7 +391,7 @@ async def rig(tmp_path, *, server=None, negotiate=False, clock=None, probe=True,
         await service.probe_time()
     server.offer()
     if probe:
-        await service.poll_state()
+        await server.push(service)
     else:
         # Applied without a round trip, so no Central answer has anchored the ShowClock yet.
         await service.dispatch(lambda: service._apply_state(server.state))
@@ -345,7 +409,7 @@ def test_an_unsequenced_state_is_refused_at_parse(tmp_path):
             server.state = types.SimpleNamespace(model_dump=lambda mode: body)
             applied = service._highest_control_sequence
             with pytest.raises(ValidationError):
-                await service.poll_state()
+                await server.push(service)
             assert service._highest_control_sequence == applied
         finally:
             await close(service)
@@ -372,7 +436,7 @@ def test_player_negotiates_before_state_and_acknowledges_ordered_v2(tmp_path):
                                     negotiate=True)
         try:
             paths = [request.url.path for request in server.requests]
-            assert paths.index("/v1/player/hello") < paths.index("/v1/player/state")
+            assert paths.index("/v1/player/hello") < paths.index("/v1/player/control-acks")
             assert service._control_selection.schema_version == 2
             reports = [request for request in server.requests
                        if request.url.path == "/v1/player/control-acks"]
@@ -452,13 +516,14 @@ def gateway():
         str(LOCATED.url("/v1/locate")): central})
 
 
-async def finder_rig(find, handle=None):
-    clock = ManualClock(100)
-    server = Server(clock)
+async def finder_rig(find, handle=None, server=None):
+    """`server` is the fake Central `handle` serves, when the test brings its own."""
+    clock = ManualClock(100) if server is None else server.clock
+    server = server or Server(clock)
     client = httpx.AsyncClient(transport=httpx.MockTransport(handle or server), trust_env=False)
     service = PlayerService(PlayerConfig(), load_identity(), (), RecordingRenderer(), immediate,
         find_central=find, trust=TRUST, clock=clock, client=client, time_client=client,
-        websocket_connect=False, boot_context=boot_context(), luts=PlayerLuts())
+        websocket_connect=server.connect, boot_context=boot_context(), luts=PlayerLuts())
     return service, server
 
 
@@ -553,24 +618,10 @@ def test_a_run_reaches_a_sustained_session(
                               cache_dir=str(directory), cache_bytes=1024**2)
         client = httpx.AsyncClient(transport=httpx.MockTransport(handle), trust_env=False)
 
-        class Socket:
-            async def __aenter__(self):
-                connect_calls.append(True)
-                return self
-
-            async def __aexit__(self, *_):
-                pass
-
-            def __aiter__(self):
-                return self
-
-            async def __anext__(self):
-                # A real session websocket stays open with no message due;
-                # only cancellation (test teardown) ever unblocks this.
-                await asyncio.Event().wait()
-
         def connect(uri, **options):
-            return Socket()
+            # Central's session socket stays open, pushing the state on each change.
+            connect_calls.append(True)
+            return server.connect(uri, **options)
 
         service = PlayerService(config, load_identity(), (), RecordingRenderer(), immediate,
             find_central=finding("http://central"), trust=TRUST, clock=clock,
@@ -600,22 +651,22 @@ def test_a_run_reaches_a_sustained_session(
     asyncio.run(check())
 
 
-def _until_steady(server, steady, *, fail_first_state=False, redirect_first_state=False):
+def _until_steady(server, steady, *, fail_first_hello=False, redirect_first_hello=False):
     """Serves `server`, offers a plan the instant enrollment completes, and sets `steady` on
     the first readiness report: only `_control_loop` sends one, i.e. only once run() is blocked
     on its steady-state tasks, the one stable cancellation point every run()-driven test here
-    relies on. `fail_first_state` makes the first state poll wait out its pool (one failed cycle:
+    relies on. `fail_first_hello` makes the first hello wait out its pool (one failed cycle:
     since decision 0032 a request Central answers, 503 included, no longer ends one);
-    `redirect_first_state` answers it 301 (one failed cycle named REDIRECT/unexpected)."""
+    `redirect_first_hello` answers it 301 (one failed cycle named REDIRECT/unexpected)."""
     failed = []
 
     def handle(request):
-        if (fail_first_state or redirect_first_state) and not failed and (
-                request.url.path == "/v1/player/state"):
+        if (fail_first_hello or redirect_first_hello) and not failed and (
+                request.url.path == "/v1/player/hello"):
             failed.append(request)
-            if redirect_first_state:
+            if redirect_first_hello:
                 return httpx.Response(301, headers={
-                    "Location": "http://moved.example/v1/player/state"})
+                    "Location": "http://moved.example/v1/player/hello"})
             raise httpx.PoolTimeout("fixture: no slot")
         result = server(request)
         if request.url.path == "/v1/enrollment/register":
@@ -657,7 +708,7 @@ def test_a_failed_locate_is_retried_on_the_next_cycle_without_restart(tmp_path, 
 
 
 def test_every_failed_cycle_locates_again_and_keeps_the_registration(tmp_path, monkeypatch):
-    """0014: a failed cycle (here a state poll that never left its pool) is followed by a new
+    """0014: a failed cycle (here a hello that never left its pool) is followed by a new
     locate; it lands
     on the origin that issued the registration, so the registration is kept (U8) and there is
     no second enrollment."""
@@ -669,7 +720,7 @@ def test_every_failed_cycle_locates_again_and_keeps_the_registration(tmp_path, m
         steady = asyncio.Event()
         await service.link.client.aclose()
         service.link.client = service.link.time_client = httpx.AsyncClient(transport=httpx.MockTransport(
-            _until_steady(server, steady, fail_first_state=True)))
+            _until_steady(server, steady, fail_first_hello=True)))
         task = asyncio.create_task(service.run())
         try:
             await asyncio.wait_for(steady.wait(), 10)
@@ -732,7 +783,7 @@ def test_a_redirect_on_a_player_request_is_named_and_relocates(tmp_path, monkeyp
         steady = asyncio.Event()
         await service.link.client.aclose()
         service.link.client = service.link.time_client = httpx.AsyncClient(transport=httpx.MockTransport(
-            _until_steady(server, steady, redirect_first_state=True)))
+            _until_steady(server, steady, redirect_first_hello=True)))
         task = asyncio.create_task(service.run())
         try:
             await asyncio.wait_for(steady.wait(), 10)
@@ -761,12 +812,12 @@ def test_exact_acquisition_readiness_commit_observation_and_absent_plan(tmp_path
             commit = Commit(plan_id="offered", revision=1, authority_epoch=1,
                 readiness_sequence=readiness.sequence, assignment_ids=("picture",), committed_at=100)
             server.offer(commits=(commit,))
-            await service.poll_state()
+            await server.push(service)
             observations = pending(service)
             assert [(o.assignment_id, o.status, o.observed_at) for o in observations] == [("picture", "presented", 100)]
             assert service.renderer.outputs["hdmi1"].layers[0].path.read_bytes() == server.data
             server.offer(absent=True)
-            await service.poll_state()
+            await server.push(service)
             service._feedback()
             assert not service._jobs and not service._authorized(job)
             assert service.renderer.outputs["hdmi1"].layers[0].layer.assignment_id == "picture"
@@ -848,7 +899,7 @@ def test_same_key_reenrollment_rotates_authority_and_rejects_old_jobs(tmp_path):
             old_job, old_state = service._jobs[0], server.state
             await service.enroll()
             server.offer()
-            await service.poll_state()
+            await server.push(service)
             assert server.proofs[0].public_key == server.proofs[1].public_key
             assert service.registration.authority_epoch == 2
             assert not service._authorized(old_job)
@@ -880,15 +931,15 @@ def test_metadata_rejects_unsafe_response_without_following_redirect(tmp_path, k
             service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
             if kind == "unauthorized":
                 with pytest.raises(Unauthorized):
-                    await service.request("GET", "/v1/player/state")
+                    await service.request("GET", "/v1/player/time")
             elif kind == "redirect":
                 with pytest.raises(UplinkError) as excinfo:
-                    await service.request("GET", "/v1/player/state")
+                    await service.request("GET", "/v1/player/time")
                 assert (excinfo.value.cause, excinfo.value.reason) == (Cause.REDIRECT, "unexpected")
                 assert "location=upstream" in excinfo.value.detail
             else:
                 with pytest.raises(ServiceError):
-                    await service.request("GET", "/v1/player/state")
+                    await service.request("GET", "/v1/player/time")
             assert len(calls) == 1 and calls[0].host == "central"
         finally:
             await close(service)
@@ -1019,7 +1070,7 @@ def test_a_download_the_player_stops_is_not_a_download_failure(tmp_path, stop):
                     await asyncio.wait_for(attempt, 2)
             else:
                 server.offer(revision=2)
-                await service.poll_state()
+                await server.push(service)
                 rest.set()
                 await asyncio.wait_for(attempt, 2)
             readiness = service._feedback()
@@ -1079,12 +1130,12 @@ def test_revocation_and_full_plan_omission_cancel_jobs_before_draw(tmp_path):
             revoked = Revocation(plan_id="offered", revision=1, authority_epoch=1,
                                  sequence=1, assignment_ids=("picture",), mode="cancel")
             server.offer(revocations=(revoked,))
-            await service.poll_state()
+            await server.push(service)
             assert not service._authorized(job)
             service._feedback()
             assert not service._jobs
             server.offer(revision=2, layers=())
-            await service.poll_state()
+            await server.push(service)
             assert not service._authorized(job)
             assert not service.renderer.outputs["hdmi1"].layers
         finally:
@@ -1138,7 +1189,7 @@ def test_a_slow_clock_answer_keeps_readiness(tmp_path):
                             readiness_sequence=readiness.sequence, assignment_ids=("picture",),
                             committed_at=service.clock.utc())
             server.offer(commits=(commit,))
-            await service.poll_state()
+            await server.push(service)
             service.link.time_client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
             assert await service.probe_time()
             assert service.show_clock.diagnostics.rejected == 0
@@ -1160,7 +1211,7 @@ def test_slow_state_parsing_does_not_change_independent_clock_mapping(
         tmp_path, monkeypatch, stage, delay):
     async def check():
         from player import service as module
-        service, _ = await rig(tmp_path)
+        service, server = await rig(tmp_path, probe=False)
         try:
             owner, attribute = (module, "_json") if stage == "json" else (State, "model_validate")
             original = getattr(owner, attribute)
@@ -1169,7 +1220,7 @@ def test_slow_state_parsing_does_not_change_independent_clock_mapping(
                 service.clock.advance(delay)
                 return parsed
             monkeypatch.setattr(owner, attribute, delayed)
-            await service.poll_state()
+            await server.through_socket(service)
             assert service.show_clock.anchored
             assert service.show_clock.uncertainty == pytest.approx(0, abs=.001)
         finally:
@@ -1262,7 +1313,7 @@ def test_a_late_main_loop_raises_the_health_fault_and_never_withdraws_readiness(
     would cancel the wall's coordinated groups. The late callbacks never run, and when the loop
     recovers readiness is unchanged, so nothing is posted: Central's holds, nothing withdrawn."""
     monkeypatch.setattr("player.service.DISPATCH_DEADLINE", .05)
-    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+    monkeypatch.setattr("player.service.FEEDBACK_INTERVAL", .01)
 
     class StarvedGLib:
         callbacks = []
@@ -1277,16 +1328,18 @@ def test_a_late_main_loop_raises_the_health_fault_and_never_withdraws_readiness(
 
     async def turn(service, server, count):
         posted = len(readiness_posts(server))
+        request = service.request
 
-        async def poll():
+        async def counted(method, path, **kwargs):
             try:
-                await PlayerService.poll_state(service)
+                return await request(method, path, **kwargs)
             finally:
                 if len(readiness_posts(server)) >= posted + count:
                     service._stop.set()
-        monkeypatch.setattr(service, "poll_state", poll)
+        monkeypatch.setattr(service, "request", counted)
         service._stop.clear()
         await asyncio.wait_for(service._control_loop(), 5)
+        monkeypatch.setattr(service, "request", request)
         return readiness_posts(server)[posted:]
 
     async def check():
@@ -1301,7 +1354,6 @@ def test_a_late_main_loop_raises_the_health_fault_and_never_withdraws_readiness(
 
             # The production dispatcher (4 slots), through more late cycles than it has slots.
             service.dispatcher = MainLoopDispatcher(StarvedGLib)
-            monkeypatch.delattr(service, "poll_state")      # the real poll, no stop hook
             late_cycles = []
             raise_late = service._main_loop_late
 
@@ -1327,14 +1379,15 @@ def test_a_late_main_loop_raises_the_health_fault_and_never_withdraws_readiness(
             service.dispatcher = immediate
             monkeypatch.undo()
             posted = len(readiness_posts(server))
-            polls = []
+            turns = []
+            feedback = service._feedback
 
-            async def counted_poll():
-                polls.append(True)
-                await PlayerService.poll_state(service)
-                if len(polls) >= 3:
+            def counted_feedback():
+                turns.append(True)
+                if len(turns) >= 3:
                     service._stop.set()
-            monkeypatch.setattr(service, "poll_state", counted_poll)
+                return feedback()
+            monkeypatch.setattr(service, "_feedback", counted_feedback)
             service._stop.clear()
             await asyncio.wait_for(service._control_loop(), 5)
             assert readiness_posts(server)[posted:] == []   # unchanged: Central's report holds
@@ -1355,7 +1408,7 @@ def test_a_blocked_main_loop_keeps_its_session_and_resumes_once_the_loop_runs(
     fatal: it re-locates once and that session holds), and reporting resumes once the loop runs
     again. A loop that stays stuck is the broker's probe kill to end."""
     monkeypatch.setattr("player.service.DISPATCH_DEADLINE", .05)
-    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+    monkeypatch.setattr("player.service.FEEDBACK_INTERVAL", .01)
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
 
     class GLib:
@@ -1368,12 +1421,9 @@ def test_a_blocked_main_loop_keeps_its_session_and_resumes_once_the_loop_runs(
     async def check():
         clock = ManualClock(100)
         server = Server(clock)
-        posts, fail_state = [], []
+        posts = []
 
         def handle(request):
-            if request.url.path == "/v1/player/state" and fail_state and not fail_state[0]:
-                fail_state[0] = True
-                return httpx.Response(503, json={"error": "fixture_outage"})
             result = server(request)
             if request.url.path == "/v1/enrollment/register":
                 server.offer()
@@ -1388,7 +1438,7 @@ def test_a_blocked_main_loop_keeps_its_session_and_resumes_once_the_loop_runs(
             locates.append(True)
             return await find()
 
-        service, _ = await finder_rig(counted_find, handle)
+        service, _ = await finder_rig(counted_find, handle, server)
         service.dispatcher = MainLoopDispatcher(GLib)
         faults = []
         record = service.fault
@@ -1411,9 +1461,10 @@ def test_a_blocked_main_loop_keeps_its_session_and_resumes_once_the_loop_runs(
             await asyncio.wait_for(until(lambda: late_count() >= 1), 5)
             blocked_at = len(posts)
             await asyncio.wait_for(until(lambda: late_count() >= 6), 5)
-            fail_state.append(False)        # the session ends while the loop is blocked
-            await asyncio.wait_for(until(lambda: fail_state[0]), 5)
-            ended_at, located_at = late_count(), len(locates)
+            connects, located_at = len(server.connects), len(locates)
+            server.close_sockets()          # the session ends while the loop is blocked
+            await asyncio.wait_for(until(lambda: len(server.connects) > connects), 5)
+            ended_at = late_count()
             await asyncio.wait_for(until(lambda: late_count() >= ended_at + 6), 5)
             # The reconnect's late cycle-start dispatches keep its session: one re-locate,
             # then the session holds (a late start that ended it would re-locate every cycle).
@@ -1436,35 +1487,99 @@ def test_a_blocked_main_loop_keeps_its_session_and_resumes_once_the_loop_runs(
     asyncio.run(check())
 
 
+def test_a_cycle_ends_though_a_library_swallows_its_cancel(monkeypatch):
+    """CI 2026-11-19: Central closed the session's socket while the control loop's readiness post
+    was connecting; anyio's connect_tcp (under httpx) was cancelling its own happy-eyeballs scope
+    at that moment, took run()'s cancel for its own and swallowed it, so the control loop ran on
+    and run() waited on it for good: no next cycle ever reached Central. Here the post swallows
+    its first cancel the same way (returns as if connected); the cycle must still end and the
+    next one open a socket."""
+    monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
+    monkeypatch.setattr("player.cancellation.CANCEL_AGAIN", .05)
+
+    async def check():
+        clock = ManualClock(100)
+        server = Server(clock)
+
+        def handle(request):
+            result = server(request)
+            if request.url.path == "/v1/enrollment/register":
+                server.offer()
+            return result
+
+        service, _ = await finder_rig(finding("http://central"), handle, server)
+        connecting, swallowed = asyncio.Event(), []
+        request = service.request
+
+        async def readiness_connecting(method, path, **options):
+            if path != "/v1/player/readiness":
+                return await request(method, path, **options)
+            if not swallowed:
+                connecting.set()
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    swallowed.append(asyncio.current_task())    # as anyio's cancel scope does
+                return {"accepted": True}
+            if asyncio.current_task() in swallowed:
+                # Its later posts answer too, so no failed request ends that loop by chance.
+                await asyncio.sleep(0)
+                return {"accepted": True}
+            return await request(method, path, **options)
+
+        monkeypatch.setattr(service, "request", readiness_connecting)
+
+        async def until(predicate):
+            while not predicate():
+                await asyncio.sleep(.005)
+
+        task = asyncio.create_task(service.run())
+        try:
+            await asyncio.wait_for(connecting.wait(), 5)
+            connects = len(server.connects)
+            server.close_sockets()          # Central ends the session while the post connects
+            await asyncio.wait_for(until(lambda: len(server.connects) > connects), 5)
+            assert swallowed, "the post never met run()'s cancel"
+        finally:
+            service.stop()
+            await asyncio.wait_for(task, 5)
+            await close(service)
+    asyncio.run(check())
+
+
 def test_stale_feedback_on_a_late_loop_keeps_the_session(tmp_path, monkeypatch):
-    """Central refuses readiness as stale (409) and the state poll that follows misses the
-    dispatch deadline: the Player raises main_loop_late and the control loop carries on (the
-    next turn polls again); a late loop never ends the session here. A readiness refused 409 is
-    not answered, so it goes again until Central takes it (two refusals, then the third taken)."""
-    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+    """Central refuses readiness as stale (409) and the turn that follows misses the dispatch
+    deadline: the Player raises main_loop_late and the control loop carries on (the next turn
+    tries again); a late loop never ends the session here. A readiness refused 409 is not
+    answered, so it goes again until Central takes it (two refusals, then the third taken)."""
+    monkeypatch.setattr("player.service.FEEDBACK_INTERVAL", .01)
 
     async def check():
         service, server = await rig(tmp_path)
-        polls, stale = [], []
+        turns, stale, taken = [], [], []
         request = service.request
 
         async def refusing(method, path, **kwargs):
-            if path == "/v1/player/readiness" and len(stale) < 2:
-                stale.append(True)
-                raise StaleFeedback("state_changed")
+            if path == "/v1/player/readiness":
+                if len(stale) < 2:
+                    stale.append(True)
+                    raise StaleFeedback("state_changed")
+                taken.append(True)
+                service._stop.set()
             return await request(method, path, **kwargs)
         monkeypatch.setattr(service, "request", refusing)
+        dispatch = service.dispatch
 
-        async def poll():
-            polls.append(True)
-            if len(polls) % 2 == 0:             # the poll after each stale refusal is late
-                raise MainLoopLate("main_loop_late")
-            if len(polls) >= 5:
-                service._stop.set()
-        monkeypatch.setattr(service, "poll_state", poll)
+        async def late_after_each_refusal(callback):
+            if callback == service._feedback:
+                turns.append(True)
+                if len(turns) % 2 == 0:         # the turn after each stale refusal is late
+                    raise MainLoopLate("main_loop_late")
+            return await dispatch(callback)
+        monkeypatch.setattr(service, "dispatch", late_after_each_refusal)
         try:
             await asyncio.wait_for(service._control_loop(), 5)
-            assert len(stale) == 2 and len(polls) >= 5
+            assert len(stale) == 2 and taken == [True] and len(turns) == 5
             assert service.last_fault == "main_loop_late"
         finally:
             await close(service)
@@ -1498,10 +1613,11 @@ def _time_route_down(server):
     return handle
 
 
-def test_one_state_poll_anchors_the_show_clock_while_the_time_route_fails(tmp_path):
+def test_one_pushed_state_anchors_the_show_clock_while_the_time_route_fails(tmp_path):
     """The 2026-11-15 freeze: Central's time route failed and the Pi had no show time. Now every
-    state answer carries Central's clock: one poll anchors the ShowClock, the plan is held and
-    its due layer reported prepared. Mutation: drop the sample in `poll_state` -> no readiness."""
+    state Central pushes carries Central's clock: one anchors the ShowClock, the plan is held and
+    its due layer reported prepared. Mutation: drop the sample in `receive_state` -> no
+    readiness."""
     async def check():
         service, server = await rig(tmp_path, probe=False)
         down = httpx.AsyncClient(transport=httpx.MockTransport(_time_route_down(server)))
@@ -1510,7 +1626,7 @@ def test_one_state_poll_anchors_the_show_clock_while_the_time_route_fails(tmp_pa
             with pytest.raises(UplinkError):
                 await service.probe_time()
             assert not service.show_clock.anchored
-            await service.poll_state()
+            await server.through_socket(service)
             assert service.show_clock.anchored
             assert service.show_clock.uncertainty == pytest.approx(0, abs=.001)
             service._feedback()
@@ -1526,10 +1642,10 @@ def test_one_state_poll_anchors_the_show_clock_while_the_time_route_fails(tmp_pa
 
 def test_run_applies_the_plan_while_the_time_route_fails_and_never_faults_clock_probe(
         tmp_path, monkeypatch):
-    """run()'s first step is the state poll alone; time is asked only in the time loop, whose
-    failures are named like any other. Readiness is posted (so the plan was applied on an
+    """run() asks for no time before its loops; time is asked only in the time loop, whose
+    failures are named like any other. Readiness is posted (so the pushed plan was applied on an
     anchored clock) although /v1/player/time never answers. Mutation: put `probe_time` back
-    before `poll_state` in run() -> every cycle ends at the probe and no readiness is posted."""
+    before the loops in run() -> every cycle ends at the probe and no readiness is posted."""
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
 
     async def check():
@@ -1558,7 +1674,7 @@ def test_first_enrollment_on_a_late_loop_keeps_its_registration(tmp_path, monkey
     """The executor's create() dispatch misses its deadline at first enrollment: the abandoned
     post never ran, so it is posted again until the loop runs it. The registration stands (one
     register, no re-enrollment that would supersede this boot), as main's unbounded wait did."""
-    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+    monkeypatch.setattr("player.service.FEEDBACK_INTERVAL", .01)
     late = [2]
 
     def dispatcher(callback):
@@ -1763,10 +1879,60 @@ def test_a_state_delivered_while_the_loop_is_late_is_skipped_not_fatal(tmp_path,
 
             async def __aiter__(self):
                 yield message               # its dispatch is abandoned at the deadline
+                await asyncio.sleep(.1)
                 for callback in GLib.queued:
                     callback()              # the loop runs again
                 service.dispatcher = immediate
                 yield message
+
+        service.link.websocket_connect = lambda uri, **options: Socket()
+        service.dispatcher = MainLoopDispatcher(GLib)
+        try:
+            with pytest.raises(ServiceError, match="session_closed"):
+                await asyncio.wait_for(service._websocket_loop(), 5)
+            assert len(applied) == 1 and service.last_fault == "main_loop_late"
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_state_pushed_while_the_loop_is_late_is_applied_once_it_runs(tmp_path, monkeypatch):
+    """PR 156's end review: Central pushes a state once, when its delivery changes, and the
+    Player no longer polls for it. A push whose dispatch misses the deadline (the GLib loop busy at
+    cold boot) is held and applied once the loop runs again, with no further push: the Frame never
+    stays on its old plan while Central reads the Player connected.
+
+    Mutation probe: drop the held state's retry -> nothing is applied."""
+    monkeypatch.setattr("player.service.DISPATCH_DEADLINE", .05)
+    monkeypatch.setattr("player.service.FEEDBACK_INTERVAL", .05)
+
+    class GLib:
+        queued = []
+
+        @classmethod
+        def idle_add(cls, callback, *, priority):
+            cls.queued.append(callback)
+
+    async def check():
+        service, server = await rig(tmp_path)
+        applied = []
+        monkeypatch.setattr(service, "_apply_state", lambda state: applied.append(state))
+        message = json.dumps({"type": "state", **server.state.model_dump(mode="json")})
+
+        class Socket:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                pass
+
+            async def __aiter__(self):
+                yield message               # its dispatch is abandoned at the deadline
+                await asyncio.sleep(.1)
+                for callback in GLib.queued:
+                    callback()              # the loop runs again
+                service.dispatcher = immediate
+                await asyncio.sleep(.5)     # Central pushes nothing more
 
         service.link.websocket_connect = lambda uri, **options: Socket()
         service.dispatcher = MainLoopDispatcher(GLib)
@@ -1812,6 +1978,7 @@ def test_a_state_applied_across_the_deadline_is_acknowledged_not_reported_late(
             acked.append(result)
         monkeypatch.setattr(service, "_apply_state", slow_apply)
         monkeypatch.setattr(service, "_ack_control", ack)
+        monkeypatch.setattr(service, "_main", lambda: None)   # each post runs on a timer thread
         message = json.dumps({"type": "state", **server.state.model_dump(mode="json")})
 
         class Socket:
@@ -1924,7 +2091,7 @@ def test_running_service_reenrolls_on_401_and_shutdown_clears_token(tmp_path, mo
         unauthorized = True
         def handle(request):
             nonlocal unauthorized
-            if request.url.path == "/v1/player/state" and unauthorized:
+            if request.url.path == "/v1/player/hello" and unauthorized:
                 unauthorized = False
                 return httpx.Response(401)
             result = server(request)
@@ -1975,10 +2142,12 @@ def test_retired_key_refusal_never_rotates_identity(tmp_path, monkeypatch):
     asyncio.run(check())
 
 
-def test_observation_renewal_race_fetches_current_state_without_reenrollment(tmp_path):
+def test_observation_renewal_race_takes_the_pushed_state_without_reenrollment(tmp_path):
+    """Central answers a report stale while it offers a newer revision: the socket pushes that
+    revision, and the report goes again under it, with no re-enrollment and no state request."""
     async def check():
         service, server = await rig(tmp_path)
-        task = None
+        task = socket = None
         try:
             service._feedback()
             assert await service.download(service._jobs[0])
@@ -1987,28 +2156,31 @@ def test_observation_renewal_race_fetches_current_state_without_reenrollment(tmp
             commit = Commit(plan_id="offered", revision=1, authority_epoch=1,
                 readiness_sequence=readiness.sequence, assignment_ids=("picture",), committed_at=100)
             server.offer(commits=(commit,))
-            await service.poll_state()
+            await server.push(service)
             assert len(service._reports) == 1
-            seen = asyncio.Event()
+            seen, posted = asyncio.Event(), []
             def handle(request):
                 if request.url.path == "/v1/player/observations":
-                    server.offer(revision=2)
-                    return httpx.Response(409, json={"error": "stale_observation"})
-                result = server(request)
-                if request.url.path == "/v1/player/state":
+                    posted.append(Observation.model_validate_json(request.content))
+                    if len(posted) == 1:
+                        server.offer(revision=2, commits=server.state.commits)
+                        return httpx.Response(409, json={"error": "stale_observation"})
                     seen.set()
-                return result
+                return server(request)
             await service.link.client.aclose()
             service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+            socket = asyncio.create_task(service._websocket_loop())
             task = asyncio.create_task(service._observation_loop())
             await asyncio.wait_for(seen.wait(), 2)
-            await asyncio.sleep(.01)
-            assert service._plan.revision == 2 and not task.done()
+            assert service._plan.revision == 2 and not task.done() and not socket.done()
+            assert [report.revision for report in posted] == [1, 2]
             assert service.registration.authority_epoch == 1
+            assert not [r for r in server.requests if r.url.path == "/v1/player/state"]
         finally:
-            if task:
-                task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
+            for running in (task, socket):
+                if running:
+                    running.cancel()
+                    await asyncio.gather(running, return_exceptions=True)
             await close(service)
     asyncio.run(check())
 
@@ -2030,27 +2202,26 @@ def test_a_report_central_answers_stale_is_sent_again_under_the_newer_revision(t
             server.offer(commits=(Commit(plan_id="offered", revision=1, authority_epoch=1,
                 readiness_sequence=readiness.sequence, assignment_ids=("picture",),
                 committed_at=100),))
-            await service.poll_state()
+            await server.push(service)
             assert len(service._reports) == 1
-            posted, polled = [], asyncio.Event()
+            posted, refused = [], asyncio.Event()
 
             def handle(request):
                 if request.url.path == "/v1/player/observations":
                     posted.append(Observation.model_validate_json(request.content))
                     if len(posted) == 1:
+                        refused.set()
                         return httpx.Response(409, json={"error": "stale_observation"})
-                if request.url.path == "/v1/player/state":
-                    polled.set()
                 return server(request)
 
             await service.link.client.aclose()
             service.link.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
             sender = asyncio.create_task(service._observation_loop())
-            await asyncio.wait_for(polled.wait(), 2)
+            await asyncio.wait_for(refused.wait(), 2)
             await asyncio.sleep(.2)
             assert len(posted) == 1 and posted[0].revision == 1 and len(service._reports) == 1
             server.offer(revision=2, commits=server.state.commits)
-            await service.poll_state()
+            await server.push(service)
 
             async def sent_again():
                 while len(posted) < 2:
@@ -2068,7 +2239,10 @@ def test_a_report_central_answers_stale_is_sent_again_under_the_newer_revision(t
 
 
 def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_path):
-    """Loopback TCP + PostgreSQL + actual Frame media bytes; RecordingRenderer only."""
+    """Loopback TCP + PostgreSQL + actual Frame media bytes; RecordingRenderer only. The Player
+    plays the Scene on the states Central pushes over its real session socket, and never asks for
+    its state: its HTTP client records no `GET /v1/player/state` (decision 0034). Mutation probe:
+    restore a state poll in the control loop -> a request to that path is recorded."""
     import socket
     import threading
     import time
@@ -2113,7 +2287,8 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
     listener.bind(("127.0.0.1", 0))
     listener.listen()
     origin = f"http://127.0.0.1:{listener.getsockname()[1]}"
-    server = uvicorn.Server(uvicorn.Config(app, log_level="warning", lifespan="off"))
+    # The lifespan runs the LISTEN that wakes the session socket on each Coordination commit.
+    server = uvicorn.Server(uvicorn.Config(app, log_level="warning", lifespan="on"))
     thread = threading.Thread(target=lambda: server.run(sockets=[listener]))
     thread.start()
     deadline = time.monotonic() + 5
@@ -2127,7 +2302,14 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
         boot_id = "12345678-1234-1234-1234-123456789abc"
         device_id = "device-" + "d" * 64
         context = BootContext(device_id=device_id, run_id=boot_id)
-        client = httpx.AsyncClient(trust_env=False, follow_redirects=False)
+        paths = []
+
+        class Recording(httpx.AsyncHTTPTransport):
+            async def handle_async_request(self, request):
+                paths.append(request.url.path)
+                return await super().handle_async_request(request)
+
+        client = httpx.AsyncClient(transport=Recording(), trust_env=False, follow_redirects=False)
         # An http root needs no trust store; the fixture CA keeps the host's out of it.
         trust = Trust.public(tls.write_bundle(tmp_path / "ca.pem", tls.CA))
         transport = HttpTransport(trust=trust)
@@ -2138,6 +2320,15 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
                                            transport=transport),
             trust=trust, clock=registry.clock, client=client, time_client=client, boot_context=context, luts=PlayerLuts())
         socket_task = None
+
+        async def until(predicate, seconds=5):
+            async def wait():
+                while not predicate():
+                    if socket_task is not None and socket_task.done():
+                        socket_task.result()
+                    await asyncio.sleep(.01)
+            await asyncio.wait_for(wait(), seconds)
+
         try:
             assert (await service.locate_central()).origin == Origin.parse_root(origin)
             await service.enroll()
@@ -2146,12 +2337,14 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             await service.hello_protocol()
             registered = service.registration
             await service.probe_time()
-            await service.poll_state()
+            # The actual websockets client and Central's endpoint: the Player's one state source.
+            socket_task = asyncio.create_task(service._websocket_loop())
+            await until(lambda: service._configuration is not None)
             assert service._plan is None
-            registry.bind("portrait", registered.player_id, "HDMI-A-1", expected_generation=0)
+            registry.bind("portrait", registered.player_id, "HDMI-A-1", expected_generation=0, by="console")
             save_position(registry, "portrait", PORTRAIT_ON_WIDE)
             schedule(app.state.coordinator, ["portrait"], starts=1000, media=True)
-            await service.poll_state()
+            await until(lambda: service._plan is not None and service._plan.layers)
             service._feedback()
             offered = service._jobs[0]
             assert await service.download(offered)
@@ -2160,24 +2353,28 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             assert offered.layer.assignment_id in readiness.prepared
             assert await service.request("POST", "/v1/player/readiness",
                 body=readiness.model_dump(mode="json")) == {"accepted": True}
-            await service.poll_state()
-            observations = pending(service)
+            observations = []
+
+            def presented():
+                observations.extend(pending(service))
+                return any(report.status == "presented" for report in observations)
+            await until(presented)
+            observations = [report for report in observations if report.status == "presented"]
             assert observations and observations[0].status == "presented"
             await service.request("POST", "/v1/player/observations",
                                   body=observations[0].model_dump(mode="json"))
             assert service.cache.path_for(prepared).read_bytes() == variant_bytes
-            # Exercise the actual websockets client and central endpoint too.
-            socket_task = asyncio.create_task(service._websocket_loop())
-            await asyncio.sleep(.15)
+            # The control loop's turns, as a session runs them: feedback and readiness, no state.
+            control = asyncio.create_task(service._control_loop())
+            await asyncio.sleep(1.2)
+            control.cancel()
+            await asyncio.gather(control, return_exceptions=True)
             assert not socket_task.done()
-            socket_task.cancel()
-            await asyncio.gather(socket_task, return_exceptions=True)
-            socket_task = None
             unavailable = True
             # The outage middleware answers 503 with Central's own {"error": ...} body, so
             # the exchange names it CENTRAL/error (not the bare HTTP/status a gateway would get).
             with pytest.raises(UplinkError) as excinfo:
-                await service.poll_state()
+                await service.probe_time()
             assert (excinfo.value.cause, excinfo.value.reason) == (Cause.CENTRAL, "error")
             assert excinfo.value.central_error == "fixture_outage"
             service.tick_main()
@@ -2207,15 +2404,19 @@ def test_real_central_http_media_commit_outage_rejoin_and_renewal(registry, tmp_
             await service.enroll()
             assert service.registration.player_id == registered.player_id
             assert service.registration.authority_epoch == registered.authority_epoch + 1
-            old = await client.get(origin + "/v1/player/state",
+            # The old enrollment's socket wakes to find its authority gone, and is closed.
+            await asyncio.wait_for(asyncio.gather(socket_task, return_exceptions=True), 5)
+            old = await client.get(origin + "/v1/player/time",
                                    headers={"Authorization": "Bearer " + registered.token})
             assert old.status_code == 401
             await service.hello_protocol()
             app.state.coordinator.advance()
-            await service.poll_state()
+            socket_task = asyncio.create_task(service._websocket_loop())
+            await until(lambda: service._configuration.authority_epoch == 2)
             service._feedback()
             assert service._configuration.authority_epoch == 2
             assert not service._authorized(offered)
+            assert paths and "/v1/player/state" not in paths
         finally:
             if socket_task:
                 socket_task.cancel()
@@ -2255,7 +2456,7 @@ def test_a_photo_a_continuation_lists_is_still_fetched_past_its_layer(tmp_path):
             unlisted = layer("unlisted", data=b"other", end=150)
             server.offer(revision=2, layers=(listed, unlisted), continuations=(Continuation(
                 output_id="hdmi1", run_id="run", photos=("listed",), start=150, seconds=10),))
-            await service.poll_state()
+            await server.push(service)
             service.clock.advance(100)                 # 200: both layers have ended
             service._feedback()
             assert [job.layer.assignment_id for job in service._jobs] == ["listed"]
@@ -2265,12 +2466,12 @@ def test_a_photo_a_continuation_lists_is_still_fetched_past_its_layer(tmp_path):
     asyncio.run(check())
 
 
-def test_a_failed_poll_inside_a_session_keeps_the_session_and_the_next_download_proceeds(
+def test_a_failed_request_inside_a_session_keeps_the_session_and_the_next_download_proceeds(
         tmp_path, monkeypatch):
     """C1, decision 0032: on 2026-11-15 one Central answer of 503 ended the whole session and its
-    downloads. A failed poll is now a fault and the next turn tries again: the session stands (no
-    second locate) and the held plan's photo is downloaded once Central answers media again.
-    Mutation probe: re-raise the error from `_control_loop`."""
+    downloads. A failed request (here the clock probe) is now a fault and the next turn tries
+    again: the session stands (no second locate) and the held plan's photo is downloaded once
+    Central answers media again. Mutation probe: re-raise the error from `_time_loop`."""
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
     monkeypatch.setattr("player.service.MEDIA_RETRY_BACKOFF", (0,) * 4)
     find = finding("http://central")
@@ -2283,7 +2484,7 @@ def test_a_failed_poll_inside_a_session_keeps_the_session_and_the_next_download_
 
         def handle(request):
             path = request.url.path
-            if path == "/v1/player/state" and steady.is_set() and not failed:
+            if path == "/v1/player/time" and steady.is_set() and not failed:
                 failed.append(request)
                 return httpx.Response(503, json={"error": "lock_busy"})
             if path.startswith("/v1/media/"):
@@ -2353,13 +2554,13 @@ def test_an_earlier_revisions_continuation_observation_reaches_central_after_an_
                                         start=150, seconds=10)
             listed = layer("listed", data=server.data, end=150)
             server.offer(revision=2, layers=(listed,), continuations=(continuation,))
-            await service.poll_state()
+            await server.push(service)
             seen = Observation(plan_id="offered", revision=2,
                                authority_epoch=service.registration.authority_epoch,
                                assignment_id=continuation_assignment_id(continuation, 0, "listed"),
                                sequence=1, observed_at=150, status="presented")
             server.offer(revision=3, layers=(listed,), continuations=(continuation,))
-            await service.poll_state()
+            await server.push(service)
             assert service._observation_current(seen)
 
             posted = []
@@ -2405,11 +2606,11 @@ def test_the_frames_report_states_since_when_a_frame_plays_its_continuation(tmp_
     asyncio.run(check())
 
 
-def test_a_first_poll_that_fails_still_starts_the_sessions_loops(tmp_path, monkeypatch):
+def test_a_first_request_that_fails_still_starts_the_sessions_loops(tmp_path, monkeypatch):
     """Decision 0032 (SLICE-C's invariant: the held plan's downloads continue while Central answers
-    any request): the session's first poll answering 503 is a fault like any other request's, not
-    the cycle's end; the loops start, readiness is posted, and no second locate happens. Mutation
-    probe: let the first poll's failure end the cycle."""
+    any request): the session's first clock probe answering 503 is a fault like any other
+    request's, not the cycle's end; the loops run, readiness is posted, and no second locate
+    happens. Mutation probe: let the time loop's failure end the cycle."""
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
     find = finding("http://central")
 
@@ -2420,7 +2621,7 @@ def test_a_first_poll_that_fails_still_starts_the_sessions_loops(tmp_path, monke
         failed = []
 
         def handle(request):
-            if request.url.path == "/v1/player/state" and not failed:
+            if request.url.path == "/v1/player/time" and not failed:
                 failed.append(request)
                 return httpx.Response(503, json={"error": "lock_busy"})
             return serve(request)
@@ -2444,7 +2645,7 @@ def test_a_failed_readiness_post_keeps_the_session_and_the_next_turn_posts_again
     """C1, decision 0032: a readiness post Central answers 503 is a fault, never the session's end;
     the next turn posts readiness again. Mutation probe: drop `_request_failed` after the post."""
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
-    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+    monkeypatch.setattr("player.service.FEEDBACK_INTERVAL", .01)
     find = finding("http://central")
 
     async def check():
@@ -2552,7 +2753,7 @@ async def _drawn_still(tmp_path):
                     readiness_sequence=service.executor.readiness().sequence,
                     assignment_ids=("picture",), committed_at=100)
     server.offer(commits=(commit,))
-    await service.poll_state()
+    await server.push(service)
     return service, server
 
 
@@ -2564,7 +2765,7 @@ def test_a_still_photo_reaches_central_once_while_central_commits_then_answers_l
     number on every send (Central writes each number once: test_shown_history's
     `test_an_observation_sent_again_adds_no_row`). Mutation probe: report presented on every tick
     (drop the `reported` check in `Executor._report`)."""
-    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+    monkeypatch.setattr("player.service.FEEDBACK_INTERVAL", .01)
 
     async def check():
         service, server = await _drawn_still(tmp_path)
@@ -2600,7 +2801,7 @@ def test_a_still_photo_reaches_central_once_while_central_commits_then_answers_l
 
 
 def test_a_report_never_holds_the_picture_while_central_is_away(tmp_path):
-    """A Central that answers nothing (its state poll stuck behind a lock) never stops the picture
+    """A Central that answers nothing (stuck behind a lock) never stops the picture
     or fills the Player's queue: a still photo drawn for 200 ticks waits as one report, sent once
     Central answers. The old queue held 128 and raised `observation_capacity`, dropping its oldest
     entries. Mutation probe: report on every tick and key `ReportOutbox` by report number (the
@@ -2640,12 +2841,13 @@ def test_a_report_never_holds_the_picture_while_central_is_away(tmp_path):
 
 
 def test_an_idle_player_sends_its_readiness_and_its_acknowledgment_once(tmp_path, monkeypatch):
-    """Each turn of the control loop polls Central's state and asks the executor for readiness;
-    while neither changes, the Player sends no further readiness and acknowledges the same delivery
-    no further (2026-11-16: every half second each was a commit under Central's Coordination
-    lock). A change is sent at once: a new delivery is acknowledged, a new readiness posted.
-    Mutation probes: post every turn's readiness, or acknowledge every state -> many posts."""
-    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+    """Each turn of the control loop asks the executor for readiness, and Central pushes the state
+    over the socket; while neither changes, the Player sends no further readiness and acknowledges
+    the same delivery no further (2026-11-16: every half second each was a commit under Central's
+    Coordination lock). A change is sent at once: a new delivery is acknowledged, a new readiness
+    posted. Mutation probes: post every turn's readiness, or acknowledge every state -> many
+    posts."""
+    monkeypatch.setattr("player.service.FEEDBACK_INTERVAL", .01)
 
     async def check():
         service, server = await rig(tmp_path, negotiate=True)
@@ -2654,16 +2856,18 @@ def test_an_idle_player_sends_its_readiness_and_its_acknowledgment_once(tmp_path
                 return [request for request in server.requests if request.url.path == path]
 
             before = len(posts("/v1/player/control-acks"))
-            assert before == 1      # the rig's first poll acknowledged its delivery
-            loop = asyncio.create_task(service._control_loop())
+            assert before == 1      # the rig's first state acknowledged its delivery
+            loops = [asyncio.create_task(service._control_loop()),
+                     asyncio.create_task(service._websocket_loop())]
             await asyncio.sleep(.3)         # about thirty turns of an unchanged state
             assert len(posts("/v1/player/readiness")) == 1
             assert len(posts("/v1/player/control-acks")) == before
             server.offer(revision=2)        # a new delivery: acknowledged, and readiness changes
             await asyncio.sleep(.2)
-            loop.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await loop
+            for loop in loops:
+                loop.cancel()
+            await asyncio.gather(*loops, return_exceptions=True)
+            assert not posts("/v1/player/state")
             assert len(posts("/v1/player/control-acks")) == before + 1
             sent = [json.loads(request.content) for request in posts("/v1/player/readiness")]
             assert [report["revision"] for report in sent] == [1, 2]
@@ -2678,21 +2882,22 @@ def _readiness_posts(server):
             if request.url.path == "/v1/player/readiness"]
 
 
-async def _control_turns(service, poll_state, count):
-    """`count` turns of the control loop, each polling Central with `poll_state`."""
-    polls = []
+async def _control_turns(service, count):
+    """`count` turns of the control loop."""
+    turns = []
+    feedback = service._feedback
 
-    async def poll():
-        polls.append(True)
-        await poll_state()
-        if len(polls) >= count:
+    def counted():
+        turns.append(True)
+        if len(turns) >= count:
             service._stop.set()
-    service.poll_state = poll
+        return feedback()
+    service._feedback = counted
     service._stop.clear()
     try:
         await asyncio.wait_for(service._control_loop(), 5)
     finally:
-        service.poll_state = poll_state
+        service._feedback = feedback
 
 
 def test_a_reenrolled_idle_player_sends_the_first_readiness_of_its_new_epoch(tmp_path, monkeypatch):
@@ -2701,22 +2906,21 @@ def test_a_reenrolled_idle_player_sends_the_first_readiness_of_its_new_epoch(tmp
     answered in the old one. It is a change of its own and is posted, else Central holds no
     readiness for the new epoch and grants nothing. Mutation: key the answered readiness by its
     sequence alone -> no readiness is posted in epoch 2."""
-    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+    monkeypatch.setattr("player.service.FEEDBACK_INTERVAL", .01)
 
     async def check():
         service, server = await rig(tmp_path)
-        poll_state = service.poll_state
         try:
             server.offer(revision=2, layers=())
-            await poll_state()
-            await _control_turns(service, poll_state, 4)
+            await server.push(service)
+            await _control_turns(service, 4)
             first = _readiness_posts(server)
             assert [(post["authority_epoch"], post["sequence"]) for post in first] == [(1, 1)]
             await service.enroll()
             await service.probe_time()
             server.offer(layers=())
-            await poll_state()
-            await _control_turns(service, poll_state, 4)
+            await server.push(service)
+            await _control_turns(service, 4)
             renewed = _readiness_posts(server)[len(first):]
             assert [(post["authority_epoch"], post["sequence"]) for post in renewed] == [(2, 1)]
         finally:
@@ -2730,11 +2934,10 @@ def test_a_readiness_refused_409_is_sent_again_until_central_takes_it(tmp_path, 
     Player cannot tell them apart, so an unchanged readiness refused 409 is posted again on the
     next turn, until Central answers it. Mutation: count a 409 as answered -> one post only, and
     Central never holds the readiness."""
-    monkeypatch.setattr("player.service.REPORT_INTERVAL", .01)
+    monkeypatch.setattr("player.service.FEEDBACK_INTERVAL", .01)
 
     async def check():
         service, server = await rig(tmp_path)
-        poll_state = service.poll_state
         refusals = []
         respond = server.__call__
 
@@ -2749,8 +2952,8 @@ def test_a_readiness_refused_409_is_sent_again_until_central_takes_it(tmp_path, 
         service.link.time_client = service.link.client
         try:
             server.offer(revision=2, layers=())
-            await poll_state()
-            await _control_turns(service, poll_state, 6)
+            await server.push(service)
+            await _control_turns(service, 6)
             posts = [(post["authority_epoch"], post["sequence"]) for post in _readiness_posts(server)]
             assert posts == [(1, 1)] * 3, posts      # refused twice, then taken: never again
         finally:

@@ -14,7 +14,6 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from contracts.enrollment import Enrollment, OutputReport, enrollment_message
 from contracts.models import Identifier
-from contracts.node_app_link import NodeAppLinkChallengeV2, NodeAppLinkV2, node_app_link_message
 
 
 @dataclass(frozen=True)
@@ -41,11 +40,6 @@ class Identity:
             device_id=device_id,
             boot_id=boot_id,
         )
-
-    def sign_node_app_link(self, challenge: NodeAppLinkChallengeV2) -> NodeAppLinkV2:
-        """Sign LAN node linkage in its own domain."""
-        return NodeAppLinkV2(challenge, self.public_key,
-                             self._key.sign(node_app_link_message(challenge)).hex())
 
 
 def load_identity() -> Identity:

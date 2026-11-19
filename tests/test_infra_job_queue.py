@@ -373,7 +373,7 @@ def test_a_cancel_during_the_pool_check_always_stops_the_task(registry, monkeypa
 
     monkeypatch.setattr(psycopg_pool.AsyncConnectionPool, "check_connection",
                         staticmethod(slow_check))
-    connector = async_connector(registry.db.dsn, min_size=1, max_size=1)
+    connector = async_connector(registry.db.dsn, application_name="photo-wall-test", min_size=1, max_size=1)
 
     async def side_task():
         while True:

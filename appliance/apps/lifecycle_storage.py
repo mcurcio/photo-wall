@@ -1,4 +1,4 @@
-"""App-effect and exact-manager recovery journals, separate from HostCore."""
+"""The app-effect journal, separate from HostCore."""
 from __future__ import annotations
 
 import json
@@ -7,7 +7,6 @@ from uuid import UUID
 
 from appliance.apps.broker import ColdStart, EffectRecord, RunningApp
 from appliance.kernel.boot_store import BootStore
-from appliance.node.manager import ManagerRecoveryState
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_protocol import NodeProcessIdentity
 
@@ -68,14 +67,3 @@ class FileEffectJournal:
         self.store.write("effects", data)
         self.data = data
 
-
-class FileManagerRecoveryStore:
-    def __init__(self, store: BootStore):
-        self.store = store
-
-    def load(self) -> ManagerRecoveryState:
-        row = self.store.read("manager")
-        return ManagerRecoveryState(**row) if row is not None else ManagerRecoveryState()
-
-    def save(self, state: ManagerRecoveryState) -> None:
-        self.store.write("manager", primitive(state))

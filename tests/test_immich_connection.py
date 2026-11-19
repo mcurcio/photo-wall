@@ -95,9 +95,21 @@ class System:
             (self.root / "worker.err").read_text().splitlines()[-40:])
 
     def connection_jobs(self) -> list[dict]:
+        """The connection's check jobs, each with whether it is due now by the database's clock
+        (a queued check is deferred for its time: decision 0034, S3a)."""
         with self.registry.db.transaction() as conn:
-            return conn.execute("SELECT status FROM procrastinate_jobs WHERE task_name=%s",
-                                (CHECK_CONNECTION_TASK,)).fetchall()
+            return conn.execute(
+                "SELECT status::text AS status,scheduled_at>now() AS later "
+                "FROM procrastinate_jobs WHERE task_name=%s AND args->>'connection_ref'=%s",
+                (CHECK_CONNECTION_TASK, self.ref)).fetchall()
+
+    def checks_settled(self) -> bool:
+        """No check of the connection runs or is due: each one asked for has run, and what
+        stays queued is only the next check, armed by the last contact for its due time
+        (`begin_contact`, `policy.next_check_due`). A due one is never absorbed into it."""
+        return all(job["status"] in ("succeeded", "failed")
+                   or (job["status"] == "todo" and job["later"])
+                   for job in self.connection_jobs())
 
     def contacts(self) -> dict:
         with self.registry.db.transaction() as conn:
@@ -216,9 +228,11 @@ def test_the_newest_check_wins(system, immich_library):
     system.write(immich_library.base_url, immich_library.api_key)
     for _ in range(2):
         assert system.call("POST", f"{CONNECTIONS}/{system.ref}/checks").status_code == 202
-    wait_for(lambda: all(job["status"] in ("succeeded", "failed")
-                         for job in system.connection_jobs()),
-             seconds=60, what="every queued connection check to run")
+    wait_for(system.checks_settled, seconds=60,
+             what="every connection check asked for to run")
+    # The connection's next check stays queued, one and only one, for its due time.
+    assert [job for job in system.connection_jobs() if job["status"] == "todo"] == [
+        {"status": "todo", "later": True}]
     contacts = system.contacts()
     assert contacts["applied_contact"] == contacts["last_contact"]
     assert system.connection()["health"]["state"] == "ok"

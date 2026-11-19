@@ -12,6 +12,8 @@ from collections.abc import Iterable
 from hashlib import sha1
 from uuid import UUID
 
+from psycopg.types.json import Jsonb
+
 from central.db import ProcessTransactionClock
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.media_queue import QueueReceipt
@@ -27,10 +29,10 @@ FIXTURE_CONNECTION = "fixture"   # its ref and its name, as migration 080 names 
 class NullLibraryQueue:
     """The store's two queueing calls, accepted and dropped: no worker runs a check here."""
 
-    def enqueue_connection_check_in(self, conn, connection_ref):
+    def enqueue_connection_check_in(self, conn, connection_ref, *, due_at):
         return QueueReceipt(coalesced=False)
 
-    def enqueue_pool_check_in(self, conn, pool_key):
+    def enqueue_pool_check_in(self, conn, pool_key, *, due_at):
         return QueueReceipt(coalesced=False)
 
 
@@ -42,11 +44,11 @@ def library_of(registry) -> PgPhotoLibrary:
 def fixture_connection(registry) -> str:
     """The test database's one keyed connection `fixture`, added on first use. Its ref is fixed
     (as a cut-over row's, C12) so a photo can be built before the database is touched. Its address
-    and key are written as rows, in migration 080's columns only, so an upgrade test may seed it
-    on a database migrated part-way (tests/test_upgrade_087.py), before the store's newer columns."""
+    and key are written as a row, as the store's own columns stand after migration 124."""
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO library_connections(connection_ref,name,url,api_key,created_at) "
-                     "VALUES(%s,%s,%s,%s,0) ON CONFLICT (connection_ref) DO UPDATE SET "
+        conn.execute("INSERT INTO library_connections(connection_ref,name,url,api_key,created_at,"
+                     "created_by,changed_at,changed_by) VALUES(%s,%s,%s,%s,0,'console',0,'console') "
+                     "ON CONFLICT (connection_ref) DO UPDATE SET "
                      "url=EXCLUDED.url,api_key=EXCLUDED.api_key "
                      "WHERE library_connections.api_key IS NULL",
                      (FIXTURE_CONNECTION, FIXTURE_CONNECTION, "http://immich.invalid/api",
@@ -70,6 +72,20 @@ def photo(label: str, *, taken_at: float, width: int = 1080, height: int = 1920,
                         original=OriginalFile(media_type=media_type, width=width, height=height))
 
 
+def seed_source(conn, name: str, query: SourceQuery | None, *, pool_key: str | None = None,
+                revision: int = 1, refresh_active: bool = True) -> str:
+    """A saved Source revision `<name>:<revision>` as its row stands after migration 124 (decision
+    0034): its name's head, never through the save path. Returns its ref."""
+    source_ref = f"{name}:{revision}"
+    conn.execute("UPDATE media_sources SET head=FALSE WHERE name=%s AND head", (name,))
+    conn.execute("INSERT INTO media_sources(source_ref,query,pool_key,refresh_active,name,revision,"
+                 "head,created_at,created_by,changed_at,changed_by) "
+                 "VALUES(%s,%s,%s,%s,%s,%s,TRUE,0,'console',0,'console')",
+                 (source_ref, None if query is None else Jsonb(query.model_dump(mode="json")),
+                  pool_key, refresh_active, name, revision))
+    return source_ref
+
+
 def seed_pool(registry, source_ref: str, photos: Iterable[LibraryAsset], *,
               complete: bool = True) -> str:
     """Make `source_ref` (`<name>:1`) a saved Source on first use, then record one step of its
@@ -89,7 +105,7 @@ def seed_pool(registry, source_ref: str, photos: Iterable[LibraryAsset], *,
             MediaRepository(registry.db, registry.clock,
                             times=ProcessTransactionClock(registry.clock)),
             RuntimeStore(registry.db, registry.clock), library)
-        saved = names.save_draft(library.create_draft(query, None), name, by="console")
+        saved = names.save_draft(library.create_draft(query, None, by="console"), name, by="console")
         assert saved["source_ref"] == source_ref, saved
     with registry.db.transaction() as conn:
         key = library.pool_key_of_source_in(conn, source_ref)

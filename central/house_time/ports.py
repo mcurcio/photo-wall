@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Literal, Protocol
 
+from central.actor import Actor
 from central.house_time.model import HouseSettings, HouseSettingsDraft
 
 HouseRefusal = Literal["unknown-zone", "place-in-use"]
@@ -30,8 +31,8 @@ class HouseQueries(Protocol):
 
 
 class HouseCommands(Protocol):
-    def save_house_settings(self, draft: HouseSettingsDraft) -> HouseSettings:
-        """Store Settings › House and wake every Node's Output document source (the timetable's set
+    def save_house_settings(self, draft: HouseSettingsDraft, *, by: Actor) -> HouseSettings:
+        """Store Settings › House as `by` (the request's principal, OperatorAuth.admin) and wake every Node's Output document source (the timetable's set
         times follow the zone and place). HouseRefused("unknown-zone", 422) for a zone the IANA
         database does not know; HouseRefused("place-in-use", 409) for no location while Night off
         or a Schedule uses sunrise or sunset (`when_problems` "needs-place", its one home), which

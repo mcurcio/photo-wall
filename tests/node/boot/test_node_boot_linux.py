@@ -114,9 +114,9 @@ def test_host_config_survives_missing_graphics_handoff(tmp_path, monkeypatch):
     with pytest.raises(FileNotFoundError):
         bootstrap.materialize_handoff(root=tmp_path)
     host = json.loads((tmp_path / "run/photo-wall-node/host.json").read_bytes())
-    assert host["offer_id"] == str(selected.offer_id)
-    # The node's own record of the base it booted, reported in its host facts record.
-    assert host["base_tag"] == selected.base.tag
+    # The node's own record of the base it booted, stated in its host facts: the host's whole
+    # configuration (it speaks to Central only over the bus, decision 0034 S4c).
+    assert host == {"base_tag": selected.base.tag}
     assert not (tmp_path / "run/photo-wall-node/cold.json").exists()
 
 
@@ -127,8 +127,14 @@ def test_no_app_handoff_creates_no_cold_start_authority(tmp_path, monkeypatch):
     monkeypatch.setattr(bootstrap, "_marker", lambda _, keys: {name: getattr(selected.base, name) for name in keys})
     bootstrap.materialize_handoff(root=tmp_path)
     assert (tmp_path / "run/photo-wall-node/host.json").exists()
-    assert (tmp_path / "run/photo-wall-node/manager.json").exists()
     assert not (tmp_path / "run/photo-wall-node/cold.json").exists()
+    # No program but the bus is given Central's origin or the serial (decision 0034, S4c): the
+    # broker's configuration is gone, Display's is empty, and no manager root is offered, so no
+    # App Manager configuration is written (S4c-2b-i).
+    assert not (tmp_path / "run/photo-wall-node/manager.json").exists()
+    assert not (tmp_path / "run/photo-wall-node/manager-client.json").exists()
+    assert not (tmp_path / "run/photo-wall-node/broker.json").exists()
+    assert json.loads((tmp_path / "run/photo-wall-node/display.json").read_bytes()) == {}
 
 
 @pytest.mark.parametrize("unsafe_staging", [False, True])
@@ -182,14 +188,14 @@ def test_cold_staging_stays_inside_the_image_pool_bind(tmp_path, monkeypatch, un
         assert not prepared and not staged
         return
     bootstrap.prepare_roots(root=tmp_path, mounter=mounter)
-    assert [p.relative_to(node_store).as_posix() for p in prepared] == [
-        "root-images/.cold-staging/manager-primary", "root-images/.cold-staging/app"]
-    assert staged == [("manager-primary", "manager-roots"), ("app", "app-roots")]
+    # The base and the app root only: the offer names no manager root (S4c-2b-i).
+    assert [p.relative_to(node_store).as_posix() for p in prepared] == ["root-images/.cold-staging/app"]
+    assert staged == [("app", "app-roots")]
     assert (images / ".cold-staging").stat().st_mode & 0o777 == 0o700
     assert not (node_store / "downloads").exists()
     # Staged roots are resident on the next run: recomputed, never downloaded again.
     bootstrap.prepare_roots(root=tmp_path, mounter=mounter)
-    assert len(prepared) == 2 and len(staged) == 2 and len(checked) == 4
+    assert len(prepared) == 1 and len(staged) == 1 and len(checked) == 2
     unit = (REPO / "appliance/systemd/photo-wall-node-prepare.service").read_text()
     writable = next(line for line in unit.splitlines() if line.startswith("ReadWritePaths=")).split()
     assert "/run/photo-wall-node-storage/root-images" in writable

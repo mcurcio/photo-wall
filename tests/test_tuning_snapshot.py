@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from support.position import LIGHTING
+from support.trial_bus import worker_trials
 from test_fleet_attempts import DEVICE_ID
 from test_node_calibration import SKEWED
 from test_position_history_store import AUTH, Node, _client, _see_display, _sql
@@ -65,18 +66,20 @@ def _read(registry, at) -> dict:
 def _project(registry) -> None:
     """The worker's picture projection for the rig's Pi, at Central's time now."""
     with registry.db.transaction() as conn:
-        output_documents(conn, DEVICE_ID, DatabaseTransactionClock().now_in(conn))
+        output_documents(conn, DEVICE_ID, DatabaseTransactionClock().now_in(conn), trials=worker_trials(registry.db))
 
 
 def test_the_tracer_a_picture_edit_and_a_position_edit_read_back_by_time(registry):
     """(1) Acceptance 1. Mutation probe P4-strict-at: entries strictly before `at` -> the read at the
-    Position draft's own time misses it."""
+    Position draft's own time misses it; order the sent entries by id instead of `at` -> the newer
+    entry, given the smaller id, is not the one read."""
     before_all = _now(registry)
     node = Node(registry)                                            # the rig's Save: a kept Position entry
     display = _see_display(registry)
     pictures = PgPictureSessions(registry.db)
-    session = pictures.begin_picture("node-f0")
-    pictures.edit_software(session.session_id, SoftwareEdit(setting="contrast", value=114, expected_sequence=1))
+    session = pictures.begin_picture("node-f0", by="console")
+    pictures.edit_software(session.session_id, SoftwareEdit(setting="contrast", value=114, expected_sequence=1),
+                           by="console")
     _project(registry)
     between = _now(registry)
     node.edit(node.begin(), SKEWED)
@@ -100,6 +103,16 @@ def test_the_tracer_a_picture_edit_and_a_position_edit_read_back_by_time(registr
     nothing = _read(registry, before_all)
     assert (nothing["position"], nothing["picture"]) == (None, None)
 
+    # A later sent entry answers by its time, never by its id: the newer entry gets the smaller id.
+    pictures.edit_software(session.session_id, SoftwareEdit(setting="contrast", value=120, expected_sequence=2),
+                           by="console")
+    _project(registry)
+    _sql(registry, "UPDATE picture_history SET id = CASE WHEN picture_change = (SELECT max(picture_change) "
+                   "FROM picture_history WHERE kind='sent') THEN %s::uuid ELSE %s::uuid END "
+                   "WHERE kind='sent' AND frame_id='node-f0'",
+         ("00000000-0000-4000-8000-000000000001", "ffffffff-ffff-4fff-bfff-ffffffffffff"))
+    assert _read(registry, _now(registry))["picture"]["picture"]["software"]["contrast_percent"] == 120
+
 
 def test_with_no_sent_entry_for_the_frame_the_seen_displays_kept_entry_answers(registry):
     """(2) Acceptance 2: the Frame's Pi never projected a picture. Mutation probe P4-no-fallback:
@@ -108,7 +121,7 @@ def test_with_no_sent_entry_for_the_frame_the_seen_displays_kept_entry_answers(r
     display = _see_display(registry)
     kept = replace(default_picture(), software=replace(default_picture().software, gamma_tenths=24))
     with registry.db.transaction() as conn:
-        entry = append_kept_in(conn, display, copied_record(kept))
+        entry = append_kept_in(conn, display, copied_record(kept), by="console")
     body = _read(registry, _now(registry))
     assert (body["picture"]["entry_id"], body["picture"]["kind"], body["picture"]["frame"]) == (
         str(entry.entry_id), "kept-copied", None)

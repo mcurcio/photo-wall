@@ -5,8 +5,8 @@
 #   debian-packaging/build-root.sh --repo DIR --package NAME --output FILE.squashfs [--once] [--revision REV]
 #   debian-packaging/build-root.sh --repo DIR --package NAME --resolve [--revision REV]
 #
-# DIR is a debian-packaging/build-repo.sh output, NAME a root package: photo-wall-player (the
-# app root) or photo-wall-app-manager (the manager root). Everything else comes from the
+# DIR is a debian-packaging/build-repo.sh output, NAME the release's one root package:
+# photo-wall-player (the app root). Everything else comes from the
 # committed tree at REV (default HEAD), never the working copy: the roots container
 # (debian-packaging/build-container.sh --target roots: mmdebstrap and squashfs-tools at the pin),
 # debian-packaging/snapshot.list and its epoch (debian-packaging/snapshot-epoch.sh), the image
@@ -54,7 +54,6 @@ done
 [ -n "$output$resolve" ] && { [ -z "$output" ] || [ -z "$resolve" ]; } || usage
 case "$package" in
 	photo-wall-player) role=app ;;
-	photo-wall-app-manager) role=manager-primary ;;
 	*) echo "build-root: $package is no root package" >&2; exit 2 ;;
 esac
 

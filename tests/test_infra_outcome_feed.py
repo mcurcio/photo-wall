@@ -226,8 +226,9 @@ def test_the_recheck_resolves_a_waiter_after_the_listen_connection_drops(registr
                 admin.execute("SELECT pg_terminate_backend(%s)", (pid,))  # only OUR feed's
                 # Written WITHOUT a NOTIFY: only a re-read can find it.
                 admin.execute(
-                    "INSERT INTO job_outcomes (lock_key, job_name, status, seq, updated_at) "
-                    "VALUES (%s, 'releases.sync', 'ok', nextval('job_outcome_seq'), 1.0)",
+                    "INSERT INTO job_outcomes (lock_key, job_name, status, seq, changed_at, created_at, "
+                    "created_by, changed_by) VALUES (%s, 'releases.sync', 'ok', nextval('job_outcome_seq'), "
+                    "1.0, 1.0, 'central', 'central')",
                     (LOCK,))
             return await asyncio.wait_for(wait, 3)
         finally:

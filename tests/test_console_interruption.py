@@ -23,7 +23,7 @@ const base = (interruptions, { silent = false, connected = true, runtime = LIVE 
   runtime,
   outputInterruptions: interruptions,
   inventory: {
-    read_at: 1000, silent_after_seconds: 30, report_interval_seconds: 5,
+    read_at: 1000, silent_after_seconds: 30, socket_keepalive_seconds: 10,
     players: [{ id: "p-1", device_id: "device-1", authority_epoch: 2, registered_at: 10,
       last_seen: 10, retired_at: null, last_report_at: silent ? 900 : 995 }],
     outputs: [
@@ -142,7 +142,7 @@ const DARK = { code: "app_descriptor_limit", line: "Photos stopped — out of op
 const snapshot = ({ dark = DARK, reportAt = 995, bound = true, connected = true, rows = [] } = {}) => ({
   readAt: 1000, runtime: null, outputInterruptions: rows,
   inventory: {
-    read_at: 1000, silent_after_seconds: 30, report_interval_seconds: 5,
+    read_at: 1000, silent_after_seconds: 30, socket_keepalive_seconds: 10,
     players: [{ id: "p-1", device_id: "device-1", authority_epoch: 2, registered_at: 10,
       last_seen: 10, retired_at: null, last_report_at: reportAt }],
     outputs: [{ player_id: "p-1", output_id: "HDMI-A-1", observation: { connected } }],

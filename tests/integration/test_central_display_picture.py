@@ -4,7 +4,7 @@ slice S2; roadmap 1c's Live model).
 A real hub on Fleet's generated configuration, a real Node bus, and the display line's session on
 the shipped `DISPLAY_SLICE`, as tests/integration/test_central_display_power.py runs them. (1)
 Central writes `picture-HDMI-A-1` on the Node's desired bucket beside `output-HDMI-A-1`. (2) The
-Node's picture report on `picture-HDMI-A-1` is recorded (`picture_reports`), so the Picture tab
+Node's picture report on `picture-HDMI-A-1` is recorded (`outputs.picture_report`), so the Picture tab
 knows what the display offers. (3) A hardware edit made through the operator API, in its own
 process, reaches the Node's `picture-HDMI-A-1` with a new picture change within 3 s while
 `output-HDMI-A-1` keeps its change: carried by the notification (no reconcile runs between the edit
@@ -22,11 +22,13 @@ import asyncio
 from fastapi.testclient import TestClient
 from integration.bus_servers import hub_server, leaf_connections, node_server, until
 from support.frames import frame_create
+from support.trial_bus import worker_trials
 from test_display_identity import ADMIN, AUTH, MODE, NO_SERIAL, enroll_pi
 
 from appliance.display_host.bus import DISPLAY_COMPONENT, DISPLAY_SLICE, DISPLAY_VERSION
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
+from central.coordination import OutputLossLedger
 from central.db import DatabaseTransactionClock
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.infra.display_store import (
@@ -97,8 +99,8 @@ def test_picture_documents_and_reports_cross_the_display_line_on_their_own_keys(
     monkeypatch.setattr(NodeLink, "reconcile", counted)
     registry = Registry(database, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
     player = enroll_pi(registry, SERIAL)
-    registry.create_frame(frame_create("kitchen"))
-    registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("kitchen"), by="console")
+    registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0, by="console")
     hub = hub_server(tmp_path, [SERIAL])
     node = node_server(tmp_path, SERIAL, hub)
     display = NodeSession(DISPLAY_COMPONENT, DISPLAY_SLICE,
@@ -109,8 +111,9 @@ def test_picture_documents_and_reports_cross_the_display_line_on_their_own_keys(
 
     def offered() -> bool:
         with database.transaction() as conn:
-            return conn.execute("SELECT 1 FROM picture_reports WHERE player_id=%s AND output_id='HDMI-A-1' "
-                                "AND report->'offered' IS NOT NULL AND report->'offered' <> 'null'::jsonb",
+            return conn.execute("SELECT 1 FROM outputs WHERE player_id=%s AND output_id='HDMI-A-1' "
+                                "AND picture_report->'offered' IS NOT NULL "
+                                "AND picture_report->'offered' <> 'null'::jsonb",
                                 (player,)).fetchone() is not None
 
     async def run(client: TestClient) -> None:
@@ -124,8 +127,9 @@ def test_picture_documents_and_reports_cross_the_display_line_on_their_own_keys(
         device = device_id_for_serial(SERIAL)
         before_listening = wakes.count(device)
         listening = asyncio.create_task(wakes.listen(database.dsn))
-        stores = PgLinkStores(database, {REPORT_STREAM: OutputReportJudge(wakes)})
-        links = NodeLinks(Pipe.FLEET, hub.client_url, stores, DisplayDocuments(stores, wakes, times=DatabaseTransactionClock()))
+        stores = PgLinkStores(database, {REPORT_STREAM: OutputReportJudge(wakes, losses=OutputLossLedger())})
+        links = NodeLinks(Pipe.FLEET, hub.client_url, stores, DisplayDocuments(stores, wakes, times=DatabaseTransactionClock(),
+                                                                                trials=worker_trials(database)))
         stop = asyncio.Event()
         running = asyncio.create_task(links.run(stop))
         try:

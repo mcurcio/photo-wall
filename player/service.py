@@ -29,7 +29,7 @@ from pydantic import ConfigDict, Field, ValidationError, model_validator
 from contracts.clock_record import ClockRecord
 from contracts.enrollment import OutputReport
 from contracts.equipment import READ_CAP, equipment_device_id
-from contracts.liveness import REPORT_INTERVAL, SESSION_BACKOFF
+from contracts.liveness import SESSION_BACKOFF
 from contracts.lut import LUT_BYTES, LUT_MEDIA_TYPE, LutRef
 from contracts.models import (
     MAX_VARIANT_BYTES,
@@ -50,8 +50,6 @@ from contracts.node_link import NODE_BUS_URL
 from contracts.node_state import FrameReport, FrameReports
 from contracts.player_control import (
     ControlAck,
-    ControlAckResponse,
-    ControlAppliedReceipt,
     ControlHello,
     ControlSelection,
 )
@@ -65,6 +63,7 @@ from contracts.room_light import (
 from contracts.time import Monotonic, SystemClock
 from nodeapi.node import WallReader
 from player.cache import Cache, CacheError
+from player.cancellation import cancel_and_wait
 from player.central_link import CentralLink, Session, read_refusal
 from player.executor import AcquisitionStopped, AuthorityError, Executor, may_still_play
 from player.geometry import light_lux_on_frame
@@ -72,7 +71,6 @@ from player.identity import Identity, load_identity
 from player.impediment import impeded
 from player.luts import LutWants, PlayerLuts
 from player.mainloop import DispatchRefused, LatePosts, LoopLate, MainLoopDispatcher, Tick
-from player.node_app_link import NodeAppLinkClient
 from player.output_discovery import discover_outputs
 from player.player_line import PlayerLine
 from player.probe_responder import ProbeResponder
@@ -117,15 +115,16 @@ def served_sha256(header: str | None) -> str:
 # The session-cycle backoff is a liveness contract (Central's silence threshold is derived from
 # it); the name is kept so tests can shorten the session retry.
 BACKOFF = SESSION_BACKOFF
+# Seconds between two turns of the control loop: the held plan's feedback read on the GLib loop,
+# and its readiness posted when it changed. Local: never a request of its own (Central pushes the
+# state over the session socket; decision 0034).
+FEEDBACK_INTERVAL = 0.5
 # A failed media download retries on its own schedule; it is not a liveness contract.
 MEDIA_RETRY_BACKOFF = (1, 5, 15, 60)
-# The app link is tried the moment an applied receipt (or a relink) arrives; this is only
-# the backoff after a refusal or a socket failure, and the idle safety net.
-APP_LINK_RETRY = 5.0
 # How long a thread-to-main handoff may wait for the GLib loop before the Player raises the
 # main_loop_late fault instead of waiting on a starved loop in silence (G8). Readiness
 # is left as last sent: a late loop never withdraws prepared playback (E-G8-8 decision).
-DISPATCH_DEADLINE = 2 * REPORT_INTERVAL
+DISPATCH_DEADLINE = 2 * FEEDBACK_INTERVAL
 # The planning tick's period (player/mainloop.py `Tick`): the executor's draw grace must outlast a
 # commit in flight plus one of them (player/executor.py `DRAW_GRACE`).
 PLANNING_TICK_MS = 33
@@ -246,7 +245,7 @@ class State(Model):
     identify_expires_at: Instant | None = None
     delivery_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     delivery_sequence: int = Field(ge=1, le=2**63 - 1)
-    # Central's clock when it answered: a show-clock sample on every poll (decision 0032), read
+    # Central's clock when it answered: a show-clock sample on every state (decision 0032), read
     # after Central's delivery digest, so a new reading never makes a new delivery.
     server_time: Instant
 
@@ -383,7 +382,6 @@ class PlayerService:
                  time_client: httpx.AsyncClient | None = None,
                  clock_record: Callable[[], ClockRecord | None] = RunClockRecord().read,
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
-                 node_link_client: NodeAppLinkClient | None = None,
                  boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
                  boot_context: BootContext, luts: LutWants, room_lights_dispatch: Callable | None = None,
                  node_bus_url: str = NODE_BUS_URL, release_digest: str = "unknown"):
@@ -446,12 +444,6 @@ class PlayerService:
         self._verify_due = threading.Event()
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="player-media")
         self._stop = threading.Event()
-        self.node_link_client = node_link_client or NodeAppLinkClient()
-        self._proof_active = False
-        self._proof_generation = 0
-        self._relink = threading.Event()
-        # The running app-link loop's wake-up, set from any thread through its loop.
-        self._link_wake: tuple[asyncio.AbstractEventLoop, asyncio.Event] | None = None
         self._thread = None
         self._loop = None
         self._task = None
@@ -461,10 +453,8 @@ class PlayerService:
         self._control_selection: ControlSelection | None = None
         self._highest_control_sequence = 0
         self._highest_control_delivery_id: str | None = None
-        self._applied_proof_receipt: tuple[Session, ControlAppliedReceipt] | None = None
-        self._control_proof_revision = 0
         # The last acknowledgment Central answered (session, delivery id, result): the same state
-        # again (each poll of an unchanged state) is not acknowledged again.
+        # again (a state sent again unchanged) is not acknowledged again.
         self._acknowledged: tuple[Session, str, str] | None = None
         # The last readiness Central answered, as (authority epoch, number): the executor numbers
         # it once per change and starts again at 1 in each epoch, so an unchanged readiness is not
@@ -702,10 +692,6 @@ class PlayerService:
         previous = self._session
         self._session = (Session(found.central) if previous is None
                          else previous.relocated(found.central))
-        if self._session is not previous:
-            with self._lock:
-                self._applied_proof_receipt = None
-                self._control_proof_revision += 1
         self._located = True
         LOG.info("player: central %s (%s root %s)", found.central.origin, found.source,
                  found.root)
@@ -774,9 +760,7 @@ class PlayerService:
         self._highest_control_sequence = 0
         self._highest_control_delivery_id = None
         with self._lock:
-            self._applied_proof_receipt = None
             self._acknowledged = None
-            self._control_proof_revision += 1
             self._offered = False
             self._jobs = ()
         self._reports.clear()
@@ -803,7 +787,7 @@ class PlayerService:
                         self._main_loop_late()
                         if self._stop.is_set():
                             raise
-                        await asyncio.sleep(REPORT_INTERVAL)
+                        await asyncio.sleep(FEEDBACK_INTERVAL)
             except Exception as error:
                 if self.cache is not None:
                     await asyncio.get_running_loop().run_in_executor(self._worker, self.cache.close)
@@ -848,8 +832,6 @@ class PlayerService:
             else:
                 self._highest_control_sequence = sequence
                 self._highest_control_delivery_id = state.delivery_id
-                self._applied_proof_receipt = None
-                self._control_proof_revision += 1
         if self.executor is None:
             return "parsed_execution_unavailable"
         with self._lock:
@@ -906,39 +888,13 @@ class PlayerService:
         acknowledgment = (session, state.delivery_id, result)
         if self._acknowledged == acknowledgment:
             return      # Central answered this one: the same state again changes nothing
-        with self._lock:
-            if result != "applied":
-                self._applied_proof_receipt = None
-                self._control_proof_revision += 1
-            revision = self._control_proof_revision
         report = ControlAck(authority_epoch=registration.authority_epoch,
                             delivery_id=state.delivery_id, result=result)
         # A superseded delivery can return accepted=false; the next state retries with a
-        # fresh challenge. This is not plan readiness or OS management evidence.
-        response = await self.request("POST", "/v1/player/control-acks",
-                                      body=report.model_dump(mode="json"))
+        # fresh challenge. This is not plan readiness or OS management evidence. The receipt Central
+        # answers an applied acknowledgment with is no longer read here (decision 0034, S4c).
+        await self.request("POST", "/v1/player/control-acks", body=report.model_dump(mode="json"))
         self._acknowledged = acknowledgment
-        if result != "applied":
-            return
-        try:
-            outcome = ControlAckResponse.model_validate(response, strict=True)
-        except ValidationError:
-            LOG.debug("player: applied ACK receipt invalid")
-            return
-        receipt = outcome.receipt
-        if (not outcome.accepted or receipt is None
-                or receipt.authority_epoch != registration.authority_epoch
-                or receipt.delivery_id != state.delivery_id
-                or receipt.delivery_sequence != state.delivery_sequence):
-            return
-        with self._lock:
-            if (self._control_proof_revision == revision and self._session is session
-                    and session.registration is registration
-                    and self._highest_control_sequence == receipt.delivery_sequence
-                    and self._highest_control_delivery_id == receipt.delivery_id
-                    and self._applied_proof_receipt != (session, receipt)):
-                self._applied_proof_receipt = (session, receipt)
-                self._wake_link_loop()
 
     def tick_main(self):
         self._main()
@@ -1145,14 +1101,13 @@ class PlayerService:
     def _state(body: dict) -> State:
         return State.model_validate(body)
 
-    async def poll_state(self):
-        """One poll of Central's state, which is also a show-clock sample: any answer anchors the
-        clock before its plan is applied, so a plan is never held on an unanchored clock however
-        Central's time route fares (decision 0032)."""
-        sent_monotonic = self.clock.monotonic()
-        # On the main client: the time client's one connection stays the time probe's alone, so
-        # a slow state answer never queues a time request behind it.
-        body, received_monotonic = await self._request_with_receipt("GET", "/v1/player/state")
+    async def receive_state(self, body: dict, sent_monotonic: float,
+                            received_monotonic: float) -> None:
+        """One state Central pushed over the session socket (`body` without its "type"). It is
+        also a show-clock sample: Central read its clock after the socket's opening request was
+        sent at `sent_monotonic`, so any state anchors the clock before its plan is applied, and a
+        plan is never held on an unanchored clock however Central's time route fares (decision
+        0032). A stale observation waiting for a newer revision goes again under it."""
         state = self._state(body)
 
         def apply():
@@ -1163,7 +1118,14 @@ class PlayerService:
             return self._apply_state(state)
 
         result = await self.dispatch(apply)
+        self._renew_stale_reports()
         await self._ack_control(state, result)
+
+    def _renew_stale_reports(self) -> None:
+        with self._lock:
+            plan = self._plan
+        if plan is not None:
+            self._reports.renewed(plan.plan_id, plan.revision)
 
     def _sample_show_clock(self, player_id: str, authority_epoch: int, server_time: float,
                            sent_monotonic: float, received_monotonic: float) -> bool:
@@ -1203,44 +1165,25 @@ class PlayerService:
                 self._main_loop_late()
             except Exception as error:
                 # A failed time request is named like any other; it never gates a plan or a
-                # photo, since every state poll also samples the show clock.
+                # photo, since every pushed state also samples the show clock.
                 self._request_failed(error)
             await asyncio.sleep(max(0, 1 - (asyncio.get_running_loop().time() - started)))
 
-    async def _poll_after_stale(self) -> None:
-        """Central refused feedback as stale: fetch state; a late loop applies it next turn."""
-        try:
-            await self.poll_state()
-        except MainLoopLate:
-            self._main_loop_late()
-
-    async def _recover_stale(self) -> None:
-        """`_poll_after_stale` inside a session's loop: a failed poll is `_request_failed`."""
-        try:
-            await self._poll_after_stale()
-        except REQUEST_FAILURES as error:
-            self._request_failed(error)
-
     async def _control_loop(self):
-        """Every REPORT_INTERVAL: poll Central's state, then the held plan's feedback (readiness
-        and the downloads still wanted) and its readiness post, only when readiness changed or
-        its post went unanswered (observations are `_observation_loop`'s). A failed request is
-        a fault and the next turn tries again (decision 0032, `_request_failed`): the feedback runs
-        whether or not the poll was answered, so downloads follow the held plan through an outage."""
+        """Every FEEDBACK_INTERVAL: the held plan's feedback (readiness and the downloads still
+        wanted) and its readiness post, only when readiness changed or its post went unanswered
+        (observations are `_observation_loop`'s). It asks Central for nothing: the state arrives
+        over the session socket (`_websocket_loop`). A failed request is a fault and the next turn
+        tries again (decision 0032, `_request_failed`), so downloads follow the held plan through
+        an outage."""
         while not self._stop.is_set():
             started = asyncio.get_running_loop().time()
             try:
-                try:
-                    await self.poll_state()
-                except MainLoopLate:
-                    raise
-                except REQUEST_FAILURES as error:
-                    self._request_failed(error)
                 readiness = await self.dispatch(self._feedback)
             except MainLoopLate:
                 # Nothing is posted: the readiness Central holds stays (E-G8-8 decision).
                 self._main_loop_late()
-                await asyncio.sleep(max(0, REPORT_INTERVAL - (asyncio.get_running_loop().time() - started)))
+                await asyncio.sleep(max(0, FEEDBACK_INTERVAL - (asyncio.get_running_loop().time() - started)))
                 continue
             numbered = None if readiness is None else (readiness.authority_epoch, readiness.sequence)
             if numbered is not None and numbered != self._readiness_answered:
@@ -1251,9 +1194,10 @@ class PlayerService:
                 except StaleFeedback:
                     # A 409 is not always a newer plan: Central also answers it while a variant
                     # is made again (`media_unavailable`) or a lock conflicts, and those clear by
-                    # themselves. So it stays unanswered and goes again next turn, after the poll
-                    # (a newer plan's readiness is numbered anew; a refused one writes nothing).
-                    await self._recover_stale()
+                    # themselves. So it stays unanswered and goes again next turn; a newer plan
+                    # arrives over the socket and its readiness is numbered anew (a refused one
+                    # writes nothing).
+                    pass
                 except REQUEST_FAILURES as error:
                     # Central answered and refused it (any other 4xx: its authority, binding or
                     # shape): judged, so not sent again; else it is sent again next turn with its
@@ -1261,7 +1205,7 @@ class PlayerService:
                     if isinstance(error, Refused) and 400 <= error.status < 500:
                         self._readiness_answered = numbered
                     self._request_failed(error)
-            await asyncio.sleep(max(0, REPORT_INTERVAL - (asyncio.get_running_loop().time() - started)))
+            await asyncio.sleep(max(0, FEEDBACK_INTERVAL - (asyncio.get_running_loop().time() - started)))
 
     async def _observation_loop(self):
         """Send the outbox's reports, each until Central answers it. A slow observation endpoint
@@ -1277,14 +1221,11 @@ class PlayerService:
                     await self.request("POST", "/v1/player/observations",
                                        body=observation.model_dump(mode="json"))
                 except StaleFeedback:
-                    # Central offered a newer revision meanwhile: sent again under it, once the
-                    # Player holds it (the executor reports a change once, never again).
+                    # Central offered a newer revision meanwhile: sent again under it once the
+                    # Player holds it (`receive_state`, or already; the executor reports a change
+                    # once, never again).
                     self._reports.stale(observation)
-                    await self._recover_stale()
-                    with self._lock:
-                        plan = self._plan
-                    if plan is not None:
-                        self._reports.renewed(plan.plan_id, plan.revision)
+                    self._renew_stale_reports()
                 except REQUEST_FAILURES as error:
                     # Decision 0032: tried again at the next turn, with its number, so a Frame's
                     # shown history survives an outage and Central writes it once however often
@@ -1294,102 +1235,48 @@ class PlayerService:
                         self._reports.again(observation)
                     self._request_failed(error)
                     if not judged:
-                        await asyncio.sleep(REPORT_INTERVAL)
+                        await asyncio.sleep(FEEDBACK_INTERVAL)
 
     async def _websocket_loop(self):
+        """The session socket: Central pushes the state on it first, then whenever it may have
+        changed; the Player's one source of its state (decision 0034), and its liveness while open
+        (central/infra/player_contact_store.py). Its close ends the session cycle.
+
+        Central pushes a state once, when its delivery changes, so a state whose dispatch misses
+        the deadline (MainLoopLate: never started, never applied) is held and tried again every
+        FEEDBACK_INTERVAL until the GLib loop takes it; a newer push replaces it."""
+        opening = self.clock.monotonic()
         async with self.link.websocket(self.session, "/v1/player/session",
                                        max_size=MAX_JSON) as socket:
-            async for message in socket:
-                body = _json(message)
-                if body.pop("type", None) != "state":
-                    raise ServiceError("message_type")
-                state = self._state(body)
-                try:
-                    result = await self.dispatch(lambda: self._apply_state(state))
-                except MainLoopLate:
-                    # Never started, so never applied; the next delivery or poll carries it.
-                    self._main_loop_late()
-                    continue
-                await self._ack_control(state, result)
+            messages = aiter(socket)
+            arriving = asyncio.ensure_future(anext(messages))
+            held: tuple[dict, float] | None = None
+            try:
+                while True:
+                    await asyncio.wait((arriving,), timeout=None if held is None else FEEDBACK_INTERVAL)
+                    if arriving.done():
+                        try:
+                            message = arriving.result()
+                        except StopAsyncIteration:
+                            break
+                        received = self.clock.monotonic()
+                        arriving = asyncio.ensure_future(anext(messages))
+                        body = _json(message)
+                        if body.pop("type", None) != "state":
+                            raise ServiceError("message_type")
+                        held = (body, received)
+                    try:
+                        await self.receive_state(held[0], opening, held[1])
+                        held = None
+                    except MainLoopLate:
+                        self._main_loop_late()
+            finally:
+                await cancel_and_wait((arriving,))   # the read never outlives its socket
             raise ServiceError("session_closed")
-
-    async def _app_link_loop(self) -> None:
-        """Link this process to its latest applied control receipt over the node's app-link
-        socket, apart from Central liveness and rendering.
-
-        Only the process-local enrollment key enters the blocking socket worker. A new
-        delivery, a re-enrollment or a relocation invalidates that worker before it signs or
-        sends a response.
-        """
-        recorded: tuple[Session, ControlAppliedReceipt] | None = None
-        wake = asyncio.Event()
-        self._link_wake = (asyncio.get_running_loop(), wake)
-        while self._proof_active and not self._stop.is_set():
-            # Cleared before reading the receipt, so one that lands during a turn wakes the next.
-            wake.clear()
-            backoff = False
-            if self._relink.is_set():
-                # The broker could not deliver the recorded link: prove it again.
-                self._relink.clear()
-                recorded = None
-            session = self._session
-            registration = session.registration if session is not None else None
-            generation = self._proof_generation
-            with self._lock:
-                applied = self._applied_proof_receipt
-                revision = self._control_proof_revision
-            if (registration is not None and applied is not None
-                    and applied[0] is session and applied != recorded
-                    and self.boot_id):
-                receipt = applied[1]
-
-                def applied_current() -> bool:
-                    with self._lock:
-                        return (self._proof_active and self._proof_generation == generation
-                                and not self._stop.is_set() and self._session is session
-                                and session.registration is registration
-                                and self._control_proof_revision == revision
-                                and self._applied_proof_receipt == applied
-                                and self._highest_control_sequence == receipt.delivery_sequence
-                                and self._highest_control_delivery_id == receipt.delivery_id)
-
-                try:
-                    outcome = await asyncio.to_thread(
-                        self.node_link_client.exchange_applied, identity=self.identity,
-                        player_id=registration.player_id,
-                        authority_epoch=registration.authority_epoch,
-                        device_id=self.boot_context.device_id,
-                        kernel_boot_id=self.boot_id, receipt=receipt,
-                        enrollment_current=applied_current,
-                    )
-                    if outcome == "recorded" and applied_current():
-                        recorded = applied
-                    elif outcome == "rejected":
-                        backoff = True
-                        LOG.warning("player: the broker refused the app link; retrying in %.0f s",
-                                    APP_LINK_RETRY)
-                    else:
-                        LOG.info("player: app link stale (a newer control delivery or "
-                                 "enrollment); retrying on the next applied delivery")
-                except (ValueError, OSError, TimeoutError) as error:
-                    backoff = True
-                    LOG.debug("player: node process linkage unavailable: %s", type(error).__name__)
-                except Exception as error:
-                    backoff = True
-                    LOG.warning("player: node process linkage failed: %s", type(error).__name__)
-            if backoff:
-                await asyncio.sleep(APP_LINK_RETRY)
-            else:
-                # The next applied receipt or relink wakes this at once; the timeout is a net.
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(wake.wait(), APP_LINK_RETRY)
 
     async def run(self):
         self._loop = asyncio.get_running_loop()
         self._task = asyncio.current_task()
-        self._proof_generation += 1
-        self._proof_active = True
-        proof_task = None
         attempt = 0
         try:
             while not self._stop.is_set():
@@ -1401,28 +1288,18 @@ class PlayerService:
                         await self.locate_central()
                     if self.registration is None:
                         await self.enroll()
-                    if proof_task is None:
-                        proof_task = asyncio.create_task(self._app_link_loop())
                     await self.hello_protocol()
-                    # Reconnection reconciles authority before any download work; the poll
-                    # also anchors the show clock, so a failing time route never holds the plan
-                    # back (time is asked only in _time_loop). A late GLib loop does not end the
-                    # session here: its loops raise main_loop_late. A failed poll is like any
-                    # session request's (decision 0032): the held plan's downloads and feedback
-                    # start anyway, and the control loop polls again at its next turn.
-                    try:
-                        await self.poll_state()
-                    except MainLoopLate:
-                        self._main_loop_late()
-                    except REQUEST_FAILURES as error:
-                        self._request_failed(error)
+                    # The state arrives over the session socket, pushed first on its open, and
+                    # anchors the show clock too, so a failing time route never holds the plan
+                    # back. The held plan's downloads and feedback start at once (decision 0032),
+                    # and a late GLib loop does not end the session: its loops raise
+                    # main_loop_late.
                     session_started = self._loop.time()
-                    tasks = [asyncio.create_task(self._control_loop()),
+                    tasks = [asyncio.create_task(self._websocket_loop()),
+                             asyncio.create_task(self._control_loop()),
                              asyncio.create_task(self._time_loop()),
                              asyncio.create_task(self._media_loop()),
                              asyncio.create_task(self._observation_loop())]
-                    if self.link.websocket_connect is not False:
-                        tasks.append(asyncio.create_task(self._websocket_loop()))
                     done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
                     for task in done:
                         task.result()
@@ -1435,9 +1312,7 @@ class PlayerService:
                     if self._session is not None:
                         self._session = self._session.unregistered()
                     with self._lock:
-                        self._applied_proof_receipt = None
                         self._acknowledged = None
-                        self._control_proof_revision += 1
                     self.fault("registration_required")
                     if not self._stop.is_set():
                         await self._publish_player_on_retry()
@@ -1449,10 +1324,10 @@ class PlayerService:
                 finally:
                     if session_started is not None and self._loop.time() - session_started >= 30:
                         attempt = 0
-                    for task in tasks:
-                        task.cancel()
-                    if tasks:
-                        await asyncio.gather(*tasks, return_exceptions=True)
+                    # Cancelled until each has ended: one cancel can be swallowed below httpx
+                    # (player/cancellation.py), and a task that outlived its cycle would hold
+                    # run() here for good.
+                    await cancel_and_wait(tasks)
                     # Decision 0032: the held plan's downloads outlive the session; the next
                     # `_feedback` rebuilds them from that plan (`_offered` follows Central's state).
                     await self.link.aclose()
@@ -1465,7 +1340,7 @@ class PlayerService:
             # stop() cancels this task, and that cancel may land after run() already saw the stop
             # and left its loop, inside this cleanup: shielded, so it never surfaces to run()'s
             # caller nor cuts the cleanup short.
-            closing = asyncio.ensure_future(self._close_run(proof_task))
+            closing = asyncio.ensure_future(self._close_run())
             while not closing.done():
                 try:
                     await asyncio.shield(closing)
@@ -1473,17 +1348,10 @@ class PlayerService:
                     pass
             closing.result()
 
-    async def _close_run(self, proof_task: asyncio.Task | None) -> None:
-        """run()'s end: the app link stopped, the clients and the cache closed."""
-        self._proof_active = False
-        self._proof_generation += 1
+    async def _close_run(self) -> None:
+        """run()'s end: the clients and the cache closed."""
         with self._lock:
-            self._applied_proof_receipt = None
             self._acknowledged = None
-            self._control_proof_revision += 1
-        if proof_task is not None:
-            proof_task.cancel()
-            await asyncio.gather(proof_task, return_exceptions=True)
         await self.link.aclose()
         if self.cache is not None:
             await asyncio.get_running_loop().run_in_executor(self._worker, self.cache.close)
@@ -1515,18 +1383,6 @@ class PlayerService:
         """Which Frames are black while content is wanted (GLib thread: the probe's answer). None
         with no executor: this Player cannot tell, which is never the same as nothing black."""
         return None if self.executor is None else self.executor.frames_black()
-
-    def request_relink(self):
-        """Thread-safe: the proof loop forgets its recorded app link and proves it again now."""
-        self._relink.set()
-        self._wake_link_loop()
-
-    def _wake_link_loop(self) -> None:
-        """Thread-safe: the app-link loop takes its next turn now, not at its safety net."""
-        if (link_wake := self._link_wake) is not None:
-            loop, wake = link_wake
-            with contextlib.suppress(RuntimeError):  # the loop has closed: nothing to wake
-                loop.call_soon_threadsafe(wake.set)
 
     def stop(self):
         self._stop.set()
@@ -1633,7 +1489,7 @@ def main():
     Tick(GLib, PLANNING_TICK_MS, tick)
     service.start()
     # Probes are answered at control dispatch's priority (own one-slot lane), never here.
-    ProbeResponder(dispatcher, on_relink=service.request_relink, frames_black=service.frames_black,
+    ProbeResponder(dispatcher, frames_black=service.frames_black,
                    gl_renderer=lambda: root.renderer.gl_renderer).start()
     try:
         with contextlib.suppress(KeyboardInterrupt):

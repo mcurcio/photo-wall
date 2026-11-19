@@ -15,7 +15,7 @@ from support.packet_pair import packet_pair
 from support.repo import REPO
 
 from appliance import feed_socket
-from appliance.apps.broker_runner import feed_listener
+from appliance.apps.broker_runner import RunFacts, feed_listener
 from appliance.apps.probe import AppRunKey
 from appliance.display_host import runner as display_runner
 from appliance.display_host.domain import OutputState
@@ -185,7 +185,8 @@ def test_the_reader_drains_the_brokers_real_feed_socket(tmp_path):
     feed = Feed(512)
     for _ in range(20):
         feed.append("probe_answered", {"run": RUN, "rtt_ms": 3})
-    listener = feed_listener(feed, directory / "feed.sock", owner_uid=os.getuid(), group=os.getgid(),
+    listener = feed_listener(feed, RunFacts(feed), directory / "feed.sock", owner_uid=os.getuid(),
+                             group=os.getgid(),
                              peer=lambda connection: 10006, kind=KIND)
     stop = threading.Event()
 
@@ -330,9 +331,9 @@ def test_the_judge_closure_is_small_and_the_base_ships_its_unit():
     assert {"appliance.health.runner", "appliance.health.judge", "contracts.node_faults",
             "appliance.kernel", "appliance.kernel.probe_timing",
             "appliance.display_host.overlay.instruction"} <= modules
-    # The judge pulls in no broker, no Central session and no compositor code.
+    # The judge pulls in no broker and no compositor code.
     assert not [module for module in modules if module.startswith((
-        "appliance.central_session", "appliance.apps.broker", "appliance.apps.probe_channel",
+        "appliance.apps.broker", "appliance.apps.probe_channel",
         "appliance.display_host.weston", "appliance.display_host.runner"))]
     assert (REPO / "appliance/launchers/health-judge/__main__.py").is_file()
     unit = (REPO / "appliance/systemd/photo-wall-health.service").read_text().splitlines()
@@ -531,11 +532,11 @@ def test_changes_are_pushed_each_turn_and_everything_every_v_over_3(pairs):
     # The evidence began at 1000 ms on the boot clock: 07:17:01 on the Pi's own clock.
     assert tinted.lines[0] == FAULTS[APP_UNRESPONSIVE].household_line + " · since 07:17"
     clock.now = 2000 + RAISE  # a change between refreshes is pushed on its own turn
-    broker.feed.append("app_link_accepted", {"run": RUN, "player_id": "player-1"})
-    health.turn()
-    [named] = received(theirs)
-    assert named.serial > tinted.serial and "Player player-1" in named.lines[1]
-    tinted = named
+    broker.feed.append("app_started", {"run": AppRunKey(uuid4(), 102, 8, 1).document()})
+    health.turn()  # another run starts: the card clears
+    [cleared] = received(theirs)
+    assert cleared.serial > tinted.serial and not cleared.tint
+    tinted = cleared
     clock.now = 1000 + RAISE + INSTRUCTION_STALE_MS // 3 - 1
     health.turn()
     assert received(theirs) == []

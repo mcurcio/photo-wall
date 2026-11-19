@@ -32,8 +32,6 @@ class NodeDeployment:
     deployment_id: UUID
     base: NodeBaseRefV2
     app_environment: AppEnvironmentRefV2 | None
-    manager_primary: AppEnvironmentRefV2
-    manager_fallback: AppEnvironmentRefV2 | None
     environment_sources: dict[str, str]
 
     def offer(self, *, offer_id: UUID, audience: str, request: NodeBootRequestV2,
@@ -41,33 +39,29 @@ class NodeDeployment:
         return NodeBootOfferV2(offer_id, audience, request.serial, device_id, generation,
             request.kernel_boot_id, request.boot_nonce, revision, uuid4(), int(now * 1000),
             int((now + OFFER_TTL_SECONDS) * 1000), self.base,
-            "selected" if self.app_environment is not None else "unconfigured", self.app_environment,
-            self.manager_primary, self.manager_fallback)
+            "selected" if self.app_environment is not None else "unconfigured", self.app_environment)
 
     def environments(self) -> tuple[AppEnvironmentRefV2, ...]:
-        """The app (when selected) and the managers, each sealed environment once."""
-        refs = (self.app_environment, self.manager_primary, self.manager_fallback)
-        return tuple({ref.environment_sha256: ref for ref in refs if ref is not None}.values())
+        """The sealed environments the deployment names: the app, when selected."""
+        return () if self.app_environment is None else (self.app_environment,)
 
 
 def parse_node_deployment(raw: bytes) -> NodeDeployment:
     value = loads_object(raw, max_bytes=MAX_NODE_BOOT_BYTES)
-    fields = {"deployment_id", "base", "app_environment", "manager_primary", "manager_fallback", "environment_sources"}
+    fields = {"deployment_id", "base", "app_environment", "environment_sources"}
     if value is None or set(value) != fields or type(value["environment_sources"]) is not dict:
         raise ValueError("node_deployment_invalid")
     try:
         value["deployment_id"] = UUID(value["deployment_id"])
         value["base"] = NodeBaseRefV2(**value["base"])
-        for name in ("app_environment", "manager_primary", "manager_fallback"):
-            if value[name] is not None:
-                value[name] = AppEnvironmentRefV2(**value[name])
+        if value["app_environment"] is not None:
+            value["app_environment"] = AppEnvironmentRefV2(**value["app_environment"])
         deployment = NodeDeployment(**value)
         # Reuse the canonical compatibility and bounds contract, never parallel rules.
         deployment.offer(offer_id=uuid4(), audience="validation", request=NodeBootRequestV2(
             "fixture", uuid4(), "0" * 64), device_id="device-" + "0" * 64,
             generation=1, revision=1, now=1)
-        refs = [item for item in (deployment.app_environment, deployment.manager_primary,
-                                 deployment.manager_fallback) if item is not None]
+        refs = deployment.environments()
         if set(deployment.environment_sources) != {item.environment_sha256 for item in refs}:
             raise ValueError("node_environment_sources_mismatch")
         for item in refs:
@@ -105,12 +99,7 @@ def deployment_for_release(manifest_sha256: str, release: NodeReleaseV2,
     """The deployment a valid release becomes, its app included when it carries one.
 
     `locators` are the catalog row's `asset_locators` (role -> {url, sha256, size})."""
-    roles = {release.manager_primary.environment_sha256: "manager-primary"}
-    if release.manager_fallback is not None:
-        roles[release.manager_fallback.environment_sha256] = "manager-fallback"
-    if release.app_environment is not None:
-        roles[release.app_environment.environment_sha256] = "app"
+    app = release.app_environment
     return NodeDeployment(
-        deployment_id_for(manifest_sha256, release.app_environment is not None), release.base,
-        release.app_environment, release.manager_primary, release.manager_fallback,
-        {sha: str(locators[role]["url"]) for sha, role in roles.items()})
+        deployment_id_for(manifest_sha256, app is not None), release.base, app,
+        {} if app is None else {app.environment_sha256: str(locators["app"]["url"])})

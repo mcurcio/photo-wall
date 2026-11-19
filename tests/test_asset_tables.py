@@ -22,7 +22,6 @@ from central.photo_library.model import (
     InPool,
     LeftOut,
     LibraryAsset,
-    MeasuredCopy,
     PoolMember,
     SourceQuery,
     Waiting,
@@ -32,10 +31,10 @@ from central.photo_library.views import ConnectionWrite
 
 
 class _Queue:
-    def enqueue_connection_check_in(self, conn, connection_ref):
+    def enqueue_connection_check_in(self, conn, connection_ref, *, due_at):
         return QueueReceipt(coalesced=False)
 
-    def enqueue_pool_check_in(self, conn, pool_key):
+    def enqueue_pool_check_in(self, conn, pool_key, *, due_at):
         return QueueReceipt(coalesced=False)
 
 
@@ -44,7 +43,7 @@ def library(registry):
     store = PgPhotoLibrary(registry.db, times=ProcessTransactionClock(registry.clock),
                            queue=_Queue())
     ref = store.add_connection(ConnectionWrite(name="Home", url="http://immich.invalid",
-                                               key="PUBLIC-FIXTURE-KEY-1234"))
+                                               key="PUBLIC-FIXTURE-KEY-1234"), by="console")
     return store, ref
 
 
@@ -63,7 +62,7 @@ def step(*entries) -> CheckStep:
 
 
 def _draft(store, query: SourceQuery) -> tuple[str, str]:
-    draft = store.create_draft(query, None)
+    draft = store.create_draft(query, None, by="console")
     with store.db.transaction() as conn:
         return draft, store.pool_of_draft_in(conn, draft)
 
@@ -104,8 +103,9 @@ def test_pages_counts_and_planner_members_read_the_revision_and_its_parent(libra
     assert {(c.reason, c.count) for c in page.left_out} == {("unreadable_answer", 1),
                                                            ("over_item_limits", 1)}
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO media_sources(source_ref,query,pool_key,refresh_active) "
-                     "SELECT 'home:1',query,pool_key,TRUE FROM photo_pools WHERE pool_key=%s",
+        conn.execute("INSERT INTO media_sources(source_ref,query,pool_key,refresh_active,"
+                     "created_at,created_by,changed_at,changed_by) SELECT 'home:1',query,pool_key,"
+                     "TRUE,0,'console',0,'console' FROM photo_pools WHERE pool_key=%s",
                      (key,))
         members, _ready = PgPhotoLibrary.pool_members_in(conn, {"home:1"})["home:1"]
     assert members == (
@@ -113,21 +113,6 @@ def test_pages_counts_and_planner_members_read_the_revision_and_its_parent(libra
                    taken_at=100.0, width=3024, height=4032),
         PoolMember(asset_id=video.asset_id, revision=f"{3:040x}", kind="video", taken_at=70.0,
                    width=1920, height=1080))
-
-
-def test_deleting_a_revision_removes_its_copies(library):
-    """A2 case 5 (the cascade): a copy is a child of its revision."""
-    store, ref = library
-    _draft_ref, key = _draft(store, SourceQuery(connection_ref=ref))
-    shown = photo(ref, 1, 100.0)
-    store.record_step(store.begin_check(key), step(InPool(asset=shown)))
-    store.record_copies(shown.asset_id, [MeasuredCopy(name="thumbnail", media_type="image/webp",
-                                                      width=250, height=188)])
-    assert list(store.copy_sizes(shown.asset_id)) == ["thumbnail"]
-    with store.db.transaction() as conn:
-        conn.execute("DELETE FROM photo_pool_rows WHERE asset_id=%s", (shown.asset_id,))
-        conn.execute("DELETE FROM asset_revisions WHERE asset_id=%s", (shown.asset_id,))
-    assert store.copy_sizes(shown.asset_id) == {}
 
 
 def test_a_step_locks_its_photos_in_immich_id_order_whatever_their_outcomes(library):

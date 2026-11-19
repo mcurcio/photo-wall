@@ -3,8 +3,13 @@
 A media variant (a prepared copy of a photo) is an Asset record of kind `media-variant`, named
 `<asset_id>.<recipe_id>` (follow-up to 5a, slice T): this module hydrates the Planner's
 candidates from those records, names the recipe each planned photo is prepared under, publishes
-`PrepareMedia` in coordination's transaction, and pins variants for offers and locks. All
-reference mutation shares Database.MEDIA_LOCK with coordination.
+`PrepareMedia` in coordination's transaction, and refuses an offer or lock whose variants are not
+ready. A variant is pinned while an offer or a secured lock names it (decision 0034: no pin is
+stored; central/infra/frame_media_grants.py, central/infra/media_cache_records.py).
+
+Authored Scenes (decision 0034): a Scene keeps the photo ids it was authored with, and planning
+reads their current facts from the library (`authored_in`); nothing of a photo is copied at save
+time.
 
 Follow-up S1 (owner, 2026-10-12: "i expect the final composition to be handled on the Player,
 via scaling and masking"): each photo has one copy for the whole wall, never cropped, named by
@@ -24,13 +29,13 @@ wall's Frames or the photo copy ladder.
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import get_args
+from typing import Final, get_args
 
 from psycopg.types.json import Jsonb
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from central.assets.frame_media import VARIANT_REFERENCE, variant_asset_key
 from central.catalog import Candidate, SourcePool
@@ -43,6 +48,8 @@ from central.infra.key_content_store import PgKeyContent
 from central.infra.outcomes import JobOutcomes
 from central.infra.photo_library_store import PgPhotoLibrary, library_assets_in
 from central.infra.publisher import ProcrastinatePublisher
+from central.infra.runtime import worker_running_in
+from central.infra.singletons import Singleton
 from central.infra.transactions import PgTransaction, PgTransactions
 from central.installation_models import FrameOutput
 from central.kernel.assets import AssetKind
@@ -69,6 +76,19 @@ from media.prepare import (
     recipe_id,
     stored_recipe,
 )
+
+
+class _MediaDocument(BaseModel):
+    """`singletons` 'media' (decision 0034's migration 118): the recipe and cache budget it was
+    seeded with and the worker's last error code. Whether the worker runs is its queue heartbeat
+    (`worker_running_in`), never a stamp here."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    recipe_id: str | None
+    max_bytes: int
+    worker_error: str | None
+
+
+MEDIA_SETTINGS: Final[Singleton[_MediaDocument]] = Singleton("media", _MediaDocument)
 
 
 class StoreLimits(Model):
@@ -221,6 +241,8 @@ class MediaRepository:
         # Roadmap 5a (slice M1): key content, hydrated onto every candidate and requested by the
         # scheduler (`request_measurements`).
         self.key_content = PgKeyContent(db, times=times, queue=queue)
+        # A revision wanted again gets its pool back, and its pool's first check, here (S3a).
+        self._library = PgPhotoLibrary(db, times=times, queue=queue)
 
     @contextmanager
     def transaction(self):
@@ -228,8 +250,6 @@ class MediaRepository:
             conn.execute("SET LOCAL lock_timeout='5s'")
             conn.execute("SET LOCAL statement_timeout='10s'")
             conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
-            conn.execute("INSERT INTO media_settings(singleton,max_bytes) VALUES(TRUE,%s) "
-                         "ON CONFLICT(singleton) DO NOTHING", (self.limits.max_bytes,))
             yield conn
 
     def sources(self) -> list[dict]:
@@ -243,25 +263,28 @@ class MediaRepository:
         Each row carries its `query` (the SourceQuery, or null for a pre-4 row whose spec could
         not be converted) and its pool's `check` (CheckState, PgPhotoLibrary.check_state_in)."""
         rows = conn.execute(
-            "SELECT n.name,n.revision,s.source_ref,s.query "
-            "FROM media_source_names n JOIN media_sources s ON s.source_ref=n.current_ref "
-            "WHERE NOT n.deleted ORDER BY n.name"
+            "SELECT name,revision,source_ref,query FROM media_sources "
+            "WHERE head AND NOT deleted ORDER BY name"
         ).fetchall()
         return [{**row, "check": PgPhotoLibrary.check_state_in(conn, row["source_ref"]).model_dump(
             mode="json")} for row in rows]
 
     def reconcile_source_activity_in(self, conn, runtime_refs: set[str]) -> None:
         """Mark which Source revisions are wanted: a name's current revision, or one current
-        execution needs (`refresh_active`). The photo library's `due_pools` and
-        `retire_unwanted` read it; a dormant revision keeps its immutable query and its
-        acquired assets for history and existing content locks. The caller holds Runtime's lock
-        before taking MEDIA_LOCK here."""
+        execution needs (`refresh_active`). The photo library's checks and `retire_unwanted`
+        read it; a dormant revision keeps its immutable query and its acquired assets for history
+        and existing content locks. A wanted revision with no pool (its pool forgotten while
+        dormant, or a pre-4 row) gets its pool here, and a new pool queues its first check
+        (`PgPhotoLibrary.assign_pools_in`; without a queue that refuses media_queue_unconfigured).
+        The caller holds Runtime's lock before taking MEDIA_LOCK here."""
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
-        heads = {row["current_ref"] for row in conn.execute(
-            "SELECT current_ref FROM media_source_names WHERE NOT deleted").fetchall()}
+        heads = {row["source_ref"] for row in conn.execute(
+            "SELECT source_ref FROM media_sources WHERE head AND NOT deleted").fetchall()}
         needed = list(runtime_refs | heads)
         conn.execute("UPDATE media_sources SET refresh_active=(source_ref=ANY(%s)) "
-                     "WHERE refresh_active<>(source_ref=ANY(%s))", (needed, needed))
+                     "WHERE draft IS NULL AND refresh_active<>(source_ref=ANY(%s))",
+                     (needed, needed))
+        self._library.assign_pools_in(conn)
 
     def variant_names_in(self, conn, asset_ids, *, record: bool = False,
                          sized: Mapping[str, tuple[str, tuple[int, int] | None]] | None = None
@@ -276,10 +299,12 @@ class MediaRepository:
         if record:
             recipes = {name.recipe_id: name for name in names.values()}
             for recipe_name, name in sorted(recipes.items()):
-                conn.execute("INSERT INTO media_recipes(recipe_id,recipe,need,created_at) "
-                             "VALUES(%s,%s,%s,%s) ON CONFLICT(recipe_id) DO NOTHING",
+                now = self.times.now_in(conn)
+                conn.execute("INSERT INTO media_recipes(recipe_id,recipe,need,created_at,"
+                             "created_by,changed_at,changed_by) VALUES(%s,%s,%s,%s,'scheduler',"
+                             "%s,'scheduler') ON CONFLICT(recipe_id) DO NOTHING",
                              (recipe_name, Jsonb(name.recipe.model_dump(mode="json")),
-                              Jsonb({"long_edge": name.step}), self.times.now_in(conn)))
+                              Jsonb({"long_edge": name.step}), now, now))
         return names
 
     def variant_key_in(self, conn, asset_id: str, *, record: bool = False) -> str | None:
@@ -387,89 +412,70 @@ class MediaRepository:
 
     @staticmethod
     def authored_candidates_in(conn, asset_ids: tuple[str, ...]) -> dict[str, Candidate]:
-        """Read authored candidates in a caller-owned transaction."""
-        rows = conn.execute("SELECT asset_id,candidate FROM authored_candidates WHERE asset_id=ANY(%s)",
-                            (list(asset_ids),)).fetchall()
-        return {row["asset_id"]: Candidate.model_validate(row["candidate"]) for row in rows}
+        """The current facts of the named photos, unhydrated, in a caller-owned transaction; a
+        photo no longer in the library is absent."""
+        return {asset_id: Candidate(asset_id=asset_id, kind=asset.kind,
+                                    original_width=asset.width, original_height=asset.height,
+                                    captured_at=asset.taken_at)
+                for asset_id, asset in library_assets_in(conn, asset_ids).items()}
 
     def author_authored_candidates(self, source_ref: str, asset_ids: tuple[str, ...]) -> dict:
-        """Persist immutable, centrally derived references from current membership."""
+        """Check that the photos are members of the Source revision's pool (nothing is
+        written: a Scene keeps their ids, `authored_in`)."""
         with self.transaction() as conn:
             return self.author_candidates_in(conn, source_ref, asset_ids)
 
-    def author_candidates_in(self, conn, source_ref: str,
-                             asset_ids: tuple[str, ...]) -> dict:
-        """Author refs on a caller-owned transaction."""
+    @staticmethod
+    def author_candidates_in(conn, source_ref: str, asset_ids: tuple[str, ...]) -> dict:
+        """Validate authored refs on a caller-owned transaction: each must be a member of the
+        Source revision's pool. Writes nothing; answers {"asset_refs", "created": 0}."""
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
         if not 1 <= len(asset_ids) <= 1000 or len(asset_ids) != len(set(asset_ids)):
             raise RegistryError("invalid_authored_candidates", 422)
-        if conn.execute("SELECT 1 FROM media_sources WHERE source_ref=%s",
+        if conn.execute("SELECT 1 FROM media_sources WHERE source_ref=%s AND draft IS NULL",
                         (source_ref,)).fetchone() is None:
             raise RegistryError("source_not_found", 404)
         # Pool rows are photos a check confirmed; they stay while Immich is down (C7), so a
         # pool authors from what it holds whether or not its latest check completed.
         pool, _ = PgPhotoLibrary.pool_members_in(conn, {source_ref})[source_ref]
-        chosen = set(asset_ids)
-        members = {member.asset_id: _candidate_of(member)
-                   for member in pool if member.asset_id in chosen}
+        members = {member.asset_id for member in pool}
         missing = [asset_id for asset_id in asset_ids if asset_id not in members]
         if missing:
-            known = {row["asset_id"] for row in conn.execute(
-                "SELECT asset_id FROM asset_revisions WHERE asset_id=ANY(%s)", (missing,)).fetchall()}
+            known = set(library_assets_in(conn, missing))
             if any(asset_id not in known for asset_id in missing):
                 raise RegistryError("authored_asset_not_found", 404)
             raise RegistryError("authored_asset_not_member", 409)
-        existing_rows = conn.execute("SELECT asset_id,candidate,source_ref FROM authored_candidates "
-                                     "WHERE asset_id=ANY(%s)", (list(asset_ids),)).fetchall()
-        existing = {row["asset_id"]: row for row in existing_rows}
-        for asset_id in asset_ids:
-            candidate = members[asset_id]
-            old = existing.get(asset_id)
-            if old:
-                prior = Candidate.model_validate(old["candidate"]).model_copy(
-                    update={"variant": None, "preparation_failure": None, "analysis": None,
-                            "readable_size": None})
-                if prior != candidate:
-                    raise RegistryError("authored_candidate_immutable", 409)
-        new = [asset_id for asset_id in asset_ids if asset_id not in existing]
-        for asset_id in new:
-            conn.execute("INSERT INTO authored_candidates(asset_id,candidate,source_ref,authored_at) "
-                         "VALUES(%s,%s,%s,%s)",
-                         (asset_id, Jsonb(members[asset_id].model_dump(mode="json")),
-                          source_ref, self.times.now_in(conn)))
-        return {"asset_refs": list(asset_ids), "created": len(new)}
+        return {"asset_refs": list(asset_ids), "created": 0}
 
-    def pin_variants_in(self, conn, pins, *, require_ready: bool) -> None:
-        """Validate and pin variants by name in a caller-owned transaction (a re-make keeps
-        the pin: it names the variant, not its bytes)."""
+    def require_ready_in(self, conn, variants: Iterable[Variant]) -> None:
+        """Refuse (`media_unavailable`) an offer or a lock naming a variant that has no name or
+        no produced file, in a caller-owned transaction: the whole batch is checked before
+        anything is written. A ready variant needs no pin: the offer or lock naming it is its
+        pin (decision 0034)."""
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
-        pins = tuple(pins)
-        if any(pin.variant.key is None for pin in pins):
+        variants = tuple(variants)
+        if any(variant.key is None for variant in variants):
             raise RegistryError("media_unavailable")
-        if require_ready:
-            # Validate the complete batch before writing any authorization.
-            keys = {pin.variant.key for pin in pins}
-            if keys - set(self.variants_in(conn, keys)):
-                raise RegistryError("media_unavailable")
-        for pin in pins:
-            conn.execute(
-                "INSERT INTO media_references(owner,variant_key,expires_at) VALUES(%s,%s,%s) "
-                "ON CONFLICT(owner,variant_key) DO UPDATE SET expires_at=EXCLUDED.expires_at",
-                (pin.owner, pin.variant.key, pin.expires_at),
-            )
+        keys = {variant.key for variant in variants}
+        if keys - set(self.variants_in(conn, keys)):
+            raise RegistryError("media_unavailable")
 
-    @staticmethod
-    def expire_pins_in(conn, now: float) -> None:
-        """Expire transfer authorization in a caller-owned transaction."""
-        conn.execute("SELECT pg_advisory_xact_lock(%s)", (MEDIA_LOCK,))
-        conn.execute("DELETE FROM media_references WHERE expires_at<=%s", (now,))
-
-    def worker_status(self, code: str | None = None):
+    def worker_status(self, code: str | None = None) -> None:
+        """The worker's last error code, written only when it differs (`MEDIA_SETTINGS.write_in`,
+        by "central"). No time stamp: whether the worker runs is `worker_running_in`."""
         if code is not None and (not isinstance(code, str) or not re.fullmatch(r"[a-z_]{1,64}", code)):
             raise ValueError("invalid worker status code")
-        with self.transaction() as conn:
-            conn.execute("UPDATE media_settings SET worker_seen=%s,worker_error=%s WHERE singleton",
-                         (self.times.now_in(conn), code))
+        with self.db.transaction() as conn:
+            stored = self._media_document_in(conn)
+            MEDIA_SETTINGS.write_in(conn, stored.model_copy(update={"worker_error": code}),
+                                    by="central", times=self.times)
+
+    def _media_document_in(self, conn) -> _MediaDocument:
+        """The stored media settings; with none, no recipe, this store's `max_bytes`, no error."""
+        stored = MEDIA_SETTINGS.read_in(conn)
+        if stored is None:
+            return _MediaDocument(recipe_id=None, max_bytes=self.limits.max_bytes, worker_error=None)
+        return stored.value
 
     def request_preparations_in(self, conn, requests: Sequence[AcquisitionRequest]) -> int:
         """Name and publish the `PrepareMedia` of each planned photo's one copy for the wall
@@ -553,42 +559,30 @@ class MediaRepository:
         with what it holds (C7). Hydration compares worker-written `retry_at`, so its now is
         the database's (G11)."""
         known = {row["source_ref"] for row in conn.execute(
-            "SELECT source_ref FROM media_sources WHERE source_ref=ANY(%s)",
+            "SELECT source_ref FROM media_sources WHERE source_ref=ANY(%s) AND draft IS NULL",
             (list(source_refs),)).fetchall()}
         now = self.times.now_in(conn)
         return {ref: SourcePool(source_ref=ref, ready=ready, candidates=self._hydrate_candidates(
                     conn, (_candidate_of(member) for member in members), now))
                 for ref, (members, ready) in PgPhotoLibrary.pool_members_in(conn, known).items()}
 
-    def authored_in(self, conn) -> dict[str, Candidate]:
-        """Every authored candidate, hydrated as `source_pools_in`'s (locks bypass both)."""
-        stored = [(row["asset_id"], Candidate.model_validate(row["candidate"])) for row in conn.execute(
-            "SELECT asset_id,candidate FROM authored_candidates ORDER BY asset_id").fetchall()]
-        hydrated = self._hydrate_candidates(
-            conn, tuple(candidate for _, candidate in stored), self.times.now_in(conn))
-        return {asset_id: candidate for (asset_id, _), candidate in zip(stored, hydrated)}
+    def authored_in(self, conn, asset_ids: frozenset[str]) -> dict[str, Candidate]:
+        """The current facts of the photos authored Scenes name (`Runtime.authored_asset_ids`),
+        hydrated as `source_pools_in`'s; a photo no longer in the library is absent."""
+        stored = self.authored_candidates_in(conn, tuple(sorted(asset_ids)))
+        hydrated = self._hydrate_candidates(conn, tuple(stored.values()), self.times.now_in(conn))
+        return {candidate.asset_id: candidate for candidate in hydrated}
 
     def health(self) -> dict:
         """Worker check-in, cache and the preparations by their latest outcome."""
         with self.transaction() as conn:
             return self.health_in(conn)
 
-    def worker_age(self) -> float | None:
-        """Seconds since the last worker check-in, or None before the first (the healthcheck).
-
-        A plain read: no settings-row insert and no media lock, so a probe never queues
-        behind the writer.
-        """
+    def worker_running(self) -> bool:
+        """Whether the media worker runs (`worker_running_in`, its queue heartbeat on the
+        database's clock): the container healthcheck. A plain read; no lock."""
         with self.db.transaction() as conn:
-            return self.worker_age_in(conn)
-
-    def worker_age_in(self, conn) -> float | None:
-        """The check-in's age on `times` (G11): `worker_seen` and the read time come from
-        one clock in one transaction, never from the probing process's clock."""
-        row = conn.execute("SELECT worker_seen FROM media_settings WHERE singleton").fetchone()
-        if row is None or row["worker_seen"] is None:
-            return None
-        return self.times.now_in(conn) - row["worker_seen"]
+            return worker_running_in(conn)
 
     def media_read(self) -> dict:
         """`GET /v1/operator/media`: Sources, health and their `read_at` in one transaction."""
@@ -606,18 +600,7 @@ class MediaRepository:
 
     def health_in(self, conn) -> dict:
         """Read worker/cache health through a caller-owned transaction."""
-        state = conn.execute(
-            "SELECT recipe_id,max_bytes,worker_seen,worker_error FROM media_settings WHERE singleton"
-        ).fetchone()
-        if state is None:
-            # The operator read endpoint is strictly read-only, so it cannot use
-            # transaction()'s lazy settings-row initialization.
-            state = {
-                "recipe_id": None,
-                "max_bytes": self.limits.max_bytes,
-                "worker_seen": None,
-                "worker_error": None,
-            }
+        state = {**self._media_document_in(conn).model_dump(), "worker_running": worker_running_in(conn)}
         # A preparation's state is its latest outcome: ok is ready, terminal failed, transient
         # retrying (a queued one has no outcome yet).
         return {**state, "accounted_bytes": self.accounted_bytes(conn), "jobs": conn.execute(

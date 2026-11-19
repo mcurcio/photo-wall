@@ -341,11 +341,10 @@ def test_the_card_lies_inside_the_explain_area_in_todays_proportions():
 
 
 # The card's longest real lines (appliance/health/judge.py `_card`): the longest household line and
-# code in the catalogue, a Player id as Central names one (34 characters), the Output's name.
-PLAYER_ID = "p-5c85e236873353bec06574c31ee5aae6"
+# code in the catalogue, the Output's name.
 LONGEST_LINES = (
     max((f"{fault.household_line} · since 12:09" for fault in FAULTS.values()), key=len),
-    f"{max(FAULTS, key=len)} · Player {PLAYER_ID} · Output HDMI-A-1",
+    f"{max(FAULTS, key=len)} · Output HDMI-A-1",
 )
 
 
@@ -356,8 +355,7 @@ LONGEST_LINES = (
 ])
 def test_every_line_of_the_card_fits_its_card_and_the_card_fits_the_area(area):
     """Bench P0 (the test Pi, 2026-10-23): line 2 inked past its card and past the Frame region.
-    Mutation probe: `fit_size` returning `size` unchanged -> the smallest Frame's line 2 overflows."""
-    assert len(PLAYER_ID) == 34
+    Mutation probe: `fit_size` returning `size` unchanged -> a line overflows the smallest Frame's card."""
     ops = render.render_health(3840, 2160, health.HealthPage(2, True, LONGEST_LINES), area=area,
                                measure=fake_text_width)
     left, top, width, height = render.area_rect(area, (3840, 2160))

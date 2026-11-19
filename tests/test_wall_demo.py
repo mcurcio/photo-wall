@@ -424,6 +424,21 @@ def test_baseline_requires_real_byte_types_and_simulated_commit_evidence():
                           players=1, outputs=1, commit_checks=2, actuation="simulated")
 
 
+# Decision 0034 (S2g): the tables the wall e2e must no longer read; it reads what Central keeps.
+DROPPED_TABLES = ("execution_events", "player_feedback", "player_configurations",
+                  "player_output_identification", "bindings", "player_control_sessions",
+                  "enrollment_nonces")
+
+
+def test_the_e2e_reads_no_dropped_table():
+    """The demo's SQL names no table decision 0034 dropped. Mutation probe: read observations from
+    `execution_events` again -> this fails."""
+    source = (Path(__file__).parents[1] / "scripts/demo_wall.py").read_text()
+    named = {table for table in DROPPED_TABLES
+             if re.search(rf"\b(FROM|JOIN|INTO|UPDATE)\s+{table}\b", source)}
+    assert named == set()
+
+
 def test_baseline_needs_no_commit_since_only_a_runs_first_turn_awaits_one():
     """Decision 0032: a wall whose Default Scene's first turn passed while its photos were prepared
     plays every later turn with no Commit; the baseline holds without one."""
@@ -1490,8 +1505,8 @@ def test_a_demo_frame_has_its_players_screen_and_is_ready(registry):
     from central.infra.display_store import frame_outputs_in
     from scripts.demo_wall import DEMO_OPENING_PX, position_demo_frame
     identity, _, request = enroll(registry, count=1, report=False)
-    registry.create_frame(frame_create("demo-frame-1"))
-    registry.bind("demo-frame-1", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("demo-frame-1"), by="console")
+    registry.bind("demo-frame-1", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     output = next(item for item in registry.inventory().outputs if item.player_id == identity["player_id"])
     position_demo_frame(registry, "demo-frame-1", request.device_id, output.model_dump(mode="json"))
     with registry.db.transaction() as conn:

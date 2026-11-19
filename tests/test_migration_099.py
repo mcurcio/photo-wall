@@ -10,7 +10,7 @@ import json
 from hashlib import sha256
 from pathlib import Path
 
-from pydantic import TypeAdapter
+from support.migrations import migrate_before
 
 from central.db import Database
 from central.frame_lighting.policy import (
@@ -18,8 +18,9 @@ from central.frame_lighting.policy import (
     UPGRADE_ROOM_LIGHT_NAME,
     upgrade_lighting,
 )
+from central.infra.room_light_rows import lights_in
 from central.infra.room_light_store import document_in
-from central.room_light.model import FixedLight, RoomLight, TypedColour
+from central.room_light.model import FixedLight, TypedColour
 from contracts.frame_lighting import FrameLighting
 from contracts.node_picture import UPGRADE_DISPLAY_LIGHT
 from contracts.room_light import FixedEntry, KelvinColour
@@ -61,7 +62,7 @@ def _frame(conn, frame_id: str, depth: float, display) -> None:
 def test_099_upgrades_every_frame_to_the_python_upgrade_rule(database_provisioner):
     """A6. Mutation probe M8: the migration's wash at 999 lx instead of 1000 -> every expectation differs."""
     with database_provisioner.empty() as conninfo:
-        db = Database(conninfo)
+        db = Database(conninfo, application_name="photo-wall-test")
         try:
             _at_098(db)
             with db.transaction() as conn:
@@ -83,7 +84,8 @@ def test_099_upgrades_every_frame_to_the_python_upgrade_rule(database_provisione
                 conn.execute("INSERT INTO plan_offers(player_id, authority_epoch, revision, plan_id, manifest, groups, "
                              "created_at, valid_until) VALUES ('p1', 1, 1, 'plan', %s, '[]', 1000, 1200)",
                              (json.dumps({"layers": [], "bindings": [binding, gone]}),))
-            db.migrate()
+            # Up to 123b, which folds `player_configurations` into the show state (decision 0034).
+            migrate_before(db, "123b")
             expected = {"hall": upgrade_lighting(UPGRADE_DISPLAY_LIGHT, 2.5, 50 / 100),
                         "dim": upgrade_lighting(UPGRADE_DISPLAY_LIGHT, 0.0, 0 / 100),
                         "lone": upgrade_lighting(UPGRADE_DISPLAY_LIGHT, 1.0, 1.0)}
@@ -105,8 +107,8 @@ def test_099_upgrades_every_frame_to_the_python_upgrade_rule(database_provisione
                 assert [FrameLighting.model_validate(each["lighting"]) for each in offered] == [
                     expected["hall"], upgrade_lighting(UPGRADE_DISPLAY_LIGHT, 2.5, 1.0)]
                 document = document_in(conn)
-                room = conn.execute("SELECT id, light FROM room_lights").fetchall()
-                assert [(row["id"], TypeAdapter(RoomLight).validate_python(row["light"])) for row in room] == [
+                # Migration 120 moves the room lights into `singletons` 'room_light_setup'.
+                assert list(lights_in(conn).items()) == [
                     (UPGRADE_ROOM_LIGHT_ID, FixedLight(name=UPGRADE_ROOM_LIGHT_NAME, colour=TypedColour(kelvin=6500)))]
                 assert document.change == 2   # 099 seeds 1; 109 raises it for the new document shape
                 assert document.lights == {UPGRADE_ROOM_LIGHT_ID: FixedEntry(colour=KelvinColour(kelvin=6500))}

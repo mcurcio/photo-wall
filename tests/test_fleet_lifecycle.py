@@ -6,6 +6,7 @@ from uuid import UUID
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from psycopg.types.json import Jsonb
+from support.devices import seed_device
 from support.frames import frame_create
 
 from central.content_catalog.catalog import device_id_for_serial
@@ -26,10 +27,10 @@ BOOT_ID = UUID(int=41)
 def _seed_player(registry, *, canonical_device: bool) -> None:
     with registry.db.transaction() as conn:
         if canonical_device:
-            conn.execute("INSERT INTO devices(device_id,serial,first_seen,last_seen) "
-                         "VALUES(%s,%s,900,900)", (DEVICE_ID, SERIAL))
+            seed_device(conn, DEVICE_ID, SERIAL, at=900)
         conn.execute("INSERT INTO players(id,public_key,token_hash,registered_at,last_seen,"
-                     "device_id) VALUES(%s,%s,%s,900,900,%s)",
+                     "device_id,created_at,created_by,changed_at,changed_by) "
+                     "VALUES(%s,%s,%s,900,900,%s,900,'node',900,'node')",
                      (PLAYER_ID, "test-public-key", "test-token-hash", DEVICE_ID))
 
 
@@ -38,23 +39,20 @@ def test_ticketless_player_retirement_creates_canonical_tombstone_once(registry)
     with registry.db.transaction() as conn:
         assert conn.execute("SELECT 1 FROM devices WHERE device_id=%s",
                             (DEVICE_ID,)).fetchone() is None
-    registry.retire(PLAYER_ID)
-    registry.retire(PLAYER_ID)
+    registry.retire(PLAYER_ID, by="console")
+    registry.retire(PLAYER_ID, by="console")
     with registry.db.transaction() as conn:
-        device = conn.execute("SELECT retired_at FROM devices WHERE device_id=%s",
-                              (DEVICE_ID,)).fetchone()
-        lifecycle = conn.execute("SELECT generation,revoked_at FROM fleet_device_lifecycle "
-                                 "WHERE device_id=%s", (DEVICE_ID,)).fetchone()
+        device = conn.execute("SELECT retired_at,generation,created_by,changed_by FROM devices "
+                              "WHERE device_id=%s", (DEVICE_ID,)).fetchone()
         player = conn.execute("SELECT retired_at,authority_epoch FROM players WHERE id=%s",
                               (PLAYER_ID,)).fetchone()
-    assert device["retired_at"] == 1000
-    assert lifecycle == {"generation": 2, "revoked_at": 1000}
+    assert device == {"retired_at": 1000, "generation": 2, "created_by": "console", "changed_by": "console"}
     assert player == {"retired_at": 1000, "authority_epoch": 2}
 
 
 def test_retired_canonical_device_refuses_new_app_enrollment(registry) -> None:
     _seed_player(registry, canonical_device=True)
-    registry.retire(PLAYER_ID)
+    registry.retire(PLAYER_ID, by="console")
     key = Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes_raw().hex()
     nonce = registry.challenge(public)["nonce"]
@@ -72,13 +70,14 @@ def test_retired_canonical_device_refuses_new_app_enrollment(registry) -> None:
 def test_bound_retirement_refusal_does_not_create_a_device_tombstone(registry) -> None:
     _seed_player(registry, canonical_device=False)
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO outputs(player_id,output_id,observation) VALUES(%s,%s,%s)",
+        conn.execute("INSERT INTO outputs(player_id,output_id,observation,created_at,created_by,changed_at,"
+                     "changed_by) VALUES(%s,%s,%s,0,'node',0,'node')",
                      (PLAYER_ID, "HDMI-A-1", Jsonb({"output_id": "HDMI-A-1",
                                                     "width_px": 1920, "height_px": 1080})))
-    registry.create_frame(frame_create("lifecycle-frame"))
-    registry.bind("lifecycle-frame", PLAYER_ID, "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("lifecycle-frame"), by="console")
+    registry.bind("lifecycle-frame", PLAYER_ID, "HDMI-A-1", expected_generation=0, by="console")
     with pytest.raises(RegistryError, match="player_bound"):
-        registry.retire(PLAYER_ID)
+        registry.retire(PLAYER_ID, by="console")
     with registry.db.transaction() as conn:
         assert conn.execute("SELECT 1 FROM devices WHERE device_id=%s",
                             (DEVICE_ID,)).fetchone() is None

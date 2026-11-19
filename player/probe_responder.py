@@ -30,8 +30,8 @@ from typing import Protocol
 
 from contracts.node_app_link import (
     MAX_NODE_LINK_BYTES,
+    PLAYER_PROBE_SOCKET,
     FrameBlack,
-    NodeProbeV2,
     encode_node_frames_black,
     encode_node_probe_answer,
     encode_node_probe_open,
@@ -39,7 +39,7 @@ from contracts.node_app_link import (
     parse_node_app_link_result,
     parse_node_probe_channel_message,
 )
-from player.node_app_link import DEFAULT_NODE_LINK_SOCKET, root_socket
+from player.probe_socket import root_socket
 
 LOG = logging.getLogger("photo_wall.player.probe")
 # Slow and capped (below the broker's startup budget S): a broker that refuses
@@ -57,14 +57,13 @@ class Dispatcher(Protocol):
 
 class ProbeResponder:
     def __init__(self, dispatcher: Dispatcher, *,
-                 on_relink: Callable[[], None],
                  frames_black: Callable[[], tuple[FrameBlack, ...] | None],
-                 path: Path = DEFAULT_NODE_LINK_SOCKET,
+                 path: Path = Path(PLAYER_PROBE_SOCKET),
                  connector: Callable[[Path], socket.socket] = root_socket,
                  sleep: Callable[[float], None] = time.sleep,
                  gl_renderer: Callable[[], str | None] = lambda: None) -> None:
         # Own one-slot lane: a queued probe can never take one of the control slots.
-        self.dispatcher, self.on_relink = dispatcher.lane(1), on_relink
+        self.dispatcher = dispatcher.lane(1)
         self.gl_renderer = gl_renderer  # read on the main thread, where the renderer lives
         self._renderer_sent = False  # this channel already carried the renderer
         self.frames_black = frames_black  # read on the main thread too
@@ -122,14 +121,8 @@ class ProbeResponder:
                     except ValueError:
                         LOG.debug("player: probe channel packet invalid")
                     return probed
-                if isinstance(message, NodeProbeV2):
-                    probed = True
-                    self._probe(message.nonce)
-                else:
-                    try:
-                        self.on_relink()
-                    except Exception as error:
-                        LOG.warning("player: relink request failed: %s", type(error).__name__)
+                probed = True
+                self._probe(message.nonce)
         except (OSError, ValueError) as error:
             LOG.debug("player: probe channel closed: %s", type(error).__name__)
             return probed

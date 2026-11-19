@@ -1,5 +1,7 @@
 # Operator Console Pass 2, Slice 1: Wall Health at a Glance
 
+> **Since [0034](decisions/0034-central-schema-consolidation.md) (2026-11-19)** Central's tables are consolidated and the Pi's old HTTP path (node sessions and producers, its posts, the app link, AppManager and the app operations) is gone. The tables and modules this page names are as they stood; [0034's table map](decisions/0034-central-schema-consolidation.md#table-map) says where each table went.
+
 **Date:** 2026-09-27 · **Status:** design-gate artifact, awaiting owner approval. Later renames ([console DDD pass 3](operator-console-ddd.md#19-screens)): `needs-commissioning` is `needs-calibration` ("Needs calibration", Calibration facet), and `display-not-detected` is `no-panel-at-enrollment` ("No Panel listed as connected at the Player app's last enrollment (may be stale)", Binding facet). The [console DDD pass 2](operator-console-ddd.md#15-screens) adds an `output-interrupted` alarm after Player silent.
 **Builds on:** [the approved console design](operator-console-ux-design.md) (rules R1–R4).
 **Layer:** one console increment, plus a small read-only backend addition and one shared constant module. No migration.

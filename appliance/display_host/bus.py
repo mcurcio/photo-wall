@@ -9,11 +9,14 @@ stream). Its three streams:
   (`contracts.node_output.output_document_key`) and one picture document per Output
   (`contracts.node_picture.picture_document_key`, decision 0022) and one Frame region document per
   Output (`contracts.node_output.region_document_key`, issue #124: the bound Frame's rectangle the
-  debug overlay draws inside). The table leaves the rest of the line to the
+  debug overlay draws inside) and one Position trial document per Output
+  (`contracts.node_calibration.trial_document_key`, decision 0034 S4b: the trial in force for the
+  Frame bound there, its leases as durations). The table leaves the rest of the line to the
   record buffer; decision 0017 C11's later "Output layout" document joins this table as its own key
   per Output (`layout-<output_id>`), which a release that lists it applies with no new stream.
 - `KV_state_display`, the state bucket the controller writes: one Output report per Output
-  (`output_report_key`) and one picture report per Output (`picture_report_key`) beside `birth`
+  (`output_report_key`), one picture report per Output (`picture_report_key`) and one trial report
+  per Output (`trial_report_key`: what the admitted surface presents under a trial) beside `birth`
   and `outbox`.
 - `RECORD_display`, the circular record buffer: `display.record.power` (one `PowerAttempt` per
   attempt) and the session's own `display.record.call`. The display component registers no method.
@@ -32,6 +35,14 @@ import threading
 from collections.abc import Callable
 from typing import Final
 
+from contracts.node_calibration import (
+    TRIAL_DOCUMENT_BYTES,
+    TRIAL_REPORT_BYTES,
+    TrialReport,
+    encode_trial_report,
+    trial_document_key,
+    trial_report_key,
+)
 from contracts.node_impeded import IMPEDED_KEY, ImpededFrames, decode_impeded
 from contracts.node_link import NODE_BUS_URL, STORE_LINES
 from contracts.node_output import (
@@ -66,10 +77,12 @@ DISPLAY_COMPONENT: Final = "display"
 DISPLAY_VERSION: Final = "1.0.0"                   # the display component's release version (birth)
 POWER_RECORD: Final = "record.power"               # emit subject of a PowerAttempt, under the line
 DISPLAY_STATE: Final = KeyTable({**{output_report_key(output): OUTPUT_REPORT_BYTES for output in OUTPUT_IDS},
-                                 **{picture_report_key(output): PICTURE_REPORT_BYTES for output in OUTPUT_IDS}})
+                                 **{picture_report_key(output): PICTURE_REPORT_BYTES for output in OUTPUT_IDS},
+                                 **{trial_report_key(output): TRIAL_REPORT_BYTES for output in OUTPUT_IDS}})
 DISPLAY_DESIRED: Final = KeyTable({**{output_document_key(output): OUTPUT_DOCUMENT_BYTES for output in OUTPUT_IDS},
                                    **{picture_document_key(output): PICTURE_DOCUMENT_BYTES for output in OUTPUT_IDS},
-                                   **{region_document_key(output): REGION_DOCUMENT_BYTES for output in OUTPUT_IDS}})
+                                   **{region_document_key(output): REGION_DOCUMENT_BYTES for output in OUTPUT_IDS},
+                                   **{trial_document_key(output): TRIAL_DOCUMENT_BYTES for output in OUTPUT_IDS}})
 
 
 def _display_slice() -> Slice:
@@ -118,6 +131,17 @@ class BusPictureSink:
 
     def put_picture(self, report: PictureReport) -> None:
         self._session.state.put(picture_report_key(report.output_id), encode_picture_report(report))
+
+
+class BusTrialSink:
+    """`trials.TrialReports` on the display session: an Output's trial report is its state key
+    (`trial_report_key`). It only queues on the session, so it never blocks."""
+
+    def __init__(self, session: NodeSession) -> None:
+        self._session = session
+
+    def put_trial(self, report: TrialReport) -> None:
+        self._session.state.put(trial_report_key(report.output_id), encode_trial_report(report))
 
 
 class BusImpededReports:

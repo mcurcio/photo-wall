@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from support.trial_bus import worker_trials
 from test_fleet_attempts import DEVICE_ID
 from test_position_history_store import AUTH, Node, _client, _see_display, _sql
 
@@ -26,7 +27,7 @@ OTHER_PI = "pi-other"
 def _project(registry) -> None:
     """The worker's picture projection for the rig's Pi, at Central's time now."""
     with registry.db.transaction() as conn:
-        output_documents(conn, DEVICE_ID, DatabaseTransactionClock().now_in(conn))
+        output_documents(conn, DEVICE_ID, DatabaseTransactionClock().now_in(conn), trials=worker_trials(registry.db))
 
 
 def _entry(client, player_id: str, output_id: str, change: str | int, headers=AUTH):
@@ -40,12 +41,12 @@ def _target_sent(registry):
     Node(registry)
     display = _see_display(registry)
     pictures = PgPictureSessions(registry.db)
-    session = pictures.begin_picture("node-f0")
+    session = pictures.begin_picture("node-f0", by="console")
     pictures.edit_test_pattern(session.session_id, TestPatternEdit(
-        test_pattern=TestPattern.TARGET_PRE_SOFTWARE, expected_sequence=session.sequence))
+        test_pattern=TestPattern.TARGET_PRE_SOFTWARE, expected_sequence=session.sequence), by="console")
     _project(registry)
-    [row] = _sql(registry, "SELECT player_id, output_id, picture_change FROM picture_sent_entries "
-                           "WHERE test_pattern='target-pre-software'")
+    [row] = _sql(registry, "SELECT player_id, output_id, picture_change FROM picture_history WHERE kind='sent' AND "
+                           "test_pattern='target-pre-software'")
     return display, Port(row["player_id"], row["output_id"]), row["picture_change"]
 
 
@@ -68,12 +69,14 @@ def test_the_key_is_exact(registry):
     """(2) Acceptance 2: another Pi on the same output id with the same change answers its own entry.
     Mutation probe K1-player: ignore player_id -> one of the two answers the other's."""
     display, port, change = _target_sent(registry)
-    _sql(registry, "INSERT INTO players(id, public_key, token_hash, registered_at, last_seen, device_id) "
-                   "VALUES (%s, 'other-public-key', 'other-token-hash', 900, 900, %s)", (OTHER_PI, OTHER_PI))
+    _sql(registry, "INSERT INTO players(id, public_key, token_hash, registered_at, last_seen, device_id, created_at, "
+                   "created_by, changed_at, changed_by) VALUES (%s, 'other-public-key', 'other-token-hash', 900, 900, "
+                   "%s, 900, 'node', 900, 'node')", (OTHER_PI, OTHER_PI))
     other_picture = replace(default_picture(), software=replace(default_picture().software, gamma_tenths=26))
     with registry.db.transaction() as conn:
         append_sent_in(conn, Port(OTHER_PI, port.output_id), change, display_id=display, frame_id=None,
-                       record=PictureRecord(PictureEntryKind.SENT_BACK, other_picture, None, None, TestPattern.WHITE))
+                       record=PictureRecord(PictureEntryKind.SENT_BACK, other_picture, None, None, TestPattern.WHITE),
+                       by="central")
     with _client(registry) as client:
         mine = _entry(client, port.player_id, port.output_id, change).json()
         theirs = _entry(client, OTHER_PI, port.output_id, change).json()

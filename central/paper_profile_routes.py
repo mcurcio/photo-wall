@@ -22,6 +22,7 @@ from typing import Any, Final
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
+from central.actor import Actor
 from central.content_routes import repr_digest
 from central.frame_lighting.paper_profiles import (
     LUT_RECIPE_ID,
@@ -54,9 +55,9 @@ def mount_paper_profile_routes(app: FastAPI, *, admin: Any, player: Any, profile
     def list_paper_profiles() -> PaperProfilesView:
         return profiles.list_paper_profiles()
 
-    @app.post(PAPER_PROFILES, dependencies=[Depends(admin)], response_model=PaperProfileView)
-    async def add_paper_profile(request: Request) -> JSONResponse:
-        view, created = await asyncio.to_thread(profiles.add_paper_profile, await _profile(request))
+    @app.post(PAPER_PROFILES, response_model=PaperProfileView)
+    async def add_paper_profile(request: Request, by: Actor = Depends(admin)) -> JSONResponse:
+        view, created = await asyncio.to_thread(profiles.add_paper_profile, await _profile(request), by=by)
         return JSONResponse(view.model_dump(mode="json"), status_code=201 if created else 200)
 
     @app.delete(PAPER_PROFILES + "/{profile_sha256}", dependencies=[Depends(admin)], status_code=204,

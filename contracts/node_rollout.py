@@ -10,7 +10,7 @@ import math
 import re
 from hashlib import sha256
 
-REPORT_CATEGORIES = ("compatibility_matrix", "fence_contract", "readiness_contract")
+REPORT_CATEGORIES = ("compatibility_matrix", "readiness_contract")
 MAX_QUALIFICATION_BYTES = 131072
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _IMAGE = re.compile(r"[a-z0-9][a-z0-9./:_-]+@sha256:[0-9a-f]{64}\Z")
@@ -59,7 +59,7 @@ def validate_qualification(value: dict) -> dict:
         if item["interpreter"] != "/app/.venv/bin/python":
             raise ValueError("qualification_interpreter_changed")
         imports = item["imports"]
-        if type(imports) is not dict or set(imports) != {"central.app", "central.coordination", "central.fleet.node_lifecycle", "contracts.node_protocol"}:
+        if type(imports) is not dict or set(imports) != {"central.app", "central.coordination", "contracts.node_protocol"}:
             raise ValueError("qualification_imports_invalid")
         if any(path != "/app/"+name.replace(".", "/")+".py" for name, path in imports.items()):
             raise ValueError("qualification_source_shadowed")

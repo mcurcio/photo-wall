@@ -8,7 +8,6 @@ import sys
 
 PATH: tuple[str, ...] = (
     "/usr/lib/photo-wall/common",
-    "/usr/lib/photo-wall/node-central-session",
     "/usr/lib/photo-wall/node-display",
     "/usr/lib/photo-wall/node-kernel",
 )

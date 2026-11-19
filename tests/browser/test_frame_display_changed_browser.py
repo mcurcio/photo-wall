@@ -39,7 +39,7 @@ CARD = "Display changed"
 
 def _landscape(registry, frame_id: str) -> str:
     """A Frame filling its screen; the reported displays prefer 1920 x 1080."""
-    registry.create_frame(frame_create(frame_id, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(frame_id, x_mm=100, y_mm=100), by="console")
     return frame_id
 
 

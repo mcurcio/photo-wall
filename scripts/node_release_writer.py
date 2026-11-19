@@ -1,5 +1,5 @@
 """The release writer (decision 0019, data flow step 4): one node component set, written from the
-local repo and the two sealed release roots; it builds nothing and computes no ABI.
+local repo and the one sealed release root; it builds nothing and computes no ABI.
 
     python -m scripts.node_release_writer write --repo DIR --images DIR --output DIR \
         --revision REV --inputs-sha256 HEX
@@ -8,20 +8,20 @@ local repo and the two sealed release roots; it builds nothing and computes no A
 
 `write` reads the local repo (debian-packaging/build-repo.sh's output) and the roots
 debian-packaging/build-root.sh built (`<role>.squashfs` and `<role>.reference.json`, for the
-roles app and manager-primary) and writes the set node_release_artifacts.append ships:
-components.json (COMPONENTS_SCHEMA: the ABI and each root's reference, the seal's plus the
+one role app; any other root in the directory is refused) and writes the set node_release_artifacts.append ships:
+components.json (COMPONENTS_SCHEMA: the ABI and the root's reference, the seal's plus the
 image's sha256 and size), build-provenance.json, the images, and the repo's .debs byte for byte:
 node-base.deb (photo-wall-node), node-display.deb (photo-wall-node-display) and each root's
 package as `<role>.deb` (the node release's roles, E-0019-RECUT-2). The ABI is what
 photo-wall-node's and photo-wall-node-display's abi.json say in the repo; it refuses a root
 sealed for another ABI or another package than the repo's, and an image over its memory line
-(appliance/kernel/capacity.py: `app-image`, `manager-image`), so no image leaves the build
+(appliance/kernel/capacity.py: `app-image`), so no image leaves the build
 unchecked. Then it stamps the set with the revision (node_release_artifacts.write_stamp).
 
 `key` prints the roots' cache key (node-components.yml): a sha256 over the recipe (`RECIPE`
 and the first-party modules the seal and this writer import), the ABI pair and, per root
 package, the Package=Version lines `build-root.sh --resolve` printed. Equal keys give equal
-images, so a restored pair of roots is the pair a build would give; the .debs and the
+images, so a restored root is the root a build would give; the .debs and the
 components.json are always this run's.
 """
 from __future__ import annotations
@@ -42,16 +42,16 @@ from typing import Final
 from appliance.apps.environment import IMAGE_SUFFIX, canonical_bytes, file_sha256
 from appliance.kernel.capacity import line
 from contracts.app_environment import AppEnvironmentRefV2
-from contracts.node_boot import APP_PACKAGE, MANAGER_PACKAGE
+from contracts.node_boot import APP_PACKAGE
 from scripts.module_closure import first_party_files
 from scripts.node_release_artifacts import COMPONENTS_SCHEMA, write_stamp
 
 REPO: Final = Path(__file__).resolve().parents[1]
 ARCHITECTURE: Final = "arm64"
-# Each root's role -> its package (debian/control), components.json field and memory line.
+# The release's one root: its role -> its package (debian/control), components.json field and
+# memory line.
 ROOTS: Final = {
     "app": (APP_PACKAGE, "app_environment", "app-image"),
-    "manager-primary": (MANAGER_PACKAGE, "manager_primary", "manager-image"),
 }
 # The packages whose .debs ship byte for byte as the node release's base and display roles, and
 # the abi.json each installs.
@@ -129,7 +129,7 @@ def reference(images: Path, role: str, *, repo: Path, debs: Mapping[str, tuple[s
 
 def check_line(role: str, size_bytes: int) -> None:
     """The role's image fits its memory line on the Node (appliance/kernel/capacity.py): the
-    app within `app-image`, the manager within `manager-image`."""
+    app within `app-image`."""
     if size_bytes > line(ROOTS[role][2]).cap_bytes:
         raise WriterError("node_components_image_over_line")
 
@@ -139,6 +139,10 @@ def write(*, repo: Path, images: Path, output: Path, revision: str, inputs_sha25
     return its components.json."""
     if output.exists():
         raise WriterError("node_release_output_exists")
+    found = {path.name.removesuffix(IMAGE_SUFFIX).removesuffix(REFERENCE_SUFFIX)
+             for path in images.iterdir() if path.name.endswith((IMAGE_SUFFIX, REFERENCE_SUFFIX))}
+    if found - set(ROOTS):
+        raise WriterError("node_release_root_unknown:" + ",".join(sorted(found - set(ROOTS))))
     debs = repo_debs(repo)
     release_abi = abi(repo, debs)
     refs = {role: reference(images, role, repo=repo, debs=debs, release_abi=release_abi)
@@ -150,7 +154,7 @@ def write(*, repo: Path, images: Path, output: Path, revision: str, inputs_sha25
         copies[role + IMAGE_SUFFIX] = images / (role + IMAGE_SUFFIX)
     for name, source in copies.items():
         shutil.copyfile(source, output / name)
-    components = {"schema": COMPONENTS_SCHEMA, "abi": release_abi, "manager_fallback": None,
+    components = {"schema": COMPONENTS_SCHEMA, "abi": release_abi,
                   **{ROOTS[role][1]: asdict(ref) for role, ref in refs.items()}}
     provenance = {"schema": COMPONENTS_SCHEMA, "architecture": ARCHITECTURE, "abi": release_abi,
                   "inputs_sha256": inputs_sha256,

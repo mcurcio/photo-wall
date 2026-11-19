@@ -17,7 +17,6 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from types import MappingProxyType
 from typing import Final
 
 from central.assets.frame_media import FrameMedia
@@ -37,6 +36,7 @@ from central.content_catalog.catalog import ReleaseCatalog
 from central.content_catalog.sync import SyncReleasesHandler
 from central.db import Database
 from central.execution_repository import PostgresExecutionRepository
+from central.fleet.pi_reboot import PiReboot, RebootPiHandler
 from central.health.probe import PodProbe
 from central.infra.asset_records import PgAssetRecords
 from central.infra.catalog_records import PgReleaseRecords
@@ -48,7 +48,7 @@ from central.infra.publisher import ProcrastinatePublisher
 from central.infra.queue_ops import (
     FinishedJobs,
     PurgeFinishedJobsHandler,
-    QueueAdmin,
+    QueueRescue,
     RescueStalledJobsHandler,
 )
 from central.infra.runtime import JobRuntime
@@ -58,7 +58,6 @@ from central.installation_repository import PostgresInstallationRepository
 from central.kernel.assets import MediaReady
 from central.kernel.handling import Handler
 from central.kernel.job_types import PrepareMedia
-from central.kernel.jobs import QueueName
 from central.kernel.ports import AssetReadiness, ThumbnailOrigin
 from central.kernel.publishing import Publisher
 from central.origins.github import GitHubReleaseOrigin
@@ -76,8 +75,9 @@ THUMBNAIL_WAIT: Final = timedelta(seconds=2)
 # own, up to the read-through bound (`contracts.read_through`), as the media gateway bounded its
 # transfers to 8.
 FRAME_MEDIA_WAITER_SLOTS: Final = 8
-WORKER_CONCURRENCY: Final[Mapping[QueueName, int]] = MappingProxyType(
-    {QueueName.FETCH: 2, QueueName.UPKEEP: 2, QueueName.TRANSCODE: 2})
+# The one Central worker's jobs at once, over every queue (decision 0034, S3a): the sum of the
+# two per queue (FETCH, UPKEEP, TRANSCODE) it replaced. A burst on one queue can take every slot.
+WORKER_CONCURRENCY: Final = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,21 +177,23 @@ def build_release_services(db: Database, clock: Clock, *, cache_root: Path) -> t
 
 def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path,
                       env: Mapping[str, str], thumbnails: ThumbnailOrigin,
-                      media_maker: Handler[PrepareMedia, MediaReady]) -> JobRuntime:
+                      media_maker: Handler[PrepareMedia, MediaReady], reboot: PiReboot) -> JobRuntime:
     """Every CATALOG handler behind one `JobRuntime`; its boot checks run here.
 
     `thumbnails` is the media worker's library origin (R22): the thumbnail handler is Central's,
     its library half is injected, so Central imports no library client. `media_maker` is the
     media worker's `PrepareMedia` handler (media/media_maker.py), injected for the same reason.
+    `reboot` asks a Pi's host to reboot (`RebootPi`): the worker's Node bus links
+    (`NodeBus.pi_reboot()`), or `NoHubReboot` with no hub deployed.
 
-    The runtime owns the queue-ops pool (`QueueAdmin`, opened on first use) and closes it when
-    `run()` ends, so no caller has a pool to remember.
+    The runtime owns the queue-ops pool (`QueueRescue`, opened on first use) and closes it when
+    `run()` ends, so no caller has a pool to remember; the rescue also runs at its start.
     """
     core = _core(db, clock, cache_root=cache_root, feed_wanted=False)
     origin = GitHubReleaseOrigin.from_env(env)
     production = AssetProduction(store=core.store, records=core.assets,
                                  transactions=core.transactions)
-    admin = QueueAdmin(db.dsn)
+    rescue = QueueRescue(db.dsn)
     handlers = (
         SyncReleasesHandler(origin=origin, releases=PgReleaseRecords(),
                             transactions=core.transactions, publisher=core.publisher,
@@ -204,9 +206,11 @@ def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path,
                         transactions=core.transactions, publisher=core.publisher),
         MaintainCacheHandler(catalog=core.catalog, records=core.assets, store=core.store,
                              transactions=core.transactions),
-        RescueStalledJobsHandler(admin),
+        RescueStalledJobsHandler(rescue),
         PurgeFinishedJobsHandler(FinishedJobs(db.transaction), transactions=core.transactions,
                                  outcomes=core.outcomes, clock=clock),
+        RebootPiHandler(reboot, core.transactions),
     )
     return JobRuntime(db.dsn, handlers, WORKER_CONCURRENCY, transactions=core.transactions,
-                      assets=core.assets, clock=clock, owned=(admin,))
+                      assets=core.assets, clock=clock, owned=(rescue,),
+                      on_start=(rescue.rescue_at_start,))

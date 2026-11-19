@@ -1,8 +1,10 @@
 """Linux base DisplayHost controller with a root-only broker ingress.
 
 This entry point does not accept app self-reported authority or expose a network
-listener. Central transport and calibration Save remain separate owners. The
-bounded local event feed is observation only and acknowledges no Runtime commit.
+listener. It hands each Output to the Player on the Pi alone (`handoff.Handoffs`: the Output
+document's Frame binding and the app broker's current run; decision 0034, S4b part 4), never by a
+request to Central. The bounded local event feed is observation only and acknowledges no Runtime
+commit.
 """
 
 from __future__ import annotations
@@ -27,13 +29,16 @@ from uuid import UUID
 
 from appliance.feed import Feed, answer_feed_read
 from appliance.feed_socket import FEED_READERS, FEEDS_GROUP, FeedListener
+from appliance.kernel.app_facts import APP_RUN_OP
 from appliance.kernel.display_paths import (
     CONTROLLER_STATE,
     DISPLAY_UNIT,
+    INGRESS_SOCKET,
     RUNTIME,
     SIGNAL_RANGE_REQUEST,
 )
 from appliance.kernel.unix_credentials import receive_credential_packet
+from contracts.node_calibration import decode_trial_document, trial_document_key
 from contracts.node_output import (
     OUTPUT_IDS,
     CentralCard,
@@ -50,11 +55,19 @@ from contracts.node_picture import decode_picture_document, picture_document_key
 from contracts.node_protocol import OutputKey
 from nodeapi.documents import Document
 
-from .bus import DISPLAY_SLICE, BusImpededReports, BusPictureSink, BusReportSink, display_session
+from .bus import (
+    DISPLAY_SLICE,
+    BusImpededReports,
+    BusPictureSink,
+    BusReportSink,
+    BusTrialSink,
+    display_session,
+)
 from .central_card import CentralCards
 from .ddc import DdcChannel
 from .domain import OutputState
 from .edid import EdidReading, parse_edid, read_edid
+from .handoff import AppRun, Handoffs
 from .output_power import OutputPowerController, PiClock, ReportSink
 from .picture import (
     DdcPictureAdapter,
@@ -68,13 +81,23 @@ from .picture_list import FileOfferedCache, PictureListAsker
 from .power_methods import DdcCiAdapter, HdmiCecAdapter, SignalOffAdapter, run_tool
 from .screen_turn import ScreenTurns
 from .signal_range import DrmConnectorRanges, FileRangeRequests
-from .weston import MAX_PACKET, SurfaceGrant, WestonBackend, _pairs, _surface
+from .trials import Trials
+from .weston import (
+    MAX_PACKET,
+    CompositorPresentation,
+    SurfaceGrant,
+    WestonBackend,
+    _pairs,
+)
 
 log = logging.getLogger(__name__)
 
 # The display feed for node readers (root, pw-health): the `events` op only, over the kernel
-# feed socket. The root-only ingress (`<runtime>/ingress.sock`) keeps every operation.
+# feed socket. The root-only ingress (`<runtime>/ingress.sock`, display_paths.INGRESS_SOCKET) keeps
+# its operations (`app_run`, `outputs`, `events`); its mode is INGRESS_MODE (group pw-display, so the app broker, root without
+# CAP_DAC_OVERRIDE, can connect through its supplementary group), and any peer not uid 0 is refused.
 FEED_SOCKET = Path("/run/photo-wall-display-feed/feed.sock")
+INGRESS_MODE: Final = 0o660
 
 
 def _unit(unit: str) -> dict[str, str]:
@@ -435,27 +458,33 @@ class CentralCardWiring:
 
 
 def settle(controller: Controller, backend: WestonBackend, wiring: CentralCardWiring) -> None:
-    """The main loop's pass before it waits: every pending shell event observed, the retiring
-    service ticked, then Central's cards told what this pass changed (`tell_cards`; no change:
-    nothing sent)."""
+    """The main loop's pass before it waits: every pending shell event observed, each Output's
+    handoff decided (`Handoffs.settle`: the Output document's binding and the broker's run), each
+    Output's Position trial settled (`Trials.settle`: its leases on this Pi's clock), then
+    Central's cards told what this pass changed (`tell_cards`; no change: nothing sent)."""
     while backend.pending:
         controller.observe()
-    if controller.service is not None:
-        controller.service.tick()
+    controller.handoffs.settle(controller.host)
+    if controller.trials is not None:
+        controller.trials.settle(controller.host)
     tell_cards(wiring.cards, backend)
 
 
 def document_feed(power: OutputPowerController, picture: PictureController,
-                  turns: ScreenTurns, regions: ShellRegions) -> Callable[[str, Document], None]:
+                  turns: ScreenTurns, regions: ShellRegions, trials: Trials,
+                  handoffs: Handoffs) -> Callable[[str, Document], None]:
     """The desired view's callback, routed by key: an Output document (`output-…`), decoded, to the
-    power controller and to the screen turns (its `turn`, render redesign S3); a picture document (`picture-…`, decision 0022), decoded, to the picture
+    power controller, to the screen turns (its `turn`, render redesign S3) and its binding to the
+    handoffs (`Handoffs.document`, decision 0034 S4b); a picture document (`picture-…`, decision 0022), decoded, to the picture
     controller (each acts on its own change number); a region document (`region-…`, issue #124),
-    decoded, its region to the shell's regions. A document that does not decode, sits under
+    decoded, its region to the shell's regions; a trial document (`trial-…`, decision 0034 S4b),
+    decoded, to the trials (`Trials.document`). A document that does not decode, sits under
     another Output's key, or under a key of none of these kinds, is logged and ignored; a refused
     region document gives its Output no region (the debug overlay on the whole Display), logged
     once per change, and touches neither power nor the turn."""
     output_keys = {output_document_key(output_id) for output_id in OUTPUT_IDS}
     picture_keys = {picture_document_key(output_id) for output_id in OUTPUT_IDS}
+    trial_keys = {trial_document_key(output_id) for output_id in OUTPUT_IDS}
     region_keys = {region_document_key(output_id): output_id for output_id in OUTPUT_IDS}
     refused: dict[str, bytes] = {}       # region key -> the refused document last logged
 
@@ -485,11 +514,17 @@ def document_feed(power: OutputPowerController, picture: PictureController,
                     raise ValueError("output_document_key")
                 power.document(decoded.output_id, decoded)
                 turns.document(decoded.output_id, decoded)
+                handoffs.document(decoded.output_id, decoded.binding)
             elif key in picture_keys:
                 wanted = decode_picture_document(document.value)
                 if picture_document_key(wanted.output_id) != key:
                     raise ValueError("picture_document_key")
                 picture.document(wanted.output_id, wanted)
+            elif key in trial_keys:
+                trial = decode_trial_document(document.value)
+                if trial_document_key(trial.output_id) != key:
+                    raise ValueError("trial_document_key")
+                trials.document(trial.output_id, trial)
             else:
                 raise ValueError("display_document_key")
         except ValueError as error:
@@ -539,12 +574,13 @@ def picture_controller(backend: WestonBackend, sink: PictureReports, ddc: DdcCha
 
 class Controller:
     def __init__(self, backend: WestonBackend, *, reports: OutputReporter | None = None,
-                 power: OutputPowerController | None = None):
+                 power: OutputPowerController | None = None, handoffs: Handoffs | None = None):
         self.backend = backend
         self._power = power   # each Output's power in force, for the feed snapshot
         self.host = backend.initialize()
         self.feed = Feed(256)
-        self.service = None
+        self.trials: Trials | None = None
+        self.handoffs = Handoffs(backend) if handoffs is None else handoffs   # shared with the document feed
         self.reports = reports
         if reports is not None:
             reports.observe(self.host.states())
@@ -555,15 +591,10 @@ class Controller:
             self.reports.observe(self.host.states())
         if observed is None:
             return
-        if self.service is not None:
-            self.service.observe(observed)
+        if self.trials is not None and isinstance(observed, CompositorPresentation):
+            self.trials.presented(observed, self.host)
         self.feed.append(
             type(observed).__name__, asdict(observed) if is_dataclass(observed) else observed
-        )
-
-    def revise(self, decision) -> None:
-        self.backend.revise(
-            decision.surface, decision.decision_id, expires_boottime_ms=decision.expires_boottime_ms
         )
 
     def outputs_snapshot(self) -> list[dict]:
@@ -588,26 +619,39 @@ class Controller:
             }
         if operation == "outputs":
             return {"outputs": [asdict(state) for state in self.host.states()]}
-        if operation == "candidate":
-            surface = _surface(value["surface"])
-            grant = SurfaceGrant(surface, value["uid"], value.get("starting_new"))
-            grant_id = self.backend.allow(grant)
-            try:
-                self.host.offer(surface)
-            except Exception:
-                self.backend.grants.pop(surface.output.output_id, None)
-                raise
-            return {"grant_id": grant_id}
-        if operation == "withdraw":
-            output = value["output_id"]
-            return {"state": asdict(self.host.authorized_withdrawal(output))}
-        if operation == "handoff":
-            import time
-
-            surface = _surface(value["surface"])
-            state = self.host.authorize_handoff(surface, now_ms=time.monotonic_ns() // 1_000_000)
-            return {"handoff_id": state.handoff_id}
+        if operation == APP_RUN_OP:
+            # The app broker's current run (appliance/apps/display_runs.py); None: no run.
+            if set(value) != {"op", "run"}:
+                raise ValueError("app_run")
+            self.handoffs.run(None if value["run"] is None else AppRun.of(value["run"]))
+            return {}
         raise ValueError("display_operation_unsupported")
+
+
+def answer_ingress(connection: socket.socket, controller: Controller, *, root: int = 0) -> None:
+    """One accepted ingress connection: a peer whose uid is not `root` (0; a test passes its own)
+    gets no answer; else its one packet, with its credentials (`receive_credential_packet`), is
+    the controller's operation (`Controller.receive`), answered {"accepted": true, ...} or
+    {"accepted": false, "reason": <the error's type>}, bounded by MAX_PACKET."""
+    connection.settimeout(1)
+    _pid, uid, _gid = struct.unpack(
+        "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+    if uid != root:
+        return
+    try:
+        credentials, raw = receive_credential_packet(connection, maximum=MAX_PACKET)
+        if credentials[1] != root:
+            raise ValueError("display_ingress_peer")
+        value = json.loads(raw, object_pairs_hook=_pairs)
+        if type(value) is not dict:
+            raise ValueError("display_ingress_type")
+        result = {"accepted": True, **controller.receive(value)}
+    except (ValueError, KeyError, TypeError, OSError) as exc:
+        result = {"accepted": False, "reason": type(exc).__name__}
+    wire = json.dumps(result, default=str, separators=(",", ":")).encode()
+    if len(wire) > MAX_PACKET:
+        wire = b'{"accepted":false,"reason":"response_bound"}'
+    connection.sendall(wire)
 
 
 class _stopping:
@@ -641,7 +685,8 @@ def main() -> None:
     config = {}
     if args.config is not None:
         config = json.loads(args.config.read_bytes(), object_pairs_hook=_pairs)
-        if type(config) is not dict or set(config) - {"runtime", "central", "serial", "offer_id"}:
+        # The runtime path alone: Display speaks to Central only over the bus (decision 0034, S4c).
+        if type(config) is not dict or set(config) - {"runtime"}:
             raise ValueError("display_config_fields")
         if "runtime" in config:
             args.runtime = Path(config["runtime"])
@@ -651,7 +696,7 @@ def main() -> None:
     # systemd stops the unit with SIGTERM: exit through the finally below (CEC `--clear`).
     signal.signal(signal.SIGTERM, lambda _signal, _frame: sys.exit(0))
     peer = _unit(DISPLAY_UNIT)
-    # The display line's session: always, with or without the retiring Central config. It connects
+    # The display line's session: always. It connects
     # on its own thread forever, so the compositor loop never waits on the bus.
     session = display_session(DISPLAY_SLICE.digest)
     session.start()
@@ -677,36 +722,29 @@ def main() -> None:
         turns.start()
         regions.start()
         cards.start()
-        feed = document_feed(power, picture, turns, regions)
+        trials = Trials(backend, BusTrialSink(session))    # the Position trial (WestonBackend.trial)
+        handoffs = Handoffs(backend)                       # the handoff: each Output's binding and the broker's run
+        feed = document_feed(power, picture, turns, regions, trials, handoffs)
         session.desired.on_change(feed)
         for output_id in OUTPUT_IDS:     # what arrived before the callback, once more (idempotent)
             for key in (output_document_key(output_id), picture_document_key(output_id),
-                        region_document_key(output_id)):
+                        region_document_key(output_id), trial_document_key(output_id)):
                 if (present := session.desired.get(key)) is not None:
                     feed(key, present)
         controller = Controller(backend, reports=OutputReporter(PowerObservations(power, picture, turns),
                                                                 mode=backend.current_mode),
-                                power=power)
-        if config:
-            from .service import DisplayService
-
-            controller.service = DisplayService(
-                controller,
-                central=config["central"],
-                serial=config["serial"],
-                offer_id=UUID(config["offer_id"]),
-                runtime=args.runtime,
-            )
+                                power=power, handoffs=handoffs)
+        controller.trials = trials
         with (
             _stopping(power, picture, turns, regions, cards, cec),
             feed_listener(controller) as feeds,
             socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as ingress,
         ):
-            path = args.runtime / "ingress.sock"
+            path = args.runtime / INGRESS_SOCKET.name
             path.unlink(missing_ok=True)
             ingress.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
             ingress.bind(str(path))
-            os.chmod(path, 0o600)
+            os.chmod(path, INGRESS_MODE)
             ingress.listen(4)
             with selectors.DefaultSelector() as selector:
                 selector.register(channel, selectors.EVENT_READ, "backend")
@@ -723,29 +761,7 @@ def main() -> None:
                             continue
                         connection, _ = ingress.accept()
                         with connection:
-                            connection.settimeout(1)
-                            _pid, uid, _gid = struct.unpack(
-                                "3i",
-                                connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12),
-                            )
-                            if uid != 0:
-                                continue
-                            try:
-                                credentials, raw = receive_credential_packet(
-                                    connection, maximum=MAX_PACKET
-                                )
-                                if credentials[1] != 0:
-                                    raise ValueError("display_ingress_peer")
-                                value = json.loads(raw, object_pairs_hook=_pairs)
-                                if type(value) is not dict:
-                                    raise ValueError("display_ingress_type")
-                                result = {"accepted": True, **controller.receive(value)}
-                            except (ValueError, KeyError, TypeError, OSError) as exc:
-                                result = {"accepted": False, "reason": type(exc).__name__}
-                            wire = json.dumps(result, default=str, separators=(",", ":")).encode()
-                            if len(wire) > MAX_PACKET:
-                                wire = b'{"accepted":false,"reason":"response_bound"}'
-                            connection.sendall(wire)
+                            answer_ingress(connection, controller)
 
 
 if __name__ == "__main__":

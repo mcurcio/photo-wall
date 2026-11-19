@@ -1,31 +1,42 @@
-"""Trial persistence/Save uses real Registry/Runtime transactions; pixels are separate evidence."""
+"""A Frame's Position trial (decision 0034, S4b part 3): its operations through real Registry and
+Runtime transactions, the trial document the worker's source puts on the Output's `trial-<port>`
+key (its leases as durations), and the Pi's statement of what it presents, through Central's real
+`TrialReportJudge` (tests/support/trial_bus.py). Pixels are separate evidence."""
 
 from dataclasses import replace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pydantic import TypeAdapter
 from support.position import LIGHTING
-from test_node_runtime_reconciliation import rig
-
-from central.fleet.node_calibration import NodeCalibration, TrialBegin, TrialOperation
-from central.fleet.node_display import NodeDisplay
-from central.fleet.node_sessions import NodeControlError
-from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
-from central.infra.frame_lighting_store import PgFrameLighting
-from contracts.models import Calibration, PositionBox
-from contracts.node_calibration import candidate_hash, canonical, parse_trial
-from contracts.node_display import (
-    DisplayExchange,
-    DisplayReceipt,
-    Surface,
-    encode_display_exchange,
-    parse_display_decision,
+from support.trial_bus import (
+    DEVICE,
+    FRAME,
+    bound_node,
+    documents_in,
+    draw,
+    present,
+    trial_document,
+    trials_of,
 )
+
+from central.fleet.models import NodeControlError, TrialRefusal
+from central.fleet.node_calibration import TrialBegin, TrialOperation
+from central.installation_repository import PostgresInstallationRepository
+from contracts.models import Calibration, PositionBox
+from contracts.node_calibration import (
+    TrialScope,
+    candidate_hash,
+    canonical,
+    encode_trial,
+    trial_document_key,
+)
+from contracts.node_display import Surface
+from contracts.node_protocol import NodeProcessIdentity, OutputKey
 from player.calibration_trial import TrialState
 from player.rendering import OutputComposition
 
-# Two Positions of the rig's 9:16 Frames on their 1920 x 1080 screens, each unlike the saved one
+# Two Positions of the 9:16 Frame on its 1920 x 1080 screen, each unlike the saved one
 # (support.position's PORTRAIT_ON_WIDE) and unlike each other.
 SKEWED = PositionBox(left=0.31, top=0.1, width=0.28, height=0.8)       # smaller, left of centre
 SHIFTED = PositionBox(left=0.5, top=0.2, width=0.2, height=0.7)         # smaller still, right and down
@@ -37,69 +48,39 @@ _OPERATION: TypeAdapter[TrialOperation] = TypeAdapter(TrialOperation)
 
 def operate(trials, frame_id, trial_id, **body):
     """One trial operation from its body's fields (`TrialOperation`)."""
-    return trials.operate(frame_id, trial_id, _OPERATION.validate_python(body))
+    return trials.operate(frame_id, trial_id, _OPERATION.validate_python(body), by="console")
 
 
 def begin(trials, frame_id, calibration=None, lighting=None):
     """Begin a trial at the saved values or the given drafts (`TrialBegin`)."""
-    return trials.begin(frame_id, TrialBegin.model_validate({"calibration": calibration, "lighting": lighting}))
+    return trials.begin(frame_id, TrialBegin.model_validate({"calibration": calibration, "lighting": lighting}), by="console")
 
 
-def setup_trial(registry):
-    coordinator, _, _, sessions, claims, grants, facts, _, _ = rig(registry)
-    fact, claim, grant = facts[0], claims["display_host"], grants["display_host"]
-    surface = Surface(
-        fact.output, fact.process, fact.app_epoch, fact.binding_generation, fact.config_revision, fact.frame_id
-    )
-    display = NodeDisplay(sessions, runtime=coordinator)
-    trials = NodeCalibration(sessions, display=display, registry=registry, lighting=PgFrameLighting(LUT_RECIPE_ID))
-    display.trials = trials
-    receipt = DisplayReceipt(surface, uuid4(), "weston-100", "baseline", 1400)
-    request = DisplayExchange(
-        grant.producer, uuid4(), 1400, fact.output, True, admitted=surface, receipt=receipt
-    )
-
-    def exchange(value):
-        return parse_display_decision(
-            display.exchange(claim.session_id, claim.credential, encode_display_exchange(value))
-        )
-
-    exchange(request)
-    return trials, request, exchange
+def setup_trial(registry, **lease):
+    """A bound Frame on a linked Pi (tests/support/trial_bus.py) and its trial owner."""
+    bound_node(registry)
+    return trials_of(registry, **lease)
 
 
 def test_latest_exact_ack_and_atomic_save_retry(registry, monkeypatch):
-    trials, request, exchange = setup_trial(registry)
-    row = begin(trials, "node-f0")
-    trial_id = __import__("uuid").UUID(row["trial_id"])
+    """Save needs the Pi's statement that it presents the latest candidate: before any report, and
+    after an edit (the statement cleared), Save is refused; a failed Save rolls back and keeps the
+    trial; a retried Save answers saved. Mutation probe 3.4: skip the `presented_*` check -> the
+    first Save succeeds -> RED."""
+    trials = setup_trial(registry)
+    row = begin(trials, FRAME)
+    trial_id = UUID(row["trial_id"])
     with pytest.raises(NodeControlError, match="latest_not_presented"):
-        operate(trials, "node-f0", trial_id, operation="save", expected_sequence=1)
+        operate(trials, FRAME, trial_id, operation="save", expected_sequence=1)
+    present(registry, trial_document(registry, trials))
     edited = Calibration.model_validate(row["calibration"]).model_copy(update={"fit": SKEWED})
-    row = operate(trials, 
-        "node-f0",
-        trial_id,
-        operation="edit",
-        expected_sequence=1,
-        calibration=edited.model_dump(mode="json"),
-        lighting=LIGHTING_JSON,
-    )
-    request = replace(request, request_id=uuid4(), sampled_boottime_ms=1500)
-    candidate = parse_trial(exchange(request).trial)
-    assert candidate.sequence == 2 and candidate.candidate_sha256 == row["candidate_sha256"]
+    row = operate(trials, FRAME, trial_id, operation="edit", expected_sequence=1,
+                  calibration=edited.model_dump(mode="json"), lighting=LIGHTING_JSON)
+    document = trial_document(registry, trials)
+    assert document.trial.sequence == 2 and document.trial.candidate_sha256 == row["candidate_sha256"]
     with pytest.raises(NodeControlError, match="latest_not_presented"):
-        operate(trials, "node-f0", trial_id, operation="save", expected_sequence=2)
-    request = replace(
-        request,
-        request_id=uuid4(),
-        sampled_boottime_ms=1600,
-        receipt=replace(
-            request.receipt,
-            sampled_boottime_ms=1600,
-            buffer_id="weston-101",
-            frame_tag=candidate.frame_tag,
-        ),
-    )
-    exchange(request)
+        operate(trials, FRAME, trial_id, operation="save", expected_sequence=2)
+    present(registry, document)
     original = registry.commit_calibration_trial_in
 
     def failed(*args, **kwargs):
@@ -107,87 +88,159 @@ def test_latest_exact_ack_and_atomic_save_retry(registry, monkeypatch):
 
     monkeypatch.setattr(registry, "commit_calibration_trial_in", failed)
     with pytest.raises(ValueError, match="fixture_save_failure"):
-        operate(trials, "node-f0", trial_id, operation="save", expected_sequence=2)
-    assert (
-        operate(trials, "node-f0", trial_id, operation="status", expected_sequence=2)["state"]
-        == "active"
-    )
+        operate(trials, FRAME, trial_id, operation="save", expected_sequence=2)
+    assert operate(trials, FRAME, trial_id, operation="status", expected_sequence=2)["state"] == "active"
     monkeypatch.setattr(registry, "commit_calibration_trial_in", original)
-    saved = operate(trials, "node-f0", trial_id, operation="save", expected_sequence=2)
+    saved = operate(trials, FRAME, trial_id, operation="save", expected_sequence=2)
     assert saved["state"] == "saved" and Calibration.model_validate(saved["saved_calibration"]).fit == SKEWED
     assert saved["saved_calibration"]["revision"] == edited.revision + 1
-    assert (
-        operate(trials, "node-f0", trial_id, operation="save", expected_sequence=2)["state"]
-        == "saved"
-    )
+    assert operate(trials, FRAME, trial_id, operation="save", expected_sequence=2)["state"] == "saved"
 
 
-def test_local_terminal_expiry_rejects_delayed_trial_and_canonical_output_primitives(registry):
-    trials, request, exchange = setup_trial(registry)
-    row = begin(trials, "node-f0")
-    request = replace(request, request_id=uuid4(), sampled_boottime_ms=1500)
-    candidate = parse_trial(exchange(request).trial)
-    binding = trials.display.installation.configuration_in
+def test_a_statement_that_names_none_clears_the_presentation(registry):
+    """The Pi's statement is level state: when it stops presenting (none named), Save is refused
+    again until it presents the latest candidate once more."""
+    trials = setup_trial(registry)
+    trial_id = UUID(begin(trials, FRAME)["trial_id"])
+    document = trial_document(registry, trials)
+    present(registry, document)
+    present(registry, replace(document, trial=None))
+    with pytest.raises(NodeControlError, match="latest_not_presented"):
+        operate(trials, FRAME, trial_id, operation="save", expected_sequence=1)
+    present(registry, document)
+    assert operate(trials, FRAME, trial_id, operation="save", expected_sequence=1)["state"] == "saved"
+
+
+def test_the_player_takes_the_envelope_and_its_terminal_expiry_holds(registry):
+    """The document's trial becomes the Pi's envelope on the admitted surface (`on_pi`), which the
+    Player applies; at its idle deadline it is terminal, and a delayed envelope with a later
+    deadline cannot revive it; Central marks the trial expired once its lease ran out."""
+    trials = setup_trial(registry)
+    row = begin(trials, FRAME)
+    trial = trial_document(registry, trials).trial
     with registry.db.transaction() as conn:
-        config = binding(conn, row["player_id"], row["authority_epoch"])["bindings"][0]
-    calibration = Calibration(
-        revision=config.calibration.revision,
-        fit=PositionBox(left=0.2, top=0.3, width=0.2, height=0.6),
-    )
+        config = PostgresInstallationRepository(registry.clock).configuration_in(
+            conn, row["player_id"], row["authority_epoch"])["bindings"][0]
+    admitted = Surface(OutputKey(uuid4(), uuid4(), config.output_id, 1, 1), NodeProcessIdentity(100, 5, uuid4()), 42,
+                       config.generation, config.configuration_revision, config.frame_id)
+    calibration = Calibration(revision=config.calibration.revision,
+                              fit=PositionBox(left=0.2, top=0.3, width=0.2, height=0.6))
     raw = canonical(calibration.model_dump(mode="json"))
-    candidate = replace(
-        candidate,
-        calibration_json=raw,
-        candidate_sha256=candidate_hash(
-            candidate.trial_id, candidate.generation, candidate.sequence, candidate.baseline, raw,
-            candidate.lighting,
-        ),
-    )
-    from contracts.node_calibration import encode_trial
-
+    trial = replace(trial, calibration_json=raw, candidate_sha256=candidate_hash(
+        trial.trial_id, trial.generation, trial.sequence, trial.scope, raw, trial.lighting))
+    candidate = trial.on_pi(admitted, 1500)
+    assert candidate.expires_boottime_ms == 1500 + trial.idle_ms
     state = TrialState()
-    applied = state.apply(
-        encode_trial(candidate), OutputComposition(config), 1500
-    )
-    assert applied.calibration == calibration
-    assert (
-        state.apply(
-            encode_trial(candidate),
-            OutputComposition(config),
-            candidate.expires_boottime_ms,
-        )
-        is None
-    )
-    # A delayed lease with a later deadline cannot resurrect the terminal generation.
+    assert state.apply(encode_trial(candidate), OutputComposition(config), 1500).calibration == calibration
+    assert state.apply(encode_trial(candidate), OutputComposition(config), candidate.expires_boottime_ms) is None
     delayed = replace(candidate, expires_boottime_ms=candidate.hard_expires_boottime_ms)
-    assert (
-        state.apply(
-            encode_trial(delayed),
-            OutputComposition(config),
-            candidate.expires_boottime_ms + 1,
-        )
-        is None
-    )
+    assert state.apply(encode_trial(delayed), OutputComposition(config), candidate.expires_boottime_ms + 1) is None
     registry.clock.advance(6)
-    expired = operate(trials, "node-f0", candidate.trial_id, operation="status", expected_sequence=1)
-    assert expired["state"] == "expired"
+    assert operate(trials, FRAME, trial.trial_id, operation="status", expected_sequence=1)["state"] == "expired"
 
 
-def test_native_capability_survives_session_loss(registry):
-    setup_trial(registry)
+def test_the_trial_reaches_the_output_with_its_leases_as_durations(registry):
+    """The Output's trial document carries the trial's scope (the Frame's binding) and the time left
+    on each lease at the document's write; a wake that changes nothing serves the same bytes, so
+    the Pi's lease is never re-armed; a keepalive raises the change and the idle duration."""
+    trials = setup_trial(registry)
+    row = begin(trials, FRAME)
+    first = trial_document(registry, trials)
+    assert first.trial.trial_id == UUID(row["trial_id"])
+    assert first.trial.scope == TrialScope("HDMI-A-1", FRAME, row["binding_generation"], row["configuration_revision"])
+    assert (first.trial.idle_ms, first.trial.hard_ms) == (5000, 110_000)
+    registry.clock.advance(2)
+    with registry.db.transaction() as conn:
+        before = documents_in(conn, trials)[trial_document_key("HDMI-A-1")]
+    with registry.db.transaction() as conn:
+        again = documents_in(conn, trials)[trial_document_key("HDMI-A-1")]
+    assert again == before
+    assert trial_document(registry, trials) == first      # 2 s on: the same document, its first durations
+    operate(trials, FRAME, first.trial.trial_id, operation="keepalive", expected_sequence=1)
+    kept = trial_document(registry, trials)
+    assert kept.change == first.change + 1
+    assert (kept.trial.idle_ms, kept.trial.hard_ms) == (5000, 108_000)
+    assert kept.trial.candidate_sha256 == first.trial.candidate_sha256
+
+
+def test_past_the_idle_deadline_the_document_carries_no_trial(registry):
+    """An idle lease that ran out leaves the document with no other write: the source projects no
+    trial past it, and wakes at it (`next_deadline_in`)."""
+    trials = setup_trial(registry)
+    begin(trials, FRAME)
+    began = registry.clock.utc()
+    assert trial_document(registry, trials).trial is not None
+    with registry.db.transaction() as conn:
+        assert trials.next_deadline_in(conn, device_id=DEVICE, now=began) == began + 5
+    registry.clock.advance(5)
+    ended = trial_document(registry, trials)
+    assert ended.trial is None and ended.change == 2
+
+
+def test_a_rebind_invalidates_the_trial_and_the_document_carries_none_at_once(registry):
+    """A Frame bound again (a new binding generation) is no longer the trial's scope: the document
+    carries none at once, and the trial's next operation marks it invalidated."""
+    player = bound_node(registry)
+    trials = trials_of(registry)
+    trial_id = UUID(begin(trials, FRAME)["trial_id"])
+    registry.unbind(FRAME, expected_generation=1, by="console")
+    registry.bind(FRAME, player["player_id"], "HDMI-A-1", expected_generation=2, by="console")
+    assert trial_document(registry, trials).trial is None
+    assert operate(trials, FRAME, trial_id, operation="status", expected_sequence=1)["state"] == "invalidated"
+
+
+@pytest.mark.parametrize(("change", "refusal"), [
+    ("unlinked", TrialRefusal.DISPLAY_UNAVAILABLE),
+    ("disconnected", TrialRefusal.CURRENT_OUTPUT_REQUIRED),
+    ("not_drawn", TrialRefusal.ADMITTED_SURFACE_REQUIRED),
+])
+def test_a_trial_needs_the_pi_linked_its_output_connected_and_the_frame_drawn(registry, change, refusal):
+    """The binding a trial needs, read from Central's own facts (`bound_frame_in`): the Pi's fleet
+    link on Central's hub, the Output's report connected, and the Player's `frames` report showing
+    the Frame at its binding."""
+    from support.output_report import report_modes
+
+    from central.fleet.node_bus_presence import record_presence_in
+
+    trials = setup_trial(registry)
+    if change == "unlinked":
+        with registry.db.transaction() as conn:
+            record_presence_in(conn, {DEVICE: False}, registry.clock.utc())
+    elif change == "disconnected":
+        report_modes(registry, DEVICE, ("HDMI-A-1",), None)
+    else:
+        draw(registry, frames=())
+    with pytest.raises(NodeControlError) as refused:
+        begin(trials, FRAME)
+    assert refused.value.code == refusal
+
+
+def test_a_frame_on_a_device_central_offered_a_boot_is_native(registry):
+    """`native_trial` once the bound Player's device has had a boot offer answered with an offer
+    (`node_boot_offers.offer_payload`, S4c-2a-v); neither a later generation nor a refused offer
+    withdraws it. Mutation probe: read `node_boot_admissions` again -> the table is gone (128)."""
+    from support.node_rig import rig
+
+    rig(registry)
     assert registry.calibration_capability("node-f0")["mode"] == "native_trial"
     with registry.db.transaction() as conn:
-        conn.execute("UPDATE node_sessions SET revoked_at=999 WHERE owner='display_host'")
+        conn.execute("UPDATE devices SET generation=generation+1")
+        conn.execute("INSERT INTO node_boot_offers(offer_id, device_id, device_generation, kernel_boot_id, "
+                     "boot_nonce, request_payload, refusal, created_at, created_by, changed_at, changed_by) "
+                     "SELECT gen_random_uuid(), device_id, generation, gen_random_uuid(), 'refused', '\\x00', "
+                     "'node_boot_policy_unconfigured', 1, 'node', 1, 'node' FROM devices")
     assert registry.calibration_capability("node-f0")["mode"] == "native_trial"
 
 
-def test_native_capability_survives_generation_revocation_without_current_boot(registry):
-    setup_trial(registry)
+def test_a_device_whose_every_boot_was_refused_is_not_admitted(registry):
+    """A refused boot offer (no `offer_payload`) admits nothing. Mutation probe: drop the
+    `offer_payload IS NOT NULL` condition -> native_trial, fails."""
+    from support.node_rig import rig
+
+    rig(registry)
     with registry.db.transaction() as conn:
-        conn.execute("UPDATE node_sessions SET revoked_at=999")
-        conn.execute("UPDATE node_boot_admissions SET superseded_at=999")
-        conn.execute("UPDATE fleet_device_lifecycle SET generation=generation+1")
-    assert registry.calibration_capability("node-f0")["mode"] == "native_trial"
+        conn.execute("UPDATE node_boot_offers SET offer_payload=NULL, refusal='node_boot_policy_unconfigured'")
+    assert registry.calibration_capability("node-f0")["mode"] == "not_admitted"
 
 
 def test_a_frame_whose_player_never_booted_a_node_is_not_admitted(registry):
@@ -199,40 +252,30 @@ def test_a_frame_whose_player_never_booted_a_node_is_not_admitted(registry):
     identity, _, _ = enroll(registry)
     frame(registry, "plain")
     assert registry.calibration_capability("plain")["mode"] == "not_admitted"
-    registry.bind("plain", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind("plain", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     assert registry.calibration_capability("plain")["mode"] == "not_admitted"
 
 
 def test_keepalive_slides_the_idle_deadline_up_to_the_hard_one(registry):
     """An open Position or Picture tab keeps its trial alive with `keepalive` (the console's
-    Frame page): the idle deadline slides, the candidate and its sequence stay, and the Node is
+    Frame page): the idle deadline slides, the candidate and its sequence stay, and the Pi is
     handed the later deadline under the same hard one. (The hard deadline ending it is
     `test_keepalive_never_passes_the_hard_deadline`.)
 
-    Mutation: make `keepalive` answer like `status` -> at 8 s the Node is handed no trial."""
-    trials, request, exchange = setup_trial(registry)
-    row = begin(trials, "node-f0")
-    trial_id = __import__("uuid").UUID(row["trial_id"])
-    began = registry.clock.utc()
-
-    def sample():  # the Node's next display exchange, on its boot clock
-        at = 1500 + int((registry.clock.utc() - began) * 1000)
-        return parse_trial(exchange(replace(
-            request, request_id=uuid4(), sampled_boottime_ms=at,
-            receipt=replace(request.receipt, sampled_boottime_ms=at, buffer_id=f"weston-{at}"),
-        )).trial)
-
-    first = sample()
+    Mutation: make `keepalive` answer like `status` -> at 8 s the Pi is handed no trial."""
+    trials = setup_trial(registry)
+    row = begin(trials, FRAME)
+    trial_id = UUID(row["trial_id"])
+    first = trial_document(registry, trials).trial
     registry.clock.advance(4)
-    kept = operate(trials, "node-f0", trial_id, operation="keepalive", expected_sequence=1)
+    kept = operate(trials, FRAME, trial_id, operation="keepalive", expected_sequence=1)
     assert kept["state"] == "active" and kept["sequence"] == 1
     assert kept["candidate_sha256"] == row["candidate_sha256"]
     registry.clock.advance(4)  # 8 s since begin: past the 5 s idle window it began with
-    later = sample()
+    later = trial_document(registry, trials).trial
+    assert later is not None
     assert later.sequence == 1 and later.candidate_sha256 == first.candidate_sha256
-    assert later.expires_boottime_ms > first.expires_boottime_ms
-    assert later.hard_expires_boottime_ms == first.hard_expires_boottime_ms
-    assert operate(trials, "node-f0", trial_id, operation="status", expected_sequence=1)["state"] == "active"
+    assert operate(trials, FRAME, trial_id, operation="status", expected_sequence=1)["state"] == "active"
 
 
 def test_keepalive_never_passes_the_hard_deadline(registry):
@@ -241,73 +284,62 @@ def test_keepalive_never_passes_the_hard_deadline(registry):
 
     Mutation: drop the `min(hard_expires_at, …)` cap from `keepalive` -> the capped deadline
     assertion goes RED (and the trial outlives its hard deadline)."""
-    trials, request, exchange = setup_trial(registry)
-    row = begin(trials, "node-f0")
-    trial_id = __import__("uuid").UUID(row["trial_id"])
-    began, hard = registry.clock.utc(), row["hard_expires_at"]
-
-    def sample():  # the Node's next display exchange, on its boot clock
-        at = 1500 + int((registry.clock.utc() - began) * 1000)
-        exchange(replace(
-            request, request_id=uuid4(), sampled_boottime_ms=at,
-            receipt=replace(request.receipt, sampled_boottime_ms=at, buffer_id=f"weston-{at}"),
-        ))
-
+    trials = setup_trial(registry, hard_seconds=20)
+    row = begin(trials, FRAME)
+    trial_id = UUID(row["trial_id"])
+    hard = row["hard_expires_at"]
     while registry.clock.utc() + 1 < hard:
         registry.clock.advance(1)
-        sample()
-        kept = operate(trials, "node-f0", trial_id, operation="keepalive", expected_sequence=1)
+        kept = operate(trials, FRAME, trial_id, operation="keepalive", expected_sequence=1)
         assert kept["state"] == "active"
         assert kept["expires_at"] == min(hard, registry.clock.utc() + trials.inactivity_seconds)
     registry.clock.advance(hard - 0.5 - registry.clock.utc())
-    sample()
-    kept = operate(trials, "node-f0", trial_id, operation="keepalive", expected_sequence=1)
+    kept = operate(trials, FRAME, trial_id, operation="keepalive", expected_sequence=1)
     assert kept["state"] == "active" and kept["expires_at"] == hard
     registry.clock.advance(1)
-    sample()
-    assert operate(trials, "node-f0", trial_id, operation="keepalive", expected_sequence=1)["state"] == "expired"
+    assert operate(trials, FRAME, trial_id, operation="keepalive", expected_sequence=1)["state"] == "expired"
 
 
 def test_renew_hands_the_draft_to_the_next_trial_in_one_step(registry):
     """The console's handover before a trial's hard deadline: `renew` ends the trial and begins
-    the next generation at the operator's draft in one transaction, so the Node's very next
-    exchange is handed the draft (never the saved calibration in between) and nothing can
+    the next generation at the operator's draft in one transaction, so the Pi's very next
+    document carries the draft (never the saved calibration in between) and nothing can
     begin in a gap. A draft whose base is not the saved revision is refused, by `renew` and by
     `begin`, and the trial stays as it was.
 
-    Mutation: have `renew` begin the next trial at the saved calibration -> the Node is handed
+    Mutation: have `renew` begin the next trial at the saved calibration -> the Pi is handed
     the saved fit -> RED. Mutation: drop the base check in `_open` -> the stale draft is accepted -> RED."""
-    trials, request, exchange = setup_trial(registry)
-    first = begin(trials, "node-f0")
-    first_id = __import__("uuid").UUID(first["trial_id"])
+    trials = setup_trial(registry)
+    first = begin(trials, FRAME)
+    first_id = UUID(first["trial_id"])
     draft = Calibration.model_validate(first["calibration"]).model_copy(update={"fit": SHIFTED})
-    operate(trials, "node-f0", first_id, operation="edit", expected_sequence=1,
-                   calibration=draft.model_dump(mode="json"), lighting=LIGHTING_JSON)
+    operate(trials, FRAME, first_id, operation="edit", expected_sequence=1,
+            calibration=draft.model_dump(mode="json"), lighting=LIGHTING_JSON)
     with pytest.raises(NodeControlError, match="trial_sequence_conflict"):
-        operate(trials, "node-f0", first_id, operation="renew", expected_sequence=1,
-                       calibration=draft.model_dump(mode="json"), lighting=LIGHTING_JSON)
-    second = operate(trials, "node-f0", first_id, operation="renew", expected_sequence=2,
-                            calibration=draft.model_dump(mode="json"), lighting=LIGHTING_JSON)
+        operate(trials, FRAME, first_id, operation="renew", expected_sequence=1,
+                calibration=draft.model_dump(mode="json"), lighting=LIGHTING_JSON)
+    second = operate(trials, FRAME, first_id, operation="renew", expected_sequence=2,
+                     calibration=draft.model_dump(mode="json"), lighting=LIGHTING_JSON)
     assert second["state"] == "active" and second["trial_id"] != first["trial_id"]
     assert second["generation"] == first["generation"] + 1 and second["sequence"] == 1
     assert Calibration.model_validate(second["calibration"]).fit == SHIFTED
     assert second["calibration_revision"] == first["calibration_revision"]
     assert second["hard_expires_at"] == registry.clock.utc() + trials.hard_seconds
-    assert operate(trials, "node-f0", first_id, operation="status", expected_sequence=2)["state"] == "ended"
-    handed = parse_trial(exchange(replace(request, request_id=uuid4(), sampled_boottime_ms=1500)).trial)
+    assert operate(trials, FRAME, first_id, operation="status", expected_sequence=2)["state"] == "ended"
+    handed = trial_document(registry, trials).trial
     assert str(handed.trial_id) == second["trial_id"] and handed.generation == second["generation"]
     assert Calibration.model_validate_json(handed.calibration_json).fit == SHIFTED
 
-    second_id = __import__("uuid").UUID(second["trial_id"])
+    second_id = UUID(second["trial_id"])
     stale = draft.model_copy(update={"revision": draft.revision + 1})
     with pytest.raises(NodeControlError, match="trial_baseline_revision_changed"):
-        operate(trials, "node-f0", second_id, operation="renew", expected_sequence=1,
-                       calibration=stale.model_dump(mode="json"), lighting=LIGHTING_JSON)
-    assert operate(trials, "node-f0", second_id, operation="status", expected_sequence=1)["state"] == "active"
-    operate(trials, "node-f0", second_id, operation="end", expected_sequence=1)
+        operate(trials, FRAME, second_id, operation="renew", expected_sequence=1,
+                calibration=stale.model_dump(mode="json"), lighting=LIGHTING_JSON)
+    assert operate(trials, FRAME, second_id, operation="status", expected_sequence=1)["state"] == "active"
+    operate(trials, FRAME, second_id, operation="end", expected_sequence=1)
     with pytest.raises(NodeControlError, match="trial_baseline_revision_changed"):
-        begin(trials, "node-f0", stale.model_dump(mode="json"))
-    third = begin(trials, "node-f0", draft.model_dump(mode="json"))
+        begin(trials, FRAME, stale.model_dump(mode="json"))
+    third = begin(trials, FRAME, draft.model_dump(mode="json"))
     assert third["state"] == "active" and Calibration.model_validate(third["calibration"]).fit == SHIFTED
 
 
@@ -319,15 +351,13 @@ def test_the_operator_routes_begin_at_a_draft_and_renew(registry):
     from test_registry import ADMIN
 
     from central.app import create_app
-    from central.fleet.node_sessions import NodeControlConfig
 
-    trials, _request, _exchange = setup_trial(registry)
-    saved = begin(trials, "node-f0")
-    operate(trials, "node-f0", __import__("uuid").UUID(saved["trial_id"]), operation="end", expected_sequence=1)
+    trials = setup_trial(registry)
+    saved = begin(trials, FRAME)
+    operate(trials, FRAME, UUID(saved["trial_id"]), operation="end", expected_sequence=1)
     draft = dict(saved["calibration"], fit=SHIFTED.model_dump(mode="json"))
-    app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
-                     node_control=NodeControlConfig("node-test"))
-    path = "/v1/operator/frames/node-f0/calibration-trials"
+    app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
+    path = f"/v1/operator/frames/{FRAME}/calibration-trials"
     with TestClient(app) as client:
         headers = {"Authorization": "Bearer " + ADMIN}
         stale = client.post(path, headers=headers, json={"calibration": dict(draft, revision=draft["revision"] + 1)})
@@ -347,44 +377,3 @@ def test_the_operator_routes_begin_at_a_draft_and_renew(registry):
         plain = client.post(path, headers=headers)
         assert plain.status_code == 200, plain.text
         assert plain.json()["calibration"]["fit"] == saved["calibration"]["fit"]
-
-
-@pytest.mark.parametrize("reason", ["registry_output_changed", "app_process_link_changed"])
-def test_a_surface_the_runtime_no_longer_admits_is_answered_in_the_trials_words(registry, monkeypatch, reason):
-    """Through the real app: a Frame whose output or app the Runtime no longer admits (the display
-    admission's own reasons) is refused with a TrialRefusal code at its TRIAL_REFUSAL_STATUS, never
-    the Runtime's reason. Mutation probe: raise NodeControlError(admission.reason, 409) in
-    NodeDisplay.current_frame_in again -> this fails."""
-    from fastapi.testclient import TestClient
-    from test_registry import ADMIN
-
-    from central.app import create_app
-    from central.coordination import Coordinator, DisplayAdmission
-    from central.fleet.models import TRIAL_REFUSAL_STATUS, TrialRefusal
-    from central.fleet.node_sessions import NodeControlConfig
-
-    setup_trial(registry)
-    monkeypatch.setattr(Coordinator, "display_admission_in",
-                        lambda self, conn, **_: DisplayAdmission(False, "", reason))
-    app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
-                     node_control=NodeControlConfig("node-test"))
-    with TestClient(app) as client:
-        refused = client.post("/v1/operator/frames/node-f0/calibration-trials",
-                              headers={"Authorization": "Bearer " + ADMIN})
-    code = refused.json()["error"]
-    assert code in {each.value for each in TrialRefusal}, code
-    assert (code, refused.status_code) == (TrialRefusal.SURFACE_CHANGED,
-                                           TRIAL_REFUSAL_STATUS[TrialRefusal.SURFACE_CHANGED])
-
-
-def test_a_trial_begins_on_a_still_output_whose_receipt_is_old(registry):
-    """A still picture is presented once, so the admitted Output's newest receipt is a minute old
-    when the owner starts a calibration trial: the admitted surface and a current exchange say the
-    app holds the Output, and the trial begins and is handed over on the next exchange."""
-    trials, request, exchange = setup_trial(registry)
-    request = replace(request, request_id=uuid4(), sampled_boottime_ms=61_400)
-    exchange(request)
-    row = begin(trials, "node-f0")
-    candidate = parse_trial(exchange(replace(request, request_id=uuid4(),
-                                             sampled_boottime_ms=61_500)).trial)
-    assert candidate.sequence == 1 and candidate.candidate_sha256 == row["candidate_sha256"]

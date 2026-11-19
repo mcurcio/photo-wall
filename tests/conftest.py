@@ -37,7 +37,6 @@ CI_SKIP_ALLOWLIST = (
     "actual in.tftpd integration requires root",  # no CI test job runs as root
     "Linux root credential socket fixture",  # likewise root
     "set PHOTO_WALL_PROVENANCE_BASE_IMAGE",  # a locally built core image only
-    "set PHOTO_WALL_NATIVE_DISPLAY_IMAGE",  # a built Linux display image only
     "interactive local fixture only",  # a developer's interactive fixture
     "set PHOTO_WALL_RELEASE_TOKEN",  # a fork pull request gets no token
     "set PHOTO_WALL_NODE_PID1_FIXTURE",  # node-pid1.yml builds it and requires every scenario
@@ -157,7 +156,7 @@ def immich_library():
 def database(database_provisioner):
     """A `Database` over a fresh clone of the migrated template, dropped after."""
     with database_provisioner.migrated() as conninfo:
-        db = Database(conninfo)
+        db = Database(conninfo, application_name="photo-wall-test")
         try:
             yield db
         finally:
@@ -174,7 +173,7 @@ def module_registry(database_provisioner):
     """`registry` shared by one module's tests: for a module whose tests run in order against one
     long-lived system (real processes on one database) that is too slow to boot per test."""
     with database_provisioner.migrated() as conninfo:
-        db = Database(conninfo)
+        db = Database(conninfo, application_name="photo-wall-test")
         try:
             yield Registry(db, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
         finally:

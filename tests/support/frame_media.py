@@ -37,7 +37,7 @@ BUILD = BuildIdentity(
 def grant(registry, repository: MediaRepository, variant: Variant, *, secured: bool = False,
           frame_id: str = "portrait"):
     """An enrolled Player bound to `frame_id`, offered (or, `secured`, locked) one layer that
-    shows `variant`, pinned as coordination pins it. Returns (player, key, plan)."""
+    shows `variant`: the offer (or lock) is its pin. Returns (player, key, plan)."""
     player, key, _ = enroll(registry)
     plan = offer(registry, repository, variant, player["player_id"], secured=secured,
                  frame_id=frame_id)
@@ -47,8 +47,8 @@ def grant(registry, repository: MediaRepository, variant: Variant, *, secured: b
 def offer(registry, repository: MediaRepository, variant: Variant, player_id: str, *,
           secured: bool = False, frame_id: str = "portrait", epoch: int = 1) -> Plan:
     """Bind the enrolled `player_id`'s HDMI-A-1 to `frame_id` and offer (or, `secured`, lock) it
-    one layer that shows `variant`, pinned as coordination pins it."""
-    registry.bind(frame_id, player_id, "HDMI-A-1", expected_generation=0)
+    one layer that shows `variant`: the offer (or lock) is its pin (decision 0034)."""
+    registry.bind(frame_id, player_id, "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, frame_id, PORTRAIT_ON_WIDE)
     binding = registry.bindings_for(player_id, epoch)[0]
     layer = Layer(assignment_id="assignment", run_id="run", output_id=binding.output_id,
@@ -59,12 +59,11 @@ def offer(registry, repository: MediaRepository, variant: Variant, player_id: st
                 layers=(layer,))
     with repository.transaction() as conn:
         if secured:
-            conn.execute("INSERT INTO assignment_locks VALUES(%s,%s,%s,%s,1000,1200)",
+            conn.execute("INSERT INTO assignment_locks(player_id,authority_epoch,assignment_id,layer,"
+                         "secured_at,valid_until,created_at,created_by,changed_at,changed_by) "
+                         "VALUES(%s,%s,%s,%s,1000,1200,1000,'central',1000,'central')",
                          (player_id, epoch, layer.assignment_id,
                           Jsonb(layer.model_dump(mode="json"))))
-            conn.execute("INSERT INTO media_references(owner,variant_key,expires_at) "
-                         "VALUES(%s,%s,1200)",
-                         (f"secured:{player_id}:{epoch}:{layer.assignment_id}", variant.key))
         else:
             Coordinator(registry.db, registry.clock, media=repository)._offer(
                 conn, plan, {layer.assignment_id: "group"})

@@ -52,5 +52,5 @@ def test_a_turned_frame_is_its_display_as_it_hangs(registry):
     hall = _frame(registry, "hall")
     _bind(registry, hall, pi, "HDMI-A-1")
     _sized(registry, "pi-a", "HDMI-A-1", QN43)
-    registry.turn_frame(hall, 90, expected_generation=_generation(registry, hall))
+    registry.turn_frame(hall, 90, expected_generation=_generation(registry, hall), by="console")
     assert _size_mm(registry, hall) == [540, 950]

@@ -23,13 +23,12 @@ name: V2 node components
 # that container (tests/debs/test_netboot_init.py, scripts/uplink_device_harness.py). It uploads
 # the repo as photo-wall-node-debs-<revision>.
 #
-# The `build` job is steps 3 and 4: the release roots, each a squashfs image mmdebstrap builds
+# The `build` job is steps 3 and 4: the release's one root, a squashfs image mmdebstrap builds
 # from the snapshot pin and the repo and the seal hook seals (debian-packaging/build-root.sh, the
-# app root from photo-wall-player and the manager root from photo-wall-app-manager), then the
-# release writer (scripts/node_release_writer.py), which writes components.json and ships the
-# repo's .debs byte for byte. The roots are cached whole under a key over their inputs (the
-# recipe, the ABI and the Package=Version lines each root resolves), written from main only; on
-# a miss each root is built twice and two digests must agree. The writer and its proofs run on
+# app root from photo-wall-player), then the release writer (scripts/node_release_writer.py),
+# which writes components.json and ships the repo's .debs byte for byte. The root is cached under
+# a key over its inputs (the recipe, the ABI and the Package=Version lines the root resolves),
+# written from main only; on a miss the root is built twice and two digests must agree. The writer and its proofs run on
 # every run, so the set's .debs and ABI are always this run's.
 on:
   workflow_call:
@@ -193,8 +192,8 @@ jobs:
   build:
     needs: debs
     runs-on: ubuntu-24.04-arm
-    # On a roots cache miss, each root built twice (the app about 2 min a build, the manager
-    # under 1); on a hit, the resolution, the restore and the writer, about 2 min.
+    # On a roots cache miss, the app root built twice (about 2 min a build); on a hit, the
+    # resolution, the restore and the writer, about 2 min.
     timeout-minutes: 30
     env:
       REVISION: ${{ inputs.revision }}
@@ -223,7 +222,7 @@ jobs:
 
       # The roots' cache key (scripts/node_release_writer.py `key`): the recipe, the ABI the
       # repo's photo-wall-node and photo-wall-node-display write, and the Package=Version lines
-      # mmdebstrap resolves for each root from the pin and this run's repo.
+      # mmdebstrap resolves for the root from the pin and this run's repo.
       - name: Compute the roots' cache key
         id: inputs
         env:
@@ -240,14 +239,11 @@ jobs:
           }
           unpack photo-wall-node usr/lib/photo-wall/node/abi.json "$work/base.json"
           unpack photo-wall-node-display usr/lib/photo-wall/node-display/abi.json "$work/display.json"
-          for package in photo-wall-player photo-wall-app-manager; do
-            debian-packaging/build-root.sh --revision "$REVISION" --repo "$RUNNER_TEMP/node-debs" \
-              --package "$package" --resolve > "$work/$package.resolved"
-          done
+          debian-packaging/build-root.sh --revision "$REVISION" --repo "$RUNNER_TEMP/node-debs" \
+            --package photo-wall-player --resolve > "$work/photo-wall-player.resolved"
           digest=$(.venv/bin/python -m scripts.node_release_writer key \
             --abi "$work/base.json" "$work/display.json" \
-            --resolved "photo-wall-player=$work/photo-wall-player.resolved" \
-                       "photo-wall-app-manager=$work/photo-wall-app-manager.resolved")
+            --resolved "photo-wall-player=$work/photo-wall-player.resolved")
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       # Exact keys only, never a prefix fallback: roots built from other inputs are not these.
@@ -256,9 +252,9 @@ jobs:
         uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ${{ runner.temp }}/node-roots
-          key: node-roots-v1-${{ steps.inputs.outputs.digest }}
+          key: node-roots-v2-${{ steps.inputs.outputs.digest }}
 
-      - name: Build the release roots, each twice
+      - name: Build the release root, twice
         if: steps.restore.outputs.cache-hit != 'true'
         env:
           PHOTO_WALL_NODE_BUILDER: ${{ steps.builder.outputs.builder }}
@@ -269,10 +265,8 @@ jobs:
           # A failed restore can leave part of an output behind; build-root.sh refuses one.
           rm -rf "$RUNNER_TEMP/node-roots"
           mkdir "$RUNNER_TEMP/node-roots"
-          for pair in photo-wall-player:app photo-wall-app-manager:manager-primary; do
-            debian-packaging/build-root.sh --revision "$REVISION" --repo "$RUNNER_TEMP/node-debs" \
-              --package "${pair%%:*}" --output "$RUNNER_TEMP/node-roots/${pair#*:}.squashfs"
-          done
+          debian-packaging/build-root.sh --revision "$REVISION" --repo "$RUNNER_TEMP/node-debs" \
+            --package photo-wall-player --output "$RUNNER_TEMP/node-roots/app.squashfs"
 
       # Written only from main (the roots name no commit): every pull request reads main's
       # entries (docs/module-appliance-ci.md, "Limits"), and its own would crowd them out.
@@ -281,7 +275,7 @@ jobs:
         uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
         with:
           path: ${{ runner.temp }}/node-roots
-          key: node-roots-v1-${{ steps.inputs.outputs.digest }}
+          key: node-roots-v2-${{ steps.inputs.outputs.digest }}
 
       # Always this run's: the .debs, the ABI and the references, refused unless the roots were
       # sealed for this repo's packages and ABI and fit their lines; stamped with this revision.
@@ -298,7 +292,7 @@ jobs:
         run: |
           set -eu
           for pair in photo-wall-node:node-base.deb photo-wall-node-display:node-display.deb \
-                      photo-wall-player:app.deb photo-wall-app-manager:manager-primary.deb; do
+                      photo-wall-player:app.deb; do
             deb=$(debian-packaging/repo-file.sh "$RUNNER_TEMP/node-debs" "${pair%%:*}")
             cmp "$deb" "$RUNNER_TEMP/node-components/${pair#*:}"
           done

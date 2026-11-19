@@ -31,8 +31,8 @@ def _reader(registry) -> PgFitAnalysisReader:
 
 def _wide_frame(registry, frame_id: str = "hall") -> None:
     player, _, _ = enroll(registry, count=1)
-    registry.create_frame(frame_create(frame_id))
-    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create(frame_id), by="console")
+    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     save_position(registry, frame_id)
 
 
@@ -41,10 +41,9 @@ def _draft(registry, photos) -> str:
     library = library_of(registry)
     draft = library.create_draft(SourceQuery(connection_ref=fixture_connection(registry),
                                              albums=("00000000-0000-4000-8000-00000000d0af",)),
-                                 None)
+                                 None, by="console")
     with registry.db.transaction() as conn:
-        key = conn.execute("SELECT pool_key FROM photo_drafts WHERE draft_ref=%s",
-                           (draft,)).fetchone()["pool_key"]
+        key = library.pool_of_draft_in(conn, draft)
     lease = library.begin_check(key)
     entries = tuple(InPool(asset=item) for item in photos)
     assert library.record_step(lease, CheckStep(progress={"page": 1}, marks=(), entries=entries,
@@ -84,7 +83,7 @@ def test_a_photo_due_a_new_measurement_is_not_counted_as_checked_until_it_is_mea
     seed_pool(registry, "family:1", photos)
     measure_all(registry, photos)
     with registry.db.transaction() as conn:
-        conn.execute("UPDATE photo_key_content SET analysis_version='2' WHERE asset_id=%s",
+        conn.execute("UPDATE library_assets SET key_analysis_version='2' WHERE asset_id=%s",
                      (photos[0].asset_id,))
     selection = FitSelection(sources=("family:1",))
     (group,) = _reader(registry).selection_sizes(selection).groups
@@ -149,11 +148,11 @@ def test_a_frame_draft_is_judged_by_its_box_alone_and_an_unbound_frame_is_unsize
     unbound Frame (no known screen) is listed in `unsized` and has no answer. A draft carrying a
     profile is refused (no such field)."""
     pi = enroll_pi(registry, "pi-a")
-    registry.create_frame(frame_create("lounge"))
+    registry.create_frame(frame_create("lounge"), by="console")
     _bind(registry, "lounge", pi, "HDMI-A-1")
     save_position(registry, "lounge")
     _sized(registry, "pi-a", "HDMI-A-1", (950, 540))
-    registry.create_frame(frame_create("attic"))
+    registry.create_frame(frame_create("attic"), by="console")
     seed_pool(registry, "family:1", (photo("tall", taken_at=900, width=1200, height=1350),
                                      photo("clip", taken_at=901, width=640, height=720,
                                            kind="video")))

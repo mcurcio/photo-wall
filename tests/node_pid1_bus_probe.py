@@ -14,6 +14,11 @@ imports on the Node's python3.
 is absent (`nodeapi.buffers.wall_mirror_config`, create only), then reads the mirror's latest value of
 the wall key WALL_KEY (None while the mirror holds none), with python3-nats and HostCore's nodeapi.
 
+`output <id>` prints {"change", "binding"}: the Output document Central wrote for Output <id> on the
+Node's display line (its desired bucket, `contracts.node_output.output_document_key`), as the Display
+Host reads it: its change and its Frame binding ({"frame_id", "generation", "configuration_revision"},
+or None unbound); {"change": None, "binding": None} while there is none.
+
 `fill` prints {"sent", "ended"}: with the same nats-py, it fills the bus's own memory streams (every
 stream the Node's components declared, each to its cap, round robin) with FILL_MESSAGE-byte
 messages, FILL_PASSES times FILL_BYTES in all, until the server ends the connection (`ended`, the
@@ -184,8 +189,42 @@ def fill(port: int) -> dict:
     return asyncio.run(run())
 
 
+def output(port: int, output_id: str) -> dict:
+    """The Output document of `output_id` on the bus on 127.0.0.1:<port> (module docstring), with
+    python3-nats and HostCore's nodeapi and contracts."""
+    host_core_path()
+    import asyncio
+
+    import nats
+    from nats.js.errors import NotFoundError
+
+    from contracts.node_output import decode_output_document, output_document_key
+
+    async def read() -> dict:
+        client = await nats.connect(servers=[f"nats://127.0.0.1:{port}"], allow_reconnect=False,
+                                    connect_timeout=2)
+        try:
+            try:
+                bucket = await client.jetstream().key_value("desired_display")
+                entry = await bucket.get(output_document_key(output_id))
+            except NotFoundError:
+                return {"change": None, "binding": None}
+            document = decode_output_document(entry.value)
+            binding = document.binding
+            return {"change": document.change, "binding": None if binding is None else {
+                "frame_id": binding.frame_id, "generation": binding.generation,
+                "configuration_revision": binding.configuration_revision}}
+        finally:
+            await client.close()
+
+    return asyncio.run(read())
+
+
 def main(arguments: list[str]) -> None:
     command, port = arguments[0], int(arguments[1])
+    if command == "output":
+        print(json.dumps(output(port, arguments[2]), sort_keys=True))
+        return
     if command == "birth":
         print(json.dumps(host_birth(port), sort_keys=True))
         return

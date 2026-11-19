@@ -51,21 +51,21 @@ def test_the_client_is_built_from_the_one_trust(tmp_path):
 
 
 @pytest.mark.parametrize("origin,http_url,ws_url", [
-    ("http://central", "http://central/v1/player/state", "ws://central/v1/player/session"),
-    ("https://central.example:8443", "https://central.example:8443/v1/player/state",
+    ("http://central", "http://central/v1/player/time", "ws://central/v1/player/session"),
+    ("https://central.example:8443", "https://central.example:8443/v1/player/time",
      "wss://central.example:8443/v1/player/session"),
 ])
 def test_urls_come_from_the_located_origin(origin, http_url, ws_url):
     central = located(origin)
-    assert central_url(central, "/v1/player/state") == http_url
+    assert central_url(central, "/v1/player/time") == http_url
     assert websocket_url(central, "/v1/player/session") == ws_url
 
 
 def test_an_exchange_is_in_connect_until_answered():
     central = located("http://central")
-    exchange = Exchange(central, "/v1/player/state")
+    exchange = Exchange(central, "/v1/player/time")
     assert exchange.phase == "connect"
-    assert exchange.url == central.origin.url("/v1/player/state")
+    assert exchange.url == central.origin.url("/v1/player/time")
     exchange.answered()
     assert exchange.phase == "transfer"
 
@@ -100,7 +100,7 @@ _FAILURE_TABLE = [
 @pytest.mark.parametrize("error,phase,expected", _FAILURE_TABLE)
 def test_exchange_names_network_failures_by_phase(error, phase, expected):
     central = located("http://central.example")
-    exchange = Exchange(central, "/v1/player/state")
+    exchange = Exchange(central, "/v1/player/time")
     if phase == "transfer":
         exchange.answered()
     named = exchange.name(error)
@@ -175,7 +175,7 @@ def test_the_clients_it_builds_are_forgotten_on_close_and_injected_ones_kept(tmp
 
 def test_exchange_passes_an_uplink_error_through_and_leaves_other_errors():
     central = located("http://central")
-    exchange = Exchange(central, "/v1/player/state")
+    exchange = Exchange(central, "/v1/player/time")
     original = UplinkError(Cause.HTTP, "status", host="central")
     assert exchange.name(original) is original
     assert exchange.name(ValueError("x")) is None
@@ -286,7 +286,7 @@ async def _read(handler, url):
 def test_read_refusal_reads_a_bounded_body():
     async def check():
         central = located("http://central")
-        url = central.origin.url("/v1/player/state")
+        url = central.origin.url("/v1/player/time")
 
         def redirect(request):
             return httpx.Response(301, headers={"Location": "https://other.example/x"})

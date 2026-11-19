@@ -7,7 +7,8 @@ listeners (`HUB_LISTENERS`), started only once the worker has written its config
 Compose hub waits for it. A Node on the shipped configuration links to it. The worker writes the
 file, Central's links record the Node's birth, and WallWriter creates WALL. A link the hub drops is
 back by itself. Central on its hub (C2): Home Assistant reads `installation` at the hub's WebSocket
-listener, and a binding made in the registry reaches it within a look (CENTRAL_STATE_LOOK_SECONDS);
+listener, and a binding made in the registry reaches it at once: its commit's NOTIFY wakes the look
+(the worker's LISTEN), well inside CENTRAL_STATE_LOOK_SECONDS;
 each Player's drawn report on its own line is House > Lights' (C4). A hub restart (empty) brings
 every key of Central's state back and a new states epoch. One SIGTERM ends all three loops normally
 and leaves no Central client on the hub.
@@ -24,6 +25,7 @@ import urllib.request
 
 import nats
 from integration.bus_servers import BusServer, line_slices, node_server, until
+from support.devices import seed_device
 
 from central.content_catalog.catalog import device_id_for_serial
 from central.db import Database
@@ -52,6 +54,7 @@ from nodeapi.buffers import KeyTable, Slice, event_buffer, state_bucket
 from nodeapi.node import NodeSession, Release
 
 SERIAL = "serial-worker-hub"
+WOKEN_SECONDS = 5   # a woken look, well inside CENTRAL_STATE_LOOK_SECONDS
 RELEASE = Release("1.0.0", "sha256:display-release", {"display": 1})
 HUB_URL = f"nats://127.0.0.1:{HUB_LISTENERS.client_port}"
 DOOR_URL = f"ws://127.0.0.1:{HUB_LISTENERS.websocket_port}"   # the hub's client WebSocket
@@ -108,7 +111,7 @@ async def _born(db: Database) -> bool:
     def read() -> bool:
         with db.transaction() as conn:
             return conn.execute(
-                "SELECT 1 FROM node_link_records WHERE device_id=%s AND stream='KV_state_display' "
+                "SELECT 1 FROM node_states WHERE device_id=%s AND stream='KV_state_display' "
                 "AND subject='$KV.state_display.birth'", (device_id_for_serial(SERIAL),)).fetchone() is not None
     return await asyncio.to_thread(read)
 
@@ -135,8 +138,7 @@ def test_the_worker_keeps_the_hub_and_records_a_node(database, tmp_path, monkeyp
 
     assert build_node_bus(database.dsn, {}) is None
     with database.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (device_id_for_serial(SERIAL), SERIAL))
+        seed_device(conn, device_id_for_serial(SERIAL), SERIAL)
     config_dir = tmp_path / "hub-config"
     config_dir.mkdir()
     config_path = config_dir / "hub.json"
@@ -203,14 +205,15 @@ def test_the_worker_keeps_the_hub_and_records_a_node(database, tmp_path, monkeyp
                 assert [(each.id, each.driven_by) for each in listed.frames] == [("hall", None)]
                 assert [(each.serial, each.address) for each in listed.players] == [(SERIAL, None)]
                 bound = await asyncio.to_thread(registry.bind, "hall", player["player_id"], "HDMI-A-1",
-                                                expected_generation=0)
+                                                expected_generation=0, by="console")
 
                 async def driven():
                     [hall] = (await installation()).frames
                     return hall.driven_by is not None and (hall.driven_by.serial, hall.driven_by.output_id,
                                                            hall.driven_by.generation) == (SERIAL, "HDMI-A-1",
                                                                                           bound["generation"])
-                await until(driven, CENTRAL_STATE_LOOK_SECONDS + 1, "the binding reaches Central's state")
+                assert CENTRAL_STATE_LOOK_SECONDS > WOKEN_SECONDS
+                await until(driven, WOKEN_SECONDS, "the binding's commit wakes Central's state")
                 assert await house.install("serial-unknown", "v1.0.0") == InstallRefused(
                     refusal=InstallRefusal.UNKNOWN_PLAYER)
                 assert await house.install(SERIAL, "v9.9.9") == InstallRefused(refusal=InstallRefusal.UNKNOWN_VERSION)

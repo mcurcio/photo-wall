@@ -88,7 +88,7 @@ flowchart LR
 | Unit | How many | Hosts | Must NEVER |
 | --- | --- | --- | --- |
 | **Central process** (HTTP server: FastAPI/uvicorn, async) | 1 per pod | HTTP routes. Calls into domain code (resolve, read-through read, health). Waiter caps per pod (32 OS/`.deb`, 8 media). One `LISTEN` connection. *(It also runs the existing playback-coordination tick, which is out of scope.)* | Write the cache disk. Call an origin. Run a job handler. Hold a thread while it waits. |
-| **Worker process** (procrastinate worker) | 1+ per pod, **all identical** | Claims jobs from every queue and dispatches each by type to its domain handler. Queues exist only to give each class of work its own concurrency (so transcoding cannot starve OS production). They never define kinds of worker. Every process runs one procrastinate loop per queue (§10.3). | Serve HTTP. Block its event loop (CPU and disk work go to threads). Do any work that did not arrive as a job. |
+| **Worker process** (procrastinate worker) | 1+ per pod, **all identical** | Claims jobs from every queue and dispatches each by type to its domain handler. Queues name classes of work and order nothing; they never define kinds of worker. Every process runs ONE procrastinate worker over every queue, one shared concurrency (§10.3; decision 0034, S3a). | Serve HTTP. Block its event loop (CPU and disk work go to threads). Do any work that did not arrive as a job. |
 | **Postgres** | 1, shared | Records (catalog, assets, devices), the job queue tables, NOTIFY | Store file bytes. |
 | **Cache disk** | 1 path. Per pod is fine with one pod; 2+ pods **must** share one. | Files named by asset key, in one subdirectory per kind | Be trusted to hold anything. |
 
@@ -151,7 +151,7 @@ finished run leaves a **job outcome** that waiters read (§10.2).
 | **Job outcome** (one table, every job type) | `(job type, subject)` | The latest written *status* only: `ok`, or `transient` + `retry_not_before`, or `terminal` + reason; a global sequence number. Never facts, and never "is cached". Last write wins, so a late run's note may replace a newer one: readers decide from the data (facts plus file) first. | The job runtime only, with NOTIFY in the same transaction |
 | **Job** | procrastinate job row | **All** pending, running and retrying state. It is stored nowhere else. | procrastinate |
 | **Photo pool** (built in 4) | `pool_key` (sha256 of the query's canonical form) | One row per Immich photo the last checks saw: its outcome (in the pool, waiting, left out with a reason), its asset id (the revision it names) and the number of the check that last saw it. Membership only: no copy of the photo's facts, no file, no "is cached". | The media worker's check steps; a complete check's sweep |
-| **Library asset** and its children (built in 4, normalized by the follow-ups of 2026-10-11) | `library_assets`: (connection, Immich asset id); children by `asset_id` | One parent row per Immich asset (kind, taken time, the original file's type, size, orientation and bytes); its revisions (`asset_revisions`, one per edit: upright size, duration, Immich's `updatedAt`); each revision's Immich copies Photo Wall measured (`asset_copies`) and prepared copies (`media-variant` Asset records, with the Immich copy each was made from). One home per fact; a cache of Immich, rewritten by every check or fetch ([media module](module-media.md#the-asset-tables)). | The media worker's check steps (parent, revision); its fetches (copies); `MediaMaker` (prepared copies) |
+| **Library asset** and its children (built in 4, normalized by the follow-ups of 2026-10-11) | `library_assets`: (connection, Immich asset id); children by `asset_id` | One parent row per Immich asset (kind, taken time, the original file's type, size, orientation and bytes); its current revision on the same row (upright size, duration, Immich's `updatedAt`; a new edit replaces it and clears its copies and key content: [0034](decisions/0034-central-schema-consolidation.md) merged `asset_revisions`, `asset_copies` and `photo_key_content` into `library_assets`); the Immich copies Photo Wall measured and prepared copies (`media-variant` Asset records, with the Immich copy each was made from). One home per fact; a cache of Immich, rewritten by every check or fetch ([media module](module-media.md#the-asset-tables)). | The media worker's check steps (parent, revision); its fetches (copies); `MediaMaker` (prepared copies) |
 | **Desired set** | a query | Pinned tags; current OS and `.deb` for unpinned devices (a last served tag only within 30 days of its serve); exact fleet roots, including the bases and sealed environments of the newest 3 stable node releases, the selected and the previous V2 node deployment (so `Prefetch` warms them before a node boots: every missing selected or previous file, and at most one window-only file per tick; serving never depends on it); media that active plans reference | nobody (computed) |
 
 Each record's identity and write rule, and why any order of job runs converges on it, are in
@@ -484,10 +484,15 @@ class JobRuntime:  # central.infra, concrete
   and unclassified exceptions mean retry (§10.1); only `TerminalFailure` is terminal. Handlers
   write no outcome. A verified file on disk returns its recorded facts without fetching, so a
   crash between the rename and the outcome write is harmless. CPU and disk work runs on threads.
-- **One worker kind, one loop per queue.** A `Worker`'s concurrency spans its queues
-  (`worker.py:34-51`). So each identical process runs one `Worker` per queue on one `App`
-  (`install_signal_handlers=False`, SIGTERM handled once). The per-loop periodic deferrers
-  (`worker.py:611`) insert each tick once (`schema.sql:87`).
+- **One worker kind, one worker over every queue** (decision 0034, S3a). A `Worker`'s
+  concurrency spans its queues (`worker.py:34-51`), so each identical process runs ONE `Worker`
+  over every queue on one `App` (`install_signal_handlers=False`, SIGTERM handled once): one
+  heartbeat row per process, one shared concurrency (`WORKER_CONCURRENCY`); a burst on one queue
+  can take every slot, and each job type's lock and queueing lock still bound its own
+  parallelism. The periodic deferrer inserts each tick once (`schema.sql:87`).
+- **One rescue** (`QueueRescue`, S3a): the typed jobs and the media app's tasks alike, when a
+  worker starts and every five minutes (`RESCUE_EVERY`); a worker is dead when it has not beaten
+  for `STALLED_WORKER_SECONDS`, the rule `worker_running_in` reads too.
 - **Rescue re-publishes first, then closes** the stalled row. The pending index covers only `todo`,
   and the fetch skips a `todo` row whose lock a `doing` row holds (`procrastinate_fetch_job_v2`).
   Only an asset fetch has that lock; any other copy may start at once, and the rules make both
@@ -526,7 +531,7 @@ nothing.
   `write` from each reference's locator, newest first → verify against the reference or produced
   digest → `os.replace`.
 - `ReleaseOperations`, `PodProbe` (process + DB), `FleetHealth.snapshot(beats, failing)` (inputs from infra).
-- In infra: `OutcomeFeed`, `QueueAdmin`, `JobRuntime`, and the queue-ops handlers.
+- In infra: `OutcomeFeed`, `QueueRescue`, `JobRuntime`, and the queue-ops handlers.
 
 `OriginUnavailable(TransientFailure)` covers network errors, 5xx and 429 + `retry_after`.
 `OriginRejected(TerminalFailure)` covers 404, oversize and schema errors. Every fetch handler

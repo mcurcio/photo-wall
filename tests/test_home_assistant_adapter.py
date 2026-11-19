@@ -244,3 +244,40 @@ def test_a_birth_naming_another_hub_server_is_a_link_closed_while_central_was_aw
     assert reports.told == []
     asyncio.run(listener.hub_is("NEWHUB"))
     assert reports.told == [("link-closed", references.SOURCE)]
+
+
+def test_an_entity_heard_again_within_a_minute_is_written_once(registry):
+    """Decision 0034 (S2d #6): Home Assistant restates an entity's state often; its row is written
+    when its kind or name changes or its heard time is HEARD_WRITE_SECONDS old, never at every state.
+    Mutation probe: `record_heard` writing on every state -> the second state 10 s later writes."""
+    from central.infra.frame_lighting_store import PgHouseLock
+    from central.infra.room_light_store import HEARD_WRITE_SECONDS, PgRoomLights
+
+    heard = PgRoomLights(registry.db, PgHouseLock())
+
+    def row() -> dict:
+        with registry.db.transaction() as conn:
+            return conn.execute("SELECT xmin::text AS xmin, name, EXTRACT(EPOCH FROM heard_at) AS heard_at, "
+                                "created_at, created_by, changed_at, changed_by "
+                                "FROM home_assistant_entities WHERE entity='light.hall'").fetchone()
+
+    def heard_ago(seconds: float) -> dict:
+        with registry.db.transaction() as conn:
+            conn.execute("UPDATE home_assistant_entities SET heard_at = clock_timestamp() - %s * interval '1 second'",
+                         (seconds,))
+        return row()
+
+    heard.record_heard("light.hall", "light", "Hall")
+    first = heard_ago(10)                                   # the next state comes 10 s later
+    heard.record_heard("light.hall", "light", "Hall")
+    assert row() == first                                   # not written
+    assert (first["created_by"], first["changed_by"]) == ("home-assistant", "home-assistant")
+    stale = heard_ago(HEARD_WRITE_SECONDS + 1)
+    heard.record_heard("light.hall", "light", "Hall")
+    again = row()
+    assert again["heard_at"] > stale["heard_at"]
+    # The audit fields: created once, changed at the instant it was heard again.
+    assert again["created_at"] == first["created_at"] and again["changed_at"] > first["changed_at"]
+    assert float(again["heard_at"]) == pytest.approx(again["changed_at"])
+    heard.record_heard("light.hall", "light", "Hall lamp")  # a new name is written at once
+    assert row()["name"] == "Hall lamp"

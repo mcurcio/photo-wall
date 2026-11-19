@@ -49,7 +49,7 @@ function hostColumns(): EntityColumn<HardwareRow>[] {
       <Lines lines={items(health(row), ["soc_temperature", "throttling"])} />
     ) },
     { id: "compute", header: "CPU, /run storage", cell: (row) => (
-      <Lines lines={items(health(row), ["cpu_busy", "runtime_available", "preparation", "out_of_memory",
+      <Lines lines={items(health(row), ["cpu_busy", "runtime_available", "out_of_memory",
         "memory_limits"])} />
     ) },
     { id: "network", header: "Network", cell: (row) => (

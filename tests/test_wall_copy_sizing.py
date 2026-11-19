@@ -39,9 +39,9 @@ P4K = Screen(3840, 2160, inches=55)
 def add_frame(registry, frame_id: str, screen: Screen) -> None:
     """A Frame bound full screen to an Output of `screen`'s pixels: its Frame output is those
     pixels (frame box run fb-8: a Frame with no known screen asks no copy)."""
-    registry.create_frame(frame_create(frame_id))
+    registry.create_frame(frame_create(frame_id), by="console")
     player, _, _ = enroll(registry, count=1, size=(screen.width_px, screen.height_px))
-    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
 
 
 def wall(registry, *screens: tuple[str, Screen]) -> MediaRepository:
@@ -104,7 +104,7 @@ def test_a_video_is_named_once_whatever_the_wall_and_the_copy_ladder(registry):
     add_frame(registry, "hall", P4K)
     assert prepared(repository, clip.asset_id, "hall") == {key}
     PgFitSettings(registry.db, times=ProcessTransactionClock(registry.clock)).save_fit_settings(
-        FitSettings(copy_ladder_px=(2560, 3840)))
+        FitSettings(copy_ladder_px=(2560, 3840)), by="console")
     assert prepared(repository, clip.asset_id, "living", "hall") == {key}
     _, recipe_name = split_media_variant_key(key)
     with repository.db.transaction() as conn:
@@ -191,7 +191,7 @@ def test_a_photo_only_slightly_larger_than_needed_gets_no_smaller_copy(registry)
     seed_pool(registry, "family:1", (near,))
     (key,) = prepared(repository, near.asset_id, "fireplace")
     assert step_of(repository, key) == 4950
-    store.save_fit_settings(FitSettings(scaled_copy_ratio=1.0))
+    store.save_fit_settings(FitSettings(scaled_copy_ratio=1.0), by="console")
     (key,) = prepared(repository, near.asset_id, "fireplace") - {key}
     assert step_of(repository, key) == 4506
 
@@ -201,7 +201,7 @@ def test_a_frame_with_no_known_screen_asks_no_copy(registry):
     screen (unbound here) has none and asks nothing, so a photo on a 1080p wall beside it is
     still prepared at the 1920 step."""
     repository = wall(registry, ("living", P1080))
-    registry.create_frame(frame_create("attic"))
+    registry.create_frame(frame_create("attic"), by="console")
     big = photo("big", taken_at=1, width=6000, height=4000)
     seed_pool(registry, "family:1", (big,))
     (key,) = prepared(repository, big.asset_id, "living")

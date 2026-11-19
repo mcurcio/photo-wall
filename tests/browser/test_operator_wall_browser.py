@@ -58,12 +58,12 @@ OTHER_SURFACE = "window-frame"
 
 def _seed(registry):
     # A placed frame with distinct geometry on surface "wall".
-    registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100), by="console")
     # A legacy origin-stacked frame (no distinct position) -> Unplaced tray.
-    registry.create_frame(frame_create(ORIGIN, x_mm=0, y_mm=0))
+    registry.create_frame(frame_create(ORIGIN, x_mm=0, y_mm=0), by="console")
     # A placed frame on a second surface (sorts after "wall", so "wall" stays the
     # default) to prove the Surface filter re-renders the plan.
-    registry.create_frame(frame_create(OTHER_SURFACE, surface_id="window", x_mm=50, y_mm=50))
+    registry.create_frame(frame_create(OTHER_SURFACE, surface_id="window", x_mm=50, y_mm=50), by="console")
 
 
 def test_wall_plan_places_frames_and_unplaced_tray_holds_origin_frame(page, registry):
@@ -102,12 +102,12 @@ def _seed_now_showing(registry):
     enroll(registry, key=key, device_id=request.device_id, count=1)
     player_id = identity["player_id"]
 
-    registry.create_frame(frame_create(SHOWING, x_mm=100, y_mm=100))
-    registry.create_frame(frame_create(OFFLINE, x_mm=600, y_mm=100))
+    registry.create_frame(frame_create(SHOWING, x_mm=100, y_mm=100), by="console")
+    registry.create_frame(frame_create(OFFLINE, x_mm=600, y_mm=100), by="console")
     # Compound-key bindings: same player, different outputs. frameHealth() must
     # resolve each frame to its OWN (player_id, output_id) port.
-    registry.bind(SHOWING, player_id, "HDMI-A-1", expected_generation=0)
-    registry.bind(OFFLINE, player_id, "HDMI-A-2", expected_generation=0)
+    registry.bind(SHOWING, player_id, "HDMI-A-1", expected_generation=0, by="console")
+    registry.bind(OFFLINE, player_id, "HDMI-A-2", expected_generation=0, by="console")
 
     # A looping Scene targeting frame:SHOWING, activated at the current (frozen)
     # clock so the projected RunView is in body phase and visible[] carries the
@@ -207,7 +207,7 @@ def test_an_unbound_frames_planned_fact_says_central_sends_it_no_layers(page, re
     """A Run on top of an unbound Frame is still Central's Runs, but the Planner gives an
     unbound Frame no layers (central/planner.py), so the basis says so, on the tile and on
     the Frame page's Overview (console DDD §35)."""
-    registry.create_frame(frame_create("spare-frame", x_mm=100, y_mm=100))
+    registry.create_frame(frame_create("spare-frame", x_mm=100, y_mm=100), by="console")
     store = RuntimeStore(registry.db, registry.clock)
     store.command("set_scene", Scene(
         scene_id=SCENE, loop=True, cycle_seconds=30,
@@ -229,7 +229,7 @@ def test_an_unbound_frames_planned_fact_says_central_sends_it_no_layers(page, re
 
 
 def test_the_frame_page_guides_content_authoring_from_its_frame(page, registry):
-    registry.create_frame(frame_create("new-frame", x_mm=100, y_mm=100))
+    registry.create_frame(frame_create("new-frame", x_mm=100, y_mm=100), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         page.get_by_role("button", name="Frame new-frame", exact=True).click()
@@ -329,7 +329,7 @@ def _wait_for(predicate, timeout=5.0):
 def _seed_empty_wall(registry):
     """A "wall" Surface whose only frame is origin-stacked (routed to the tray),
     so the plan canvas is EMPTY yet the Surface exists to place onto."""
-    registry.create_frame(frame_create("origin-seed", x_mm=0, y_mm=0))
+    registry.create_frame(frame_create("origin-seed", x_mm=0, y_mm=0), by="console")
 
 
 def test_first_frame_can_be_drawn_when_installation_has_no_frames(page, registry):
@@ -507,7 +507,7 @@ def test_measured_create_and_numeric_reposition(page, registry):
 
 
 def test_drag_move_existing_frame_patches_placement(page, registry):
-    registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         edit_layout(page)
@@ -534,7 +534,7 @@ def test_drag_move_existing_frame_patches_placement(page, registry):
 def test_a_drag_across_a_poll_ends_in_the_dragged_placement(page, registry):
     """Pass 2 §7: the 5 s poll replaces Plane A mid-drag, and the drag (a ref plus local
     state in Plan) survives it -- the release lands where the operator dragged to."""
-    registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         pause_page_clock(page, registry.clock.utc())
         connect(page, origin, "wall")
@@ -585,13 +585,13 @@ def _seed_bound(registry):
     passes the runtime guard and is refused by the binding guard (frame_bound)."""
     identity, _key, _request = enroll(registry, count=1)
     player_id = identity["player_id"]
-    registry.create_frame(frame_create(BOUND, x_mm=100, y_mm=100))
-    registry.bind(BOUND, player_id, "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create(BOUND, x_mm=100, y_mm=100), by="console")
+    registry.bind(BOUND, player_id, "HDMI-A-1", expected_generation=0, by="console")
     return player_id
 
 
 def test_delete_clear_frame_removes_it_from_the_plan(page, registry):
-    registry.create_frame(frame_create(CLEAR, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(CLEAR, x_mm=100, y_mm=100), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         edit_layout(page)
@@ -615,7 +615,7 @@ def test_delete_clear_frame_removes_it_from_the_plan(page, registry):
 
 def test_delete_frame_lists_stored_scene_roots_and_the_schedules_playing_them(page, registry):
     """The confirmation and the refusal name the Schedules playing those Scenes by their names."""
-    registry.create_frame(frame_create(CLEAR, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(CLEAR, x_mm=100, y_mm=100), by="console")
     store = RuntimeStore(registry.db, registry.clock)
     store.command("set_scene", Scene(scene_id="nested-gallery", children=(Child(scene=Scene(
         scene_id="inline", contributions=(Contribution(
@@ -640,7 +640,7 @@ def test_delete_frame_lists_stored_scene_roots_and_the_schedules_playing_them(pa
 
 
 def test_delete_frame_referenced_refusal_gives_refresh_and_edit_guidance(page, registry):
-    registry.create_frame(frame_create(CLEAR, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(CLEAR, x_mm=100, y_mm=100), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         edit_layout(page)
@@ -663,7 +663,7 @@ def test_delete_frame_referenced_refusal_gives_refresh_and_edit_guidance(page, r
 
 
 def test_delete_frame_queue_only_refusal_does_not_suggest_editing_scenes(page, registry):
-    registry.create_frame(frame_create(CLEAR, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(CLEAR, x_mm=100, y_mm=100), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         edit_layout(page)
@@ -719,7 +719,7 @@ def test_delete_frame_with_live_run_shows_finish_guidance(page, registry):
 
 def test_drop_tray_frame_onto_plan_gives_distinct_geometry(page, registry):
     # The only frame is origin-stacked -> it starts in the Unplaced tray.
-    registry.create_frame(frame_create(ORIGIN, x_mm=0, y_mm=0))
+    registry.create_frame(frame_create(ORIGIN, x_mm=0, y_mm=0), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         edit_layout(page)
@@ -808,7 +808,7 @@ def test_guidance_banner_leaves_by_itself_when_the_first_frame_exists(page, regi
         sign_in(page, origin)
         guidance = page.get_by_role("note", name="Getting started")
         expect(guidance).to_be_visible()
-        registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100))
+        registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100), by="console")
         page.get_by_role("button", name="Refresh", exact=True).click()
         expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()
         expect(page.get_by_role("note", name="Getting started")).to_have_count(0)
@@ -830,8 +830,8 @@ def _plan_writes(page):
 def test_a_drag_on_the_daily_wall_sends_no_write_and_edit_layout_sends_one_patch(page, registry):
     # Two unbound Frames (500 x 300 mm outlines) 2 m apart: the plan spans 2000 x 300 mm, so
     # PLACED is drawn at viewBox x 0..240, y 0..144 and the canvas right of it is empty.
-    registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100))
-    registry.create_frame(frame_create("far-frame", x_mm=1600, y_mm=100))
+    registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100), by="console")
+    registry.create_frame(frame_create("far-frame", x_mm=1600, y_mm=100), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         expect(page.get_by_role("button", name=f"Frame {PLACED}", exact=True)).to_be_visible()
@@ -860,7 +860,7 @@ def test_a_drag_on_the_daily_wall_sends_no_write_and_edit_layout_sends_one_patch
 
 
 def test_done_returns_to_the_daily_face(page, registry):
-    registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100), by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         bar = edit_layout(page)
@@ -932,8 +932,8 @@ def test_a_bound_frame_is_drawn_at_its_displays_size_and_an_unbound_one_as_a_das
     """A Frame bound to a Display stating 950 x 540 mm, its box the whole screen, is drawn 950 x 540
     beside an unbound Frame's 500 x 300 mm outline labelled "size not known yet"."""
     pi = enroll_pi(registry, "pi-a")
-    registry.create_frame(frame_create(SIZED, x_mm=100, y_mm=100))
-    registry.create_frame(frame_create(UNSIZED, x_mm=1200, y_mm=100))
+    registry.create_frame(frame_create(SIZED, x_mm=100, y_mm=100), by="console")
+    registry.create_frame(frame_create(UNSIZED, x_mm=1200, y_mm=100), by="console")
     _bind(registry, SIZED, pi, "HDMI-A-1")
     _sized(registry, "pi-a", "HDMI-A-1", (950, 540))
     assert next(frame for frame in registry.inventory().frames if frame.id == SIZED).size_mm == (950, 540)

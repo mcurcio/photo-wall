@@ -13,10 +13,8 @@ const run = { name: "runtime_available", value: 1.2e9, unit: "bytes", source: "h
 
 const host = (device: string, receivedAt: number, celsius: number, linked: boolean | null) => ({
   device_id: device,
-  previous_boot_received_at: null,
-  intake_full: false,
   host: { received_at: receivedAt, fault_code: null, metrics: [temp(celsius), cpu, run] },
-  bus_link: linked === null ? undefined : { linked, changed_at: 400, looked_at: 995 },
+  bus_link: linked === null ? undefined : { linked, changed_at: 400, hub: "reachable" },
 });
 
 const player = (id: string, device: string, registered: number, retired: number | null = null) => ({

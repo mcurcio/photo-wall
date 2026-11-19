@@ -9,10 +9,8 @@ from __future__ import annotations
 
 from test_fleet_attempts import SERIAL
 from test_node_boot import ALL_READY
-from test_node_fleet_hosts import Host, _rig
-from test_node_host_facts_ingest import _facts, _send
+from test_node_fleet_hosts import FACTS, Host, _rig, on_line
 
-from central.fleet.node_commands import NodeCommands
 from central.infra.central_state import PgCentralStateReads
 from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.player_versions import PgPlayerVersions
@@ -28,22 +26,23 @@ from central.room_light.model import (
     SensorRef,
     TypedColour,
 )
+from contracts.node_host_facts import encode_host_facts_state
+from contracts.node_state import HOST_FACTS_KEY
 
 
-def _reads(registry, sessions=None) -> tuple[PgCentralStateReads, PgRoomLights]:
+def _reads(registry, *, seeded: bool = False) -> tuple[PgCentralStateReads, PgRoomLights]:
     lights = PgRoomLights(registry.db, PgHouseLock())
-    if sessions is None:
-        _, sessions = _rig(registry)
-    versions = PgPlayerVersions(registry.db, registry.clock, ALL_READY, None, NodeCommands(sessions))
+    if not seeded:
+        _rig(registry)
+    versions = PgPlayerVersions(registry.db, registry.clock, ALL_READY, None)
     return PgCentralStateReads(registry.db, registry.clock, versions, lights, lambda: None), lights
 
 
-def test_the_installation_lists_each_pi_at_the_address_its_host_reported(registry):
-    boots, sessions = _rig(registry)
-    host = Host(registry, sessions, boots)
-    reads, _ = _reads(registry, sessions)
+def test_the_installation_lists_each_pi_at_the_address_its_host_line_states(registry):
+    Host(registry, _rig(registry))
+    reads, _ = _reads(registry, seeded=True)
     assert [(each.serial, each.address) for each in reads.installation().players] == [(SERIAL, None)]
-    _send(host, _facts(host.grant.producer, 2, address="192.168.1.40"))
+    on_line(registry, SERIAL, HOST_FACTS_KEY, encode_host_facts_state(FACTS), 1)
     assert [(each.serial, each.address) for each in reads.installation().players] == [(SERIAL, "192.168.1.40")]
 
 
@@ -51,17 +50,17 @@ def test_listening_names_every_home_assistant_entity_the_setup_names_and_nothing
     reads, lights = _reads(registry)
     assert reads.listening().entities == ()
     lights.save_room_light("spot", ReportedLight(name="Spot", colour=TypedColour(kelvin=4000),
-                                                 reporter=ReporterRef(source="home-assistant", address="light.spot")))
-    lights.save_sensor("meter", Sensor(name="Meter", at=SensorRef(source="home-assistant", address="sensor.lux")))
-    lights.save_room_light("window", MeasuredLight(name="Window", colour=TypedColour(kelvin=6500), sensor="meter"))
+                                                 reporter=ReporterRef(source="home-assistant", address="light.spot")), by="console")
+    lights.save_sensor("meter", Sensor(name="Meter", at=SensorRef(source="home-assistant", address="sensor.lux")), by="console")
+    lights.save_room_light("window", MeasuredLight(name="Window", colour=TypedColour(kelvin=6500), sensor="meter"), by="console")
     lights.save_colour_sensor("sky", ColourSensor(name="Sky", at=ColourSensorRef(
-        source="home-assistant", address="sensor.sun_sky_color_temperature")))
+        source="home-assistant", address="sensor.sun_sky_color_temperature")), by="console")
     assert reads.listening().entities == ("light.spot", "sensor.lux", "sensor.sun_sky_color_temperature")
 
 
 def test_room_lights_list_each_light_by_name_with_the_entry_the_wall_draws(registry):
     reads, lights = _reads(registry)
-    lights.save_room_light("lamp", FixedLight(name="Lamp", colour=TypedColour(kelvin=3000)))
+    lights.save_room_light("lamp", FixedLight(name="Lamp", colour=TypedColour(kelvin=3000)), by="console")
     document = lights.current()
     listed = reads.room_lights()
     assert listed.change == document.change

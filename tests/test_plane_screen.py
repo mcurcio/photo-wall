@@ -18,6 +18,7 @@ from contracts.models import Calibration, Layer, OutputBinding, PositionBox, Var
 from contracts.node_calibration import (
     MAX_TRIAL_BYTES,
     TrialCandidate,
+    TrialScope,
     candidate_hash,
     canonical,
     encode_trial,
@@ -270,7 +271,7 @@ def _envelope(fit) -> str:
     calibration = canonical(Calibration(fit=fit).model_dump(mode="json"))
     return encode_trial(TrialCandidate(
         trial_id=trial_id, generation=1, sequence=1, baseline=BASELINE, calibration_json=calibration,
-        candidate_sha256=candidate_hash(trial_id, 1, 1, BASELINE, calibration, LIGHTING),
+        candidate_sha256=candidate_hash(trial_id, 1, 1, TrialScope.of(BASELINE), calibration, LIGHTING),
         expires_boottime_ms=5000, hard_expires_boottime_ms=9000, lighting=LIGHTING))
 
 

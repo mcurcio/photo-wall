@@ -403,9 +403,10 @@ class WestonBackend:
             uid=grant.uid,
         )
 
-    def revise(self, surface: Surface, decision_id: UUID, *, expires_boottime_ms: int) -> None:
-        from appliance.kernel.clock import boottime_ms
-
+    def revise(self, surface: Surface, decision_id: UUID, *, ttl_ms: int) -> None:
+        """Ask the shell to adopt `surface`, the admitted one at a higher configuration revision,
+        on the Player's next presentation within `ttl_ms` (bounded to the shell's 1..5000 ms
+        window), timed by the shell itself: no deadline crosses a clock."""
         state = self.host.state(surface.output.output_id)
         active, _ = self.grants[surface.output.output_id]
         grant = SurfaceGrant(surface, active.uid, True)
@@ -422,7 +423,7 @@ class WestonBackend:
                 identity=asdict(surface),
                 grant_id=str(grant_id),
                 decision_id=str(decision_id),
-                ttl_ms=max(1, min(5000, expires_boottime_ms - boottime_ms())),
+                ttl_ms=max(1, min(5000, ttl_ms)),
             )
         except Exception:
             self.host.revision_expired(surface)

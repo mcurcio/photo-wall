@@ -2,7 +2,7 @@
 every Frame there is, chosen one by one; today's single-window Programs end at deploy while a Run
 already admitted keeps its snapshot end, and the Runtime restores.
 
-The migration's SQL runs on the real tables, after dropping the two it creates, with a Runtime
+The migration's SQL runs at head (which no longer has the two tables it creates), with a Runtime
 snapshot holding a Program as the previous build stored it (one window, `starts_at`/`ends_at`).
 """
 from __future__ import annotations
@@ -48,10 +48,12 @@ def test_089_seeds_night_off_with_every_frame_and_ends_todays_programs(registry)
         conn.execute("INSERT INTO runtime_state(singleton, revision, snapshot, changed_at, created_at, created_by, changed_by) VALUES (TRUE, 7, %s, 0, 0, 'console', 'console') "
                      "ON CONFLICT (singleton) DO UPDATE SET revision=7, snapshot=EXCLUDED.snapshot",
                      (Jsonb(snapshot),))
-        conn.execute("DROP TABLE house_settings; DROP TABLE night_off")
         conn.execute(MIGRATION.read_text())
+        # Migrations 116 and 118 moved the house and Night off into `singletons`; the tables 089
+        # creates again are read here, then go.
+        conn.execute("DROP TABLE house_settings")
         night_off = conn.execute("SELECT settings, revision FROM night_off").fetchone()
-        houses = conn.execute("SELECT count(*) AS n FROM house_settings").fetchone()["n"]
+        conn.execute("DROP TABLE night_off")
         state = conn.execute("SELECT revision, snapshot FROM runtime_state").fetchone()
         runtime = RuntimeStore.read_in(conn)
 
@@ -59,7 +61,6 @@ def test_089_seeds_night_off_with_every_frame_and_ends_todays_programs(registry)
     assert seeded.frames == ChosenFrames(frame_ids=("Attic", "b-c", "ba", "hall", "study"))   # sorted as Python sorts
     assert (seeded.off.time, seeded.on.time, seeded.days, seeded.darkness) == (
         "23:00", "07:00", ("mon", "tue", "wed", "thu", "fri", "sat", "sun"), Darkness.DISPLAY_OFF)
-    assert houses == 0                          # Central seeds the house row at start, never the migration
     assert state["revision"] == 8 and state["snapshot"]["programs"] == {}
     (kept,) = state["snapshot"]["runs"].values()
     assert kept["program_ends_at"] == 9000.0    # the admitted window keeps its end

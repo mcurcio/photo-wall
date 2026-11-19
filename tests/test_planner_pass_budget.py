@@ -49,11 +49,16 @@ def test_a_pass_over_fifty_thousand_photos_reads_only_the_top_of_its_line(regist
                                                     immich_up_to=None))
     assert library.finish_check(lease, CheckComplete())
     with registry.db.transaction() as conn:
-        # Every photo measured, as on a wall that has played a while.
-        conn.execute("INSERT INTO photo_key_content(asset_id,analysis_version,status,key,"
-                     "measured_at) SELECT asset_id,%s,'measured',%s,0 FROM asset_revisions",
+        # Every photo measured, as on a wall that has played a while. The seeding is the test's, not
+        # a request: its one UPDATE of 50,000 rows is not bound by the request's statement limit (it
+        # took 9.6 s of the 10 s with six of these tests at once), and only the tables the check
+        # filled are analyzed (a database-wide ANALYZE takes the shared catalogs' locks, which
+        # another test's CREATE or DROP DATABASE holds past the request's lock limit).
+        conn.execute("SET LOCAL statement_timeout = 0")
+        conn.execute("UPDATE library_assets SET key_analysis_version=%s,key_status='measured',"
+                     "key=%s,key_measured_at=0 WHERE asset_id IS NOT NULL",
                      (ANALYSIS_VERSION, Jsonb(key_content(3840, 2160).model_dump(mode="json"))))
-        conn.execute("ANALYZE")
+        conn.execute("ANALYZE library_assets, photo_pool_rows, photo_pools")
     repository = MediaRepository(registry.db, registry.clock,
                                  times=ProcessTransactionClock(registry.clock))
     runtime = Runtime(house=UTC_HOUSE)

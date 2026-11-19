@@ -286,7 +286,7 @@ def test_a_started_player_writes_its_own_line_and_refills_it_after_a_bus_crash(t
             # Bound twice: the report carries the binding generation of the second.
             server.offer(bindings=(binding().model_copy(update={"generation": 2, "lighting": WASHED}),),
                          configuration_revision=2, revision=2, layers=())
-            await service.poll_state()
+            await server.push(service)
             service.start_node_bus()
 
             dark = await until(reads(lambda held: "birth" in held and "drawn" in held and _frame(held) is not None

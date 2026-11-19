@@ -5,7 +5,8 @@ The fleet pipe and the show pipe each run one `NodeLinks` in the worker, on its 
 Node (`nodeapi.hub.run_link`), so the pipes stay apart: a link reads, cursors and writes only its own
 pipe's streams. Each link is a long-lived task, never a job and never a process per Node; it
 reconnects by itself. A Node that leaves the tracked set has its link stopped and its records kept. A
-store error is Central's own failure: it ends the supervisor, and the worker with it.
+store error is Central's own failure: it ends the supervisor, and the worker with it. `call` asks one
+Node's method over its running link (the fleet pipe's: the host's `reboot`, central/fleet/pi_reboot.py).
 """
 from __future__ import annotations
 
@@ -15,9 +16,10 @@ import logging
 from collections.abc import Collection
 from typing import Protocol
 
+from central.content_catalog.catalog import device_id_for_serial
 from central.infra.node_link_store import PgLinkStores
 from contracts.node_link import Pipe
-from nodeapi.hub import DocumentSource, run_link
+from nodeapi.hub import DocumentSource, HubUnavailable, NodeLink, run_link
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +42,7 @@ class NodeLinks:
         self._stores = stores
         self._documents = documents
         self._links: dict[str, tuple[asyncio.Event, asyncio.Task[None]]] = {}
+        self._running: dict[str, NodeLink] = {}   # device id -> its link while it runs
         self._failed = asyncio.Event()
         self._error: BaseException | None = None
 
@@ -50,10 +53,41 @@ class NodeLinks:
             stop = asyncio.Event()
             task = asyncio.create_task(
                 run_link(self._hub_url, serial, self._pipe, self._stores.store(serial, self._pipe),
-                         self._documents.source(serial, self._pipe), stop), name=f"node-link {self._pipe} {serial}")
+                         self._documents.source(serial, self._pipe), stop, linked=self._linked(serial)),
+                name=f"node-link {self._pipe} {serial}")
             task.add_done_callback(self._ended)
             self._links[serial] = (stop, task)
         await self._stop([serial for serial in self._links if serial not in wanted])
+
+    @property
+    def pipe(self) -> Pipe:
+        return self._pipe
+
+    async def call(self, device_id: str, component: str, method: str, payload: bytes, *,
+                   timeout: float) -> bytes | None:
+        """`component`'s `method` on `device_id`'s Node over its running link: the reply, or None when
+        it has no link now or does not answer within `timeout` (logged)."""
+        link = self._running.get(device_id)
+        if link is None:
+            log.info("%s %s.%s on %s: no link now", self._pipe, component, method, device_id)
+            return None
+        try:
+            return await link.call(component, method, payload, timeout=timeout)
+        except HubUnavailable as error:
+            log.info("%s %s.%s on %s: not answered: %s", self._pipe, component, method, device_id, error)
+            return None
+
+    def _linked(self, serial: str):
+        device_id = device_id_for_serial(serial)
+
+        def linked(link: NodeLink | None) -> None:
+            if device_id is None:
+                return
+            if link is None:
+                self._running.pop(device_id, None)
+            else:
+                self._running[device_id] = link
+        return linked
 
     async def run(self, stop: asyncio.Event) -> None:
         """Until `stop` or a link fails, then stop every link; raises the first exception a link

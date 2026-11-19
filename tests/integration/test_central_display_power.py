@@ -16,11 +16,13 @@ import asyncio
 from fastapi.testclient import TestClient
 from integration.bus_servers import hub_server, leaf_connections, node_server, until
 from support.frames import frame_create
+from support.trial_bus import worker_trials
 from test_display_identity import ADMIN, AUTH, enroll_pi
 
 from appliance.display_host.bus import DISPLAY_COMPONENT, DISPLAY_SLICE, DISPLAY_VERSION
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
+from central.coordination import OutputLossLedger
 from central.db import DatabaseTransactionClock
 from central.displays.model import TEST_SECONDS
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
@@ -61,8 +63,8 @@ def test_a_console_test_reaches_the_nodes_desired_bucket_by_notification(databas
     monkeypatch.setattr(NodeLink, "reconcile", counted)
     registry = Registry(database, ManualClock(1000), lighting=PgFrameLighting(LUT_RECIPE_ID))
     player = enroll_pi(registry, SERIAL)
-    registry.create_frame(frame_create("kitchen"))
-    registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("kitchen"), by="console")
+    registry.bind("kitchen", player, "HDMI-A-1", expected_generation=0, by="console")
     hub = hub_server(tmp_path, [SERIAL])
     node = node_server(tmp_path, SERIAL, hub)
     display = NodeSession(DISPLAY_COMPONENT, DISPLAY_SLICE,
@@ -82,9 +84,9 @@ def test_a_console_test_reaches_the_nodes_desired_bucket_by_notification(databas
         device = device_id_for_serial(SERIAL)
         before_listening = wakes.count(device)
         listening = asyncio.create_task(wakes.listen(database.dsn))
-        stores = PgLinkStores(database, {REPORT_STREAM: OutputReportJudge(wakes)})
+        stores = PgLinkStores(database, {REPORT_STREAM: OutputReportJudge(wakes, losses=OutputLossLedger())})
         links = NodeLinks(Pipe.FLEET, hub.client_url, stores, 
-                         DisplayDocuments(stores, wakes, times=DatabaseTransactionClock()))
+                         DisplayDocuments(stores, wakes, times=DatabaseTransactionClock(), trials=worker_trials(database)))
         stop = asyncio.Event()
         running = asyncio.create_task(links.run(stop))
         try:

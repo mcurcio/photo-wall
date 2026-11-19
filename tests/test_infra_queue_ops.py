@@ -22,13 +22,14 @@ from central.infra.outcomes import JobOutcomes
 from central.infra.queue_ops import (
     FinishedJobs,
     PurgeFinishedJobsHandler,
-    QueueAdmin,
+    QueueRescue,
     RescueStalledJobsHandler,
     StalledJob,
 )
 from central.infra.transactions import PgTransactions, pg_connection
 from central.kernel.handling import TransientFailure, handler_job_type
 from central.kernel.job_types import (
+    RESCUE_EVERY,
     FetchOsImage,
     PurgeFinishedJobs,
     RescueStalledJobs,
@@ -40,13 +41,14 @@ DAY = 86400.0
 DSN = "postgresql://unused.invalid/none"
 
 
-class RecordingAdmin:
+class RecordingRescue(QueueRescue):
     def __init__(self, stalled=()):
+        super().__init__(DSN)
         self._stalled = list(stalled)
         self.calls = []
 
-    async def stalled(self, *, heartbeat_timeout):
-        self.calls.append(("stalled", heartbeat_timeout))
+    async def stalled(self):
+        self.calls.append("stalled")
         return self._stalled
 
     async def republish(self, stalled):
@@ -56,36 +58,43 @@ class RecordingAdmin:
         self.calls.append(("close", stalled.id))
 
 
-# -- handlers (no DB) -------------------------------------------------------------------------------
+# -- the rescue's loop and its handler (no DB) ------------------------------------------------------
 
 
 def test_rescue_republishes_each_stalled_job_then_closes_it():
     stalled = [StalledJob(7, FetchOsImage(tarball_sha256="1" * 64), 1), StalledJob(9, SyncReleases(), 0)]
-    admin = RecordingAdmin(stalled)
-    asyncio.run(RescueStalledJobsHandler(admin).handle(RescueStalledJobs()))
-    assert admin.calls == [("stalled", timedelta(seconds=30)), ("republish", 7), ("close", 7),
-                           ("republish", 9), ("close", 9)]
+    rescue = RecordingRescue(stalled)
+    asyncio.run(RescueStalledJobsHandler(rescue).handle(RescueStalledJobs()))
+    assert rescue.calls == ["stalled", ("republish", 7), ("close", 7),
+                            ("republish", 9), ("close", 9)]
+    assert asyncio.run(rescue.rescue()) == 2
 
 
 def test_one_row_failing_to_close_does_not_abort_the_rescue_of_the_others():
     # e.g. procrastinate's "not in doing" when the row's worker came back and finished it.
-    class Refusing(RecordingAdmin):
+    class Refusing(RecordingRescue):
         async def close(self, stalled):
             await super().close(stalled)
             if stalled.id == 7:
                 raise procrastinate.exceptions.ConnectorException("not in doing")
 
     stalled = [StalledJob(7, FetchOsImage(tarball_sha256="1" * 64), 1), StalledJob(9, SyncReleases(), 0)]
-    admin = Refusing(stalled)
+    rescue = Refusing(stalled)
     with pytest.raises(TransientFailure) as raised:
-        asyncio.run(RescueStalledJobsHandler(admin).handle(RescueStalledJobs()))
+        asyncio.run(RescueStalledJobsHandler(rescue).handle(RescueStalledJobs()))
     assert raised.value.reason == queue_ops.RESCUE_INCOMPLETE  # the next run looks again
-    assert admin.calls[1:] == [("republish", 7), ("close", 7), ("republish", 9), ("close", 9)]
+    assert rescue.calls[1:] == [("republish", 7), ("close", 7), ("republish", 9), ("close", 9)]
+    rescue.calls.clear()
+    asyncio.run(rescue.rescue_at_start())     # at a worker's start a failure is only logged
+    assert rescue.calls[1:] == [("republish", 7), ("close", 7), ("republish", 9), ("close", 9)]
+
+
+def test_the_rescue_runs_every_five_minutes():
+    assert RescueStalledJobs.delivery.every == RESCUE_EVERY == timedelta(minutes=5)
 
 
 def test_the_handlers_dispatch_by_their_hints_and_fill_the_catalog():
-    admin = RecordingAdmin()
-    rescue = RescueStalledJobsHandler(admin)
+    rescue = RescueStalledJobsHandler(RecordingRescue())
     purge = PurgeFinishedJobsHandler(FinishedJobs(FakeTransactions().begin), transactions=FakeTransactions(),
                                      outcomes=JobOutcomes(), clock=ManualClock(0.0))
     assert handler_job_type(rescue) is RescueStalledJobs
@@ -96,7 +105,7 @@ def test_the_handlers_dispatch_by_their_hints_and_fill_the_catalog():
                 assets=PgAssetRecords(ManualClock(0.0)), clock=ManualClock(0.0), redeliver=None)
 
 
-# -- QueueAdmin against a faked procrastinate job manager (no DB) ----------------------------------
+# -- QueueRescue against a faked procrastinate job manager (no DB) ---------------------------------
 
 
 class FakeJobManager:
@@ -113,7 +122,7 @@ class FakeJobManager:
 
 
 def admin_with(monkeypatch, manager):
-    admin = QueueAdmin(DSN)
+    admin = QueueRescue(DSN)
 
     async def opened():
         return SimpleNamespace(job_manager=manager)
@@ -127,19 +136,22 @@ def row(id_, name, kwargs, queue="photo-wall-fetch"):
                             task_kwargs=kwargs, status="doing")
 
 
-def test_stalled_returns_only_our_jobs_with_their_attempt(monkeypatch):
+def test_stalled_returns_our_typed_jobs_with_their_attempt_and_every_media_task(monkeypatch):
+    """S3a: one rescue, both apps' tasks, one dead-worker rule (STALLED_WORKER_SECONDS)."""
     ours = FetchOsImage(tarball_sha256="3" * 64)
+    media = row(1, "photo_wall.media.measure", {"asset_id": "x"}, queue="photo-wall-media")
     manager = FakeJobManager([
-        row(1, "photo_wall.media.prepare", {"job_id": "x"}, queue="photo-wall-media"),
+        media,
         row(2, task_name(FetchOsImage), job_kwargs(ours, attempt=2)),
         row(3, "builtin:procrastinate.builtin_tasks.remove_old_jobs", {}),
         row(4, task_name(SyncReleases), {"timestamp": 60}, queue="photo-wall-fetch"),
         row(5, "photo_wall.test_not_in_catalog", {}),
     ])
     admin = admin_with(monkeypatch, manager)
-    found = asyncio.run(admin.stalled(heartbeat_timeout=timedelta(seconds=45)))
-    assert found == [StalledJob(2, ours, 2), StalledJob(4, SyncReleases(), 0)]
-    assert manager.calls == [("get_stalled_jobs", {"seconds_since_heartbeat": 45.0})]
+    found = asyncio.run(admin.stalled())
+    assert found == [StalledJob(1, None, 0, media), StalledJob(2, ours, 2),
+                     StalledJob(4, SyncReleases(), 0)]
+    assert manager.calls == [("get_stalled_jobs", {"seconds_since_heartbeat": 30.0})]
 
 
 def test_close_finishes_the_row_failed_and_republish_keeps_the_attempt(monkeypatch):
@@ -192,7 +204,7 @@ class Db:
                         ([queue],))[0]
 
 
-def test_a_stalled_job_is_republished_then_closed_and_legacy_jobs_are_untouched(registry):
+def test_a_stalled_job_is_republished_then_closed_and_other_queues_rows_are_untouched(registry):
     db = Db(registry)
     job = FetchOsImage(tarball_sha256="5" * 64)
     db.publish(job, attempt=1)
@@ -200,7 +212,7 @@ def test_a_stalled_job_is_republished_then_closed_and_legacy_jobs_are_untouched(
                   "VALUES (now() - interval '5 minutes') RETURNING id")[0]["id"]
     live = db.sql("INSERT INTO procrastinate_workers DEFAULT VALUES RETURNING id")[0]["id"]
     db.sql("UPDATE procrastinate_jobs SET status = 'doing', worker_id = %s", (dead,))
-    legacy = db.legacy()
+    legacy = db.legacy(queue="photo-wall-elsewhere")   # a queue neither app owns
     db.sql("UPDATE procrastinate_jobs SET worker_id = %s WHERE id = %s", (dead, legacy))
     db.publish(SyncReleases())
     db.sql("UPDATE procrastinate_jobs SET status = 'doing', worker_id = %s "
@@ -209,7 +221,7 @@ def test_a_stalled_job_is_republished_then_closed_and_legacy_jobs_are_untouched(
         "SELECT id FROM procrastinate_jobs WHERE task_name = %s", (task_name(FetchOsImage),))]
     observed = []
 
-    class Observing(QueueAdmin):
+    class Observing(QueueRescue):
         async def republish(self, stalled):
             await super().republish(stalled)
             observed.append(("after_republish", db.fetch("photo-wall-fetch")["id"]))
@@ -236,6 +248,41 @@ def test_a_stalled_job_is_republished_then_closed_and_legacy_jobs_are_untouched(
     assert statuses[stalled_id] == "failed"
     assert statuses[legacy] == "doing"  # never touched
     assert statuses[new_copy["id"]] == "doing"  # fetched by the probe above
+
+
+def test_one_rescue_republishes_a_dead_workers_media_and_central_jobs(registry):
+    """S3a: `QueueRescue.rescue` covers both apps' tasks: a `doing` media task and a `doing`
+    Central job whose worker is aged past STALLED_WORKER_SECONDS are both re-published and
+    closed; a live worker's job is untouched. Mutation probe: rescue only Central's tasks (the
+    media job stays stalled)."""
+    db = Db(registry)
+    job = FetchOsImage(tarball_sha256="6" * 64)
+    db.publish(job, attempt=1)
+    dead = db.sql("INSERT INTO procrastinate_workers (last_heartbeat) "
+                  "VALUES (now() - interval '31 seconds') RETURNING id")[0]["id"]
+    live = db.sql("INSERT INTO procrastinate_workers DEFAULT VALUES RETURNING id")[0]["id"]
+    db.sql("UPDATE procrastinate_jobs SET status = 'doing', worker_id = %s", (dead,))
+    media = db.legacy()                                   # a media task on photo-wall-media
+    db.sql("UPDATE procrastinate_jobs SET worker_id = %s WHERE id = %s", (dead, media))
+    beating = db.sql("INSERT INTO procrastinate_jobs (queue_name, task_name, args, status, "
+                     "worker_id) VALUES ('photo-wall-media', 'photo_wall.media.measure', "
+                     "'{\"asset_id\": \"a\"}', 'doing', %s) RETURNING id", (live,))[0]["id"]
+    rescue = QueueRescue(db.dsn)
+
+    async def scenario():
+        try:
+            return await rescue.rescue()
+        finally:
+            await rescue.aclose()
+
+    assert asyncio.run(scenario()) == 2
+    rows = db.sql("SELECT id, task_name, status::text AS status, args FROM procrastinate_jobs "
+                  "ORDER BY id")
+    statuses = {r["id"]: r["status"] for r in rows}
+    assert statuses[media] == "failed" and statuses[beating] == "doing"
+    todo = {r["task_name"]: r["args"] for r in rows if r["status"] == "todo"}
+    assert todo == {task_name(FetchOsImage): job_kwargs(job, attempt=1),
+                    "photo_wall.media.prepare": {"job_id": "j"}}
 
 
 def test_purge_deletes_old_finished_rows_of_every_queue_and_stale_outcomes_only(registry):

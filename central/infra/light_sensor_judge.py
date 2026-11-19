@@ -2,11 +2,11 @@
 Pi's wired light sensor (contracts/room_light.py LIGHT_SENSOR_KEY) as it is recorded and hands it to
 room lights as a reading of the reference (PI_SOURCE, the Pi's player id).
 
-Each reading, and each value that is not a reading (kept in the one refusal log), is recorded in a
-savepoint of its own (`RoomLightReports.record_reading_within`, `record_refused_within`), so a
+Each reading, and each value that is not a reading (kept in the one refusal log, `events`), is
+recorded in a savepoint of its own (`RoomLightReports.record_reading_within`, `record_refused_within`), so a
 failure rolls back only that word and is logged: the host line's record always commits. The record
-stays the source: `missed_readings_in` names each Pi whose newest recorded reading its word has not
-taken, and the room-lights document takes them before it is built.
+stays the source: `missed_readings_in` names each Pi whose newest recorded reading its facts have not
+taken, and the room-lights document (and a House › Lights save) takes them before it is built.
 """
 from __future__ import annotations
 
@@ -78,10 +78,12 @@ class LightSensorJudge:
 
 def missed_readings_in(conn: Any) -> tuple[tuple[str, Reading], ...]:
     """(player id, reading) for each enrolled Pi whose newest recorded light-sensor value is a reading
-    its word (reading_words, PI_SOURCE) was not taken from: heard before that record, or never. A
-    value that is not a reading, or a removed key, takes nothing (the judge logged the refusal)."""
-    heard = {row["address"]: float(row["heard"]) for row in conn.execute(
-        "SELECT address, EXTRACT(EPOCH FROM heard_at) AS heard FROM reading_words WHERE source=%s",
+    its facts (room_light_facts, kind 'reading', PI_SOURCE) were not heard at or after: heard before
+    that record, or never (no Sensor named it then, or a facts write within HEARD_WRITE_SECONDS left
+    `heard_at` as it was: judging it again writes nothing). A value that is not a reading, or a
+    removed key, takes nothing (the judge logged the refusal)."""
+    heard = {row["address"]: float(row["heard_at"]) for row in conn.execute(
+        "SELECT address, heard_at FROM room_light_facts WHERE kind='reading' AND source=%s",
         (PI_SOURCE,)).fetchall()}
     missed: list[tuple[str, Reading]] = []
     for latest in latest_values_in(conn, HOST_LINE, LIGHT_SENSOR_KEY):

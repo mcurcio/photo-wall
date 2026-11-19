@@ -92,7 +92,8 @@ def _now(registry) -> datetime:
 
 
 def _kept_rows(registry) -> list[dict]:
-    return _sql(registry, "SELECT * FROM picture_kept_entries ORDER BY display_id, number")
+    return _sql(registry, "SELECT id, display_id, number, entry_kind AS kind, at, by, session_id, restored_from, picture FROM picture_history WHERE kind='kept' "
+                          "ORDER BY display_id, number")
 
 
 def _append(registry, display_id: UUID, picture: DisplayPicture) -> UUID:
@@ -100,7 +101,7 @@ def _append(registry, display_id: UUID, picture: DisplayPicture) -> UUID:
     write today: a code since withdrawn, an older recipe)."""
     with registry.db.transaction() as conn:
         return append_kept_in(conn, display_id, PictureRecord(PictureEntryKind.KEPT_COPIED, picture, None, None,
-                                                              None)).entry_id
+                                                              None), by="console").entry_id
 
 
 def _assert_utc(body: dict) -> None:
@@ -127,6 +128,8 @@ def test_done_appends_one_kept_entry_and_the_display_lists_it(registry):
     assert (row["kind"], row["number"], str(row["session_id"]), row["restored_from"]) == (
         "kept-done", 1, session["session_id"], None)
     assert before <= row["at"] <= after
+    # The operator's request (the API token) appended the entry and changed the Display.
+    assert (row["by"], _display(registry, player)["changed_by"]) == ("api-token", "api-token")
     assert (row["picture"]["hardware_picture"], row["picture"]["software_contrast_percent"],
             row["picture"]["signal_range"]) == ({"10": 46}, 114, "auto")
     name = _display(registry, player)["name"]
@@ -194,7 +197,7 @@ def test_an_entry_from_before_the_light_restores_with_todays_light(registry):
     display_id = _display_id(registry, player)
     entry = _append(registry, display_id, DisplayPicture({}, replace(NEUTRAL_SOFTWARE, contrast_percent=80),
                                                          SignalRange.AUTO, UPGRADE_DISPLAY_LIGHT))
-    _sql(registry, "UPDATE picture_kept_entries SET picture = picture - 'matched_lux' - 'panel_black' WHERE id=%s",
+    _sql(registry, "UPDATE picture_history SET picture = picture - 'matched_lux' - 'panel_black' WHERE id=%s",
          (entry,))
     with _client(registry) as client:
         [listed] = _kept(_history(client, display_id))
@@ -255,12 +258,14 @@ def test_restore_refusals_in_order(registry):
         refusals = [(_restore(client, session, uuid4(), 1), 404, "unknown_entry"),
                     (_restore(client, session, foreign, 2), 409, "stale_sequence"),
                     (_restore(client, session, foreign, 1), 409, "other_display")]
-        _sql(registry, "UPDATE picture_sessions SET idle_until = EXTRACT(EPOCH FROM clock_timestamp()) - 1")
+        _sql(registry, "UPDATE displays SET picture_session = jsonb_set(picture_session, '{idle_until}', to_jsonb(EXTRACT(EPOCH FROM clock_timestamp()) - 1)) "
+             "WHERE picture_session IS NOT NULL")
         refusals += [(_restore(client, session, uuid4(), 9), 404, "unknown_entry"),
                      (_restore(client, session, foreign, 9), 410, "session_ended")]
         for answer, status, code in refusals:
             assert (answer.status_code, answer.json()) == (status, {"error": code})
-    assert _sql(registry, "SELECT restored_from FROM picture_sessions") == [{"restored_from": None}]
+    assert _sql(registry, "SELECT (picture_session->>'restored_from')::uuid AS restored_from FROM displays "
+                          "WHERE picture_session IS NOT NULL") == [{"restored_from": None}]
 
 
 def test_restore_skips_what_is_no_longer_offered_or_listed_and_keeps_the_test_pattern(registry):
@@ -322,7 +327,7 @@ def test_a_failed_append_fails_the_done(registry, monkeypatch):
     write_picture -> the Done is taken and the Display stores 130."""
     player = _bound(registry)
 
-    def refuse(conn, display_id, record):
+    def refuse(conn, display_id, record, *, by):
         raise RuntimeError("history write failed")
 
     with _client(registry) as client:
@@ -333,7 +338,8 @@ def test_a_failed_append_fails_the_done(registry, monkeypatch):
         with pytest.raises(RuntimeError, match="history write failed"):
             _done(client, session)
     assert _display(registry, player)["software_contrast_percent"] == 100
-    assert [str(row["id"]) for row in _sql(registry, "SELECT id FROM picture_sessions")] == [session["session_id"]]
+    assert [str(row["id"]) for row in _sql(registry, "SELECT picture_session->>'id' AS id FROM displays "
+                                                             "WHERE picture_session IS NOT NULL")] == [session["session_id"]]
     assert _kept_rows(registry) == []
 
 
@@ -346,6 +352,6 @@ def test_the_kept_write_takes_only_done_or_copy(registry):
     picture = DisplayPicture({}, louder, SignalRange.AUTO, UPGRADE_DISPLAY_LIGHT)
     for kind in (PictureEntryKind.KEPT_UNRECORDED, PictureEntryKind.SENT_DRAFT, PictureEntryKind.SENT_KEPT):
         with registry.db.transaction() as conn, pytest.raises(ValueError, match="picture_history_kind"):
-            display_store.write_picture(conn, display_id, PictureRecord(kind, picture, None, None, None))
+            display_store.write_picture(conn, display_id, PictureRecord(kind, picture, None, None, None), by="console")
     assert _display(registry, player)["software_contrast_percent"] == 100
     assert _kept_rows(registry) == []

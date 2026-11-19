@@ -290,7 +290,7 @@ def test_after_photo_library_and_attention(page, registry, scheme, suffix):
     _library(registry, page)
     store = PgPhotoLibrary(registry.db, times=DatabaseTransactionClock(), queue=NoQueue())
     archive = store.add_connection(ConnectionWrite(name="Archive", url="http://archive.invalid:2283",
-                                                   key=KEY.replace("1234", "9876")))
+                                                   key=KEY.replace("1234", "9876")), by="console")
     assert store.record_contact(store.begin_contact(archive), ContactRefused(problem=KeyRejected()))
     _sized(page, scheme, WIDTHS[suffix])
     with operator_server(registry.db, registry.clock) as origin:

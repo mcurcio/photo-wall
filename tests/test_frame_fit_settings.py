@@ -19,7 +19,6 @@ from test_registry import ADMIN, enroll
 
 from central.app import create_app
 from central.displays.model import Readiness
-from central.fleet.node_sessions import NodeControlConfig
 from central.fleet.position_history import PositionEntryKind
 from central.infra.display_store import frame_outputs_in
 from central.infra.position_history_store import latest_kept_position_in, latest_position_in
@@ -40,8 +39,8 @@ OLD_FORMS = [
 def _bound(registry, frame_id: str = "lounge") -> str:
     """A landscape Frame bound to HDMI-A-1 of a Pi whose Outputs reported 1920 x 1080; its player id."""
     player, _key, _request = enroll(registry, count=1)
-    registry.create_frame(frame_create(frame_id))
-    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create(frame_id), by="console")
+    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     return player["player_id"]
 
 
@@ -73,8 +72,7 @@ def test_a_cover_or_corners_save_body_is_refused_422_before_any_write(registry, 
     with registry.db.transaction() as conn:
         latest = latest_position_in(conn, "lounge")
     calibration = {"revision": 1, "fit": fit}
-    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False,
-                               node_control=NodeControlConfig("node-test"))) as client:
+    with TestClient(create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)) as client:
         begun = client.post("/v1/operator/frames/lounge/calibration-trials", headers=AUTH,
                             json={"calibration": calibration})
         edited = client.post(f"/v1/operator/frames/lounge/calibration-trials/{uuid4()}", headers=AUTH,
@@ -129,8 +127,8 @@ def _turned_on_uhd(registry, frame_id: str = "lounge", size=(3840, 2160)) -> str
     """A 16:9 Frame bound to HDMI-A-1 of a Pi whose Output reported `size`, turned 90 (its
     Position then saved again, so it is READY); its player id."""
     player, _key, _request = enroll(registry, count=1, size=size)
-    registry.create_frame(frame_create(frame_id))
-    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0)
-    registry.turn_frame(frame_id, 90, expected_generation=_frame(registry, frame_id).generation)
+    registry.create_frame(frame_create(frame_id), by="console")
+    registry.bind(frame_id, player["player_id"], "HDMI-A-1", expected_generation=0, by="console")
+    registry.turn_frame(frame_id, 90, expected_generation=_frame(registry, frame_id).generation, by="console")
     save_position(registry, frame_id)
     return player["player_id"]

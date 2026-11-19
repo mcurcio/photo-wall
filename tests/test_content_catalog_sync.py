@@ -131,7 +131,7 @@ def test_a_release_without_a_node_manifest_writes_nothing_but_the_etag(world):
     assert w.publisher.calls == [PublishedCall(Prefetch(), False, w.transactions.begun[-1])]
     with w.db.transaction() as conn:
         assert conn.execute("SELECT kind FROM assets").fetchall() == []
-        assert conn.execute("SELECT tag FROM node_release_observations").fetchall() == []
+        assert conn.execute("SELECT tag FROM node_releases").fetchall() == []
 
 
 def test_unchanged_listing_runs_only_the_tail(world):

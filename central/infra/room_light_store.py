@@ -1,47 +1,67 @@
-"""Room lights over PostgreSQL (migrations 099, 109, 111): `PgRoomLights` implements central/room_light/ports.py's
-RoomLightReports (every reporting source's adapter), RoomLightSetup (House › Lights),
-RoomLightsDocuments (the worker's WALL writer) and DrawnReports (each Player's drawn report), and
-the Home Assistant adapter's HeardEntities (central/infra/home_assistant/states.py: each entity Home
-Assistant published, its kind, name and when Central last heard it, home_assistant_entities).
+"""Room lights over PostgreSQL (decision 0034, migration 120): `PgRoomLights` implements
+central/room_light/ports.py's RoomLightReports (every reporting source's adapter), RoomLightSetup
+(House › Lights) and RoomLightsDocuments (the worker's WALL writer), and the Home Assistant
+adapter's HeardEntities and GalleriaBirths (central/infra/home_assistant/states.py: each entity Home
+Assistant published, its kind, name and when Central last heard it, home_assistant_entities; and
+Galleria's birth, the `singletons` document 'galleria_birth').
 
-Every reference's facts are kept by its reference (light_words, reading_words, colour_words: the
-last stated value and when, its doubt (why and since when), when last heard; policy.py's
-`*_facts_after` and `doubted` decide them) whether or not a room light, Sensor or colour sensor names it, and are resolved only when
-the document is built (policy.room_lights_document). Each source keeps its newest
-WORDS_KEPT_PER_SOURCE references and REFUSALS_KEPT refusals.
+The setup is one document, `singletons` 'room_light_setup' (central/infra/room_light_rows.py: room
+lights, Sensors, colour sensors and the room-lights document's change number); its row is the
+house's lock. Facts are kept for named references only, one row per (kind, source, address) of
+`room_light_facts` (kinds light, reading, colour; the kind's model as JSON beside when its source
+was last heard); a report for a reference no setup item names is judged and dropped.
 
-Every write that changes the room-lights document raises `room_lights_change.change` in its own
-transaction, under that row's lock (the house's lock, taken first through the HouseLock
-the store is handed, central/infra/frame_lighting_store.py), and sends `NOTIFY ROOM_LIGHTS_CHANNEL`, delivered at commit: the worker's WALL writer listens
-and puts the document again. Every instant is PostgreSQL's `clock_timestamp()` (Central's one clock);
-a write stamping several columns reads it once (`_CLOCK`) and binds that one instant to each, so a new
-record's created_at and changed_at are equal (`clock_timestamp()` moves within a statement).
-No trigger, no stored procedure, no range in SQL: the rules are central/room_light/policy.py's and
-the ranges pydantic's.
+A report's write path, the class-B rule (`_report_in`, its one home):
+  1. no lock: does the setup name (source, address) for this kind? No: nothing is written;
+  2. no lock: the facts after it (policy.*_facts_after over the stored facts);
+  3. unchanged (but for when it was heard): nothing is written, except `heard_at` once it is older
+     than HEARD_WRITE_SECONDS;
+  4. changed: when the room-lights document changes with it, the house's lock is taken
+     (HouseLock.changing_within), the report judged again under it, the facts written, the setup's
+     `change` raised and `NOTIFY ROOM_LIGHTS_CHANNEL` sent (delivered at commit: the worker's WALL
+     writer listens and puts the document again); else the facts row alone is written, no lock.
 
-A doubt with no report behind it is written here too, under the same lock and wake: an unreadable
-refusal doubts every reference at its (source, address) "can't read" (one a setup item names, or
-one with facts), and a closed link doubts every reference of its source with facts "link closed".
-The words that travel for a doubt are dated on the house's clock (its zone and 12- or 24-hour clock,
+Every instant is PostgreSQL's `clock_timestamp()` (Central's one clock); a write stamping several
+columns reads it once (`_CLOCK`) and binds that one instant to each. No trigger, no stored
+procedure, no range in SQL: the rules are central/room_light/policy.py's and the ranges pydantic's.
+
+A doubt with no report behind it is written here too, under the house's lock and wake: an
+unreadable refusal doubts every reference at its (source, address) a setup item names "can't
+read", and a closed link doubts every named reference of its source with facts "link closed". The
+words that travel for a doubt are dated on the house's clock (its zone and 12- or 24-hour clock,
 central/infra/house_store.py), so a Settings › House save that changes them raises the change too
-(`house_clock_changing_within`, which PgHouse calls).
+(`house_clock_changing_within`, which PgHouse calls). Refused reports are `events` (kind 'refusal',
+central/infra/events.py, kept a week).
+
+What each Player drew with is judged on read from its newest `room-lights-drawn` value on the
+Player line (`node_states`), never copied.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, Final
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
+from typing import Any, Final, Literal
 from zoneinfo import ZoneInfo
 
 from psycopg.types.json import Jsonb
-from pydantic import TypeAdapter
+from pydantic import BaseModel, ConfigDict, TypeAdapter
 
+from central.actor import Actor
 from central.db import Database, DatabaseTransactionClock
 from central.frame_lighting.ports import HouseLock
 from central.house_time.model import HouseClock
+from central.infra.events import refusal_in, refusals_in
 from central.infra.house_store import house_settings_in
 from central.infra.light_sensor_judge import PI_SOURCE, missed_readings_in
-from central.infra.room_light_rows import ROOM_LIGHT, lights_in
+from central.infra.node_link_latest import latest_values_in
+from central.infra.room_light_rows import (
+    ROOM_LIGHT_SETUP,
+    _PlacedLight,
+    _RoomLightSetup,
+    lights_of,
+    setup_in,
+)
+from central.infra.singletons import Singleton
 from central.infra.transactions import PgTransaction, pg_connection
 from central.kernel.transactions import Transaction
 from central.room_light.model import (
@@ -51,11 +71,9 @@ from central.room_light.model import (
     ColourSensor,
     ColourSensorId,
     ColourSensorRef,
-    Doubt,
     DoubtReason,
     Facts,
     FixedLight,
-    Kept,
     LightFacts,
     LightReport,
     MeasuredLight,
@@ -101,89 +119,131 @@ from central.room_light.views import (
     SensorView,
 )
 from contracts.home_assistant import HOME_ASSISTANT_ENTITIES_MAX, GalleriaBirth
+from contracts.node_state import PLAYER_LINE, ROOM_LIGHTS_DRAWN_KEY
 from contracts.room_light import (
-    Dimmer,
-    KelvinColour,
-    LightColour,
-    Measured,
+    ROOM_LIGHTS_DRAWN_BYTES,
     Reading,
     RoomLightsDocument,
     RoomLightsDrawn,
     room_lights_digest,
 )
+from contracts.wire_model import decoded
 
 ROOM_LIGHTS_CHANNEL: Final = "room_lights"     # NOTIFY payload: empty; the WALL writer re-reads the document
-REFUSALS_KEPT: Final = 20                      # the newest refused reports kept per source
-WORDS_KEPT_PER_SOURCE: Final = 256             # the newest references' words kept per source
-# Who writes a row, for its audit fields (created_by, changed_by; there are no accounts): the console's
-# operator for setup, Galleria for its birth, a reference's own source for what it stated, and
-# Central for a doubt it set itself (a refused report, a closed link).
-OPERATOR: Final = "operator"
-GALLERIA: Final = "galleria"
-CENTRAL: Final = "central"
+REFUSALS_SHOWN: Final = 20                     # the newest refused reports shown (kept a week as `events`)
+HEARD_WRITE_SECONDS: Final = 60.0              # an unchanged report or entity rewrites when it was heard at most this often
+# Who writes, for the audit fields: a facts row, its reference's own source for what it stated and
+# Central for a doubt it set itself (a refused report, a closed link); the setup, the request's
+# principal for a House › Lights edit and Central for a change a report raised; Galleria's birth, Central;
+# an entity Home Assistant published, Home Assistant.
+CENTRAL: Final[Actor] = "central"
+HOME_ASSISTANT: Final[Actor] = "home-assistant"
 
-_COLOUR: Final = TypeAdapter(LightColour)
+FactsKind = Literal["light", "reading", "colour"]
+_Reference = ReporterRef | SensorRef | ColourSensorRef
+_Facts = LightFacts | ReadingFacts | ColourFacts
+_KIND_OF: Final[dict[type, FactsKind]] = {ReporterRef: "light", SensorRef: "reading", ColourSensorRef: "colour"}
+_REFERENCE_OF: Final[dict[FactsKind, type]] = {kind: reference for reference, kind in _KIND_OF.items()}
+_FACTS_OF: Final[dict[FactsKind, TypeAdapter[Any]]] = {
+    "light": TypeAdapter(LightFacts), "reading": TypeAdapter(ReadingFacts), "colour": TypeAdapter(ColourFacts)}
+_EMPTY_OF: Final[dict[FactsKind, Callable[[float], _Facts]]] = {
+    "light": lambda at: LightFacts(state=None, colour=None, doubt=None, heard_at=at),
+    "reading": lambda at: ReadingFacts(reading=None, doubt=None, heard_at=at),
+    "colour": lambda at: ColourFacts(colour=None, doubt=None, heard_at=at)}
 
+
+class _GalleriaBirthDocument(BaseModel):
+    """Galleria's last birth and when Central first heard it (Central's clock)."""
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    birth: GalleriaBirth
+    heard_at: float
+
+
+GALLERIA_BIRTH: Final[Singleton[_GalleriaBirthDocument]] = Singleton("galleria_birth", _GalleriaBirthDocument)
+
+_CLOCK: Final = DatabaseTransactionClock()
+"""Central's clock, read once per write (epoch seconds): the instant every column the write stamps takes."""
+
+
+# ---- The setup ----
 
 def sensors_in(conn: Any) -> dict[SensorId, Sensor]:
-    rows = conn.execute("SELECT id, sensor FROM sensors ORDER BY id").fetchall()
-    return {row["id"]: Sensor.model_validate(row["sensor"]) for row in rows}
+    return dict(sorted(setup_in(conn).sensors.items()))
 
 
 def colour_sensors_in(conn: Any) -> dict[ColourSensorId, ColourSensor]:
-    rows = conn.execute("SELECT id, sensor FROM colour_sensors ORDER BY id").fetchall()
-    return {row["id"]: ColourSensor.model_validate(row["sensor"]) for row in rows}
+    return dict(sorted(setup_in(conn).colour_sensors.items()))
 
 
-def _doubt(row: Any) -> Doubt | None:
-    return None if row["doubt_reason"] is None else Doubt(DoubtReason(row["doubt_reason"]), float(row["doubt_since"]))
+def _named(setup: _RoomLightSetup) -> dict[_Reference, str]:
+    """Every reference a room light reports by (ReporterRef), a Sensor is (SensorRef) or a colour
+    sensor is (ColourSensorRef), with that item's id, room lights first in House › Lights order, then
+    Sensors by id, then colour sensors by id."""
+    named: dict[_Reference, str] = {}
+    for light_id, light in lights_of(setup).items():
+        if isinstance(light, ReportedLight):
+            named[light.reporter] = light_id
+    for sensor_id, sensor in sorted(setup.sensors.items()):
+        named[sensor.at] = sensor_id
+    for sensor_id, colour_sensor in sorted(setup.colour_sensors.items()):
+        named[colour_sensor.at] = sensor_id
+    return named
 
 
-def _kept[T](value: T | None, at: Any) -> Kept[T] | None:
-    return None if value is None else Kept(value, float(at))
+def named_in(conn: Any, source: Source) -> dict[ReporterRef | SensorRef | ColourSensorRef, str]:
+    """Every reference of `source` a setup item names (`_named`), with that item's id."""
+    return {reference: item for reference, item in _named(setup_in(conn)).items() if reference.source == source}
 
 
-def _epochs(*columns: str) -> str:
-    return ", ".join(f"EXTRACT(EPOCH FROM {column}) AS {column}" for column in columns)
-
-
-def _light_facts(row: Any) -> LightFacts:
-    return LightFacts(
-        state=_kept(None if row["state"] is None else Dimmer.model_validate(row["state"]), row["state_at"]),
-        colour=_kept(None if row["colour"] is None else _COLOUR.validate_python(row["colour"]), row["colour_at"]),
-        doubt=_doubt(row), heard_at=float(row["heard_at"]))
-
-
-def _reading_facts(row: Any) -> ReadingFacts:
-    return ReadingFacts(
-        reading=_kept(None if row["reading"] is None else Measured.model_validate(row["reading"]), row["reading_at"]),
-        doubt=_doubt(row), heard_at=float(row["heard_at"]))
-
-
-def _colour_facts(row: Any) -> ColourFacts:
-    return ColourFacts(
-        colour=_kept(None if row["colour"] is None else KelvinColour.model_validate(row["colour"]), row["colour_at"]),
-        doubt=_doubt(row), heard_at=float(row["heard_at"]))
-
-
-_LIGHT_SELECT: Final = (f"SELECT source, address, state, colour, doubt_reason, "
-                        f"{_epochs('state_at', 'colour_at', 'doubt_since', 'heard_at')} FROM light_words")
-_READING_SELECT: Final = (f"SELECT source, address, reading, doubt_reason, "
-                          f"{_epochs('reading_at', 'doubt_since', 'heard_at')} FROM reading_words")
-_COLOUR_SELECT: Final = (f"SELECT source, address, colour, doubt_reason, "
-                         f"{_epochs('colour_at', 'doubt_since', 'heard_at')} FROM colour_words")
-
+# ---- Facts ----
 
 def facts_in(conn: Any) -> Facts:
-    """Every reference's kept facts."""
-    return Facts(
-        lights={ReporterRef(source=row["source"], address=row["address"]): _light_facts(row)
-                for row in conn.execute(_LIGHT_SELECT).fetchall()},
-        readings={SensorRef(source=row["source"], address=row["address"]): _reading_facts(row)
-                  for row in conn.execute(_READING_SELECT).fetchall()},
-        colours={ColourSensorRef(source=row["source"], address=row["address"]): _colour_facts(row)
-                 for row in conn.execute(_COLOUR_SELECT).fetchall()})
+    """Every named reference's kept facts."""
+    kept: dict[FactsKind, dict[Any, Any]] = {"light": {}, "reading": {}, "colour": {}}
+    for row in conn.execute("SELECT kind, source, address, facts, heard_at FROM room_light_facts").fetchall():
+        kind: FactsKind = row["kind"]
+        reference = _REFERENCE_OF[kind](source=row["source"], address=row["address"])
+        kept[kind][reference] = _FACTS_OF[kind].validate_python({**row["facts"], "heard_at": float(row["heard_at"])})
+    return Facts(lights=kept["light"], readings=kept["reading"], colours=kept["colour"])
 
+
+def _kept_of(facts: Facts, kind: FactsKind) -> Mapping[Any, Any]:
+    return {"light": facts.lights, "reading": facts.readings, "colour": facts.colours}[kind]
+
+
+def _with(facts: Facts, reference: _Reference, kept: _Facts) -> Facts:
+    """`facts` with `reference`'s replaced by `kept`."""
+    kind = _KIND_OF[type(reference)]
+    replaced = {**_kept_of(facts, kind), reference: kept}
+    return Facts(lights=replaced if kind == "light" else facts.lights,
+                 readings=replaced if kind == "reading" else facts.readings,
+                 colours=replaced if kind == "colour" else facts.colours)
+
+
+def _put_facts_in(conn: Any, reference: _Reference, kept: _Facts, now: float, by: str) -> None:
+    """Upsert `reference`'s facts and its audit fields: created at `now` by `by` when new, changed at
+    `now` by `by` always."""
+    kind = _KIND_OF[type(reference)]
+    conn.execute(
+        "INSERT INTO room_light_facts (kind, source, address, facts, heard_at, created_at, created_by, changed_at,"
+        " changed_by) VALUES (%(kind)s, %(source)s, %(address)s, %(facts)s, %(heard)s, %(now)s, %(by)s, %(now)s,"
+        " %(by)s) ON CONFLICT (kind, source, address) DO UPDATE SET facts=EXCLUDED.facts,"
+        " heard_at=EXCLUDED.heard_at, changed_at=EXCLUDED.changed_at, changed_by=EXCLUDED.changed_by",
+        {"kind": kind, "source": reference.source, "address": reference.address,
+         "facts": Jsonb(_FACTS_OF[kind].dump_python(kept, mode="json", exclude={"heard_at"})),
+         "heard": kept.heard_at, "now": now, "by": by})
+
+
+def _forget_unnamed_in(conn: Any, setup: _RoomLightSetup) -> None:
+    """Delete every facts row no setup item names any more (named references only are kept)."""
+    named = list(_named(setup))
+    conn.execute(
+        "DELETE FROM room_light_facts f WHERE NOT EXISTS (SELECT 1 FROM unnest(%s::text[], %s::text[], %s::text[])"
+        " AS n(kind, source, address) WHERE (n.kind, n.source, n.address) = (f.kind, f.source, f.address))",
+        ([_KIND_OF[type(each)] for each in named], [each.source for each in named], [each.address for each in named]))
+
+
+# ---- The document ----
 
 def _clock_in(conn: Any) -> HouseClock:
     """The house's clock (its zone and 12- or 24-hour clock), the one a doubt's words are dated on."""
@@ -191,172 +251,119 @@ def _clock_in(conn: Any) -> HouseClock:
     return HouseClock(ZoneInfo(settings.time.zone), settings.clock)
 
 
+def _document(setup: _RoomLightSetup, facts: Facts, clock: HouseClock) -> RoomLightsDocument:
+    return room_lights_document(lights_of(setup), setup.sensors, setup.colour_sensors, facts, setup.change, clock)
+
+
 def document_in(conn: Any) -> RoomLightsDocument:
-    """The room-lights document now (policy.room_lights_document over the stored rows)."""
-    change = int(conn.execute("SELECT change FROM room_lights_change WHERE one").fetchone()["change"])
-    return room_lights_document(lights_in(conn), sensors_in(conn), colour_sensors_in(conn), facts_in(conn), change,
-                                _clock_in(conn))
+    """The room-lights document now (policy.room_lights_document over the stored setup and facts)."""
+    return _document(setup_in(conn), facts_in(conn), _clock_in(conn))
 
 
-def _changed_in(conn: Any, before: RoomLightsDocument) -> bool:
+def _changed_in(conn: Any, before: RoomLightsDocument, by: Actor) -> bool:
     """When the document's lights differ from `before`'s: raise its change and wake the WALL writer
     (at commit). True when it did."""
     if dict(document_in(conn).lights) == dict(before.lights):
         return False
-    conn.execute("UPDATE room_lights_change SET change = change + 1 WHERE one")
+    setup = setup_in(conn)
+    ROOM_LIGHT_SETUP.write_in(conn, setup.model_copy(update={"change": setup.change + 1}), by=by, times=_CLOCK)
     conn.execute("SELECT pg_notify(%s, '')", (ROOM_LIGHTS_CHANNEL,))
     return True
 
 
-def _json(value: Any) -> Jsonb | None:
-    return None if value is None else Jsonb(value.model_dump(mode="json"))
+# ---- A report's write path (the class-B rule's one home) ----
 
-
-_CLOCK: Final = DatabaseTransactionClock()
-"""Central's clock, read once per write (epoch seconds): the instant every column the write stamps takes."""
-
-
-def _kept_in(conn: Any, house: HouseLock, table: str, source: str, address: str,
-             write: Any) -> Recorded:
-    """Under the house's lock: `write(now)` upserts (source, address)'s facts in `table`; then of that
-    source's references no room light, Sensor or colour sensor names, only those among its newest
-    WORDS_KEPT_PER_SOURCE stay (a named reference's facts are never trimmed); "recorded" when the
-    document changed."""
-    house.changing_within(PgTransaction(conn))
+def _report_in[F: (LightFacts, ReadingFacts, ColourFacts)](
+        conn: Any, house: HouseLock, reference: _Reference, after: Callable[[F | None, float], F]) -> Recorded:
+    """`reference`'s report, whose facts after it `after(stored, now)` gives: judged before stored
+    (the module's steps 1 to 4)."""
+    kind = _KIND_OF[type(reference)]
+    setup = setup_in(conn)
+    if reference not in _named(setup):                                     # 1
+        return "unchanged"
+    now = _CLOCK.now_in(conn)
+    facts = facts_in(conn)
+    stored: F | None = _kept_of(facts, kind).get(reference)
+    judged = after(stored, now)                                            # 2
+    if stored is not None and replace(judged, heard_at=stored.heard_at) == stored:   # 3
+        if now - stored.heard_at >= HEARD_WRITE_SECONDS:
+            conn.execute("UPDATE room_light_facts SET heard_at=%s WHERE kind=%s AND source=%s AND address=%s",
+                         (judged.heard_at, kind, reference.source, reference.address))
+        return "unchanged"
+    clock = _clock_in(conn)
+    if dict(_document(setup, _with(facts, reference, judged), clock).lights) == dict(
+            _document(setup, facts, clock).lights):                        # 4, the facts alone
+        _put_facts_in(conn, reference, judged, now, reference.source)
+        return "unchanged"
+    house.changing_within(PgTransaction(conn))                             # 4, the document changes
+    setup = setup_in(conn)
+    if reference not in _named(setup):
+        return "unchanged"
     before = document_in(conn)
-    write(_CLOCK.now_in(conn))
-    named = sorted({reference.address for reference in named_in(conn, source)})
-    conn.execute(f"DELETE FROM {table} WHERE source=%(source)s AND NOT (address = ANY(%(named)s)) "  # noqa: S608
-                 f"AND address NOT IN (SELECT address FROM {table} WHERE source=%(source)s "
-                 "ORDER BY heard_at DESC, address LIMIT %(keep)s)",
-                 {"source": source, "named": named, "keep": WORDS_KEPT_PER_SOURCE})
-    return "recorded" if _changed_in(conn, before) else "unchanged"
-
-
-def _put_words(conn: Any, table: str, source: str, address: str, values: dict[str, Any], instants: frozenset[str],
-               now: float, by: str) -> None:
-    """Upsert (source, address)'s row of `table` with `values` (column -> value; the `instants`
-    columns as epoch seconds) and its audit fields: created at `now` by `by` when new, changed at
-    `now` by `by` always."""
-    columns = list(values)
-    placeholders = ", ".join(f"to_timestamp(%({column})s)" if column in instants else f"%({column})s"
-                             for column in columns)
-    updates = ", ".join(f"{column}=EXCLUDED.{column}" for column in (*columns, "changed_at", "changed_by"))
-    conn.execute(
-        f"INSERT INTO {table}(source, address, {', '.join(columns)}, created_at, created_by, changed_at, "  # noqa: S608
-        f"changed_by) VALUES (%(source)s, %(address)s, {placeholders}, to_timestamp(%(now)s), %(by)s, "
-        f"to_timestamp(%(now)s), %(by)s) ON CONFLICT (source, address) DO UPDATE SET {updates}",
-        {**values, "source": source, "address": address, "now": now, "by": by})
-
-
-def _put_light(conn: Any, reporter: ReporterRef, facts: LightFacts, now: float, by: str) -> None:
-    reason, since = _doubt_columns(facts.doubt)
-    _put_words(conn, "light_words", reporter.source, reporter.address, {
-        "state": _json(facts.state and facts.state.value), "state_at": facts.state and facts.state.at,
-        "colour": _json(facts.colour and facts.colour.value), "colour_at": facts.colour and facts.colour.at,
-        "doubt_reason": reason, "doubt_since": since, "heard_at": facts.heard_at},
-        frozenset({"state_at", "colour_at", "doubt_since", "heard_at"}), now, by)
-
-
-def _put_reading(conn: Any, sensor: SensorRef, facts: ReadingFacts, now: float, by: str) -> None:
-    reason, since = _doubt_columns(facts.doubt)
-    _put_words(conn, "reading_words", sensor.source, sensor.address, {
-        "reading": _json(facts.reading and facts.reading.value), "reading_at": facts.reading and facts.reading.at,
-        "doubt_reason": reason, "doubt_since": since, "heard_at": facts.heard_at},
-        frozenset({"reading_at", "doubt_since", "heard_at"}), now, by)
-
-
-def _put_colour(conn: Any, sensor: ColourSensorRef, facts: ColourFacts, now: float, by: str) -> None:
-    reason, since = _doubt_columns(facts.doubt)
-    _put_words(conn, "colour_words", sensor.source, sensor.address, {
-        "colour": _json(facts.colour and facts.colour.value), "colour_at": facts.colour and facts.colour.at,
-        "doubt_reason": reason, "doubt_since": since, "heard_at": facts.heard_at},
-        frozenset({"colour_at", "doubt_since", "heard_at"}), now, by)
-
-
-def _doubt_columns(doubt: Doubt | None) -> tuple[str | None, float | None]:
-    return (None, None) if doubt is None else (doubt.reason.value, doubt.since)
+    judged = after(_kept_of(facts_in(conn), kind).get(reference), now)
+    _put_facts_in(conn, reference, judged, now, reference.source)
+    return "recorded" if _changed_in(conn, before, CENTRAL) else "unchanged"
 
 
 def _light_in(conn: Any, house: HouseLock, reporter: ReporterRef, report: LightReport) -> Recorded:
-    def write(now: float) -> None:
-        row = conn.execute(f"{_LIGHT_SELECT} WHERE source=%s AND address=%s",  # noqa: S608
-                           (reporter.source, reporter.address)).fetchone()
-        _put_light(conn, reporter, light_facts_after(None if row is None else _light_facts(row), report, now), now,
-                   reporter.source)
-    return _kept_in(conn, house, "light_words", reporter.source, reporter.address, write)
+    return _report_in(conn, house, reporter, lambda stored, now: light_facts_after(stored, report, now))
 
 
 def _reading_in(conn: Any, house: HouseLock, sensor: SensorRef, reading: Reading) -> Recorded:
-    def write(now: float) -> None:
-        row = conn.execute(f"{_READING_SELECT} WHERE source=%s AND address=%s",  # noqa: S608
-                           (sensor.source, sensor.address)).fetchone()
-        _put_reading(conn, sensor, reading_facts_after(None if row is None else _reading_facts(row), reading, now), now,
-                     sensor.source)
-    return _kept_in(conn, house, "reading_words", sensor.source, sensor.address, write)
+    return _report_in(conn, house, sensor, lambda stored, now: reading_facts_after(stored, reading, now))
 
 
 def _colour_in(conn: Any, house: HouseLock, sensor: ColourSensorRef, reading: ColourReading) -> Recorded:
-    def write(now: float) -> None:
-        row = conn.execute(f"{_COLOUR_SELECT} WHERE source=%s AND address=%s",  # noqa: S608
-                           (sensor.source, sensor.address)).fetchone()
-        _put_colour(conn, sensor, colour_facts_after(None if row is None else _colour_facts(row), reading, now), now,
-                    sensor.source)
-    return _kept_in(conn, house, "colour_words", sensor.source, sensor.address, write)
+    return _report_in(conn, house, sensor, lambda stored, now: colour_facts_after(stored, reading, now))
 
 
 def _doubts_in(conn: Any, house: HouseLock, source: Source, address: str | None, reason: DoubtReason) -> Recorded:
-    """Under the house's lock: every reference of `source` (at `address` only, when given) that has
-    facts takes `reason`'s doubt (policy.doubted), its last word standing; for "can't read" (the
-    source spoke), so does every such reference a setup item names that has none yet. "recorded"
-    when the document changed."""
+    """Under the house's lock: every named reference of `source` (at `address` only, when given) that
+    has facts takes `reason`'s doubt (policy.doubted), its last word standing; for "can't read" (the
+    source spoke), so does every such reference that has none yet. Only facts that change are
+    written. "recorded" when the document changed."""
     house.changing_within(PgTransaction(conn))
     before = document_in(conn)
     now = _CLOCK.now_in(conn)
     facts = facts_in(conn)
-    named = named_in(conn, source) if reason == DoubtReason.CANT_READ else {}
-
-    def mine[R: (ReporterRef, SensorRef, ColourSensorRef)](kept: Any, kind: type[R]) -> list[R]:
-        found = {reference for reference in kept if reference.source == source}
-        found |= {reference for reference in named if isinstance(reference, kind)}
-        return sorted((reference for reference in found if address is None or reference.address == address),
-                      key=lambda reference: reference.address)
-
-    for reporter in mine(facts.lights, ReporterRef):
-        _put_light(conn, reporter, doubted(facts.lights.get(reporter), reason, now,
-                                           LightFacts(state=None, colour=None, doubt=None, heard_at=now)), now, CENTRAL)
-    for sensor in mine(facts.readings, SensorRef):
-        _put_reading(conn, sensor, doubted(facts.readings.get(sensor), reason, now,
-                                           ReadingFacts(reading=None, doubt=None, heard_at=now)), now, CENTRAL)
-    for colour_sensor in mine(facts.colours, ColourSensorRef):
-        _put_colour(conn, colour_sensor, doubted(facts.colours.get(colour_sensor), reason, now,
-                                                 ColourFacts(colour=None, doubt=None, heard_at=now)), now, CENTRAL)
-    return "recorded" if _changed_in(conn, before) else "unchanged"
-
-
-def _refusal_in(conn: Any, source: Source, address: str, reason: ReportRefusal) -> None:
-    """Keep one refused report and the newest REFUSALS_KEPT of `source`. The address is cut to
-    ADDRESS_MAX here and only here: a refused report's text is the source's own and may be anything."""
-    conn.execute("INSERT INTO report_refusals(source, address, reason, at) "
-                 "VALUES (%s, %s, %s, clock_timestamp())", (source, address[:ADDRESS_MAX], reason.value))
-    conn.execute("DELETE FROM report_refusals WHERE source=%(source)s AND id NOT IN (SELECT id FROM "
-                 "report_refusals WHERE source=%(source)s ORDER BY id DESC LIMIT %(keep)s)",
-                 {"source": source, "keep": REFUSALS_KEPT})
+    for reference in sorted(named_in(conn, source), key=lambda each: (_KIND_OF[type(each)], each.address)):
+        if address is not None and reference.address != address:
+            continue
+        kind = _KIND_OF[type(reference)]
+        stored = _kept_of(facts, kind).get(reference)
+        if stored is None and reason != DoubtReason.CANT_READ:
+            continue
+        judged = doubted(stored, reason, now, _EMPTY_OF[kind](now))
+        if judged != stored:
+            _put_facts_in(conn, reference, judged, now, CENTRAL)
+    return "recorded" if _changed_in(conn, before, CENTRAL) else "unchanged"
 
 
 def _refused_in(conn: Any, house: HouseLock, source: Source, address: str, reason: ReportRefusal) -> None:
-    """The refusal in the one log; an unreadable one also doubts its references "can't read"."""
-    _refusal_in(conn, source, address, reason)
+    """The refusal in the one log (`events`, its address cut to ADDRESS_MAX here and only here: a
+    refused report's text is the source's own and may be anything); an unreadable one also doubts its
+    references "can't read"."""
+    _refusal_in(conn, source, address[:ADDRESS_MAX], reason)
     if reason == ReportRefusal.UNREADABLE:
         _doubts_in(conn, house, source, address[:ADDRESS_MAX], DoubtReason.CANT_READ)
+
+
+def _refusal_in(conn: Any, source: Source, address: str, reason: ReportRefusal) -> None:
+    refusal_in(conn, source=source, address=address, reason=reason.value)
+
+
+def _take_missed_in(conn: Any, house: HouseLock) -> None:
+    """Every Pi reading the host line recorded and its facts did not take (its savepoint failed, or no
+    Sensor named it then), so the host line's record, not the facts, decides a Pi's reading."""
+    for player_id, reading in missed_readings_in(conn):
+        _reading_in(conn, house, SensorRef(source=PI_SOURCE, address=player_id), reading)
 
 
 class PgRoomLights:
     """Room lights' ports over one Database."""
 
     def __init__(self, db: Database, house: HouseLock) -> None:
-        """`house` is the house's lock and its "which Frames name it" query (every change here takes
-        the lock first)."""
+        """`house` is the house's lock and its "which Frames name it" query."""
         self._db = db
         self._house = house
 
@@ -399,56 +406,50 @@ class PgRoomLights:
         self._house.changing_within(tx)
         before = document_in(conn)
         write()
-        return "recorded" if _changed_in(conn, before) else "unchanged"
+        return "recorded" if _changed_in(conn, before, CENTRAL) else "unchanged"
 
     # ---- RoomLightsDocuments ----
 
     def current(self) -> RoomLightsDocument:
-        """First takes every Pi reading the host line recorded and its judge did not keep (its
-        savepoint failed), so the host line's record, not reading_words, decides a Pi's reading."""
+        """First takes every Pi reading the host line recorded and its facts did not take, so the
+        host line's record, not the facts, decides a Pi's reading."""
         with self._db.transaction() as conn:
-            for player_id, reading in missed_readings_in(conn):
-                _reading_in(conn, self._house, SensorRef(source=PI_SOURCE, address=player_id), reading)
+            _take_missed_in(conn, self._house)
             return document_in(conn)
-
-    # ---- DrawnReports ----
-
-    def record_drawn_within(self, tx: Transaction, player_id: str, report: RoomLightsDrawn) -> None:
-        conn = pg_connection(tx)
-        with conn.transaction():
-            conn.execute("INSERT INTO room_lights_drawn(player_id, drawn, following, reported_at) "
-                         "VALUES (%s, %s, %s, clock_timestamp()) ON CONFLICT (player_id) DO UPDATE "
-                         "SET drawn=EXCLUDED.drawn, following=EXCLUDED.following, reported_at=EXCLUDED.reported_at",
-                         (player_id, report.drawn, report.following))
-
-    def record_drawn(self, player_id: str, report: RoomLightsDrawn) -> None:
-        """`record_drawn_within` in a transaction of its own (a test's seeding; the judge records
-        within the Player line's record)."""
-        with self._db.transaction() as conn:
-            self.record_drawn_within(PgTransaction(conn), player_id, report)
 
     # ---- HeardEntities (the Home Assistant adapter) ----
 
     def record_heard(self, entity: str, kind: str, name: str) -> None:
+        """Written only on change: a new entity, its kind or name changed, or when it was heard older
+        than HEARD_WRITE_SECONDS, stamped `home-assistant` (its audit fields). The newest
+        HOME_ASSISTANT_ENTITIES_MAX are kept."""
         with self._db.transaction() as conn:
-            conn.execute("INSERT INTO home_assistant_entities(entity, kind, name, heard_at) "
-                         "VALUES (%s, %s, %s, clock_timestamp()) ON CONFLICT (entity) DO UPDATE "
-                         "SET kind=EXCLUDED.kind, name=EXCLUDED.name, heard_at=EXCLUDED.heard_at",
-                         (entity, kind, name))
-            conn.execute("DELETE FROM home_assistant_entities WHERE entity NOT IN (SELECT entity FROM "
-                         "home_assistant_entities ORDER BY heard_at DESC, entity LIMIT %s)",
-                         (HOME_ASSISTANT_ENTITIES_MAX,))
+            row = conn.execute("SELECT kind, name, EXTRACT(EPOCH FROM clock_timestamp() - heard_at) AS age "
+                               "FROM home_assistant_entities WHERE entity=%s", (entity,)).fetchone()
+            if row is not None and (row["kind"], row["name"]) == (kind, name) and float(row["age"]) < HEARD_WRITE_SECONDS:
+                return
+            conn.execute("INSERT INTO home_assistant_entities(entity, kind, name, heard_at, created_at, created_by, "
+                         "changed_at, changed_by) VALUES (%(entity)s, %(kind)s, %(name)s, to_timestamp(%(now)s), "
+                         "%(now)s, %(by)s, %(now)s, %(by)s) ON CONFLICT (entity) DO UPDATE SET kind=EXCLUDED.kind, "
+                         "name=EXCLUDED.name, heard_at=EXCLUDED.heard_at, changed_at=EXCLUDED.changed_at, "
+                         "changed_by=EXCLUDED.changed_by",
+                         {"entity": entity, "kind": kind, "name": name, "now": _CLOCK.now_in(conn),
+                          "by": HOME_ASSISTANT})
+            if row is None:
+                conn.execute("DELETE FROM home_assistant_entities WHERE entity NOT IN (SELECT entity FROM "
+                             "home_assistant_entities ORDER BY heard_at DESC, entity LIMIT %s)",
+                             (HOME_ASSISTANT_ENTITIES_MAX,))
 
     # ---- GalleriaBirths (the Home Assistant adapter) ----
 
     def record_galleria_birth(self, birth: GalleriaBirth) -> None:
+        """Written when it changes: the same birth again keeps when it was first heard."""
         with self._db.transaction() as conn:
-            conn.execute("INSERT INTO galleria_birth(one, birth, heard_at, created_at, created_by, changed_at, "
-                         "changed_by) VALUES (true, %(birth)s, to_timestamp(%(now)s), to_timestamp(%(now)s), %(by)s, "
-                         "to_timestamp(%(now)s), %(by)s) "
-                         "ON CONFLICT (one) DO UPDATE SET birth=EXCLUDED.birth, heard_at=EXCLUDED.heard_at, "
-                         "changed_at=EXCLUDED.changed_at, changed_by=EXCLUDED.changed_by",
-                         {"birth": Jsonb(birth.model_dump(mode="json")), "by": GALLERIA, "now": _CLOCK.now_in(conn)})
+            stored = GALLERIA_BIRTH.read_in(conn)
+            if stored is not None and stored.value.birth == birth:
+                return
+            GALLERIA_BIRTH.write_in(conn, _GalleriaBirthDocument(birth=birth, heard_at=_CLOCK.now_in(conn)),
+                                    by=CENTRAL, times=_CLOCK)
 
     def galleria_birth(self) -> GalleriaBirth | None:
         with self._db.transaction() as conn:
@@ -462,98 +463,115 @@ class PgRoomLights:
             return _view_in(conn, self._house)
 
     def drawn(self) -> DrawnView:
+        """Each enrolled Player's newest `room-lights-drawn` value on its line, judged now against the
+        document (`drawn_state`); its age is when Central recorded it against the database's clock in
+        the same read. A removed or undecodable value lists no Player."""
         with self._db.transaction() as conn:
             digest_now = room_lights_digest(document_in(conn))
-            rows = conn.execute("SELECT player_id, drawn, following, EXTRACT(EPOCH FROM reported_at) AS reported_at, "
-                                "EXTRACT(EPOCH FROM clock_timestamp() - reported_at) AS age "
-                                "FROM room_lights_drawn ORDER BY player_id").fetchall()
-        return DrawnView(players=tuple(PlayerDrawnView(
-            player_id=row["player_id"], reported_at=float(row["reported_at"]),
-            state=drawn_state(RoomLightsDrawn(drawn=row["drawn"], following=row["following"]), float(row["age"]),
-                              digest_now)) for row in rows))
+            now = _CLOCK.now_in(conn)
+            latest = latest_values_in(conn, PLAYER_LINE, ROOM_LIGHTS_DRAWN_KEY)
+        players = []
+        for value in sorted(latest, key=lambda each: each.player_id):
+            report = value.decoded(lambda data: decoded(RoomLightsDrawn, data, ROOM_LIGHTS_DRAWN_BYTES,
+                                                        "room_lights_drawn"), "drawn report")
+            if report is None:
+                continue
+            players.append(PlayerDrawnView(player_id=value.player_id, reported_at=value.recorded_at,
+                                           state=drawn_state(report, now - value.recorded_at, digest_now)))
+        return DrawnView(players=tuple(players))
 
     def refused(self) -> RefusedReportsView:
         with self._db.transaction() as conn:
             return RefusedReportsView(refused=refused_in(conn, None))
 
-    def save_room_light(self, light_id: RoomLightId, light: RoomLight) -> RoomLightView:
+    def save_room_light(self, light_id: RoomLightId, light: RoomLight, *, by: Actor) -> RoomLightView:
         with self._db.transaction() as conn:
             tx = PgTransaction(conn)
             self._house.changing_within(tx)
-            lights = lights_in(conn)
-            refused = check_room_light(light_id, light, lights, sensors_in(conn), colour_sensors_in(conn),
+            setup = setup_in(conn)
+            refused = check_room_light(light_id, light, lights_of(setup), setup.sensors, setup.colour_sensors,
                                        self._house.naming_within(tx).lights.get(light_id, ()))
             if refused is not None:
                 raise refused
-            before = document_in(conn)
-            conn.execute("INSERT INTO room_lights(id, light, position) "
-                         "SELECT %s, %s, COALESCE(max(position), -1) + 1 FROM room_lights "
-                         "ON CONFLICT (id) DO UPDATE SET light=EXCLUDED.light",
-                         (light_id, Jsonb(ROOM_LIGHT.dump_python(light, mode="json"))))
-            _changed_in(conn, before)
+            placed = setup.lights.get(light_id)
+            position = placed.position if placed is not None else max(
+                (each.position for each in setup.lights.values()), default=-1) + 1
+            _setup_saved_in(conn, self._house, setup.model_copy(update={
+                "lights": {**setup.lights, light_id: _PlacedLight(light=light, position=position)}}), by)
             return next(view for view in _view_in(conn, self._house).lights if view.id == light_id)
 
-    def remove_room_light(self, light_id: RoomLightId) -> None:
+    def remove_room_light(self, light_id: RoomLightId, *, by: Actor) -> None:
         with self._db.transaction() as conn:
             tx = PgTransaction(conn)
             self._house.changing_within(tx)
-            refused = check_room_light_removal(light_id, lights_in(conn),
+            setup = setup_in(conn)
+            refused = check_room_light_removal(light_id, lights_of(setup),
                                                self._house.naming_within(tx).lights.get(light_id, ()))
             if refused is not None:
                 raise refused
-            before = document_in(conn)
-            conn.execute("DELETE FROM room_lights WHERE id=%s", (light_id,))
-            _changed_in(conn, before)
+            _setup_saved_in(conn, self._house, setup.model_copy(update={
+                "lights": {key: each for key, each in setup.lights.items() if key != light_id}}), by)
 
-    def save_sensor(self, sensor_id: SensorId, sensor: Sensor) -> SensorView:
+    def save_sensor(self, sensor_id: SensorId, sensor: Sensor, *, by: Actor) -> SensorView:
         with self._db.transaction() as conn:
             self._house.changing_within(PgTransaction(conn))
-            refused = check_sensor(sensor_id, sensor, sensors_in(conn), lights_in(conn), colour_sensors_in(conn))
+            setup = setup_in(conn)
+            refused = check_sensor(sensor_id, sensor, setup.sensors, lights_of(setup), setup.colour_sensors)
             if refused is not None:
                 raise refused
-            before = document_in(conn)
-            conn.execute("INSERT INTO sensors(id, sensor) VALUES (%s, %s) "
-                         "ON CONFLICT (id) DO UPDATE SET sensor=EXCLUDED.sensor",
-                         (sensor_id, Jsonb(sensor.model_dump(mode="json"))))
-            _changed_in(conn, before)
+            _setup_saved_in(conn, self._house, setup.model_copy(update={
+                "sensors": {**setup.sensors, sensor_id: sensor}}), by)
             return next(view for view in _view_in(conn, self._house).sensors if view.id == sensor_id)
 
-    def remove_sensor(self, sensor_id: SensorId) -> None:
+    def remove_sensor(self, sensor_id: SensorId, *, by: Actor) -> None:
         with self._db.transaction() as conn:
             self._house.changing_within(PgTransaction(conn))
-            refused = check_sensor_removal(sensor_id, sensors_in(conn), lights_in(conn))
+            setup = setup_in(conn)
+            refused = check_sensor_removal(sensor_id, setup.sensors, lights_of(setup))
             if refused is not None:
                 raise refused
-            conn.execute("DELETE FROM sensors WHERE id=%s", (sensor_id,))
+            _setup_saved_in(conn, self._house, setup.model_copy(update={
+                "sensors": {key: each for key, each in setup.sensors.items() if key != sensor_id}}), by)
 
-    def save_colour_sensor(self, sensor_id: ColourSensorId, sensor: ColourSensor) -> ColourSensorView:
+    def save_colour_sensor(self, sensor_id: ColourSensorId, sensor: ColourSensor, *, by: Actor) -> ColourSensorView:
         with self._db.transaction() as conn:
             self._house.changing_within(PgTransaction(conn))
-            refused = check_colour_sensor(sensor_id, sensor, colour_sensors_in(conn), lights_in(conn),
-                                          sensors_in(conn))
+            setup = setup_in(conn)
+            refused = check_colour_sensor(sensor_id, sensor, setup.colour_sensors, lights_of(setup), setup.sensors)
             if refused is not None:
                 raise refused
-            before = document_in(conn)
-            conn.execute("INSERT INTO colour_sensors(id, sensor, created_at, created_by, changed_at, changed_by) "
-                         "VALUES (%(id)s, %(sensor)s, to_timestamp(%(now)s), %(by)s, to_timestamp(%(now)s), %(by)s) "
-                         "ON CONFLICT (id) DO UPDATE SET sensor=EXCLUDED.sensor, changed_at=EXCLUDED.changed_at, "
-                         "changed_by=EXCLUDED.changed_by",
-                         {"id": sensor_id, "sensor": Jsonb(sensor.model_dump(mode="json")), "by": OPERATOR,
-                          "now": _CLOCK.now_in(conn)})
-            _changed_in(conn, before)
+            _setup_saved_in(conn, self._house, setup.model_copy(update={
+                "colour_sensors": {**setup.colour_sensors, sensor_id: sensor}}), by)
             return next(view for view in _view_in(conn, self._house).colour_sensors if view.id == sensor_id)
 
-    def remove_colour_sensor(self, sensor_id: ColourSensorId) -> None:
+    def remove_colour_sensor(self, sensor_id: ColourSensorId, *, by: Actor) -> None:
         with self._db.transaction() as conn:
             self._house.changing_within(PgTransaction(conn))
-            refused = check_colour_sensor_removal(sensor_id, colour_sensors_in(conn), lights_in(conn))
+            setup = setup_in(conn)
+            refused = check_colour_sensor_removal(sensor_id, setup.colour_sensors, lights_of(setup))
             if refused is not None:
                 raise refused
-            conn.execute("DELETE FROM colour_sensors WHERE id=%s", (sensor_id,))
+            _setup_saved_in(conn, self._house, setup.model_copy(update={
+                "colour_sensors": {key: each for key, each in setup.colour_sensors.items() if key != sensor_id}}), by)
+
+
+def _setup_saved_in(conn: Any, house: HouseLock, saved: _RoomLightSetup, by: Actor) -> None:
+    """Under the house's lock, which the caller holds: store `saved` (its change raised when the
+    document's lights move with it, and the WALL writer woken at commit), forget the facts no setup
+    item names any more, and take a Pi reading its new Sensor names from the host line's record."""
+    before = document_in(conn)
+    facts = facts_in(conn)
+    if dict(_document(saved, facts, _clock_in(conn)).lights) != dict(before.lights):
+        saved = saved.model_copy(update={"change": saved.change + 1})
+        conn.execute("SELECT pg_notify(%s, '')", (ROOM_LIGHTS_CHANNEL,))
+    ROOM_LIGHT_SETUP.write_in(conn, saved, by=by, times=_CLOCK)
+    _forget_unnamed_in(conn, saved)
+    _take_missed_in(conn, house)
 
 
 def _view_in(conn: Any, house: HouseLock) -> RoomLightsView:
-    lights, sensors, colour_sensors, facts = lights_in(conn), sensors_in(conn), colour_sensors_in(conn), facts_in(conn)
+    setup = setup_in(conn)
+    lights, sensors, colour_sensors, facts = lights_of(setup), setup.sensors, setup.colour_sensors, facts_in(conn)
     clock = _clock_in(conn)
     named = house.naming_within(PgTransaction(conn)).lights
 
@@ -590,34 +608,15 @@ def _view_in(conn: Any, house: HouseLock) -> RoomLightsView:
 
     return RoomLightsView(
         lights=tuple(light_view(light_id, light) for light_id, light in lights.items()),
-        sensors=tuple(sensor_view(sensor_id, sensor) for sensor_id, sensor in sensors.items()),
-        colour_sensors=tuple(colour_sensor_view(sensor_id, sensor) for sensor_id, sensor in colour_sensors.items()))
+        sensors=tuple(sensor_view(sensor_id, sensor) for sensor_id, sensor in sorted(sensors.items())),
+        colour_sensors=tuple(colour_sensor_view(sensor_id, sensor)
+                             for sensor_id, sensor in sorted(colour_sensors.items())))
 
 
 def refused_in(conn: Any, source: Source | None) -> tuple[RefusedReportView, ...]:
-    """The newest refused reports (of `source` only, when given), newest first."""
-    columns = "SELECT source, address, reason, EXTRACT(EPOCH FROM at) AS at FROM report_refusals"
-    rows = (conn.execute(f"{columns} ORDER BY id DESC") if source is None  # noqa: S608
-            else conn.execute(f"{columns} WHERE source=%s ORDER BY id DESC", (source,))).fetchall()  # noqa: S608
-    return tuple(RefusedReportView(source=row["source"], address=row["address"], reason=ReportRefusal(row["reason"]),
-                                   at=float(row["at"])) for row in rows)
-
-
-def named_in(conn: Any, source: Source) -> dict[ReporterRef | SensorRef | ColourSensorRef, str]:
-    """Every reference of `source` a room light reports by (ReporterRef), a Sensor is (SensorRef) or a
-    colour sensor is (ColourSensorRef), with that room light's, Sensor's or colour sensor's id, room
-    lights first in House > Lights order, then Sensors by id, then colour sensors by id."""
-    named: dict[ReporterRef | SensorRef | ColourSensorRef, str] = {}
-    for light_id, light in lights_in(conn).items():
-        if isinstance(light, ReportedLight) and light.reporter.source == source:
-            named[light.reporter] = light_id
-    for sensor_id, sensor in sensors_in(conn).items():
-        if sensor.at.source == source:
-            named[sensor.at] = sensor_id
-    for sensor_id, colour_sensor in colour_sensors_in(conn).items():
-        if colour_sensor.at.source == source:
-            named[colour_sensor.at] = sensor_id
-    return named
+    """The newest REFUSALS_SHOWN refused reports (of `source` only, when given), newest first."""
+    return tuple(RefusedReportView(source=each.source, address=each.address, reason=ReportRefusal(each.reason),
+                                   at=each.recorded_at) for each in refusals_in(conn, source, REFUSALS_SHOWN))
 
 
 @dataclass(frozen=True)
@@ -654,8 +653,8 @@ def heard_entities_in(conn: Any, source: Source) -> tuple[HeardEntity, ...]:
 
 def galleria_birth_in(conn: Any) -> tuple[GalleriaBirth, float] | None:
     """Galleria's last birth and when Central heard it (None: none heard)."""
-    row = conn.execute("SELECT birth, EXTRACT(EPOCH FROM heard_at) AS heard_at FROM galleria_birth WHERE one").fetchone()
-    return None if row is None else (GalleriaBirth.model_validate(row["birth"]), float(row["heard_at"]))
+    stored = GALLERIA_BIRTH.read_in(conn)
+    return None if stored is None else (stored.value.birth, stored.value.heard_at)
 
 
 def last_heard_in(conn: Any) -> float | None:
@@ -664,6 +663,6 @@ def last_heard_in(conn: Any) -> float | None:
     return None if row["heard_at"] is None else float(row["heard_at"])
 
 
-__all__ = ["REFUSALS_KEPT", "ROOM_LIGHTS_CHANNEL", "WORDS_KEPT_PER_SOURCE", "HeardEntity", "PgRoomLights",
-           "colour_sensors_in", "document_in", "facts_in", "galleria_birth_in", "heard_entities_in", "last_heard_in",
-           "named_in", "refused_in", "sensors_in"]
+__all__ = ["GALLERIA_BIRTH", "HEARD_WRITE_SECONDS", "REFUSALS_SHOWN", "ROOM_LIGHTS_CHANNEL", "ROOM_LIGHT_SETUP",
+           "FactsKind", "HeardEntity", "PgRoomLights", "colour_sensors_in", "document_in", "facts_in",
+           "galleria_birth_in", "heard_entities_in", "last_heard_in", "named_in", "refused_in", "sensors_in"]

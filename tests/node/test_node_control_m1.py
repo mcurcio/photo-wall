@@ -2,90 +2,16 @@ from dataclasses import replace
 from uuid import UUID
 
 import pytest
+from support.node_doubles import (
+    MemoryEffectJournal,
+    RecordingAppDriver,
+    RecordingDisplayBackend,
+)
 
 from appliance.apps.broker import AppEffectBroker, ColdStart
 from appliance.display_host.domain import DisplayHost, Surface
-from appliance.host.host import HostCore, RebootRequest
 from contracts.app_environment import AppEnvironmentRefV2
-from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
-from scripts.node_control_demo import (
-    MemoryEffectJournal,
-    MemoryRebootJournal,
-    RecordingAppDriver,
-    RecordingDisplayBackend,
-    RecordingRebootDriver,
-    run_demo,
-)
-
-
-def host_values(journal=None, driver=None):
-    p = NodeProducerV2("test", "device-" + "a" * 64, 1, UUID(int=1), "host_core", UUID(int=2))
-    journal = journal or MemoryRebootJournal()
-    driver = driver or RecordingRebootDriver()
-    host = HostCore(producer=p, session_id=UUID(int=3), offer_id=UUID(int=4),
-                    journal=journal, driver=driver)
-    request = RebootRequest(UUID(int=5), "a" * 64, UUID(int=3), UUID(int=4), p)
-    return host, request, journal, driver
-
-
-def test_reboot_admission_is_not_initiation_and_retries_do_not_repeat():
-    host, request, _, driver = host_values()
-    response = host.receive(request, now_ms=0)
-    assert response.decision == "accepted" and driver.calls == 0
-    assert host.receive(replace(request, command_sha256="b" * 64), now_ms=1).decision == "rejected"
-    effect = host.initiate(request.command_id, now_ms=2)
-    assert effect.event.causative_command_id == request.command_id
-    assert host.initiate(request.command_id, now_ms=3) == effect
-    assert driver.calls == 1
-    assert host.receive(request, now_ms=1000) == response
-
-
-def test_reboot_rechecks_session_scope_before_effect():
-    host, request, journal, driver = host_values()
-    host.receive(request, now_ms=0)
-    renewed = HostCore(producer=host.producer, session_id=UUID(int=6), offer_id=host.offer_id,
-                       journal=journal, driver=driver)
-    with pytest.raises(ValueError, match="scope"):
-        renewed.initiate(request.command_id, now_ms=90)
-    assert driver.calls == 0
-
-
-def test_reboot_lost_result_stays_unknown_and_not_repeated_after_reconstruction():
-    class LostDriver:
-        calls = 0
-        def initiate(self):
-            self.calls += 1
-            raise OSError("lost reply after effect")
-    driver = LostDriver()
-    host, request, journal, _ = host_values(driver=driver)
-    host.receive(request, now_ms=0)
-    result = host.initiate(request.command_id, now_ms=1)
-    assert result.effect_unknown and result.event is None
-    reconstructed, _, _, _ = host_values(journal, driver)
-    assert reconstructed.initiate(request.command_id, now_ms=2) == result
-    assert driver.calls == 1
-
-
-def test_reboot_journal_failure_prevents_effect():
-    class FailingJournal(MemoryRebootJournal):
-        fail = False
-        def put(self, record):
-            if self.fail:
-                raise OSError("journal unavailable")
-            super().put(record)
-    journal = FailingJournal()
-    host, request, _, driver = host_values(journal)
-    host.receive(request, now_ms=0)
-    journal.fail = True
-    with pytest.raises(OSError):
-        host.initiate(request.command_id, now_ms=1)
-    assert driver.calls == 0
-
-
-def test_independent_reboot_observation_does_not_execute_or_manufacture_command():
-    host, _, _, driver = host_values()
-    event = host.observed_reboot_initiation(now_ms=1)
-    assert event.causative_command_id is None and driver.calls == 0
+from contracts.node_protocol import NodeProcessIdentity
 
 
 def display_values():
@@ -171,67 +97,6 @@ def test_broker_ambiguous_start_blocks_second_mutation_but_can_observe_survivor(
         broker.cold_start(replace(command, operation_id=UUID(int=4)))
     assert broker.reconcile().phase == "running"
     assert driver.calls.count("start_simulated_process") == 1
-
-
-def test_demo_truthful_trace_distinguishes_request_observation_and_delayed_evidence():
-    result = run_demo()
-    assert result["evidence_class"] == "simulated" and result["production_effects"] is False
-    steps = {row["step"]: row for row in result["trace"]}
-    assert steps["reboot_command_admitted"]["reboot_effect_calls"] == 0
-    assert steps["reboot_initiation_injected"]["reboot_effect_calls"] == 1
-    assert steps["delayed_invalidation_event"]["central"]["disposition"] == "historical"
-    assert steps["old_presentation_duplicate"]["central"]["disposition"] == "duplicate"
-    for key in ("background_staging_failed", "background_staging_superseded", "control_transport_lost"):
-        assert steps[key]["display"]["admitted"] is not None
-
-
-def test_manager_restart_retains_charged_ambiguous_start_and_bounded_fallback():
-    from appliance.node.manager import ManagerRecovery, ManagerRecoveryState
-    class Store:
-        state = ManagerRecoveryState()
-        def load(self):
-            return self.state
-        def save(self, state):
-            self.state = state
-    class Launcher:
-        calls = []
-        def verify(self, root):
-            return True
-        def start(self, root):
-            assert store.state.fault == "manager_start_unknown"
-            self.calls.append(root)
-            raise OSError("ambiguous start")
-    store, launcher = Store(), Launcher()
-    def supervisor():
-        return ManagerRecovery(launcher, primary="a" * 64, fallback="b" * 64, store=store)
-    first = supervisor().recover()
-    assert first.attempts == 1 and first.fault == "manager_start_unknown"
-    second = supervisor()
-    assert second.recover() == first and len(launcher.calls) == 1
-    second.observed_start_result("a" * 64, running=False)
-    assert second.recover().attempts == 2
-    second.observed_start_result("b" * 64, running=False)
-    assert second.recover().fault == "manager_recovery_required"
-    assert supervisor().recover().attempts == 2 and len(launcher.calls) == 2
-
-
-def test_manager_store_failure_prevents_launch():
-    from appliance.node.manager import ManagerRecovery, ManagerRecoveryState
-    class Store:
-        def load(self):
-            return ManagerRecoveryState()
-        def save(self, state):
-            raise OSError("store failed")
-    class Launcher:
-        def verify(self, root):
-            pytest.fail("verification must follow durable charge")
-        def start(self, root):
-            pytest.fail("launch must follow durable charge")
-    manager = ManagerRecovery(Launcher(), primary="a" * 64, fallback="b" * 64, store=Store())
-    with pytest.raises(OSError):
-        manager.recover()
-    with pytest.raises(ValueError, match="store_unavailable"):
-        manager.recover()
 
 
 def test_late_diagnostic_release_cannot_ack_new_handoff_even_with_same_buffer():

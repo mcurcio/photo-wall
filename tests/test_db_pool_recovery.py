@@ -86,7 +86,7 @@ def test_the_pool_stays_bounded_during_an_outage_and_recovers_after_it(database)
     port = _free_port()
     proxy = _Proxy(port, (live.get("host") or "localhost", int(live.get("port") or 5432)))
     db = Database(make_conninfo(database.dsn, host="127.0.0.1", port=str(port)),
-                  pool_size=POOL_SIZE, reconnect_timeout=1.0)
+                  application_name="photo-wall-test", pool_size=POOL_SIZE, reconnect_timeout=1.0)
     cap = POOL_SIZE * 2
     try:
         db.open()

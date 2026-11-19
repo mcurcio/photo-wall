@@ -106,7 +106,7 @@ async def _bound(tmp_path, lights: FrameLighting):
     service._room_lights_dispatch = hops.append
     server.offer(bindings=(binding().model_copy(update={"generation": 2, "lighting": lights}),),
                  configuration_revision=2, revision=2, layers=())
-    await service.poll_state()
+    await server.push(service)
     return service, hops
 
 

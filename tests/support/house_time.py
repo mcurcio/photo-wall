@@ -40,14 +40,20 @@ def window_program(program_id: str, scene_id: str, start: float, end: float, *, 
                    when=daily(clock_time(start), clock_time(end)), priority=priority)
 
 
+class _AtZero:
+    """The audit time a test's house is stored at (epoch 0, as the row before migration 116 was)."""
+
+    def now_in(self, conn) -> float:
+        return 0.0
+
+
 def set_house(db, house: HouseTime) -> None:
     """Store Settings › House as `house`, its zone confirmed as an operator's save confirms it (a DB
     test's house; with no row Central would read its own server zone, which differs between a laptop
-    and CI, and Night off would switch nothing)."""
-    place = house.place
+    and CI, and Night off would switch nothing). Units and the clock format are kept when stored."""
+    from central.infra.house_store import HOUSE, _HouseDocument
     with db.transaction() as conn:
-        conn.execute(
-            "INSERT INTO house_settings (singleton, zone, latitude, longitude, units, clock_format, updated_at, "
-            "zone_confirmed) VALUES (TRUE, %s, %s, %s, 'cm', '24h', 0, TRUE) ON CONFLICT (singleton) DO UPDATE SET "
-            "zone=EXCLUDED.zone, latitude=EXCLUDED.latitude, longitude=EXCLUDED.longitude, zone_confirmed=TRUE",
-            (house.zone, None if place is None else place.latitude, None if place is None else place.longitude))
+        stored = HOUSE.read_in(conn)
+        units, clock = ("cm", "24h") if stored is None else (stored.value.units, stored.value.clock)
+        HOUSE.write_in(conn, _HouseDocument(time=house, units=units, clock=clock, zone_confirmed=True),
+                       by="console", times=_AtZero())

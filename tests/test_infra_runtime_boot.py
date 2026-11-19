@@ -22,7 +22,7 @@ from central.infra.asset_records import PgAssetRecords
 from central.infra.execution import Redelivery
 from central.infra.job_queue import build_app, defer, task_name
 from central.infra.outcomes import JobOutcomes
-from central.infra.queue_ops import QueueAdmin
+from central.infra.queue_ops import QueueRescue
 from central.infra.runtime import JobRuntime, RecordedFailure
 from central.infra.transactions import PgTransactions, pg_connection
 from central.kernel.handling import TransientFailure
@@ -31,7 +31,7 @@ from central.kernel.jobs import Delivery, Job, QueueName, job_keys
 from contracts.time import ManualClock, SystemClock
 
 DSN = "postgresql://unused.invalid/none"
-BOTH = {QueueName.FETCH: 2, QueueName.UPKEEP: 1, QueueName.TRANSCODE: 1}
+BOTH = 4   # the one worker's jobs at once, over every queue
 
 
 def make(handlers=None, concurrency=None, **kwargs):
@@ -60,11 +60,12 @@ def test_boot_refuses_a_duplicate_handler():
 
 @pytest.mark.parametrize("concurrency", [
     {QueueName.FETCH: 1},
-    {**BOTH, "photo-wall-media": 1},
-    {QueueName.FETCH: 1, QueueName.UPKEEP: 0},
-    {QueueName.FETCH: 1, QueueName.UPKEEP: True},
+    0,
+    -1,
+    True,
+    2.0,
 ])
-def test_boot_refuses_a_concurrency_map_that_does_not_match(concurrency):
+def test_boot_refuses_a_concurrency_that_is_not_a_positive_whole_number(concurrency):
     with pytest.raises(ValueError, match="concurrency"):
         make(concurrency=concurrency)
 
@@ -95,29 +96,35 @@ def fake_app(runtime, monkeypatch):
     return log, started
 
 
-def test_run_starts_one_loop_per_queue_and_stop_is_graceful_and_idempotent(monkeypatch):
-    runtime = make()
+ALL_QUEUES = ("photo-wall-fetch", "photo-wall-transcode", "photo-wall-upkeep")
+
+
+def test_run_starts_one_worker_over_every_queue_and_stop_is_graceful_and_idempotent(monkeypatch):
+    """S3a: one worker (one heartbeat row) over every queue, sharing one concurrency."""
+    starts = []
+
+    async def at_start():
+        starts.append(len(started))
+
+    runtime = make(on_start=(at_start,))
     log, started = fake_app(runtime, monkeypatch)
 
     async def scenario():
         running = asyncio.create_task(runtime.run())
-        while len(started) < 2:
+        while len(started) < 1:
             await asyncio.sleep(0)
         runtime.stop()
         runtime.stop()
         await asyncio.wait_for(running, 1)
 
     asyncio.run(scenario())
-    assert sorted((tuple(s["queues"]), s["concurrency"]) for s in started) == [
-        (("photo-wall-fetch",), 2), (("photo-wall-transcode",), 1), (("photo-wall-upkeep",), 1)]
-    for kwargs in started:
-        assert kwargs["install_signal_handlers"] is False
-        assert kwargs["update_heartbeat_interval"] == 10
-        assert kwargs["stalled_worker_timeout"] == 30
-    assert log[0] == "open" and log[-1] == "close"
-    assert sorted(entry for entry in log if entry not in ("open", "close")) == [
-        ("stopped", ("photo-wall-fetch",)), ("stopped", ("photo-wall-transcode",)),
-        ("stopped", ("photo-wall-upkeep",))]
+    assert [(tuple(s["queues"]), s["concurrency"]) for s in started] == [(ALL_QUEUES, 4)]
+    assert starts == [0]                     # on_start ran once, before the worker
+    (kwargs,) = started
+    assert kwargs["install_signal_handlers"] is False
+    assert kwargs["update_heartbeat_interval"] == 10
+    assert kwargs["stalled_worker_timeout"] == 30
+    assert log == ["open", ("stopped", ALL_QUEUES), "close"]
     runtime.stop()  # after run returned: still a no-op
 
 
@@ -135,7 +142,7 @@ def test_stop_from_another_thread(monkeypatch):
 
     async def scenario():
         running = asyncio.create_task(runtime.run())
-        while len(started) < 2:
+        while len(started) < 1:
             await asyncio.sleep(0)
         await asyncio.to_thread(runtime.stop)
         await asyncio.wait_for(running, 1)
@@ -147,19 +154,16 @@ def test_a_loop_that_returns_while_not_stopping_fails_the_runtime(monkeypatch):
     # procrastinate ends a worker NORMALLY when its LISTEN/heartbeat/periodic side task fails.
     runtime = make()
     log, started = fake_app(runtime, monkeypatch)
-    real = runtime._app.run_worker_async
 
     async def run_worker_async(**kwargs):
-        if kwargs["queues"] == ["photo-wall-upkeep"]:
-            started.append(kwargs)
-            return  # the side task failed: procrastinate stopped this worker "cleanly"
-        await real(**kwargs)
+        started.append(kwargs)
+        # the side task failed: procrastinate stopped this worker "cleanly"
 
     monkeypatch.setattr(runtime._app, "run_worker_async", run_worker_async)
     with pytest.raises(ExceptionGroup) as caught:
         asyncio.run(asyncio.wait_for(runtime.run(), 1))
     assert [str(e) for e in caught.value.exceptions] == [runtime_module.WORKER_EXITED]
-    assert ("stopped", ("photo-wall-fetch",)) in log  # the other queue stopped gracefully
+    assert log == ["open", "close"]
 
 
 class Closeable:
@@ -177,7 +181,7 @@ def test_run_closes_what_the_runtime_owns_on_stop_and_on_failure(monkeypatch):
 
     async def scenario():
         running = asyncio.create_task(runtime.run())
-        while len(started) < 2:
+        while len(started) < 1:
             await asyncio.sleep(0)
         runtime.stop()
         await asyncio.wait_for(running, 1)
@@ -299,16 +303,14 @@ def test_a_lost_completion_ends_run_with_an_error(monkeypatch):
 
     async def scenario():
         running = asyncio.create_task(runtime.run())
-        while len(started) < 3:
+        while len(started) < 1:
             await asyncio.sleep(0)
         runtime._completion_lost()
         await asyncio.wait_for(running, 1)
 
     with pytest.raises(RuntimeError, match="completion_not_recorded"):
         asyncio.run(scenario())
-    assert sorted(entry for entry in log if entry not in ("open", "close")) == [
-        ("stopped", ("photo-wall-fetch",)), ("stopped", ("photo-wall-transcode",)),
-        ("stopped", ("photo-wall-upkeep",))]
+    assert log == ["open", ("stopped", ALL_QUEUES), "close"]
 
 
 def test_body_raises_recorded_failure_only_for_failed_outcomes(monkeypatch):
@@ -386,7 +388,7 @@ def test_transient_failures_retry_by_republishing_never_in_place(registry):
     dsn = registry.db.dsn
     apply_procrastinate_schema(dsn)
     transactions, handler = PgTransactions(registry.db), FlakyHandler()
-    runtime = JobRuntime(dsn, [handler], {QueueName.UPKEEP: 1}, transactions=transactions,
+    runtime = JobRuntime(dsn, [handler], 1, transactions=transactions,
                          assets=PgAssetRecords(SystemClock()), clock=SystemClock(), catalog=(Flaky,))
     publisher_app = build_app(procrastinate.SyncPsycopgConnector(conninfo=dsn), (Flaky,), None)
     with transactions.begin() as tx:
@@ -440,7 +442,7 @@ def pg_runtime(registry, handler, job_type):
     dsn = registry.db.dsn
     apply_procrastinate_schema(dsn)
     transactions = PgTransactions(registry.db)
-    runtime = JobRuntime(dsn, [handler], {QueueName.UPKEEP: 1}, transactions=transactions,
+    runtime = JobRuntime(dsn, [handler], 1, transactions=transactions,
                          assets=PgAssetRecords(SystemClock()), clock=SystemClock(), catalog=(job_type,))
     publisher_app = build_app(procrastinate.SyncPsycopgConnector(conninfo=dsn), (job_type,), None)
     return runtime, transactions, publisher_app
@@ -462,11 +464,11 @@ def test_a_lost_completion_write_leaves_a_row_rescue_can_reach(registry, monkeyp
         asyncio.run(asyncio.wait_for(runtime.run(), 30))
 
     async def stalled():
-        admin = QueueAdmin(registry.db.dsn, job_types=(Quick,))
+        rescue = QueueRescue(registry.db.dsn, job_types=(Quick,))
         try:
-            return await admin.stalled(heartbeat_timeout=timedelta(seconds=30))
+            return await rescue.stalled()
         finally:
-            await admin.aclose()
+            await rescue.aclose()
 
     assert [(s.job, s.attempt) for s in asyncio.run(stalled())] == [(Quick(), 0)]
 
@@ -536,3 +538,56 @@ def test_a_merged_redelivery_carries_its_attempt_into_the_pending_copy(registry)
     assert attempts() == [2]  # merged, attempt carried forward
     asyncio.run(redeliver(1))
     assert attempts() == [2]  # never lowered
+
+
+class OnFetch(Job[None], name="test.runtime_on_fetch", delivery=Delivery(queue=QueueName.FETCH)):
+    pass
+
+
+class OnTranscode(Job[None], name="test.runtime_on_transcode",
+                  delivery=Delivery(queue=QueueName.TRANSCODE)):
+    pass
+
+
+def _handler_of(job_type, ran):
+    class One:
+        async def handle(self, job) -> None:
+            ran.append(job_type.job_name)
+
+    One.handle.__annotations__["job"] = job_type
+    return One()
+
+
+def test_one_worker_row_runs_a_job_of_every_queue(registry):
+    """S3a: JobRuntime registers ONE procrastinate worker row (it was one per queue) and still
+    runs a job of each queue. Mutation probe: one worker per queue again (three rows)."""
+    dsn = registry.db.dsn
+    apply_procrastinate_schema(dsn)
+    transactions, ran = PgTransactions(registry.db), []
+    catalog = (Quick, OnFetch, OnTranscode)
+    runtime = JobRuntime(dsn, [_handler_of(job_type, ran) for job_type in catalog], 3,
+                         transactions=transactions, assets=PgAssetRecords(SystemClock()),
+                         clock=SystemClock(), catalog=catalog)
+    publisher_app = build_app(procrastinate.SyncPsycopgConnector(conninfo=dsn), catalog, None)
+    with transactions.begin() as tx:
+        for job_type in catalog:
+            assert defer(publisher_app, job_type(), attempt=0, connection=pg_connection(tx))
+
+    def workers():
+        with registry.db.transaction() as conn:
+            return conn.execute("SELECT count(*) AS n FROM procrastinate_workers").fetchone()["n"]
+
+    async def scenario():
+        running = asyncio.create_task(runtime.run())
+        deadline = time.monotonic() + 20
+        try:
+            while len(ran) < len(catalog):
+                assert time.monotonic() < deadline, f"only {ran} ran"
+                await asyncio.sleep(0.02)
+            return await asyncio.to_thread(workers)
+        finally:
+            runtime.stop()
+            await asyncio.wait_for(running, 20)
+
+    assert asyncio.run(scenario()) == 1
+    assert sorted(ran) == sorted(job_type.job_name for job_type in catalog)

@@ -47,7 +47,7 @@ def _fleet(registry):
         device_ids=["device-a-ok", "device-c-alarm", "device-b-notice"])
     spare_identity, _, spare_request = enroll(registry, count=1)
     retired_identity, _, retired_request = enroll(registry, count=1)
-    registry.retire(retired_identity["player_id"])
+    registry.retire(retired_identity["player_id"], by="console")
     names = {"ok": ok_name, "alarm": alarm_name, "notice": notice_name,
              "spare": player_name(registry, spare_identity["player_id"]),
              "retired": player_name(registry, retired_identity["player_id"])}

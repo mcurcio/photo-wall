@@ -249,12 +249,6 @@ def test_other_facts_are_never_a_fault(event):
     assert judge.verdict(60000).conditions == () and judge.transitions() == ()
 
 
-def test_an_accepted_app_link_keeps_the_player_id():
-    judge = HealthJudge(**timing())
-    judge.observe(fact("app_link_accepted", player_id="player-1"), 0)
-    assert judge.player == (RUN, "player-1") and judge.verdict(0).conditions == ()
-
-
 def test_the_transition_ring_is_bounded_and_counts_what_it_drops():
     judge = HealthJudge(**timing())
     for index in range(RING_CAPACITY):  # pending + withdrawn per round
@@ -355,7 +349,6 @@ def test_the_underlay_is_taken_from_the_admission_never_from_the_fault():
 
 def test_the_admitted_unresponsive_run_is_held_and_every_output_shows_the_code():
     judge = HealthJudge(**timing())
-    judge.observe(fact("app_link_accepted", player_id="player-1"), 0)
     judge.observe_outputs([output(), output("HDMI-A-2", None), output("HDMI-A-3", NEXT_RUN)], 0)
     judge.observe(unanswered(), 0)
     assert underlays(judge, RAISE - 1) == [  # pending is not shown: still live
@@ -365,7 +358,7 @@ def test_the_admitted_unresponsive_run_is_held_and_every_output_shows_the_code()
                                        ("HDMI-A-3", "live", raised),
                                        ("Virtual-1", "held", raised)]
     assert cards(judge, RAISE)[-1] == ("Virtual-1", True, (
-        f"{LINE} · since 07:17", "app_unresponsive · Player player-1 · Output Virtual-1"))
+        f"{LINE} · since 07:17", "app_unresponsive · Output Virtual-1"))
     assert all(tint for _, tint, _ in cards(judge, RAISE))
 
 
@@ -376,7 +369,7 @@ def test_after_the_run_is_gone_the_slate_keeps_the_card_and_its_time():
     judge.observe_outputs([output(run=None, fault="surface_lease_or_process_lost")], 30001)
     assert underlays(judge, 30001) == [("Virtual-1", "slate", (APP_UNRESPONSIVE,))]
     assert cards(judge, 30001) == [("Virtual-1", True, (
-        f"{LINE} · since 07:17", "app_unresponsive · Output Virtual-1"))]  # no link: no Player id
+        f"{LINE} · since 07:17", "app_unresponsive · Output Virtual-1"))]
     absent = FAULTS[APP_ABSENT].household_line  # app_absent raised too: it comes first
     assert cards(judge, 30000 + RAISE) == [("Virtual-1", True, (
         f"{absent} · since 07:17", "app_absent · Output Virtual-1"))]
@@ -400,17 +393,6 @@ def test_the_serial_bumps_on_every_change_of_an_outputs_card_and_only_then():
     assert [(i.tint, i.lines[1]) for i in cleared] == [
         (True, "nothing_to_show · Output HDMI-A-2"), (False, "")]
     assert all(new.serial > max(i.serial for i in tinted) for new in cleared)
-    judge.observe(fact("app_link_accepted", player_id="player-2"), RAISE + 2001)
-    assert project(judge, RAISE + 2002)[1] == cleared[1]  # lines unchanged while off
-
-
-def test_a_new_player_id_changes_the_card_and_its_serial():
-    judge = raised_judge()
-    judge.observe_outputs([output()], RAISE)
-    before = project(judge, RAISE)[0]
-    judge.observe(fact("app_link_accepted", player_id="player-9"), RAISE)
-    after = project(judge, RAISE)[0]
-    assert after.serial > before.serial and "Player player-9" in after.lines[1]
 
 
 def test_an_invalidation_refines_the_snapshot_until_the_next_one():
@@ -470,11 +452,11 @@ def test_a_malformed_snapshot_is_refused_and_changes_nothing(snapshot):
 def test_an_output_name_the_health_layer_cannot_carry_is_not_projected():
     judge = raised_judge()
     long = "O" * (MAX_TEXT + 1)
-    judge.observe(fact("app_link_accepted", player_id="p" * 80), RAISE)
     judge.observe_outputs([output(long), output("Virtual-1")], RAISE)
     assert [o.output for o in judge.verdict(RAISE).outputs] == [long, "Virtual-1"]
     [instruction] = project(judge, RAISE)
-    assert instruction.output == "Virtual-1" and len(instruction.lines[1]) == MAX_TEXT
+    assert instruction.output == "Virtual-1"
+    assert instruction.lines[1] == "app_unresponsive · Output Virtual-1"
 
 
 def test_a_presented_serial_is_kept_in_the_ring_once():

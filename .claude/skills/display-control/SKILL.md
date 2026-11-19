@@ -192,7 +192,7 @@ finish"); time a real batch, `setvcp` and `capabilities` on the bench before tru
 From Central, `GET /v1/operator/frames/{id}/picture` (admin token) gives whether the display's
 list is known, one row per hardware setting (offered with its range and current value, the value
 set in Photo Wall, the last write's result with `before` and `after`), the Photo Wall values, and
-whether the Player presented the latest change. In the database, `picture_reports.report` is the
+whether the Player presented the latest change. In the database, `outputs.picture_report` is the
 Pi's latest picture report per port.
 
 **Bench steps** (NOT RUN until a release with the picture split is on the test Pi; each needs the
@@ -416,7 +416,7 @@ picture") and, after 120 s, `nothing_to_show`. A pattern or calibration target h
 number rises only when the rectangle's digest changes):
 
 ```sql
-SELECT player_id, output_id, region_change, region_digest FROM output_documents ORDER BY player_id, output_id;
+SELECT player_id, output_id, region_change, region_digest FROM outputs ORDER BY player_id, output_id;
 ```
 
 The rectangle itself is `central/displays/model.py` `frame_region`: the Frame's Position box placed
@@ -432,14 +432,14 @@ sudo journalctl -b --no-pager -u photo-wall-display-controller.service | grep -i
 # "region for HDMI-A-1 not taken by the shell; sent again when it announces the Output"
 ```
 
-**What Central recorded.** Each verdict lands in `node_link_records`; the Frame page's Player status
-reads the newest ("Dark since 08:10 · ..."):
+**What Central recorded.** Central keeps each Pi's newest verdict in `node_states` (one row per state
+key, [0034](../../../docs/decisions/0034-central-schema-consolidation.md)); the Frame page's Player status
+reads it ("Dark since 08:10 · ..."):
 
 ```sql
-SELECT recorded_at, seq, convert_from(data, 'UTF8') AS verdict
-FROM node_link_records
-WHERE device_id = '<device id>' AND stream = 'KV_state_health' AND subject = '$KV.state_health.verdict'
-ORDER BY recorded_at DESC, seq DESC LIMIT 5;
+SELECT to_timestamp(recorded_at) AS recorded, seq, convert_from(data, 'UTF8') AS verdict
+FROM node_states
+WHERE device_id = '<device id>' AND stream = 'KV_state_health' AND subject = '$KV.state_health.verdict';
 ```
 
 **Whether the Player stayed down, and why.** `systemctl show photo-wall-node-player.service -p

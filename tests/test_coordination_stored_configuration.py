@@ -30,13 +30,13 @@ class Rows:
 
 
 class Conn:
-    """player_configurations as one stored row; records what is written back."""
+    """A Player's show state (player_show_state) as one stored row; records what is written back."""
 
     def __init__(self, stored):
         self.stored, self.written = stored, None
 
     def execute(self, sql, params=()):
-        if sql.startswith("SELECT * FROM player_configurations"):
+        if sql.startswith("SELECT authority_epoch,configuration_revision"):
             return Rows(self.stored)
         self.written = params
         return Rows()
@@ -71,5 +71,5 @@ def test_a_stored_configuration_that_no_longer_validates_is_regenerated(caplog):
     assert configuration.bindings == (BINDING,)
     assert configuration.configuration_revision == 5     # the Player fetches the regenerated one
     assert conn.written[2] == 5
-    assert "player_configurations" in caplog.text and PLAYER in caplog.text
+    assert "player_show_state" in caplog.text and PLAYER in caplog.text
     assert "bindings.0.preview" in caplog.text and SECRET not in caplog.text

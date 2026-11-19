@@ -11,7 +11,7 @@ import pytest
 from fakes.transactions import FakeTransaction
 
 from central.content_catalog.ports import StoredEtag
-from central.infra.catalog_records import PgReleaseRecords
+from central.infra.catalog_records import RELEASE_SYNC, PgReleaseRecords
 from central.infra.transactions import PgTransactions
 
 
@@ -58,7 +58,11 @@ def test_etag_round_trip_records_when_it_was_stored(registry, pg):
         assert releases.load_etag(tx) == StoredEtag('W/"abc"', 1000.0)
         releases.store_etag(tx, None, now=2000.0)
         assert releases.load_etag(tx) == StoredEtag(None, 2000.0)
+    with registry.db.transaction() as conn:  # Central's own write, audited (decision 0034)
+        stored = RELEASE_SYNC.read_in(conn)
+    assert (stored.revision, stored.created_by, stored.changed_by) == (2, "central", "central")
     with registry.db.transaction() as conn:  # an ETag no code of this version stored
-        conn.execute("UPDATE app_release_poll SET etag='W/\"old\"', etag_stored_at=NULL")
+        conn.execute("UPDATE singletons SET document = jsonb_build_object('etag', 'W/\"old\"', "
+                     "'etag_stored_at', NULL) WHERE name = 'release_sync'")
     with pg.begin() as tx:
         assert releases.load_etag(tx) is None

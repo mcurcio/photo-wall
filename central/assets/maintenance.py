@@ -36,8 +36,10 @@ compared with either.
 **The media rule** (`MediaCacheBudget`, follow-up to 5a, slice S5). A media variant is made on
 demand from its name (`PrepareMedia`), so its file is evictable whenever no plan needs it now:
 
-* **Kept: every file a live pin holds** (`media_references`: an offer, a secured lock, a
-  transfer; by variant name, so a pin holds the file its record's produced digest names).
+* **Kept: every file a pin holds** (decision 0034: an offer or a secured lock naming the
+  variant, by name, so it holds the file its record's produced digest names), **and every file
+  served within `SERVED_SPARE_SECONDS`** (`assets.last_served_at`, stamped by the grant, the
+  database's clock): a transfer in progress is never cut short.
 * **Evicted: the others, least recently served first** (`assets.last_served_at`, the database's
   clock; never served goes first), until the variant directory is at or under
   `CacheSettings.media_budget_bytes`. A file no record names (a re-make's predecessor) was never
@@ -47,9 +49,10 @@ demand from its name (`PrepareMedia`), so its file is evictable whenever no plan
   filesystem's clock, `CLOCK_MARKER`) is spared: the maker installs before it records, and a
   making just finished has not been served yet.
 * **Race-free with a pin.** Each unlink runs in a transaction holding the media lock, after
-  re-reading the file's pins: every pin is written under that lock (`FrameMedia`, coordination),
-  so a pin committed first spares the file, and a read granted after finds the file gone and
-  re-makes it (the AssetReader's miss). An open descriptor keeps its inode on POSIX anyway.
+  re-reading the file's pins and serves: every offer and lock is checked ready, and every grant
+  stamps its serve, under that lock (coordination, `FrameMedia`), so one committed first spares
+  the file, and a read granted after finds the file gone and re-makes it (the AssetReader's
+  miss). An open descriptor keeps its inode on POSIX anyway.
 """
 
 from __future__ import annotations
@@ -64,6 +67,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Final, Protocol
 
+from central.assets.frame_media import TRANSFER_SECONDS
 from central.assets.layout import TEMP_PREFIX
 from central.assets.store import CacheStore
 from central.kernel.assets import AssetKey, AssetKind
@@ -197,6 +201,8 @@ def _unlink_if_older(candidate: _Candidate) -> bool:
 # The media rule ------------------------------------------------------------------------------
 
 MEDIA_BUDGET_ENV: Final = "PHOTO_WALL_MEDIA_CACHE_BYTES"
+# A media variant served this recently is spared: at least a transfer's longest run.
+SERVED_SPARE_SECONDS: Final = TRANSFER_SECONDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,7 +230,7 @@ class CacheSettings:
 class VariantFileUse:
     """What the records say of one variant file (by its digest)."""
 
-    pinned: bool  # a live pin holds a variant whose produced digest names it
+    pinned: bool  # a pin or a recent serve holds a variant whose produced digest names it
     last_served_at: float | None  # the latest serve of any such variant (database clock)
 
 
@@ -234,11 +240,11 @@ class MediaVariantUse(Protocol):
         ...
 
     def lock(self, tx: Transaction) -> None:
-        """The media lock, under which every pin is written."""
+        """The media lock, under which every pin is checked and every serve granted."""
         ...
 
     def pinned(self, tx: Transaction, digest: str) -> bool:
-        """Whether a live pin holds the file named `digest` now."""
+        """Whether a pin or a recent serve holds the file named `digest` now."""
         ...
 
 

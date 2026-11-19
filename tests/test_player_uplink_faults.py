@@ -59,13 +59,13 @@ async def _run_to_fault(service, timeout: float = 15.0) -> None:
 
 
 def _service(*, find_central, trust, cache_dir=None, client=None, time_client=None,
-            clock=None, clock_record=None):
+            clock=None, clock_record=None, websocket_connect=None):
     kwargs = dict(cache_dir=str(cache_dir)) if cache_dir is not None else {}
     return PlayerService(
         PlayerConfig(**kwargs), load_identity(), (), RecordingRenderer(), immediate,
         find_central=find_central, trust=trust, client=client, time_client=time_client,
         clock=clock, clock_record=clock_record or (lambda: RECORD),
-        websocket_connect=False, boot_context=boot_context(), luts=PlayerLuts())
+        websocket_connect=websocket_connect, boot_context=boot_context(), luts=PlayerLuts())
 
 
 # --- AC2: R9's fault table, over a real socket for every case ----------------------------
@@ -150,9 +150,9 @@ def test_a_redirect_is_followed_by_a_new_locate(monkeypatch, caplog, trust):
         server = Server(clock)
         steady = asyncio.Event()
         client = httpx.AsyncClient(transport=httpx.MockTransport(
-            _until_steady(server, steady, redirect_first_state=True)), trust_env=False)
+            _until_steady(server, steady, redirect_first_hello=True)), trust_env=False)
         service = _service(find_central=find, trust=trust, clock=clock,
-                           client=client, time_client=client)
+                           client=client, time_client=client, websocket_connect=server.connect)
         task = asyncio.create_task(service.run())
         try:
             await asyncio.wait_for(steady.wait(), 10)
@@ -234,9 +234,9 @@ def test_a_failed_cycle_leaves_no_wedged_connection_for_the_next(monkeypatch, tr
     Through the real run() and the clients CentralLink builds, over a loopback socket: the
     server closes a connection idle for 0.3 s, so a clock probe (one a second) meets an expired
     connection. The window is forced, not raced: httpcore's close of that expired connection
-    is held (the one patched seam) while a clock probe waits on it, and Central refuses the
-    next state poll's registration (401: since decision 0032 only a cycle-ending failure ends the
-    cycle, and a 500 no longer does), so the failed cycle cancels the probe at that await. The
+    is held (the one patched seam) while a clock probe waits on it, and Central closes the
+    session's socket (since decision 0032 only a cycle-ending failure ends the cycle, and a 500
+    no longer does), so the failed cycle cancels the probe at that await. The
     next cycle must reach Central with its own clock probe; with one client per process it never
     does."""
     monkeypatch.setattr("player.service.BACKOFF", (.001,) * 4)
@@ -263,9 +263,6 @@ def test_a_failed_cycle_leaves_no_wedged_connection_for_the_next(monkeypatch, tr
 
         def handle(request):
             path = request.url.path
-            if path == "/v1/player/state" and window.is_set() and not failed:
-                failed.append(request)
-                return httpx.Response(401, json={"error": "not_registered"})
             if path == "/v1/player/time" and failed:
                 probes_after.append(request)
             result = fake(request)
@@ -276,10 +273,12 @@ def test_a_failed_cycle_leaves_no_wedged_connection_for_the_next(monkeypatch, tr
         server = await _serve_http(handle, idle=.3)
         port = server.sockets[0].getsockname()[1]
         service = _service(find_central=finding(f"http://127.0.0.1:{port}"), trust=trust,
-                           cache_dir=cache_dir, clock=clock)
+                           cache_dir=cache_dir, clock=clock, websocket_connect=fake.connect)
         task = asyncio.create_task(service.run())
         try:
             await asyncio.wait_for(window.wait(), 5)
+            failed.append(True)
+            fake.close_sockets()                    # Central closes the session's socket
             loop = asyncio.get_running_loop()
             deadline = loop.time() + 5
             while not probes_after and loop.time() < deadline:

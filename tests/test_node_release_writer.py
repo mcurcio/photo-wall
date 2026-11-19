@@ -1,6 +1,6 @@
 """The release writer (scripts/node_release_writer.py) on a synthetic local repo and roots: it
-ships the repo's .debs byte for byte with the roots' references, and refuses a root sealed for
-another package or ABI and an image over its memory line. The real repo and roots are
+ships the repo's .debs byte for byte with the app root's reference, and refuses a root sealed for
+another package or ABI, an image over its memory line and a root other than the app's. The real repo and roots are
 node-components.yml's (tests/debs/test_roots.py, tests/node/apps/test_environment_image.py)."""
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ REPO = Path(__file__).resolve().parents[1]
 ABI = {"base_abi": "node-v2-" + "a" * 64, "graphics_abi": "weston14-" + "b" * 64,
        "plugin_abi": "frame-v3"}
 PACKAGES = {"photo-wall-node": "0+111111111111", "photo-wall-node-display": "0+222222222222",
-            "photo-wall-player": "0+333333333333", "photo-wall-app-manager": "0+444444444444"}
+            "photo-wall-player": "0+333333333333"}
 
 
 def _sha(data: bytes) -> str:
@@ -68,11 +68,13 @@ def test_the_set_ships_the_repos_debs_and_the_roots_references(world):
     components = write(world)
     for name, package in (("node-base.deb", "photo-wall-node"),
                           ("node-display.deb", "photo-wall-node-display"),
-                          ("app.deb", "photo-wall-player"),
-                          ("manager-primary.deb", "photo-wall-app-manager")):
+                          ("app.deb", "photo-wall-player")):
         assert (output / name).read_bytes() == (repo / f"{package}_{PACKAGES[package]}_all.deb"
                                                 ).read_bytes(), name
-    assert components["abi"] == ABI and components["manager_fallback"] is None
+    assert set(components) == {"schema", "abi", "app_environment"} and components["abi"] == ABI
+    assert sorted(path.name for path in output.iterdir()) == [
+        "app.deb", "app.squashfs", "build-provenance.json", "components.json", "node-base.deb",
+        "node-display.deb", STAMP]
     for role, (_package, field, _line) in writer.ROOTS.items():
         image = (images / (role + ".squashfs")).read_bytes()
         assert (output / (role + ".squashfs")).read_bytes() == image
@@ -88,12 +90,11 @@ def test_the_set_is_a_valid_node_release_set(world):
     """The references pass the release's own role rules (contracts.node_boot)."""
     components = write(world)
     base = NodeBaseRefV2("v0.0.1", "1" * 64, "2" * 64, 3, **components["abi"])
-    validate_node_environment_roles(base, AppEnvironmentRefV2(**components["app_environment"]),
-                                    AppEnvironmentRefV2(**components["manager_primary"]), None)
+    validate_node_environment_roles(base, AppEnvironmentRefV2(**components["app_environment"]))
 
 
 @pytest.mark.parametrize("field, value, code", [
-    ("deb_name", "photo-wall-node-manager", "node_release_root_package_mismatch"),
+    ("deb_name", "photo-wall-app-manager", "node_release_root_package_mismatch"),
     ("deb_version", "0+999999999999", "node_release_root_package_mismatch"),
     ("deb_sha256", "9" * 64, "node_release_root_package_mismatch"),
     ("base_abi", "node-v2-" + "9" * 64, "node_release_root_abi_mismatch"),
@@ -101,9 +102,19 @@ def test_the_set_is_a_valid_node_release_set(world):
 ])
 def test_a_root_sealed_for_another_package_or_abi_is_refused(world, field, value, code):
     _repo, images, output = world
-    path = images / ("manager-primary" + writer.REFERENCE_SUFFIX)
+    path = images / ("app" + writer.REFERENCE_SUFFIX)
     path.write_text(json.dumps({**json.loads(path.read_text()), field: value}))
     with pytest.raises(writer.WriterError, match=f"^{code}$"):
+        write(world)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("name", ["manager-primary.squashfs", "manager-primary.reference.json"])
+def test_a_root_other_than_the_apps_is_refused(world, name):
+    """The build makes one root (S4c-2b-i): a manager root left beside the app's is refused."""
+    _repo, images, output = world
+    (images / name).write_bytes(b"manager")
+    with pytest.raises(writer.WriterError, match="^node_release_root_unknown:manager-primary$"):
         write(world)
     assert not output.exists()
 
@@ -131,13 +142,11 @@ def test_the_key_covers_the_recipe_the_abi_and_each_roots_packages(tmp_path):
     base, display = tmp_path / "base.json", tmp_path / "display.json"
     base.write_text(json.dumps({"base_abi": ABI["base_abi"]}))
     display.write_text(json.dumps({"graphics_abi": ABI["graphics_abi"], "plugin_abi": "frame-v3"}))
-    player, manager = tmp_path / "player", tmp_path / "manager"
+    player = tmp_path / "player"
     player.write_text("python3=3.13.5-1\nphoto-wall-player=0+3\n")
-    manager.write_text("photo-wall-app-manager=0+4\n")
 
     def key():
-        return writer.key(abi_files=(base, display),
-                          resolved={"photo-wall-player": player, "photo-wall-app-manager": manager})
+        return writer.key(abi_files=(base, display), resolved={"photo-wall-player": player})
     first = key()
     assert first == key() and len(first) == 64
     player.write_text("python3=3.13.5-1\nphoto-wall-player=0+5\n")
@@ -145,7 +154,7 @@ def test_the_key_covers_the_recipe_the_abi_and_each_roots_packages(tmp_path):
     player.write_text("python3=3.13.5-1\nphoto-wall-player=0+3\n")
     base.write_text(json.dumps({"base_abi": "node-v2-" + "9" * 64}))
     assert key() != first
-    manager.write_text("")
+    player.write_text("")
     with pytest.raises(writer.WriterError, match="^node_release_key_unresolved$"):
         key()
 

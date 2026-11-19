@@ -5,8 +5,9 @@ page comes back full (at most 32 reads per feed a turn), and hands each fact to 
 with this node's boot clock: the broker's probe feed (`/run/photo-wall-app-feed/feed.sock`) and
 the display feed (`/run/photo-wall-display-feed/feed.sock`), whose every page carries Display's
 `outputs` snapshot. A gap or a new incarnation of the broker feed makes the judge forget what the
-missed facts may have changed; a display feed gap needs nothing (the page's snapshot replaces
-the Output set). An unreadable feed (including Display's `response_bound`) leaves the verdict as
+missed facts may have changed, then take the run state its page carries once caught up
+(`BrokerFeedReader`); a display feed gap needs nothing (the page's snapshot replaces the Output
+set). An unreadable feed (including Display's `response_bound`) leaves the verdict as
 it was and is counted.
 
 It serves `/run/photo-wall-health/health.sock` (socket 0666, the operation chosen by the first
@@ -51,6 +52,7 @@ from appliance.feed_socket import peer_uid
 from appliance.health.bus import HEALTH_SLICE, BusHealthSink, health_session
 from appliance.health.judge import HealthJudge, Presented, display_outputs
 from appliance.health.report import health_report, report_key
+from appliance.kernel.app_facts import APP_RUN_STATE, run_state_fact
 from appliance.kernel.clock import boottime_ms
 from appliance.kernel.probe_timing import SHIPPED_TIMING
 from contracts.node_faults import FAULTS, catalogue_digest
@@ -165,6 +167,32 @@ class FeedReader:
                 "publisher_incarnation": None if incarnation is None else str(incarnation),
                 "reads": self.reads, "gaps": self.gaps, "failures": self.failures,
                 "last_failure": self.last_failure}
+
+
+class BrokerFeedReader(FeedReader):
+    """The broker's feed: its facts, and every page's run state (`APP_RUN_STATE`, current at the
+    reply). After a gap or a new incarnation the judge forgets, and once the reader has caught
+    up (the page reached the feed's latest, so the snapshot and the facts read agree) the run
+    state stands for the facts it may have missed: the broker states each fact once, never on a
+    timer (`appliance.kernel.app_facts`)."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.owed = False  # a gap's run state not yet taken
+
+    def _check(self, page: dict) -> None:
+        run_state_fact(page.get(APP_RUN_STATE))
+
+    def _take(self, judge: HealthJudge, page: dict, events: tuple[FeedEvent, ...],
+              resnapshot: bool, clock: Callable[[], int]) -> None:
+        super()._take(judge, page, events, resnapshot, clock)
+        self.owed = self.owed or resnapshot
+        if not self.owed or self.cursor.after != page.get("latest"):
+            return
+        self.owed = False
+        fact = run_state_fact(page.get(APP_RUN_STATE))
+        if fact is not None:
+            judge.observe(FeedEvent(self.cursor.after, *fact, "node"), clock())
 
 
 class DisplayFeedReader(FeedReader):
@@ -462,7 +490,7 @@ def main() -> None:
     # the bus, and it is kept for the process's life.
     session = health_session(HEALTH_SLICE.digest)
     session.start()
-    runner = HealthRunner(shipped_judge(), (FeedReader("broker", BROKER_FEED_SOCKET),
+    runner = HealthRunner(shipped_judge(), (BrokerFeedReader("broker", BROKER_FEED_SOCKET),
                                             DisplayFeedReader("display", DISPLAY_FEED_SOCKET)),
                           sink=BusHealthSink(session))
     server = HealthSocket(HEALTH_SOCKET, runner.answer, stream=runner.stream)

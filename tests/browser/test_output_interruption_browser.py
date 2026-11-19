@@ -1,9 +1,8 @@
 """Output interrupted, end to end (console DDD §15, bead C1).
 
 The production app on the loopback harness, with a real Output loss recorded through
-Central's own node owner services and Runtime reconciliation (tests/test_node_runtime_
-reconciliation.py `rig`): two Frames bound to one Player's two Outputs inside one Run, and
-Display Host reporting Output 0's surface invalidated. Central serves the loss on the operator
+Central's own services (tests/support/node_rig.py `rig`): two Frames bound to one Player's two
+Outputs inside one Run, and Display Host reporting Output 0 disconnected on its display line. Central serves the loss on the operator
 snapshot (current Bindings only), and the one classifier shows it on the plan tile, the Run's
 Frame chips, Attention and the Player page's Output row. Every assertion is behavioural.
 """
@@ -15,9 +14,10 @@ import pytest
 from console_tasks import connect, go, open_player
 from operator_harness import operator_server, tile_health
 from playwright.sync_api import expect
-from test_fleet_attempts import SERIAL
-from test_node_runtime_reconciliation import rig
-from test_operator_output_interruptions import _lose_first_output
+from support.node_rig import rig
+from support.output_report import report_modes
+from support.player_state import heard_in
+from test_fleet_attempts import DEVICE_ID, SERIAL
 from test_registry import frame
 
 from central.registry import FramePlacement
@@ -36,12 +36,13 @@ SHORT = "Output interrupted · the Run continues"
 
 def _seed(registry):
     """rig's two bound Frames, placed on the plan, with Output 0's loss recorded, and the Player
-    heard (its state poll authenticated: liveness, central/infra/player_contact_store.py)."""
-    _, player, _, sessions, claims, grants, surfaces, reconciler, _ = rig(registry)
-    registry.authenticate(player["token"])
+    heard (its session socket: liveness, central/infra/player_contact_store.py)."""
+    _, player, _, surfaces = rig(registry)
+    with registry.db.transaction() as conn:
+        heard_in(conn, player["player_id"], player["authority_epoch"], registry.clock.utc())
     for index, frame_id in enumerate((LOST, KEPT)):
-        registry.place_frame(frame_id, FramePlacement(x_mm=100 + 500 * index, y_mm=100))
-    _lose_first_output(sessions, claims, grants, surfaces, reconciler)
+        registry.place_frame(frame_id, FramePlacement(x_mm=100 + 500 * index, y_mm=100), by="console")
+    report_modes(registry, DEVICE_ID, (surfaces[0].output.output_id,), None)  # the display line
     return player["player_id"], surfaces[0]
 
 
@@ -81,10 +82,10 @@ def test_a_served_interruption_shows_on_the_tile_run_chip_attention_and_output_r
 
 def test_a_frame_newly_bound_to_the_lost_output_shows_nothing(page, registry):
     player_id, old = _seed(registry)
-    registry.unbind(LOST, expected_generation=old.binding_generation)
+    registry.unbind(LOST, expected_generation=old.binding_generation, by="console")
     frame(registry, "replacement")
-    registry.place_frame("replacement", FramePlacement(x_mm=1100, y_mm=100))
-    registry.bind("replacement", player_id, old.output.output_id, expected_generation=0)
+    registry.place_frame("replacement", FramePlacement(x_mm=1100, y_mm=100), by="console")
+    registry.bind("replacement", player_id, old.output.output_id, expected_generation=0, by="console")
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         replacement = tile_health(page, "replacement")

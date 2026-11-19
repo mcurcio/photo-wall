@@ -49,7 +49,7 @@ VALUE = re.compile(r"v1\.[0-9]{10}\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{1,344}\.[A-
 
 
 def _portrait(registry):
-    registry.create_frame(frame_create("portrait"))
+    registry.create_frame(frame_create("portrait"), by="console")
 
 
 @pytest.fixture
@@ -453,7 +453,7 @@ def test_no_cors_headers_on_preflight_or_cross_origin_requests(client):
 
 def test_players_ignore_operator_cookies(client):
     cookie = signed_in(client)
-    for path in ("/v1/player/config", "/v1/player/state", "/v1/player/time", "/v1/media/abc/def"):
+    for path in ("/v1/player/config", "/v1/player/time", "/v1/media/abc/def"):
         assert client.get(path, headers=cookie).status_code == 401, path
 
 

@@ -97,15 +97,14 @@ def mount_photo_library_routes(app: FastAPI, *, admin: Any, queries: PhotoLibrar
     def connections() -> tuple[LibraryConnectionView, ...]:
         return queries.connections()
 
-    @app.post(CONNECTIONS, dependencies=[Depends(admin)], status_code=201,
-              response_model=ConnectionSaved)
-    def add_connection(write: ConnectionWrite) -> ConnectionSaved:
-        return ConnectionSaved(connection_ref=commands.add_connection(write))
+    @app.post(CONNECTIONS, status_code=201, response_model=ConnectionSaved)
+    def add_connection(write: ConnectionWrite, by: Actor = Depends(admin)) -> ConnectionSaved:
+        return ConnectionSaved(connection_ref=commands.add_connection(write, by=by))
 
-    @app.put(CONNECTIONS + "/{connection_ref}", dependencies=[Depends(admin)],
-             response_model=ConnectionSaved)
-    def change_connection(connection_ref: Identifier, write: ConnectionWrite) -> ConnectionSaved:
-        commands.change_connection(connection_ref, write)
+    @app.put(CONNECTIONS + "/{connection_ref}", response_model=ConnectionSaved)
+    def change_connection(connection_ref: Identifier, write: ConnectionWrite,
+                          by: Actor = Depends(admin)) -> ConnectionSaved:
+        commands.change_connection(connection_ref, write, by=by)
         return ConnectionSaved(connection_ref=connection_ref)
 
     @app.delete(CONNECTIONS + "/{connection_ref}", dependencies=[Depends(admin)], status_code=204,
@@ -159,14 +158,15 @@ def mount_photo_source_routes(app: FastAPI, *, admin: Any, queries: PhotoSourceQ
     """The draft, pool and check routes above (slice C2); create_app mounts them after
     `mount_photo_library_routes`, whose handler answers LibraryRefused."""
 
-    @app.post(DRAFTS, dependencies=[Depends(admin)], status_code=201, response_model=DraftCreated)
-    def create_draft(request: DraftCreate) -> DraftCreated:
-        return DraftCreated(draft_ref=commands.create_draft(request.query, request.editing))
+    @app.post(DRAFTS, status_code=201, response_model=DraftCreated)
+    def create_draft(request: DraftCreate, by: Actor = Depends(admin)) -> DraftCreated:
+        return DraftCreated(draft_ref=commands.create_draft(request.query, request.editing,
+                                                            by=by))
 
-    @app.put(DRAFTS + "/{draft_ref}/query", dependencies=[Depends(admin)], status_code=204,
-             response_class=Response)
-    def set_draft_query(draft_ref: UUID, request: DraftQueryWrite) -> Response:
-        commands.set_draft_query(str(draft_ref), request.query)
+    @app.put(DRAFTS + "/{draft_ref}/query", status_code=204, response_class=Response)
+    def set_draft_query(draft_ref: UUID, request: DraftQueryWrite,
+                        by: Actor = Depends(admin)) -> Response:
+        commands.set_draft_query(str(draft_ref), request.query, by=by)
         return Response(status_code=204)
 
     @app.post(DRAFTS + "/{draft_ref}/save", response_model=DraftSaved)
@@ -184,9 +184,8 @@ def mount_photo_source_routes(app: FastAPI, *, admin: Any, queries: PhotoSourceQ
                     after: str | None = Query(None, max_length=512)) -> SourcePoolView:
         return queries.source_pool(source_ref, _cursor(after))
 
-    @app.post(SOURCES + "{source_ref}/checks", dependencies=[Depends(admin)], status_code=202,
-              response_class=Response)
-    def check_source(source_ref: Identifier) -> Response:
-        commands.check_source(source_ref)
+    @app.post(SOURCES + "{source_ref}/checks", status_code=202, response_class=Response)
+    def check_source(source_ref: Identifier, by: Actor = Depends(admin)) -> Response:
+        commands.check_source(source_ref, by=by)
         return Response(status_code=202)
 

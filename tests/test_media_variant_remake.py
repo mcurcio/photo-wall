@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
 from support.frame_media import grant, offer
+from support.player_state import player_state
 from test_frame_media_read_path import FIRST, Wall, repr_digest
 from test_player_service import TRUST, boot_context, close, immediate
 from uplink_fakes import finding
@@ -86,8 +87,8 @@ def test_the_player_accepts_a_re_made_copy_under_the_plan_s_name(wall, registry,
     async def check():
         cache_dir = tmp_path / "player-cache"
         cache_dir.mkdir(mode=0o700)
-        client = httpx.AsyncClient(transport=httpx.ASGITransport(app=wall.app()),
-                                   trust_env=False)
+        app = wall.app()
+        client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), trust_env=False)
         service = PlayerService(
             PlayerConfig(central_origin="http://central", cache_dir=str(cache_dir),
                          cache_bytes=1024**2),
@@ -95,14 +96,18 @@ def test_the_player_accepts_a_re_made_copy_under_the_plan_s_name(wall, registry,
                                            height_px=1080),),
             RecordingRenderer(), immediate, find_central=finding("http://central"),
             trust=TRUST, clock=registry.clock, client=client, time_client=client,
-            websocket_connect=False, boot_context=boot_context(), luts=PlayerLuts())
+            boot_context=boot_context(), luts=PlayerLuts())
         try:
             await service.locate_central()
             await service.enroll()
             await service.hello_protocol()
             plan = offer(registry, wall.repository, variant,
                          service.registration.player_id)
-            await service.poll_state()
+            # The state Central's session socket sends first (an ASGI transport has no socket).
+            state = await asyncio.to_thread(player_state, TestClient(app),
+                                            service.registration.token)
+            now = service.clock.monotonic()
+            await service.receive_state(state, now, now)
             service._feedback()
             (job,) = service._jobs
             assert job.layer.variant.sha256 == hashlib.sha256(FIRST).hexdigest()  # the plan's

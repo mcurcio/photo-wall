@@ -10,7 +10,7 @@ Rules this module owns (one home each):
   `{"error": "lock_busy"}` and `Retry-After: LOCK_RETRY_AFTER_SECONDS`, on every route of the app
   it is mounted on (operator and node alike), never a raw 500.
 - **Naming the holder**: before answering, the holders of Central's own advisory locks
-  (Coordination, Runtime and every Node lock, central/transaction_locks.py) and of every other
+  (Coordination and Runtime, central/transaction_locks.py) and of every other
   advisory lock someone still waits for are read from `pg_locks` joined with `pg_stat_activity` on
   a connection of their own and logged once (pid, application, transaction age, state, the first
   LOCK_QUERY_CHARS of the query). The request that timed out has already rolled back, so it is no
@@ -30,7 +30,8 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 
-from central.transaction_locks import COORDINATION_LOCK, NODE_LOCK_CLASS, RUNTIME_LOCK
+from central.db import with_application_name
+from central.transaction_locks import COORDINATION_LOCK, RUNTIME_LOCK
 
 LOCK_RETRY_AFTER_SECONDS: Final = 1
 LOCK_QUERY_CHARS: Final = 200
@@ -39,8 +40,8 @@ LOCK_BUSY: Final = "lock_busy"
 log = logging.getLogger(__name__)
 
 # The holders, in this database, of Central's own advisory locks (Coordination and Runtime, one-key
-# form: classid 0, objsubid 1; a Node lock, two-key form: classid NODE_LOCK_CLASS, objsubid 2) and
-# of any other advisory lock another backend waits for, the reading backend itself excluded.
+# form: classid 0, objsubid 1) and of any other advisory lock another backend waits for, the
+# reading backend itself excluded.
 _HOLDERS_SQL = (
     "SELECT DISTINCT h.pid, a.application_name, "
     "EXTRACT(EPOCH FROM (now() - a.xact_start))::float8 AS transaction_seconds, "
@@ -49,7 +50,6 @@ _HOLDERS_SQL = (
     "WHERE h.locktype='advisory' AND h.granted AND h.pid<>pg_backend_pid() "
     "AND h.database=(SELECT oid FROM pg_database WHERE datname=current_database()) "
     "AND ((h.classid=0 AND h.objsubid=1 AND h.objid=ANY(%(central)s::oid[])) "
-    "OR (h.classid=%(node)s::oid AND h.objsubid=2) "
     "OR EXISTS (SELECT 1 FROM pg_locks w WHERE w.locktype='advisory' AND NOT w.granted "
     "AND w.database=h.database AND w.classid=h.classid AND w.objid=h.objid "
     "AND w.objsubid=h.objsubid AND w.pid<>h.pid)) ORDER BY h.pid"
@@ -69,13 +69,12 @@ class LockHolder:
 
 
 def lock_holders_in(conn: Any) -> tuple[LockHolder, ...]:
-    """Every other backend in this database holding Coordination, Runtime or a Node lock, or a
+    """Every other backend in this database holding Coordination or Runtime, or a
     granted advisory lock some other backend waits for (pg_locks granted rows matching an ungranted
     row's classid, objid and objsubid), with its pg_stat_activity facts; read in the caller's
     (fresh, autocommit) connection. Never raises for an empty answer."""
     rows = conn.execute(_HOLDERS_SQL, {"chars": LOCK_QUERY_CHARS,
-                                       "central": [COORDINATION_LOCK, RUNTIME_LOCK],
-                                       "node": NODE_LOCK_CLASS}).fetchall()
+                                       "central": [COORDINATION_LOCK, RUNTIME_LOCK]}).fetchall()
     return tuple(
         LockHolder(pid=row["pid"], application=row["application_name"] or "",
                    transaction_seconds=row["transaction_seconds"], state=row["state"],
@@ -88,7 +87,7 @@ def _log_holders(db: Any) -> None:
     """Name the holders in the log, on a connection of its own (the failed transaction's is
     aborted). Reading them is best effort: a failure is logged and never hides the refusal."""
     try:
-        with psycopg.connect(db.dsn, autocommit=True, row_factory=dict_row,
+        with psycopg.connect(with_application_name(db.dsn, "photo-wall-lock-waits"), autocommit=True, row_factory=dict_row,
                              connect_timeout=5) as conn:
             holders = lock_holders_in(conn)
     except Exception:

@@ -18,10 +18,13 @@ import uuid
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
+from support.devices import seed_device
 from support.frames import frame_create
+from support.trial_bus import worker_trials
 
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
+from central.coordination import OutputLossLedger
 from central.db import DatabaseTransactionClock
 from central.infra.display_store import (
     DOCUMENT_STREAM,
@@ -29,9 +32,11 @@ from central.infra.display_store import (
     DisplayDocuments,
     DisplayWakes,
     OutputReportJudge,
+    record_report,
 )
 from central.infra.node_link_store import PgLinkStores
 from central.registry import Enrollment, OutputReport, enrollment_message
+from contracts.node_calibration import trial_document_key
 from contracts.node_link import Pipe
 from contracts.node_output import (
     BEST_DETECTED,
@@ -63,8 +68,7 @@ def enroll_pi(registry, serial: str) -> str:
     """A Pi with two HDMI ports, enrolled under its bus serial's device id; its player id."""
     device_id = device_id_for_serial(serial)
     with registry.db.transaction() as conn:
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (device_id, serial))
+        seed_device(conn, device_id, serial)
     key = Ed25519PrivateKey.generate()
     public = key.public_key().public_bytes_raw().hex()
     boot_id = str(uuid.uuid4())
@@ -77,7 +81,7 @@ def enroll_pi(registry, serial: str) -> str:
 
 
 def _frame(registry, frame_id: str) -> str:
-    registry.create_frame(frame_create(frame_id))
+    registry.create_frame(frame_create(frame_id), by="console")
     return frame_id
 
 
@@ -87,11 +91,11 @@ def _generation(registry, frame_id: str) -> int:
 
 
 def _bind(registry, frame_id: str, player_id: str, output_id: str) -> None:
-    registry.bind(frame_id, player_id, output_id, expected_generation=_generation(registry, frame_id))
+    registry.bind(frame_id, player_id, output_id, expected_generation=_generation(registry, frame_id), by="console")
 
 
 def _unbind(registry, frame_id: str) -> None:
-    registry.unbind(frame_id, expected_generation=_generation(registry, frame_id))
+    registry.unbind(frame_id, expected_generation=_generation(registry, frame_id), by="console")
 
 
 def _report(registry, serial: str, output_id: str, identity: DisplayIdentity | None, *, connected: bool = True,
@@ -102,7 +106,7 @@ def _report(registry, serial: str, output_id: str, identity: DisplayIdentity | N
     token = Token(EPOCH, next(_SEQ))
     read = Read(token, "$KV.state_display." + output_report_key(output_id), {},
                 encode_output_report(report) if data is None else data)
-    stores = PgLinkStores(registry.db, {REPORT_STREAM: OutputReportJudge(DisplayWakes())})
+    stores = PgLinkStores(registry.db, {REPORT_STREAM: OutputReportJudge(DisplayWakes(), losses=OutputLossLedger())})
     asyncio.run(stores.store(serial, Pipe.FLEET).commit(REPORT_STREAM, Batch((read,), token, False)))
 
 
@@ -110,8 +114,8 @@ def _seen(registry, player_id: str, output_id: str) -> dict:
     """The Output's row joined to the Display recorded there."""
     with registry.db.transaction() as conn:
         return conn.execute(
-            "SELECT o.connected, o.identity, o.display_id, d.serial, d.frame_id, d.power_method, "
-            "d.switch_input_on_power_on, d.never_off_on_other_input, d.modes FROM output_displays o "
+            "SELECT o.connected, o.display_identity AS identity, o.display_id, d.serial, d.frame_id, d.power_method, "
+            "d.switch_input_on_power_on, d.never_off_on_other_input, d.modes FROM outputs o "
             "LEFT JOIN displays d ON d.id=o.display_id WHERE o.player_id=%s AND o.output_id=%s",
             (player_id, output_id)).fetchone()
 
@@ -124,7 +128,8 @@ def _sql(registry, sql: str, params=()) -> list[dict]:
 
 def _documents(registry, serial: str, pipe: Pipe = Pipe.FLEET) -> dict:
     stores = PgLinkStores(registry.db)
-    source = DisplayDocuments(stores, DisplayWakes(), times=DatabaseTransactionClock()).source(serial, pipe)
+    source = DisplayDocuments(stores, DisplayWakes(), times=DatabaseTransactionClock(),
+                              trials=worker_trials(registry.db)).source(serial, pipe)
     return asyncio.run(source.documents(DOCUMENT_STREAM))
 
 
@@ -224,7 +229,7 @@ def test_one_serial_reported_by_two_outputs_at_once_is_shared(registry):
     _bind(registry, right, pi, "HDMI-A-2")
     _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)
     _report(registry, "pi-a", "HDMI-A-2", SERIAL_DISPLAY)
-    assert _sql(registry, "SELECT maker, product, serial FROM shared_serials") == [
+    assert _sql(registry, "SELECT maker, product, serial FROM displays WHERE shared_serial") == [
         {"maker": "DEL", "product": 41200, "serial": "CN0F1X7K"}]
     second = _seen(registry, pi, "HDMI-A-2")
     assert (second["serial"], second["frame_id"]) == (None, right)
@@ -237,7 +242,8 @@ def test_the_output_document_changes_only_when_its_body_does(registry):
     first = _documents(registry, "pi-a")
     assert sorted(first) == [output_document_key("HDMI-A-1"), output_document_key("HDMI-A-2"),
                              picture_document_key("HDMI-A-1"), picture_document_key("HDMI-A-2"),
-                             region_document_key("HDMI-A-1"), region_document_key("HDMI-A-2")]
+                             region_document_key("HDMI-A-1"), region_document_key("HDMI-A-2"),
+                             trial_document_key("HDMI-A-1"), trial_document_key("HDMI-A-2")]
     document = decode_output_document(first[output_document_key("HDMI-A-1")])
     assert (document.change, document.method, document.power.now, document.power.test) == (
         1, BEST_DETECTED, Power.ON, None)
@@ -260,8 +266,8 @@ def test_the_output_document_changes_only_when_its_body_does(registry):
 def test_an_undecodable_report_is_skipped_and_the_rest_recorded(registry):
     pi = enroll_pi(registry, "pi-a")
     _report(registry, "pi-a", "HDMI-A-1", None, data=b'{"not": "a report"}')
-    assert _seen(registry, pi, "HDMI-A-1") is None
-    assert len(_sql(registry, "SELECT 1 FROM node_link_records WHERE stream=%s", (REPORT_STREAM,))) == 1
+    assert _seen(registry, pi, "HDMI-A-1")["connected"] is None   # the enrolled Output, no report recorded
+    assert len(_sql(registry, "SELECT 1 FROM node_states WHERE stream=%s", (REPORT_STREAM,))) == 1
 
 
 def test_the_hardware_tab_reads_the_display_on_a_frames_output(registry):
@@ -280,3 +286,25 @@ def test_the_hardware_tab_reads_the_display_on_a_frames_output(registry):
         assert {key: body["display"][key] for key in ("maker", "product", "name", "serial", "tied_to_frame")} == {
             "maker": "XYM", "product": 5475, "name": "MNN", "serial": None, "tied_to_frame": True}
         assert client.get(f"/v1/operator/frames/{frame}/display").status_code == 401
+
+
+def test_an_unchanged_output_report_writes_nothing(registry):
+    """(8) Decision 0034: the judge writes an Output row only when a column it holds changes. Read
+    again, the report a port last stated takes no transaction id (neither a write nor a row lock);
+    a changed one is recorded, stamped by the Pi. Mutation probe: write the Output row unconditionally
+    in `record_report` -> a transaction id is taken and this fails."""
+    player = enroll_pi(registry, "pi-quiet")
+    _bind(registry, _frame(registry, "quiet"), player, "HDMI-A-1")
+    _report(registry, "pi-quiet", "HDMI-A-1", SERIAL_DISPLAY)
+    report = WireReport("HDMI-A-1", True, SERIAL_DISPLAY, MODE, (), None, None, None, None, None, None)
+    with registry.db.transaction() as conn:
+        record_report(conn, player, report, 5000.0)
+        assert conn.execute("SELECT pg_current_xact_id_if_assigned() AS xid").fetchone()["xid"] is None
+    changed = WireReport("HDMI-A-1", False, None, (), (), None, None, None, None, None, None)
+    with registry.db.transaction() as conn:
+        record_report(conn, player, changed, 5000.0)
+        assert conn.execute("SELECT pg_current_xact_id_if_assigned() AS xid").fetchone()["xid"] is not None
+    [row] = _sql(registry, "SELECT connected, display_reported_at, changed_at, changed_by FROM outputs "
+                           "WHERE player_id=%s AND output_id='HDMI-A-1'", (player,))
+    assert (row["connected"], row["display_reported_at"], row["changed_at"], row["changed_by"]) == (
+        False, 5000.0, 5000.0, "node")

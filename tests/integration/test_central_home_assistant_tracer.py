@@ -35,6 +35,7 @@ from integration.home_assistant_rig import (
     worker,
 )
 from integration.room_light_rig import HomeAssistant
+from support.devices import seed_device
 from test_registry import enroll, frame, hello
 
 from central.content_catalog.catalog import device_id_for_serial
@@ -69,8 +70,7 @@ def test_a_home_assistant_light_reaches_its_frame_read_through_the_pis_door(regi
     database = registry.db
     device_id = device_id_for_serial(SERIAL)
     with database.transaction() as conn:   # the Node's device, as its boot offer records it
-        conn.execute("INSERT INTO devices(device_id, serial, first_seen, last_seen) VALUES (%s, %s, 1, 1)",
-                     (device_id, SERIAL))
+        seed_device(conn, device_id, SERIAL)
     player, _, _ = enroll(registry, device_id=device_id)
     hello(registry, player)
 
@@ -82,8 +82,8 @@ def test_a_home_assistant_light_reaches_its_frame_read_through_the_pis_door(regi
     async def run() -> None:
         # The Frame, bound twice (generation 2); the light its lighting views becomes light.test's.
         frame(registry, FRAME)
-        registry.bind(FRAME, player["player_id"], "HDMI-A-2", expected_generation=0)
-        registry.bind(FRAME, player["player_id"], "HDMI-A-1", expected_generation=1)
+        registry.bind(FRAME, player["player_id"], "HDMI-A-2", expected_generation=0, by="console")
+        registry.bind(FRAME, player["player_id"], "HDMI-A-1", expected_generation=1, by="console")
         bindings = await asyncio.to_thread(central_bindings, central, player)
         [(frame_id, generation, [light])] = [
             (b.frame_id, b.generation, [frame_light.light for frame_light in b.lighting.lights]) for b in bindings]

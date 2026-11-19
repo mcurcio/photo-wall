@@ -31,12 +31,11 @@ SUITES = {
         "test_player_control_protocol.py::test_a_refused_state_leaves_hello_open_and_new_epoch_can_negotiate",
         "test_player_control_protocol.py::test_delivery_sequence_and_applied_receipt_remain_distinct_from_latest_result",
         "test_node_protocol.py", "test_node_boot.py"),
-    "fence_contract": ("test_node_lifecycle.py", "test_node_runtime_reconciliation.py"),
     "readiness_contract": ("test_readiness_diagnostics.py", "test_coordination.py", "test_node_central.py"),
 }
 # The project packages the image's source stage copies into /app (Dockerfile, `FROM scratch AS source`).
 IMAGE_PACKAGES = frozenset({"central", "contracts", "media", "player", "uplink", "nodeapi"})
-PRODUCTION_MODULES = ("central.app", "central.coordination", "central.fleet.node_lifecycle", "contracts.node_protocol")
+PRODUCTION_MODULES = ("central.app", "central.coordination", "contracts.node_protocol")
 
 
 def report_result(raw: bytes) -> dict:

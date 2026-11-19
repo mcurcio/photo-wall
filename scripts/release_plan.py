@@ -246,13 +246,13 @@ _NODE_DEBS: Final = (*_PROJECT, ".github/workflows/node-components.yml", "debian
                      "scripts/uplink_device_harness.py",
                      "contracts/**", "nodeapi/**", "uplink/**", "player/**", "appliance/kernel/**",
                      "appliance/feed.py", "appliance/feed_socket.py",
-                     "appliance/central_session/**", "appliance/host/**",
+                     "appliance/host/**",
                      "appliance/display_host/**", "appliance/health/**", "appliance/apps/**",
                      "appliance/process_identity.py",
                      "appliance/boot/**", "appliance/node_boot_handoff.py",
                      "appliance/netboot_init.py", "appliance/bootstrap.py",
                      "appliance/central_post.py", "appliance/netboot_initramfs/**",
-                     "appliance/node/**", "appliance/launchers/**", "appliance/bus/**",
+                     "appliance/launchers/**", "appliance/bus/**",
                      "appliance/systemd/photo-wall-*.service",
                      "appliance/systemd/photo-wall-*.path",
                      "appliance/systemd/photowall*.slice",
@@ -282,8 +282,7 @@ PACKAGES: Final = (
            "scripts/service_base.py", "scripts/registry_pull.py", "scripts/docker_diagnostics.py",
            ".github/workflows/service-base.yml"),
     # photo-wall-node, the composition (launchers, units, bus configuration), ships byte for byte
-    # as the node release's node-base.deb; photo-wall-player and photo-wall-app-manager as its
-    # app.deb and manager-primary.deb.
+    # as the node release's node-base.deb; photo-wall-player as its app.deb.
     Package("node-debs", "the Node's Debian packages from the one source package, and their "
             "local repo", _NODE_DEBS),
     # photo-wall-node-display from the one source package, built by debhelper's Meson build
@@ -291,11 +290,11 @@ PACKAGES: Final = (
     Package("node-display-deb", "the native Weston display .deb from the local repo",
             (*_PROJECT, "debian/**", "debian-packaging/**", "appliance/display_host/**",
              ".github/workflows/node-components.yml")),
-    # The release roots (decision 0019, steps 3 and 4): mmdebstrap builds the app and manager
-    # roots from the pin and the local repo (debian-packaging/build-root.sh), the seal
-    # (debian-packaging/seal-hook.sh, scripts/seal_root.py) seals them and the release writer
+    # The release root (decision 0019, steps 3 and 4): mmdebstrap builds the app root from the
+    # pin and the local repo (debian-packaging/build-root.sh), the seal
+    # (debian-packaging/seal-hook.sh, scripts/seal_root.py) seals it and the release writer
     # (scripts/node_release_writer.py) writes the component set's components.json.
-    Package("release-roots", "the app and manager release roots (squashfs images) and the "
+    Package("release-roots", "the app release root (squashfs image) and the "
             "component set's components.json",
             (*_NODE_DEBS, "appliance/__init__.py", "scripts/seal_root.py",
              "scripts/node_release_writer.py", "scripts/node_release_artifacts.py",
@@ -348,7 +347,6 @@ NOT_SHIPPED: Final = (
     # Development, documentation and test-harness tooling; no build reads these.
     "scripts/boot_time_fixture.py", "scripts/check_docs.py",
     "scripts/configure.py", "scripts/container_build.py", "scripts/demo_wall.py",
-    "scripts/node_control_demo.py",  # Opt-in software simulator, never a runtime artifact.
     "scripts/node_rollout_image_check.py",
     "scripts/harness_bundle.py", "scripts/harness_failure.py",
     "scripts/immich_actions.py", "scripts/immich_fixture.py", "scripts/immich_runtime.py",
@@ -441,7 +439,7 @@ SUITES: Final = (
                  "scripts/run_display_harness.py",
                  "tests/content_db.py", "tests/runtime_fakes.py", "tests/test_assets_handlers.py",
                  "tests/test_fleet_attempts.py",
-                 "tests/test_node_boot.py", "tests/test_registry.py",
+                 "tests/test_node_boot.py", "tests/test_registry.py", "tests/support/frames.py",
                  # the join's hub harness and its pinned nats-server
                  "tests/integration/bus_servers.py", "tests/systemd_environment.py",
                  "scripts/nats_server.py", "scripts/pinned_fetch.py",

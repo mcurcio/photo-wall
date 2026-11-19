@@ -18,6 +18,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
+from central.actor import Actor
 from central.house_time.model import HouseSettings, HouseSettingsDraft
 from central.house_time.ports import HouseCommands, HouseQueries, HouseRefused
 from central.operator_auth import OPERATOR_PREFIX
@@ -47,9 +48,9 @@ def mount_house_routes(app: FastAPI, *, admin: Any, queries: HouseQueries, comma
     def house_settings() -> HouseSettings:
         return queries.house_settings()
 
-    @app.put(HOUSE, dependencies=[Depends(admin)], response_model=HouseSettings)
-    def save_house_settings(body: Any = Body(...)) -> HouseSettings:
-        return commands.save_house_settings(_draft(body))
+    @app.put(HOUSE, response_model=HouseSettings)
+    def save_house_settings(body: Any = Body(...), by: Actor = Depends(admin)) -> HouseSettings:
+        return commands.save_house_settings(_draft(body), by=by)
 
 
 __all__ = ["mount_house_routes"]

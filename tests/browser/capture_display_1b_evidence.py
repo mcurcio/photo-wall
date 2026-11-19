@@ -55,8 +55,8 @@ def test_before_hardware(page, registry, scheme):
     from test_registry import enroll
 
     identity, _key, _request = enroll(registry, count=1, device_id="device-display-1b-pi")
-    registry.create_frame(frame_create("lobby", x_mm=100, y_mm=100))
-    registry.bind("lobby", identity["player_id"], "HDMI-A-1", expected_generation=0)
+    registry.create_frame(frame_create("lobby", x_mm=100, y_mm=100), by="console")
+    registry.bind("lobby", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     _open(page, scheme)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
@@ -80,7 +80,7 @@ def test_after_hardware(page, registry, scheme):
     pi = enroll_pi(registry, "pi-a")
     # The ready Frame's profile matches its display (1920 x 1080), as main's `before` Frame does.
     ready = "lobby"
-    registry.create_frame(frame_create(ready, x_mm=100, y_mm=100))
+    registry.create_frame(frame_create(ready, x_mm=100, y_mm=100), by="console")
     changed, no_serial = (_landscape(registry, name) for name in ("hallway", "kitchen"))
     _bind(registry, ready, pi, "HDMI-A-1")
     _report(registry, "pi-a", "HDMI-A-1", SERIAL_DISPLAY)

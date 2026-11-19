@@ -17,7 +17,7 @@ import { counted, lastCompleteWords } from "./sourceWords.js";
 
 /**
  * The media pipeline (pass 2 slice 3 §14), in the "Now" column: the worker
- * (checked in, jobs, cache) and each Source's check (roadmap 4), from the media read
+ * (running, jobs, cache) and each Source's check (roadmap 4), from the media read
  * Plane A already fetches. Central fetches and prepares all media; Players
  * receive it only from Central.
  *
@@ -26,7 +26,7 @@ import { counted, lastCompleteWords } from "./sourceWords.js";
 export function MediaPipeline({ snapshot }) {
   const now = mediaNow(snapshot);
   const health = snapshot?.media?.health ?? null;
-  const worker = workerState(health, now);
+  const worker = workerState(health);
   const sources = snapshot?.media?.sources ?? [];
   return (
     <section className="showrunner__region" role="region" aria-label="Media pipeline">

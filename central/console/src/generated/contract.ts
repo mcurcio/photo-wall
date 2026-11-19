@@ -1123,7 +1123,6 @@ export const REFUSALS = {
     "trial_display_unavailable",
     "trial_current_output_required",
     "trial_admitted_surface_required",
-    "trial_surface_changed",
     "unknown_entry",
     "node_trial_operation_invalid",
     "node_body_too_large",

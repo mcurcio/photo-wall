@@ -11,17 +11,21 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from contextlib import nullcontext
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 from support.house_time import LONDON, at, set_house
+from support.trial_bus import worker_trials
 from test_display_identity import ADMIN, AUTH, _bind, _frame, enroll_pi
 
 from central.app import create_app
 from central.content_catalog.catalog import device_id_for_serial
 from central.infra.display_store import DOCUMENT_STREAM, DisplayDocuments, DisplayWakes
 from central.infra.node_link_store import PgLinkStores
+from central.infra.power_store import POWER_POLICY, PgPower
+from central.power.views import NightOffSave
 from contracts.node_link import Pipe
 from contracts.node_output import (
     OutputDocument,
@@ -63,6 +67,16 @@ def draft(*, off: str = "23:00", on: str = "07:00", days: tuple[str, ...] = ("mo
             "frames": {"kind": "frames", "frame_ids": sorted(frames)}, "darkness": "display-off"}
 
 
+class _InTransaction:
+    """A Database whose every transaction is `conn`'s, so a save runs inside the test's."""
+
+    def __init__(self, conn) -> None:
+        self.conn = conn
+
+    def transaction(self):
+        return nullcontext(self.conn)
+
+
 class House:
     """The test's house: the API on Central's fixed clock and each Frame's projected document."""
 
@@ -92,7 +106,8 @@ class House:
         return self.client.get(HOLDS, headers=AUTH).json()
 
     def document(self, frame_id: str) -> OutputDocument:
-        source = DisplayDocuments(PgLinkStores(self.registry.db), DisplayWakes(), times=self.clock).source(
+        source = DisplayDocuments(PgLinkStores(self.registry.db), DisplayWakes(), times=self.clock,
+                                  trials=worker_trials(self.registry.db)).source(
             SERIAL, Pipe.FLEET)
         documents = asyncio.run(source.documents(DOCUMENT_STREAM))
         return decode_output_document(documents[output_document_key(PORTS[frame_id])])
@@ -189,12 +204,13 @@ def test_the_same_request_twice_makes_one_hold_that_keeps_its_start(house):
 
 
 def test_a_hold_until_resumed_survives_every_scheduled_change(house):
-    """The setting is its own (#90, beside All off and All on): changing it leaves Night off's
-    revision alone, and a hold already in force keeps its end."""
+    """The setting is set beside All off and All on (#90), and a hold already in force keeps its
+    end. It lives in the one power policy document with Night off (decision 0034, migration 118),
+    whose revision is Night off's, so a change raises it: an editor open on Night off reloads."""
     assert house.client.get(HOLD_LASTS, headers=AUTH).json() == {"hold_lasts": "next-scheduled-change"}
     before = house.hold("off", uuid.uuid4())
     house.hold_lasts("until-resumed")
-    assert house.client.get(NIGHT_OFF, headers=AUTH).json()["night_off"]["revision"] == 2
+    assert house.client.get(NIGHT_OFF, headers=AUTH).json()["night_off"]["revision"] == 3
     assert house.holds() == before
     (held,) = house.hold("on", uuid.uuid4())
     assert (held["frame_ids"], held["until_at"], held["until"]) == ([HALL, LIVING], None, None)
@@ -253,3 +269,26 @@ def test_deleting_a_chosen_frame_drops_it_from_night_off_so_the_next_save_is_acc
     assert (stored["frames"], stored["revision"]) == ({"kind": "frames", "frame_ids": [LIVING]}, 4)
     shown = stored["frames"]["frame_ids"]
     assert house.save(4, off="22:00", frames=tuple(shown)).status_code == 200
+
+
+def test_an_equal_night_off_save_writes_nothing_and_keeps_its_revision(house):
+    """Decision 0034 (S2b #2): the power policy document is written only when it changes. An equal
+    save in one transaction takes no transaction id and wakes no Node; through the API it answers
+    the same revision, so the editor stays current.
+    Mutation probe: an unconditional upsert in `Singleton.write_in` -> an id is assigned."""
+    with house.registry.db.transaction() as conn:
+        before = POWER_POLICY.read_in(conn)
+        save = NightOffSave(expected_revision=2, night_off=draft())
+        PgPower(_InTransaction(conn), times=house.clock).save_night_off(save, by="api-token")
+        assert conn.execute("SELECT pg_current_xact_id_if_assigned() AS x").fetchone()["x"] is None
+    assert (before.revision, before.created_by, before.changed_by) == (2, "unknown", "api-token")
+    again = house.save(2)
+    assert (again.status_code, again.json()["night_off"]["revision"]) == (200, 2)
+
+
+def test_a_hold_records_who_pressed_it(house):
+    house.hold("off", uuid.uuid4())
+    with house.registry.db.transaction() as conn:
+        rows = conn.execute("SELECT created_at, created_by, changed_at, changed_by FROM power_holds"
+                            ).fetchall()
+    assert [tuple(row.values()) for row in rows] == [(THREE_PM, "api-token", THREE_PM, "api-token")] * 2

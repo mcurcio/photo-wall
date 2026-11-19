@@ -10,7 +10,13 @@ import pytest
 
 from contracts.frame_lighting import AT_FULL, CloseLight, FrameLighting, Paper, WashLight
 from contracts.models import Calibration, OutputBinding, PositionBox
-from contracts.node_calibration import TrialCandidate, candidate_hash, canonical, encode_trial
+from contracts.node_calibration import (
+    TrialCandidate,
+    TrialScope,
+    candidate_hash,
+    canonical,
+    encode_trial,
+)
 from contracts.node_display import Surface
 from contracts.node_protocol import NodeProcessIdentity, OutputKey
 from player.calibration_trial import TrialState
@@ -36,7 +42,7 @@ def envelope(lighting: FrameLighting | dict, sequence: int = 1, trial_id=None) -
     raw = encode_trial(TrialCandidate(
         trial_id=trial_id, generation=1, sequence=sequence, baseline=BASELINE,
         calibration_json=calibration,
-        candidate_sha256=candidate_hash(trial_id, 1, sequence, BASELINE, calibration, valid),
+        candidate_sha256=candidate_hash(trial_id, 1, sequence, TrialScope.of(BASELINE), calibration, valid),
         expires_boottime_ms=5000, hard_expires_boottime_ms=9000, lighting=valid))
     if isinstance(lighting, FrameLighting):
         return raw

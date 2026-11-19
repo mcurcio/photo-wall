@@ -94,7 +94,7 @@ class PgTuningHistory:
                                   picture=pictures[0] if pictures else None)
 
     def sent_picture_entry(self, player_id: str, output_id: str, picture_change: int) -> PictureEntryView:
-        """HistoryRefused("unknown_entry", 404). The entry under picture_sent_entries' key
+        """HistoryRefused("unknown_entry", 404). The sent entry under picture_history's port key
         (`sent_entry_in`), answered as the picture history answers it."""
         with self._db.transaction() as conn:
             entry = sent_entry_in(conn, Port(player_id, output_id), picture_change)

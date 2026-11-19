@@ -29,9 +29,8 @@ from playwright.sync_api import expect
 from test_console_frame_page_browser import FRAME, PRESENTED, FakeSessions, _bar, _seed
 from test_frame_picture_browser import _off_thread
 
-from central.fleet.models import TrialRefused
+from central.fleet.models import NodeControlError, TrialRefused
 from central.fleet.node_routes import _OPERATION, _trial_body
-from central.fleet.node_sessions import NodeControlError
 from central.infra.frame_lighting_store import PgHouseLock
 from central.infra.room_light_store import PgRoomLights
 from central.room_light.model import SensorRef
@@ -73,7 +72,8 @@ def room_lights(page, origin, *, daylight_on=None):
 
 
 def record_reading(registry, player_id, lux):
-    """The Pi's wired Sensor reads `lux`, through Central's reporting port."""
+    """The Pi's wired Sensor reads `lux`, through Central's reporting port (kept only while a Sensor
+    names the Pi)."""
     lights = PgRoomLights(registry.db, PgHouseLock())
     _off_thread(lambda: lights.record_reading(SensorRef(source=PI, address=player_id), Measured(lux=lux)))
 
@@ -86,14 +86,14 @@ def _save(registry, calibration, lighting, expected_revision):
     """Central's Save: the trial's calibration and lighting through the Registry's Save CAS."""
     with registry.db.transaction() as conn:
         acquire_runtime_locks(conn)
-        row = conn.execute("SELECT f.generation, f.configuration_revision, b.player_id, b.output_id, "
-                           "p.authority_epoch FROM frames f JOIN bindings b ON b.frame_id=f.id "
-                           "JOIN players p ON p.id=b.player_id WHERE f.id=%s", (FRAME,)).fetchone()
+        row = conn.execute("SELECT f.generation, f.configuration_revision, f.player_id, f.output_id, "
+                           "p.authority_epoch FROM frames f "
+                           "JOIN players p ON p.id=f.player_id WHERE f.id=%s", (FRAME,)).fetchone()
         registry.commit_calibration_trial_in(
             conn, frame_id=FRAME, player_id=row["player_id"], authority_epoch=row["authority_epoch"],
             output_id=row["output_id"], binding_generation=row["generation"],
             config_revision=row["configuration_revision"], calibration_revision=expected_revision,
-            calibration=calibration, lighting=lighting, session_id=None, restored_from=None)
+            calibration=calibration, lighting=lighting, session_id=None, restored_from=None, by="console")
 
 
 class LightingSessions(FakeSessions):
@@ -246,10 +246,10 @@ def test_a_light_a_sensor_measures_is_read_at_the_sensors_reading(page, registry
 
     Mutation: AtFull for every light -> the first reference is at-full."""
     player_id = _seed(registry)
-    record_reading(registry, player_id, READING)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         room_lights(page, origin, daylight_on=player_id)
+        record_reading(registry, player_id, READING)   # kept once its Sensor names the Pi (decision 0034)
         open_frame(page, FRAME, "lighting")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
         light = add_close_light(page, "Daylight")

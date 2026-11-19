@@ -208,8 +208,6 @@ def test_the_picker_offers_light_entities_for_a_light_and_illuminance_entities_f
     smart Sensor only from its illuminance entities, each by name with its entity id; the saved light
     and Sensor name the entity picked, and the light reports itself on House › Lights."""
     lights = PgRoomLights(registry.db, PgHouseLock())
-    _off_thread(lambda: lights.record_light_state(ReporterRef(source=HOME_ASSISTANT, address="light.kitchen"),
-                                                  LightStated(state=Dimmer(on=True, brightness=0.5), colour=None)))
     with operator_server(registry.db, registry.clock) as origin:
         _states(page)
         signed_in(page, origin)
@@ -226,6 +224,10 @@ def test_the_picker_offers_light_entities_for_a_light_and_illuminance_entities_f
         assert sent.value.status == 200, sent.value.text()
         assert sent.value.request.post_data_json["reporter"] == {"source": HOME_ASSISTANT, "address": "light.kitchen"}
         expect(_row(page, "In the house", "Kitchen")).to_contain_text("Reports itself")
+        # Its state is kept once a light names the entity (decision 0034).
+        _off_thread(lambda: lights.record_light_state(ReporterRef(source=HOME_ASSISTANT, address="light.kitchen"),
+                                                      LightStated(state=Dimmer(on=True, brightness=0.5), colour=None)))
+        page.reload()
         expect(_row(page, "In the house", "Kitchen")).to_contain_text("On, 50 %")
 
         page.get_by_role("button", name="Add a smart Sensor", exact=True).click()

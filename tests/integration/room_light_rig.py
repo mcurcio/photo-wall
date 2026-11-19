@@ -111,16 +111,18 @@ class HomeAssistant:
 
 class Worker:
     """`media.worker`'s own loops, its Node bus composed by `build_node_bus`, under `_run_workers` with
-    a media loop and a job runtime that only wait; stopped as the process is, by SIGTERM."""
+    a media loop that only waits and a job runtime that only waits, or `runtime(bus)` (a JobRuntime
+    over the bus, as the worker builds its own); stopped as the process is, by SIGTERM."""
 
-    def __init__(self, dsn: str, env: Mapping[str, str]) -> None:
+    def __init__(self, dsn: str, env: Mapping[str, str], *, runtime=None) -> None:
         from central.node_bus_wiring import build_node_bus
         self._bus = build_node_bus(dsn, env)
+        self._runtime = _IdleRuntime() if runtime is None else runtime(self._bus)
         self._task: asyncio.Task | None = None
 
     def start(self) -> None:
         from media.worker import _run_workers
-        self._task = asyncio.create_task(_run_workers(asyncio.Event().wait(), _IdleRuntime(), self._bus))
+        self._task = asyncio.create_task(_run_workers(asyncio.Event().wait(), self._runtime, self._bus))
 
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
@@ -144,12 +146,13 @@ class Player:
         cache = tmp / "cache"
         cache.mkdir(mode=0o700, parents=True)
         clock = ManualClock(100)
-        self._client = httpx.AsyncClient(transport=httpx.MockTransport(Server(clock)), trust_env=False)
+        server = Server(clock)
+        self._client = httpx.AsyncClient(transport=httpx.MockTransport(server), trust_env=False)
         self.renderer = RecordingRenderer()
         self.service = PlayerService(
             PlayerConfig(central_origin="http://central", cache_dir=str(cache), cache_bytes=1024**2),
             load_identity(), (), self.renderer, immediate, find_central=finding("http://central"), trust=TRUST,
-            clock=clock, client=self._client, time_client=self._client, websocket_connect=False,
+            clock=clock, client=self._client, time_client=self._client, websocket_connect=server.connect,
             boot_context=boot_context(), luts=PlayerLuts(), node_bus_url=node_url)
 
     def start(self) -> None:

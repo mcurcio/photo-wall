@@ -86,10 +86,10 @@ def _tool(name: str) -> str:
 class _Queue:
     """The store's two queueing calls: this test runs each step itself, as the queue would."""
 
-    def enqueue_connection_check_in(self, conn, connection_ref):
+    def enqueue_connection_check_in(self, conn, connection_ref, *, due_at):
         return QueueReceipt(coalesced=False)
 
-    def enqueue_pool_check_in(self, conn, pool_key):
+    def enqueue_pool_check_in(self, conn, pool_key, *, due_at):
         return QueueReceipt(coalesced=False)
 
 
@@ -107,7 +107,7 @@ class Wall:
         self.checks = LibraryChecks(self.library, lambda secret: ImmichClient.for_connection(
             secret, limits=limits, clock=wall_clock), wall_clock)
         self.ref = self.library.add_connection(ConnectionWrite(
-            name="Fixture", url=immich_library.base_url, key=immich_library.api_key))
+            name="Fixture", url=immich_library.base_url, key=immich_library.api_key), by="console")
         self.repository = MediaRepository(registry.db, registry.clock, queue=RecordingMediaQueue(),
                                           times=DatabaseTransactionClock())
         self.names = SourceNameService(registry.db, self.repository,
@@ -141,7 +141,7 @@ class Wall:
                                 (pool_key,)).fetchone()
 
     def draft(self, query: SourceQuery) -> tuple[str, str]:
-        draft = self.library.create_draft(query, None)
+        draft = self.library.create_draft(query, None, by="console")
         with self.registry.db.transaction() as conn:
             return draft, self.library.pool_of_draft_in(conn, draft)
 
@@ -165,9 +165,9 @@ class Wall:
     def frames(self, *frame_ids: str, box_px: tuple[int, int] = LANDSCAPE) -> None:
         player, _, _ = enroll(self.registry, count=len(frame_ids))
         for index, frame_id in enumerate(frame_ids):
-            self.registry.create_frame(frame_create(frame_id))
+            self.registry.create_frame(frame_create(frame_id), by="console")
             self.registry.bind(frame_id, player["player_id"], f"HDMI-A-{index + 1}",
-                               expected_generation=0)
+                               expected_generation=0, by="console")
             # Follow-ups B1: the fit rule needs the Frame output (its picture on the enrolled
             # 1920 x 1080 Output), so each Frame's Position is a box of `box_px`
             # pixels in the screen's top-left corner and the fixture's 96 x 64 photos hold it.
@@ -252,13 +252,13 @@ def test_what_the_draft_shows_is_what_the_planner_plans_and_every_planned_photo_
                         revision="f" * 40, kind="image", taken_at=time.time() - 86400,
                         width=96, height=64)
     wall.library.set_draft_query(draft, SourceQuery.model_validate(
-        wall.pool(anna_key)["query"]))                                  # Check now
+        wall.pool(anna_key)["query"]), by="console")                                  # Check now
     lease = wall.library.begin_check(anna_key)
     assert wall.library.record_step(lease, CheckStep(
         progress=lease.progress or {}, entries=(InPool(asset=gone),), seen_so_far=1))
     assert wall.library.finish_check(lease, CheckFailed(problem="connection"))
     assert gone.asset_id in wall.shown(draft)
-    wall.library.set_draft_query(draft, SourceQuery.model_validate(wall.pool(anna_key)["query"]))
+    wall.library.set_draft_query(draft, SourceQuery.model_validate(wall.pool(anna_key)["query"]), by="console")
     assert wall.check_to_end(anna_key) == "complete"
     shown = wall.shown(draft)
     assert set(shown.values()) == ANNA_AND_BEN and gone.asset_id not in shown
@@ -279,7 +279,7 @@ def test_what_the_draft_shows_is_what_the_planner_plans_and_every_planned_photo_
     projection = wall.show(("tracer-a", "tracer-b"), (anna, garden))
     with wall.registry.db.transaction() as conn:
         measured = {row["asset_id"] for row in conn.execute(
-            "SELECT asset_id FROM photo_key_content WHERE status='measured'")}
+            "SELECT asset_id FROM library_assets WHERE key_status='measured'")}
     assert measured == union
     assert {request.asset_id for request in projection.acquisitions} == union
     assert not {"source_missing", "source_not_ready"} & {d.code for d in projection.diagnostics}

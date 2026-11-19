@@ -1,20 +1,18 @@
 """HostCore's declared metric families and `valid_metrics` (docs/node-4gb-memory-design.md §4.3 T2): what one
 observation may carry, checked in the contract so a node can never post an observation Central
 refuses. No database."""
-from uuid import uuid4
 
 import pytest
 
 from contracts.node_observation import (
     MAX_HOST_METRICS,
     METRIC_FAMILIES,
+    HostMetricsState,
     HostMetricV2,
-    HostObservationV2,
     MetricFamily,
     check_metric_families,
     valid_metrics,
 )
-from contracts.node_protocol import NodeProducerV2
 
 
 def _dropped(metrics):
@@ -24,13 +22,13 @@ def _dropped(metrics):
 
 
 def test_the_declared_families_fit_one_observation():
-    assert sum(family.max_rows for family in METRIC_FAMILIES) == 38 <= MAX_HOST_METRICS
+    assert sum(family.max_rows for family in METRIC_FAMILIES) == 30 <= MAX_HOST_METRICS
     keys = {family.key: family.max_rows for family in METRIC_FAMILIES}
     # memory_peak: hostcore, base, preparation, app, display (Weston's own service) and bus;
     # oom_kill: base, preparation, app and bus.
     assert (keys["memory_peak:"], keys["oom_kill:"], keys["metrics_dropped"]) == (6, 4, 1)
-    # The retired per-unit rows are undeclared; the manager summary rows stay.
-    assert "broker_failed" not in keys and "manager_summary_known" in keys
+    # The retired per-unit rows and the App Manager's summary (S4c-2b-ii) are undeclared.
+    assert "broker_failed" not in keys and "manager_summary_known" not in keys
 
 
 @pytest.mark.parametrize(("families", "code"), [
@@ -94,14 +92,12 @@ def test_any_input_yields_an_observation_central_accepts():
             name = family.key + f"s{index}" if family.key.endswith(":") else family.key
             rows += [(name, index, "count", f"source{index}"), (name, index, "count", f"source{index}")]
     metrics = valid_metrics(rows)
-    producer = NodeProducerV2("site", "device-" + "a" * 64, 1, uuid4(), "host_core", uuid4())
-    observation = HostObservationV2(producer, 1, 0, metrics)
-    assert len(observation.metrics) == sum(family.max_rows for family in METRIC_FAMILIES)
+    state = HostMetricsState(metrics)
+    assert len(state.metrics) == sum(family.max_rows for family in METRIC_FAMILIES)
 
 
 def test_an_observation_carries_at_most_max_host_metrics_rows():
-    producer = NodeProducerV2("site", "device-" + "a" * 64, 1, uuid4(), "host_core", uuid4())
     rows = tuple(HostMetricV2(f"m{index}", index, "count") for index in range(MAX_HOST_METRICS + 1))
-    HostObservationV2(producer, 1, 0, rows[:MAX_HOST_METRICS])
+    HostMetricsState(rows[:MAX_HOST_METRICS])
     with pytest.raises(ValueError, match="invalid_host_metrics"):
-        HostObservationV2(producer, 1, 0, rows)
+        HostMetricsState(rows)

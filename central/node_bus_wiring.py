@@ -11,8 +11,11 @@ The room-lights document rides WALL (`ROOM_LIGHTS_KEY`), the same for every Pi a
 desired bucket or the control State: `RoomLightsWall` is that key's one writer, woken by
 `NOTIFY room_lights` (every recorded change, from any process: Home Assistant's states, a House ›
 Lights edit, a Pi's sensor), when WALL is ensured, and every WALL_RECHECK_SECONDS, which heals a
-put that failed; WallWriter itself never writes it. The same NOTIFY wakes Central's hub session, which
-otherwise looks again every CENTRAL_STATE_LOOK_SECONDS.
+put that failed; WallWriter itself never writes it. The same NOTIFY wakes Central's hub session. A
+second LISTEN hears a Player state commit (PLAYER_STATE_CHANNEL: every Coordination and Registry
+write, a bind, an enrolment, a retirement) and a release write (RELEASES_CHANNEL: a release, a
+deployment, an Install) and wakes both Central's hub session and FleetHub's look; with no wake they
+look again only every CENTRAL_STATE_LOOK_SECONDS and HUB_LOOK_SECONDS.
 
 Stop order: FleetHub and Central's hub session first, then the supervisors. Every look points the supervisors at the enrolled
 set and starts any link not running, so a look still in flight after the supervisors stopped would
@@ -29,11 +32,13 @@ from typing import Final, Protocol
 
 from central import cache_layout
 from central.content_wiring import build_release_services
-from central.db import Database, DatabaseTransactionClock
+from central.coordination import OutputLossLedger
+from central.db import Database, DatabaseTransactionClock, PoolName
 from central.fleet.node_bus_hub import HUB_LISTENERS, FleetHub
-from central.fleet.node_commands import NodeCommands
+from central.fleet.node_calibration import NodeCalibration, TrialReportJudge
 from central.fleet.node_release_catalog import NodeReleaseCatalog
-from central.fleet.node_sessions import NodeControlConfig, NodeSessions
+from central.fleet.pi_reboot import BusPiReboot, PiReboot
+from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.hub_api import central_state, hub_methods
 from central.infra.central_state import PgCentralStateReads, PgStateWakes
 from central.infra.display_store import (
@@ -42,15 +47,22 @@ from central.infra.display_store import (
     DisplayWakes,
     OutputReportJudge,
 )
-from central.infra.drawn_report_judge import PLAYER_STATE_STREAM, DrawnReportJudge
-from central.infra.frame_lighting_store import PgHouseLock
+from central.infra.frame_lighting_store import PgFrameLighting, PgHouseLock
 from central.infra.home_assistant.states import HomeAssistantListener
 from central.infra.light_sensor_judge import HOST_STATE_STREAM, LightSensorJudge
 from central.infra.listen import listen
-from central.infra.node_link_store import LINK_STORE_CONCURRENCY, PgLinkStores, PgWallMarks
+from central.infra.node_link_store import (
+    LINK_STORE_CONCURRENCY,
+    AllJudges,
+    PgLinkStores,
+    PgWallMarks,
+)
 from central.infra.node_links import NodeLinks
-from central.infra.player_versions import PgPlayerVersions
+from central.infra.node_releases import RELEASES_CHANNEL
+from central.infra.player_state_wakes import PLAYER_STATE_CHANNEL
+from central.infra.player_versions import InstallEnds, PgPlayerVersions
 from central.infra.room_light_store import ROOM_LIGHTS_CHANNEL, PgRoomLights
+from central.registry import Registry
 from central.room_light.ports import RoomLightsDocuments
 from central.version import central_version
 from contracts.node_link import Pipe
@@ -69,7 +81,8 @@ WALL_TABLE: Final = KeyTable({"timing": 4096, ROOM_LIGHTS_KEY: ROOM_LIGHTS_BYTES
 WALL_RECHECK_SECONDS: Final = 5.0     # how often the writer looks again for a wall it could not put to yet
 _LISTEN_RETRY_SECONDS: Final = 1.0
 _HUB_SESSION_RETRY_SECONDS: Final = 2.0   # the hub session's first connect, tried again until it answers
-_LISTEN_APPLICATION: Final = "photo-wall-room-lights"
+_LISTEN_APPLICATION: Final[PoolName] = "photo-wall-room-lights"
+_FLEET_LISTEN_APPLICATION: Final[PoolName] = "photo-wall-fleet-wakes"
 
 
 class WallSource(Protocol):
@@ -141,9 +154,19 @@ class NodeBus:
         self._hub_session = hub_session
         self._state_wakes = state_wakes
 
+    def pi_reboot(self) -> PiReboot:
+        """A Pi's reboot over its fleet-pipe link (the worker's `RebootPi` handler's)."""
+        [fleet] = (links for links in self._links if links.pipe is Pipe.FLEET)
+        return BusPiReboot(fleet)
+
     def _room_lights_changed(self) -> None:
         self.room_lights.wake()
         self._state_wakes.wake()
+
+    def _fleet_changed(self) -> None:
+        """A Player state or release commit: Central's state and FleetHub look again."""
+        self._state_wakes.wake()
+        self._fleet.wake()
 
     async def run(self, stop: asyncio.Event) -> None:
         """Until `stop` or the first failure; then FleetHub stops, then both supervisors, then the
@@ -168,12 +191,17 @@ class NodeBus:
             self._db.dsn, ROOM_LIGHTS_CHANNEL, application=_LISTEN_APPLICATION, connected=self._room_lights_changed,
             notified=lambda _payload: self._room_lights_changed(), retry_seconds=_LISTEN_RETRY_SECONDS),
             name="node-bus room light wakes")
+        fleet_listening = asyncio.create_task(listen(
+            self._db.dsn, (PLAYER_STATE_CHANNEL, RELEASES_CHANNEL), application=_FLEET_LISTEN_APPLICATION,
+            connected=self._fleet_changed, notified=lambda _payload: self._fleet_changed(),
+            retry_seconds=_LISTEN_RETRY_SECONDS), name="node-bus fleet wakes")
         try:
             await asyncio.wait((stopping, fleet, *supervisors, walling, serving), return_when=asyncio.FIRST_COMPLETED)
         finally:
             stopping.cancel()
             listening.cancel()
             room_listening.cancel()
+            fleet_listening.cancel()
             fleet_stop.set()
             await asyncio.wait((walling, serving))
             await asyncio.wait((fleet,))
@@ -182,7 +210,7 @@ class NodeBus:
             for links in self._links:   # a supervisor that failed no longer stops what a last look started
                 with contextlib.suppress(Exception):
                     await links.track(())
-            await asyncio.wait((listening, room_listening))
+            await asyncio.wait((listening, room_listening, fleet_listening))
             await asyncio.to_thread(self._db.close)
         if failures:
             raise failures[0]
@@ -204,32 +232,38 @@ async def serve_hub(url: str, stop: asyncio.Event, **session: object) -> None:
 def build_node_bus(dsn: str, env: Mapping[str, str]) -> NodeBus | None:
     """The worker's NodeBus over its own database pool, or None without HUB_URL_ENV (no hub
     deployed). Both pipes' links take their documents from `DisplayDocuments` (the fleet pipe's
-    Output documents; the show pipe's are empty), and the display line's Output reports are judged
-    as they are recorded (`OutputReportJudge`); a console command in Central's API process wakes the
+    Output, region, picture and Position trial documents; the show pipe's are empty), and the display
+    line's Output reports are judged as they are recorded (`OutputReportJudge`, which keeps each
+    Output's loss through `OutputLossLedger`), then its trial reports (`TrialReportJudge`); a console command in Central's API process wakes the
     documents through `DisplayWakes.listen`. A Pi's light meter on the host line is judged as it is
-    recorded (`LightSensorJudge`), and each Player's drawn report on its own line (`DrawnReportJudge`);
+    recorded (`LightSensorJudge`; each Player's drawn report is read where its line is recorded), and
+    a recorded host base wakes the look that ends a Pi's install (`InstallEnds`);
     WALL carries the room-lights document (`RoomLightsWall`). Central's hub session serves its state
     and installPlayer (`PgPlayerVersions`, whose running installs move on at each FleetHub look) and
-    hands Home Assistant's states to `HomeAssistantListener`."""
+    hands Home Assistant's states to `HomeAssistantListener`. `NodeBus.pi_reboot()` asks a Pi's host
+    to reboot over the fleet pipe's links (the worker's `RebootPi` handler)."""
     hub_url = env.get(HUB_URL_ENV)
     if not hub_url:
         return None
-    db = Database(dsn, pool_size=LINK_STORE_CONCURRENCY + 4)
+    db = Database(dsn, application_name="photo-wall-bus", pool_size=LINK_STORE_CONCURRENCY + 4)
     clock = SystemClock()
     wakes = DisplayWakes()
     room_lights = PgRoomLights(db, PgHouseLock())
-    stores = PgLinkStores(db, {REPORT_STREAM: OutputReportJudge(wakes),
-                               HOST_STATE_STREAM: LightSensorJudge(room_lights),
-                               PLAYER_STATE_STREAM: DrawnReportJudge(room_lights)})
-    documents = DisplayDocuments(stores, wakes, times=DatabaseTransactionClock())
+    # The output judge first: it takes Coordination and Runtime when a loss is due, then `players` and
+    # `outputs`; the trial judge locks only `frame_trials` rows, last.
+    stores = PgLinkStores(db, {REPORT_STREAM: AllJudges(OutputReportJudge(wakes, losses=OutputLossLedger()),
+                                                        TrialReportJudge()),
+                               HOST_STATE_STREAM: AllJudges(LightSensorJudge(room_lights), InstallEnds())})
+    lighting = PgFrameLighting(LUT_RECIPE_ID)
+    trials = NodeCalibration(db, registry=Registry(db, clock, lighting=lighting), lighting=lighting)
+    documents = DisplayDocuments(stores, wakes, times=DatabaseTransactionClock(), trials=trials)
     links = tuple(NodeLinks(pipe, hub_url, stores, documents) for pipe in (Pipe.FLEET, Pipe.SHOW))
     wall = RoomLightsWall(room_lights)
-    sessions = NodeSessions(db, clock, NodeControlConfig())
     readiness, publisher = build_release_services(db, clock, cache_root=cache_layout.cache_root())
-    versions = PgPlayerVersions(db, clock, readiness, publisher, NodeCommands(sessions))
+    versions = PgPlayerVersions(db, clock, readiness, publisher)
     state_wakes = PgStateWakes()
     reads = PgCentralStateReads(db, clock, versions, room_lights,
-                                NodeReleaseCatalog(sessions, readiness=readiness).view)
+                                NodeReleaseCatalog(db, clock, readiness=readiness).view)
     fleet = FleetHub(db, hub_url, Path(env.get(HUB_CONFIG_ENV) or DEFAULT_HUB_CONFIG), HUB_LISTENERS,
                      WALL_TABLE, PgWallMarks(db, wall.wall_created), links, each_look=(versions.advance_installs,))
 

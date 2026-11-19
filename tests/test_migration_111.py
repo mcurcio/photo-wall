@@ -9,7 +9,6 @@ from hashlib import sha256
 from pathlib import Path
 
 from central.db import Database
-from central.infra.room_light_store import galleria_birth_in
 from central.room_light.model import Doubt, DoubtReason
 
 MIGRATIONS = Path(__file__).parents[1] / "central/migrations"
@@ -18,11 +17,18 @@ HA = "home-assistant"
 
 def _at_110(db: Database) -> None:
     """Every migration up to 110, as Database.migrate applies them."""
+    _applied(db, "", "111")
+
+
+def _applied(db: Database, start: str, stop: str) -> None:
+    """Every migration from `start` up to `stop`, as Database.migrate applies them."""
     with db.transaction() as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, sha256 TEXT NOT NULL, "
                      "applied_at TIMESTAMPTZ NOT NULL DEFAULT now())")
         for path in sorted(MIGRATIONS.glob("*.sql")):
-            if path.name >= "111":
+            if path.name < start:
+                continue
+            if path.name >= stop:
                 break
             conn.execute(path.read_text())
             conn.execute("INSERT INTO schema_migrations(name, sha256) VALUES (%s, %s)",
@@ -37,7 +43,7 @@ def _doubts(conn, table: str) -> dict[str, Doubt | None]:
 
 def test_111_turns_can_t_tell_into_a_doubt_and_drops_an_old_galleria_birth(database_provisioner):
     with database_provisioner.empty() as conninfo:
-        db = Database(conninfo)
+        db = Database(conninfo, application_name="photo-wall-test")
         try:
             _at_110(db)
             with db.transaction() as conn:
@@ -52,13 +58,13 @@ def test_111_turns_can_t_tell_into_a_doubt_and_drops_an_old_galleria_birth(datab
                 conn.execute("INSERT INTO galleria_birth(one, birth, heard_at, created_at, created_by, changed_at, "
                              "changed_by) VALUES (true, %s, now(), now(), 'galleria', now(), 'galleria')",
                              (json.dumps({"component": "galleria", "version": "0.43.0", "kinds": ["light"]}),))
-            db.migrate()
+            _applied(db, "111", "120")   # 120 moves these rows (tests/test_migration_120.py)
             with db.transaction() as conn:
                 assert _doubts(conn, "light_words") == {"light.away": Doubt(DoubtReason.CANT_TELL, 300.0),
                                                         "light.here": None}
                 assert _doubts(conn, "reading_words") == {"sensor.gone": Doubt(DoubtReason.CANT_TELL, 450.0)}
                 assert _doubts(conn, "colour_words") == {"sensor.sky": Doubt(DoubtReason.CANT_TELL, 550.0)}
-                assert galleria_birth_in(conn) is None
+                assert conn.execute("SELECT 1 FROM galleria_birth").fetchone() is None
                 for table, address, heard in (("light_words", "light.away", 300.0), ("reading_words", "sensor.gone", 500.0)):
                     row = conn.execute(f"SELECT created_by, changed_by, EXTRACT(EPOCH FROM created_at) AS created, "  # noqa: S608
                                        f"EXTRACT(EPOCH FROM changed_at) AS changed FROM {table} WHERE address=%s",

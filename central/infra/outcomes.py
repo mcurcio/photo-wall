@@ -4,7 +4,8 @@ The asset record holds what was produced; this table holds only how the latest r
 `(job type, subject)` ended, because a late waiter misses a NOTIFY. `record` upserts, takes a
 new global sequence number (`since` compares against it), and sends `NOTIFY job_outcome,
 <lock key>` in the same transaction, so a waiter is woken only by a committed outcome. The table's
-CHECKs (migration 020) refuse an inconsistent status/reason/retry row.
+CHECKs (migration 020) refuse an inconsistent status/reason/retry row. Audit fields (121b): every
+outcome is written by "central"; `changed_at` is the latest attempt's time.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from central.kernel.transactions import Transaction
 
 OutcomeStatus: TypeAlias = Literal["ok", "transient", "terminal"]
 OUTCOME_CHANNEL = "job_outcome"
-_COLUMNS = "lock_key, job_name, status, reason, retry_not_before, seq, updated_at"
+_COLUMNS = "lock_key, job_name, status, reason, retry_not_before, seq, changed_at"
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,7 +32,7 @@ class OutcomeRow:
     reason: str | None
     retry_not_before: float | None
     seq: int
-    updated_at: float
+    changed_at: float
 
 
 def _row(values: dict[str, Any]) -> OutcomeRow:
@@ -71,16 +72,17 @@ class JobOutcomes:
         lock = job_keys(job).lock
         conn = pg_connection(tx)
         row = conn.execute(
-            f"""INSERT INTO job_outcomes ({_COLUMNS})
+            f"""INSERT INTO job_outcomes ({_COLUMNS}, changed_by, created_at, created_by)
                 VALUES (%(lock)s, %(name)s, %(status)s, %(reason)s, %(retry_not_before)s,
-                        nextval('job_outcome_seq'), %(now)s)
+                        nextval('job_outcome_seq'), %(now)s, 'central', %(now)s, 'central')
                 ON CONFLICT (lock_key) DO UPDATE SET
                     job_name = EXCLUDED.job_name,
                     status = EXCLUDED.status,
                     reason = EXCLUDED.reason,
                     retry_not_before = EXCLUDED.retry_not_before,
                     seq = EXCLUDED.seq,
-                    updated_at = EXCLUDED.updated_at
+                    changed_at = EXCLUDED.changed_at,
+                    changed_by = EXCLUDED.changed_by
                 RETURNING {_COLUMNS}""",
             {"lock": lock, "name": type(job).job_name, "status": status, "reason": reason,
              "retry_not_before": retry_not_before, "now": now},
@@ -91,7 +93,7 @@ class JobOutcomes:
     def purge(self, tx: Transaction, *, older_than: float) -> int:
         """Delete rows not written since `older_than` (epoch seconds); returns how many."""
         cursor = pg_connection(tx).execute(
-            "DELETE FROM job_outcomes WHERE updated_at < %s",
+            "DELETE FROM job_outcomes WHERE changed_at < %s",
             (_finite(older_than, "older_than"),),
         )
         return cursor.rowcount

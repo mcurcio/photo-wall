@@ -76,10 +76,11 @@ class Wall:
         return create_app(self.registry.db, self.registry.clock, ADMIN, cache_root=self.root,
                           content=replace(content, frame_media_reader=reader))
 
-    def transfers(self) -> int:
+    def served_at(self, variant) -> float | None:
+        """When the variant was last served (`assets.last_served_at`, the database's clock)."""
         with self.registry.db.transaction() as conn:
-            return conn.execute("SELECT count(*) AS n FROM media_references "
-                                "WHERE owner LIKE 'transfer:%'").fetchone()["n"]
+            return conn.execute("SELECT last_served_at FROM assets WHERE kind='media-variant' "
+                                "AND identity=%s", (variant.key,)).fetchone()["last_served_at"]
 
 
 @pytest.fixture
@@ -103,7 +104,7 @@ def test_a_first_making_is_served_by_its_name(wall, registry):
         assert response.headers["Content-Length"] == str(len(FIRST))
         assert response.headers["Cache-Control"] == "private, no-store"
     assert wall.client.fetches == 1  # served from the cache, never made twice
-    assert wall.transfers() == 0  # every transfer pin is released with its body
+    assert wall.served_at(variant) is not None  # the grant stamped it: the cache spares it
 
 
 def test_a_secured_lock_grants_its_variant(wall, registry):
@@ -131,10 +132,10 @@ def test_another_players_media_unknown_names_and_retired_players_are_refused(wal
         assert client.get(f"/v1/media/not-an-asset/{variant.recipe_id}",
                           headers=headers).status_code == 404
         assert client.get("/v1/media/" + "0" * 64, headers=headers).status_code == 404
-        registry.unbind("portrait", expected_generation=1)
-        registry.retire(player["player_id"])
+        registry.unbind("portrait", expected_generation=1, by="console")
+        registry.retire(player["player_id"], by="console")
         assert client.get(url, headers=headers).status_code == 401
-    assert wall.transfers() == 0
+    assert wall.served_at(variant) is None  # nothing refused was stamped served
 
 
 class StillMaking:
@@ -151,10 +152,9 @@ class StillMaking:
         return Pending()
 
 
-def test_a_miss_whose_re_make_does_not_finish_in_time_answers_503_and_releases_its_pin(
-        wall, registry):
+def test_a_miss_whose_re_make_does_not_finish_in_time_answers_503(wall, registry):
     """The file is gone and its re-make is still running when the read stops waiting: 503
-    `media_unavailable` with a Retry-After, and the transfer pin the grant took is released."""
+    `media_unavailable` with a Retry-After."""
     variant = wall.first_making()
     player, _, _ = grant(registry, wall.repository, variant)
     with registry.db.transaction() as conn:
@@ -168,7 +168,6 @@ def test_a_miss_whose_re_make_does_not_finish_in_time_answers_503_and_releases_i
     assert (response.status_code, response.json()) == (503, {"error": "media_unavailable"})
     assert int(response.headers["Retry-After"]) > 0
     assert publisher.published == [PrepareMedia(key=variant.key)]
-    assert wall.transfers() == 0
 
 
 class StaleSessions(PostgresInstallationRepository):
@@ -194,3 +193,61 @@ def test_a_stale_epoch_answers_401(wall, registry):
     with pytest.raises(FrameMediaRefused) as refused:
         frame_media.resolve(player["token"], variant.key)
     assert (refused.value.code, refused.value.status) == ("unauthorized", 401)
+
+
+def test_a_variant_is_granted_exactly_while_an_offer_names_it(wall, registry):
+    """Decision 0034: the pin is derived. A photo in a current offer is served; once the offer's
+    `valid_until` has passed (Central's clock, which wrote it) it is refused, though its row
+    still stands; a photo in no offer nor lock is refused. Mutation probe: ignore `valid_until`
+    in `media_authorized_in` -> the expired offer still grants, and this test fails."""
+    variant = wall.first_making()
+    player, _, plan = grant(registry, wall.repository, variant)
+    url = f"/v1/media/{variant.asset_id}/{variant.recipe_id}"
+    headers = {"Authorization": f"Bearer {player['token']}"}
+    renewed_until = plan.layers[0].end - 100   # the offer lapses before its layer would end
+    with registry.db.transaction() as conn:
+        conn.execute("UPDATE plan_offers SET valid_until=%s", (renewed_until,))
+    with TestClient(wall.app()) as client:
+        assert client.get(url, headers=headers).status_code == 200
+        registry.clock.advance(renewed_until - registry.clock.utc())
+        refused = client.get(url, headers=headers)
+    assert (refused.status_code, refused.json()) == (403, {"error": "media_forbidden"})
+    with registry.db.transaction() as conn:
+        assert conn.execute("SELECT count(*) AS n FROM plan_offers").fetchone()["n"] == 1
+
+
+def test_a_file_served_within_a_transfer_survives_a_sweep(wall, registry):
+    """A transfer is never cut short (decision 0034: no transfer pin): the grant stamps the
+    variant served, and the media cache spares a file served within `SERVED_SPARE_SECONDS`, at
+    least `TRANSFER_SECONDS`, with no offer naming it any more; served before that, it goes.
+    Mutation probe: shrink `SERVED_SPARE_SECONDS` below `TRANSFER_SECONDS` -> the file served
+    `TRANSFER_SECONDS - 10` ago is evicted, and this test fails."""
+    import os
+
+    from central.assets.frame_media import TRANSFER_SECONDS
+    from central.assets.maintenance import CacheSettings, MediaCacheBudget
+    from central.infra.media_cache_records import PgMediaVariantUse
+
+    variant = wall.first_making()
+    player, _, _ = grant(registry, wall.repository, variant)
+    with TestClient(wall.app()) as client:
+        assert client.get(f"/v1/media/{variant.asset_id}/{variant.recipe_id}",
+                          headers={"Authorization": f"Bearer {player['token']}"}).status_code == 200
+    key = asset_key(PrepareMedia(key=variant.key))
+    with registry.db.transaction() as conn:
+        conn.execute("DELETE FROM plan_offers")     # no offer holds it any more
+        path = CacheLayout(wall.root).path(key, wall.repository.records.get(
+            PgTransaction(conn), key).produced)
+    os.utime(path, (1, 1))                          # installed long ago: no install grace
+
+    def served(seconds_ago: float) -> list:
+        with registry.db.transaction() as conn:
+            conn.execute("UPDATE assets SET last_served_at=EXTRACT(EPOCH FROM clock_timestamp())"
+                         "-%s WHERE kind='media-variant' AND identity=%s",
+                         (seconds_ago, variant.key))
+        return MediaCacheBudget(store=CacheStore(CacheLayout(wall.root)), use=PgMediaVariantUse(),
+                                transactions=PgTransactions(registry.db),
+                                settings=CacheSettings(media_budget_bytes=0)).enforce()
+
+    assert served(TRANSFER_SECONDS - 10) == [] and path.exists()
+    assert served(TRANSFER_SECONDS + 10) == [path] and not path.exists()

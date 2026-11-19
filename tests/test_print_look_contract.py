@@ -22,6 +22,7 @@ from contracts.lut import LUT_BYTES, LUT_GRID, LutRef, lut_offset
 from contracts.models import OutputBinding
 from contracts.node_calibration import (
     TrialCandidate,
+    TrialScope,
     candidate_hash,
     canonical,
     encode_trial,
@@ -126,8 +127,8 @@ def test_the_trial_candidate_hash_covers_the_lighting():
     trial_id = uuid4()
     calibration = '{"fit":{"height":1.0,"left":0.0,"mode":"box","top":0.0,"width":1.0},"revision":1}'
     baseline = _surface()
-    assert candidate_hash(trial_id, 1, 1, baseline, calibration, SPOT_LIGHTING) != candidate_hash(
-        trial_id, 1, 1, baseline, calibration, LIGHTING)
+    assert candidate_hash(trial_id, 1, 1, TrialScope.of(baseline), calibration, SPOT_LIGHTING) != candidate_hash(
+        trial_id, 1, 1, TrialScope.of(baseline), calibration, LIGHTING)
 
 
 def test_the_frames_wires_refuse_a_message_without_its_lighting():
@@ -140,7 +141,7 @@ def test_the_frames_wires_refuse_a_message_without_its_lighting():
     calibration = '{"fit":{"height":1.0,"left":0.0,"mode":"box","top":0.0,"width":1.0},"revision":1}'
     lighting = LIGHTING
     envelope = json.loads(encode_trial(TrialCandidate(
-        trial_id, 1, 1, baseline, calibration, candidate_hash(trial_id, 1, 1, baseline, calibration, lighting),
+        trial_id, 1, 1, baseline, calibration, candidate_hash(trial_id, 1, 1, TrialScope.of(baseline), calibration, lighting),
         5000, 9000, lighting)))
     assert parse_trial(canonical(envelope)).lighting == lighting
     del envelope["lighting"]

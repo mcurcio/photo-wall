@@ -4,7 +4,7 @@ CentralErrors from what Central already keeps, never a copy. What is in doubt is
 (central/frame_lighting/ports.py HouseLock), what to do each source's adapter's (`SourceAdvice`,
 composed by central/app.py), where a Frame is shown the Registry's (`FrameOutputs`), and what a
 Frame's Player said is the newest record of its Player line's IMPEDED_KEY
-(contracts/node_impeded.py) in node_link_records (central/infra/node_link_latest.py).
+(contracts/node_impeded.py) in node_states (central/infra/node_link_latest.py).
 """
 from __future__ import annotations
 

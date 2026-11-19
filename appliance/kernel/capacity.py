@@ -89,14 +89,12 @@ _PREPARATION_MEMBERS: Final = (
     MemoryLine("app-image", 320 * MIB, "M 288 (E2b image) + 32, rounded", parent="preparation"),
     MemoryLine("app-image-rollback", 320 * MIB, "the previous app image (design-r3 §5.2 rollback room)",
                parent="preparation"),
-    MemoryLine("manager-image", 96 * MIB, "M 62 + 32, rounded; releases ship one manager root (C7)",
-               parent="preparation"),
     MemoryLine("store-residue", 32 * MIB,
-               "E: AppManager's session and prepared.json, debris, directories; 16 KiB pages",
+               "E: the store's debris and directories; 16 KiB pages",
                parent="preparation"),
     MemoryLine("preparation-process", 192 * MIB,
-               "AppManager's TemporaryFileSystem /run 32 + /tmp 64 (floor) + E 96 anon: AppManager and "
-               "the import worker at once, or the prepare one-shot", floor_bytes=96 * MIB,
+               "the import worker or the prepare one-shot: floor 96 + E 96 anon, kept from when the "
+               "App Manager shared the slice (S4c-2b-ii; not re-measured)", floor_bytes=96 * MIB,
                parent="preparation"),
 )
 
@@ -111,8 +109,6 @@ LINES: Final[tuple[MemoryLine, ...]] = (
     MemoryLine("base", 480 * MIB, "M 138 + S/E 90", peak_bytes=228 * MIB, cgroup="photowallbase.slice"),
     MemoryLine("broker", 96 * MIB, "E inside the measured slice (W4)",
                cgroup="photo-wall-app-broker.service", parent="base"),
-    MemoryLine("manager-supervisor", 96 * MIB, "E (W4); leaves with AppManager",
-               cgroup="photo-wall-manager-supervisor.service", parent="base"),
     MemoryLine("display", 160 * MIB, "M 12 (the fireplace Pi, 2026-10-28) + the capture the shell "
                "allows (CAPTURE_BYTES, floor)", peak_bytes=12 * MIB, floor_bytes=CAPTURE_BYTES,
                cgroup="photo-wall-display.service", parent="base"),
@@ -163,7 +159,7 @@ def content_line(total_bytes: int) -> int:
 
 
 # The store holds the image lines and its residue: bytes are counted once, as images.
-IMAGE_ROOM_BYTES: Final = sum(line(name).cap_bytes for name in ("app-image", "app-image-rollback", "manager-image"))
+IMAGE_ROOM_BYTES: Final = sum(line(name).cap_bytes for name in ("app-image", "app-image-rollback"))
 STORE_BYTES: Final = IMAGE_ROOM_BYTES + line("store-residue").cap_bytes
 
 CLASSES: tuple[DeviceClass, ...] = (

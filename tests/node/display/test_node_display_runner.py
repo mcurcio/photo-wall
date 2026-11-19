@@ -89,6 +89,56 @@ def test_restarted_controller_reports_gap_to_an_old_incarnation():
     assert page["stream_gap"] is True and [e["sequence"] for e in page["events"]] == [1, 2]
 
 
+def test_the_app_run_op_keeps_the_brokers_current_run():
+    """Decision 0034, S4b part 4 (E3): the broker's `app_run` packet on the ingress is held by the
+    controller's handoffs (the run its RunDocument names; None: no run), answered {}; any other
+    shape is refused and the run held stays."""
+    from appliance.display_host.handoff import AppRun
+    from appliance.kernel.app_facts import APP_RUN_OP
+
+    controller = Controller(FakeBackend())
+    invocation = uuid4()
+    run = {"invocation_id": str(invocation), "pid": 396, "start_ticks": 31751781, "app_epoch": 2}
+    assert controller.receive({"op": APP_RUN_OP, "run": run}) == {}
+    assert controller.handoffs.current_run == AppRun(NodeProcessIdentity(396, 31751781, invocation), 2)
+    for refused in ({"op": APP_RUN_OP}, {"op": APP_RUN_OP, "run": run, "extra": 1},
+                    {"op": APP_RUN_OP, "run": {**run, "app_epoch": 0}},
+                    {"op": APP_RUN_OP, "run": {**run, "invocation_id": "not-a-uuid"}},
+                    {"op": APP_RUN_OP, "run": {**run, "pid": "396"}},
+                    {"op": APP_RUN_OP, "run": {key: value for key, value in run.items() if key != "pid"}}):
+        with pytest.raises((ValueError, KeyError)):
+            controller.receive(refused)
+    assert controller.handoffs.current_run == AppRun(NodeProcessIdentity(396, 31751781, invocation), 2)
+    assert controller.receive({"op": APP_RUN_OP, "run": None}) == {}
+    assert controller.handoffs.current_run is None
+
+
+def test_the_handoffs_hold_each_outputs_newest_binding():
+    """The document feed hands each Output document's binding to the handoffs (stored, part 4a)."""
+    from appliance.display_host.handoff import Handoffs
+    from appliance.display_host.runner import document_feed
+    from contracts.node_output import (
+        BEST_DETECTED,
+        Darkness,
+        OutputBinding,
+        OutputDocument,
+        OutputPower,
+        encode_output_document,
+    )
+    from nodeapi.documents import Document
+
+    handoffs = Handoffs(SimpleNamespace(withdrawals={}, grants={}))
+    ignored = SimpleNamespace(document=lambda output_id, document: None)
+    feed = document_feed(ignored, ignored, ignored, ignored, ignored, handoffs)
+    power = OutputPower(Power.ON, (), "2099-01-01T00:00:00Z", Darkness.DISPLAY_OFF, None)
+    bound = OutputDocument("HDMI-A-1", 2, power, BEST_DETECTED, False, False, 0, OutputBinding("kitchen", 3, 5))
+    feed("output-HDMI-A-1", Document(encode_output_document(bound), "central", None))
+    assert (handoffs.binding("HDMI-A-1"), handoffs.binding("HDMI-A-2")) == (OutputBinding("kitchen", 3, 5), None)
+    unbound = OutputDocument("HDMI-A-1", 3, power, BEST_DETECTED, False, False, 0, None)
+    feed("output-HDMI-A-1", Document(encode_output_document(unbound), "central", None))
+    assert handoffs.binding("HDMI-A-1") is None
+
+
 def test_events_op_refuses_a_bad_cursor():
     with pytest.raises(ValueError, match="feed_read_request"):
         controller_with(0).receive({"op": "events", "after": -1})
@@ -180,6 +230,23 @@ def test_main_starts_the_display_session_without_the_central_config(monkeypatch,
     with pytest.raises(OSError):                       # no compositor control socket here
         runner.main()
     assert started == [DISPLAY_SLICE.digest]
+
+
+@pytest.mark.parametrize(("config", "accepted"), [
+    ({}, True), ({"runtime": "/run/elsewhere"}, True),
+    # Display is given no Central origin, serial or offer (decision 0034, S4c).
+    ({"central": "http://central.test"}, False), ({"serial": "s"}, False), ({"offer_id": "o"}, False),
+])
+def test_the_config_takes_the_runtime_path_alone(monkeypatch, tmp_path, config, accepted):
+    monkeypatch.setattr(runner, "_unit", lambda unit: {"MainPID": "1"})
+    monkeypatch.setattr(runner, "display_session", lambda digest: SimpleNamespace(start=lambda: None))
+    path = tmp_path / "node-config"
+    path.write_text(json.dumps(config))
+    monkeypatch.setattr(sys, "argv", ["display-controller", "--runtime", str(tmp_path),
+                                      "--config", str(path)])
+    monkeypatch.setattr(os, "umask", lambda mask: 0)
+    with pytest.raises(OSError if accepted else ValueError):   # accepted: no compositor socket here
+        runner.main()
 
 
 def test_the_feed_socket_answers_events_and_nothing_else():
@@ -345,6 +412,13 @@ def test_the_display_paths_are_the_ones_the_base_units_and_tmpfiles_declare():
     assert f"BindsTo={paths.DISPLAY_UNIT}" in controller
     assert f"After={paths.DISPLAY_UNIT}" in controller
     assert {f"RuntimeDirectory={paths.CONTROLLER_STATE.name}", "RuntimeDirectoryPreserve=yes"} <= set(controller)
+    # The ingress (decision 0034, S4b part 4): in Weston's runtime directory, bound group-writable
+    # for the broker, which reaches it through its supplementary group.
+    assert paths.INGRESS_SOCKET.parent == paths.RUNTIME
+    assert runner.INGRESS_MODE == 0o660
+    broker = (units / "photo-wall-app-broker.service").read_text().splitlines()
+    assert "SupplementaryGroups=pw-display" in broker
+    assert "Group=pw-display" in display
 
 
 def test_the_signal_range_request_and_its_units_say_the_same():
@@ -520,6 +594,7 @@ def test_the_document_feed_routes_each_document_by_its_key_and_ignores_the_rest(
     a document under another Output's key, under a key of neither kind, or that does not decode
     reaches neither."""
     from appliance.display_host.runner import document_feed
+    from contracts.node_calibration import TrialDocument, encode_trial_document
     from contracts.node_output import (
         BEST_DETECTED,
         Darkness,
@@ -536,13 +611,15 @@ def test_the_document_feed_routes_each_document_by_its_key_and_ignores_the_rest(
     )
     from nodeapi.documents import Document
 
-    got, pictures, turned, regions = [], [], [], []
+    got, pictures, turned, regions, trials, bindings = [], [], [], [], [], []
     feed = document_feed(SimpleNamespace(document=lambda output_id, document: got.append((output_id, document))),
                          SimpleNamespace(document=lambda output_id, document: pictures.append((output_id, document))),
                          SimpleNamespace(document=lambda output_id, document: turned.append((output_id, document))),
-                         SimpleNamespace(document=lambda output_id, region: regions.append((output_id, region))))
+                         SimpleNamespace(document=lambda output_id, region: regions.append((output_id, region))),
+                         SimpleNamespace(document=lambda output_id, document: trials.append((output_id, document))),
+                         SimpleNamespace(document=lambda output_id, binding: bindings.append((output_id, binding))))
     wanted = OutputDocument("HDMI-A-1", 2, OutputPower(Power.ON, (), "2099-01-01T00:00:00Z", Darkness.DISPLAY_OFF, None),
-                            BEST_DETECTED, False, False, 90)
+                            BEST_DETECTED, False, False, 90, None)
     picture = PictureDocument("HDMI-A-1", 3, {"10": 46}, NEUTRAL_SOFTWARE, light=UPGRADE_DISPLAY_LIGHT)
     feed("output-HDMI-A-1", Document(encode_output_document(wanted), "central", None))
     feed("output-HDMI-A-2", Document(encode_output_document(wanted), "central", None))   # another key
@@ -551,10 +628,16 @@ def test_the_document_feed_routes_each_document_by_its_key_and_ignores_the_rest(
     feed("picture-HDMI-A-2", Document(encode_picture_document(picture), "central", None))  # another key
     feed("picture-HDMI-A-1", Document(encode_output_document(wanted), "central", None))    # not a picture
     feed("layout-HDMI-A-1", Document(encode_picture_document(picture), "central", None))   # neither kind
+    trial = TrialDocument("HDMI-A-1", 1, None)
+    feed("trial-HDMI-A-1", Document(encode_trial_document(trial), "central", None))
+    feed("trial-HDMI-A-2", Document(encode_trial_document(trial), "central", None))         # another key
+    feed("trial-HDMI-A-1", Document(encode_picture_document(picture), "central", None))     # not a trial
     assert got == [("HDMI-A-1", wanted)]
     assert turned == [("HDMI-A-1", wanted)]                  # an Output document only, never a picture one
     assert pictures == [("HDMI-A-1", picture)]
     assert regions == []                                     # no region document came
+    assert trials == [("HDMI-A-1", trial)]
+    assert bindings == [("HDMI-A-1", None)]                 # the Output document's binding, to the handoffs
 
 
 def region_feed():
@@ -565,7 +648,9 @@ def region_feed():
     feed = document_feed(SimpleNamespace(document=lambda output_id, document: powered.append(output_id)),
                          SimpleNamespace(document=lambda output_id, document: None),
                          SimpleNamespace(document=lambda output_id, document: turned.append(output_id)),
-                         SimpleNamespace(document=lambda output_id, region: regions.append((output_id, region))))
+                         SimpleNamespace(document=lambda output_id, region: regions.append((output_id, region))),
+                         SimpleNamespace(document=lambda output_id, document: None),
+                         SimpleNamespace(document=lambda output_id, binding: None))
     return feed, powered, turned, regions
 
 
@@ -580,7 +665,7 @@ def output_document():
     from nodeapi.documents import Document
 
     wanted = OutputDocument("HDMI-A-1", 2, OutputPower(Power.ON, (), "2099-01-01T00:00:00Z", Darkness.DISPLAY_OFF, None),
-                            BEST_DETECTED, False, False, 90)
+                            BEST_DETECTED, False, False, 90, None)
     return Document(encode_output_document(wanted), "central", None)
 
 

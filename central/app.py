@@ -36,8 +36,8 @@ from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database, DatabaseTransactionClock, ProcessTransactionClock, TransactionClock
 from central.display_routes import mount_display_routes, mount_picture_routes
 from central.fleet.leaf_bridge import mount_bus_bridges
+from central.fleet.node_boot import NodeBootConfig
 from central.fleet.node_routes import mount_node_routes
-from central.fleet.node_sessions import NodeControlConfig
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
 from central.home_assistant_routes import mount_home_assistant_routes
 from central.house_routes import mount_house_routes
@@ -48,7 +48,6 @@ from central.infra.display_store import (
     PgPictureSessions,
     frame_outputs_in,
 )
-from central.infra.execution_event_retention import ExecutionEventRetention
 from central.infra.fit_analysis_store import PgFitAnalysisReader
 from central.infra.fit_settings_store import PgFitSettings
 from central.infra.frame_lighting_store import PgFrameLighting, PgHouseLock
@@ -60,7 +59,12 @@ from central.infra.light_sensor_judge import PI_SOURCE, PiMeterAdvice, is_player
 from central.infra.node_record_retention import NodeRecordRetention
 from central.infra.paper_profile_store import PgPaperProfiles
 from central.infra.photo_library_store import PgPhotoLibrary
-from central.infra.player_contact_store import player_reports_in
+from central.infra.player_contact_store import (
+    closed_in,
+    disconnected_all_in,
+    opened_in,
+    player_reports_in,
+)
 from central.infra.player_state_wakes import PlayerStateWakes
 from central.infra.power_store import PgPower
 from central.infra.room_light_store import PgRoomLights
@@ -72,7 +76,6 @@ from central.lock_waits import mount_lock_refusal
 from central.media_ports import MediaApplication
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
-from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from central.operator_auth import OperatorAuth
 from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
 from central.paper_profile_routes import mount_paper_profile_routes
@@ -97,6 +100,7 @@ from central.room_light_routes import mount_room_light_routes
 from central.runtime import RuntimeConflict, Scene, SceneInUse, SceneOnWall, SceneWriteRefused
 from central.runtime_store import RuntimeStore
 from central.scheduler import Scheduler
+from central.scheduler import run_scheduler as run_scheduler_until_cancelled
 from central.source_names import SourceInUse, SourceNameService
 from central.tuning_history_routes import mount_tuning_history_routes
 from central.version import central_version as installed_central_version
@@ -190,7 +194,7 @@ def create_app(
     cache_root: Path | None = None,
     media_queue: MediaTaskQueue | None = None,
     content: ContentServices | None = None,
-    node_control: NodeControlConfig = NodeControlConfig(),
+    node_boot: NodeBootConfig = NodeBootConfig(),
     media_times: TransactionClock | None = None,
     hub_leaf_url: str | None = None,
     central_version: str | None = None,
@@ -200,7 +204,7 @@ def create_app(
     run_scheduler = clock is None if run_scheduler is None else run_scheduler
     clock_injected = clock
     owns_db = db is None
-    db = db or Database(os.environ["PHOTO_WALL_DATABASE_URL"])
+    db = db or Database(os.environ["PHOTO_WALL_DATABASE_URL"], application_name="photo-wall-web")
     clock = clock or SystemClock()
     admin_token = admin_token or os.environ["PHOTO_WALL_ADMIN_TOKEN"]
     if len(admin_token) < 32:
@@ -261,7 +265,7 @@ def create_app(
     )
     feed = content.feed if content is not None else None
     # Whether the scheduler loop runs, and when its last tick completed. Each step's own health
-    # is the Scheduler's (central/scheduler.py), built once the reconciler exists (below).
+    # is the Scheduler's (central/scheduler.py), built once the routes are mounted (below).
     scheduler_loop = {"enabled": run_scheduler, "running": False, "stopped": False,
                       "last_tick": None}
     # When a Player's state may have changed: its session socket pushes it then
@@ -271,17 +275,22 @@ def create_app(
     async def run_scheduler_loop():
         scheduler_loop.update(running=True, stopped=False)
         try:
-            while True:
-                # Every step runs and reports on its own; a tick itself never fails.
-                await asyncio.to_thread(app.state.scheduler.tick)
-                scheduler_loop["last_tick"] = clock.utc()
-                await asyncio.sleep(1)
+            # Every step runs and reports on its own; a tick itself never fails. It ticks at the
+            # tick's own answer or at a commit's wake (central/scheduler.py `run_scheduler`).
+            await run_scheduler_until_cancelled(
+                app.state.scheduler, player_state_wakes,
+                ticked=lambda: scheduler_loop.update(last_tick=clock.utc()))
         finally:
             scheduler_loop.update(running=False, stopped=True)
 
     @asynccontextmanager
     async def lifespan(app):
         db.migrate()
+        if isinstance(db, Database):
+            # This process holds every Player socket (decision 0034): none is open before it
+            # accepts one, whatever a Central that stopped without closing its sockets left.
+            with db.transaction() as conn:
+                disconnected_all_in(conn)
         if isinstance(db, Database):    # Settings › House starts from Central's own zone (a stand-in has none)
             seed_house(db, DatabaseTransactionClock())
         if isinstance(media_queue, ProcrastinateMediaQueue) or (
@@ -414,8 +423,8 @@ def create_app(
     @app.get("/healthz")
     def health():
         """503 only when Central cannot serve: the database is down, or the scheduler loop has
-        not completed a tick yet ("starting"), has not completed one within SCHEDULER_MAX_AGE
-        ("stale") or has stopped. A completed tick with a failing step is 200 "degraded", each
+        not completed a tick yet ("starting"), has not completed one within SCHEDULER_MAX_AGE of
+        when it was due ("stale") or has stopped. A completed tick with a failing step is 200 "degraded", each
         step's facet beside it (its reason sanitized: type and where, never a message)."""
         try:
             database = db.healthy()
@@ -439,11 +448,16 @@ def create_app(
             elif not scheduler_loop["running"]:
                 status = "stopped"
             else:
+                # The loop rests until its next tick is due: it is stale once that tick is late
+                # by more than SCHEDULER_MAX_AGE, never merely for resting.
+                due = ticks.due_monotonic
+                resting = 0.0 if due is None else max(0.0, due - ticks.last_tick_monotonic)
+                allowance = SCHEDULER_MAX_AGE + resting
                 try:
                     age = clock.monotonic() - ticks.last_tick_monotonic
                 except Exception:
-                    age = SCHEDULER_MAX_AGE + 1
-                status = ("stale" if not 0 <= age <= SCHEDULER_MAX_AGE
+                    age = allowance + 1
+                status = ("stale" if not 0 <= age <= allowance
                           else "degraded" if degraded else "ok")
             scheduler["status"] = status
             serving = database and status in ("ok", "degraded")
@@ -528,10 +542,6 @@ def create_app(
         config = coordinator.configuration(identity["id"], identity["authority_epoch"])
         return {**config.model_dump(mode="json"), "server_time": clock.utc()}
 
-    @app.get("/v1/player/state")
-    def player_state(identity: dict = Depends(player)):
-        return timed_state(identity)
-
     @app.post("/v1/player/control-acks")
     def control_ack(request: ControlAck, identity: dict = Depends(player)):
         if request.authority_epoch != identity["authority_epoch"]:
@@ -555,8 +565,8 @@ def create_app(
         credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
     ):
         """One media variant, by its name, through the one read path: the grant
-        (`FrameMedia`), then the AssetReader (a hit serves, a miss re-makes it and waits). The
-        transfer pin is released when the body ends, or at once when nothing is served."""
+        (`FrameMedia`, which stamps the variant served so the cache spares it mid-transfer), then
+        the AssetReader (a hit serves, a miss re-makes it and waits)."""
         if credentials is None:
             raise RegistryError("unauthorized", 401)
         if "range" in request.headers:
@@ -569,17 +579,11 @@ def create_app(
                                             f"{asset_id}.{recipe_id}")
         except FrameMediaRefused as refused:
             return error_response(refused.code, refused.status)
-        try:
-            opened = await until_disconnect(request, reader.read(grant.candidates))
-        except BaseException:
-            await asyncio.to_thread(frame_media.release, grant.transfer_owner)
-            raise
+        opened = await until_disconnect(request, reader.read(grant.candidates))
         if isinstance(opened, Unavailable):
-            await asyncio.to_thread(frame_media.release, grant.transfer_owner)
             return error_response("media_unavailable", 503,
                                   retry_after=opened.retry_after_seconds)
-        return stream_frame_media(opened, release=lambda: frame_media.release(
-            grant.transfer_owner))
+        return stream_frame_media(opened)
 
     @app.post("/v1/player/readiness")
     def readiness(request: Readiness, identity: dict = Depends(player)):
@@ -608,6 +612,11 @@ def create_app(
             return
         await websocket.accept()
 
+        def contact(write) -> None:
+            # Liveness (central/infra/player_contact_store.py): the socket's open and close only.
+            with db.transaction() as conn:
+                write(conn, identity["id"], identity["authority_epoch"], clock.utc())
+
         async def handle(raw: str) -> None:
             if len(raw.encode()) > 1024**2:
                 raise ValueError("session message limit")
@@ -631,12 +640,15 @@ def create_app(
         # state re-read under the Coordination lock and re-sent every half second): at the start,
         # at each wake (a write under the Coordination lock committed, in any process:
         # central/infra/player_state_wakes.py), and after each message the Player sends; and sent
-        # only when its delivery differs from the last one sent.
+        # only when its delivery differs from the last one sent. The Player never asks for it.
         sent: tuple | None = None
         seen = player_state_wakes.count()
         receiving = asyncio.ensure_future(websocket.receive_text())
         waking: asyncio.Future | None = None
+        opened = False
         try:
+            await asyncio.to_thread(contact, opened_in)
+            opened = True
             while True:
                 # Reauthenticate existing sessions too, including token rotation/retirement.
                 current = await asyncio.to_thread(registry.authenticate, token)
@@ -669,6 +681,12 @@ def create_app(
             for pending in (receiving, waking):
                 if pending is not None and not pending.done():
                     pending.cancel()
+            if opened:
+                try:
+                    await asyncio.shield(asyncio.to_thread(contact, closed_in))
+                except Exception:   # it reads connected until the next start clears it
+                    LOG.warning("player %s: the session's close was not written", identity["id"],
+                                exc_info=True)
 
     @app.get(
         "/v1/operator/inventory",
@@ -703,21 +721,21 @@ def create_app(
         await _content().catalog.refresh()
         return JSONResponse({"status": "polling"}, status_code=202)
 
-    @app.post("/v1/operator/frames", dependencies=[Depends(admin)], status_code=201)
-    def create_frame(frame: FrameCreate):
-        return registry.create_frame(frame)
+    @app.post("/v1/operator/frames", status_code=201)
+    def create_frame(frame: FrameCreate, by: Actor = Depends(admin)):
+        return registry.create_frame(frame, by=by)
 
-    @app.patch("/v1/operator/frames/{frame_id}", dependencies=[Depends(admin)])
-    def reposition(frame_id: Identifier, placement: FramePlacement) -> dict:
-        return registry.place_frame(frame_id, placement)
+    @app.patch("/v1/operator/frames/{frame_id}")
+    def reposition(frame_id: Identifier, placement: FramePlacement, by: Actor = Depends(admin)) -> dict:
+        return registry.place_frame(frame_id, placement, by=by)
 
-    @app.put("/v1/operator/frames/{frame_id}/name", dependencies=[Depends(admin)])
-    def rename_frame(frame_id: Identifier, request: FrameName) -> dict:
-        return registry.rename_frame(frame_id, request.name)
+    @app.put("/v1/operator/frames/{frame_id}/name")
+    def rename_frame(frame_id: Identifier, request: FrameName, by: Actor = Depends(admin)) -> dict:
+        return registry.rename_frame(frame_id, request.name, by=by)
 
-    @app.put("/v1/operator/walls/{surface_id}", dependencies=[Depends(admin)], response_model=WallInventory)
-    def name_wall(surface_id: Identifier, naming: WallNaming) -> WallInventory:
-        return registry.name_wall(surface_id, naming)
+    @app.put("/v1/operator/walls/{surface_id}", response_model=WallInventory)
+    def name_wall(surface_id: Identifier, naming: WallNaming, by: Actor = Depends(admin)) -> WallInventory:
+        return registry.name_wall(surface_id, naming, by=by)
 
     def _refuse_frame_in_use(frame_id: str) -> None:
         # Runs refer to Frame ids by string, so keep destructive/reconfiguring
@@ -727,20 +745,20 @@ def create_app(
         if any(run.phase in ("body", "outro") and target in run.participants for run in view.runs):
             raise RegistryError("frame_in_use", 409)
 
-    @app.put("/v1/operator/frames/{frame_id}/turn", dependencies=[Depends(admin)])
-    def turn_frame(frame_id: Identifier, request: FrameTurnChange) -> dict:
+    @app.put("/v1/operator/frames/{frame_id}/turn")
+    def turn_frame(frame_id: Identifier, request: FrameTurnChange, by: Actor = Depends(admin)) -> dict:
         # How the Frame's screen hangs (render redesign S2): the Frame's own setting, sent in its
         # Output's document; Registry owns the write, the generation and the Node's wake.
-        return registry.turn_frame(frame_id, request.turn, expected_generation=request.expected_generation)
+        return registry.turn_frame(frame_id, request.turn, expected_generation=request.expected_generation, by=by)
 
-    @app.put("/v1/operator/frames/{frame_id}/video", dependencies=[Depends(admin)])
-    def set_frame_video(frame_id: Identifier, request: FrameVideoChange) -> dict:
+    @app.put("/v1/operator/frames/{frame_id}/video")
+    def set_frame_video(frame_id: Identifier, request: FrameVideoChange, by: Actor = Depends(admin)) -> dict:
         # Shows videos (frame box run, fb-5): the Frame's own setting, last write wins; it changes
         # what the Planner may put on the Frame, never its picture, so no generation is asked.
-        return registry.set_frame_video(frame_id, request.video)
+        return registry.set_frame_video(frame_id, request.video, by=by)
 
-    @app.delete("/v1/operator/frames/{frame_id}", dependencies=[Depends(admin)])
-    def remove_frame(frame_id: Identifier) -> dict:
+    @app.delete("/v1/operator/frames/{frame_id}")
+    def remove_frame(frame_id: Identifier, by: Actor = Depends(admin)) -> dict:
         # Serialize with all Runtime/Scene mutations, then take the Frame row lock,
         # matching authored configuration's COORDINATION -> RUNTIME -> Frame order.
         # Registry checks existence and binding before applying reference data so those
@@ -752,30 +770,30 @@ def create_app(
                     "run_ids": list(references["run_ids"]),
                 })
 
-            return registry.delete_frame(frame_id, conn=conn, references=references)
+            return registry.delete_frame(frame_id, conn=conn, references=references, by=by)
 
-    @app.put("/v1/operator/frames/{frame_id}/binding", dependencies=[Depends(admin)])
-    def bind(frame_id: Identifier, binding: BindingRequest):
+    @app.put("/v1/operator/frames/{frame_id}/binding")
+    def bind(frame_id: Identifier, binding: BindingRequest, by: Actor = Depends(admin)):
         return registry.bind(
             frame_id,
             binding.player_id,
             binding.output_id,
             expected_generation=binding.expected_generation,
+            by=by,
         )
 
-    @app.delete("/v1/operator/frames/{frame_id}/binding", dependencies=[Depends(admin)])
-    def unbind(frame_id: Identifier, request: UnbindRequest):
-        return registry.unbind(frame_id, expected_generation=request.expected_generation)
+    @app.delete("/v1/operator/frames/{frame_id}/binding")
+    def unbind(frame_id: Identifier, request: UnbindRequest, by: Actor = Depends(admin)):
+        return registry.unbind(frame_id, expected_generation=request.expected_generation, by=by)
 
-    @app.post("/v1/operator/players/{player_id}/retire", dependencies=[Depends(admin)])
-    def retire(player_id: Identifier):
-        registry.retire(player_id)
+    @app.post("/v1/operator/players/{player_id}/retire")
+    def retire(player_id: Identifier, by: Actor = Depends(admin)):
+        registry.retire(player_id, by=by)
         return {"status": "retired"}
 
-    @app.post("/v1/operator/players/{player_id}/outputs/{output_id}/identify",
-              dependencies=[Depends(admin)])
-    def identify_output(player_id: Identifier, output_id: Identifier):
-        return registry.identify_output(player_id, output_id)
+    @app.post("/v1/operator/players/{player_id}/outputs/{output_id}/identify")
+    def identify_output(player_id: Identifier, output_id: Identifier, by: Actor = Depends(admin)):
+        return registry.identify_output(player_id, output_id, by=by)
 
     @app.get("/v1/operator/runtime", dependencies=[Depends(admin)])
     def runtime_state():
@@ -887,7 +905,7 @@ def create_app(
     mount_program_routes(app, admin=admin, runtime=runtime_store)
     mount_why_routes(app, admin=admin, queries=PgWhy(db, times=media_times))
     room_lights = PgRoomLights(db, house_lock)
-    house = PgHouse(db, times=media_times, room_lights=room_lights)
+    house = PgHouse(db, times=media_times, room_lights=room_lights, runtime=runtime_store)
     mount_house_routes(app, admin=admin, queries=house, commands=house)
     mount_room_light_routes(app, admin=admin, lights=room_lights, sources=REPORT_SOURCES)
     version = installed_central_version() if central_version is None else central_version
@@ -903,15 +921,10 @@ def create_app(
                                profiles=PgPaperProfiles(db, clock, house_lock))
     if content is not None:
         mount_content_routes(app, content)
-    mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,
-                      content=content)
-    app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions, coordinator)
-    app.state.scheduler = Scheduler(app.state.node_reconciler, coordinator,
-                                    media_application.request_measurements, clock,
-                                    retentions={
-                                        "retention": ExecutionEventRetention(db).prune,
-                                        "node-retention": NodeRecordRetention(db.transaction,
-                                                                              clock).prune})
+    mount_node_routes(app, db=db, clock=clock, admin=admin, config=node_boot,
+                      times=media_times, content=content)
+    app.state.scheduler = Scheduler(coordinator, media_application.request_measurements, clock,
+                                    retentions={"node-retention": NodeRecordRetention(db.transaction).prune})
     # A Node's leaf and Home Assistant's door arrive at Central's origin (erratum E-E3D-CUT-4): relayed to the hub.
     hub_leaf_url = hub_leaf_url or os.environ.get("PHOTO_WALL_HUB_LEAF_URL")
     if hub_leaf_url:

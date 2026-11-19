@@ -28,18 +28,14 @@ from central.kernel.assets import MediaReady
 from central.kernel.handling import TerminalFailure, TransientFailure
 from central.kernel.job_types import PrepareMedia
 from central.media_queue import MEDIA_QUEUE, ProcrastinateMediaQueue
-from central.media_repository import MediaRepository, StoreLimits
+from central.media_repository import MEDIA_SETTINGS, MediaRepository, StoreLimits
 from central.photo_library.model import LibraryAsset, MeasuredCopy, Unreachable
 from central.wall_plan.key_content import ANALYSIS_VERSION, InterestGrid, KeyContent, UnitBox
 from contracts.time import Clock
 from media.library_client import FaceBox, FetchedRendition, LibraryUnavailable
 from media.models import MediaError
 from media.prepare import BuildIdentity, PreparedMedia, StillRecipe
-from media.task_queue import (
-    ProcrastinateCheckQueue,
-    RetryableMediaTask,
-    create_worker_app,
-)
+from media.task_queue import RetryableMediaTask, create_worker_app
 from media.worker import MediaWorker, WorkerLimits, _media_loop
 
 SECRET = "PUBLIC_SYNTHETIC_PRIVATE_KEY"
@@ -299,15 +295,16 @@ def test_command_reports_the_job_runtime_exit_code(monkeypatch, capsys, error, c
 
 def test_the_boot_path_runs_maintenance_and_checks_the_worker_in_then_runs_the_queue(
         worker_storage):
-    """No refresh, preview or tag list at boot (roadmap 4): the library tick queues checks."""
+    """No refresh, preview or tag list at boot (roadmap 4): each check queues the next (S3a)."""
     instance = worker(worker_storage, FakeLibrary(worker_storage.clock))
     ran = []
 
     async def queue():
-        ran.append(worker_storage.repository.health()["worker_seen"])
+        with worker_storage.repository.db.transaction() as conn:
+            ran.append(MEDIA_SETTINGS.read_in(conn) is not None)
 
     asyncio.run(_media_loop(instance, queue))
-    assert ran == [1000.0]
+    assert ran == [True]
     for gone in ("refresh_once", "refresh_source", "preview_source", "list_tags"):
         assert not hasattr(instance, gone)
 
@@ -329,13 +326,14 @@ def test_the_queue_runs_a_deferred_pool_check_step_through_the_library_checks(wo
 
     checks = Checks()
 
+    with worker_storage.db.transaction() as conn:   # due now (any past time)
+        queue.enqueue_pool_check_in(conn, "a" * 64, due_at=0.0)
+        queue.enqueue_pool_check_in(conn, "a" * 64, due_at=0.0)   # a queued step coalesces
+        queue.enqueue_connection_check_in(conn, "main", due_at=0.0)
+
     async def exercise():
         app = create_worker_app(worker_storage.db.dsn)
         async with app.open_async():
-            checks_queue = ProcrastinateCheckQueue(app)
-            await checks_queue.pool("a" * 64)
-            await checks_queue.pool("a" * 64)       # an already queued step coalesces
-            await checks_queue.connection("main")
             await app.run_worker_async(queues=[MEDIA_QUEUE], concurrency=1, wait=False,
                                        additional_context={"media_worker": instance,
                                                            "library_checks": checks})

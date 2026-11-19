@@ -25,6 +25,7 @@ from typing import Any
 
 import procrastinate
 
+from central.db import with_application_name
 from central.infra.job_queue import build_app, defer
 from central.infra.outcome_feed import OutcomeFeed
 from central.infra.outcomes import JobOutcomes, OutcomeRow
@@ -53,7 +54,8 @@ class ProcrastinatePublisher:
                  job_types: Sequence[type[Job[Any]]] = CATALOG) -> None:
         # Publish-only: every insert goes through the caller's connection, so this connector's
         # own pool is never opened.
-        self._app = build_app(procrastinate.SyncPsycopgConnector(conninfo=dsn), job_types, None)
+        self._app = build_app(procrastinate.SyncPsycopgConnector(
+            conninfo=with_application_name(dsn, "photo-wall-publisher")), job_types, None)
         self._job_types = frozenset(job_types)
         self._transactions = transactions
         self._outcomes = outcomes

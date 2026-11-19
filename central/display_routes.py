@@ -40,6 +40,7 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 
+from central.actor import Actor
 from central.displays.picture import PictureRefused
 from central.displays.ports import (
     DisplayCommands,
@@ -97,8 +98,8 @@ def _mount_power_routes(app: FastAPI, *, admin: Any, queries: DisplayQueries, co
 
     @app.post(FRAMES + "{frame_id}/power-tests", dependencies=[Depends(admin)], status_code=202,
               response_model=PowerTestAccepted)
-    def power_test(frame_id: Identifier) -> PowerTestAccepted:
-        return commands.request_power_test(frame_id)
+    def power_test(frame_id: Identifier, by: Actor = Depends(admin)) -> PowerTestAccepted:
+        return commands.request_power_test(frame_id, by=by)
 
     @app.delete(FRAMES + "{frame_id}/power-tests", dependencies=[Depends(admin)], status_code=204,
                 response_class=Response)
@@ -108,8 +109,9 @@ def _mount_power_routes(app: FastAPI, *, admin: Any, queries: DisplayQueries, co
 
     @app.put(DISPLAYS + "{display_id}/power-settings", dependencies=[Depends(admin)],
              response_model=DisplayPowerSettings)
-    def power_settings(display_id: UUID, request: DisplayPowerSettings) -> DisplayPowerSettings:
-        return commands.set_power_settings(display_id, request)
+    def power_settings(display_id: UUID, request: DisplayPowerSettings,
+                       by: Actor = Depends(admin)) -> DisplayPowerSettings:
+        return commands.set_power_settings(display_id, request, by=by)
 
 
 def mount_picture_routes(app: FastAPI, *, admin: Any, queries: PictureQueries, commands: PictureCommands) -> None:
@@ -126,58 +128,60 @@ def mount_picture_routes(app: FastAPI, *, admin: Any, queries: PictureQueries, c
 
     @app.post(FRAMES + "{frame_id}/picture-sessions", dependencies=[Depends(admin)], status_code=201,
               response_model=PictureSessionView)
-    def begin_picture(frame_id: Identifier) -> PictureSessionView:
-        return commands.begin_picture(frame_id)
+    def begin_picture(frame_id: Identifier, by: Actor = Depends(admin)) -> PictureSessionView:
+        return commands.begin_picture(frame_id, by=by)
 
     @app.post(PICTURE_SESSIONS + "{session_id}/hardware-edits", dependencies=[Depends(admin)],
               response_model=PictureSequence)
-    def edit_hardware(session_id: UUID, request: HardwareEdit) -> PictureSequence:
-        return commands.edit_hardware(session_id, request)
+    def edit_hardware(session_id: UUID, request: HardwareEdit, by: Actor = Depends(admin)) -> PictureSequence:
+        return commands.edit_hardware(session_id, request, by=by)
 
     @app.post(PICTURE_SESSIONS + "{session_id}/software-edits", dependencies=[Depends(admin)],
               response_model=PictureSequence)
-    def edit_software(session_id: UUID, request: SoftwareEdit) -> PictureSequence:
-        return commands.edit_software(session_id, request)
+    def edit_software(session_id: UUID, request: SoftwareEdit, by: Actor = Depends(admin)) -> PictureSequence:
+        return commands.edit_software(session_id, request, by=by)
 
     @app.post(PICTURE_SESSIONS + "{session_id}/light-edits", dependencies=[Depends(admin)],
               response_model=PictureSequence)
-    def edit_light(session_id: UUID, request: LightEdit) -> PictureSequence:
-        return commands.edit_light(session_id, request)
+    def edit_light(session_id: UUID, request: LightEdit, by: Actor = Depends(admin)) -> PictureSequence:
+        return commands.edit_light(session_id, request, by=by)
 
     @app.post(PICTURE_SESSIONS + "{session_id}/signal-range-edits", dependencies=[Depends(admin)],
               response_model=PictureSequence)
-    def edit_signal_range(session_id: UUID, request: SignalRangeEdit) -> PictureSequence:
-        return commands.edit_signal_range(session_id, request)
+    def edit_signal_range(session_id: UUID, request: SignalRangeEdit, by: Actor = Depends(admin)) -> PictureSequence:
+        return commands.edit_signal_range(session_id, request, by=by)
 
     @app.post(PICTURE_SESSIONS + "{session_id}/test-pattern-edits", dependencies=[Depends(admin)],
               response_model=PictureSequence)
-    def edit_test_pattern(session_id: UUID, request: TestPatternEdit) -> PictureSequence:
-        return commands.edit_test_pattern(session_id, request)
+    def edit_test_pattern(session_id: UUID, request: TestPatternEdit, by: Actor = Depends(admin)) -> PictureSequence:
+        return commands.edit_test_pattern(session_id, request, by=by)
 
     @app.post(PICTURE_SESSIONS + "{session_id}/keepalive", dependencies=[Depends(admin)],
               response_model=PictureSessionView)
-    def keep_picture_alive(session_id: UUID) -> PictureSessionView:
-        return commands.keep_picture_alive(session_id)
+    def keep_picture_alive(session_id: UUID, by: Actor = Depends(admin)) -> PictureSessionView:
+        return commands.keep_picture_alive(session_id, by=by)
 
     @app.post(PICTURE_SESSIONS + "{session_id}/done", dependencies=[Depends(admin)], status_code=204,
               response_class=Response)
-    def picture_done(session_id: UUID) -> Response:
-        commands.picture_done(session_id)
+    def picture_done(session_id: UUID, by: Actor = Depends(admin)) -> Response:
+        commands.picture_done(session_id, by=by)
         return Response(status_code=204)
 
     @app.delete(PICTURE_SESSIONS + "{session_id}", dependencies=[Depends(admin)], status_code=204,
                 response_class=Response)
-    def revert_picture(session_id: UUID) -> Response:
-        commands.revert_picture(session_id)
+    def revert_picture(session_id: UUID, by: Actor = Depends(admin)) -> Response:
+        commands.revert_picture(session_id, by=by)
         return Response(status_code=204)
 
     @app.post(FRAMES + "{frame_id}/picture-copies", dependencies=[Depends(admin)],
               response_model=tuple[PictureCopyResult, ...])
-    def copy_picture(frame_id: Identifier, request: PictureCopyRequest) -> tuple[PictureCopyResult, ...]:
-        return commands.copy_picture(frame_id, request)
+    def copy_picture(frame_id: Identifier, request: PictureCopyRequest,
+                     by: Actor = Depends(admin)) -> tuple[PictureCopyResult, ...]:
+        return commands.copy_picture(frame_id, request, by=by)
 
     @app.post(PICTURE_SESSIONS + "{session_id}/restores", dependencies=[Depends(admin)],
               response_model=PictureRestoreResult)
-    def restore_picture(session_id: UUID, request: PictureRestore) -> PictureRestoreResult:
-        return commands.restore_picture(session_id, request)
+    def restore_picture(session_id: UUID, request: PictureRestore,
+                        by: Actor = Depends(admin)) -> PictureRestoreResult:
+        return commands.restore_picture(session_id, request, by=by)
 

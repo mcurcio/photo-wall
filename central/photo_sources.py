@@ -20,17 +20,18 @@ class PhotoSources:
     def __init__(self, store: PgPhotoLibrary, names: SourceNameService) -> None:
         self.store, self.names = store, names
 
-    def create_draft(self, query: SourceQuery, editing: SourceRef | None) -> DraftRef:
-        return self.store.create_draft(query, editing)
+    def create_draft(self, query: SourceQuery, editing: SourceRef | None, *,
+                     by: Actor) -> DraftRef:
+        return self.store.create_draft(query, editing, by=by)
 
-    def set_draft_query(self, draft: DraftRef, query: SourceQuery) -> None:
-        self.store.set_draft_query(draft, query)
+    def set_draft_query(self, draft: DraftRef, query: SourceQuery, *, by: Actor) -> None:
+        self.store.set_draft_query(draft, query, by=by)
 
     def save_draft(self, draft: DraftRef, name: str, *, by: Actor) -> SourceRef:
         return self.names.save_draft(draft, name, by=by)["source_ref"]
 
-    def check_source(self, source_ref: SourceRef) -> None:
-        self.store.check_source(source_ref)
+    def check_source(self, source_ref: SourceRef, *, by: Actor) -> None:
+        self.store.check_source(source_ref, by=by)
 
     def draft_pool(self, draft: DraftRef, after: PoolCursor | None) -> SourcePoolView:
         return self.store.draft_pool(draft, after)

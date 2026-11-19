@@ -1,4 +1,9 @@
-"""Procrastinate task definitions for the central media worker."""
+"""Procrastinate task definitions for the central media worker.
+
+No poll and no rescue of its own (decision 0034, S3a): a library check is deferred for its due
+time by the check before it (central/infra/photo_library_store.py), and a dead worker's jobs, on
+this queue as on the job runtime's, are rescued by the one rescue
+(central/infra/queue_ops.py `QueueRescue`)."""
 
 from __future__ import annotations
 
@@ -6,36 +11,19 @@ import logging
 from typing import Any, Final
 
 import procrastinate
-from procrastinate.jobs import Job, Status
 
 from central.infra.job_queue import async_connector
 from central.media_queue import (
     CHECK_CONNECTION_TASK,
     CHECK_POOL_TASK,
-    LIBRARY_CONNECTION_LOCK_PREFIX,
-    LIBRARY_POOL_LOCK_PREFIX,
     MEASURE_KEY_CONTENT_TASK,
     MEDIA_QUEUE,
     MEDIA_STORAGE_LOCK,
 )
 
-# The library tick: due connection and pool checks are queued every 30 seconds (each is due once
-# CHECK_EVERY_SECONDS have passed, central/photo_library/policy.py).
-REFRESH_CRON = "* * * * * */30"
+# Seconds last (croniter reads a sixth field as seconds).
 MAINTENANCE_MINUTES: Final = 5
 MAINTENANCE_CRON = f"*/{MAINTENANCE_MINUTES} * * * * 0"
-# The guaranteed check-in (`worker_status`) cadence: boot plus every maintenance pass.
-WORKER_CHECK_IN_SECONDS: Final = MAINTENANCE_MINUTES * 60
-# A check-in older than this marks the worker unhealthy (`media.healthcheck`). It is the
-# console's worker-quiet window (central/console/src/mediaHealth.js WORKER_QUIET_AFTER: two
-# check-in intervals plus a minute); tests/test_media_queue.py pins the two equal. Cost: a hung
-# worker reads healthy for up to 11 minutes (Compose consumes worker health only for `--wait`).
-WORKER_FRESH_SECONDS: Final = 2 * WORKER_CHECK_IN_SECONDS + 60
-# A `doing` media job whose worker has not beaten this long is a dead worker's (Procrastinate's
-# own stalled-worker default); the rescue looks every 30 seconds.
-STALLED_HEARTBEAT_SECONDS: Final = 30
-RESCUE_CRON: Final = "* * * * * */30"  # seconds last, as REFRESH_CRON
-RESCUE_TASK: Final = "photo_wall.media.rescue"
 
 logger = logging.getLogger(__name__)
 
@@ -60,74 +48,25 @@ class MediaRetryStrategy(procrastinate.BaseRetryStrategy):
         )
 
 
-class ProcrastinateCheckQueue:
-    """`media.library_checks.LibraryCheckQueue` over this app: one queued check per connection
-    or pool at a time (an already queued one coalesces); a running one holds the lock."""
+class CheckRetryStrategy(MediaRetryStrategy):
+    """A pool check step that raises is retried (any error, MediaRetryStrategy's delays); once
+    the retries run out the task's failure path queues the pool's next check at its due time."""
 
-    def __init__(self, app: procrastinate.App) -> None:
-        self.app = app
-
-    async def _defer(self, task: str, lock: str, **arguments: str) -> None:
-        try:
-            await self.app.configure_task(task, queue=MEDIA_QUEUE, lock=lock,
-                                          queueing_lock=lock).defer_async(**arguments)
-        except procrastinate.exceptions.AlreadyEnqueued:
-            pass
-
-    async def connection(self, connection_ref: str) -> None:
-        await self._defer(CHECK_CONNECTION_TASK, LIBRARY_CONNECTION_LOCK_PREFIX + connection_ref,
-                          connection_ref=connection_ref)
-
-    async def pool(self, pool_key: str) -> None:
-        await self._defer(CHECK_POOL_TASK, LIBRARY_POOL_LOCK_PREFIX + pool_key, pool_key=pool_key)
+    def get_retry_decision(self, *, exception: BaseException, job: Any):
+        if final_attempt(job):
+            return None
+        return procrastinate.RetryDecision(retry_in={"seconds": self.delays[max(1, job.attempts) - 1]})
 
 
-async def rescue_stalled(app: procrastinate.App, *,
-                         heartbeat_seconds: float = STALLED_HEARTBEAT_SECONDS) -> int:
-    """Each `doing` job on MEDIA_QUEUE whose worker has not beaten for `heartbeat_seconds`
-    (Procrastinate's `get_stalled_jobs`), each on its own: first defer one copy (same task,
-    arguments, lock and queueing lock; an already queued copy absorbs it), then finish the
-    stalled row `failed`, which frees its lock. A periodic task's row is only finished: its
-    schedule defers the next run. Returns how many rows were finished. One row's failure never
-    skips the others; any failure is logged and the next run looks again.
-
-    Deferring first leaves no window without a copy: the queueing-lock index covers only `todo`
-    rows, and the copy cannot run while the stalled row holds the lock (the content runtime's
-    rescue, central/infra/queue_ops.py, follows the same order for its typed jobs).
-
-    One difference from that rescue, by design: the copy starts at attempt 0
-    (`defer_job_async` cannot carry `attempts`). What this rescue guarantees is the lock:
-    MEDIA_STORAGE_LOCK and a check's lock are free again. Media variants are not on this queue
-    (`PrepareMedia` runs on the job runtime, whose rescue is its own). The rule has these two
-    bodies until a residual gives it one home (run ledger, maintenance risks)."""
-    periodic = {task.task.name for task in app.periodic_registry.periodic_tasks.values()}
-    finished = 0
-    for row in await app.job_manager.get_stalled_jobs(
-            queue=MEDIA_QUEUE, seconds_since_heartbeat=heartbeat_seconds):
-        if row.id is None:
-            continue
-        logger.warning("rescuing stalled media job %s (%s)", row.id, row.task_name)
-        try:
-            if row.task_name not in periodic:
-                try:
-                    await app.job_manager.defer_job_async(Job(
-                        queue=row.queue, priority=row.priority, lock=row.lock,
-                        queueing_lock=row.queueing_lock, task_name=row.task_name,
-                        task_kwargs=row.task_kwargs))
-                except procrastinate.exceptions.AlreadyEnqueued:
-                    pass
-            await app.job_manager.finish_job_by_id_async(job_id=row.id, status=Status.FAILED,
-                                                         delete_job=False)
-            finished += 1
-        except Exception:
-            logger.exception("rescue of stalled media job %s failed", row.id)
-    return finished
+def final_attempt(job: Any) -> bool:
+    """Whether this run of `job` is its last: the queue retries it no more."""
+    return max(1, job.attempts) > len(MediaRetryStrategy.delays)
 
 
 def create_worker_app(dsn: str) -> procrastinate.App:
     """Build the async worker app; runtime collaborators arrive via context."""
     app = procrastinate.App(
-        connector=async_connector(dsn),
+        connector=async_connector(dsn, application_name="photo-wall-media-jobs"),
     )
 
     # Roadmap 5a: one photo's key content. No lock: measurements run beside the
@@ -135,36 +74,26 @@ def create_worker_app(dsn: str) -> procrastinate.App:
     @app.task(name=MEASURE_KEY_CONTENT_TASK, queue=MEDIA_QUEUE, pass_context=True,
               retry=MediaRetryStrategy())
     async def measure_key_content(context, asset_id: str):
-        final = max(1, context.job.attempts) > len(MediaRetryStrategy.delays)
-        await context.additional_context["media_worker"].measure(asset_id, final_attempt=final)
-
-    # croniter places seconds last in a six-field expression.  Keeping that
-    # explicit matters here: a conventional seconds-first expression silently
-    # turns this into a 30-minute schedule.
-    @app.periodic(cron=REFRESH_CRON)
-    @app.task(name="photo_wall.media.refresh", queue=MEDIA_QUEUE, pass_context=True,
-              queueing_lock="media-refresh")
-    async def library_tick(context, timestamp: int):
-        del timestamp
-        await context.additional_context["library_checks"].tick()
+        await context.additional_context["media_worker"].measure(
+            asset_id, final_attempt=final_attempt(context.job))
 
     # One connection check, or one bounded step of a pool's check (the step queues the next).
-    # The lock keeps one step per connection or pool running at a time.
+    # The lock (central/media_queue.py) keeps one step per connection or pool running at a time.
+    # A contact queues its next check as it begins, so a contact that raises is not retried.
     @app.task(name=CHECK_CONNECTION_TASK, queue=MEDIA_QUEUE, pass_context=True)
     async def check_connection(context, connection_ref: str):
         await context.additional_context["library_checks"].contact(connection_ref)
 
-    @app.task(name=CHECK_POOL_TASK, queue=MEDIA_QUEUE, pass_context=True)
+    @app.task(name=CHECK_POOL_TASK, queue=MEDIA_QUEUE, pass_context=True,
+              retry=CheckRetryStrategy())
     async def check_pool(context, pool_key: str):
-        await context.additional_context["library_checks"].check_pool(pool_key)
-
-    # No lock: a dead worker's row holding MEDIA_STORAGE_LOCK must never block its own rescue.
-    @app.periodic(cron=RESCUE_CRON)
-    @app.task(name=RESCUE_TASK, queue=MEDIA_QUEUE, pass_context=True,
-              queueing_lock="media-rescue")
-    async def rescue(context, timestamp: int):
-        del timestamp
-        await rescue_stalled(context.app)
+        checks = context.additional_context["library_checks"]
+        try:
+            await checks.check_pool(pool_key)
+        except Exception:
+            if final_attempt(context.job):
+                await checks.check_step_failed(pool_key)
+            raise
 
     @app.periodic(cron=MAINTENANCE_CRON)
     @app.task(name="photo_wall.media.maintenance", queue=MEDIA_QUEUE, pass_context=True,

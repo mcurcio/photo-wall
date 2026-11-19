@@ -136,8 +136,8 @@ def _seen(registry, frame=FRAME, serial=SERIAL, output_id="HDMI-A-1", player=Non
 
 
 def _display(registry, frame=FRAME):
-    [row] = _sql(registry, "SELECT d.* FROM frames f JOIN bindings b ON b.frame_id=f.id "
-                           "JOIN output_displays o ON o.player_id=b.player_id AND o.output_id=b.output_id "
+    [row] = _sql(registry, "SELECT d.* FROM frames f "
+                           "JOIN outputs o ON o.player_id=f.player_id AND o.output_id=f.output_id "
                            "JOIN displays d ON d.id=o.display_id WHERE f.id=%s", (frame,))
     return row
 
@@ -408,7 +408,10 @@ def test_the_removed_sliders_are_gone_and_matched_light_is_edited_live(page, reg
 
         page.reload()
         open_frame(page, FRAME, "picture")
-        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)
+        # The page begins its next session right after Done; when that begin wins the race with the
+        # reload, the left page's session holds the Display until its idle window ends
+        # (PICTURE_IDLE_SECONDS) and the reloaded page's retry (RETRY_MS) takes it over.
+        expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED, timeout=10_000)
         expect(_typed(page, "Matched light")).to_have_value("600")
 
 
@@ -543,7 +546,8 @@ def _show(page, label):
 
 
 def _sequence(registry):
-    [row] = _sql(registry, "SELECT sequence FROM picture_sessions")
+    [row] = _sql(registry, "SELECT (picture_session->>'sequence')::bigint AS sequence FROM displays "
+                           "WHERE picture_session IS NOT NULL")
     return row["sequence"]
 
 
@@ -692,7 +696,8 @@ def test_hiding_the_tab_keeps_a_shown_pattern_and_ends_a_session_without_one(pag
         sent = []
         page.on("request", lambda request: sent.append((request.method, request.url.rsplit("/", 1)[-1]))
                 if "/picture-sessions/" in request.url else None)
-        [before] = _off_thread(_sql, registry, "SELECT id FROM picture_sessions")
+        [before] = _off_thread(_sql, registry, "SELECT picture_session->>'id' AS id FROM displays "
+                                     "WHERE picture_session IS NOT NULL")
 
         _visibility(page, "hidden")
         # A keepalive tick that fired before React took the hide in (its re-render clears the
@@ -709,7 +714,8 @@ def test_hiding_the_tab_keeps_a_shown_pattern_and_ends_a_session_without_one(pag
         expect(group).to_contain_text(SHOWN)
         page.wait_for_timeout(1200)
         assert any(last == "keepalive" for _, last in sent), sent
-        assert _off_thread(_sql, registry, "SELECT id FROM picture_sessions") == [before]
+        assert _off_thread(_sql, registry, "SELECT picture_session->>'id' AS id FROM displays "
+                                     "WHERE picture_session IS NOT NULL") == [before]
 
         _show(page, "Off")
         expect(_bar(page).get_by_role("status")).to_have_text(PRESENTED)

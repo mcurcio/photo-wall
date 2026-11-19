@@ -4,9 +4,12 @@ implements both over PostgreSQL; central/display_routes.py depends only on these
 """
 from __future__ import annotations
 
-from typing import Protocol
+from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
+from central.actor import Actor
 from central.displays.views import (
     DisplayPowerSettings,
     FrameDisplayView,
@@ -25,6 +28,7 @@ from central.displays.views import (
     SoftwareEdit,
     TestPatternEdit,
 )
+from contracts.node_calibration import PositionTrial
 
 
 class DisplayRefused(Exception):
@@ -48,7 +52,7 @@ class DisplayQueries(Protocol):
 
 
 class DisplayCommands(Protocol):
-    def request_power_test(self, frame_id: str) -> PowerTestAccepted:
+    def request_power_test(self, frame_id: str, *, by: Actor) -> PowerTestAccepted:
         """Test: turn off. Replace the Frame's console test with an off of TEST_SECONDS, in one
         transaction that also wakes the worker's Output document source.
         DisplayRefused("unknown_frame", 404), ("frame_unbound", 409)."""
@@ -60,7 +64,7 @@ class DisplayCommands(Protocol):
         test there is nothing to end. Wakes the source when it ended one. DisplayRefused("unknown_frame", 404)."""
         ...
 
-    def set_power_settings(self, display_id: UUID, settings: DisplayPowerSettings) -> DisplayPowerSettings:
+    def set_power_settings(self, display_id: UUID, settings: DisplayPowerSettings, *, by: Actor) -> DisplayPowerSettings:
         """Store #116-#118 on the Display and wake the source; DisplayRefused("unknown_display", 404)."""
         ...
 
@@ -68,7 +72,8 @@ class DisplayCommands(Protocol):
 # Roadmap 1c's Live model, two groups from the picture split (decision 0022, slice S2). Refusals are DisplayRefused with
 # the codes of central/displays/picture.py PictureRefused, plus unknown_frame 404, frame_unbound
 # 409, no_display 409, session_open 409 and unknown_session 404. Every write wakes the worker's
-# Output document source in its own transaction, as the power commands do.
+# Output document source in its own transaction, as the power commands do. Every write is stamped
+# with the operator's actor (`by`, from the request's principal).
 
 class PictureQueries(Protocol):
     def frame_picture(self, frame_id: str) -> FramePictureView:
@@ -77,65 +82,110 @@ class PictureQueries(Protocol):
 
 
 class PictureCommands(Protocol):
-    def begin_picture(self, frame_id: str) -> PictureSessionView:
+    def begin_picture(self, frame_id: str, *, by: Actor) -> PictureSessionView:
         """Open a picture session on the Display last seen on the Frame's bound Output, recording
         the Output's picture change (`began_at_change`). An ended session on that Display is folded
         first (its `reverted` result stored). unknown_frame, frame_unbound, no_display,
         session_open (a live session on that Display)."""
         ...
 
-    def edit_hardware(self, session_id: UUID, edit: HardwareEdit) -> PictureSequence:
+    def edit_hardware(self, session_id: UUID, edit: HardwareEdit, *, by: Actor) -> PictureSequence:
         """One display setting's new value, or None to hand it back (as the display has it), live on
         the Display; checked against what the display offers (`hardware.edit_refusal`).
         unknown_session, session_ended, stale_sequence, not_offered, out_of_range."""
         ...
 
-    def edit_software(self, session_id: UUID, edit: SoftwareEdit) -> PictureSequence:
+    def edit_software(self, session_id: UUID, edit: SoftwareEdit, *, by: Actor) -> PictureSequence:
         """One of Photo Wall's numeric settings (its four, the print sliders and the LUT's
         amount), live on the Display. unknown_session, session_ended, stale_sequence,
         out_of_range."""
         ...
 
-    def edit_light(self, session_id: UUID, edit: LightEdit) -> PictureSequence:
+    def edit_light(self, session_id: UUID, edit: LightEdit, *, by: Actor) -> PictureSequence:
         """The Display's light (decision 0028), live on the Display: kept by Done, put back by
         Revert. unknown_session, session_ended, stale_sequence."""
         ...
 
-    def edit_signal_range(self, session_id: UUID, edit: SignalRangeEdit) -> PictureSequence:
+    def edit_signal_range(self, session_id: UUID, edit: SignalRangeEdit, *, by: Actor) -> PictureSequence:
         """The Display's signal range, live on the Display (decision 0024): kept by Done, put back
         by Revert and the lease's end. unknown_session, session_ended, stale_sequence."""
         ...
 
-    def edit_test_pattern(self, session_id: UUID, edit: TestPatternEdit) -> PictureSequence:
+    def edit_test_pattern(self, session_id: UUID, edit: TestPatternEdit, *, by: Actor) -> PictureSequence:
         """The session's test pattern, or None to take it off: a new ask at the edit's sequence,
         never stored, off at Done, Revert and the lease's end. unknown_session, session_ended,
         stale_sequence."""
         ...
 
-    def keep_picture_alive(self, session_id: UUID) -> PictureSessionView:
+    def keep_picture_alive(self, session_id: UUID, *, by: Actor) -> PictureSessionView:
         """Slide the session's idle deadline; unknown_session, session_ended."""
         ...
 
-    def picture_done(self, session_id: UUID) -> None:
+    def picture_done(self, session_id: UUID, *, by: Actor) -> None:
         """Store the draft on the Display and end the session; not_presented_yet until
         picture_status is SHOWN for the latest change. unknown_session, session_ended."""
         ...
 
-    def revert_picture(self, session_id: UUID) -> None:
+    def revert_picture(self, session_id: UUID, *, by: Actor) -> None:
         """Store `reverted(...)` and end the session. unknown_session, session_ended."""
         ...
 
-    def restore_picture(self, session_id: UUID, request: PictureRestore) -> PictureRestoreResult:
+    def restore_picture(self, session_id: UUID, request: PictureRestore, *, by: Actor) -> PictureRestoreResult:
         """Load a picture history entry of the session's Display into its draft, live on the Display
         (`picture.restored`; configuration snapshots, "View and restore"): Done still keeps it.
         unknown_session 404, unknown_entry 404 (no such entry, or trimmed), session_ended 410,
         stale_sequence 409, other_display 409 (another Display's entry: use Copy)."""
         ...
 
-    def copy_picture(self, frame_id: str, request: PictureCopyRequest) -> tuple[PictureCopyResult, ...]:
+    def copy_picture(self, frame_id: str, request: PictureCopyRequest, *, by: Actor) -> tuple[PictureCopyResult, ...]:
         """Copy the source Frame's Display's software values, and its hardware values where each
         target offers them (`picture.copied`), to each target Frame's Display, one outcome per target
         in request order, naming the hardware codes skipped; never position. unknown_frame (the
         source, or any target), no_display (the source)."""
         ...
 
+
+
+class OutputLosses(Protocol):
+    """Where an Output's loss is kept: Runtime state the Coordinator reads (`_commit_due`,
+    `output_interruptions_in`). Called by the display line's judge in the commit that records the
+    Output report, with Coordination then Runtime held (`transaction_locks.acquire_runtime_locks`).
+    `conn` is the caller's transaction."""
+
+    def lost_in(self, conn: Any, *, player_id: str, output_id: str, cause_layer: Literal["display_host"],
+                cause_kind: Literal["output_disconnected"], detail: Mapping[str, object], at: float) -> bool:
+        """One unresolved loss for the Frame bound to (player_id, output_id) now; False, writing
+        nothing, when no Frame is bound there or that binding's loss is already unresolved."""
+        ...
+
+    def restored_in(self, conn: Any, *, player_id: str, output_id: str, at: float) -> bool:
+        """Every unresolved loss of (player_id, output_id) resolved, whatever Frame or binding
+        generation it names; False when there was none."""
+        ...
+
+
+@dataclass(frozen=True)
+class TrialInForce:
+    """The Frame's active trial as the document source sends it at `now`: the trial with the time
+    left on each lease from `now` (`trial`), and its deadlines on Central's clock, which the
+    document's digest covers (never the durations, so a wake that changes nothing raises no
+    change)."""
+    trial: PositionTrial
+    expires_at: float
+    hard_expires_at: float
+
+
+class TrialProjection(Protocol):
+    """What the document source puts on an Output's trial key (decision 0034, S4b part 3), and when
+    it must look again. `conn` is the source's transaction."""
+
+    def trial_in(self, conn: Any, *, frame_id: str, now: float) -> TrialInForce | None:
+        """The Frame's active trial while its lease is live at `now` and its scope is the Frame's
+        binding now (its Output, generation and configuration revision; the Player and authority
+        epoch the trial's); else None. Records the sent Position entry when what it hands differs.
+        Never marks a trial expired or invalidated: that stays lazy, in the trial's own operations."""
+        ...
+
+    def next_deadline_in(self, conn: Any, *, device_id: str, now: float) -> float | None:
+        """The earliest idle or hard deadline after `now` of an active trial on the Node's Frames."""
+        ...

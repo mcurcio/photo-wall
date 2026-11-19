@@ -11,7 +11,6 @@ PATH: tuple[str, ...] = (
     "/usr/lib/photo-wall/node-apps",
     "/usr/lib/photo-wall/node-boot",
     "/usr/lib/photo-wall/node-kernel",
-    "/usr/lib/photo-wall/node-manager",
     "/usr/lib/photo-wall/uplink",
 )
 ENTRY: str = "appliance.boot.node_bootstrap"
