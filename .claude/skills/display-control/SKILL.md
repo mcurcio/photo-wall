@@ -432,14 +432,14 @@ sudo journalctl -b --no-pager -u photo-wall-display-controller.service | grep -i
 # "region for HDMI-A-1 not taken by the shell; sent again when it announces the Output"
 ```
 
-**What Central recorded.** Each verdict lands in `node_link_records`; the Frame page's Player status
-reads the newest ("Dark since 08:10 · ..."):
+**What Central recorded.** Central keeps each Pi's newest verdict in `node_states` (one row per state
+key, [0034](../../../docs/decisions/0034-central-schema-consolidation.md)); the Frame page's Player status
+reads it ("Dark since 08:10 · ..."):
 
 ```sql
-SELECT recorded_at, seq, convert_from(data, 'UTF8') AS verdict
-FROM node_link_records
-WHERE device_id = '<device id>' AND stream = 'KV_state_health' AND subject = '$KV.state_health.verdict'
-ORDER BY recorded_at DESC, seq DESC LIMIT 5;
+SELECT to_timestamp(recorded_at) AS recorded, seq, convert_from(data, 'UTF8') AS verdict
+FROM node_states
+WHERE device_id = '<device id>' AND stream = 'KV_state_health' AND subject = '$KV.state_health.verdict';
 ```
 
 **Whether the Player stayed down, and why.** `systemctl show photo-wall-node-player.service -p

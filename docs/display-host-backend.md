@@ -93,10 +93,11 @@ Player commits its screen's ground under the candidate tag on every present its 
 until it is admitted). The Player's
 own copy of the presentation feedback paces its commits ([plane renderer](module-plane-renderer.md#the-frame-loop-and-pacing));
 it is never evidence. `tests/native_display_smoke.py` proves both sides: a probe that stops
-committing keeps its grant past `LEASE_MS`, and a stopped (SIGSTOP) one loses it. Central's display exchange keeps a receipt however old (a still
-picture is presented once); only a handoff, its completion, a removal recognized from an issued
-role and a calibration trial's presentation need a receipt under 5 s old
-(`central/fleet/node_display.py` `NodeDisplay.recent`).
+committing keeps its grant past `LEASE_MS`, and a stopped (SIGSTOP) one loses it. Central reads no receipt: the handoff is decided on the Pi
+([the handoff](#the-handoff-from-the-output-document)), and a Position trial's Save needs the Pi's
+current statement that it shows the draft (its `TrialReport`, [the trial](#the-position-trial-on-the-display-line)),
+no longer a receipt under 5 s old ([0034](decisions/0034-central-schema-consolidation.md); the
+display exchange that kept receipts is gone).
 
 A fully opaque diagnostic occludes candidate content and cannot provide meaningful
 candidate presentation feedback. During an explicitly authorized `starting_new`
@@ -331,6 +332,23 @@ new run), then offers the new one. A step the backend refuses (a stale identity)
 and tried again no sooner than `RETRY_MS`. No ingress op grants, hands off or withdraws: only the
 rule does. No request to Central decides any of it; Central's part is the Output document.
 
+### The Position trial on the display line
+
+A Frame's Position trial reaches the Pi on the `display` line (decision 0034, S4b part 3;
+[`trials.py`](../appliance/display_host/trials.py)): Central puts a `TrialDocument` on the
+Output's `trial-<port>` desired key, the trial's scope (Output, Frame, binding generation,
+configuration revision) and the time left on each lease as durations (`idle_ms`, `hard_ms`),
+which the controller times from the document's arrival on its own boot clock; neither side
+reads the other's clock. A document is kept only when its `change` rose, so a re-put (a bus
+re-attach, Central's restart) never re-arms a lease. The trial in force goes to the shell as the
+envelope it takes (`PositionTrial.on_pi` over the Output's admitted surface), and the controller
+states what the Player presents under it on the line's `trial-<port>` state key (`TrialReport`).
+The candidate hash covers the scope, never the whole admitted Surface. A controller restart can
+time a lease once more from the document's redelivery (at most the 110 s hard lease; Central
+clears the document at its own deadline).
+
+### Grant events
+
 The shell delivers candidate/admitted/revoked grant events over the custom
 Wayland protocol only to clients matching the exact kernel process identity.
 An admitted event follows the matching post-removal presentation, not the handoff
@@ -398,7 +416,7 @@ turn belongs to the spot on the wall), sent in the Output document (`turn`, disp
   the response, and refuses any other transform. The wanted transform is kept across a hot-plug
   and applied to the Output's new `weston_output`, as `black` is.
 - **What a turn does to the Output:** a mode change. The app's grant is invalidated and the Output
-  comes back under a new key, which Central's surface decisions grant again; the Frame's Position
+  comes back under a new key, which the controller's handoff offers the Player again (the Output document still binds the Frame); the Frame's Position
   becomes one to check (a rectangle is fractions of the screen as it hangs).
 - **The controller** ([`screen_turn.py`](../appliance/display_host/screen_turn.py): `ScreenTurns`
   on its own worker thread, `WestonBackend.turn` its one port) asks once per trigger: a document whose turn differs
@@ -557,16 +575,15 @@ The app-private bridge requires protocol version 3 and binds 4 when offered
 (picture operations, above). Historical facts without
 Frame identity are not current authority.
 
-When a live Output moves to another Frame or process/binding identity, Central's
-Runtime owner explicitly authorizes withdrawal of the exact previously observed
-role. DisplayHost submits its immutable decision identity and old Surface. The
-shell checks the whole current tuple, removes that role, and separately emits
+When a live Output's Output document binds another Frame or none, or the broker reports
+another run, the controller withdraws the held role on its own
+([the handoff](#the-handoff-from-the-output-document)); no request to Central authorizes it
+([0034](decisions/0034-central-schema-consolidation.md)). DisplayHost submits the old Surface.
+The shell checks the whole current tuple, removes that role, and separately emits
 `role_removed`. The transport response is not the removal acknowledgment. Events
 may arrive before the response and the controller queues them for later dispatch.
-Central records the exact completion without recovering Runtime or granting the
-replacement; replacement follows ordinary synthetic candidate and handoff flow.
-A stale withdrawal cannot remove a new role. The same producer may carry a
-historical completion through credential renewal without retargeting the effect.
+The replacement follows ordinary synthetic candidate and handoff flow. A stale
+withdrawal cannot remove a new role.
 
 Same-Frame committed revision adoption retains its separate atomic revision
 path: the old grant remains active until genuine pending-revision presentation.

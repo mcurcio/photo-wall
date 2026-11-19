@@ -8,12 +8,11 @@ One source package, `photo-wall` (`debian/`, `3.0 (native)`, `debhelper-compat (
 
 | Package | Holds | Installed in |
 |---|---|---|
-| `photo-wall-common` | `contracts`, `nodeapi`, less the modules only Central imports (`debian/rules` `CENTRAL_ONLY`: `nodeapi/hub.py`, `contracts/node_release.py`, and the release pipeline's `contracts/node_rollout.py`) | base, app root, manager root |
-| `photo-wall-uplink` | `uplink` (stdlib-only) | base, app root, manager root |
-| `photo-wall-node-kernel`, `-central-session`, `-host`, `-display`, `-health`, `-apps`, `-boot`, `-manager` | one Node context each; `-display` is the one architecture-dependent context (the Meson-built shell, the diagnostic client and `abi.json`) | base; the manager root takes the manager's imports |
+| `photo-wall-common` | `contracts`, `nodeapi`, less the modules only Central imports (`debian/rules` `CENTRAL_ONLY`: `nodeapi/hub.py`, `contracts/node_release.py`, and the release pipeline's `contracts/node_rollout.py`) | base, app root |
+| `photo-wall-uplink` | `uplink` (stdlib-only) | base, app root |
+| `photo-wall-node-kernel`, `-host`, `-display`, `-health`, `-apps`, `-boot` | one Node context each; `-display` is the one architecture-dependent context (the Meson-built shell, the diagnostic client and `abi.json`) | base |
 | `photo-wall-frame-client` | the frame client's `.so` | app root |
 | `photo-wall-player` | `player/` and its launcher | app root |
-| `photo-wall-app-manager` | AppManager's launcher | manager root |
 | `photo-wall-node` | the composition: units, slices, the target, system users, runtime directories, the bus configuration, the seven base launchers, `abi.json`; Depends on every context at its exact version and on `nats-server (= the pin)` | base |
 | `photo-wall-netboot-init` | stage 1 and an initramfs-tools hook that copies it, `uplink` and the CA bundle into the netboot initramfs | the scratch root that builds the initrd |
 
@@ -46,7 +45,7 @@ Rules the build enforces:
 | 0. Weston | `debian-packaging/build-weston.sh --output <new dir>` | `weston`, `libweston-14-0` and `libweston-14-dev` at the local version |
 | 1. Packages and local repo | `debian-packaging/build-repo.sh --output <new dir> [--weston <step 0's dir>]` (without `--weston` it runs step 0 itself) | the `.deb`s and an apt `Packages` index, a flat repo read as `deb [trusted=yes] file:<dir> ./` |
 | 2. Base | [base-image.yml](../.github/workflows/base-image.yml): rpi-image-gen installs `photo-wall-node` by name from the local repo | the base squashfs |
-| 3. Release roots | `debian-packaging/build-root.sh --repo <dir> --package photo-wall-player` (app root) or `photo-wall-app-manager` (manager root): `mmdebstrap` from the pin and the repo, `debian-packaging/seal-hook.sh` and `scripts/seal_root.py`, `mksquashfs`; built twice on a cache miss, two image digests must agree | `<role>.squashfs` and its reference |
+| 3. Release root | `debian-packaging/build-root.sh --repo <dir> --package photo-wall-player` (the app root, the one release root since [0034](decisions/0034-central-schema-consolidation.md): `photo-wall-node-central-session`, `photo-wall-node-manager` and `photo-wall-app-manager` and the manager root are gone): `mmdebstrap` from the pin and the repo, `debian-packaging/seal-hook.sh` and `scripts/seal_root.py`, `mksquashfs`; built twice on a cache miss, two image digests must agree | `<role>.squashfs` and its reference |
 | 4. Release writer | `python -m scripts.node_release_writer write ...` | `components.json`, the repo's `.deb`s byte for byte and the stamp; it refuses an image over its memory line (`appliance/kernel/capacity.py`) |
 | 5. Stage 1 | `photo-wall-netboot-init` is installed into base-image's scratch root, where `update-initramfs` runs its hook; `scripts/build_netboot_bundle.sh` assembles the boot tree | the netboot bundle |
 

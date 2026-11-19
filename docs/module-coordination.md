@@ -25,26 +25,25 @@ decoder work or WebSocket sends. Configuration reads and offers validate current
 Player epoch and Frame generation while holding the same transaction's row locks.
 
 A fleet transaction that also needs a device takes, after Coordination and Runtime, that
-device's fence (`central/fleet/device_fence.py`), then the offer quota row, the device insert,
-the session, the producer and evidence or commands. The fence is a per-device reader/writer
-lock: every node request and operator action on a device holds it shared (`act`), so no request
-waits on another's slow COMMIT; a boot offer, a node enrolment and retirement hold it exclusive
+device's fence (`central/fleet/device_fence.py`). The fence is a per-device reader/writer lock:
+an operator action on a device (the operator's reboot among them) holds it shared (`act`), so
+no request waits on another's slow COMMIT; a boot offer and retirement hold it exclusive
 (`change`), and a `change` not granted within the lock timeout answers 503 `node_device_busy`
 with Retry-After. A transaction holds at most one fence: taking its device again is free, an
-upgrade or a second device is refused. A post that writes a producer's evidence also holds that
-producer's row (`NodeSessions.authenticate_producer_in`), so one producer's posts run one at a
-time and a retry finds the first post's rows. Operator device reads take none and read one READ
-ONLY snapshot. The release writer takes its own lock, alone. There is no fleet-wide lock.
+upgrade or a second device is refused. Operator device reads take none and read one READ ONLY
+snapshot. The release writer takes its own lock, alone. There is no fleet-wide lock, and no
+Node lock: its only taker, the display exchange, went with the Pi's old HTTP path
+([0034](decisions/0034-central-schema-consolidation.md)), as did the producer rows its posts held.
 
-A Node's display exchange (`POST /v2/node/display`, `central/fleet/node_display.py`) takes only
-that Node's lock (issue #127; `central/transaction_locks.py` `acquire_node_lock`, the two-key
-advisory lock `NODE_LOCK_CLASS` and `hashtext(device_id)`), never Coordination or Runtime, so one
-Node's exchange never waits on another's. `Coordinator.display_admission_in` and
-`display_withdrawal_in` refuse (`node_display_node_lock_required`) unless the caller holds it, and
-read the Player row `FOR SHARE`, so a binding write on that one Player (`FOR UPDATE`) orders
-against it. Lock order: Coordination, Runtime, then a Node lock (an operator calibration trial
-and an exchange reporting a completion take it after them); a holder of a Node lock never takes
-Coordination or Runtime after it. The exchange keeps `lock_timeout` 5 s for its own statements.
+**Output losses are judged from the `display` line** ([0034](decisions/0034-central-schema-consolidation.md),
+S4b part 2). The worker's Output report judge (`central/infra/display_store.py`) records each
+Output report and, only when a report turns a bound Output's `connected` from true to false or
+back, takes Coordination then Runtime (`acquire_runtime_locks`) before any row lock and calls
+`OutputLossLedger` (`central/coordination.py`): `lost_in` writes one unresolved `output_losses`
+row for the Frame bound there (cause `display_host`, `output_disconnected`) and marks invalid
+every execution commit of an offer layer on that exact binding; `restored_in` resolves it when
+the display is connected again. A report that changes no bound Output's connection takes no
+Coordination or Runtime lock. A Player exit or a surface invalidation no longer records a loss.
 
 **A lock that times out is a retryable refusal** (`central/lock_waits.py` `mount_lock_refusal`,
 mounted once by `create_app` over the operator and node routes): any request whose transaction

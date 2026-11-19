@@ -1,8 +1,10 @@
 # Real PID1 and Central node lifecycle scenarios
 
 [`tests/test_node_pid1.py`](../../../tests/test_node_pid1.py) (marker `node_pid1`) runs the
-actual sealed Player and manager, production base units, real HTTP Central owners with Central's
-hub and the worker's bus side, and a disposable test database. Each scenario boots a fresh
+actual sealed Player, production base units, Central's real boot-offer route with Central's
+hub and the worker's bus side (since [0034](../../decisions/0034-central-schema-consolidation.md) a Pi
+speaks no other HTTP path to Central, and the harness checks that every `/v2/node/*` path asked after
+cold is the boot offer or one of its files; no manager root is staged), and a disposable test database. Each scenario boots a fresh
 privileged arm64 container with systemd as PID 1, masks host actions (and reboot, except on a
 boot the scenario reboots over the bus), and removes only its own containers, database and
 archive copies. The [node-pid1 workflow](../../../.github/workflows/node-pid1.yml)
@@ -96,8 +98,8 @@ the host line, the device's version, its reboot records and its Outputs (`GET /f
   then holds the judge's verdict from the Pi's `health` line, Virtual-1 dark with `app_absent`.
 - **refused**: a drop-in binds a 2 GiB `/proc/meminfo` (read-only) into the storage unit
   alone, below the smallest memory class. Handoff and the Node bus run, then storage, prepare,
-  Host Management, the broker and the manager supervisor start as one PID1 transaction. Storage
-  must fail; prepare, the broker and the manager supervisor must never start (their `Requires=`);
+  Host Management and the broker start as one PID1 transaction. Storage
+  must fail; prepare and the broker must never start (their `Requires=`);
   Central must read on the host line the facts `boot` report with storage `refused`, fault
   `node_memory_class`, required 3584 MiB and room the fake total, and metrics with
   `memcg_present` 1 and a `memory_peak:` row. The fake is valid for this leg only: the bind gives

@@ -1,6 +1,6 @@
 # 0034 — Central's database: one table per thing it keeps, and a write only when something changed
 
-**Date:** 2026-11-17 · **Layer:** module (Central's persistence: which aggregates it keeps and the tables each needs; the write load) · **Status:** accepted design, built on the branch `feat/schema-consolidation` (one pull request, slices S1 to S4). **Builds on:** [0033](0033-central-write-load.md) (write what changed, node records kept a week) and [0017](0017-node-redesign-r3.md) (the Node bus).
+**Date:** 2026-11-17 · **Layer:** module (Central's persistence: which aggregates it keeps and the tables each needs; the write load) · **Status:** accepted design, built on the branch `feat/schema-consolidation` (one pull request, slices S1 to S4 and the docs slice); [as built](#as-built) 2026-11-19: 41 tables at migration 129. **Builds on:** [0033](0033-central-write-load.md) (write what changed, node records kept a week) and [0017](0017-node-redesign-r3.md) (the Node bus).
 
 **Decision owner:** the owner. His words below are his; everything not quoted from him is a design choice, not his ruling.
 
@@ -87,11 +87,11 @@ One pull request; the slices are build order within it. Migrations are forward-o
 | S1 (tracer) | The Runtime saved on change only; both quota tables and `node_bus_hub_looks` dropped; the planning and settle row locks gone; `application_name` per pool; `singletons` created with its audit fields and Settings › House moved into it | no |
 | S2 | Central's consolidation: every merge and drop below marked S2; the bus link store becomes `node_links`, `node_states` and `events`; one release table; Central's 18 triggers and 2 functions dropped; audit fields on every kept table | no |
 | S3 | The queue and the timers (classes E and F); one Central worker; the Player pushed over its socket, never polling | yes (the Player) |
-| S4 | The old Pi path: reboot becomes a bus method and Install reads its completion from the `host` line, where the host's facts and metrics move too; the Display Host decides its handoff from the Output document, and a Frame's Position trial travels on its Output's own document key; Output losses judged from the `display` line; the `/v2/node/*` routes other than boot offers removed, with 16 tables | yes |
+| S4 | The old Pi path: reboot becomes a bus method and Install reads its completion from the `host` line, where the host's facts and metrics move too; the Display Host decides its handoff from the Output document, and a Frame's Position trial travels on its Output's own document key; Output losses judged from the `display` line; the `/v2/node/*` routes other than boot offers removed, with 20 tables (the four app-operation tables among them, moved from S2); the App Manager and its release root retired | yes |
 
 ## Deploying it
 
-**Central first, then each Pi rebooted once by hand** (engineering call 2026-11-19, superseding the Pi-first order of 2026-11-18). The release names no manager root (S4c part 2b-i), and the Central before it requires one in every release it ingests (`parse_node_release`), so the old Central cannot ingest this release and nothing can Install it through the old Central. So:
+**Central first, then each Pi rebooted once by hand** (engineering call 2026-11-19, superseding the Pi-first order of 2026-11-18, [E2](#s4bs-errata-and-their-decisions-2026-11-18)). The release names no manager root (S4c part 2b-i), and the Central before it requires one in every release it ingests (`parse_node_release`), so the old Central cannot ingest this release and nothing can Install it through the old Central: E2's Pi-first order is impossible. The orchestrator running this delivery confirmed the Central-first order on 2026-11-19, before part 2b-i ran (an engineering call, recorded with the delivery's decisions; not the owner's ruling). The steps, and the recovery if the order breaks, are in the [runbook](../runbook.md#deploying-the-schema-consolidation-release). So:
 
 1. The merge releases as usual (semantic-release; images and Pi packages). The old Central records the new tag as a release it cannot ingest; harmless: migration 129 forgets that record.
 2. Deploy Central (an iac pull request) **stop-then-start**: every old pod stops before the new one starts and migrates (Kubernetes `Recreate`), migrations 116 to 129 running. In the same deploy, the TFTP boot tree is staged from this release: stage 1 parses a boot offer strictly, so an old `initrd.img` refuses the new offers and a new one the old, and they move together (check what the iac stager stages before deploying). Central is down for about a minute.
@@ -114,6 +114,16 @@ One pull request; the slices are build order within it. Migrations are forward-o
 - A one-time enrolment nonce lives in memory; one issued before a Central restart is refused and retried.
 - Central is down about a minute at the deploy.
 - A release published before this delivery can no longer be ingested (it names a manager root), and migration 129 forgets every stored release, deployment and boot offer: each Pi's version is cleared and its next boot takes the newest ready stable release. Each Pi is rebooted once by hand at the deploy ([Deploying it](#deploying-it)).
+- A Home Assistant reference named after its source last spoke reads "never heard" until its next state: facts are kept only for named references (S2d).
+- A Display's shared serial is one flag on the Display: a (maker, product, serial) triple with no Display loses the fact until the judge sees both Outputs again. A picture session no longer ends with its Frame's deletion; it ends by its idle window (`PICTURE_IDLE_SECONDS`) (S2f).
+- "Check now" and a failed library check step: an immediate check cancels a queued later one and defers anew (never absorbed by it); a step stalled with its worker is re-published by the one rescue, so the stale-step rule of the old poll is gone (S3a).
+- A dead worker's jobs wait up to the one rescue's 5 minutes, where they waited 30 s (S3a).
+- An Output loss is written only for a disconnected display and resolves when it is connected again; a Player exit or a surface invalidation no longer writes one, and the picture's return no longer resolves one (S4b).
+- A Position trial's Save needs the Pi's current statement that it shows the draft, and its bus link; no longer a presentation within 5 s (S4b).
+- A Display Host restart can time a trial's lease once more from the document's redelivery: at most its 110 s hard lease, and Central clears the document at its own deadline (S4b).
+- The host read's App Manager `preparation` and the device read's session and admission facts are gone (S4c-2a-iii); the local recovery deadlines and their faults are gone (S4c-2a-ii).
+- The deploy window of the Central-first order: until its reboot an old Pi keeps its last plan while its programs call removed routes (it may show its last picture or go dark; not verified), a Pi that reboots before the new release is ready is refused an offer until it is, and calibration mode reads `not_admitted` until each Pi's next boot (S4c-2b-i). E2's window (a new Pi showing nothing on the old Central for minutes) does not occur, as E2's order is superseded.
+- A rollback is a forward fix: the migrations are forward-only, and an older release could not run against this Central (S4c).
 - **Deferred:** moving every repository onto a query builder that stamps audit fields itself. This delivery adds the columns and one repository per aggregate, so that move can later go one repository at a time.
 - **Not planned:** changing Procrastinate's tables.
 
@@ -125,11 +135,11 @@ S1 to S4 are the slices; "child" means written by its aggregate's repository. Ro
 |---|---|---|---|---|---|---|---|
 | 1 | node_app_effects | 0 | 0 | drop | — | Old path; empty | S4 |
 | 2 | node_app_links | 1 | 0.5 | drop | node_states (`player` line) | Old path | S4 |
-| 3 | node_app_operations | 0 | 0 | drop | — | Route never used | S2 |
-| 4 | node_app_qualification_samples | 0 | 0 | drop | — | Qualification never ran | S2 |
-| 5 | node_app_qualifications | 0 | 0 | drop | — | Same | S2 |
+| 3 | node_app_operations | 0 | 0 | drop | — | Route never used | S4 (moved from S2) |
+| 4 | node_app_qualification_samples | 0 | 0 | drop | — | Qualification never ran | S4 (moved from S2) |
+| 5 | node_app_qualifications | 0 | 0 | drop | — | Same | S4 (moved from S2) |
 | 6 | node_app_responses | 0 | 0 | drop | events | Old path | S4 |
-| 7 | node_base_managers | 67 | 0 | merge | node_releases (inline) | Immutable release document | S2 |
+| 7 | node_base_managers | 67 | 0 | merge | node_releases (derived from the deployment documents; gone with the manager root in S4) | Immutable release document | S2 |
 | 8 | node_boot_admissions | 75 | 0 | drop | — | Old session; `calibration_mode_in` reads boot offers | S4 |
 | 9 | node_boot_offers | 83 | 0 | keep | node_boot_offers | Netboot; audit fields | — |
 | 10 | node_bus_hub_looks | 1 | 28.5 | drop | worker heartbeat + singletons (hub reachability, on change) | Freshness stamp | S1 |
@@ -140,13 +150,13 @@ S1 to S4 are the slices; "child" means written by its aggregate's repository. Ro
 | 15 | node_ci_publications | 0 | 0 | drop | — | No code | S2 |
 | 16 | node_ci_revoked_qualifications | 0 | 0 | drop | — | No code | S2 |
 | 17 | node_command_responses | 6 | 0 | drop | events | Reboot answer on the bus | S4 |
-| 18 | node_deployment_assets | 201 | 0 | merge | asset_references | Duplicates `owner = node-deployment:<id>` | S2 |
+| 18 | node_deployment_assets | 201 | 0 | merge | asset_references (owner `node-deployment:<hex>`) | Duplicates `owner = node-deployment:<id>` | S2 |
 | 19 | node_deployments | 67 | 0 | merge | node_releases | One release | S2 |
 | 20 | node_display_exchanges | 42,992 | 19.5 | drop | node_states (`display` line) | Old path; 39,535 "already admitted" | S4 |
 | 21 | node_display_handoffs | 2 | 0 | drop | — | The Pi decides from the Output document | S4 |
 | 22 | node_display_withdrawals | 0 | 0 | drop | — | Same | S4 |
-| 23 | node_environment_acceptances | 0 | 0 | drop | — | Never ran | S2 |
-| 24 | node_environment_catalog | 100 | 0 | merge | node_releases (inline list) | Immutable document | S2 |
+| 23 | node_environment_acceptances | 0 | 0 | drop | — | Never ran | S4 (moved from S2) |
+| 24 | node_environment_catalog | 100 | 0 | merge | node_releases (derived from the deployment documents) | Immutable document | S2 |
 | 25 | node_evidence | 39,335 | 19.5 | drop | node_states / events | 99.5% restated snapshots | S4 |
 | 26 | node_host_facts | 74 | 0 | drop | node_states (`host` line) | Install reads the base tag there | S4 |
 | 27 | node_host_observations | 7,765 | 4 | drop | node_states (`host` line) | Duplicate | S4 |
@@ -160,7 +170,7 @@ S1 to S4 are the slices; "child" means written by its aggregate's repository. Ro
 | 35 | node_offer_contexts | 78 | 0 | drop | — | Always `node_v2` | S2 |
 | 36 | node_output_losses | 26 | 0 | rename | output_losses (Show; full fence key; cause inline) | Fences commits; its producer moves to the `display` judge in S4 | S2 |
 | 37 | node_producers | 383 | 0 | drop | — | Old session; the loss cause inlined first | S4 |
-| 38 | node_reboot_commands | 14 | 0 | drop | events | Reboot is a bus method | S4 |
+| 38 | node_reboot_commands | 14 | 0 | drop | events (link-action rows: the operator's ask and the `RebootPi` job's outcome) | Reboot is a bus method | S4 |
 | 39 | node_reconciliation_work | 39,134 | 39 | drop | — | A second queue for no-ops | S4 |
 | 40 | node_release_catalog | 67 | 0 | merge | node_releases | 1:1 | S2 |
 | 41 | node_release_observations | 67 | 0 | merge | node_releases | 1:1 | S2 |
@@ -173,8 +183,8 @@ S1 to S4 are the slices; "child" means written by its aggregate's repository. Ro
 | 48 | assets | 340 | 0 | keep | assets | Aggregate | — |
 | 49 | assignment_locks | 1 | 0 | keep (child) | assignment_locks | Keyed by assignment | — |
 | 50 | audit_events | 150 | 0 | drop | — | No reader; audit columns | S2 |
-| 51 | authored_candidates | 0 | 0 | drop | — | The Scene keeps ids | S2 |
-| 52 | bindings | 1 | 0 | merge | frames | 1:1 | S2 |
+| 51 | authored_candidates | 0 | 0 | drop | — (planning reads the Scene's photo ids' current facts, `MediaRepository.authored_in`) | The Scene keeps ids | S2 |
+| 52 | bindings | 1 | 0 | merge | frames (`player_id`, `output_id`) | 1:1 | S2 |
 | 53 | colour_sensors | 1 | 0 | merge | singletons (room-light setup) | One setup | S2 |
 | 54 | colour_words | 2 | 0 | merge | room_light_facts | Facts by reference | S2 |
 | 55 | coordination_groups | 0 | 0 | keep | coordination_groups | Cues | — |
@@ -182,8 +192,8 @@ S1 to S4 are the slices; "child" means written by its aggregate's repository. Ro
 | 57 | displays | 4 | 0 | keep | displays | Takes the session and the shared serial | — |
 | 58 | enrollment_nonces | 0 | 0 | memory | the enrolment handshake | One-time, short-lived; retried | S2 |
 | 59 | execution_commits | 0 | 0 | keep (child) | execution_commits | Queried by cue | — |
-| 60 | execution_events | 14,292 | 0 | drop | player_show_state (observation numbers) + a skip-number sequence | Its uses get their own homes: a repeated observation is known by its number, a skipped group's revocation number comes from a sequence | S2 |
-| 61 | fleet_device_lifecycle | 1 | 0 | merge | devices | 1:1; trigger dropped | S2 |
+| 60 | execution_events | 14,292 | 0 | drop | player_show_state (`observed_sequence`) + the sequence `coordination_skip_sequence` | Its uses get their own homes: a repeated observation is known by its number, a skipped group's revocation number comes from a sequence | S2 |
+| 61 | fleet_device_lifecycle | 1 | 0 | merge | devices (`revoked_at` as `retired_at`) | 1:1; trigger dropped | S2 |
 | 62 | fleet_t0_daily_quotas | 26 | 0 | drop | — | Durable rate limit | S1 |
 | 63 | frames | 1 | 0 | keep | frames | Takes the binding | — |
 | 64 | galleria_birth | 1 | 0 | merge | singletons | Must persist | S2 |
@@ -198,7 +208,7 @@ S1 to S4 are the slices; "child" means written by its aggregate's repository. Ro
 | 73 | light_words | 120 | 4.5 | merge | room_light_facts (named references only) | 117 lights no Frame names | S2 |
 | 74 | media_orphans | 0 | 0 | drop | — | No code | S2 |
 | 75 | media_recipes | 9 | 0 | keep | media_recipes | In variant keys | — |
-| 76 | media_references | 2 | 0.5 | drop | derived from plan_offers + assignment_locks; a download protected by assets.last_served_at | One row set per offer revision | S2 |
+| 76 | media_references | 2 | 0.5 | drop | derived: an offer or secured lock naming a variant is its pin; a download protected by `assets.last_served_at` | One row set per offer revision | S2 |
 | 77 | media_settings | 1 | 0 | merge | singletons | One row | S2 |
 | 78 | media_source_name_versions | 5 | 0 | merge | media_sources | One Source | S2 |
 | 79 | media_source_names | 4 | 0 | merge | media_sources | Same | S2 |
@@ -224,10 +234,10 @@ S1 to S4 are the slices; "child" means written by its aggregate's repository. Ro
 | 99 | planning_outcome | 1 | 0 | merge | singletons | One row | S2 |
 | 100 | player_configurations | 1 | 0 | merge | player_show_state | Coordination's, per Player | S2 |
 | 101 | player_contacts | 1 | 12 | keep (child) | player_contacts | Off the players lock; socket open and close after S3 | S3 |
-| 102 | player_control_sessions | 1 | 0 | merge | players | Same writer and lock | S2 |
+| 102 | player_control_sessions | 1 | 0 | merge | players (`control_session`) | Same writer and lock | S2 |
 | 103 | player_feedback | 1 | 0.5 | merge | player_show_state | Per Player | S2 |
 | 104 | player_output_identification | 0 | 0 | merge | player_show_state | Per Player | S2 |
-| 105 | player_versions | 1 | 0 | merge | devices | Decided at first boot | S2 |
+| 105 | player_versions | 1 | 0 | merge | devices (`deployment_id`, `previous_deployment_id`, `install`, `version_changed_at`) | Decided at first boot | S2 |
 | 106 | players | 1 | 0 | keep | players | Takes the control session | — |
 | 107 | position_entries | 67 | 0 | keep | position_entries | [0025](0025-configuration-snapshots.md) history | — |
 | 108 | power_holds | 0 | 0 | keep (child) | power_holds | Per Frame, pruned on expiry | — |
@@ -250,6 +260,75 @@ S1 to S4 are the slices; "child" means written by its aggregate's repository. Ro
 | 125 | walls | 1 | 0 | keep | walls | Frames reference it | — |
 
 **New or renamed (10):** `singletons`, `player_show_state`, `picture_history`, `room_light_facts`, `node_links`, `node_states`, `node_releases`, `events`, `output_losses`, `frame_trials`. **Kept (30):** the rest marked keep above.
+
+## As built
+
+Recorded 2026-11-19, after the last code slice (S4c-2b-ii). The design above stands; this section says how it was built and what the build found. Every decision here is an engineering call made during the build, not the owner's ruling.
+
+### The tables after each migration
+
+Counted on a fresh database migrated one file at a time, 2026-11-19 (Procrastinate's four are not in these counts). At 129 it holds **41 tables**: the 40 domain tables of [the target](#the-target-40-tables-21-kinds-of-thing) and `schema_migrations`; 45 with Procrastinate's four.
+
+| Migration | Slice | Central's tables after |
+|---|---|---|
+| 115 | (production, 2026-11-17) | 121 |
+| 116 | S1 | 118 |
+| 117 to 120 | S2a to S2d | 110, 104, 100, 91 |
+| `121_devices`, `121b_releases` | S2e | 89, 84 |
+| `122_outputs`, `122b_displays_and_picture_history` | S2f | 80, 77 |
+| `123_layout`, `123b_show_state` | S2g | 74, 71 |
+| `124_photo_library` | S2h | 61 |
+| 125 | S3b part 2 (`player_contacts.connected`) | 61 |
+| 126 | S4b part 1 (`position_entries.by`) | 61 |
+| 127 | S4b part 3 (`frame_trials` on the bus, `outputs.trial_*`) | 61 |
+| `128_old_node_path` | S4c-2a-v (the old path's 20 tables) | 41 |
+| `129_releases_without_the_manager_root` | S4c-2b-i (data only: every stored release, deployment reference and boot offer cleared) | 41 |
+
+Slices landed in parts, each its own commit and green alone: S2e, S2f, S2g, S3b and S4a in two; S4b in four (126 and `by`; Output losses from the `display` line; the Position trial on the bus; the handoff on the Pi); S4c in eight (part 1, the operator's reboot over the bus; 2a-i, the PID1 scenarios on the bus path; 2a-ii, the Pi stops speaking the old path; 2a-iii, what the console showed of it; 2a-iv, the old node routes behind no page; 2a-v, node sessions, app links and the 20 tables; 2b-i, releases and boot offers without the manager root; 2b-ii, the App Manager and `appliance/node` deleted). `Actor` gained `home-assistant` (Galleria's `installPlayer`, S2e).
+
+### How the merged tables were built
+
+- The four app-operation tables (`node_app_operations`, `node_app_qualifications`, `node_app_qualification_samples`, `node_environment_acceptances`) dropped in S4 with their routes and console pages, not in S2: their writers lived on the old path. So S4 dropped 20 tables, not 16.
+- `node_base_managers` and `node_environment_catalog` are not copied inline: they are derived from the deployment documents `node_releases` holds. `write_deployment` checks a digest's reference against the other releases under `RELEASE_WRITER_LOCK` (and, until S4c-2b-i retired the manager root, a base's manager pins). A deployment's files are its `asset_references` rows (owner `node-deployment:<hex>`) (S2e).
+- `fleet_device_lifecycle.revoked_at` became `devices.retired_at`, and `player_versions` became `devices.deployment_id`, `previous_deployment_id`, `install` and `version_changed_at` (S2e).
+- `media_references`: an offer or secured lock naming a variant is its pin (`media_authorized_in` checks `valid_until` on Central's clock), and the cache keeps a file while an offer or lock row names it or it was served within `SERVED_SPARE_SECONDS` (equal to `TRANSFER_SECONDS`), stamped on `assets.last_served_at` by the grant (S2h).
+- `authored_candidates`: planning reads a Scene's photo ids' current facts (`MediaRepository.authored_in`).
+- `execution_events`: `player_show_state.observed_sequence` and the sequence `coordination_skip_sequence` (S2g).
+- `node_reboot_commands`: `events` link-action rows, the `RebootPi` job's outcome (S4a) and the operator route's ask (S4c).
+- `bindings`: `frames.player_id` and `output_id`; `player_control_sessions`: `players.control_session`.
+
+### Errata from S2e to S2h
+
+- `position_entries` had no `by` after S2f (its writers carried no actor). S4b part 1 added it (migration 126, existing entries `unknown`): every append is stamped with its writer, and a change made outside Photo Wall that a Save or a turn finds carries that writer's `by`, as `picture_history` does.
+- Per-Player planning refusals (`offer_unavailable`, with `plan_shortened` and `offer_backpressure`) are log lines (`central/coordination.py` `_left_out`), not stored; what a pass could not plan is the planning outcome singleton. `ExecutionOutcome` and its router are deleted.
+- A photo is one `library_assets` row: a new revision replaces the old one on the row and clears its copies and key content; pool rows follow it (foreign key `ON UPDATE CASCADE`). An older revision is not kept.
+- A Source draft is a `media_sources` row of its own (no query, its pool, `draft`). A Source name's uniqueness is held by constraints: the unique index `media_sources_current_name` on the name among heads, and `UNIQUE (name, revision)`.
+- The enrolment nonce lives in one process's memory (`central/registry.py` `_EnrolmentNonces`): this assumes one Central pod serving the API. S3b's `connected` flag rests on the same assumption (cleared when the API process starts). Two API processes would need both revisited.
+- `picture_history` keeps `kind` (`kept`, `sent`) and `entry_kind` (the old kinds: `kept-done`, `kept-copied`, `kept-unrecorded`, `sent-draft`, `sent-back`, `sent-kept`) tied by a CHECK, with single-table-inheritance CHECKs on the kind-only columns.
+- A Display's shared serial is the flag `displays.shared_serial`; a picture session ends by its idle window, not with its Frame (costs in [What it gives up](#what-it-gives-up)).
+- A tag once catalogued keeps its manifest: another one is refused `node_release_identity_conflict`.
+
+### S4b's errata and their decisions (2026-11-18)
+
+- **E1.** The Output document carries the Frame binding (`OutputBinding`: Frame id, generation, configuration revision, or none), projected from the `frames` row; its `change` rises when the binding moves. The `display` line's schema major is 12.
+- **E2.** No compatibility path. The deploy order was then Pi first (Install through the old Central, then Central), at the cost of a new Pi showing nothing on the old Central until Central was deployed. **Superseded** by S4c-2b-i's Central-first order ([Deploying it](#deploying-it)).
+- **E3.** The Display Host learns the Player's run from the app broker, which pushes its current run (the `RunDocument` it reports as `app_started`, `app_epoch` included) over the Display Host's root-only ingress (`app_run`) when the run or the ingress socket changes; never through Central. The ingress socket became mode `0660`, group `pw-display`, and the broker joined that group (it has no `CAP_DAC_OVERRIDE`). Rejected: the broker's node feed (polled, retiring), the Player line (no `app_epoch`, and a self-report), dropping `app_epoch` (it reaches the health judge).
+- **E4.** The Position trial rides `trial-<port>` keys on the `display` line (Central's `TrialDocument`, the Pi's `TrialReport`), its leases as durations timed on the Pi from receipt; the candidate hash covers the trial's scope (Output, Frame, binding generation, configuration revision), not the Pi's whole surface. `frame_trials` keeps that scope (migration 127) and lost `producer_id`, `baseline` and `presentation_request_id`; a trial's times are the database's clock, the one the document source reads.
+- Output losses are judged from the `display` line by the Output report judge (`OutputLossLedger`), which takes the Coordination and Runtime locks only when a report changes a bound Output's connection, before any row lock.
+
+### S4c's re-cut and its findings (2026-11-19)
+
+- The PID1 scenarios failed with HTTP 409 at f039d158 because the fixture's stage read `current_cohort_in` (`central/fleet/node_acceptance.py`), which needs display exchange rows S4b part 4b had stopped writing (`node_output_cohort_unavailable`). The scenarios now prove the new path: Install's reboot over the bus and the Pi's next offer, the Pi's own handoff of a bound Output, the operator's reboot and a second boot of the same device, and a Pi that keeps playing through a Central outage.
+- The App Manager never started the Player (the app broker does). It idled through 2a and was deleted in 2b-ii with its root, packages, launchers, unit and memory lines.
+- The local recovery deadlines (HostCore's `RecoverySupervisor`, the broker's `RecoveryClient`) were deleted, not moved: the online broker's stage was the only thing that armed one. The `local_recovery_*` host metrics went with them.
+- The probe channel's listener moved into `appliance/apps` (`ProbeListener`) and admits only `probe_open`; the relink message went with the app link; `DownloadPreparer` moved to `appliance/boot`.
+- Migration 129 removes every stored release, deployment reference and boot offer and the release listing's ETag, rather than rewriting the deployment documents: a canonical document (sorted keys, compact separators) cannot be rewritten byte-exactly in SQL, and the Pi software those releases carry speaks the removed path. A Pi with no version is offered the newest ready stable release at its next boot.
+- A Player that exited within the broker's first turn produced no `app_started` or `app_exited` fact, so its Frame was dark with no card (a product bug of the [#123](https://github.com/mcurcio/photo-wall/issues/123) to [#125](https://github.com/mcurcio/photo-wall/issues/125) class). Fixed at the broker and the judge (`appliance/kernel/app_facts.py`), proven by the PID1 failure scenario and a unit test.
+- The deploy order became Central first ([Deploying it](#deploying-it)).
+
+### Tests of older schemas (2026-11-17)
+
+Tests that ran today's code on a schema older than production's (production was at migration 115) were retired, with the helpers only they used (`tests/support/offer_contexts.py`, `content_db.schema_before` and the like): there is no backwards compatibility and the one database is past those migrations; a fresh database still applies every migration. Tests of migrations 116 and later stay, seeded with raw SQL as the schema before them stood, never through today's code.
 
 ## Prior art
 

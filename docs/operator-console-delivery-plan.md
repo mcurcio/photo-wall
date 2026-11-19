@@ -1,5 +1,7 @@
 # Operator Console Redesign — Delivery Plan (T0 pass)
 
+> **Since [0034](decisions/0034-central-schema-consolidation.md) (2026-11-19)** Central's tables are consolidated and the Pi's old HTTP path (node sessions and producers, its posts, the app link, AppManager and the app operations) is gone. The tables and modules this page names are as they stood; [0034's table map](decisions/0034-central-schema-consolidation.md#table-map) says where each table went.
+
 **Date:** 2026-09-13
 **Status:** Delivery working state (NOT the gate artifact). The design of record
 is [`operator-console-ux-design.md`](operator-console-ux-design.md); every slice

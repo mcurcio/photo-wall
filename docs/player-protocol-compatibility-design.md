@@ -1,5 +1,7 @@
 # Player control-protocol compatibility after a Central upgrade
 
+> **Since [0034](decisions/0034-central-schema-consolidation.md) (2026-11-19)** Central's tables are consolidated and the Pi's old HTTP path (node sessions and producers, its posts, the app link, AppManager and the app operations) is gone. The tables and modules this page names are as they stood; [0034's table map](decisions/0034-central-schema-consolidation.md#table-map) says where each table went.
+
 **Status:** design proposal for review, not implemented or qualified. **Scope:** F0 in the [v0.13 production-readiness intake](production-readiness-v0.13.md). **Evidence:** a read-only 2026-09-29 Kubernetes diagnosis and exact v0.12.0/v0.13.0 release sources. This design concerns the Player **application** control-state schema; the base-OS management protocol is proposed separately in the [fleet-control design](player-fleet-control-design.md).
 
 **Superseded 2026-10-10 (PR 45).** Control schema 1, the four-field legacy state envelope, the legacy session seal and the `layer_after_end` down-conversion are deleted: every Player says hello on schema 2, and Central refuses state before hello with 409 `control_negotiation_required` (the WebSocket closes 1008). Migration `075_player_control_one_schema.sql` drops the ACK-nonce guard trigger that protected against older Central pods. This page is the design record of the compatibility window only.

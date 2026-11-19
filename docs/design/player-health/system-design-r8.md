@@ -1,5 +1,7 @@
 # Player node: base layer, app layer and one health verdict (recommended shape)
 
+> **Since [0034](../../decisions/0034-central-schema-consolidation.md) (2026-11-19)** Central's tables are consolidated and the Pi's old HTTP path (node sessions and producers, its posts, the app link, AppManager and the app operations) is gone. The tables and modules this page names are as they stood; [0034's table map](../../decisions/0034-central-schema-consolidation.md#table-map) says where each table went.
+
 **Superseded** wherever Central is assumed in charge: see [0016](../../decisions/0016-central-and-node-relationship.md) and the node redesign ([0017](../../decisions/0017-node-redesign-r3.md)). Paths inside are historical: the Node modules moved to `appliance/{kernel,host,boot,apps}/` in E1.
 
 **Layer: system design.** Domain concepts, bounded contexts and their dependency direction, supervision and trust topology, health model, technology choices. Module contracts, thresholds and plans are parked (section 10). Synthesises shape A (screen owner holds leases) and shape B (one verdict, earned pets, ANR-style probe) against seven review rounds, reworked client-first under R11 (r6), re-layered by bounded context (r7) and corrected against the r7 re-review (r8).
