@@ -18,12 +18,11 @@ from appliance.kernel.capacity import (
 )
 from contracts.node_observation import (
     MAX_OBSERVATION_BYTES,
+    HostMetricsState,
     HostMetricV2,
-    HostObservationV2,
-    encode_host_observation,
+    encode_host_metrics_state,
     valid_metrics,
 )
-from contracts.node_protocol import NodeProducerV2
 
 MIB = 1024**2
 FLAGS = ("under_voltage", "frequency_capped", "throttled", "soft_temperature_limit")
@@ -134,11 +133,9 @@ def test_each_name_is_emitted_once_and_the_largest_sample_fits_the_contract(tmp_
         (cgroup / f"{name}.slice/memory.events").write_text("low 0\nhigh 0\nmax 4\noom 2\noom_kill 2\n")
     rows = host + sampler.supervision() + sampler.memory_rows()
     assert len(rows) == 32
-    producer = NodeProducerV2("s" * 64, "device-" + "a" * 64, 2**31, uuid4(), "host_core", uuid4())
     metrics = valid_metrics((name, 1.0e15 + 0.123456789, unit, *source) for name, _, unit, *source in rows)
     assert len(metrics) == 33 and metrics[-1] == HostMetricV2("metrics_dropped", 0, "count", "host_core")
-    raw = encode_host_observation(HostObservationV2(producer, 2**62, 2**62, metrics,
-                                                    fault_code="sampler_partial_" + "x" * 48))
+    raw = encode_host_metrics_state(HostMetricsState(metrics, fault_code="sampler_partial_" + "x" * 48))
     assert len(raw) <= MAX_OBSERVATION_BYTES and len(metrics) <= 64
 
 

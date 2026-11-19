@@ -81,7 +81,6 @@ from contracts.node_link import (
     account_id,
     node_user,
 )
-from contracts.node_observation import HOST_OBSERVATION_INTERVAL_SECONDS
 from nodeapi.hub import WallWriter
 
 pytestmark = pytest.mark.node_pid1
@@ -1173,11 +1172,15 @@ def assert_memory_lines(node):
     assert "photowallbase.slice" in checked, checked
 
 
+# How long to wait for the bus's memory rows on Central's host read.
+BUS_MEMORY_WAIT_SECONDS = 60
+
+
 def _bus_memory_reported(fixture, node, name, until):
     """Host Management's newest observation from this Node once `until(metrics)` holds for its
     memory_peak:bus and oom_kill:bus rows (the bus's own slice, photowallbus.slice), written to
-    <name>.json; the last observation if it never holds within four observation intervals."""
-    deadline = time.monotonic() + 4 * HOST_OBSERVATION_INTERVAL_SECONDS
+    <name>.json; the last observation if it never holds within BUS_MEMORY_WAIT_SECONDS."""
+    deadline = time.monotonic() + BUS_MEMORY_WAIT_SECONDS
     while True:
         host = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/host")
         metrics = dict(host["metrics"])

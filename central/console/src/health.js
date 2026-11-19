@@ -285,7 +285,7 @@ export const RUN_CONTINUES = "the Run continues";
 
 /**
  * What each layer actually reported when Central records an Output loss from it
- * (node_runtime_reconciliation.py; the owner of each fact kind is fixed in
+ * (central/coordination.py `OutputLossLedger`; the owner of each fact kind is fixed in
  * contracts/node_protocol.py `owners`): the App Effect Broker reports an app process
  * exit, which Central applies to every Output linked to that process; Display Host
  * reports one Output's app surface invalidated or withdrawn. Any other served layer gets

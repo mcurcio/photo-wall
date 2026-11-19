@@ -58,11 +58,6 @@ class Idle:
         return Advance(projection=projection, failures=(), wake_at=self.wake_at)
 
 
-class NoReconciliation:
-    def advance(self) -> int:
-        return 0
-
-
 class NoWakes:
     """No commit ever wakes the loop."""
 
@@ -109,7 +104,7 @@ def ticks(log: list[tuple[str, float]]) -> list[float]:
 
 def test_an_idle_wall_rests_the_idle_ceiling_between_ticks():
     clock = ManualClock(1000)
-    scheduler = Scheduler(NoReconciliation(), Idle(clock), lambda _requests: 0, clock,
+    scheduler = Scheduler(Idle(clock), lambda _requests: 0, clock,
                           retentions={})
     log = drive(scheduler, clock, 600)
     assert ticks(log) == [1000 + 60 * n for n in range(11)]
@@ -119,7 +114,7 @@ def test_an_idle_wall_rests_the_idle_ceiling_between_ticks():
 def test_retention_runs_every_retention_period_never_in_a_tick():
     clock = ManualClock(1000)
     retained: list[float] = []
-    scheduler = Scheduler(NoReconciliation(), Idle(clock), lambda _requests: 0, clock,
+    scheduler = Scheduler(Idle(clock), lambda _requests: 0, clock,
                           retentions={"node-retention": lambda: retained.append(clock.utc())})
     log = drive(scheduler, clock, 3 * RETENTION_EVERY)
     assert retained == [1000 + RETENTION_EVERY * n for n in range(4)]
@@ -132,11 +127,10 @@ def test_retention_runs_every_retention_period_never_in_a_tick():
 def test_a_failing_step_tries_again_after_the_shortest_rest():
     clock = ManualClock(1000)
 
-    class Failing:
-        def advance(self) -> int:
-            raise RuntimeError("private reconciler failure")
+    def failing(_requests) -> int:
+        raise RuntimeError("private measurement failure")
 
-    scheduler = Scheduler(Failing(), Idle(clock), lambda _requests: 0, clock, retentions={})
+    scheduler = Scheduler(Idle(clock), failing, clock, retentions={})
     assert scheduler.tick() == 1000 + SCHEDULER_MIN_SECONDS
 
 

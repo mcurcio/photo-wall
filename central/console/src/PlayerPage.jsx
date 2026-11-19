@@ -45,19 +45,13 @@ function ReadTime({ what, at, failed }) {
 }
 
 /**
- * The software layer rows (§9 Layers, L1.5 to L2) and the closing Panel line. Host Management's
- * row (L0) lives on the Pi's Hardware page, in Link and sessions.
+ * The software layer row (§9 Layers, L2) and the closing Panel line. Host Management's row (L0)
+ * lives on the Pi's Hardware page, in Link and sessions.
  */
-function LayersSection({ node, snapshot, playerId, retired }) {
-  const rows = layerEvidence({ nodeDevice: node, snapshot, playerId }).filter((row) => row.key !== "host");
-  const shown = retired ? rows.filter((row) => row.key === "app") : rows;
+function LayersSection({ node, snapshot, playerId }) {
+  const shown = layerEvidence({ nodeDevice: node, snapshot, playerId }).filter((row) => row.key === "app");
   return (
     <>
-      {retired ? (
-        <p className="player__read-time">{`${RETIRED_NOT_READ} (Display Host)`}</p>
-      ) : (
-        <ReadTime what="Node read" at={node.readAt} failed={node.error !== null && node.read !== null} />
-      )}
       <ReadTime what="Player app read" at={snapshot?.inventory?.read_at} failed={false} />
       <ul className="player__layers" aria-label="Layers">
         {shown.map((row) => (
@@ -283,7 +277,7 @@ function OutputsSection({ snapshot, bootFacts, row, wall, setStatus }) {
 /**
  * One Pi's Software and screens page (`#/players/<device-id>`; console by domain § Fleet): the
  * Pi header (linking to the Pi's Hardware page, which holds Reboot, Health, its Node API link
- * and Retire), its Enrollment, its software layers bottom up (L1.5 to L2), its Outputs, its boot
+ * and Retire), its Enrollment, its software layer (L2), its Outputs, its boot
  * and Unbind all. It keeps what belongs to Software and
  * Screens until their own pages land. Each section shows its own read time and sits behind its
  * own error boundary. Node records are read only on a Pi's pages, for that box only
@@ -344,7 +338,7 @@ export function PlayerPage({ deviceId, snapshot, bootFacts, wall }) {
       </div>
 
       <SectionBoundary title="Layers" resetKey={node.readAt}>
-        <LayersSection node={node} snapshot={snapshot} playerId={player?.id ?? null} retired={retired} />
+        <LayersSection node={node} snapshot={snapshot} playerId={player?.id ?? null} />
       </SectionBoundary>
 
       <SectionBoundary title="Outputs" resetKey={snapshot?.at}>

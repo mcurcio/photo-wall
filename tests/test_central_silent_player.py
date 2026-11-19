@@ -4,15 +4,13 @@
 The incident on the test Pi: the Player app on HDMI-A-1 died and nothing restarted it, while
 Host Management kept reporting. Central's view of that box is rebuilt here through Central's own
 owner services on real PostgreSQL (enrollment, the Player's readiness report, Host Management's
-samples, the App Effect Broker's process facts with no app link) and read through the
-production operator API at T + SILENT_AFTER_SECONDS + 1 on Central's test clock, T being when
-Central last heard from the Player. Each case asserts what the console classifies from: the
-snapshot's `last_report_at` against its served `silent_after_seconds`, the fleet host read's
-receipt against its served host-silence limit, and the broker's exit's work item.
-tests/browser/test_silent_player_browser.py drives the console on the same state.
+metrics on its host line) and read through the production operator API at
+T + SILENT_AFTER_SECONDS + 1 on Central's test clock, T being when Central last heard from the
+Player. Each case asserts what the console classifies from: the snapshot's `last_report_at`
+against its served `silent_after_seconds`, and the fleet host read's receipt against its served
+host-silence limit. tests/browser/test_silent_player_browser.py drives the console on the same
+state.
 """
-
-from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from support.frames import frame_create
@@ -20,33 +18,16 @@ from support.player_state import heard_in
 from support.position import PORTRAIT_ON_WIDE, save_position
 from test_coordination import report
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
-from test_node_boot import claim_for, cold_setup
+from test_node_boot import cold_setup
 from test_node_fleet_hosts import on_line
 from test_registry import ADMIN, enroll
 
 from central.app import create_app
 from central.coordination import Coordinator
-from central.fleet.node_ingest import NodeIngest
-from central.fleet.node_observations import NodeObservations
 from central.fleet.node_sessions import NodeControlConfig
-from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from contracts.liveness import SILENT_AFTER_SECONDS
 from contracts.node_boot import NodeBootRequestV2
-from contracts.node_observation import (
-    HOST_OBSERVATION_INTERVAL_SECONDS,
-    HostMetricsState,
-    HostMetricV2,
-    HostObservationV2,
-    encode_host_metrics_state,
-    encode_host_observation,
-)
-from contracts.node_protocol import (
-    AppProcessFact,
-    NodeEventV2,
-    NodeProcessIdentity,
-    NodeSnapshotV2,
-    encode_node_message,
-)
+from contracts.node_observation import HostMetricsState, HostMetricV2, encode_host_metrics_state
 from contracts.node_state import BIRTH_KEY, HOST_METRICS_KEY
 
 NODE = NodeControlConfig("node-test")
@@ -59,16 +40,14 @@ class Incident:
     """One netbooted box in the incident's state, built through Central's owner services.
 
     `last_report_at` (T) is when Central last heard from the Player app (its session socket's close
-    after its readiness report; liveness is its own domain, central/infra/player_contact_store.py); the App Effect
-    Broker reported the app running before it and exited after it, with no app link admitted on
-    the boot (so Central can link the exit to no Output); Host Management puts its metrics on
-    its host line every interval up to `read_at` = T + SILENT_AFTER_SECONDS + 1."""
+    after its readiness report; liveness is its own domain, central/infra/player_contact_store.py);
+    Host Management states its metrics on its host line, last at `read_at` =
+    T + SILENT_AFTER_SECONDS + 1."""
 
     def __init__(self, registry, *, bound=True):
         self.registry = registry
-        boots, self.sessions, _ = cold_setup(registry)
-        offer = boots.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
-        self.observations = NodeObservations(self.sessions)
+        boots, _, _ = cold_setup(registry)
+        boots.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
         self.host_sequence = 0
         identity, _, _ = enroll(registry, count=2, device_id=DEVICE_ID)
         self.player_id = identity["player_id"]
@@ -76,14 +55,6 @@ class Incident:
             registry.create_frame(frame_create(FRAME, x_mm=100, y_mm=100), by="console")
             registry.bind(FRAME, self.player_id, OUTPUT, expected_generation=0, by="console")
             save_position(registry, FRAME, PORTRAIT_ON_WIDE)
-        # The node sessions are admitted after the Position commit: an admitted node boot turns
-        # the commit into a native trial, which this replay does not exercise.
-        self.claims = {}
-        for owner in ("host_core", "app_effect_broker"):
-            claim = claim_for(offer, owner=owner)
-            self.claims[owner] = (claim, self.sessions.enroll(claim))
-        self.process = NodeProcessIdentity(321, 7, uuid4())
-        self._broker(NodeSnapshotV2, 1, "running")
         self.host_sample()
         self.coordinator = Coordinator(registry.db, registry.clock)
         registry.clock.advance(1)
@@ -92,42 +63,19 @@ class Incident:
         with registry.db.transaction() as conn:     # its socket closed: Central last heard it
             heard_in(conn, self.player_id, identity["authority_epoch"], registry.clock.utc())
         self.last_report_at = registry.clock.utc()
-        registry.clock.advance(2)
-        self.exit_evidence = self._broker(NodeEventV2, 2, "exited")
-        self.exited_at = registry.clock.utc()
         self.read_at = self.last_report_at + SILENT_AFTER_SECONDS + 1
-        # Samples one interval apart ending on read_at, so the last is stored (Central coalesces
-        # a sample within one interval of its stored one) and Host Management reads current.
-        steps = int((self.read_at - registry.clock.utc()) // HOST_OBSERVATION_INTERVAL_SECONDS)
-        for k in range(steps, -1, -1):
-            registry.clock.advance(self.read_at - k * HOST_OBSERVATION_INTERVAL_SECONDS
-                                   - registry.clock.utc())
-            self.host_sample()
-        NodeRuntimeReconciler(self.sessions).advance()
+        registry.clock.advance(self.read_at - registry.clock.utc())
+        self.host_sample()
 
     def host_sample(self):
-        """One Host Management sample on its own boot clock (the test clock's monotonic): its post on
-        the old path (until S4c-2a-iv) and its put on its host line (the fleet host read and the
-        device read, decision 0034), the line's birth first."""
-        claim, grant = self.claims["host_core"]
+        """Host Management's metrics on its host line (the fleet host read and the device read,
+        decision 0034), the line's birth first."""
         if self.host_sequence == 0:
             on_line(self.registry, SERIAL, BIRTH_KEY, b"{}", 1)
         self.host_sequence += 1
         metrics = (HostMetricV2("uptime", self.host_sequence, "seconds"),)
-        sample = HostObservationV2(grant.producer, self.host_sequence,
-                                   int(self.registry.clock.monotonic() * 1000), metrics)
-        self.observations.record(grant.session_id, claim.credential, encode_host_observation(sample))
         on_line(self.registry, SERIAL, HOST_METRICS_KEY, encode_host_metrics_state(HostMetricsState(metrics)),
                 self.host_sequence + 1)
-
-    def _broker(self, kind, sequence, state):
-        """The App Effect Broker's process fact for the Player app, as a snapshot or an event."""
-        claim, grant = self.claims["app_effect_broker"]
-        evidence = uuid4()
-        fact = AppProcessFact(self.process, 1, "b" * 64, state)
-        NodeIngest(self.sessions).ingest(grant.session_id, claim.credential, encode_node_message(
-            kind(grant.producer, evidence, sequence, 1000 * sequence, (fact,))))
-        return evidence
 
 
 def _reads(registry):
@@ -169,15 +117,3 @@ def test_an_unbound_player_that_stops_reporting_reads_silent_while_its_host_repo
     incident = Incident(registry, bound=False)
     inventory = _reads_silent_while_its_host_reports(registry, incident)
     assert all(frame["player_id"] != incident.player_id for frame in inventory["frames"])
-
-
-def test_an_app_exit_with_no_app_link_finishes_its_work_on_the_display_line(registry):
-    incident = Incident(registry)
-    with registry.db.transaction() as conn:
-        work = conn.execute("SELECT completed_at,result FROM node_reconciliation_work "
-                            "WHERE evidence_id=%s", (incident.exit_evidence,)).fetchone()
-        links = conn.execute("SELECT count(*) n FROM node_app_links").fetchone()["n"]
-    # The replay's premise: no app link; the exit fences nothing (an Output's loss is the display
-    # line's, decision 0034 S4b), so its work item finishes as `display_line`.
-    assert links == 0
-    assert work["completed_at"] is not None and work["result"] == "display_line"

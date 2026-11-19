@@ -1,9 +1,8 @@
 """Output interrupted, end to end (console DDD §15, bead C1).
 
 The production app on the loopback harness, with a real Output loss recorded through
-Central's own node owner services and Runtime reconciliation (tests/test_node_runtime_
-reconciliation.py `rig`): two Frames bound to one Player's two Outputs inside one Run, and
-Display Host reporting Output 0's surface invalidated. Central serves the loss on the operator
+Central's own services (tests/support/node_rig.py `rig`): two Frames bound to one Player's two
+Outputs inside one Run, and Display Host reporting Output 0 disconnected on its display line. Central serves the loss on the operator
 snapshot (current Bindings only), and the one classifier shows it on the plan tile, the Run's
 Frame chips, Attention and the Player page's Output row. Every assertion is behavioural.
 """
@@ -15,10 +14,10 @@ import pytest
 from console_tasks import connect, go, open_player
 from operator_harness import operator_server, tile_health
 from playwright.sync_api import expect
+from support.node_rig import rig
 from support.output_report import report_modes
 from support.player_state import heard_in
 from test_fleet_attempts import DEVICE_ID, SERIAL
-from test_node_runtime_reconciliation import rig
 from test_registry import frame
 
 from central.registry import FramePlacement
@@ -38,7 +37,7 @@ SHORT = "Output interrupted · the Run continues"
 def _seed(registry):
     """rig's two bound Frames, placed on the plan, with Output 0's loss recorded, and the Player
     heard (its session socket: liveness, central/infra/player_contact_store.py)."""
-    _, player, _, _, _, _, surfaces, _, _ = rig(registry)
+    _, player, _, _, _, _, surfaces, _ = rig(registry)
     with registry.db.transaction() as conn:
         heard_in(conn, player["player_id"], player["authority_epoch"], registry.clock.utc())
     for index, frame_id in enumerate((LOST, KEPT)):

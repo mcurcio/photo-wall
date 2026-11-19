@@ -1,7 +1,7 @@
 """Central's event log and the bus store (decision 0034, slice S2c; central/infra/events.py,
-central/infra/node_link_store.py): every Pi event, gap and link action is logged once and kept a
-week; only the newest value per state key is kept; a pipe's cursors stay its own; the WALL mark
-never lowers.
+central/infra/node_link_store.py): every Pi event, gap and link action is logged once (kept a week:
+tests/test_node_record_retention.py); only the newest value per state key is kept; a pipe's
+cursors stay its own; the WALL mark never lowers.
 
 Mutation probes (S2c): remove ON CONFLICT DO NOTHING from `record_events_in` -> the repeat raises
 (#2); drop the `WHERE` guard from the node_states upsert -> an older seq replayed overwrites the
@@ -19,7 +19,6 @@ from support.devices import seed_device
 
 from central.content_catalog.catalog import device_id_for_serial
 from central.infra.events import (
-    EVENTS_KEPT_SECONDS,
     EventKind,
     GapEvent,
     RecordEvent,
@@ -30,9 +29,7 @@ from central.infra.events import (
     refusals_in,
 )
 from central.infra.node_link_store import WALL_MARK, PgLinkStores, PgWallMarks
-from central.infra.node_record_retention import NodeRecordRetention
 from contracts.node_link import Pipe
-from contracts.time import ManualClock
 from nodeapi.buffers import KV_OPERATION_HEADER
 from nodeapi.epoch import Token
 from nodeapi.pull import Batch, Gap, Read
@@ -95,21 +92,6 @@ def test_refusals_read_newest_first_by_source(registry):
         refusal_in(conn, source="pi", address="p2", reason="unreadable")
         assert [(r.source, r.address) for r in refusals_in(conn, "pi", 10)] == [("pi", "p2"), ("pi", "p1")]
         assert [r.address for r in refusals_in(conn, None, 2)] == ["p2", "light.a"]
-
-
-def test_retention_trims_events_only_past_a_week_in_whole_batches(registry):
-    _device(registry)
-    with registry.db.transaction() as conn:
-        now = _now(conn)
-        old = now - EVENTS_KEPT_SECONDS - 600
-        record_events_in(conn, [_record(seq, old + seq) for seq in range(1, 6)])
-        record_events_in(conn, [_record(9, now - EVENTS_KEPT_SECONDS + 600)])
-    retention = NodeRecordRetention(registry.db.transaction, ManualClock(now), batch_rows=2, batches=4)
-    assert retention.prune()["events"] == 4      # two whole batches; the fifth old one is short of one
-    assert retention.prune()["events"] == 0
-    with registry.db.transaction() as conn:
-        left = [row["seq"] for row in conn.execute("SELECT seq FROM events ORDER BY seq").fetchall()]
-    assert left == [5, 9]                        # the oldest went first; the young one stays
 
 
 def _states(registry) -> list[tuple]:

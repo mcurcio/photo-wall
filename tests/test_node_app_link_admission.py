@@ -4,8 +4,8 @@ from dataclasses import replace
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
+from support.node_rig import rig
 from support.player_state import player_state
-from test_node_runtime_reconciliation import rig
 from test_registry import ADMIN
 
 from central.app import create_app
@@ -20,7 +20,7 @@ def test_a_state_read_between_acknowledgement_and_link_keeps_the_receipt_current
     delivery, the ACK replays the same receipt, and Central records the link. Mutation probe:
     issue a new delivery on every read (the old rotation) and the link is refused with 409
     node_link_control_not_current."""
-    _, player, key, sessions, claims, _, _, _, proof = rig(registry)
+    _, player, key, sessions, claims, _, _, proof = rig(registry)
     headers = {"Authorization": "Bearer " + player["token"]}
     with TestClient(create_app(registry.db, registry.clock, ADMIN)) as client:
         state = player_state(client, player["token"])
@@ -62,7 +62,7 @@ def test_a_relink_that_restates_the_current_link_writes_nothing(registry):
     of 658 relinks measured on 2026-11-15): the link row keeps its row version; the answer is a
     200 duplicate, current. A new control receipt is a new link: the row is replaced in place, `changed_*` stamped, `created_*` kept. Mutation probe: make
     `link_standing` compare the nonce (the relink rewrites the row)."""
-    coordinator, player, key, sessions, claims, _, _, _, proof = rig(registry)
+    coordinator, player, key, sessions, claims, _, _, proof = rig(registry)
     broker = claims["app_effect_broker"]
     links = NodeAppLinks(sessions)
     device = proof.challenge.producer.device_id
@@ -97,7 +97,7 @@ def test_a_late_older_link_never_replaces_the_newer_one(registry):
     """Link A of a boot arrives after the newer link C of the same boot (a later app epoch):
     C's row stays as it is and A is answered 200, not stored, not current, so the Pi's outbox
     slot clears. Mutation probe: drop the `older` arm of `link_standing` (A replaces C)."""
-    _, _, key, sessions, claims, _, _, _, proof = rig(registry)
+    _, _, key, sessions, claims, _, _, proof = rig(registry)
     broker = claims["app_effect_broker"]
     links = NodeAppLinks(sessions)
     device = proof.challenge.producer.device_id
@@ -124,7 +124,7 @@ def test_a_link_of_the_next_boot_replaces_the_current_one_whatever_its_counters(
     from contracts.node_boot import NodeBootRequestV2
     from contracts.node_protocol import NodeProcessIdentity
 
-    _, _, key, sessions, claims, _, _, _, proof = rig(registry)
+    _, _, key, sessions, claims, _, _, proof = rig(registry)
     broker = claims["app_effect_broker"]
     links = NodeAppLinks(sessions)
     device = proof.challenge.producer.device_id

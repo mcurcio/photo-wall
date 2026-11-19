@@ -29,7 +29,6 @@ function sceneHref(sceneId) {
 const STEP_WORDS = [
   [["planning", "runtime"], "planning", "Planning is failing"],
   [["settle"], "settle", "Plans are not being committed"],
-  [["reconcile"], "reconcile", "Players are not being brought up to date"],
   [["measurement"], "measurement", "Photos are not being measured"],
 ];
 

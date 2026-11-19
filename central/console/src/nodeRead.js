@@ -9,8 +9,8 @@ import { usePolledRead } from "./polledRead.js";
  * The Player page's node read and its layer evidence (console DDD §9-§11).
  *
  * THE READ (`useNodeDevice`): one box's node records, read only while its Player page is
- * open — `GET …/node/devices/<id>` (its host line as Central keeps it, Display Host's newest
- * exchange per Output, boot claims and reboot records) — every `cadenceMs` through the shared
+ * open — `GET …/node/devices/<id>` (its host line as Central keeps it, boot claims and reboot
+ * records) — every `cadenceMs` through the shared
  * polled read (polledRead.js), never for a retired box (`skip`). Like the fleet host read it goes
  * through `apiWrite(path, {method: "GET"})`, so a failure never touches the session. A failed read
  * KEEPS the last values and reports its error beside them.
@@ -99,86 +99,15 @@ function hostRow(nodeDevice) {
 }
 
 /**
- * The Player page's layer rows, bottom up: Host Management (L0), Display Host (L1.5) and the
- * Player app (L2). The node rows come from the device read, the Player app's from the snapshot;
- * each fact names its source.
+ * The Player page's layer rows, bottom up: Host Management (L0) and the Player app (L2). The host
+ * row comes from the device read, the Player app's from the snapshot; each fact names its source.
+ * Display Host states its Outputs on its own display line, never in the device read.
  *
  * @param {{nodeDevice: NodeDevice|null, snapshot: object|null, playerId: string|null}} input
  * @returns {LayerRow[]}
  */
 export function layerEvidence({ nodeDevice, snapshot, playerId }) {
-  return [hostRow(nodeDevice), displayRow(nodeDevice), playerAppRow(snapshot, playerId)];
-}
-
-/**
- * Display Host's newest exchange per Output on the box's current boot, as three `reported`
- * (latest) facts each, from the device read's `display_outputs` (§15, §16 display read). The
- * receipt age compares one producer's own boot clock with itself (R10) and is shown, never
- * judged. Nothing here is Panel pixels or names Display Host's own diagnostic page. An Output
- * Central served as `undecodable` (its stored exchange no longer parses) is one Unknown fact.
- *
- * @param {NodeDevice|null} nodeDevice
- * @param {number|null} readAt Central's read time
- * @returns {Array<{outputId: string, facts: import("./facts.js").Fact[]}>}
- */
-export function displayOutputs(nodeDevice, readAt) {
-  const source = LAYER_NAMES.display_host;
-  return (nodeDevice?.read?.display_outputs ?? []).map((output) => {
-    if (output.undecodable === true) {
-      return { outputId: output.output_id, facts: [fact({ kind: "unknown",
-        why: `Central could not decode ${source}'s last exchange for this Output` })] };
-    }
-    const reported = (value) => fact({ kind: "reported", source, receipt: "latest",
-      value, receivedAt: output.received_at, readAt, field: "display_outputs received_at" });
-    const surface = output.surface;
-    const receipt = output.receipt;
-    return {
-      outputId: output.output_id,
-      facts: [
-        reported(typeof output.connected === "boolean"
-          ? `Panel connector: ${output.connected ? "connected" : "not connected"}` : null),
-        reported(surface == null ? `${source} reported no app surface admitted`
-          : `Admitted surface: the app's surface for Frame ${surface.frame_id} (binding generation ${surface.binding_generation})`),
-        reported(receipt?.matches_surface === true && typeof receipt.age_ms === "number"
-          ? `Compositor receipt for that surface, sampled ${formatAge(Math.max(0, receipt.age_ms) / 1000)} before this report`
-          : "No compositor receipt for that surface in this report"),
-      ],
-    };
-  });
-}
-
-/**
- * The Display Host (L1.5) row: when it last reported (the newest exchange receipt across this
- * boot's Display Host producers), then each Output's three facts.
- */
-function displayRow(nodeDevice) {
-  const row = { key: "display", layer: LAYER_NAMES.display_host, level: "L1.5" };
-  const why = nodeUnknown(nodeDevice);
-  const unknownRow = (reason) => ({ ...row, details: [],
-    facts: [{ label: "Last reported", fact: fact({ kind: "unknown", why: reason }) }] });
-  if (why !== null) return unknownRow(why);
-  const read = nodeDevice.read;
-  if (!Array.isArray(read.display_outputs)) return unknownRow("display_outputs not served");
-  if (read.display_outputs.length === 0) {
-    return unknownRow(`${row.layer} has reported no Output on this boot`);
-  }
-  const times = read.display_outputs.map((output) => output.received_at).filter(Number.isFinite);
-  const outputs = displayOutputs(nodeDevice, read.read_at);
-  return { ...row,
-    facts: [
-      { label: "Last reported", fact: fact({ kind: "reported", source: row.layer, receipt: "latest",
-        receivedAt: times.length > 0 ? Math.max(...times) : null, readAt: read.read_at,
-        field: "display_outputs received_at" }) },
-      ...outputs.flatMap((output) => output.facts.map((value) => ({ label: `Output ${output.outputId}`,
-        fact: value }))),
-    ],
-    details: [
-      ...read.display_outputs.filter((output) => output.surface != null).map((output) =>
-        `Output ${output.output_id}: admitted surface configuration revision ${output.surface.config_revision}`),
-      `Source: ${row.layer}'s newest display exchange per Output on the current boot (node device read). `
-        + "A compositor receipt is not proof of Panel pixels.",
-    ],
-  };
+  return [hostRow(nodeDevice), playerAppRow(snapshot, playerId)];
 }
 
 /** The Player app (L2) row: its last readiness report on the current epoch (R3). */

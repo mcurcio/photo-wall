@@ -9,9 +9,9 @@ the node read (only on an open Pi page), the facts' labels and their Unknowns, t
 error boundary and the retired `#/equipment` and `#/players` bookmarks (no aliases); and (B2)
 Reboot Player against Central's real reboot owner: the frozen request, its retry, its window and
 late responses, and (R0) the one send rule: a dialog frozen at an older read sends nothing once
-the newest read lists another outstanding request; and (C2) Display Host's newest exchange per
-Output (the display read). The app operations (Stage app, the Qualified fallback) and the old
-path's device facts (sessions, App Manager, the App Effect Broker) are gone (S4c-2a-iii).
+the newest read lists another outstanding request. The app operations (Stage app, the Qualified
+fallback) and the old path's device facts (sessions, App Manager, the App Effect Broker) are gone
+(S4c-2a-iii), and so is Display Host's exchange per Output (S4c-2a-iv).
 
 Every assertion is behavioural (role, text, outcome).
 """
@@ -32,15 +32,13 @@ from playwright.sync_api import expect
 from support.frames import frame_create
 from support.pi_reboots import ask_reboot, reboot_queue, run_queued
 from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
-from test_node_boot import claim_for, cold_setup
+from test_node_boot import cold_setup
 from test_node_fleet_hosts import on_line
 from test_registry import enroll
 
 from central.fleet.node_sessions import NodeControlConfig
 from contracts.node_boot import NodeBootRequestV2
-from contracts.node_display import DisplayExchange, encode_display_exchange
 from contracts.node_observation import HostMetricsState, HostMetricV2, encode_host_metrics_state
-from contracts.node_protocol import OutputKey
 from contracts.node_state import BIRTH_KEY, HOST_METRICS_KEY
 
 pytestmark = pytest.mark.skipif(
@@ -73,22 +71,6 @@ class Box:
         metrics = (HostMetricV2("uptime", self.sequence, "seconds"),)
         on_line(self.registry, SERIAL, HOST_METRICS_KEY, encode_host_metrics_state(HostMetricsState(metrics)),
                 self.sequence + 1)
-
-    def display_exchange(self, output_id="HDMI-A-1"):
-        """One Display Host exchange on this boot, stored as Central's display owner stores it.
-        Inserted directly: the read under test is the device read's, not the display owner's
-        decision path (tests/test_node_display.py proves that)."""
-        claim = claim_for(self.offer, owner="display_host")
-        grant = self.sessions.enroll(claim)
-        output = OutputKey(grant.producer.kernel_boot_id, grant.producer.incarnation_id, output_id, 1, 1)
-        exchange = DisplayExchange(grant.producer, uuid4(), 1000, output, True)
-        with self.registry.db.transaction() as conn:
-            conn.execute("INSERT INTO node_display_exchanges(producer_id,request_id,session_id,output_id,"
-                         "sampled_boottime_ms,request,response,decision_id,received_at) "
-                         "SELECT producer_id,%s,session_id,%s,1000,%s,'{}',%s,%s FROM node_sessions "
-                         "WHERE session_id=%s",
-                         (exchange.request_id, output_id, encode_display_exchange(exchange), uuid4(),
-                          self.registry.clock.utc(), grant.session_id))
 
 
 def _node_reads(page):
@@ -143,27 +125,22 @@ def test_the_tracer_reaches_a_pi_page_from_the_list_with_standing_and_host_age(p
         assert len(sent) == count
 
 
-def test_three_layers_and_no_app_section_on_the_software_page(page, registry):
-    """S4c-2a-iii: the Software and screens page shows Display Host and the Player app (Host
+def test_one_layer_and_no_app_section_on_the_software_page(page, registry):
+    """S4c-2a-iii and 2a-iv: the Software and screens page shows the Player app's layer (Host
     Management lives on the Pi's Hardware page), the Boot section names the host line's start,
-    and nothing of the app operations is left: no App section, no Stage app, no Qualified
-    fallback, no App Manager or App Effect Broker row. Mutation probe: restore the App section
+    and nothing of the old path is left: no App section, no Stage app, no Qualified fallback, no
+    App Manager, App Effect Broker or Display Host row. Mutation probe: restore the App section
     in PlayerPage.jsx -> its region is found, fails."""
     box = Box(registry)
     report_readiness(registry, box.player_id)
-    box.display_exchange()
     box.host_sample()
     with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         connect(page, origin)
         open_player(page, NAME)
         layers = page.get_by_role("region", name="Layers", exact=True).get_by_role("listitem")
-        expect(layers).to_have_count(2)
-        expect(_layer(page, "Host Management")).to_have_count(0)
-        for gone in ("App Manager", "App Effect Broker"):
+        expect(layers).to_have_count(1)
+        for gone in ("Host Management", "App Manager", "App Effect Broker", "Display Host"):
             expect(_layer(page, gone)).to_have_count(0)
-        display = _layer(page, "Display Host")
-        expect(display).to_contain_text("Output HDMI-A-1: Display Host last reported")
-        expect(display).to_contain_text("Panel connector: connected")
         expect(_layer(page, "Player app")).to_contain_text("Player app last reported")
         expect(page.get_by_role("region", name="Boot", exact=True)).to_contain_text(
             "Host line: Host Management reported line start epoch")
@@ -208,7 +185,7 @@ def test_a_malformed_read_blanks_one_section_only(page, registry):
         expect(page.get_by_role("region", name="Boot", exact=True).get_by_role("alert")).to_have_text(
             "This section could not be shown. The rest of the page is current.")
         # The other sections, the page and the console stay up.
-        expect(_layer(page, "Display Host")).to_contain_text("Last reported")
+        expect(_layer(page, "Player app")).to_contain_text("Last reported")
         expect(player).to_contain_text("Standing: Unbound")
         expect(page.get_by_role("region", name="Outputs", exact=True)).to_contain_text("HDMI-A-1")
         go(page, "hardware")

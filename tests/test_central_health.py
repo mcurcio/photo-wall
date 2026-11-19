@@ -70,11 +70,6 @@ class FakeCoordinator:
         return Advance(projection=projection, failures=(), wake_at=self.wake_at)
 
 
-class NoReconciliation:
-    def advance(self):
-        return 0
-
-
 class NoRetention:
     def prune(self):
         return 0
@@ -87,8 +82,6 @@ def app_with(fake_db, fake_coordinator, clock, monkeypatch, *, enabled):
         "MediaRepository",
         lambda *_args, **_kwargs: fake_coordinator.media,
     )
-    # A fake database cannot serve the node reconciler's tick: it reconciles nothing here.
-    monkeypatch.setattr(central_app, "NodeRuntimeReconciler", lambda *_args, **_kwargs: NoReconciliation())
     monkeypatch.setattr(central_app, "NodeRecordRetention", lambda *_args, **_kwargs: NoRetention())
     return central_app.create_app(fake_db, clock, ADMIN, run_scheduler=enabled)
 
@@ -192,7 +185,7 @@ def test_measurement_request_failure_is_its_own_facet_and_clears(monkeypatch):
         steps = failed.json()["scheduler"]["steps"]
         assert steps["measurement"]["status"] == "failing"
         assert {name: step["status"] for name, step in steps.items() if name != "measurement"} == {
-            "planning": "ok", "reconcile": "ok", "runtime": "ok", "settle": "ok",
+            "planning": "ok", "runtime": "ok", "settle": "ok",
             "node-retention": "ok"}
         coordinator.media.fail = False
         assert wait_for(client, lambda response: response.json()["status"] == "ok").status_code == 200
@@ -257,25 +250,31 @@ def test_plan_horizon_and_renewal_come_from_the_environment_over_deployment_defa
 
 
 def test_a_failing_step_never_skips_a_later_one():
-    """The scheduler's steps are each their own: a reconciler that raises still lets the
-    coordinator and the measurement requests run, and only its facet fails. Mutation probe: run
-    the steps in one try (the coordinator and measurement never run)."""
-    class Raising:
+    """The scheduler's steps are each their own, and they are exactly the coordinator's three,
+    measurement and the retentions: a settle step that fails still lets the measurement requests
+    run, and only its facet fails. Mutation probes: run the steps in one try (measurement never
+    runs); add a step to the tick (the step list differs)."""
+    class SettleFails(FakeCoordinator):
         def advance(self):
-            raise RuntimeError("private reconciler failure")
+            advance = super().advance()
+            try:
+                raise RuntimeError("private settle failure")
+            except RuntimeError as exc:
+                failure = StepFailure(step="settle", reason=scheduler_failure(exc))
+            return Advance(projection=advance.projection, failures=(failure,))
 
-    coordinator = FakeCoordinator()
+    coordinator = SettleFails()
     measured = []
-    scheduler = Scheduler(Raising(), coordinator, measured.append, ManualClock(1000),
+    scheduler = Scheduler(coordinator, measured.append, ManualClock(1000),
                           retentions={"node-retention": lambda: 0})
     scheduler.tick()
     scheduler.retain()
     health = scheduler.health()
     assert coordinator.calls == 1 and measured == [()]
     assert {name: step.status for name, step in health.steps.items()} == {
-        "reconcile": "failing", "runtime": "ok", "planning": "ok", "settle": "ok",
-        "measurement": "ok", "node-retention": "ok"}
-    assert "private" not in health.steps["reconcile"].reason
+        "runtime": "ok", "planning": "ok", "settle": "failing", "measurement": "ok",
+        "node-retention": "ok"}
+    assert "private" not in health.steps["settle"].reason
     assert health.last_tick_monotonic is not None
 
 
@@ -289,7 +288,7 @@ def test_a_coordinator_that_raises_fails_its_three_steps_and_skips_measurement()
             raise RuntimeError("private coordinator failure")
 
     clock = ManualClock(1000)
-    scheduler = Scheduler(NoReconciliation(), FakeCoordinator(), lambda _requests: 0, clock,
+    scheduler = Scheduler(FakeCoordinator(), lambda _requests: 0, clock,
                           retentions={"node-retention": lambda: 0})
     scheduler.tick()
     scheduler.retain()
@@ -298,7 +297,7 @@ def test_a_coordinator_that_raises_fails_its_three_steps_and_skips_measurement()
     scheduler.tick()
     health = scheduler.health()
     assert {name: step.status for name, step in health.steps.items()} == {
-        "reconcile": "ok", "runtime": "failing", "planning": "failing", "settle": "failing",
+        "runtime": "failing", "planning": "failing", "settle": "failing",
         "measurement": "skipped", "node-retention": "ok"}
     assert all("private" not in health.steps[name].reason
                for name in ("runtime", "planning", "settle"))
@@ -312,7 +311,7 @@ def test_a_step_failing_tick_after_tick_keeps_its_first_since():
     coordinator = FakeCoordinator()
     coordinator.fail_planning = True
     clock = ManualClock(1000)
-    scheduler = Scheduler(NoReconciliation(), coordinator, lambda _requests: 0, clock,
+    scheduler = Scheduler(coordinator, lambda _requests: 0, clock,
                           retentions={"node-retention": lambda: 0})
     scheduler.tick()
     clock.advance(30)

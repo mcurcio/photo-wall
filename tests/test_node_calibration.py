@@ -217,7 +217,7 @@ def test_a_trial_needs_the_pi_linked_its_output_connected_and_the_frame_drawn(re
 
 
 def test_native_capability_survives_session_loss(registry):
-    from test_node_runtime_reconciliation import rig
+    from support.node_rig import rig
 
     rig(registry)
     assert registry.calibration_capability("node-f0")["mode"] == "native_trial"
@@ -227,7 +227,7 @@ def test_native_capability_survives_session_loss(registry):
 
 
 def test_native_capability_survives_generation_revocation_without_current_boot(registry):
-    from test_node_runtime_reconciliation import rig
+    from support.node_rig import rig
 
     rig(registry)
     with registry.db.transaction() as conn:

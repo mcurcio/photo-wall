@@ -1,17 +1,15 @@
-"""Host facts record (console DDD §63-§64, G13, bead F1), contract and node side: the
-HostFactsV2 wire rule, the sampler's `facts()` (kernel, default-route interface, operstate,
-the fib_trie address) and what Host Management states of them on its line (decision 0034: it posts
-nothing). No database; Central's ingest and G12 are proven in tests/test_node_host_facts_ingest.py."""
+"""Host facts (console DDD §63-§64, G13, bead F1), contract and node side: the facts' wire rule
+(`HostFactsState`, the host line's `facts`, decision 0034), the sampler's `facts()` (kernel,
+default-route interface, operstate, the fib_trie address) and what Host Management states of them
+on its line. No database; G12 is proven in tests/test_node_fleet_hosts.py."""
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import uuid4
 
 import pytest
 
 from appliance.host.host_linux import LinuxHostSampler, reset_cause
 from appliance.host.host_runner import HostRunner
-from contracts.node_commands import producer_document
 from contracts.node_host_facts import (
     LINK_STATES,
     MAX_HOST_FACTS_BYTES,
@@ -19,59 +17,41 @@ from contracts.node_host_facts import (
     WALL_CLOCK_STATES,
     BootReportV2,
     BootStageV2,
-    HostFactsV2,
-    encode_host_facts,
-    fact_values_document,
-    parse_host_facts,
-    stored_fact_values,
+    HostFactsState,
+    decode_host_facts_state,
+    encode_host_facts_state,
     valid_fact,
 )
-from contracts.node_protocol import NodeProducerV2
-
-
-def _producer(owner="host_core"):
-    return NodeProducerV2("site", "device-" + "a" * 64, 1, uuid4(), owner, uuid4())
 
 
 def _facts(**fields):
     values = {"kernel_release": "6.6.51+rpt-rpi-v8", "interface": "eth0", "link_state": "up",
-              "address": "192.168.1.40", "base_tag": "2026.10.01", **fields}
-    return HostFactsV2(_producer(), 3, 1234, **values)
+              "address": "192.168.1.40", "base_tag": "2026.10.01", "reset_cause": None,
+              "wall_clock": None, "boot": None, **fields}
+    return HostFactsState(**values)
 
 
 def _document(**fields):
-    return {**json.loads(encode_host_facts(_facts())), **fields}
+    return {**json.loads(encode_host_facts_state(_facts())), **fields}
+
+
+def _decoded(document) -> HostFactsState:
+    return decode_host_facts_state(json.dumps(document).encode())
 
 
 # Contract.
 
 def test_round_trip_with_a_plus_in_the_kernel_release_and_nulls():
     value = _facts()
-    raw = encode_host_facts(value)
-    assert parse_host_facts(raw) == value
+    raw = encode_host_facts_state(value)
+    assert decode_host_facts_state(raw) == value
     document = json.loads(raw)
-    assert document["schema"] == 2 and document["kind"] == "host_facts"
     assert document["base_tag"] == "2026.10.01" and "base" not in document
     assert raw == json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
     assert len(raw) <= MAX_HOST_FACTS_BYTES
     empty = _facts(kernel_release=None, interface=None, link_state=None, address=None, base_tag=None)
-    assert parse_host_facts(encode_host_facts(empty)) == empty
+    assert decode_host_facts_state(encode_host_facts_state(empty)) == empty
     assert LINK_STATES == {"up", "down", "dormant", "lowerlayerdown", "notpresent", "testing", "unknown"}
-
-
-def test_a_stored_row_of_an_older_shape_reads_its_missing_or_refused_facts_as_none():
-    # Central's read side: one old row must not fail the fleet read (G12); ingest stays strict.
-    old = _document()
-    del old["base_tag"]
-    raw = json.dumps(old).encode()
-    with pytest.raises(ValueError):
-        parse_host_facts(raw)
-    assert stored_fact_values(raw) == {"kernel_release": "6.6.51+rpt-rpi-v8", "interface": "eth0",
-                                       "link_state": "up", "address": "192.168.1.40", "base_tag": None,
-                                       "reset_cause": None, "wall_clock": None, "boot": None}
-    assert stored_fact_values(json.dumps(_document(link_state="UP")).encode())["link_state"] is None
-    assert stored_fact_values(encode_host_facts(_facts())) == fact_values_document(_facts())
-    assert set(stored_fact_values(b"not json").values()) == {None}
 
 
 # Why this boot began: the hardware watchdog's reset (issue #125).
@@ -80,23 +60,18 @@ def test_the_reset_cause_round_trips_and_is_one_of_its_causes():
     assert RESET_CAUSES == ("watchdog", "other")
     for cause in (*RESET_CAUSES, None):
         value = _facts(reset_cause=cause)
-        raw = encode_host_facts(value)
-        assert parse_host_facts(raw) == value and json.loads(raw)["reset_cause"] == cause
-        assert stored_fact_values(raw) == fact_values_document(value)
-        assert fact_values_document(value)["reset_cause"] == cause
+        raw = encode_host_facts_state(value)
+        assert decode_host_facts_state(raw) == value and json.loads(raw)["reset_cause"] == cause
     with pytest.raises(ValueError, match="^invalid_host_fact_reset_cause$"):
         _facts(reset_cause="panic")
     for refused in ("panic", 1):
         with pytest.raises(ValueError):
-            parse_host_facts(json.dumps(_document(reset_cause=refused)).encode())
-    # The field is part of the record: a document without it is refused at ingest, and a stored row
-    # without it (or with a refused cause) reads as not read.
+            _decoded(_document(reset_cause=refused))
+    # The field is part of the value: a document without it is refused.
     old = _document()
     del old["reset_cause"]
     with pytest.raises(ValueError):
-        parse_host_facts(json.dumps(old).encode())
-    assert stored_fact_values(json.dumps(old).encode())["reset_cause"] is None
-    assert stored_fact_values(json.dumps(_document(reset_cause="panic")).encode())["reset_cause"] is None
+        _decoded(old)
 
 
 # The wall clock as the kernel judges it (decision 0032).
@@ -106,19 +81,17 @@ def test_the_wall_clock_round_trips_and_is_one_of_its_states():
     assert WALL_CLOCK_STATES == ("synchronised", "unsynchronised")
     for state in (*WALL_CLOCK_STATES, None):
         value = _facts(wall_clock=state)
-        raw = encode_host_facts(value)
-        assert parse_host_facts(raw) == value and json.loads(raw)["wall_clock"] == state
-        assert stored_fact_values(raw) == fact_values_document(value)
+        raw = encode_host_facts_state(value)
+        assert decode_host_facts_state(raw) == value and json.loads(raw)["wall_clock"] == state
     with pytest.raises(ValueError, match="^invalid_host_fact_wall_clock$"):
         _facts(wall_clock="maybe")
     for refused in ("maybe", 1):
         with pytest.raises(ValueError):
-            parse_host_facts(json.dumps(_document(wall_clock=refused)).encode())
+            _decoded(_document(wall_clock=refused))
     old = _document()
     del old["wall_clock"]
     with pytest.raises(ValueError):
-        parse_host_facts(json.dumps(old).encode())
-    assert stored_fact_values(json.dumps(old).encode())["wall_clock"] is None
+        _decoded(old)
 
 
 def test_the_kernels_wall_clock_verdict_reaches_the_facts_record(monkeypatch, tmp_path):
@@ -170,34 +143,31 @@ BOOT = BootReportV2((BootStageV2("handoff", "done", None, None, None), REFUSED_S
                     ("photo-wall-node-storage.service",), 0)
 
 
-def test_a_boot_report_round_trips_and_a_document_without_boot_encodes_as_before():
+def test_a_boot_report_round_trips_and_none_is_not_read():
     value = _facts(boot=BOOT)
-    raw = encode_host_facts(value)
-    assert parse_host_facts(raw) == value
+    raw = encode_host_facts_state(value)
+    assert decode_host_facts_state(raw) == value
     assert json.loads(raw)["boot"] == {
         "stages": [{"stage": "handoff", "state": "done", "fault": None, "required_bytes": None,
                     "room_bytes": None},
                    {"stage": "storage", "state": "refused", "fault": "node_memory_class",
                     "required_bytes": 3758096384, "room_bytes": 2147483648}],
         "failed_units": ["photo-wall-node-storage.service"], "failed_units_more": 0}
-    # An older node's document (no `boot` key) still validates, and boot=None omits the key.
-    assert "boot" not in json.loads(encode_host_facts(_facts()))
-    assert parse_host_facts(encode_host_facts(_facts())).boot is None
-    assert fact_values_document(value) != fact_values_document(_facts())
+    assert json.loads(encode_host_facts_state(_facts()))["boot"] is None
+    assert decode_host_facts_state(encode_host_facts_state(_facts())).boot is None
 
 
-def test_the_worst_case_boot_report_fits_the_facts_record():
+def test_the_worst_case_boot_report_fits_the_facts_value():
     stages = tuple(BootStageV2(stage, "refused", "f" * 64, 2**63 - 1, 2**63 - 1)
                    for stage in ("handoff", "storage", "prepare"))
     units = tuple(sorted(f"photo-wall-{index}" + "u" * 76 + ".service" for index in range(4)))
     assert all(len(unit) == 96 for unit in units)
-    producer = NodeProducerV2("s" * 256, "device-" + "a" * 64, 2**63 - 1, uuid4(), "host_core", uuid4())
     # The kernel release's worst case is its longest-encoding allowed character, 64 times.
     kernel = max((chr(code) for code in range(128) if valid_fact("kernel_release", chr(code))),
                  key=lambda character: len(json.dumps(character)))
-    worst = HostFactsV2(producer, 2**63 - 1, 2**63 - 1, kernel * 64, "e" * 15, "lowerlayerdown",
-                        "255.255.255.255", "t" * 128, BootReportV2(stages, units, 2**63 - 1), "watchdog")
-    assert len(encode_host_facts(worst)) <= MAX_HOST_FACTS_BYTES
+    worst = HostFactsState(kernel * 64, "e" * 15, "lowerlayerdown", "255.255.255.255", "t" * 128,
+                           "watchdog", "unsynchronised", BootReportV2(stages, units, 2**63 - 1))
+    assert len(encode_host_facts_state(worst)) <= MAX_HOST_FACTS_BYTES
 
 
 @pytest.mark.parametrize("stage", [
@@ -239,40 +209,25 @@ def test_a_malformed_boot_report_is_refused(report):
         BootReportV2(*report)
 
 
-@pytest.mark.parametrize("boot", [None, [], {"stages": [], "failed_units": []},
+@pytest.mark.parametrize("boot", [[], {"stages": [], "failed_units": []},
                                   {"stages": [{"stage": "storage"}], "failed_units": [],
                                    "failed_units_more": 0}])
-def test_ingest_refuses_a_malformed_boot_document(boot):
-    with pytest.raises(ValueError, match="invalid_boot"):
-        parse_host_facts(json.dumps(_document(boot=boot)).encode())
+def test_a_malformed_boot_document_is_refused(boot):
+    with pytest.raises(ValueError, match="host_facts"):
+        _decoded(_document(boot=boot))
     with pytest.raises(ValueError, match="invalid_host_facts"):
-        HostFactsV2(_producer(), 3, 1234, None, None, None, None, None, boot={"stages": []})
+        _facts(boot={"stages": []})
 
 
 def test_units_not_read_round_trip_as_null_never_as_none_failed():
     # Errata E-T3-2: a failed-units list that was never read is null on the wire, distinct from
-    # an empty list ("nothing failed"), and stored and posted documents compare equal.
+    # an empty list ("nothing failed").
     unread = _facts(boot=BootReportV2(BOOT.stages, None, None))
-    raw = encode_host_facts(unread)
+    raw = encode_host_facts_state(unread)
     assert json.loads(raw)["boot"]["failed_units"] is None
     assert json.loads(raw)["boot"]["failed_units_more"] is None
-    assert parse_host_facts(raw) == unread
-    assert stored_fact_values(raw) == fact_values_document(unread)
-    assert fact_values_document(unread) != fact_values_document(_facts(boot=BootReportV2(BOOT.stages, (), 0)))
-
-
-def test_stored_values_equal_the_posted_document_with_and_without_boot():
-    # Central's "values unchanged" compares these two (central/fleet/node_observations.py).
-    for value in (_facts(), _facts(boot=BOOT)):
-        assert stored_fact_values(encode_host_facts(value)) == fact_values_document(value)
-    # A row stored before `boot` existed equals a post that read none, and differs from one
-    # that did; an invalid stored `boot` reads as None and never fails the read.
-    old = json.dumps(_document()).encode()
-    assert stored_fact_values(old) == fact_values_document(_facts())
-    assert stored_fact_values(old) != fact_values_document(_facts(boot=BOOT))
-    assert stored_fact_values(json.dumps(_document(boot={"stages": 1})).encode())["boot"] is None
-    assert fact_values_document(_facts(boot=BOOT)) != fact_values_document(
-        _facts(boot=BootReportV2(BOOT.stages, (), 0)))
+    assert decode_host_facts_state(raw) == unread
+    assert unread != _facts(boot=BootReportV2(BOOT.stages, (), 0))
 
 
 REFUSED = {
@@ -290,9 +245,6 @@ REFUSED = {
     "a base tag with a space": {"base_tag": "2026 10 01"},
     "a 129-character base tag": {"base_tag": "2" * 129},
     "a missing key": None,
-    "another kind": {"kind": "host_observation"},
-    "a sequence of 0": {"sequence": 0},
-    "an App Manager producer": {"producer": producer_document(_producer("app_manager"))},
 }
 
 
@@ -302,7 +254,7 @@ def test_the_contract_refuses(change):
     if change is None:
         del document["address"]
     with pytest.raises(ValueError):
-        parse_host_facts(json.dumps(document).encode())
+        _decoded(document)
 
 
 def test_a_64_character_kernel_release_is_accepted_and_construction_refuses_like_parsing():

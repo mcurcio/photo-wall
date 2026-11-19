@@ -40,7 +40,7 @@ def test_operator_node_browser(registry, tmp_path):
     coordinator = Coordinator(registry.db, registry.clock)
     app = FastAPI()
     mount_node_routes(app, db=registry.db, clock=registry.clock, admin=lambda: None,
-        coordinator=coordinator, config=NodeControlConfig("node-test"), times=ProcessTransactionClock(registry.clock),
+        config=NodeControlConfig("node-test"), times=ProcessTransactionClock(registry.clock),
         content=build_content_services(registry.db, registry.clock, cache_root=tmp_path))
     reader = OperatorSnapshotReader(registry.db, registry.clock, registry,
         RuntimeStore(registry.db, registry.clock), MediaRepository(registry.db, registry.clock, times=ProcessTransactionClock(registry.clock)), coordinator)

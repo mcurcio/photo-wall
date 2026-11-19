@@ -76,7 +76,6 @@ from central.lock_waits import mount_lock_refusal
 from central.media_ports import MediaApplication
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
-from central.node_runtime_reconciliation import NodeRuntimeReconciler
 from central.operator_auth import OperatorAuth
 from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
 from central.paper_profile_routes import mount_paper_profile_routes
@@ -266,7 +265,7 @@ def create_app(
     )
     feed = content.feed if content is not None else None
     # Whether the scheduler loop runs, and when its last tick completed. Each step's own health
-    # is the Scheduler's (central/scheduler.py), built once the reconciler exists (below).
+    # is the Scheduler's (central/scheduler.py), built once the routes are mounted (below).
     scheduler_loop = {"enabled": run_scheduler, "running": False, "stopped": False,
                       "last_tick": None}
     # When a Player's state may have changed: its session socket pushes it then
@@ -922,14 +921,10 @@ def create_app(
                                profiles=PgPaperProfiles(db, clock, house_lock))
     if content is not None:
         mount_content_routes(app, content)
-    mount_node_routes(app, db=db, clock=clock, admin=admin, coordinator=coordinator, config=node_control,
+    mount_node_routes(app, db=db, clock=clock, admin=admin, config=node_control,
                       times=media_times, content=content)
-    app.state.node_reconciler = NodeRuntimeReconciler(app.state.node_sessions)
-    app.state.scheduler = Scheduler(app.state.node_reconciler, coordinator,
-                                    media_application.request_measurements, clock,
-                                    retentions={
-                                        "node-retention": NodeRecordRetention(db.transaction,
-                                                                              clock).prune})
+    app.state.scheduler = Scheduler(coordinator, media_application.request_measurements, clock,
+                                    retentions={"node-retention": NodeRecordRetention(db.transaction).prune})
     # A Node's leaf and Home Assistant's door arrive at Central's origin (erratum E-E3D-CUT-4): relayed to the hub.
     hub_leaf_url = hub_leaf_url or os.environ.get("PHOTO_WALL_HUB_LEAF_URL")
     if hub_leaf_url:

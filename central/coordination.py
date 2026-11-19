@@ -44,7 +44,7 @@ from central.registry import RegistryError
 from central.runtime import Scene
 from central.runtime_store import RuntimeStore
 from central.scheduler import scheduler_failure
-from central.transaction_locks import COORDINATION_LOCK, holds_node_lock_in, holds_runtime_locks_in
+from central.transaction_locks import COORDINATION_LOCK, holds_runtime_locks_in
 from central.wall_plan.assignment import Reservation, frame_clock_uncertainty
 from central.wall_plan.continuation import held_reservations
 from central.wall_plan.fit import FitTarget, fit_target
@@ -78,13 +78,6 @@ class CoordinationLimits(Model):
     # Roadmap 5a (slice W1): how far ahead the wall plan reaches, every Frame together; layers
     # are still offered only inside `horizon_seconds`.
     plan_seconds: float = Field(default=PLAN_SECONDS, gt=0, le=PLAN_SECONDS)
-
-
-@dataclass(frozen=True, slots=True)
-class DisplayAdmission:
-    allowed: bool
-    fence: str
-    reason: str
 
 
 class CoordinationError(RegistryError):
@@ -1258,83 +1251,6 @@ class Coordinator:
             (player_id, epoch),
         ).fetchone()
         return None if row is None else row["observed_sequence"]
-
-    def display_admission_in(self, conn, *, device_id: str, player_id: str, authority_epoch: int,
-                             output_id: str, frame_id: str, binding_generation: int, config_revision: int,
-                             process, app_epoch: int, environment_sha256: str,
-                             phase: str) -> DisplayAdmission:
-        """Authorize an exact operational surface, never an execution Commit.
-
-        Caller holds the Node's own lock (`acquire_node_lock`), never the fleet-wide
-        Coordination lock (issue #127). The player row is read FOR SHARE, so a binding write
-        on this one player orders against it and no other Node waits.
-        A live app linkage and Registry tuple are necessary.
-        """
-        from central.fleet.node_app_links import load_current_node_app_link_for_player_in
-
-        if not holds_node_lock_in(conn, device_id):
-            raise ValueError("node_display_node_lock_required")
-        if phase not in ("candidate", "handoff", "revision"):
-            raise ValueError("node_display_phase_invalid")
-        conn.execute("SELECT id FROM players WHERE id=%s FOR SHARE", (player_id,))
-        observed = self.installation.configuration_in(conn, player_id, authority_epoch)
-        if observed is None or not any(b.output_id == output_id and b.frame_id == frame_id
-                and b.generation == binding_generation
-                and b.configuration_revision == config_revision for b in observed["bindings"]):
-            return DisplayAdmission(False, "", "registry_output_changed")
-        link = load_current_node_app_link_for_player_in(conn, player_id, authority_epoch, self.clock.utc())
-        if link is None or (link.process, link.app_epoch, link.environment_sha256) != (
-                process, app_epoch, environment_sha256):
-            return DisplayAdmission(False, "", "app_process_link_changed")
-        fence = identity("display-", [player_id, authority_epoch, output_id, frame_id, binding_generation,
-            config_revision, link.producer.device_generation, str(link.producer.kernel_boot_id),
-            link.process.pid, link.process.start_ticks, str(link.process.invocation_id),
-            link.app_epoch, link.environment_sha256, phase])
-        return DisplayAdmission(True, fence, "current_linked_app")
-
-    def display_withdrawal_in(self, conn, *, device_id: str, player_id: str, authority_epoch: int,
-                              previous_surface, expected_surface) -> DisplayAdmission:
-        """Revoke exactly an old operational role after Registry authority changes.
-
-        Caller holds the Node's own lock, as for `display_admission_in`, and proves this
-        DisplayHost previously admitted the old surface. This decision neither changes Run
-        state nor grants a replacement surface.
-        """
-        from central.fleet.node_app_links import load_current_node_app_link_for_player_in
-
-        if not holds_node_lock_in(conn, device_id):
-            raise ValueError("node_display_node_lock_required")
-        conn.execute("SELECT id FROM players WHERE id=%s FOR SHARE", (player_id,))
-        if previous_surface.frame_id is None:
-            return DisplayAdmission(False, "", "historical_surface_identity_incomplete")
-        observed = self.installation.configuration_in(conn, player_id, authority_epoch)
-        if observed is None:
-            return DisplayAdmission(False, "", "registry_player_changed")
-        output_id = previous_surface.output.output_id
-        binding = next((b for b in observed["bindings"] if b.output_id == output_id), None)
-        if expected_surface is None:
-            if binding is not None:
-                return DisplayAdmission(False, "", "registry_output_still_bound")
-        else:
-            if (binding is None or expected_surface.output.output_id != output_id
-                    or (binding.frame_id, binding.generation, binding.configuration_revision) != (
-                        expected_surface.frame_id, expected_surface.binding_generation, expected_surface.config_revision)):
-                return DisplayAdmission(False, "", "registry_output_changed")
-            link = load_current_node_app_link_for_player_in(conn, player_id, authority_epoch, self.clock.utc())
-            if link is None or (link.process, link.app_epoch) != (expected_surface.process, expected_surface.app_epoch):
-                return DisplayAdmission(False, "", "app_process_link_changed")
-            if previous_surface == expected_surface:
-                return DisplayAdmission(False, "", "surface_still_current")
-        def parts(surface):
-            if surface is None:
-                return None
-            return [surface.frame_id, surface.output.output_id, str(surface.output.kernel_boot_id),
-                    str(surface.output.display_host_incarnation), surface.output.connection_generation,
-                    surface.output.mode_generation, surface.process.pid, surface.process.start_ticks,
-                    str(surface.process.invocation_id), surface.app_epoch, surface.binding_generation,
-                    surface.config_revision]
-        fence = identity("withdraw-", [player_id, authority_epoch, parts(previous_surface), parts(expected_surface)])
-        return DisplayAdmission(True, fence, "old_registry_surface_revoked")
 
     def _commit_due(self, conn, configurations, now, *, by: Actor):
         interrupted = {(row["player_id"], row["authority_epoch"], row["output_id"], row["frame_id"], row["binding_generation"])

@@ -12,29 +12,23 @@ and the `photo-wall-*` units PID1 lists as failed (None when never read on this 
 issue #125): "watchdog" after a watchdog reset, None when not read (the driver cannot tell).
 
 Categorical state rides here, reported on change; numbers stay metrics
-(contracts/node_observation.py). On the Node's bus the same facts are the host line's `facts`
-(`HostFactsState`, decision 0034); the HTTP record (`HostFactsV2`) stays until the old path goes.
+(contracts/node_observation.py). On the Node's bus the facts are the host line's `facts`
+(`HostFactsState`, decision 0034).
 """
 from __future__ import annotations
 
 import ipaddress
-import json
 import re
 from dataclasses import dataclass
 from typing import Final
 
-from contracts.node_commands import producer_document, producer_from_document
-from contracts.node_protocol import NodeProducerV2, counter, token
-from contracts.strict_json import loads_object
+from contracts.node_protocol import counter, token
 from contracts.wire_codec import decode, encode
 
 MAX_HOST_FACTS_BYTES: Final[int] = 2048
 # The kernel's operstate values (Documentation/networking/operstates.rst).
 LINK_STATES: Final[frozenset[str]] = frozenset(
     {"up", "down", "dormant", "lowerlayerdown", "notpresent", "testing", "unknown"})
-_FIELDS: Final[tuple[str, ...]] = ("producer", "sequence", "sampled_boottime_ms", "kernel_release",
-                                   "interface", "link_state", "address", "base_tag", "reset_cause",
-                                   "wall_clock")
 # Why this boot began, as the hardware watchdog's driver reports it (issue #125; the owner,
 # 2026-10-20, on keeping the watchdog: "keep", each watchdog reboot logged): "watchdog" when the
 # watchdog reset the board, "other" when the driver can tell and it did not.
@@ -174,17 +168,9 @@ class BootReportV2:
             raise ValueError("invalid_boot_report") from exc
 
 
-def boot_document(value: BootReportV2) -> dict:
-    """The JSON-ready form of a boot report: what the wire carries and what Central compares."""
-    return {"stages": [{"stage": stage.stage, "state": stage.state, "fault": stage.fault,
-                        "required_bytes": stage.required_bytes, "room_bytes": stage.room_bytes}
-                       for stage in value.stages],
-            "failed_units": None if value.failed_units is None else list(value.failed_units),
-            "failed_units_more": value.failed_units_more}
-
-
 def boot_from_document(value: object) -> BootReportV2:
-    """Strict: exactly `boot_document`'s shape."""
+    """Strict: exactly a `BootReportV2`'s plain fields (contracts/wire_codec.py `plain`), each stage
+    a `BootStageV2`'s."""
     if (not isinstance(value, dict) or set(value) != _BOOT_FIELDS
             or type(value["stages"]) is not list
             or (value["failed_units"] is not None and type(value["failed_units"]) is not list)
@@ -194,95 +180,6 @@ def boot_from_document(value: object) -> BootReportV2:
     units = None if value["failed_units"] is None else tuple(value["failed_units"])
     return BootReportV2(tuple(BootStageV2(**stage) for stage in value["stages"]),
                         units, value["failed_units_more"])
-
-
-@dataclass(frozen=True, slots=True)
-class HostFactsV2:
-    producer: NodeProducerV2
-    sequence: int
-    sampled_boottime_ms: int
-    kernel_release: str | None
-    interface: str | None
-    link_state: str | None
-    address: str | None
-    base_tag: str | None
-    # None = not read (and every document from a node older than the field).
-    boot: BootReportV2 | None = None
-    # One of RESET_CAUSES; None = not read this boot (no watchdog, or its driver cannot tell).
-    reset_cause: str | None = None
-    # One of WALL_CLOCK_STATES; None = not read (not Linux, or adjtimex failed).
-    wall_clock: str | None = None
-
-    def __post_init__(self) -> None:
-        if type(self.producer) is not NodeProducerV2 or self.producer.owner != "host_core":
-            raise ValueError("host_facts_producer_invalid")
-        if self.boot is not None and type(self.boot) is not BootReportV2:
-            raise ValueError("invalid_host_facts")
-        counter(self.sequence, 1)
-        counter(self.sampled_boottime_ms)
-        for name, rule in FACT_RULES.items():
-            value = getattr(self, name)
-            if value is not None:
-                rule(value)
-
-
-def fact_values_document(facts: HostFactsV2) -> dict:
-    """The JSON-ready facts, `boot` included: equal to `stored_fact_values` of the same
-    record's encoding, so Central's "values unchanged" compares like with like."""
-    return {**{name: getattr(facts, name) for name in FACT_RULES},
-            "boot": None if facts.boot is None else boot_document(facts.boot)}
-
-
-def encode_host_facts(value: HostFactsV2) -> bytes:
-    if type(value) is not HostFactsV2:
-        raise ValueError("invalid_host_facts")
-    # `boot` is omitted when not read, so a record without it encodes exactly as it did before
-    # the field existed (an older Central accepts it; a stored older row stays byte-identical).
-    boot = {} if value.boot is None else {"boot": boot_document(value.boot)}
-    raw = json.dumps({"schema": 2, "kind": "host_facts", "producer": producer_document(value.producer),
-                      **{name: getattr(value, name) for name in _FIELDS[1:]}, **boot},
-                     sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-    if len(raw) > MAX_HOST_FACTS_BYTES:
-        raise ValueError("host_facts_too_large")
-    return raw
-
-
-def parse_host_facts(raw: bytes) -> HostFactsV2:
-    value = loads_object(raw, max_bytes=MAX_HOST_FACTS_BYTES)
-    if (value is None or set(value) - {"boot"} != {"schema", "kind", *_FIELDS}
-            or type(value["schema"]) is not int or value["schema"] != 2
-            or value["kind"] != "host_facts"):
-        raise ValueError("invalid_host_facts")
-    boot = boot_from_document(value["boot"]) if "boot" in value else None
-    try:
-        return HostFactsV2(producer_from_document(value["producer"]),
-                           **{name: value[name] for name in _FIELDS[1:]}, boot=boot)
-    except (TypeError, KeyError, AttributeError) as exc:
-        raise ValueError("invalid_host_facts") from exc
-
-
-def _stored_boot(value: object) -> dict | None:
-    if value is None:
-        return None
-    try:
-        return boot_document(boot_from_document(value))
-    except (ValueError, TypeError):
-        return None
-
-
-def stored_fact_values(raw: bytes) -> dict:
-    """The facts of a STORED record, read tolerantly (Central's read side only).
-
-    A row written in an older shape (before a fact existed) or holding a fact today's rule
-    refuses serves that fact as None (not read), so one old row cannot fail a read that covers
-    every box (G12). `boot` likewise: its plain document, or None when absent or invalid. Ingest
-    stays strict: `parse_host_facts` is what a post must pass. Keys in `FACT_RULES` order, then
-    `boot`, matching `fact_values_document`.
-    """
-    value = loads_object(raw, max_bytes=MAX_HOST_FACTS_BYTES) or {}
-    return {**{name: value.get(name) if valid_fact(name, value.get(name)) else None
-               for name in FACT_RULES},
-            "boot": _stored_boot(value.get("boot"))}
 
 
 @dataclass(frozen=True, slots=True)

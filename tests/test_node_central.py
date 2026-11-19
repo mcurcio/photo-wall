@@ -1,4 +1,4 @@
-"""Durable V2 node admission/evidence, with real PostgreSQL and inert effects."""
+"""Durable V2 node admission and the node routes Central mounts, with real PostgreSQL and inert effects."""
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from uuid import UUID, uuid4
@@ -9,8 +9,6 @@ from test_fleet_attempts import BOOT_ID, DEVICE_ID, OFFER_ID, SERIAL, _seed
 from test_registry import ADMIN
 
 from central.app import create_app
-from central.fleet.node_ingest import NodeIngest
-from central.fleet.node_observations import NodeObservations
 from central.fleet.node_sessions import (
     NODE_AUDIENCE,
     NodeControlConfig,
@@ -18,15 +16,6 @@ from central.fleet.node_sessions import (
     NodeSessions,
 )
 from contracts.node_commands import NodeSessionClaim, encode_session_claim, parse_session_grant
-from contracts.node_observation import HostMetricV2, HostObservationV2, encode_host_observation
-from contracts.node_protocol import (
-    AppProcessFact,
-    NodeEventV2,
-    NodeProcessIdentity,
-    NodeSnapshotV2,
-    RebootFact,
-    encode_node_message,
-)
 
 
 def node_offer(registry, config=None):
@@ -75,238 +64,6 @@ def test_session_exact_retry_concurrent_and_scope_separation(registry):
         sessions.enroll(replace(claim, session_id=uuid4()))
 
 
-def test_replaced_producer_cannot_regress_current_projection(registry):
-    sessions, claim, grant = setup(registry)
-    ingest = NodeIngest(sessions)
-    event = NodeEventV2(grant.producer, uuid4(), 1, 1000, (RebootFact("unknown", "base_observer"),))
-    first = ingest.ingest(grant.session_id, claim.credential, encode_node_message(event))
-    registry.clock.advance(10)
-    assert ingest.ingest(grant.session_id, claim.credential, encode_node_message(event))["received_at"] == first["received_at"]
-    next_claim = replace(claim, session_id=uuid4(), incarnation_id=uuid4(),
-                         credential=uuid4().hex + uuid4().hex)
-    sessions.enroll(next_claim)
-    later = replace(event, event_id=uuid4(), sequence=2)
-    assert ingest.ingest(grant.session_id, claim.credential, encode_node_message(later))["disposition"] == "historical"
-    with registry.db.transaction() as conn:
-        with pytest.raises(NodeControlError, match="superseded"):
-            sessions.authenticate_in(conn, grant.session_id, claim.credential)
-
-
-def test_snapshot_before_event_atomic_dedupe_and_restart(registry):
-    sessions, claim, grant = setup(registry, "app_effect_broker")
-    first = AppProcessFact(NodeProcessIdentity(100, 1, uuid4()), 1, "a" * 64, "running")
-    second = AppProcessFact(NodeProcessIdentity(101, 2, uuid4()), 2, "b" * 64, "running")
-    snap = NodeSnapshotV2(grant.producer, uuid4(), 10, 1000, (replace(first, state="exited"),))
-    event = NodeEventV2(grant.producer, uuid4(), 9, 999, (first, second))
-    ingest = NodeIngest(sessions)
-    ingest.ingest(grant.session_id, claim.credential, encode_node_message(snap))
-    with ThreadPoolExecutor(4) as pool:
-        outcomes = list(pool.map(lambda _: NodeIngest(sessions).ingest(
-            grant.session_id, claim.credential, encode_node_message(event)), range(4)))
-    assert sorted(outcome["disposition"] for outcome in outcomes) == ["applied", "duplicate", "duplicate", "duplicate"]
-    with registry.db.transaction() as conn:
-        assert conn.execute("SELECT count(*) AS n FROM node_evidence").fetchone()["n"] == 2
-        assert conn.execute("SELECT count(*) AS n FROM node_reconciliation_work").fetchone()["n"] == 2
-        projection = conn.execute("SELECT projection FROM node_producers").fetchone()["projection"]
-        assert sorted(item["sequence"] for item in projection) == [9, 10]
-    with pytest.raises(NodeControlError, match="sequence_conflict"):
-        ingest.ingest(grant.session_id, claim.credential, encode_node_message(replace(event, event_id=uuid4())))
-    with pytest.raises(NodeControlError, match="identity_conflict"):
-        ingest.ingest(grant.session_id, claim.credential, encode_node_message(replace(event, sequence=11)))
-
-
-def test_observation_replay_keeps_sample_and_receipt_age(registry):
-    sessions, claim, grant = setup(registry)
-    service = NodeObservations(sessions)
-    sample = HostObservationV2(grant.producer, 1, 1000, (HostMetricV2("uptime", 1, "seconds"),))
-    first = service.record(grant.session_id, claim.credential, encode_host_observation(sample))
-    registry.clock.advance(20)
-    duplicate = service.record(grant.session_id, claim.credential, encode_host_observation(sample))
-    assert duplicate["received_at"] == first["received_at"]
-    with pytest.raises(NodeControlError, match="identity_conflict"):
-        service.record(grant.session_id, claim.credential,
-                       encode_host_observation(replace(sample, sampled_boottime_ms=2000)))
-
-
-def test_display_read_serves_the_newest_exchange_per_output_on_the_current_boot(registry):
-    # Console DDD C2 (§16 display read): newest per Output across the current admission's
-    # Display Host producers; an earlier boot is never served; receipt age on one clock.
-    from test_node_boot import claim_for, cold_setup
-
-    from contracts.node_boot import NodeBootRequestV2
-    from contracts.node_display import (
-        DisplayExchange,
-        DisplayReceipt,
-        Surface,
-        encode_display_exchange,
-    )
-    from contracts.node_protocol import OutputKey
-    service, sessions, _ = cold_setup(registry)
-    reads = NodeObservations(sessions)
-    process = NodeProcessIdentity(123, 10, uuid4())
-
-    def display_host(offer):
-        return sessions.enroll(claim_for(offer, owner="display_host"))
-
-    def record(grant, output_id, sampled, *, connected=True, admitted=False, receipt_at=None, receipt_revision=7):
-        output = OutputKey(grant.producer.kernel_boot_id, grant.producer.incarnation_id, output_id, 1, 1)
-        surface = Surface(output, process, 42, 3, 7, "lobby")
-        received = replace(surface, config_revision=receipt_revision)
-        receipt = None if receipt_at is None else DisplayReceipt(received, uuid4(), "buffer-1", "tag", receipt_at)
-        exchange = DisplayExchange(grant.producer, uuid4(), sampled, output, connected,
-                                   admitted=surface if admitted else None, receipt=receipt)
-        with registry.db.transaction() as conn:
-            producer = conn.execute("SELECT producer_id FROM node_sessions WHERE session_id=%s",
-                                    (grant.session_id,)).fetchone()["producer_id"]
-            conn.execute("INSERT INTO node_display_exchanges(producer_id,request_id,session_id,output_id,"
-                         "sampled_boottime_ms,request,response,decision_id,received_at) "
-                         "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                         (producer, exchange.request_id, grant.session_id, output_id, sampled,
-                          encode_display_exchange(exchange), b"{}", uuid4(), registry.clock.utc()))
-
-    def served():
-        return {item["output_id"]: item for item in reads.status(DEVICE_ID)["display_outputs"]}
-
-    first_boot = service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
-    assert served() == {}
-    before = display_host(first_boot)
-    record(before, "HDMI-A-1", 1000, connected=False)
-    record(before, "HDMI-A-1", 1100, admitted=True, receipt_at=900)
-    record(before, "HDMI-A-2", 5000, admitted=True, receipt_at=4000, receipt_revision=6)
-    received = registry.clock.utc()
-    registry.clock.advance(5)
-    record(before, "HDMI-A-2", 4500)  # received later on Central's clock, sampled earlier: loses
-    restarted = display_host(first_boot)  # a new Display Host producer within the same boot
-    record(restarted, "HDMI-A-1", 2000, admitted=True, receipt_at=1600)
-    now = served()
-    assert set(now) == {"HDMI-A-1", "HDMI-A-2"}
-    assert now["HDMI-A-1"] == {"output_id": "HDMI-A-1", "received_at": received + 5, "connected": True,
-        "surface": {"frame_id": "lobby", "binding_generation": 3, "config_revision": 7},
-        "receipt": {"matches_surface": True, "age_ms": 400}}  # the restarted producer wins
-    assert now["HDMI-A-2"] == {"output_id": "HDMI-A-2", "received_at": received, "connected": True,
-        "surface": {"frame_id": "lobby", "binding_generation": 3, "config_revision": 7},
-        "receipt": {"matches_surface": False, "age_ms": 1000}}  # a receipt for another revision
-    # A later boot supersedes the first; its earlier samples (a new boot clock) still win,
-    # because the first boot's exchanges are never served.
-    later = display_host(service.offer(NodeBootRequestV2(SERIAL, uuid4(), "b" * 64)))
-    assert served() == {}
-    record(later, "HDMI-A-1", 10, connected=False)
-    assert served() == {"HDMI-A-1": {"output_id": "HDMI-A-1", "received_at": registry.clock.utc(),
-                                     "connected": False, "surface": None, "receipt": None}}
-    # The read is bounded by the index, not the boot's history: thousands of exchanges per
-    # Output leave the served rows unchanged and the plan reads a handful of index entries.
-    from central.fleet.node_display import DISPLAY_OUTPUTS_SQL, display_outputs_params
-    with registry.db.transaction() as conn:
-        producer = conn.execute("SELECT producer_id FROM node_sessions WHERE session_id=%s",
-                                (later.session_id,)).fetchone()["producer_id"]
-        conn.execute("INSERT INTO node_display_exchanges(producer_id,request_id,session_id,output_id,"
-                     "sampled_boottime_ms,request,response,decision_id,received_at) "
-                     "SELECT %s,gen_random_uuid(),%s,'HDMI-A-' || (1 + i %% 2),i,'\\x00'::bytea,"
-                     "'\\x00'::bytea,gen_random_uuid(),0 FROM generate_series(100,20099) i",
-                     (producer, later.session_id))
-        conn.execute("ANALYZE node_display_exchanges")
-    record(later, "HDMI-A-1", 50000, connected=False)
-    record(later, "HDMI-A-2", 50001, admitted=True)
-    assert {key: item["connected"] for key, item in served().items()} == {"HDMI-A-1": False, "HDMI-A-2": True}
-    with registry.db.transaction() as conn:
-        plan = conn.execute("EXPLAIN (ANALYZE, FORMAT JSON) " + DISPLAY_OUTPUTS_SQL,
-                            display_outputs_params(DEVICE_ID, later.producer.device_generation)).fetchone()
-    plan = next(iter(plan.values()))[0]["Plan"]
-    assert 0 < _exchange_rows(plan) < 50  # never a scan of the 20,002 rows
-
-
-def _exchange_rows(node):
-    """Rows the plan read from node_display_exchanges, across every loop."""
-    own = (node["Actual Rows"] * node["Actual Loops"]
-           if node.get("Relation Name") == "node_display_exchanges" else 0)
-    return own + sum(_exchange_rows(child) for child in node.get("Plans", []))
-
-
-def test_display_read_is_bounded_however_many_producers_the_node_creates(registry):
-    # A node picks its incarnation ids, so it picks how many display_host producers one boot
-    # has (up to the daily session cap), and any Output id. The read is bounded in SQL by
-    # the newest producers and the Output bound, never by that count: removing the producer
-    # LIMIT reads every producer's Outputs and fails the row bound below.
-    from test_node_boot import claim_for, cold_setup
-
-    from central.fleet.node_display import (
-        _MAX_OUTPUTS,
-        _MAX_PRODUCERS,
-        DISPLAY_OUTPUTS_SQL,
-        display_outputs_params,
-    )
-    from contracts.node_boot import NodeBootRequestV2
-    service, sessions, _ = cold_setup(registry)
-    offer = service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
-    producers = 3 * _MAX_PRODUCERS
-    grants = []
-    for _ in range(producers):
-        grants.append(sessions.enroll(claim_for(offer, owner="display_host")))
-        registry.clock.advance(1)  # admission order is Central's own clock
-    with registry.db.transaction() as conn:
-        for index, grant in enumerate(grants):
-            producer = conn.execute("SELECT producer_id FROM node_sessions WHERE session_id=%s",
-                                    (grant.session_id,)).fetchone()["producer_id"]
-            # Each producer floods past the Output bound; the newest producer samples latest.
-            conn.execute("INSERT INTO node_display_exchanges(producer_id,request_id,session_id,output_id,"
-                         "sampled_boottime_ms,request,response,decision_id,received_at) "
-                         "SELECT %s,gen_random_uuid(),%s,'OUT-' || lpad(i::text,3,'0'),%s,"
-                         "'\\x00'::bytea,'\\x00'::bytea,gen_random_uuid(),0 "
-                         "FROM generate_series(1,%s) i",
-                         (producer, grant.session_id, 1000 + index, _MAX_OUTPUTS + 6))
-        conn.execute("ANALYZE node_display_exchanges")
-        params = display_outputs_params(DEVICE_ID, grants[0].producer.device_generation)
-        rows = conn.execute(DISPLAY_OUTPUTS_SQL, params).fetchall()
-        plan = conn.execute("EXPLAIN (ANALYZE, FORMAT JSON) " + DISPLAY_OUTPUTS_SQL, params).fetchone()
-    assert len(rows) == _MAX_OUTPUTS
-    assert {row["sampled_boottime_ms"] for row in rows} == {1000 + producers - 1}  # newest wins
-    assert [row["output_id"] for row in rows] == sorted(row["output_id"] for row in rows)
-    plan = next(iter(plan.values()))[0]["Plan"]
-    # Skip-scan plus newest probe per (producer, Output), then one request row per winner.
-    bound = _MAX_PRODUCERS * (2 * _MAX_OUTPUTS + 2) + _MAX_OUTPUTS
-    assert _exchange_rows(plan) <= bound
-
-
-def test_an_undecodable_display_exchange_fails_only_its_own_output(registry):
-    # §15: a stored exchange this Central cannot decode (a display contract changed across an
-    # upgrade while the node kept its boot) is served as undecodable for that Output alone;
-    # the device read, the other Outputs and the reboot records survive.
-    from test_node_boot import claim_for, cold_setup
-
-    from contracts.node_boot import NodeBootRequestV2
-    from contracts.node_display import DisplayExchange, encode_display_exchange
-    from contracts.node_protocol import OutputKey
-    service, sessions, _ = cold_setup(registry)
-    reads = NodeObservations(sessions)
-    grant = sessions.enroll(claim_for(service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64)),
-                                      owner="display_host"))
-
-    def store(output_id, sampled, request):
-        with registry.db.transaction() as conn:
-            producer = conn.execute("SELECT producer_id FROM node_sessions WHERE session_id=%s",
-                                    (grant.session_id,)).fetchone()["producer_id"]
-            conn.execute("INSERT INTO node_display_exchanges(producer_id,request_id,session_id,output_id,"
-                         "sampled_boottime_ms,request,response,decision_id,received_at) "
-                         "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s)",
-                         (producer, uuid4(), grant.session_id, output_id, sampled, request, b"{}",
-                          uuid4(), registry.clock.utc()))
-
-    output = OutputKey(grant.producer.kernel_boot_id, grant.producer.incarnation_id, "HDMI-A-1", 1, 1)
-    store("HDMI-A-1", 100, encode_display_exchange(DisplayExchange(grant.producer, uuid4(), 100, output, True)))
-    store("HDMI-A-2", 200, b'{"schema":99,"kind":"display_exchange"}')
-    store("HDMI-A-3", 300, b"\x00")
-    status = reads.status(DEVICE_ID)
-    served = {item["output_id"]: item for item in status["display_outputs"]}
-    received = registry.clock.utc()
-    assert served == {
-        "HDMI-A-1": {"output_id": "HDMI-A-1", "received_at": received, "connected": True,
-                     "surface": None, "receipt": None},
-        "HDMI-A-2": {"output_id": "HDMI-A-2", "received_at": received, "undecodable": True},
-        "HDMI-A-3": {"output_id": "HDMI-A-3", "received_at": received, "undecodable": True},
-    }
-    assert "reboot_commands" in status and "sessions" not in status
-
-
 def test_the_default_app_serves_node_routes_and_no_command_poll(registry):
     """Node control is not a mode: the default composition serves the node path, with nothing
     opened first (no effect gate, owner answer G-A). The host polls for no command: an operator's
@@ -325,8 +82,6 @@ def test_the_default_app_serves_node_routes_and_no_command_poll(registry):
         headers = {"Authorization": "Bearer " + claim.credential, "X-Node-Session": str(grant.session_id)}
         assert grant.command_eligible and grant.command_reason == "boot_admitted"
         assert client.get("/v2/node/commands", headers=headers).status_code in (404, 405)
-        assert client.post("/v2/node/evidence", content=b"{}", headers=headers).status_code == 422
-        assert client.post("/v2/node/observations", content=b"x" * 20000, headers=headers).status_code == 413
         admin = {"Authorization": "Bearer " + ADMIN}
         assert client.get("/v1/operator/node/status", headers=admin).status_code == 404
 
@@ -350,3 +105,17 @@ def test_the_app_operation_routes_are_not_mounted(registry, method, path):
     with TestClient(app) as client:
         response = client.request(method, path, content=b"{}", headers={"Authorization": "Bearer " + ADMIN})
         assert response.status_code in (404, 405), (method, path, response.status_code)
+
+
+# The old path's posts behind no page, gone with the display exchange and the reconciler (S4c-2a-iv).
+OLD_NODE_POSTS = ("/v2/node/evidence", "/v2/node/observations", "/v2/node/host-facts", "/v2/node/display")
+
+
+@pytest.mark.parametrize("path", OLD_NODE_POSTS)
+def test_the_old_node_posts_are_not_mounted(registry, path):
+    """Mutation probe: re-mount `/v2/node/display` -> its post answers, fails."""
+    app = create_app(registry.db, registry.clock, ADMIN)
+    with TestClient(app) as client:
+        response = client.post(path, content=b"{}", headers={"Authorization": "Bearer x",
+                                                            "X-Node-Session": str(UUID(int=3))})
+        assert response.status_code in (404, 405), (path, response.status_code)

@@ -24,15 +24,12 @@ from central.content_routes import (
     until_disconnect,
 )
 from central.content_wiring import ContentServices
-from central.coordination import Coordinator
 from central.db import Database, TransactionClock
 from central.fleet.bytes import OfferByteReader
 from central.fleet.models import FleetError, TrialRefusal, TrialRefused
 from central.fleet.node_app_links import NodeAppLinks
 from central.fleet.node_boot import NodeBootService
 from central.fleet.node_calibration import NodeCalibration, TrialBegin, TrialOperation
-from central.fleet.node_display import NodeDisplay
-from central.fleet.node_ingest import NodeIngest
 from central.fleet.node_observations import NodeObservations
 from central.fleet.node_release_catalog import NodeReleaseCatalog
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
@@ -49,11 +46,7 @@ from contracts.central_api import InstallRefusal, InstallStarted
 from contracts.node_app_link import MAX_NODE_LINK_BYTES
 from contracts.node_boot import MAX_NODE_BOOT_BYTES, encode_node_boot_offer, parse_node_boot_request
 from contracts.node_commands import MAX_COMMAND_BYTES, encode_session_grant, parse_session_claim
-from contracts.node_display import MAX_DISPLAY_BYTES
-from contracts.node_host_facts import MAX_HOST_FACTS_BYTES
 from contracts.node_link import SERIAL_PATTERN
-from contracts.node_observation import MAX_OBSERVATION_BYTES
-from contracts.node_protocol import MAX_NODE_MESSAGE_BYTES
 from contracts.strict_json import loads_object
 from contracts.time import Clock
 
@@ -92,11 +85,10 @@ def _trial_body[T](adapter: TypeAdapter[T], raw: bytes) -> T:
 
 
 def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
-                      admin: Callable[..., None], coordinator: Coordinator, config: NodeControlConfig,
+                      admin: Callable[..., None], config: NodeControlConfig,
                       times: TransactionClock, content: ContentServices | None = None) -> None:
     sessions = NodeSessions(db, clock, config)
-    ingest, observations = NodeIngest(sessions), NodeObservations(sessions)
-    display = NodeDisplay(sessions, runtime=coordinator)
+    observations = NodeObservations(sessions)
     bytes_reader = OfferByteReader(content.reader if content else None)
     reboots = OperatorReboots(db, content.publisher if content else None)
     # Each Pi's version needs the cache's readiness: without content services (a fake database) no
@@ -193,21 +185,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         grant = await invoke(sessions.enroll, claim)
         return Response(encode_session_grant(grant), media_type="application/json")
 
-    @app.post("/v2/node/evidence")
-    async def evidence(request: Request):
-        raw = await body(request, MAX_NODE_MESSAGE_BYTES)
-        return await invoke(ingest.ingest, *_credentials(request), raw)
-
-    @app.post("/v2/node/observations")
-    async def observation(request: Request):
-        raw = await body(request, MAX_OBSERVATION_BYTES)
-        return await invoke(observations.record, *_credentials(request), raw)
-
-    @app.post("/v2/node/host-facts")
-    async def host_facts(request: Request):
-        raw = await body(request, MAX_HOST_FACTS_BYTES)
-        return await invoke(observations.record_facts, *_credentials(request), raw)
-
     @app.post("/v2/node/app-links")
     async def app_link(request: Request):
         raw = await body(request, MAX_NODE_LINK_BYTES)
@@ -240,12 +217,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
             raise TrialRefused(TrialRefusal.OPERATION_INVALID) from exc
         return await invoke(lambda: trials.restore(frame_id, trial_id, entry_id=restore.entry_id,
                                                    expected_sequence=restore.expected_sequence, by=by))
-
-    @app.post("/v2/node/display")
-    async def display_exchange(request: Request):
-        raw = await body(request, MAX_DISPLAY_BYTES)
-        result = await invoke(display.exchange, *_credentials(request), raw)
-        return Response(result, media_type="application/json")
 
     @app.post("/v1/operator/node/devices/{device_id}/reboots")
     async def reboot(device_id: str, request: Request, by: Actor = Depends(admin)):

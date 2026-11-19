@@ -45,7 +45,7 @@ def drain(begin: Begin, statement: str, params: Mapping[str, object], *, batch_r
 
     Never:
     - takes an advisory lock, or runs inside a caller's transaction: a batch can never hold the
-      Coordination, Runtime or Node lock;
+      Coordination or Runtime lock;
     - retries or catches: a failed batch raises the driver's error (a statement or lock timeout
       included) with the earlier batches committed. The caller's scheduler step turns failing
       and the next run goes on where this one stopped;

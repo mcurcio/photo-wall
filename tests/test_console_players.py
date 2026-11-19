@@ -116,32 +116,12 @@ out.disabled = rows({ read: null, readAt: null,
 out.noRecord = rows({ read: null, readAt: null,
                       error: { code: "node_device_unavailable", status: 403 } }).map((row) => row.facts[0][1]);
 out.notYet = rows({ read: null, readAt: null, error: null }).map((row) => row.facts[0][1]);
-out.notEnrolled = rows(reporting, null)[2].facts;
-// --- Display Host (C2): the display read's newest exchange per Output on the current boot.
-const displayOutputs = [
-  { output_id: "HDMI-A-1", received_at: 1997, connected: true,
-    surface: { frame_id: "lobby", binding_generation: 3, config_revision: 7 },
-    receipt: { matches_surface: true, age_ms: 2400 } },
-  { output_id: "HDMI-A-2", received_at: 1990, connected: false, surface: null,
-    receipt: { matches_surface: false, age_ms: 100 } },
-  { output_id: "HDMI-A-3", received_at: 1985, connected: true,
-    surface: { frame_id: "hall", binding_generation: 1, config_revision: 2 }, receipt: null },
-];
-const withDisplay = (display_outputs) => ({ ...reporting, read: { ...read, display_outputs } });
-out.display = rows(withDisplay(displayOutputs))[1];
-out.displayModel = node.displayOutputs(withDisplay(displayOutputs), 2000).map((output) => ({
-  outputId: output.outputId, facts: output.facts.map(factText) }));
-out.displayEmpty = rows(withDisplay([]))[1].facts;
-// An Output Central could not decode (served undecodable): one Unknown fact, the rest unaffected.
-out.displayUndecodable = rows(withDisplay([displayOutputs[1],
-  { output_id: "HDMI-A-9", received_at: 1999, undecodable: true }]))[1].facts;
-out.displayNoTime = node.displayOutputs(withDisplay([{ ...displayOutputs[0], received_at: null }]), 2000)
-  .map((output) => output.facts.map(factText));
+out.notEnrolled = rows(reporting, null)[1].facts;
 // Central reads no reports from a retired Player: its null last_report_at is not "no report".
-out.retiredApp = rows(reporting, "p-r")[2].facts;
+out.retiredApp = rows(reporting, "p-r")[1].facts;
 // Payload drift (a field of the wrong type) throws, for the section's boundary to contain.
 out.drift = (() => {
-  try { node.layerEvidence({ nodeDevice: { ...reporting, read: { ...read, display_outputs: [null] } }, snapshot,
+  try { node.layerEvidence({ nodeDevice: reporting, snapshot: { inventory: { players: 5 } },
                              playerId: "p-a" }); return "rendered"; }
   catch { return "threw"; }
 })();
@@ -253,69 +233,29 @@ def test_players_by_device_has_one_row_per_box_including_boxes_seen_only_at_boot
     assert out["empty"] == []
 
 
-def test_layer_evidence_has_three_labelled_rows_bottom_up():
-    """S4c-2a-iii: the host's row reads its line (no session, no host sample); App Manager and the
-    App Effect Broker, which only the old path reported, have no row. Mutation probe: bring back
-    the App Manager row -> the layer list differs, fails."""
+def test_layer_evidence_has_two_labelled_rows_bottom_up():
+    """S4c-2a-iii and 2a-iv: the host's row reads its line (no session, no host sample); App
+    Manager, the App Effect Broker and Display Host, which reported in the device read only on the
+    old path, have no row. Mutation probe: bring back the Display Host row -> the layer list
+    differs, fails."""
     out = _run()
     layers = out["layers"]
     assert [(row["layer"], row["level"]) for row in layers] == [
-        ("Host Management", "L0"), ("Display Host", "L1.5"), ("Player app", "L2")]
+        ("Host Management", "L0"), ("Player app", "L2")]
     assert layers[0]["facts"] == [["Last reported", "Host Management last reported 4 s ago"]]
     assert layers[0]["details"] == [
         "Line start start-2",
         "Source: Host Management's line as Central keeps it. It states a value only when it changes."]
-    # A Central that does not serve the display read: Unknown, naming the field.
-    assert layers[1]["facts"] == [["Last reported", "Unknown: display_outputs not served"]]
-    assert layers[2]["facts"] == [
+    assert layers[1]["facts"] == [
         ["Last reported", "Unknown: no readiness report on the current enrollment (epoch 3)"]]
-    assert "Enrolled 10 min ago (enrollment is not a report)" in layers[2]["details"]
-
-
-def test_display_host_row_reads_the_newest_exchange_per_output():
-    out = _run()
-    display = out["display"]
-    # Last reported: the newest exchange receipt across the boot (1997 against read 2000).
-    assert display["facts"][0] == ["Last reported", "Display Host last reported 3 s ago"]
-    assert display["facts"][1:] == [
-        ["Output HDMI-A-1", "Display Host last reported 3 s ago · Panel connector: connected"],
-        ["Output HDMI-A-1", "Display Host last reported 3 s ago · Admitted surface: the app's surface "
-                            "for Frame lobby (binding generation 3)"],
-        ["Output HDMI-A-1", "Display Host last reported 3 s ago · Compositor receipt for that surface, "
-                            "sampled 2 s before this report"],
-        ["Output HDMI-A-2", "Display Host last reported 10 s ago · Panel connector: not connected"],
-        ["Output HDMI-A-2", "Display Host last reported 10 s ago · Display Host reported no app surface admitted"],
-        ["Output HDMI-A-2", "Display Host last reported 10 s ago · No compositor receipt for that surface "
-                            "in this report"],
-        ["Output HDMI-A-3", "Display Host last reported 15 s ago · Panel connector: connected"],
-        ["Output HDMI-A-3", "Display Host last reported 15 s ago · Admitted surface: the app's surface "
-                            "for Frame hall (binding generation 1)"],
-        ["Output HDMI-A-3", "Display Host last reported 15 s ago · No compositor receipt for that surface "
-                            "in this report"],
-    ]
-    assert [item["outputId"] for item in out["displayModel"]] == ["HDMI-A-1", "HDMI-A-2", "HDMI-A-3"]
-    assert [len(item["facts"]) for item in out["displayModel"]] == [3, 3, 3]
-    assert out["displayEmpty"] == [["Last reported", "Unknown: Display Host has reported no Output on this boot"]]
-    assert out["displayNoTime"] == [["Unknown: display_outputs received_at not served"] * 3]
-    assert out["displayUndecodable"] == [
-        ["Last reported", "Display Host last reported 1 s ago"],
-        ["Output HDMI-A-2", "Display Host last reported 10 s ago · Panel connector: not connected"],
-        ["Output HDMI-A-2", "Display Host last reported 10 s ago · Display Host reported no app surface admitted"],
-        ["Output HDMI-A-2", "Display Host last reported 10 s ago · No compositor receipt for that surface "
-                            "in this report"],
-        ["Output HDMI-A-9", "Unknown: Central could not decode Display Host's last exchange for this Output"],
-    ]
-    # The display wording never names the diagnostic page, and never claims what is seen.
-    words = " ".join([text for _, text in display["facts"]] + display["details"]).lower()
-    for phrase in ("diagnostic page", "visible", "showing"):
-        assert phrase not in words
+    assert "Enrolled 10 min ago (enrollment is not a report)" in layers[1]["details"]
 
 
 def test_a_silent_app_with_a_reporting_host_shows_both_ages():
     out = _run()
     # p-b's last readiness report is 10 s old against the snapshot's read time.
     assert out["silentApp"][0] == "Host Management last reported 4 s ago"
-    assert out["silentApp"][2] == "Player app last reported 10 s ago"
+    assert out["silentApp"][1] == "Player app last reported 10 s ago"
 
 
 def test_layer_evidence_names_what_it_cannot_read():
@@ -323,11 +263,10 @@ def test_layer_evidence_names_what_it_cannot_read():
     assert out["noHostLine"][0] == "Unknown: no Host Management line heard"
     assert out["noHostValue"][0] == "Unknown: host.received_at not served"
     disabled = "Unknown: the node read failed (unanswered)"
-    assert out["disabled"][:2] == [disabled] * 2
-    assert out["disabled"][2] == "Unknown: no readiness report on the current enrollment (epoch 3)"
-    record = "Unknown: no current node record for this box"
-    assert out["noRecord"][:2] == [record] * 2
-    assert out["notYet"][:2] == ["Unknown: not read yet"] * 2
+    assert out["disabled"][0] == disabled
+    assert out["disabled"][1] == "Unknown: no readiness report on the current enrollment (epoch 3)"
+    assert out["noRecord"][0] == "Unknown: no current node record for this box"
+    assert out["notYet"][0] == "Unknown: not read yet"
     assert out["notEnrolled"] == [["Last reported", "Unknown: this box has not enrolled"]]
     assert out["retiredApp"] == [
         ["Last reported", "Unknown: Central does not read reports from a retired Player"]]

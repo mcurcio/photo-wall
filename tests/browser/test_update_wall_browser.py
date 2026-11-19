@@ -124,7 +124,7 @@ class Fleet:
             return self._json(route, {"device_id": device, "device_generation": 3, "read_at": 1_759_363_300,
                                       "host": {"epoch": box["boot"], "born_at": 1_759_363_000,
                                                "received_at": 1_759_363_290},
-                                      "reboot_commands": box["commands"], "boot_claims": [], "display_outputs": []})
+                                      "reboot_commands": box["commands"], "boot_claims": []})
         body = request.post_data_json
         if tail == "reboots":
             self.reboots.append(device)

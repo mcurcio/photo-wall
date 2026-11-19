@@ -1,12 +1,8 @@
-"""Host-health tracer, Central side (console DDD §60, §63-§64, bead T1), on real PostgreSQL:
-the old path's observation coalescing on the producer's own boot clock (never a Central receipt
-clock, so a stepped or skewed Central replica changes nothing; until S4c removes it), and G12
+"""Host-health tracer, Central side (console DDD §60, §63-§64, bead T1), on real PostgreSQL: G12
 (`GET /v1/operator/node/hosts`): the metrics and facts each Pi's host line states as Central's link
 store records them (decision 0034, S4a), the numbers-only thresholds, the Node API link with the
-hub's state, its access rules and its lock-free snapshot. No post is ever refused for volume
-(decision 0034: the daily caps are gone)."""
+hub's state, its access rules and its lock-free snapshot."""
 import asyncio
-import math
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -33,45 +29,23 @@ from central.infra.node_link_store import PgLinkStores
 from contracts.node_boot import NodeBootRequestV2
 from contracts.node_host_facts import HostFactsState, encode_host_facts_state
 from contracts.node_link import Pipe
-from contracts.node_observation import (
-    HOST_OBSERVATION_INTERVAL_SECONDS,
-    HostMetricsState,
-    HostMetricV2,
-    HostObservationV2,
-    encode_host_metrics_state,
-    encode_host_observation,
-)
+from contracts.node_observation import HostMetricsState, HostMetricV2, encode_host_metrics_state
 from contracts.node_state import BIRTH_KEY, HOST_FACTS_KEY, HOST_LINE, HOST_METRICS_KEY
 from nodeapi.buffers import state_prefix, state_stream
 from nodeapi.epoch import Token
 from nodeapi.pull import Batch, Read
 
-INTERVAL = HOST_OBSERVATION_INTERVAL_SECONDS
 NODE = NodeControlConfig("node-test")
 
 
 class Host:
-    """Host Management on one boot of the fixture box, posting through Central's owner."""
+    """Host Management on one boot of the fixture box: Central's boot offer and its session."""
 
     def __init__(self, registry, sessions, boots, boot_id=None):
         self.registry, self.sessions = registry, sessions
         self.offer = boots.offer(NodeBootRequestV2(SERIAL, boot_id or uuid4(), uuid4().hex + uuid4().hex))
         self.claim = claim_for(self.offer)
         self.grant = sessions.enroll(self.claim)
-        self.observations = NodeObservations(sessions)
-        self.sequence = 0
-
-    def post(self, temperature=50.0, *, boottime_ms=None, observations=None):
-        """One post. The node's boot clock follows the test clock's monotonic reading (in ms)
-        unless `boottime_ms` says otherwise; `observations` posts through another Central
-        replica."""
-        self.sequence += 1
-        if boottime_ms is None:
-            boottime_ms = int(self.registry.clock.monotonic() * 1000)
-        sample = HostObservationV2(self.grant.producer, self.sequence, boottime_ms,
-                                   (HostMetricV2("soc_temperature", temperature, "celsius"),))
-        return (observations or self.observations).record(
-            self.claim.session_id, self.claim.credential, encode_host_observation(sample))
 
 
 def on_line(registry, serial, key, value, seq):
@@ -102,110 +76,15 @@ def _rig(registry, *, session_seconds=3600):
     return boots, sessions
 
 
-def _stored(registry):
-    with registry.db.transaction() as conn:
-        return conn.execute("SELECT count(*) n FROM node_host_observations").fetchone()["n"]
-
-
 def _device(read, device_id=DEVICE_ID):
     return next((item for item in read["devices"] if item["device_id"] == device_id), None)
 
 
-def test_a_producer_posting_every_2_s_for_a_day_stores_one_per_interval_and_never_429(registry):
-    boots, sessions = _rig(registry, session_seconds=86400)
-    host = Host(registry, sessions, boots)
-    dispositions = {}
-    for _ in range(86400 // 2 - 1):
-        answer = host.post()
-        dispositions[answer["disposition"]] = dispositions.get(answer["disposition"], 0) + 1
-        if answer["disposition"] == "coalesced":
-            assert answer["stored"] is False and answer["authority_granted"] is False
-        registry.clock.advance(2)
-    stored = _stored(registry)
-    assert stored <= math.ceil(86400 / INTERVAL) + 1
-    assert stored == dispositions["recorded"] and dispositions["coalesced"] > 0
-
-
-def test_a_post_inside_the_interval_is_coalesced_and_one_after_it_stores(registry):
-    boots, sessions = _rig(registry)
-    host = Host(registry, sessions, boots)
-    assert host.post()["disposition"] == "recorded"
-    registry.clock.advance(INTERVAL - 0.5)
-    assert host.post() == {"stored": False, "disposition": "coalesced",
-                           "received_at": registry.clock.utc(), "authority_granted": False}
-    registry.clock.advance(0.5)
-    assert host.post()["disposition"] == "recorded"
-    assert _stored(registry) == 2
-
-
-def test_central_clock_steps_neither_coalesce_nor_store_a_post(registry):
-    # Coalescing reads the producer's boot clock only. Central's wall clock stepping back 30 s
-    # with the node's clock a whole interval on stores; stepping forward ten minutes (inside
-    # the session) with the node's clock 1 s on coalesces. A receipt-clock judgement gets both backwards.
-    boots, sessions = _rig(registry)
-    host = Host(registry, sessions, boots)
-    registry.clock.advance(60)
-    assert host.post()["disposition"] == "recorded"
-    registry.clock.advance(INTERVAL)
-    registry.clock.step_utc(-30)
-    assert host.post()["disposition"] == "recorded"
-    registry.clock.advance(1)
-    registry.clock.step_utc(600)
-    assert host.post()["disposition"] == "coalesced"
-    assert _stored(registry) == 2
-
-
-def test_a_skewed_replica_judges_coalescing_by_the_producers_boot_clock(registry):
-    # Two Central replicas whose clocks disagree by 40 s, one in each direction, share the
-    # database. Whichever replica ingests, a post 2 s after the stored one on the node's clock
-    # is coalesced and one an interval after it stores.
-    from contracts.time import ManualClock
-    boots, sessions = _rig(registry)
-    host = Host(registry, sessions, boots)
-    registry.clock.advance(120)
-    assert host.post()["disposition"] == "recorded"
-
-    def replica(skew):
-        clock = ManualClock(wall=registry.clock.utc() + skew, mono=registry.clock.monotonic())
-        return NodeObservations(NodeSessions(registry.db, clock, NODE)), clock
-
-    for skew in (40, -40):
-        other, clock = replica(skew)
-        registry.clock.advance(2)
-        clock.advance(2)
-        answer = host.post(observations=other)
-        assert answer["disposition"] == "coalesced", skew
-        registry.clock.advance(INTERVAL)
-        clock.advance(INTERVAL)
-        assert host.post(observations=other)["disposition"] == "recorded", skew
-    assert _stored(registry) == 3
-
-
-def test_a_sample_older_than_the_stored_one_on_the_boot_clock_stores(registry):
-    boots, sessions = _rig(registry)
-    host = Host(registry, sessions, boots)
-    assert host.post(boottime_ms=50_000)["disposition"] == "recorded"
-    # A higher sequence carrying an earlier boot-clock reading: a negative difference stores.
-    assert host.post(boottime_ms=49_000)["disposition"] == "recorded"
-    assert host.post(boottime_ms=49_000 + INTERVAL * 1000 - 1)["disposition"] == "coalesced"
-
-
-def test_the_same_sequence_is_still_a_duplicate_before_coalescing(registry):
-    boots, sessions = _rig(registry)
-    host = Host(registry, sessions, boots)
-    first = host.post(boottime_ms=5000)
-    host.sequence -= 1
-    registry.clock.advance(1)
-    again = host.post(boottime_ms=5000)
-    assert again["disposition"] == "duplicate" and again["received_at"] == first["received_at"]
-
-
-def test_g12_serves_what_the_host_line_states_and_not_the_old_path(registry):
-    """Criterion 4. Mutation probe: read `host` from node_host_observations -> the bus-only Pi reads
-    never heard, fails."""
+def test_g12_serves_what_the_host_line_states(registry):
+    """Criterion 4. Mutation probe: serve no metrics from the line -> `host` stays None, fails."""
     boots, sessions = _rig(registry)
     observations = NodeObservations(sessions)
-    Host(registry, sessions, boots).post(12.0)          # the old path's post: never served
+    Host(registry, sessions, boots)
     served = _device(observations.fleet_hosts())
     assert served["host"] is None and served["facts"] is None
     assert "previous_boot_received_at" not in served
@@ -240,19 +119,19 @@ def test_g12_serves_what_the_host_line_states_and_not_the_old_path(registry):
 
 
 def test_the_device_read_states_the_host_line_and_nothing_of_the_old_path(registry):
-    """S4c-2a-iii: the device read's host part is the host line's (its birth's stream creation and
-    when Central recorded the birth and the newest metrics or facts); no session, producer,
-    admission, host sample or App Manager preparation is served, though the old path still posted.
+    """S4c-2a-iii and 2a-iv: the device read's host part is the host line's (its birth's stream
+    creation and when Central recorded the birth and the newest metrics or facts); no session,
+    producer, admission, host sample, App Manager preparation or display exchange is served.
     Mutation probe: serve `sessions` again -> the key set differs, fails."""
     boots, sessions = _rig(registry)
     observations = NodeObservations(sessions)
-    Host(registry, sessions, boots).post(12.0)          # the old path's post: never served
+    Host(registry, sessions, boots)
     assert observations.status(DEVICE_ID)["host"] is None   # no birth on the line yet
     on_line(registry, SERIAL, BIRTH_KEY, b"{}", 1)
     metrics_on_line(registry, SERIAL, 50.0, 2)
     read = observations.status(DEVICE_ID)
     assert set(read) == {"device_id", "device_generation", "read_at", "host", "boot_claims",
-                         "reboot_commands", "physical_output", "display_outputs"}
+                         "reboot_commands", "physical_output"}
     with registry.db.transaction() as conn:
         recorded = {row["subject"]: row["recorded_at"] for row in conn.execute(
             "SELECT subject, recorded_at FROM node_states WHERE device_id=%s", (DEVICE_ID,)).fetchall()}
@@ -291,7 +170,7 @@ def test_g12_omits_retired_boxes_and_lists_active_ones_without_a_boot(registry):
 
 def test_g12_serves_each_boxs_own_bus_link_linked_unlinked_and_never_seen(registry):
     boots, sessions = _rig(registry)
-    Host(registry, sessions, boots).post()
+    Host(registry, sessions, boots)
     unlinked_id, unseen_id = "device-" + "d" * 64, "device-" + "e" * 64
     with registry.db.transaction() as conn:
         for device_id in (unlinked_id, unseen_id):

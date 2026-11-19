@@ -1,32 +1,27 @@
-"""The device fence on real PostgreSQL, through Central's real routes.
+"""The device fence on real PostgreSQL, through Central's real services and routes.
 
-A node request acts on its device's generation under a shared fence, so one slow transaction (a
-commit waiting on the disk) never makes the next request from the same device, or the operator's
-device page, wait out the lock timeout. Only a change to the generation (an offer, an enrolment,
+A node session acts on its device's generation under a shared fence, so one slow transaction (a
+commit waiting on the disk) never makes the next act on the same device, or the operator's device
+page, wait out the lock timeout. Only a change to the generation (an offer, an enrolment,
 retirement) is exclusive."""
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
-from test_fleet_attempts import BASE_TAG, BOOT_ID, DEVICE_ID, SERIAL
+from test_fleet_attempts import BOOT_ID, DEVICE_ID, SERIAL
 from test_node_boot import publish_deployment
 from test_node_central import node_offer
-from test_node_fleet_hosts import Host, _rig
 from test_registry import ADMIN, enroll
 
 from central.app import create_app
 from central.fleet.device_fence import fence_in, retire_in
 from central.fleet.models import FleetError
 from central.fleet.node_boot import parse_node_deployment
-from central.fleet.node_observations import NodeObservations
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
 from contracts.node_commands import NodeSessionClaim
-from contracts.node_host_facts import HostFactsV2, encode_host_facts
-from contracts.node_observation import HostMetricV2, HostObservationV2, encode_host_observation
 
 
 def _enrolled(registry, owner="host_core"):
@@ -38,9 +33,10 @@ def _enrolled(registry, owner="host_core"):
     return sessions, claim, sessions.enroll(claim)
 
 
-def _sample(grant) -> bytes:
-    """One Host Management sample, the host session's own node request (its command poll is gone)."""
-    return encode_host_observation(HostObservationV2(grant.producer, 1, 1000, (HostMetricV2("uptime", 1, "seconds"),)))
+def _act(registry, sessions, claim) -> None:
+    """One act of the session: its authentication under the device's shared fence, committed."""
+    with registry.db.transaction() as conn:
+        sessions.authenticate_in(conn, claim.session_id, claim.credential)
 
 
 class _Held:
@@ -68,33 +64,30 @@ class _Held:
         self.thread.join()
 
 
-def test_a_slow_node_request_never_stalls_the_next_node_request_or_the_device_page(registry):
-    sessions, claim, grant = _enrolled(registry)
+def test_a_slow_node_act_never_stalls_the_next_act_or_the_device_page(registry):
+    sessions, claim, _ = _enrolled(registry)
     app = create_app(registry.db, registry.clock, ADMIN)
-    node = {"Authorization": "Bearer " + claim.credential, "X-Node-Session": str(grant.session_id)}
     admin = {"Authorization": "Bearer " + ADMIN}
     with TestClient(app, raise_server_exceptions=False) as client, _Held(registry, sessions, claim):
         started = time.monotonic()
-        polled = client.post("/v2/node/observations", content=_sample(grant), headers=node)
-        assert polled.status_code == 200, polled.text
+        _act(registry, sessions, claim)
         page = client.get(f"/v1/operator/node/devices/{DEVICE_ID}", headers=admin)
         assert page.status_code == 200, page.text
         assert time.monotonic() - started < 2
 
 
 def test_retirement_waits_for_an_open_act_then_refuses_every_act(registry):
-    sessions, claim, grant = _enrolled(registry)
+    sessions, claim, _ = _enrolled(registry)
     player, _, _ = enroll(registry, device_id=DEVICE_ID)
-    app = create_app(registry.db, registry.clock, ADMIN)
-    node = {"Authorization": "Bearer " + claim.credential, "X-Node-Session": str(grant.session_id)}
-    with TestClient(app, raise_server_exceptions=False) as client, ThreadPoolExecutor(1) as pool:
+    with ThreadPoolExecutor(1) as pool:
         with _Held(registry, sessions, claim):
             retiring = pool.submit(registry.retire, player["player_id"], by="console")
             time.sleep(0.5)
             assert not retiring.done()
         retiring.result(10)
-        polled = client.post("/v2/node/observations", content=_sample(grant), headers=node)
-        assert (polled.status_code, polled.json()) == (403, {"error": "node_device_unavailable"})
+        with pytest.raises(NodeControlError) as refused:
+            _act(registry, sessions, claim)
+        assert (refused.value.code, refused.value.status) == ("node_device_unavailable", 403)
     registry.retire(player["player_id"], by="console")     # retiring a retired device changes nothing
     with registry.db.transaction() as conn:
         assert conn.execute("SELECT generation FROM devices WHERE device_id=%s",
@@ -167,49 +160,3 @@ def test_a_transaction_fences_its_one_device_again_but_never_upgrades_or_fences_
         conn.commit()
         fence_in(conn, DEVICE_ID, "change")
         assert fence_in(conn, DEVICE_ID, "act").generation() == 1
-
-
-class _StalledCommits:
-    """A Database whose transactions wait for `release` before they commit, as a COMMIT behind a
-    stalled WAL flush does."""
-
-    def __init__(self, db):
-        self.db, self.wrote, self.release = db, threading.Event(), threading.Event()
-
-    @contextmanager
-    def transaction(self):
-        with self.db.transaction() as conn:
-            yield conn
-            self.wrote.set()
-            assert self.release.wait(30)
-
-    def __getattr__(self, name):
-        return getattr(self.db, name)
-
-
-@pytest.mark.parametrize("kind", ["observation", "facts"])
-def test_a_producers_retry_during_its_own_slow_commit_is_a_duplicate(registry, kind):
-    """A Node retries a post whose first COMMIT is stalled (its client timeout is 0.5 s): the
-    retry waits for that commit and answers `duplicate`, never a 500."""
-    boots, sessions = _rig(registry)
-    host = Host(registry, sessions, boots)
-    stalled = _StalledCommits(registry.db)
-    slow = NodeObservations(NodeSessions(stalled, registry.clock, sessions.config))
-    if kind == "observation":
-        raw = encode_host_observation(HostObservationV2(
-            host.grant.producer, 1, 5000, (HostMetricV2("soc_temperature", 50.0, "celsius"),)))
-        record = "record"
-    else:
-        raw = encode_host_facts(HostFactsV2(
-            host.grant.producer, 1, 1000, kernel_release="6.6.51+rpt-rpi-v8", interface="eth0",
-            link_state="up", address="192.168.1.40", base_tag=BASE_TAG))
-        record = "record_facts"
-    session = (host.claim.session_id, host.claim.credential, raw)
-    with ThreadPoolExecutor(2) as pool:
-        first = pool.submit(getattr(slow, record), *session)
-        assert stalled.wrote.wait(10)
-        retry = pool.submit(getattr(host.observations, record), *session)
-        time.sleep(0.3)
-        stalled.release.set()
-        assert first.result(10)["disposition"] == "recorded"
-        assert retry.result(10)["disposition"] == "duplicate"

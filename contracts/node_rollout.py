@@ -10,7 +10,7 @@ import math
 import re
 from hashlib import sha256
 
-REPORT_CATEGORIES = ("compatibility_matrix", "fence_contract", "readiness_contract")
+REPORT_CATEGORIES = ("compatibility_matrix", "readiness_contract")
 MAX_QUALIFICATION_BYTES = 131072
 _HEX = re.compile(r"[0-9a-f]{64}\Z")
 _IMAGE = re.compile(r"[a-z0-9][a-z0-9./:_-]+@sha256:[0-9a-f]{64}\Z")

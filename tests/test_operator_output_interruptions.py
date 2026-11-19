@@ -8,9 +8,9 @@ so its `cause_layer` is 'display_host'.
 
 import pytest
 from fastapi.testclient import TestClient
+from support.node_rig import rig
 from support.output_report import report_modes
 from test_fleet_attempts import DEVICE_ID
-from test_node_runtime_reconciliation import rig
 from test_operator_frames import ADMIN, AUTH
 from test_registry import enroll, frame
 
@@ -35,7 +35,7 @@ def _unresolved(registry):
 
 
 def test_a_loss_on_the_current_binding_is_served_on_the_snapshot_with_its_cause_layer(registry):
-    _, player, _, _, _, _, surfaces, _, _ = rig(registry)
+    _, player, _, _, _, _, surfaces, _ = rig(registry)
     _lose_first_output(registry, surfaces)
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     with TestClient(app) as client:
@@ -60,7 +60,7 @@ def test_a_loss_on_the_current_binding_is_served_on_the_snapshot_with_its_cause_
 
 
 def test_a_loss_from_an_earlier_binding_generation_of_the_same_output_is_not_served(registry):
-    _, player, _, _, _, _, surfaces, _, _ = rig(registry)
+    _, player, _, _, _, _, surfaces, _ = rig(registry)
     _lose_first_output(registry, surfaces)
     old = surfaces[0]
     registry.unbind(old.frame_id, expected_generation=old.binding_generation, by="console")
@@ -71,7 +71,7 @@ def test_a_loss_from_an_earlier_binding_generation_of_the_same_output_is_not_ser
 
 
 def test_a_frame_newly_bound_to_that_output_inherits_nothing(registry):
-    _, player, _, _, _, _, surfaces, _, _ = rig(registry)
+    _, player, _, _, _, _, surfaces, _ = rig(registry)
     _lose_first_output(registry, surfaces)
     old = surfaces[0]
     registry.unbind(old.frame_id, expected_generation=old.binding_generation, by="console")
@@ -85,7 +85,7 @@ def test_a_frame_newly_bound_to_that_output_inherits_nothing(registry):
 
 
 def test_a_loss_from_an_earlier_authority_epoch_is_not_served(registry):
-    _, _, key, _, _, _, surfaces, _, _ = rig(registry)
+    _, _, key, _, _, _, surfaces, _ = rig(registry)
     _lose_first_output(registry, surfaces)
     enroll(registry, key, device_id=DEVICE_ID, report=False)   # the display is still away
     assert _unresolved(registry) == 1
@@ -94,7 +94,7 @@ def test_a_loss_from_an_earlier_authority_epoch_is_not_served(registry):
 
 @pytest.mark.parametrize("resolved", [False, True])
 def test_only_an_unresolved_loss_is_served(registry, resolved):
-    _, _, _, _, _, _, surfaces, _, _ = rig(registry)
+    _, _, _, _, _, _, surfaces, _ = rig(registry)
     _lose_first_output(registry, surfaces)
     if resolved:
         with registry.db.transaction() as conn:
