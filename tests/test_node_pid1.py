@@ -287,7 +287,7 @@ class Node:
         self.masks = tuple(unit for unit in MASKS if not (rebootable and unit == "reboot.target"))
         work.mkdir(exist_ok=True)
         cpuinfo = work / "cpuinfo"
-        cpuinfo.write_text(cpuinfo_text("abcdef1234567890"))
+        cpuinfo.write_text(cpuinfo_text(SERIAL))
         self.name = "photo-wall-node-pid1-" + phase + "-" + secrets.token_hex(4)
         self.container = Container(self.name, run=subprocess.run)
         argv = docker_run_argv(image, self.name, cpuinfo, target="basic.target")
@@ -761,13 +761,16 @@ class Node:
         contracts; a kill -9 restarts it at once and neither the Player, the broker nor HostCore
         notices. HostCore's session writes the host's birth (its release digest the boot's base tag)
         and, after the kill, writes it again in the bus's new epoch with no help from Central.
-        `before_kill(born)` runs once birth is read, before the kill. Returns (born, reborn)."""
+        `before_kill(born)` runs once birth is read, before the kill. Returns (born, reborn).
+        host.json holds the base tag alone (decision 0034, S4c: HostCore is given no serial), so
+        the bus's name is checked against the serial the fixture's Central offered and the Pi's
+        cpuinfo states (SERIAL)."""
         self.copy_bus_probe()
         host = json.loads(self.run("cat", "/run/photo-wall-node/host.json"))
-        serial = host["serial"]
+        assert set(host) == {"base_tag"}, host
         before = self._bus_answers(time.monotonic() + BUS_SECONDS)
         assert before == {
-            "server_name": node_user(serial), "jetstream": True, "listen": ["127.0.0.1"]
+            "server_name": node_user(SERIAL), "jetstream": True, "listen": ["127.0.0.1"]
         }, before
         born = self._host_birth(time.monotonic() + BUS_SECONDS)
         assert born["birth"]["component"] == "host", born
