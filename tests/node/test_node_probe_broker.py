@@ -41,8 +41,8 @@ def listener(tmp_path):
     directory.mkdir(mode=0o750)
     feed = Feed(512)
     readers = {"uid": 0}
-    served = broker_runner.feed_listener(feed, directory / "feed.sock", owner_uid=os.getuid(),
-                                         group=os.getgid(), peer=lambda connection: readers["uid"],
+    served = broker_runner.feed_listener(feed, broker_runner.RunFacts(feed), directory / "feed.sock",
+                                         owner_uid=os.getuid(), group=os.getgid(), peer=lambda connection: readers["uid"],
                                          kind=socket.SOCK_SEQPACKET if LINUX else socket.SOCK_STREAM)
     yield served, feed, readers
     served.close()

@@ -10,11 +10,11 @@ from test_node_boot import environment
 
 from appliance.apps import broker_runner
 from appliance.apps.broker import Launch, RunningApp
-from appliance.apps.broker_runner import BrokerLoop
+from appliance.apps.broker_runner import BrokerLoop, answer_broker_feed
 from appliance.apps.descriptors import DESCRIPTOR_SAMPLE_MS
 from appliance.apps.probe import AppRunKey
 from appliance.feed import Feed
-from appliance.kernel.app_facts import APP_DESCRIPTORS, APP_EXITED, APP_STARTED, RUN_RESTATE_MS
+from appliance.kernel.app_facts import APP_DESCRIPTORS, APP_EXITED, APP_RUN_STATE, APP_STARTED
 from contracts.node_protocol import NodeProcessIdentity
 
 TICKS = 31751781
@@ -110,25 +110,28 @@ def test_a_pid_now_naming_another_process_is_not_sampled(tmp_path, monkeypatch):
         store.close()
 
 
-def test_the_holding_run_state_is_restated_until_it_changes(tmp_path, monkeypatch):
-    """A reader that missed a statement (a feed gap, a new broker incarnation, the ring's
-    eviction) reads it again within RUN_RESTATE_MS: `app_started` while the run is current,
-    `app_exited` once it is not. Mutation probe: drop the restatement -> one statement each."""
+def test_a_frozen_run_and_a_dead_one_state_nothing_more(tmp_path, monkeypatch):
+    """Issue #125 (CI's PID1 `dark` leg, 2026-11-19): `app_started` means a run started, so a run
+    that stays current (frozen by SIGSTOP) or stays down states each fact once, however long it
+    holds; every feed page carries the state instead. Mutation probe: restate the holding fact on
+    a timer -> repeated `app_started` and `app_exited`."""
     loop, feed, state, store = broker_loop(tmp_path, monkeypatch)
     try:
         running = running_app(396, 1)
         loop.driver.launched = lambda: Launch(1, None, 0, running)  # the record outlives the run
-        state["running"] = running
-        for ms in range(0, 2 * RUN_RESTATE_MS, 1000):  # a turn each second
-            state["ms"] = ms
-            loop.turn()
-        state["running"] = None
-        for ms in range(2 * RUN_RESTATE_MS, 4 * RUN_RESTATE_MS, 1000):
-            state["ms"] = ms
-            loop.turn()
         run = AppRunKey.of(running).document()
-        assert facts(feed, APP_STARTED, APP_EXITED) == [
-            (APP_STARTED, {"run": run}), (APP_STARTED, {"run": run}),
-            (APP_EXITED, {"run": run}), (APP_EXITED, {"run": run})]
+        state["running"] = running
+        for ms in range(0, 120_000, 1000):  # two minutes of turns, one a second
+            state["ms"] = ms
+            loop.turn()
+        page = answer_broker_feed(feed, loop.facts, {"after": 0})
+        assert page[APP_RUN_STATE] == {"run": run, "exited": False}
+        state["running"] = None
+        for ms in range(120_000, 240_000, 1000):
+            state["ms"] = ms
+            loop.turn()
+        assert facts(feed, APP_STARTED, APP_EXITED) == [(APP_STARTED, {"run": run}), (APP_EXITED, {"run": run})]
+        page = answer_broker_feed(feed, loop.facts, {"after": 0})
+        assert page[APP_RUN_STATE] == {"run": run, "exited": True}
     finally:
         store.close()

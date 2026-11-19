@@ -9,11 +9,15 @@ live here, the lowest layer both reach. Stdlib only.
   spawn or adoption: the run the driver saw, else the launch's epoch alone,
   `appliance.apps.probe.AppRunKey.of_launch`); a started run that a known turn finds not current
   has exited. So a run that began and ended between two turns (a Player that exits within the
-  broker's first turn after a cold start) still starts and exits. Each is stated when it first
-  holds and restated every RUN_RESTATE_MS while it holds, so a reader's feed gap, a new broker
-  incarnation or the ring's eviction never loses it (the judge's `forget` drops a pending
-  condition; the next statement opens it again). Judged on every known turn, Central session or
-  not.
+  broker's first turn after a cold start) still starts and exits. Each is a fact, stated once
+  when it first holds and never again: a run that is frozen, or stays down, writes nothing more
+  (issue #125: `app_started` means a run started). Judged on every known turn, Central session
+  or not.
+- APP_RUN_STATE: the same state as a snapshot, carried on every page of the broker's feed
+  (`AppRunState`, None before any launch names a run), current at the reply. A reader whose
+  read had a gap (the ring's eviction, a new broker incarnation) learns the run state from it
+  once it has caught up, never from a fact repeated on a timer (`run_state_fact`; the judge's
+  `forget` drops a pending condition and the snapshot opens it again).
 - `app_observation_failed`: the broker could not observe the app's unit (a driver fault, say a
   unit failed with its main process still set); reported once per reason while it lasts, and the
   broker observes again on a backoff (`appliance.apps.broker_runner.OBSERVATION_BACKOFF_MS`),
@@ -41,7 +45,7 @@ APP_DESCRIPTORS: Final = "app_descriptors"
 APP_OBSERVATION_FAILED: Final = "app_observation_failed"
 APP_FRAMES_BLACK: Final = "app_frames_black"
 APP_RUN_OP: Final = "app_run"       # the broker's current run, on Display's ingress
-RUN_RESTATE_MS: Final = 10_000      # how often the holding `app_started`/`app_exited` is stated again
+APP_RUN_STATE: Final = "app_run_state"  # the broker feed page's run state snapshot (`AppRunState`)
 PLAYER_UID: Final = 10004           # the Player's uid (debian sysusers pw-player): its unit's User=, Display's grant
 
 
@@ -66,6 +70,24 @@ class AppRunValue(TypedDict):
     """The value of `app_started` and `app_exited`."""
 
     run: RunDocument
+
+
+class AppRunState(TypedDict):
+    """APP_RUN_STATE: the run the current launch named and whether a known turn found it gone."""
+
+    run: RunDocument
+    exited: bool
+
+
+def run_state_fact(state: object) -> tuple[str, AppRunValue] | None:
+    """The fact a page's APP_RUN_STATE holds: (`app_exited` or `app_started`, its value); None
+    when no launch named a run. ValueError("app_run_state") when it is not an AppRunState."""
+    if state is None:
+        return None
+    if (type(state) is not dict or set(state) != {"run", "exited"} or type(state["run"]) is not dict
+            or type(state["exited"]) is not bool):
+        raise ValueError("app_run_state")
+    return (APP_EXITED if state["exited"] else APP_STARTED), {"run": state["run"]}
 
 
 class AppObservationFailedValue(TypedDict):
@@ -97,6 +119,7 @@ class AppFramesBlackValue(TypedDict):
     frames: list[FrameBlackFact]
 
 
-__all__ = ["APP_DESCRIPTORS", "APP_EXITED", "APP_FRAMES_BLACK", "APP_OBSERVATION_FAILED", "APP_RUN_OP", "APP_STARTED",
-           "PLAYER_UID", "RUN_RESTATE_MS", "AppDescriptorsValue", "AppFramesBlackValue", "AppObservationFailedValue", "AppRunOp",
-           "AppRunValue", "FrameBlackFact", "RunDocument"]
+__all__ = ["APP_DESCRIPTORS", "APP_EXITED", "APP_FRAMES_BLACK", "APP_OBSERVATION_FAILED", "APP_RUN_OP",
+           "APP_RUN_STATE", "APP_STARTED", "PLAYER_UID", "AppDescriptorsValue", "AppFramesBlackValue",
+           "AppObservationFailedValue", "AppRunOp", "AppRunState", "AppRunValue", "FrameBlackFact", "RunDocument",
+           "run_state_fact"]
