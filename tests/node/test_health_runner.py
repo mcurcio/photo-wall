@@ -532,11 +532,11 @@ def test_changes_are_pushed_each_turn_and_everything_every_v_over_3(pairs):
     # The evidence began at 1000 ms on the boot clock: 07:17:01 on the Pi's own clock.
     assert tinted.lines[0] == FAULTS[APP_UNRESPONSIVE].household_line + " · since 07:17"
     clock.now = 2000 + RAISE  # a change between refreshes is pushed on its own turn
-    broker.feed.append("app_link_accepted", {"run": RUN, "player_id": "player-1"})
-    health.turn()
-    [named] = received(theirs)
-    assert named.serial > tinted.serial and "Player player-1" in named.lines[1]
-    tinted = named
+    broker.feed.append("app_started", {"run": AppRunKey(uuid4(), 102, 8, 1).document()})
+    health.turn()  # another run starts: the card clears
+    [cleared] = received(theirs)
+    assert cleared.serial > tinted.serial and not cleared.tint
+    tinted = cleared
     clock.now = 1000 + RAISE + INSTRUCTION_STALE_MS // 3 - 1
     health.turn()
     assert received(theirs) == []
