@@ -1,8 +1,7 @@
 """The current Registry control row and the one rule that joins an applied ACK receipt to it.
 
-A node app link (node_app_links.py) and node acceptance (node_acceptance.py) both prove a
-Player process against the receipt Registry issued for its latest applied control delivery;
-this module is that join's one home.
+A node app link (node_app_links.py) proves a Player process against the receipt Registry issued
+for its latest applied control delivery; this module is that join's one home.
 """
 
 from __future__ import annotations

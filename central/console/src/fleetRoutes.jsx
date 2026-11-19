@@ -13,7 +13,7 @@ import { UpdateWallPage } from "./UpdateWallPage.jsx";
  * `#/hardware/<device-id>`); one Pi's Software and screens page (`#/players/<device-id>`,
  * reached from the Pi header only, so it has no sidebar link and no list until the Software
  * list lands); and Releases (`#/releases`, Part E §25), the home of the fleet-wide release
- * aggregates, with its Update the wall journey (`#/releases/update/<tag>[/try/<player-id>]`,
+ * aggregates, with its Update the wall journey (`#/releases/update/<tag>[/skip/<player-id>…]`,
  * §25a). Like the Wall sections, the shell mounts them ONLY while current, so a Pi page's node
  * read and the release read stop when the operator leaves them. Like the Show and neutral
  * sections they never reach the Frame page or its live adjustment (R4;
@@ -49,7 +49,7 @@ export const fleetRoutes = Object.freeze(
       label: "Releases",
       render: ({ snapshot, bootFacts, route, navigate }) =>
         route.flow === "update" ? (
-          <UpdateWallPage key={route.id} tag={route.id} tried={route.tried ?? null}
+          <UpdateWallPage key={route.id} tag={route.id}
             skipped={route.skipped ?? []} snapshot={snapshot}
             bootFacts={bootFacts} navigate={navigate} />
         ) : (

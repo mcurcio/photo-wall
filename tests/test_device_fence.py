@@ -79,8 +79,6 @@ def test_a_slow_node_request_never_stalls_the_next_node_request_or_the_device_pa
         assert polled.status_code == 200, polled.text
         page = client.get(f"/v1/operator/node/devices/{DEVICE_ID}", headers=admin)
         assert page.status_code == 200, page.text
-        attempts = client.get(f"/v1/operator/node/devices/{DEVICE_ID}/app-attempts", headers=admin)
-        assert attempts.status_code == 200, attempts.text
         assert time.monotonic() - started < 2
 
 

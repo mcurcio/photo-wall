@@ -7,9 +7,8 @@ import { liveRunsFor } from "./join.js";
 import { nodeUnknown } from "./nodeRead.js";
 
 /**
- * The fleet's commands on one box (console DDD §10-§11, bead B2): Reboot Player and the
- * read-only app operations, as pure functions from the node read (nodeRead.js) to the
- * request the console sends and the named state it shows.
+ * The fleet's command on one box (console DDD §10-§11, bead B2): Reboot Player, as pure functions
+ * from the node read (nodeRead.js) to the request the console sends and the named state it shows.
  *
  * REBOOT (decision 0034 S4c). Central queues the reboot as one job that asks the Pi's Host
  * Management over the Pi's link (central/fleet/pi_reboot.py); no node session is named.
@@ -26,16 +25,16 @@ import { nodeUnknown } from "./nodeRead.js";
  * judges the rule on `node.latest()`, the hook's newest read at the moment of sending, never on
  * a read the caller hands it.
  *
- * STATES. `rebootCommandState` and `appOperationState` compute each state only from
- * Central's records and Central's read time (R10): no browser or node clock is involved.
- * A later boot is never linked to a request: a later boot does not show what caused it.
+ * STATES. `rebootCommandState` computes each state only from Central's records and Central's
+ * read time (R10): no browser or node clock is involved. A later boot is never linked to a
+ * request: a later boot does not show what caused it.
  *
- * @typedef {{available: true, deviceGeneration: number, kernelBootId: string|null}
+ * @typedef {{available: true, deviceGeneration: number, hostEpoch: string|null}
  *         | {available: false, reason: string}} RebootTarget
- *   `kernelBootId`: the box's current Host Management session's boot, when served (the Update
- *   Wall page tells a later boot by it)
+ *   `hostEpoch`: the start of the box's host line now, when served (nodeRead.js `hostStart`; the
+ *   Update Wall page tells a later start by it)
  * @typedef {{command_id: string, reason: string}} RebootBody
- * @typedef {{body: RebootBody, kernelBootId: string|null, retryUntil: number,
+ * @typedef {{body: RebootBody, hostEpoch: string|null, retryUntil: number,
  *            frames: Array<{frameId: string, runs: Array<{runId: string, sceneId: string, phase: string}>}>,
  *            previous: string|null}} FrozenRebootRequest
  * @typedef {{state: string, label: string, fact: import("./facts.js").Fact}} CommandState
@@ -57,11 +56,10 @@ const MAX_REASON = 256;
 const isTime = (value) => typeof value === "number" && Number.isFinite(value);
 const isGeneration = (value) => Number.isInteger(value) && value >= 1;
 
-/** The kernel boot of the box's ONE current Host Management session, or null. */
-export function hostBoot(read) {
-  const hosts = (read?.sessions ?? []).filter((session) => session.current && session.producer?.owner === "host_core");
-  return hosts.length === 1 && typeof hosts[0].producer?.kernel_boot_id === "string"
-    ? hosts[0].producer.kernel_boot_id : null;
+/** The start of the box's host line in a device read (its `host.epoch`), or null. */
+export function hostEpoch(read) {
+  const epoch = read?.host?.epoch;
+  return typeof epoch === "string" ? epoch : null;
 }
 
 /**
@@ -80,7 +78,7 @@ export function rebootTarget(nodeDevice) {
   }
   const read = nodeDevice.read;
   if (!isGeneration(read.device_generation)) return { available: false, reason: "the device generation is not served" };
-  return { available: true, deviceGeneration: read.device_generation, kernelBootId: hostBoot(read) };
+  return { available: true, deviceGeneration: read.device_generation, hostEpoch: hostEpoch(read) };
 }
 
 /**
@@ -167,7 +165,7 @@ export function rebootRequest(target, commands, snapshot, readAt,
     : `The previous request: ${rebootCommandState(latest, readAt, { clock }).label}.`;
   return frozen({
     body: { command_id: commandId, reason: reference },
-    kernelBootId: target.kernelBootId,
+    hostEpoch: target.hostEpoch,
     // Central's clock: the read time it was frozen at plus the retry window; `rebootOffer`
     // stops counting a request no read lists at this time.
     retryUntil: readAt + REBOOT_RETRY_SECONDS,
@@ -237,77 +235,6 @@ export function rebootCommandState(command, readAt, { clock = localClock } = {})
   }
   return { state: "outcome_unknown", label: "Outcome unknown: Central's queue no longer holds it and recorded no answer",
     fact: recorded };
-}
-
-/**
- * One app operation's named state (§10). Central keeps `state` at `staged` whatever the
- * broker answered, so the broker's `command_response` is read too: a rejected stage reads
- * "Rejected by App Effect Broker", never "Staged". A superseded or interrupted operation
- * keeps what the broker had reported before (its latest effect, else its response) as
- * `prior`, a second Evidence fact, so a rejection is not hidden behind the later state.
- *
- * @param {object} operation one entry of the app-attempts read's `operations`
- * @param {number|null} readAt that read's `read_at`
- * @returns {CommandState & {prior: import("./facts.js").Fact|null}}
- */
-export function appOperationState(operation, readAt) {
-  return { prior: null, ...operationState(operation, readAt) };
-}
-
-function operationState(operation, readAt) {
-  const response = operation.command_response;
-  const effect = operation.latest_effect;
-  const recorded = fact({ kind: "set", value: operation.operator_audit_ref
-    ? `Stage recorded by Central · audit ${operation.operator_audit_ref}` : "Stage recorded by Central" });
-  // One phase event of this operation, received once: a `first` receipt, never the broker's
-  // last report (Central does not serve when the broker layer last reported).
-  const effectFact = () => fact({ kind: "reported", source: LAYER_NAMES.app_effect_broker, receipt: "first",
-    value: effect?.phase ? `phase ${words(effect.phase)}` : null, receivedAt: effect?.received_at, readAt,
-    field: "latest_effect.received_at" });
-  const responseFact = () => fact({ kind: "reported", source: LAYER_NAMES.app_effect_broker, receipt: "first",
-    value: `a "${words(response.decision)}" response`, receivedAt: response.received_at, readAt,
-    field: "command_response.received_at" });
-  // What the broker had reported before a later stage or boot replaced this operation.
-  const prior = () => (effect != null ? effectFact() : response != null ? responseFact() : null);
-  switch (operation.state) {
-    case "staged": {
-      if (response == null) {
-        return { state: "staged", label: "Staged; no response from App Effect Broker", fact: recorded };
-      }
-      const label = { received: "Received by App Effect Broker",
-        accepted: "Accepted by App Effect Broker; preparing",
-        rejected: "Rejected by App Effect Broker" }[response.decision];
-      if (label === undefined) {
-        return { state: "unknown", label: "Unknown response from App Effect Broker",
-          fact: fact({ kind: "unknown", why: `Central served an unrecognised decision "${words(response.decision)}"` }) };
-      }
-      return { state: response.decision, label, fact: responseFact() };
-    }
-    case "switching":
-      return { state: "switching", label: `App Effect Broker reported switching (${words(effect?.phase)})`,
-        fact: effectFact() };
-    case "target_running":
-      return { state: "target_running", label: "App Effect Broker reported the staged app running", fact: effectFact() };
-    case "effect_unknown":
-      return { state: "effect_unknown", label: "App Effect Broker reported the outcome as unknown", fact: effectFact() };
-    case "superseded":
-      return { state: "superseded", label: "Replaced by a later stage",
-        fact: fact({ kind: "set", value: "A later stage is recorded by Central" }), prior: prior() };
-    case "interrupted_by_reboot":
-      return { state: "interrupted_by_reboot", label: "Interrupted",
-        fact: fact({ kind: "derived", value: "Interrupted", basis: "a later boot of this Player was admitted" }),
-        prior: prior() };
-    case "ended_by_later_boot":
-      // G2: the stage had finished (target or fallback running); a later boot was admitted, and Central offers each
-      // boot its Player's own version.
-      return { state: "ended_by_later_boot", label: "Ended by a later boot",
-        fact: fact({ kind: "derived", value: "Ended by a later boot",
-          basis: "a later boot was admitted; Central offers each boot its Player's own version" }),
-        prior: prior() };
-    default:
-      return { state: "unknown", label: "Unknown state",
-        fact: fact({ kind: "unknown", why: `Central served an unrecognised state "${words(operation.state)}"` }) };
-  }
 }
 
 /** Devices with a reboot POST in flight from this page (module state: one page, one send path). */

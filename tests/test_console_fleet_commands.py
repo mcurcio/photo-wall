@@ -1,6 +1,6 @@
 """The fleet commands' pure parts (console DDD §10-§11, beads B2 and R0): fleetCommands.js
 (`rebootTarget`, `rebootOffer`, `rebootRequest`, `sendReboot`, `rebootCommandState`,
-`appOperationState`, `rebootResult`; the reboot over the bus, decision 0034 S4c),
+`rebootResult`; the reboot over the bus, decision 0034 S4c),
 run under Node as tests/test_console_players.py runs the B1 model. Without Node it skips on a
 developer machine, but FAILS where the checks are meant to run in full. The browser half is
 tests/browser/test_player_page_browser.py.
@@ -22,20 +22,18 @@ const out = {};
 const clock = (seconds) => `t${seconds}`;
 const show = (state) => ({ state: state.state, label: state.label, fact: factText(state.fact) });
 
-// --- rebootTarget: an active device read; the host session's boot when served (Update Wall's).
-const host = (extra = {}) => ({ session_id: "s-host", current: true, scope: "operator_reboot",
-  command_eligible: true, command_reason: null, producer: { owner: "host_core", kernel_boot_id: "boot-2" },
-  ...extra });
-const read = (sessions, extra = {}) => ({ read_at: 1000, device_generation: 3, sessions,
+// --- rebootTarget: an active device read; the host line's start when served (Update Wall's).
+const host = () => ({ epoch: "start-2", born_at: 980, received_at: 990 });
+const read = (line, extra = {}) => ({ read_at: 1000, device_generation: 3, host: line,
   reboot_commands: [], boot_claims: [], ...extra });
-const node = (r, extra = {}) => ({ read: r, operations: null, readAt: r?.read_at ?? null, error: null, ...extra });
+const node = (r, extra = {}) => ({ read: r, readAt: r?.read_at ?? null, error: null, ...extra });
 const target = (n) => commands.rebootTarget(n);
 out.target = [
-  target(node(read([host(), host({ session_id: "old", current: false })]))),
-  target(node(read([]))),
-  target(node(read([host()], { device_generation: null }))),
-  target(node(read([host()]), { error: { code: "500", status: 500 } })),
-  target({ read: null, operations: null, readAt: null, error: { code: "node_device_unavailable", status: 403 } }),
+  target(node(read(host()))),
+  target(node(read(null))),
+  target(node(read(host(), { device_generation: null }))),
+  target(node(read(host()), { error: { code: "500", status: 500 } })),
+  target({ read: null, readAt: null, error: { code: "node_device_unavailable", status: 403 } }),
 ];
 
 // --- rebootCommandState: one named state per request, Central's record and clock only.
@@ -61,7 +59,7 @@ const snapshot = { inventory: { read_at: 1000, players: [{ id: "p-1", device_id:
     { run_id: "r-1", scene_id: "morning", phase: "body", participants: ["frame:lobby", "frame:other"] },
     { run_id: "r-2", scene_id: "ended", phase: "ended", participants: ["frame:hall"] },
   ] } } };
-const bound = target(node(read([host()])));
+const bound = target(node(read(host())));
 const listed = (id, outstanding, extra = {}) => command({ command_id: id, outstanding, ...extra });
 const built = commands.rebootRequest(bound, [], snapshot, 1759363200,
   { playerId: "p-1", commandId: "c-new", reason: "stuck", clock });
@@ -114,13 +112,13 @@ const send = async (request, r) => {
 };
 out.send = {
   // The dialog was frozen at read 1000; the newest read, at 1005, lists another tab's queued request.
-  staleDialog: await send(frozenAt1000, read([host()], { read_at: 1005, reboot_commands: [listed("c-x", true)] })),
-  outOfDate: await send(frozenAt1000, read([host()], { read_at: 1031 })),
-  inWindow: await send(frozenAt1000, read([host()], { read_at: 1005 })),
+  staleDialog: await send(frozenAt1000, read(host(), { read_at: 1005, reboot_commands: [listed("c-x", true)] })),
+  outOfDate: await send(frozenAt1000, read(host(), { read_at: 1031 })),
+  inWindow: await send(frozenAt1000, read(host(), { read_at: 1005 })),
   // A held retry the read lists as outstanding re-sends the identical body.
-  heldRetry: await send(frozenAt1000, read([host()], { read_at: 1040, reboot_commands: [listed("c-a", true)] })),
+  heldRetry: await send(frozenAt1000, read(host(), { read_at: 1040, reboot_commands: [listed("c-a", true)] })),
   // The device is no longer readable after the dialog opened: the frozen request is out of date.
-  deviceGone: await send(frozenAt1000, read([host()], { read_at: 1005, device_generation: null })),
+  deviceGone: await send(frozenAt1000, read(host(), { read_at: 1005, device_generation: null })),
 };
 out.sentBodies = posts.map((post) => post.body);
 out.sentUrl = posts[0]?.url;
@@ -137,7 +135,7 @@ const ok = () => new Response(JSON.stringify({ duplicate: false }), { status: 20
 // Answer every POST in flight (each with `how`), then let the sends settle.
 const answerAll = (how) => { const now = pending; pending = []; now.forEach(how); };
 const resolveOk = ({ resolve }) => resolve(ok());
-const flight = (device = "d-1") => commands.sendReboot(device, frozenAt1000, hook(read([host()], { read_at: 1005 })));
+const flight = (device = "d-1") => commands.sendReboot(device, frozenAt1000, hook(read(host(), { read_at: 1005 })));
 const words = (r) => ({ outcome: r.outcome, message: r.message });
 const first = flight();
 const secondCall = flight();
@@ -154,38 +152,6 @@ const afterFailure = flight();
 answerAll(resolveOk);
 out.guard.afterFailure = (await afterFailure).outcome;
 out.guard.posts = gated.length;
-
-// --- appOperationState: the broker's response is read, not only Central's `state`.
-const operation = (state, extra = {}) => ({ operation_id: "o-1", command_id: "c-1",
-  operator_audit_ref: "stage:1", state, command_response: null, latest_effect: null, ...extra });
-const app = (o) => show(commands.appOperationState(o, 1000));
-out.app = [
-  app(operation("staged")),
-  app(operation("staged", { command_response: { decision: "accepted", received_at: 990 } })),
-  app(operation("staged", { command_response: { decision: "rejected", received_at: 990 } })),
-  app(operation("switching", { latest_effect: { phase: "stopping_current", sequence: 2, received_at: 995 } })),
-  app(operation("target_running", { latest_effect: { phase: "running", sequence: 3, received_at: 997 } })),
-  app(operation("superseded")),
-  app(operation("interrupted_by_reboot")),
-  app(operation("mystery")),
-  app(operation("ended_by_later_boot", { latest_effect: { phase: "running", sequence: 4, received_at: 990 } })),
-];
-// Superseded and interrupted keep the broker's earlier answer as a second Evidence fact.
-const prior = (o) => {
-  const value = commands.appOperationState(o, 1000).prior;
-  return value === null ? null : factText(value);
-};
-out.prior = {
-  supersededRejected: prior(operation("superseded", { command_response: { decision: "rejected", received_at: 990 } })),
-  interruptedSwitching: prior(operation("interrupted_by_reboot", {
-    command_response: { decision: "accepted", received_at: 990 },
-    latest_effect: { phase: "stopping_current", sequence: 2, received_at: 995 } })),
-  supersededNothing: prior(operation("superseded")),
-  stagedHasNone: prior(operation("staged", { command_response: { decision: "rejected", received_at: 990 } })),
-  // G2: a finished stage a later boot ended keeps what the broker reported.
-  endedRunning: prior(operation("ended_by_later_boot", {
-    latest_effect: { phase: "running", sequence: 5, received_at: 995 } })),
-};
 
 // --- rebootResult: Central's answer in the equipment outcome vocabulary.
 const answer = (ok, status, error = null, data = null) => commands.rebootResult({ ok, status, error, data });
@@ -213,9 +179,9 @@ def _run():
 def test_reboot_needs_only_an_active_device_read_or_says_why_not():
     out = _run()
     assert out["target"] == [
-        {"available": True, "deviceGeneration": 3, "kernelBootId": "boot-2"},
-        # No current Host Management session: the reboot goes over the Pi's link all the same.
-        {"available": True, "deviceGeneration": 3, "kernelBootId": None},
+        {"available": True, "deviceGeneration": 3, "hostEpoch": "start-2"},
+        # No host line heard: the reboot goes over the Pi's link all the same.
+        {"available": True, "deviceGeneration": 3, "hostEpoch": None},
         {"available": False, "reason": "the device generation is not served"},
         {"available": False, "reason": "the last node read failed (500); press Refresh"},
         {"available": False, "reason": "no current node record for this box"},
@@ -245,7 +211,7 @@ def test_the_reboot_request_is_frozen_whole_when_the_dialog_opens():
     out = _run()
     assert out["request"] == {
         "body": {"command_id": "c-new", "reason": "console/2025-10-02/stuck"},
-        "kernelBootId": "boot-2", "retryUntil": 1759363230,
+        "hostEpoch": "start-2", "retryUntil": 1759363230,
         # In Output order; an ended Run is not live, and a Run's other targets are not named.
         "frames": [{"frameId": "lobby", "runs": [{"runId": "r-1", "sceneId": "morning", "phase": "body"}]},
                    {"frameId": "hall", "runs": []}],
@@ -345,42 +311,6 @@ def test_a_new_request_states_the_previous_outcome():
     assert _run()["afterNotDelivered"] == (
         "The previous request: Not delivered: the Pi had no link to Central or did not answer at t995; "
         "its next boot is offered its version.")
-
-
-def test_app_operations_read_the_brokers_response_not_only_staged():
-    app = _run()["app"]
-    assert [entry["label"] for entry in app] == [
-        "Staged; no response from App Effect Broker",
-        "Accepted by App Effect Broker; preparing",
-        "Rejected by App Effect Broker",
-        "App Effect Broker reported switching (stopping current)",
-        "App Effect Broker reported the staged app running",
-        "Replaced by a later stage",
-        "Interrupted",
-        "Unknown state",
-        "Ended by a later boot",
-    ]
-    assert app[2]["fact"] == 'App Effect Broker reported a "rejected" response · first received 10 s ago'
-    # One phase event, received once: a `first` receipt, never the broker layer's last report.
-    assert app[3]["fact"] == "App Effect Broker reported phase stopping current · first received 5 s ago"
-    assert not [entry for entry in app if "last reported" in entry["fact"]]
-    assert app[6]["fact"] == "Interrupted (Central's inference: a later boot of this Player was admitted)"
-    assert app[7]["fact"] == 'Unknown: Central served an unrecognised state "mystery"'
-    # G2 (§26): a derived fact, Central's inference from a later admitted boot.
-    assert app[8]["state"] == "ended_by_later_boot"
-    assert app[8]["fact"] == ("Ended by a later boot (Central's inference: a later boot was admitted; "
-                              "Central offers each boot its Player's own version)")
-
-
-def test_superseded_and_interrupted_operations_keep_the_brokers_earlier_answer():
-    prior = _run()["prior"]
-    assert prior == {
-        "supersededRejected": 'App Effect Broker reported a "rejected" response · first received 10 s ago',
-        "interruptedSwitching": "App Effect Broker reported phase stopping current · first received 5 s ago",
-        "supersededNothing": None,
-        "stagedHasNone": None,
-        "endedRunning": "App Effect Broker reported phase running · first received 5 s ago",
-    }
 
 
 def test_reboot_answers_use_the_equipment_outcomes():

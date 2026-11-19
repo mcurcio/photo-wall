@@ -15,8 +15,7 @@ from test_node_boot import boot_service, claim_for
 from test_node_runtime_reconciliation import rig
 
 from central.fleet.node_display import RECENT_EXCHANGES, display_outputs_in
-from central.fleet.node_observations import PREPARATION_KEYS
-from central.infra.node_record_retention import KEPT_SECONDS, NodeRecordRetention
+from central.infra.node_record_retention import KEPT_SECONDS, PREPARATION_KEYS, NodeRecordRetention
 from central.transaction_locks import acquire_runtime_locks
 from contracts.node_boot import NodeBootRequestV2
 from contracts.time import ManualClock

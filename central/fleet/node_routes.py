@@ -28,13 +28,11 @@ from central.coordination import Coordinator
 from central.db import Database, TransactionClock
 from central.fleet.bytes import OfferByteReader
 from central.fleet.models import FleetError, TrialRefusal, TrialRefused
-from central.fleet.node_acceptance import NodeAcceptance
 from central.fleet.node_app_links import NodeAppLinks
 from central.fleet.node_boot import NodeBootService
 from central.fleet.node_calibration import NodeCalibration, TrialBegin, TrialOperation
 from central.fleet.node_display import NodeDisplay
 from central.fleet.node_ingest import NodeIngest
-from central.fleet.node_lifecycle import NodeLifecycle, OperatorAppStage
 from central.fleet.node_observations import NodeObservations
 from central.fleet.node_release_catalog import NodeReleaseCatalog
 from central.fleet.node_sessions import NodeControlConfig, NodeControlError, NodeSessions
@@ -53,10 +51,8 @@ from contracts.node_boot import MAX_NODE_BOOT_BYTES, encode_node_boot_offer, par
 from contracts.node_commands import MAX_COMMAND_BYTES, encode_session_grant, parse_session_claim
 from contracts.node_display import MAX_DISPLAY_BYTES
 from contracts.node_host_facts import MAX_HOST_FACTS_BYTES
-from contracts.node_lifecycle import MAX_LIFECYCLE_BYTES
 from contracts.node_link import SERIAL_PATTERN
 from contracts.node_observation import MAX_OBSERVATION_BYTES
-from contracts.node_preparation import MAX_PREPARATION_BYTES
 from contracts.node_protocol import MAX_NODE_MESSAGE_BYTES
 from contracts.strict_json import loads_object
 from contracts.time import Clock
@@ -109,15 +105,12 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
     versions = (None if readiness is None
                 else PgPlayerVersions(db, clock, readiness, content.publisher if content else None))
     boots = None if versions is None else NodeBootService(sessions, versions=versions)
-    lifecycle = NodeLifecycle(sessions)
     links = NodeAppLinks(sessions)
-    acceptance = NodeAcceptance(sessions)
     publications = None if readiness is None else NodeReleaseCatalog(sessions, readiness=readiness)
     lighting = PgFrameLighting(LUT_RECIPE_ID)
     # A trial's times are the database's (the document source's clock) in production; a test that
     # injects its own clock passes its times (create_app's media_times).
     trials = NodeCalibration(db, registry=Registry(db, clock, lighting=lighting), lighting=lighting, times=times)
-    app.state.node_lifecycle = lifecycle
     app.state.node_app_links = links
     app.state.node_sessions = sessions
     app.state.player_versions = versions
@@ -220,70 +213,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         raw = await body(request, MAX_NODE_LINK_BYTES)
         return await invoke(links.admit, *_credentials(request), raw)
 
-    @app.post("/v2/node/app-preparation")
-    async def manager_preparation(request: Request):
-        return await invoke(observations.record_preparation, *_credentials(request),
-                            await body(request, MAX_PREPARATION_BYTES))
-
-    @app.get("/v2/node/app-desired")
-    async def app_desired(request: Request):
-        return await invoke(lifecycle.desired, *_credentials(request))
-
-    @app.get("/v2/node/app-commands")
-    async def app_commands(request: Request):
-        return await invoke(lambda sid, credential: lifecycle.desired(sid, credential, effects=True),
-                            *_credentials(request))
-
-    @app.post("/v2/node/app-effects")
-    async def app_effect(request: Request):
-        return await invoke(lifecycle.effect, *_credentials(request), await body(request, MAX_LIFECYCLE_BYTES))
-
-    @app.post("/v2/node/app-responses")
-    async def app_response(request: Request):
-        return await invoke(lifecycle.response, *_credentials(request), await body(request, MAX_NODE_MESSAGE_BYTES))
-
-    @app.get("/v2/node/app-attempts/{operation_id}/artifacts/{role}")
-    async def app_artifact(request: Request, operation_id: UUID, role: str):
-        asset = await invoke(lifecycle.artifact, *_credentials(request), operation_id, role)
-        try:
-            opened = await until_disconnect(request, bytes_reader.open_exact(asset))
-        except ClientDisconnected:
-            return Response(status_code=499)
-        try:
-            return stream_opened(opened, "application/octet-stream")
-        except BaseException:
-            os.close(opened.fd)
-            raise
-
-    @app.post("/v1/operator/node/devices/{device_id}/app-stages", dependencies=[Depends(admin)])
-    async def app_stage(device_id: str, request: Request):
-        value = loads_object(await body(request, MAX_LIFECYCLE_BYTES), max_bytes=MAX_LIFECYCLE_BYTES)
-        try:
-            if value is None:
-                raise ValueError("shape")
-            for key in ("operation_id", "command_id", "session_id", "deployment_id"):
-                value[key] = UUID(value[key])
-            stage = OperatorAppStage(**value)
-        except (KeyError, TypeError, ValueError) as exc:
-            raise NodeControlError("node_app_stage_invalid", 422) from exc
-        return await invoke(lifecycle.stage, device_id, stage)
-
-    @app.post("/v1/operator/node/devices/{device_id}/app-qualifications", dependencies=[Depends(admin)])
-    async def app_qualification(device_id: str, request: Request):
-        value = loads_object(await body(request, MAX_LIFECYCLE_BYTES), max_bytes=MAX_LIFECYCLE_BYTES)
-        try:
-            if value is None or set(value) != {"qualification_id", "environment_sha256", "operator_audit_ref"}:
-                raise ValueError("shape")
-            qualification_id = UUID(value["qualification_id"])
-        except (TypeError, ValueError) as exc:
-            raise NodeControlError("node_qualification_invalid", 422) from exc
-        return await invoke(acceptance.begin, device_id, qualification_id,
-                            value["environment_sha256"], value["operator_audit_ref"])
-
-    @app.post("/v1/operator/node/app-qualifications/{qualification_id}/sample", dependencies=[Depends(admin)])
-    async def app_qualification_sample(qualification_id: UUID):
-        return await invoke(acceptance.sample, qualification_id)
-
     @app.get("/v1/operator/frames/{frame_id}/calibration-capability", dependencies=[Depends(admin)])
     async def calibration_capability(frame_id: str):
         return await invoke(Registry(db, clock, lighting=lighting).calibration_capability, frame_id)
@@ -327,10 +256,6 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         except ValueError as exc:
             raise NodeControlError("invalid_operator_reboot", 422) from exc
         return await invoke(lambda: reboots.request_operator_reboot(device_id, command, by=by))
-
-    @app.get("/v1/operator/node/devices/{device_id}/app-attempts", dependencies=[Depends(admin)])
-    async def app_status(device_id: str):
-        return await invoke(lifecycle.status, device_id)
 
     @app.get("/v1/operator/node/hosts", dependencies=[Depends(admin)])
     async def fleet_hosts():

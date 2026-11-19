@@ -2,20 +2,19 @@ from dataclasses import replace
 from uuid import UUID
 
 import pytest
+from support.node_doubles import (
+    MemoryEffectJournal,
+    MemoryRebootJournal,
+    RecordingAppDriver,
+    RecordingDisplayBackend,
+    RecordingRebootDriver,
+)
 
 from appliance.apps.broker import AppEffectBroker, ColdStart
 from appliance.display_host.domain import DisplayHost, Surface
 from appliance.host.host import HostCore, RebootRequest
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
-from scripts.node_control_demo import (
-    MemoryEffectJournal,
-    MemoryRebootJournal,
-    RecordingAppDriver,
-    RecordingDisplayBackend,
-    RecordingRebootDriver,
-    run_demo,
-)
 
 
 def host_values(journal=None, driver=None):
@@ -171,18 +170,6 @@ def test_broker_ambiguous_start_blocks_second_mutation_but_can_observe_survivor(
         broker.cold_start(replace(command, operation_id=UUID(int=4)))
     assert broker.reconcile().phase == "running"
     assert driver.calls.count("start_simulated_process") == 1
-
-
-def test_demo_truthful_trace_distinguishes_request_observation_and_delayed_evidence():
-    result = run_demo()
-    assert result["evidence_class"] == "simulated" and result["production_effects"] is False
-    steps = {row["step"]: row for row in result["trace"]}
-    assert steps["reboot_command_admitted"]["reboot_effect_calls"] == 0
-    assert steps["reboot_initiation_injected"]["reboot_effect_calls"] == 1
-    assert steps["delayed_invalidation_event"]["central"]["disposition"] == "historical"
-    assert steps["old_presentation_duplicate"]["central"]["disposition"] == "duplicate"
-    for key in ("background_staging_failed", "background_staging_superseded", "control_transport_lost"):
-        assert steps[key]["display"]["admitted"] is not None
 
 
 def test_manager_restart_retains_charged_ambiguous_start_and_bounded_fallback():

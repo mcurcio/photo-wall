@@ -41,7 +41,7 @@ from contracts.node_observation import (
     encode_host_metrics_state,
     encode_host_observation,
 )
-from contracts.node_state import HOST_FACTS_KEY, HOST_LINE, HOST_METRICS_KEY
+from contracts.node_state import BIRTH_KEY, HOST_FACTS_KEY, HOST_LINE, HOST_METRICS_KEY
 from nodeapi.buffers import state_prefix, state_stream
 from nodeapi.epoch import Token
 from nodeapi.pull import Batch, Read
@@ -239,6 +239,28 @@ def test_g12_serves_what_the_host_line_states_and_not_the_old_path(registry):
         assert host_facts_in(conn)[DEVICE_ID]["address"] == "192.168.1.40"
 
 
+def test_the_device_read_states_the_host_line_and_nothing_of_the_old_path(registry):
+    """S4c-2a-iii: the device read's host part is the host line's (its birth's stream creation and
+    when Central recorded the birth and the newest metrics or facts); no session, producer,
+    admission, host sample or App Manager preparation is served, though the old path still posted.
+    Mutation probe: serve `sessions` again -> the key set differs, fails."""
+    boots, sessions = _rig(registry)
+    observations = NodeObservations(sessions)
+    Host(registry, sessions, boots).post(12.0)          # the old path's post: never served
+    assert observations.status(DEVICE_ID)["host"] is None   # no birth on the line yet
+    on_line(registry, SERIAL, BIRTH_KEY, b"{}", 1)
+    metrics_on_line(registry, SERIAL, 50.0, 2)
+    read = observations.status(DEVICE_ID)
+    assert set(read) == {"device_id", "device_generation", "read_at", "host", "boot_claims",
+                         "reboot_commands", "physical_output", "display_outputs"}
+    with registry.db.transaction() as conn:
+        recorded = {row["subject"]: row["recorded_at"] for row in conn.execute(
+            "SELECT subject, recorded_at FROM node_states WHERE device_id=%s", (DEVICE_ID,)).fetchall()}
+    assert read["host"] == {"epoch": "epoch", "born_at": recorded[state_prefix(HOST_LINE) + BIRTH_KEY],
+                            "received_at": recorded[state_prefix(HOST_LINE) + HOST_METRICS_KEY]}
+    assert read["boot_claims"][0]["kernel_boot_id"]
+
+
 def test_a_pi_heard_only_on_its_line_is_served(registry):
     """A Pi with no old-path session at all (enrolled, never posted): its line alone is its host."""
     boots, sessions = _rig(registry)
@@ -262,7 +284,7 @@ def test_g12_omits_retired_boxes_and_lists_active_ones_without_a_boot(registry):
     assert _device(read, retired_id) is None
     assert _device(read)["serial"] == SERIAL  # the box's claim at boot, for the console's names
     assert _device(read, spare_id) == {"device_id": spare_id, "serial": None, "host": None,
-                                       "boot": None, "facts": None, "preparation": None,
+                                       "boot": None, "facts": None,
                                        "bus_link": {"linked": None, "changed_at": None,
                                                     "hub": "no_hub"}}
 

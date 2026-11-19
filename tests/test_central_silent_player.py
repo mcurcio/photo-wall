@@ -8,12 +8,10 @@ samples, the App Effect Broker's process facts with no app link) and read throug
 production operator API at T + SILENT_AFTER_SECONDS + 1 on Central's test clock, T being when
 Central last heard from the Player. Each case asserts what the console classifies from: the
 snapshot's `last_report_at` against its served `silent_after_seconds`, the fleet host read's
-receipt against its served host-silence limit, and the broker's exit in the node device read the
-Player page's layer evidence reads (central/console/src/nodeRead.js `processFacts`).
+receipt against its served host-silence limit, and the broker's exit's work item.
 tests/browser/test_silent_player_browser.py drives the console on the same state.
 """
 
-import json
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
@@ -49,7 +47,7 @@ from contracts.node_protocol import (
     NodeSnapshotV2,
     encode_node_message,
 )
-from contracts.node_state import HOST_METRICS_KEY
+from contracts.node_state import BIRTH_KEY, HOST_METRICS_KEY
 
 NODE = NodeControlConfig("node-test")
 OPERATOR = {"Authorization": "Bearer " + ADMIN}
@@ -109,16 +107,18 @@ class Incident:
 
     def host_sample(self):
         """One Host Management sample on its own boot clock (the test clock's monotonic): its post on
-        the old path (the device read's sessions, until S4c) and its put on its host line (the fleet
-        host read, decision 0034)."""
+        the old path (until S4c-2a-iv) and its put on its host line (the fleet host read and the
+        device read, decision 0034), the line's birth first."""
         claim, grant = self.claims["host_core"]
+        if self.host_sequence == 0:
+            on_line(self.registry, SERIAL, BIRTH_KEY, b"{}", 1)
         self.host_sequence += 1
         metrics = (HostMetricV2("uptime", self.host_sequence, "seconds"),)
         sample = HostObservationV2(grant.producer, self.host_sequence,
                                    int(self.registry.clock.monotonic() * 1000), metrics)
         self.observations.record(grant.session_id, claim.credential, encode_host_observation(sample))
         on_line(self.registry, SERIAL, HOST_METRICS_KEY, encode_host_metrics_state(HostMetricsState(metrics)),
-                self.host_sequence)
+                self.host_sequence + 1)
 
     def _broker(self, kind, sequence, state):
         """The App Effect Broker's process fact for the Player app, as a snapshot or an event."""
@@ -171,7 +171,7 @@ def test_an_unbound_player_that_stops_reporting_reads_silent_while_its_host_repo
     assert all(frame["player_id"] != incident.player_id for frame in inventory["frames"])
 
 
-def test_an_app_exit_with_no_app_link_is_readable_on_the_player(registry):
+def test_an_app_exit_with_no_app_link_finishes_its_work_on_the_display_line(registry):
     incident = Incident(registry)
     with registry.db.transaction() as conn:
         work = conn.execute("SELECT completed_at,result FROM node_reconciliation_work "
@@ -181,14 +181,3 @@ def test_an_app_exit_with_no_app_link_is_readable_on_the_player(registry):
     # line's, decision 0034 S4b), so its work item finishes as `display_line`.
     assert links == 0
     assert work["completed_at"] is not None and work["result"] == "display_line"
-    _, _, device = _reads(registry)
-    broker = [session for session in device["sessions"]
-              if session["current"] and session["producer"]["owner"] == "app_effect_broker"]
-    assert len(broker) == 1
-    # Read as nodeRead.js processFacts reads the projection.
-    facts = []
-    for entry in broker[0]["projection"]:
-        item = json.loads(entry["payload"])["message"]["facts"][entry["fact_index"]]
-        if item["type"] == "AppProcessFact":
-            facts.append((item["process"]["pid"], item["state"], entry["received_at"]))
-    assert facts == [(incident.process.pid, "exited", incident.exited_at)]

@@ -1,8 +1,7 @@
-"""Host telemetry: the old path's intake (until S4c) and the operator's host read (G12), which reads
-the host's line (decision 0034, S4a)."""
+"""Host telemetry: the old path's host intake (until S4c-2a-iv), the operator's host read (G12) and
+the device read's host part, both read from the host's line (decision 0034, S4a)."""
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
 from typing import Any, Final
 from uuid import UUID
@@ -16,7 +15,6 @@ from central.fleet.node_sessions import NodeControlError, NodeSessions
 from central.fleet.pi_reboot import reboot_records_in
 from central.infra.node_link_latest import latest_values_in
 from contracts.node_boot import parse_node_boot_offer
-from contracts.node_commands import parse_session_grant, producer_document
 from contracts.node_host_facts import (
     decode_host_facts_state,
     encode_host_facts,
@@ -30,45 +28,23 @@ from contracts.node_observation import (
     encode_host_observation,
     parse_host_observation,
 )
-from contracts.node_preparation import encode_manager_preparation, parse_manager_preparation
-from contracts.node_state import HOST_FACTS_KEY, HOST_LINE, HOST_METRICS_KEY
+from contracts.node_state import BIRTH_KEY, HOST_FACTS_KEY, HOST_LINE, HOST_METRICS_KEY
 from contracts.wire_codec import plain
+from nodeapi.buffers import state_prefix, state_stream
 
 # A producer's newest host sample, by sequence through the primary key (never ORDER BY
 # received_at over the table): coalescing (its payload's boot clock) and G12 both read it.
 _NEWEST_HOST_SQL = ("SELECT payload,received_at FROM node_host_observations WHERE producer_id={p} "
                     "ORDER BY sequence DESC LIMIT 1")
 
-# A producer's newest App Manager samples, by sequence through the primary key. Coalescing
-# looks for the same (state, operation, fault) among them; a window holds at most one stored
-# sample per such key, so these rows cover this many distinct keys (more only costs storage,
-# bounded by the cap). Node records' retention keeps at least these at any age
-# (central/infra/node_record_retention.py).
-PREPARATION_KEYS = 8
-_RECENT_PREPARATION_SQL = ("SELECT payload,received_at FROM node_manager_observations "
-                           f"WHERE producer_id=%s ORDER BY sequence DESC LIMIT {PREPARATION_KEYS}")
-
-
-def _preparation_key(sample) -> tuple:
-    return sample.state, sample.operation_id, sample.fault
-
-
-# G12 (console DDD §63), one statement per read: every active device in its current generation, its
-# newest boot offer that carried an offer (Central's offer: its base tag), and the current
-# admission's newest-admitted app_manager producer's newest preparation sample (the App Manager's,
-# served until S4c removes it). The host's metrics and facts are its line's (`fleet_hosts_in`).
+# G12 (console DDD §63), one statement per read: every active device in its current generation and its
+# newest boot offer that carried an offer (Central's offer: its base tag). The host's metrics and
+# facts are its line's (`fleet_hosts_in`).
 _FLEET_HOSTS_SQL = (
-    "SELECT d.device_id,d.serial,co.offer_payload,"
-    "cm.payload AS preparation_payload,cm.received_at AS preparation_received_at FROM devices d "
+    "SELECT d.device_id,d.serial,co.offer_payload FROM devices d "
     "LEFT JOIN LATERAL (SELECT offer_payload FROM node_boot_offers WHERE device_id=d.device_id "
     "AND device_generation=d.generation AND offer_payload IS NOT NULL "
     "ORDER BY created_at DESC,offer_id DESC LIMIT 1) co ON true "
-    "LEFT JOIN node_boot_admissions cb ON cb.device_id=d.device_id "
-    "AND cb.device_generation=d.generation AND cb.superseded_at IS NULL "
-    "LEFT JOIN LATERAL (SELECT producer_id FROM node_producers WHERE admission_id=cb.admission_id "
-    "AND owner='app_manager' ORDER BY admitted_at DESC,producer_id DESC LIMIT 1) mp ON true "
-    "LEFT JOIN LATERAL (SELECT payload,received_at FROM node_manager_observations "
-    "WHERE producer_id=mp.producer_id ORDER BY sequence DESC LIMIT 1) cm ON true "
     "WHERE d.retired_at IS NULL ORDER BY d.device_id")
 _CLOCK: Final = DatabaseTransactionClock()
 
@@ -95,8 +71,7 @@ def host_facts_in(conn) -> dict[str, dict]:
 def fleet_hosts_in(conn) -> dict:
     """G12 inside the caller's transaction: every active box's serial (its claim at boot), the metrics
     and facts its host line states (decision 0034, S4a: `host` and `facts`, each with when Central
-    recorded it), Central's offer's base (`boot`), the App Manager's newest sample (`preparation`),
-    its presence on Central's hub (`bus_link`: the console's silence) and the numbers-only
+    recorded it), Central's offer's base (`boot`), its presence on Central's hub (`bus_link`: the console's silence) and the numbers-only
     thresholds; `read_at` is the database's clock, the clock every `received_at` here was stamped by
     (`bus_link.changed_at` is the worker's)."""
     read_at = _CLOCK.now_in(conn)
@@ -117,19 +92,31 @@ def fleet_hosts_in(conn) -> dict:
             # Central recorded these values (the host puts them only when they change).
             received_at, values = facts[row["device_id"]]
             stated = {"first_received_at": received_at, **plain(values)}
-        preparation = None
-        if row["preparation_received_at"] is not None:
-            sample = json.loads(bytes(row["preparation_payload"]))
-            preparation = {"received_at": row["preparation_received_at"],
-                           **{key: sample[key] for key in ("state", "fault", "available_bytes",
-                                                           "required_bytes")}}
         boot = None
         if row["offer_payload"] is not None:
             boot = {"base_tag": parse_node_boot_offer(bytes(row["offer_payload"])).base.tag}
         devices.append({"device_id": row["device_id"], "serial": row["serial"], "host": host,
-                        "boot": boot, "facts": stated, "preparation": preparation,
+                        "boot": boot, "facts": stated,
                         "bus_link": bus_links[row["device_id"]]})
     return {"read_at": read_at, "thresholds": thresholds_document(), "devices": devices}
+
+
+def host_line_in(conn, device_id: str) -> dict | None:
+    """The device read's host part, from the host line as Central keeps it (node_states): `epoch`,
+    the line's stream creation its host's birth was written in (the Pi's bus keeps its streams in
+    memory, so every bus start, every boot among them, makes a new one), `born_at` when Central
+    recorded that birth, and `received_at` when it recorded the newest metrics or facts (None:
+    neither stated). None when Central keeps no birth of the device's host."""
+    birth = conn.execute("SELECT epoch,recorded_at FROM node_states WHERE device_id=%s AND stream=%s "
+                         "AND subject=%s AND NOT removed",
+                         (device_id, state_stream(HOST_LINE), state_prefix(HOST_LINE) + BIRTH_KEY)).fetchone()
+    if birth is None:
+        return None
+    stated = [latest.recorded_at for key in (HOST_METRICS_KEY, HOST_FACTS_KEY)
+              for latest in latest_values_in(conn, HOST_LINE, key, device_id=device_id, of_players=False)
+              if not latest.removed]
+    return {"epoch": str(birth["epoch"]), "born_at": float(birth["recorded_at"]),
+            "received_at": max(stated, default=None)}
 
 
 class NodeObservations:
@@ -139,10 +126,6 @@ class NodeObservations:
     def record(self, session_id: UUID, credential: str, raw: bytes) -> dict:
         observation = parse_host_observation(raw)
         return self._record(session_id, credential, observation, encode_host_observation(observation), "node_host_observations")
-
-    def record_preparation(self, session_id: UUID, credential: str, raw: bytes) -> dict:
-        observation = parse_manager_preparation(raw)
-        return self._record(session_id, credential, observation, encode_manager_preparation(observation), "node_manager_observations")
 
     def record_facts(self, session_id: UUID, credential: str, raw: bytes) -> dict:
         """Host facts ingest (console DDD §64): one row per producer, replaced only by a higher
@@ -217,31 +200,14 @@ class NodeObservations:
     @staticmethod
     def _coalesced_in(conn, table, producer_id, observation) -> bool:
         """Whether this post stores nothing (§60, §64), judged on the producer's OWN boot clock:
-        the post's `sampled_boottime_ms` against a stored sample's, both read by one kernel of
-        one boot (a producer is one boot), so a clock is compared only with itself and no
-        Central receipt clock, of this replica or another, enters the judgement. A negative
-        difference (a sample older than the stored one) stores. Host Management: one stored
-        sample per producer per interval. App Manager: one per producer per (state, operation,
-        fault) per interval, so an alternating stream (`preparing`/`refused` every poll) stores
-        each state at most once an interval. The cost: a
-        state that returns within one interval of its last stored sample is not stored again
-        until that interval passes, so the newest stored state can lag by up to one interval
-        plus the node's next resend. A node that misreports its boot clock defeats coalescing
-        for its own producer only."""
-        window_ms = HOST_OBSERVATION_INTERVAL_SECONDS * 1000
-
-        def within(stored) -> bool:
-            return 0 <= observation.sampled_boottime_ms - stored.sampled_boottime_ms < window_ms
-
-        if table == "node_host_observations":
-            newest = conn.execute(_NEWEST_HOST_SQL.format(p="%s"), (producer_id,)).fetchone()
-            return newest is not None and within(parse_host_observation(bytes(newest["payload"])))
-        key = _preparation_key(observation)
-        for row in conn.execute(_RECENT_PREPARATION_SQL, (producer_id,)).fetchall():
-            stored = parse_manager_preparation(bytes(row["payload"]))
-            if _preparation_key(stored) == key and within(stored):
-                return True
-        return False
+        the post's `sampled_boottime_ms` against the newest stored sample's, both read by one
+        kernel of one boot (a producer is one boot), so a clock is compared only with itself and no
+        Central receipt clock enters the judgement: one stored sample per producer per interval. A
+        negative difference (a sample older than the stored one) stores. A node that misreports its
+        boot clock defeats coalescing for its own producer only."""
+        newest = conn.execute(_NEWEST_HOST_SQL.format(p="%s"), (producer_id,)).fetchone()
+        return newest is not None and 0 <= (observation.sampled_boottime_ms - parse_host_observation(
+            bytes(newest["payload"])).sampled_boottime_ms) < HOST_OBSERVATION_INTERVAL_SECONDS * 1000
 
     def fleet_hosts(self) -> dict:
         """G12 (`fleet_hosts_in`) under one read-only snapshot. No fleet or device lock is taken, so
@@ -250,37 +216,13 @@ class NodeObservations:
             return fleet_hosts_in(conn)
 
     def status(self, device_id: str) -> dict:
+        """The device read: the host part from the host line only (`host_line_in`), the box's boot
+        claims (its boot offers), its reboot records and Display Host's newest exchange per Output;
+        no session, producer, admission, observation sample or manager preparation. `read_at` is
+        the database's clock, the one the host line and the reboot records were stamped by (R10)."""
         with self.sessions.db.read_snapshot() as conn:
             generation = standing_in(conn, device_id).active_generation()
-            rows = conn.execute("SELECT s.session_id,s.grant_payload,s.expires_at,s.revoked_at,"
-                                "p.producer_id,p.projection,b.superseded_at FROM node_sessions s "
-                                "JOIN node_producers p USING(producer_id) "
-                                "JOIN node_boot_admissions b USING(admission_id) "
-                                "WHERE s.device_id=%s AND s.device_generation=%s "
-                                "ORDER BY s.issued_at DESC LIMIT 64", (device_id, generation)).fetchall()
-            now = self.sessions.clock.utc()
-            sessions = []
-            for row in rows:
-                grant = self.sessions._grant_eligibility_in(conn,
-                    parse_session_grant(bytes(row["grant_payload"])))
-                sample = conn.execute("SELECT payload,received_at FROM node_host_observations "
-                                      "WHERE producer_id=%s ORDER BY sequence DESC LIMIT 1",
-                                      (row["producer_id"],)).fetchone()
-                preparation = conn.execute("SELECT payload,received_at FROM node_manager_observations "
-                    "WHERE producer_id=%s ORDER BY sequence DESC LIMIT 1", (row["producer_id"],)).fetchone()
-                sessions.append({"session_id": str(grant.session_id), "producer": producer_document(
-                    grant.producer), "scope": grant.scope, "trust_mode": "lan_serial",
-                    "physical_identity": "unverified", "command_eligible": grant.command_eligible,
-                    "command_reason": grant.command_reason, "current": row["revoked_at"] is None
-                    and row["superseded_at"] is None and row["expires_at"] > now,
-                    "expires_at": row["expires_at"],
-                    "manager_preparation": None if preparation is None else {
-                        "sample": json.loads(bytes(preparation["payload"])), "received_at": preparation["received_at"],
-                        "receipt_age_seconds": max(0, now-preparation["received_at"]), "authority_granted": False},
-                    "projection": row["projection"], "host_observation": None if sample is None else {
-                        "sample": json.loads(bytes(sample["payload"])),
-                        "received_at": sample["received_at"], "receipt_age_seconds": max(
-                            0, now - sample["received_at"])}})
+            now = _CLOCK.now_in(conn)
             claims = conn.execute("SELECT kernel_boot_id,offer_id,created_at,refusal FROM node_boot_offers "
                 "WHERE device_id=%s AND device_generation=%s ORDER BY created_at DESC,offer_id LIMIT 64",
                 (device_id, generation)).fetchall()
@@ -289,6 +231,6 @@ class NodeObservations:
                 "physical_identity": "unverified"} for item in claims]
             return {"boot_claims": boot_claims,
                     "device_id": device_id, "device_generation": generation, "read_at": now,
-                    "sessions": sessions, "reboot_commands": reboot_records_in(conn, device_id), "physical_output": "unknown",
-                    "display_outputs": display_outputs_in(conn, device_id, generation),
-                    "runtime_reconciliation": "asynchronous_output_evidence"}
+                    "host": host_line_in(conn, device_id),
+                    "reboot_commands": reboot_records_in(conn, device_id), "physical_output": "unknown",
+                    "display_outputs": display_outputs_in(conn, device_id, generation)}

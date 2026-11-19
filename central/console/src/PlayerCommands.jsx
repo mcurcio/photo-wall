@@ -3,7 +3,6 @@ import React, { useId, useRef, useState } from "react";
 import { FactLine } from "./domain/fact-line.tsx";
 import { clock, fact } from "./facts.js";
 import {
-  appOperationState,
   heldReboot,
   rebootCommandState,
   rebootOffer,
@@ -205,47 +204,6 @@ export function RebootSection({ deviceId, name, node, snapshot, playerId }) {
       {dialog !== null && (
         <RebootDialog key={dialog.request.body.command_id} deviceId={deviceId} name={name}
           request={dialog.request} retry={dialog.retry} node={node} onSent={onSent} onClose={onClose} />
-      )}
-    </>
-  );
-}
-
-/**
- * The App section (§9, §10): the box's app operations with their named states, read-only
- * in pass 1. Each reads the broker's response, not only Central's `state`.
- *
- * @param {{node: object}} props
- */
-export function AppOperationsSection({ node }) {
-  const read = node.operations;
-  if (read == null) {
-    const why = nodeUnknown(node)
-      ?? (node.error ? `the app operations read failed (${node.error.code})` : "not read yet");
-    return <FactLine label="App operations" fact={fact({ kind: "unknown", why })} />;
-  }
-  const operations = read.operations;
-  return (
-    <>
-      <p className="player__read-time">
-        {typeof read.read_at === "number" ? `App operations read as of ${clock(read.read_at)}` : "App operations: read time not served"}
-        {node.error !== null && ", refresh failed"}
-      </p>
-      {operations.length === 0 ? (
-        <p className="roster__empty">No app operations recorded for this box.</p>
-      ) : (
-        <ul className="player__commands" aria-label="App operations">
-          {operations.map((operation) => (
-            <StateEntry key={operation.operation_id} state={appOperationState(operation, read.read_at)}>
-              <details className="player__details">
-                <summary>{`Operation ${tail(operation.operation_id)}`}</summary>
-                <ul>
-                  <li>{`Operation ${operation.operation_id}`}</li>
-                  <li>{`Command ${operation.command_id}`}</li>
-                </ul>
-              </details>
-            </StateEntry>
-          ))}
-        </ul>
       )}
     </>
   );

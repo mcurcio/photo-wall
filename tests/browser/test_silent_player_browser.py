@@ -3,7 +3,7 @@ Player"): the production app with node management mounted, over the state
 tests/test_central_silent_player.py builds through Central's owner services (`Incident`), read
 at T + SILENT_AFTER_SECONDS + 1 on the registry's controlled clock. The Wall marks the Frame with
 the liveness cause and links to the Player's page; there the Player app reads silent while Host
-Management reads current, and the App Effect Broker's exit is shown.
+Management reads current.
 
 The link lands on the Pi's Software and screens page (`#/players/<device>`), which shows the
 Player app's last report with its age (no verdict: the Wall and the Frame page word the
@@ -31,7 +31,6 @@ def test_the_wall_marks_a_silent_players_frame_and_its_pages_show_the_apps_age_a
         page, registry):
     incident = Incident(registry)
     silent_for = int(incident.read_at - incident.last_report_at)
-    exited_for = int(incident.read_at - incident.exited_at)
     with operator_server(registry.db, registry.clock, node_control=NODE) as origin:
         connect(page, origin, "wall")
         label = tile_health(page, FRAME)
@@ -47,9 +46,6 @@ def test_the_wall_marks_a_silent_players_frame_and_its_pages_show_the_apps_age_a
         layers = page.get_by_role("region", name="Layers", exact=True)
         expect(layers.get_by_role("group", name="Player app", exact=True)).to_contain_text(
             f"Last reported: Player app last reported {silent_for} s ago")
-        expect(layers.get_by_role("group", name="App Effect Broker", exact=True)).to_contain_text(
-            "App process: App Effect Broker reported the app exited · first received "
-            f"{exited_for} s ago")
 
         page.get_by_role("navigation", name=f"Other pages of {NAME}", exact=True).get_by_role(
             "link", name="Hardware", exact=True).click()
@@ -58,5 +54,5 @@ def test_the_wall_marks_a_silent_players_frame_and_its_pages_show_the_apps_age_a
             re.compile(r"Host Management: Host Management last reported \d+ s ago"))
         expect(page.get_by_role("region", name="Link and sessions", exact=True).get_by_role(
             "group", name="Host Management", exact=True)).to_contain_text(
-            "Last reported: Host Management last reported 0 s ago")
+            re.compile(r"Last reported: Host Management last reported \d+ s ago"))
         expect(page.get_by_text(re.compile("Host Management silent"))).to_have_count(0)

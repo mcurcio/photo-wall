@@ -1,11 +1,10 @@
 import { appHandle, fact, words } from "./facts.js";
-import { hostBoot, rebootCommandState, rebootOffer, rebootTarget } from "./fleetCommands.js";
+import { hostEpoch, rebootCommandState, rebootOffer, rebootTarget } from "./fleetCommands.js";
 import { frameHealth, outputStates } from "./health.js";
 import { playersByDevice } from "./players.js";
 import { readinessRecoveryForFrame } from "./readinessRecovery.js";
 import { bootsNext, deployable, downloadSize, readinessLine, wallOn } from "./domain/releases/model";
 import { WALL_SCOPE } from "./releases.js";
-import { STAGE_REFUSAL } from "./stage.js";
 
 /**
  * Update the wall (console DDD Part E §25a, beads NU1 and B8): the guided journey "put this
@@ -14,42 +13,38 @@ import { STAGE_REFUSAL } from "./stage.js";
  * plan and each Player's row. Central ingests and downloads every release by itself, so there
  * is no "get it" step: a release row already says whether it may be put on and its readiness.
  * Central keeps a version per Player (Q2 A, 2026-10-16): Put on the wall gives every Player the
- * release as its version (one PUT, no reboot), then this page reboots them one at a time.
+ * release as its version (one PUT, no reboot), then this page reboots them one at a time; Undo
+ * puts the version they all booted before back.
  *
  * NO CENTRAL STATE, NO VERB. The journey is a client of the verbs' homes: every write goes
- * through its verb's one send function (`sendBegin` with the sampler, `sendStage`,
- * `sendWallVersion`, `sendReboot`), each judging its own rule on its hook's newest read. This module and the page name no route (a source-scan test holds it). Its one rule of
- * its own is `nextReboot`: one reboot in flight, the previous Player Rejoined or Skipped.
+ * through its verb's one send function (`sendWallVersion`, `sendReboot`), each judging its own
+ * rule on its hook's newest read. This module and the page name no route (a source-scan test
+ * holds it). Its one rule of its own is `nextReboot`: one reboot in flight, the previous Player
+ * Rejoined or Skipped.
  *
- * PROGRESS IS DERIVED. The URL holds only the operator's choices (target release, tried
- * Player, skipped Players); the step is re-derived from the reads on every render, so a reload
- * or a second tab shows the same step. Page memory holds only what Central cannot serve: this
- * page's sampling, its held stage, the Back out press, whether rolling is running, and the
- * FROZEN ROLLOUT: the Players a confirmation named, in order (`freezeRollout`). Rolling reboots
- * only those; a Player that appears later is Not in this rollout and never rebooted, and no
- * rolling starts without a confirmation that named its Players (a reload forgets the frozen
- * list, so Resume names them again).
+ * PROGRESS IS DERIVED. The URL holds only the operator's choices (target release, skipped
+ * Players); the step is re-derived from the reads on every render, so a reload or a second tab
+ * shows the same step. Page memory holds only what Central cannot serve: whether rolling is
+ * running and the FROZEN ROLLOUT: the Players a confirmation named, in order (`freezeRollout`).
+ * Rolling reboots only those; a Player that appears later is Not in this rollout and never
+ * rebooted, and no rolling starts without a confirmation that named its Players (a reload forgets
+ * the frozen list, so Resume names them again).
  *
- * WHAT THE READS CANNOT SAY (stated, not papered over). Central serves neither which release a
- * boot was offered (§29 G7, an owner choice not taken) nor which deployment an app
- * operation staged. So a stage is the target's when this page holds it, or when it reads
- * `target_running` with the Player app linking the target's app; and a Player is on the
- * release when this page rebooted it after Put on the wall and its Host Management session is on a
- * later boot (two kernel boot ids, never clocks), or, for a Player this page did not reboot,
- * when its linked app is the target's, that app identifies the target (`appIdentifiesTarget`)
- * and no Stage ran on its current boot (a Stage applies to that boot only). Any other Player is
- * rebooted to make sure: a release with no app, or one whose app another release carries on a
- * different base (a base-only release), cannot be recognised by its app. Every wait is the
- * page's own monotonic time.
+ * WHAT THE READS CANNOT SAY (stated, not papered over). Central does not serve which release a
+ * boot was offered (§29 G7, an owner choice not taken). So a Player is on the release when this
+ * page rebooted it after Put on the wall and its host line is on a later start (two line starts,
+ * never clocks), or, for a Player this page did not reboot, when the base its host reports running
+ * (the release read's `running`) is the target's base and that base identifies the target
+ * (`baseIdentifiesTarget`). Any other Player is rebooted to make sure: a release whose base another
+ * release a Player may run carries too cannot be recognised by its base. Every wait is the page's
+ * own monotonic time.
  *
- * @typedef {"reading"|"no_release"|"rejected"|"choose"|"qualifying"|"staging"|"looking"
- *           |"backing_out"|"keeping"|"paused"|"done"} StepName
- * @typedef {{release: import("./generated/contract").ReleaseView, withApp: boolean, deployable: boolean,
- *            app: string|null, appIdentifies: boolean}} Target
+ * @typedef {"reading"|"no_release"|"rejected"|"choose"|"keeping"|"paused"|"done"} StepName
+ * @typedef {{release: import("./generated/contract").ReleaseView, deployable: boolean,
+ *            app: string|null, baseIdentifies: boolean}} Target
  *   `deployable`: false when Central refused the release's upload (`release.problem` says why);
- *   `appIdentifies`: `appIdentifiesTarget` on the read the target came from
- * @typedef {{step: StepName, target?: Target, stage?: object|null,
- *            how?: "kept"|"backed_out"}} Step
+ *   `baseIdentifies`: `baseIdentifiesTarget` on the read the target came from
+ * @typedef {{step: StepName, target?: Target}} Step
  * @typedef {{playerId: string, deviceId: string, name: string,
  *            frames: Array<{frameId: string, outputId: string}>}} PlanEntry
  * @typedef {{request: import("./fleetCommands.js").FrozenRebootRequest, atMs: number,
@@ -71,16 +66,6 @@ import { STAGE_REFUSAL } from "./stage.js";
 /** Rebooting or Rejoining for this long (the page's own monotonic time) reads Not rejoined. */
 export const KEEP_WAIT_MS = 10 * 60 * 1000;
 
-/** Try is withdrawn when the target changes the base (§25a); a hint only, Central judges at send. */
-export const TRY_BASE_CHANGES = "This release changes the base, so it cannot be tried live; putting it on the "
-  + "wall reboots each Player onto it";
-/** A release with no app has nothing to stage (Central refuses a stage without an app). */
-export const TRY_NO_APP = "This release has no app, so there is nothing to try live; putting it on "
-  + "the wall reboots each Player onto it";
-
-const LOOKING = new Set(["target_running", "effect_unknown"]);
-const IN_PROGRESS = new Set(["staged", "switching"]);
-const ENDED = new Set(["interrupted_by_reboot", "ended_by_later_boot"]);
 // A bound Output is live when its Frame's health is past every liveness and Output cause;
 // calibration is kept across a reboot, so a Frame that needed it before still does. Liveness
 // is not readiness: a current readiness failure is read separately (`readinessFailures`).
@@ -89,23 +74,35 @@ const LIVE = new Set(["ok", "display-changed", "needs-calibration"]);
 const SETTLED = new Set(["rejoined", "skipped", "not_in_rollout"]);
 
 /**
- * Whether the target's app identifies the target (§25a Keep table): it has an app, and no
- * release a Player may run pairs that app environment with a different base. Only then does a
- * Player's linked app say which release it booted; a base-only release (new base, same app)
- * cannot be recognised that way. Central lists pre-releases too, so only rows a Player may run
- * count: a deployable stable release, and whatever a Player boots next or booted before. Pure,
+ * Whether the target's base identifies the target (§25a Keep table): it has a base, and no other
+ * release a Player may run carries the same base. Only then does the base a Player's host reports
+ * running say which release it booted. Central lists pre-releases too, so only rows a Player may
+ * run count: a deployable stable release, and whatever a Player boots next or booted before. Pure,
  * on the release read, so a reload derives the same.
  *
  * @param {import("./generated/contract").ReleasesView|null} read the release read
- * @param {{app: string|null, release: {base_tag: string|null}}} target
+ * @param {{release: {version: string, base_tag: string|null}}} target
  * @returns {boolean}
  */
-export function appIdentifiesTarget(read, target) {
-  if (target.app === null || read == null) return false;
+export function baseIdentifiesTarget(read, target) {
+  const base = target.release.base_tag;
+  if (base == null || read == null) return false;
   const chosen = new Set(read.players.flatMap((player) => [bootsNext(player, read), player.previous])
     .filter((version) => version != null));
   const rows = read.releases.filter((row) => deployable(row) && (row.stable || chosen.has(row.version)));
-  return !rows.some((row) => row.app_environment_sha256 === target.app && row.base_tag !== target.release.base_tag);
+  return !rows.some((row) => row.base_tag === base && row.version !== target.release.version);
+}
+
+/**
+ * The base a Player's host reports running, from the release read (`running`), or null.
+ *
+ * @param {import("./generated/contract").ReleasesView|null} read
+ * @param {string} playerId
+ * @returns {string|null}
+ */
+export function runningBase(read, playerId) {
+  const running = (read?.players ?? []).find((player) => player.player_id === playerId)?.running;
+  return typeof running === "string" ? running : null;
 }
 
 /**
@@ -119,14 +116,8 @@ export function appIdentifiesTarget(read, target) {
 export function journeyTarget(read, version) {
   const release = (read?.releases ?? []).find((row) => row.version === version);
   if (release === undefined) return null;
-  const app = release.app_environment_sha256 ?? null;
-  return Object.freeze({
-    release,
-    withApp: app !== null,
-    deployable: deployable(release),
-    app,
-    appIdentifies: deployable(release) && appIdentifiesTarget(read, { app, release }),
-  });
+  return Object.freeze({ release, deployable: deployable(release), app: release.app_environment_sha256 ?? null,
+    baseIdentifies: deployable(release) && baseIdentifiesTarget(read, { release }) });
 }
 
 /** What a version change alone (Undo) says: no reboot. */
@@ -174,73 +165,13 @@ export function putConfirmation(target) {
 }
 
 /**
- * What the journey does after a stage send (§25a failures), keyed on the outcome and Central's
- * served code, never on the words: `stay` (a lost answer or a send-rule refusal: stays on
- * Staging with its words), `held` (recorded), `qualify` (a missing qualified fallback, the first
- * time), `withdraw` (a base mismatch: Try is withdrawn for this target, back to Choose) or
- * `choose` (any other refusal, back to Choose with Central's words).
+ * The journey's step (§25a step table), from the newest reads and the operator's choice.
  *
- * @param {import("./sendOutcome.js").Outcome} outcome
- * @param {number} refusals missing-fallback refusals already met on this journey
- * @returns {"stay"|"held"|"qualify"|"withdraw"|"choose"}
- */
-export function stageFollowUp(outcome, refusals) {
-  if (outcome.outcome === "unknown" || outcome.outcome === "changed") return "stay";
-  if (outcome.outcome !== "refused") return "held";
-  if (outcome.code === STAGE_REFUSAL.fallbackRequired && refusals === 0) return "qualify";
-  return outcome.code === STAGE_REFUSAL.baseMismatch ? "withdraw" : "choose";
-}
-
-/**
- * Why Try is withdrawn for this target before anything is sent (a hint; Central judges a stage
- * at send), or null: the target has no app, or a Player boots a release on another base.
- *
- * @param {import("./generated/contract").ReleasesView} read the release read
- * @param {Target} target
- * @returns {string|null}
- */
-export function tryWithdrawn(read, target) {
-  if (!target.withApp) return TRY_NO_APP;
-  const bases = read.players.map((player) => read.releases.find((row) => row.version === bootsNext(player, read)))
-    .filter((row) => row !== undefined).map((row) => row.base_tag);
-  return bases.some((base) => base !== target.release.base_tag) ? TRY_BASE_CHANGES : null;
-}
-
-/** The app the current boot linked (G4), or null. */
-export function linkedApp(operations) {
-  const sha = operations?.qualification?.linked_app?.environment_sha256;
-  return typeof sha === "string" && sha !== "" ? sha : null;
-}
-
-/** Whether Central lists an acceptance of the linked app (G4); no verdict on whether it fits. */
-function acceptedLinked(operations) {
-  const linked = linkedApp(operations);
-  const acceptances = operations?.qualification?.acceptances;
-  return linked !== null && Array.isArray(acceptances) && acceptances.some((row) => row.environment_sha256 === linked);
-}
-
-/**
- * The tried Player's latest stage when it is provably the target's, or null: the stage this
- * page holds, or one reading `target_running` while the Player app links the target's app.
- */
-function targetStage(operations, target, stageId) {
-  const latest = operations?.operations?.[0];
-  if (latest == null) return null;
-  if (stageId != null && latest.operation_id === stageId) return latest;
-  return latest.state === "target_running" && target.app !== null && linkedApp(operations) === target.app
-    ? latest : null;
-}
-
-/**
- * The journey's step (§25a step table), from the newest reads, the operator's choices and the
- * little this page holds.
- *
- * @param {{releases: object|null, tried: {operations: object|null}|null, rows: RowState[]|null}} reads
- *   `tried`: the tried Player's node read; `rows`: the Keep rows while the target is selected
- *   (null until the snapshot the plan comes from is read; an empty array is a read plan of none)
- * @param {{tag: string, tried: string|null}} choices `tag`: the release's version
- * @param {{sampling: boolean, qualified: boolean, needQualify: boolean, backingOut: boolean,
- *          stageId: string|null, rolling: boolean}} held
+ * @param {{releases: object|null, rows: RowState[]|null}} reads
+ *   `rows`: the Keep rows while the target is selected (null until the snapshot the plan comes
+ *   from is read; an empty array is a read plan of none)
+ * @param {{tag: string}} choices `tag`: the release's version
+ * @param {{rolling: boolean}} held
  * @returns {Step}
  */
 export function journeyStep(reads, choices, held) {
@@ -249,48 +180,27 @@ export function journeyStep(reads, choices, held) {
   const target = journeyTarget(read, choices.tag);
   if (target === null) return { step: "no_release" };
   if (!target.deployable) return { step: "rejected", target };
-  if (wallOn(read, target.release.version)) {
-    // No rows yet (the snapshot is unread): no completion is claimed from no reads.
-    const rows = reads.rows;
-    if (rows == null) return { step: "reading", target };
-    if (rows.every((row) => SETTLED.has(row.state))) {
-      return { step: "done", target, how: "kept" };
-    }
-    return { step: held.rolling ? "keeping" : "paused", target };
-  }
-  if (choices.tried == null) return { step: "choose", target };
-  const operations = reads.tried?.operations ?? null;
-  const listed = operations?.operations ?? [];
-  if (held.backingOut) {
-    const backed = listed.find((entry) => entry.operation_id === held.stageId) ?? listed[0];
-    return ENDED.has(backed?.state) ? { step: "done", target, how: "backed_out" } : { step: "backing_out", target };
-  }
-  const stage = targetStage(operations, target, held.stageId);
-  if (stage !== null && LOOKING.has(stage.state)) return { step: "looking", target, stage };
-  if (stage !== null && IN_PROGRESS.has(stage.state)) return { step: "staging", target, stage };
-  if (held.sampling) return { step: "qualifying", target };
-  if (!held.qualified && (held.needQualify || (linkedApp(operations) !== null && !acceptedLinked(operations)))) {
-    return { step: "qualifying", target };
-  }
-  return { step: "staging", target, stage };
+  if (!wallOn(read, target.release.version)) return { step: "choose", target };
+  // No rows yet (the snapshot is unread): no completion is claimed from no reads.
+  const rows = reads.rows;
+  if (rows == null) return { step: "reading", target };
+  if (rows.every((row) => SETTLED.has(row.state))) return { step: "done", target };
+  return { step: held.rolling ? "keeping" : "paused", target };
 }
 
 /**
  * The Players a Put on the wall reboots, in order (§25a): the Players this console knows (not retired,
- * enrolled with a device), the tried Player first (it is proven on this hardware), the
- * others by name.
+ * enrolled with a device), by name.
  *
  * @param {object|null} snapshot
  * @param {{devices?: Map<string, object>}|null} bootFacts
- * @param {string|null} triedPlayerId
  * @returns {PlanEntry[]}
  */
-export function keepPlan(snapshot, bootFacts, triedPlayerId) {
+export function keepPlan(snapshot, bootFacts) {
   return playersByDevice(snapshot, bootFacts)
     .filter((row) => row.player !== null && row.standing !== "retired")
     .map((row) => ({ playerId: row.player.id, deviceId: row.deviceId, name: row.name, frames: row.frames }))
-    .sort((a, b) => (b.playerId === triedPlayerId) - (a.playerId === triedPlayerId)
-      || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
 /**
@@ -356,19 +266,22 @@ function readinessFailures(snapshot, playerId) {
 const row = (playerId, state, label, extra = {}) => Object.freeze({ playerId, state, label, pause: null, ...extra });
 
 /**
- * One Player's Keep row (§25a Keep table), from its newest node read, the snapshot, the
- * target and the reboot this page sent it in this rollout.
+ * One Player's Keep row (§25a Keep table), from its newest node read, the snapshot, the target,
+ * the base its host reports running and the reboot this page sent it in this rollout.
  *
  * @param {{node: import("./nodeRead.js").NodeDevice, snapshot: object|null, playerId: string,
- *          target: Target, sent: SentReboot|null, waitedMs: number, skipped: boolean, outside?: boolean}} input
+ *          target: Target, running?: string|null, sent: SentReboot|null, waitedMs: number,
+ *          skipped: boolean, outside?: boolean}} input
+ *   `running`: `runningBase` of the release read
  *   `outside`: the Player is not in the frozen rollout (`rolloutMembers`), so no reboot is
  *   ever judged for it
  *   `waitedMs`: the page's monotonic time since `sent`, or, without one, since rolling began
- *   (0 while not rolling), so a Player that runs the target's app but never reports ready
+ *   (0 while not rolling), so a Player recognised on the release that never reports ready
  *   stalls too
  * @returns {RowState}
  */
-export function keepRow({ node, snapshot, playerId, target, sent, waitedMs, skipped, outside = false }) {
+export function keepRow({ node, snapshot, playerId, target, running = null, sent, waitedMs, skipped,
+  outside = false }) {
   if (skipped) return row(playerId, "skipped", "Skipped");
   if (outside) {
     return row(playerId, "not_in_rollout", "Not in this rollout: no confirmation named it; this page never reboots it");
@@ -377,22 +290,15 @@ export function keepRow({ node, snapshot, playerId, target, sent, waitedMs, skip
     if (node?.error == null) return row(playerId, "reading", "Reading its node records…");
     return row(playerId, "cannot_reboot", `Cannot reboot: ${rebootTarget(node).reason}`);
   }
-  const linked = linkedApp(node.operations);
-  const appLinked = target.app === null || linked === target.app;
   const booted = sent != null && (() => {
-    const boot = hostBoot(node.read);
-    return boot !== null && sent.request.kernelBootId !== null && boot !== sent.request.kernelBootId;
+    const start = hostEpoch(node.read);
+    return start !== null && sent.request.hostEpoch !== null && start !== sent.request.hostEpoch;
   })();
-  // A stage not yet ended by a later boot ran on the current boot: its app is that boot's only,
-  // never evidence of the Player's version (the tried Player after Try reads exactly so).
-  const latest = node.operations?.operations?.[0] ?? null;
-  const stagedThisBoot = latest != null && !ENDED.has(latest.state);
-  const onSelection = sent != null ? booted : target.appIdentifies && !stagedThisBoot && linked === target.app;
+  const recognised = sent == null && target.baseIdentifies && running === target.release.base_tag;
   const stalled = waitedMs >= KEEP_WAIT_MS;
-  if (onSelection) {
-    const basis = sent != null
-      ? "its Host Management session is on a later kernel boot than the reboot this page sent"
-      : "this page did not reboot it; its linked app identifies this release and no Stage ran on this boot";
+  if (booted || recognised) {
+    const basis = booted ? "its host line is on a later start than the reboot this page sent"
+      : "this page did not reboot it; the base its host reports running identifies this release";
     const evidence = (value, more) => ({ evidence: fact({ kind: "derived", value, basis: `${basis}${more}` }) });
     // After this page's reboot, the snapshot judges the new boot only once it lists the Player
     // app's new enrollment: an older snapshot's liveness and readiness describe the old boot.
@@ -407,7 +313,7 @@ export function keepRow({ node, snapshot, playerId, target, sent, waitedMs, skip
         pause: `it reports a readiness failure on a bound Output: ${words}`,
         ...evidence("Not rejoined", "; Central serves a current readiness failure for a Frame it drives") });
     }
-    if (appLinked && fresh && outputsLive(snapshot, playerId)) {
+    if (fresh && outputsLive(snapshot, playerId)) {
       return row(playerId, "rejoined", "Rejoined", evidence("On this release and rejoined",
         "; every bound Output's Frame has a recent accepted report, no interruption and no current readiness "
           + "failure (Central serves no per-Output playback commitment, so this is not proof it is showing its "
@@ -418,9 +324,8 @@ export function keepRow({ node, snapshot, playerId, target, sent, waitedMs, skip
         pause: "This Player has not rejoined after 10 minutes",
         ...evidence("Not rejoined", "; 10 minutes of this page's own time without rejoining") });
     }
-    return row(playerId, "rejoining", !appLinked
-      ? `Rejoining: the Player app has not linked app ${appHandle(target.app)} yet`
-      : !fresh ? "Rejoining: Central's snapshot does not list the Player app's enrollment on the new boot yet"
+    return row(playerId, "rejoining", !fresh
+      ? "Rejoining: Central's snapshot does not list the Player app's enrollment on the new boot yet"
       : "Rejoining: a bound Output's Frame is not live yet", evidence("On this release", ""));
   }
   if (sent != null) {
@@ -433,7 +338,7 @@ export function keepRow({ node, snapshot, playerId, target, sent, waitedMs, skip
       return row(playerId, "not_rejoined", "Not rejoined after 10 minutes", {
         pause: "This Player has not come back on a new boot after 10 minutes",
         evidence: fact({ kind: "derived", value: "Not rejoined",
-          basis: "no later kernel boot after 10 minutes of this page's own time since its reboot" }) });
+          basis: "no later start of its host line after 10 minutes of this page's own time since its reboot" }) });
     }
     return row(playerId, "rebooting", state?.label ?? "Reboot sent by this page; Central has not listed it yet");
   }
@@ -441,17 +346,9 @@ export function keepRow({ node, snapshot, playerId, target, sent, waitedMs, skip
   if (!reboot.available) return row(playerId, "cannot_reboot", `Cannot reboot: ${reboot.reason}`);
   const offer = rebootOffer(reboot, node.read.reboot_commands, node.readAt, null);
   if (offer.offer !== "new") return row(playerId, "rebooting", `Rebooting: ${offer.reason}`);
-  if (stagedThisBoot) {
-    return row(playerId, "waiting", "Waiting · it runs a Stage, which applies to this boot only; this page reboots it; "
-      + "its next boot is offered its version");
-  }
-  if (target.app === null) {
-    return row(playerId, "waiting", "Waiting · unknown whether it booted this release (a release with no app cannot "
-      + "be recognised); this page reboots it to make sure");
-  }
-  return row(playerId, "waiting", target.appIdentifies ? "Waiting"
-    : "Waiting · unknown whether it booted this release (another release carries the same app on a different "
-      + "base, so it cannot be recognised by its app); this page reboots it to make sure");
+  return row(playerId, "waiting", target.baseIdentifies ? "Waiting"
+    : "Waiting · unknown whether it booted this release (another release a Player may run has the same base, so "
+      + "it cannot be recognised by its base); this page reboots it to make sure");
 }
 
 /**

@@ -245,14 +245,9 @@ export const NOT_SHOWN = Object.freeze([
   "uptime", "load_1m", "memory_total", "memory_available", "cma_total", "cma_free",
   "memory_peak:", "manager_summary_known", "manager_running", "manager_attempts",
   "manager_recovery_required", "manager_start_unknown", "manager_summary_age",
-  "local_recovery_active", "local_recovery_reboot", "metrics_dropped",
+  "metrics_dropped",
 ]);
 
-const APP_MANAGER = LAYER_NAMES.app_manager;
-// App Manager's storage refusal (§63 "Storage short"): an item from G12's `preparation`, not a
-// host metric, shown only while this boot's Host Management reports.
-const PREPARATION = "preparation";
-const PREPARATION_ENTRY = Object.freeze({ group: "Storage", label: "Storage" });
 
 const RANK = Object.freeze({ ok: 0, unknown: 1, notice: 2, alarm: 3 });
 // Why a box has no row (§62): absent from a read, or no read at all because it failed.
@@ -272,8 +267,7 @@ function receipt(receivedAt, readAt) {
 }
 
 function item(name, fields) {
-  const entry = name === RECEIPT ? { group: HOST, label: HOST }
-    : name === PREPARATION ? PREPARATION_ENTRY : HOST_CATALOG[name];
+  const entry = name === RECEIPT ? { group: HOST, label: HOST } : HOST_CATALOG[name];
   return Object.freeze({ name, group: entry.group, label: entry.label, band: null, ...fields });
 }
 
@@ -345,8 +339,8 @@ function reportedMetric(name, host, facts, readAt, thresholds) {
   }
   const reported = (band) => item(name, { band, fact: fact({ kind: "reported", source: HOST,
     value: read.text, readAt, ...read.receipt }) });
-  // A self-judging item's band is its own (a stopped boot stage, a failed unit, a kill), as
-  // App Manager's storage refusal's is: no Central threshold is read for it.
+  // A self-judging item's band is its own (a stopped boot stage, a failed unit, a kill): no Central
+  // threshold is read for it.
   if (entry.judge !== undefined) return reported(read.band);
   if (entry.flags) {
     // Each flag is banded by its own served threshold; the item takes the worst.
@@ -378,22 +372,6 @@ function lastReportedMetric(name, host, facts, readAt) {
   if (read.why !== undefined) return item(name, { fact: fact({ kind: "unknown", why: read.why }) });
   return item(name, { fact: fact({ kind: "reported", source: HOST, value: `${read.text} at last report`,
     readAt, ...read.receipt }) });
-}
-
-/**
- * App Manager's storage refusal while reporting (§62-§63): an alarm when the current boot's
- * newest App Manager sample is `refused` for `node_storage_capacity` with both numbers, else
- * no item (a newer sample clears it).
- */
-function storageShort(preparation, readAt) {
-  if (preparation?.state !== "refused" || preparation.fault !== "node_storage_capacity"
-      || !isNumber(preparation.required_bytes) || !isNumber(preparation.available_bytes)) {
-    return [];
-  }
-  return [item(PREPARATION, { band: "alarm", fact: fact({ kind: "reported", source: APP_MANAGER,
-    receipt: "latest", receivedAt: preparation.received_at, readAt, field: "preparation.received_at",
-    value: `${APP_MANAGER} refused a preparation: needs ${gigabytes(preparation.required_bytes)} GB, ` +
-      `room ${gigabytes(preparation.available_bytes)} GB` }) })];
 }
 
 /** Whether Central's hub, reachable, does not hold the box's leaf (`bus_link`). */
@@ -438,8 +416,7 @@ function classify(row, read, absent) {
       ...metrics.map((name) => lastReportedMetric(name, host, facts, readAt))], "alarm");
   }
   return judged("reporting", [item(RECEIPT, { fact: newest }),
-    ...metrics.map((name) => reportedMetric(name, host, facts, readAt, thresholds)),
-    ...storageShort(row.preparation ?? null, readAt)]);
+    ...metrics.map((name) => reportedMetric(name, host, facts, readAt, thresholds))]);
 }
 
 // The host facts record (G13) and the boot's base (§62): text a box's current boot carries.

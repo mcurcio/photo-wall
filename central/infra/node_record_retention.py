@@ -19,9 +19,9 @@ stamped (`NodeSessions.clock`): a clock is compared only with itself.
 | Result key (the rule's table) | Deleted: rows received before the cut | Never deleted | Index |
 |---|---|---|---|
 | `node_reconciliation_work` | finished work, and with each row its `node_evidence` row | unfinished work; the evidence of an event (the reboot audit reads events at any age) | `received_at` (migration 113) |
-| `node_display_exchanges` | exchanges, and with each its `node_display_handoffs` and `node_display_withdrawals` rows | of a producer of its device's current boot, the newest `RECENT_EXCHANGES` (128) per Output by its boot clock, at any age: `node_display.py` reads the newest per Output (`DISPLAY_OUTPUTS_SQL`) and a withdrawal looks through the newest 128, `node_acceptance.py` the latest per Output and its handoff | `received_at` (migration 113) |
+| `node_display_exchanges` | exchanges, and with each its `node_display_handoffs` and `node_display_withdrawals` rows | of a producer of its device's current boot, the newest `RECENT_EXCHANGES` (128) per Output by its boot clock, at any age: `node_display.py` reads the newest per Output (`DISPLAY_OUTPUTS_SQL`) and a withdrawal looks through the newest 128 | `received_at` (migration 113) |
 | `node_host_observations` | samples | of a producer of its device's current or most recently superseded boot, the newest sample, at any age: `node_observations.py` reads the newest per producer (G12 shows both boots' "last heard") | `received_at` (migration 113) |
-| `node_manager_observations` | samples | of a producer of its device's current or most recently superseded boot, the newest `PREPARATION_KEYS` (8), at any age: `node_observations.py` reads the newest per producer and coalesces among the newest 8 | `received_at` (migration 113) |
+| `node_manager_observations` | samples | of a producer of its device's current or most recently superseded boot, the newest `PREPARATION_KEYS` (8), at any age (unread since S4c-2a-iii) | `received_at` (migration 113) |
 
 So a Pi dark for over a week (powered off, its current boot silent) still shows its last sample
 and its Outputs; a boot that is neither its device's current nor its previous one keeps nothing
@@ -51,13 +51,15 @@ from __future__ import annotations
 from typing import Final
 
 from central.fleet.node_display import RECENT_EXCHANGES
-from central.fleet.node_observations import PREPARATION_KEYS
 from central.infra.batched_retention import Begin, drain
 from central.infra.events import EVENTS_KEPT_SECONDS
 from contracts.time import Clock
 
 KEPT_SECONDS: Final = 7 * 86400
 BATCH_ROWS: Final = 500
+# The newest App Manager samples kept per producer: nothing reads them since S4c-2a-iii (the table and
+# this rule go in S4c-2a-iv and 2a-v).
+PREPARATION_KEYS: Final = 8
 BATCHES: Final = 4
 # `node_observations.py` `_NEWEST_HOST_SQL`: a producer's newest host sample is all it reads.
 HOST_SAMPLES_KEPT: Final = 1

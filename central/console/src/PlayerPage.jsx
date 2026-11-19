@@ -8,10 +8,7 @@ import { clock, fact, words } from "./facts.js";
 import {
   interruptionFor, isBound, outputLabel, outputStates,
 } from "./health.js";
-import { currentSessionBoot, layerEvidence, useNodeDevice } from "./nodeRead.js";
-import { AppOperationsSection } from "./PlayerCommands.jsx";
-import { QualifiedFallback } from "./QualifiedFallback.jsx";
-import { StageApp } from "./StageApp.jsx";
+import { hostStart, layerEvidence, useNodeDevice } from "./nodeRead.js";
 import {
   BOOT_FACTS_UNAVAILABLE, enrolledFact, identifyOffer, panelAtEnrollment, playersByDevice, RETIRED_NOT_READ,
 } from "./players.js";
@@ -48,7 +45,7 @@ function ReadTime({ what, at, failed }) {
 }
 
 /**
- * The software layer rows (§9 Layers, L1 to L2) and the closing Panel line. Host Management's
+ * The software layer rows (§9 Layers, L1.5 to L2) and the closing Panel line. Host Management's
  * row (L0) lives on the Pi's Hardware page, in Link and sessions.
  */
 function LayersSection({ node, snapshot, playerId, retired }) {
@@ -57,7 +54,7 @@ function LayersSection({ node, snapshot, playerId, retired }) {
   return (
     <>
       {retired ? (
-        <p className="player__read-time">{`${RETIRED_NOT_READ} (App Manager, App Effect Broker, Display Host)`}</p>
+        <p className="player__read-time">{`${RETIRED_NOT_READ} (Display Host)`}</p>
       ) : (
         <ReadTime what="Node read" at={node.readAt} failed={node.error !== null && node.read !== null} />
       )}
@@ -86,14 +83,14 @@ function LayersSection({ node, snapshot, playerId, retired }) {
 }
 
 /**
- * The Boot section (Part E §25): the current node session's boot, then the latest node boot
+ * The Boot section (Part E §25): the start of the box's host line now, then the latest node boot
  * offer record.
  */
 function BootSection({ node, retired }) {
   if (retired) {
     return <p className="player__read-time">{RETIRED_NOT_READ}</p>;
   }
-  const current = currentSessionBoot(node);
+  const current = hostStart(node);
   const read = node.read;
   let offer = current.none?.kind === "unknown" ? current.none : null;
   if (read != null) {
@@ -111,7 +108,7 @@ function BootSection({ node, retired }) {
   }
   return (
     <>
-      <FactLine label="Current node session's boot" fact={current.fact ?? current.none} />
+      <FactLine label="Host line" fact={current.fact ?? current.none} />
       {offer === null ? (
         <p className="roster__empty">No node boot offer recorded for this box.</p>
       ) : (
@@ -286,12 +283,12 @@ function OutputsSection({ snapshot, bootFacts, row, wall, setStatus }) {
 /**
  * One Pi's Software and screens page (`#/players/<device-id>`; console by domain § Fleet): the
  * Pi header (linking to the Pi's Hardware page, which holds Reboot, Health, its Node API link
- * and Retire), its Enrollment, its software layers bottom up (L1 to L2), its Outputs, its boot,
- * its app (Stage app and its operations) and Unbind all. It keeps what belongs to Software and
+ * and Retire), its Enrollment, its software layers bottom up (L1.5 to L2), its Outputs, its boot
+ * and Unbind all. It keeps what belongs to Software and
  * Screens until their own pages land. Each section shows its own read time and sits behind its
  * own error boundary. Node records are read only on a Pi's pages, for that box only
  * (nodeRead.js), never for a retired box.
- * Writes stay with their aggregate: Bind goes to the Frame, Stage app to the fleet.
+ * Writes stay with their aggregate: Bind goes to the Frame.
  *
  * @param {{deviceId: string, snapshot: object, bootFacts: object|null,
  *          wall: import("./wallState.js").WallMemory}} props
@@ -361,16 +358,6 @@ export function PlayerPage({ deviceId, snapshot, bootFacts, wall }) {
       <SectionBoundary title="Boot" resetKey={node.readAt}>
         <BootSection node={node} retired={retired} />
       </SectionBoundary>
-
-      {!retired && (
-        <SectionBoundary title="App" resetKey={node.operations?.read_at}>
-          <StageApp key={deviceId} deviceId={deviceId} name={row.name} node={node} snapshot={snapshot}
-            player={player} />
-          <AppOperationsSection node={node} />
-          <QualifiedFallback key={deviceId} deviceId={deviceId} node={node} snapshot={snapshot}
-            playerId={player?.id ?? null} />
-        </SectionBoundary>
-      )}
 
       {player !== null && row.standing === "bound" && (
         <SectionBoundary title="Danger zone">

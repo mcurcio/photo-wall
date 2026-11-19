@@ -16,6 +16,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from node.test_node_linux_adapters import store as boot_store
+from support.node_doubles import MemoryEffectJournal, RecordingAppDriver
 from support.repo import REPO
 
 from appliance.apps import process_linux as linux
@@ -30,7 +31,6 @@ from appliance.apps.broker import (
 from appliance.apps.lifecycle_storage import FileEffectJournal
 from appliance.kernel.display_paths import DISPLAY_UNIT, PURPOSEFUL_RESTART, SIGNAL_RANGE_UNIT
 from contracts.app_environment import AppEnvironmentRefV2
-from scripts.node_control_demo import MemoryEffectJournal, RecordingAppDriver
 
 # Weston incarnations as systemctl shows an InvocationID; the driver records a UUID's text.
 WESTON_1, WESTON_2, WESTON_3 = "a1" * 16, "b2" * 16, "c3" * 16

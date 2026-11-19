@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 
 import { apiWrite } from "./apiWrite.js";
-import { fact, LAYER_NAMES, words } from "./facts.js";
+import { fact, LAYER_NAMES } from "./facts.js";
 import { formatAge, livenessFact } from "./health.js";
 import { usePolledRead } from "./polledRead.js";
 
@@ -9,22 +9,20 @@ import { usePolledRead } from "./polledRead.js";
  * The Player page's node read and its layer evidence (console DDD §9-§11).
  *
  * THE READ (`useNodeDevice`): one box's node records, read only while its Player page is
- * open — `GET …/node/devices/<id>` (its sessions, host samples, preparation, broker
- * projection, Display Host's newest exchange per Output, boot claims and reboot audit) and
- * `GET …/node/devices/<id>/app-attempts` (its app operations) — every `cadenceMs` through
- * the shared polled read (polledRead.js), never for a retired box (`skip`). Like the fleet host read it goes through
- * `apiWrite(path, {method: "GET"})`, so a failure never touches the session. A failed read
+ * open — `GET …/node/devices/<id>` (its host line as Central keeps it, Display Host's newest
+ * exchange per Output, boot claims and reboot records) — every `cadenceMs` through the shared
+ * polled read (polledRead.js), never for a retired box (`skip`). Like the fleet host read it goes
+ * through `apiWrite(path, {method: "GET"})`, so a failure never touches the session. A failed read
  * KEEPS the last values and reports its error beside them.
  *
- * THE MODEL (`layerEvidence`, `currentSessionBoot`, `processFacts`): pure functions from
- * that read and the snapshot to facts (facts.js). A field that is null or absent renders
+ * THE MODEL (`layerEvidence`, `hostStart`): pure functions from that read and the snapshot to
+ * facts (facts.js). A field that is null or absent renders
  * Unknown naming it; a payload of the wrong shape throws, which the section's error
  * boundary (SectionBoundary.jsx) contains. Every age is Central's read time minus
  * Central's receipt time (R10).
  *
  * @typedef {{code: string, status: number|null}} NodeReadError
- * @typedef {{read: object|null, operations: object|null, readAt: number|null,
- *            error: NodeReadError|null}} NodeDevice
+ * @typedef {{read: object|null, readAt: number|null, error: NodeReadError|null}} NodeDevice
  *   `readAt` is the device read's `read_at` (Central's clock).
  * @typedef {{key: string, layer: string, level: string,
  *            facts: Array<{label: string, fact: import("./facts.js").Fact}>,
@@ -34,7 +32,7 @@ import { usePolledRead } from "./polledRead.js";
 export const NO_NODE_RECORD = "no current node record for this box";
 
 const DEFAULT_CADENCE_MS = 5000;
-const NOT_READ = Object.freeze({ read: null, operations: null, readAt: null, error: null });
+const NOT_READ = Object.freeze({ read: null, readAt: null, error: null });
 
 /**
  * The error a failed node read reports: its code, or the status, or "unanswered" (the
@@ -61,71 +59,12 @@ export function readError(result) {
 export function useNodeDevice(deviceId, { cadenceMs = DEFAULT_CADENCE_MS, skip = false } = {}) {
   const base = `/v1/operator/node/devices/${encodeURIComponent(deviceId)}`;
   const load = useCallback(async (current) => {
-    const get = (path) => apiWrite(path, { method: "GET" }).catch(() => null);
-    const [read, operations] = await Promise.all([get(base), get(`${base}/app-attempts`)]);
-    const failed = [read, operations].find((result) => result === null || !result.ok);
-    return {
-      read: read?.ok ? read.data : current.read,
-      operations: operations?.ok ? operations.data : current.operations,
-      readAt: read?.ok ? read.data?.read_at ?? null : current.readAt,
-      error: failed === undefined ? null : readError(failed),
-    };
+    const read = await apiWrite(base, { method: "GET" }).catch(() => null);
+    return read?.ok ? { read: read.data, readAt: read.data?.read_at ?? null, error: null }
+      : { read: current.read, readAt: current.readAt, error: readError(read) };
   }, [base]);
   const { value, refresh, latest } = usePolledRead(load, { cadenceMs, skip, initial: NOT_READ });
   return { ...value, refresh, latest };
-}
-
-/**
- * The App Effect Broker's app-process facts in one session's served `projection`: each
- * entry is a node snapshot message holding one fact (central/fleet/node_ingest.py), with
- * the sequence and Central's receipt time of the report that last changed it. Entries
- * that are not app-process facts, or do not decode, are left out; newest sequence first.
- *
- * @param {object|null} session one entry of the device read's `sessions`
- * @returns {Array<{pid: number, startTicks: number, invocationId: string|null,
- *                  appEpoch: number, environmentSha256: string, state: string,
- *                  sequence: number, receivedAt: number}>}
- */
-export function processFacts(session) {
-  const facts = [];
-  for (const entry of session?.projection ?? []) {
-    let item;
-    try {
-      item = JSON.parse(entry.payload)?.message?.facts?.[entry.fact_index];
-    } catch {
-      continue;
-    }
-    if (item?.type !== "AppProcessFact" || typeof item.process !== "object" || item.process === null) {
-      continue;
-    }
-    facts.push({
-      pid: item.process.pid,
-      startTicks: item.process.start_ticks,
-      invocationId: item.process.invocation_id?.uuid ?? null,
-      appEpoch: item.app_epoch,
-      environmentSha256: item.environment_sha256,
-      state: item.state,
-      sequence: entry.sequence,
-      receivedAt: entry.received_at,
-    });
-  }
-  return facts.sort((a, b) => b.sequence - a.sequence);
-}
-
-/** The current session of `owner` in a device read, or null. */
-function currentSession(read, owner) {
-  return (read?.sessions ?? []).find((session) => session.current && session.producer?.owner === owner)
-    ?? null;
-}
-
-/**
- * The newest NON-current session of `owner` that holds this layer's evidence, or null. The
- * read serves sessions newest first (`issued_at DESC`) with each one's latest sample, so a
- * box whose host stopped reporting keeps its last receipt time after its session lapses.
- */
-function lastSession(read, owner, hasEvidence) {
-  return (read?.sessions ?? []).find((session) => !session.current && session.producer?.owner === owner
-    && hasEvidence(session)) ?? null;
 }
 
 /** Why no node layer can be read, or null when the read can speak for them. */
@@ -140,92 +79,36 @@ export function nodeUnknown(nodeDevice) {
 
 
 /**
- * One node layer's row: its last-reported fact from its current session's field. With no
- * current session, the newest earlier session holding the layer's evidence (`hasEvidence`)
- * speaks instead, with a Session fact saying none is current; Unknown only when no session
- * of the layer has any.
+ * The Host Management (L0) row: when Central last recorded a value of the host's line (its
+ * metrics or facts) and the line's start, from the device read's `host` (decision 0034: the
+ * host states its values only when they change, so this age is how long they have stood, never
+ * silence; silence is Health's, from the fleet host read).
  */
-function nodeRow(key, level, owner, nodeDevice, hasEvidence, build) {
-  const layer = LAYER_NAMES[owner];
-  const why = nodeUnknown(nodeDevice);
+function hostRow(nodeDevice) {
+  const row = { key: "host", layer: LAYER_NAMES.host_core, level: "L0" };
+  const why = nodeUnknown(nodeDevice) ?? (nodeDevice.read.host == null ? `no ${row.layer} line heard` : null);
   if (why !== null) {
-    return { key, layer, level, facts: [{ label: "Last reported", fact: fact({ kind: "unknown", why }) }],
-      details: [] };
+    return { ...row, details: [], facts: [{ label: "Last reported", fact: fact({ kind: "unknown", why }) }] };
   }
-  const current = currentSession(nodeDevice.read, owner);
-  const session = current ?? lastSession(nodeDevice.read, owner, hasEvidence);
-  if (session === null) {
-    return { key, layer, level, details: [],
-      facts: [{ label: "Last reported", fact: fact({ kind: "unknown", why: `no current ${layer} session` }) }] };
-  }
-  const { facts, details } = build(session, nodeDevice.read.read_at);
-  const lapsed = current === null
-    ? [{ label: "Session", fact: fact({ kind: "set",
-      value: `No current ${layer} session; the evidence above is from its last session` }) }]
-    : [];
-  return { key, layer, level, facts: [...facts, ...lapsed],
-    details: [...details,
-      `${current === null ? "Last session" : "Session"} ${session.session_id} · boot ${session.producer?.kernel_boot_id}`] };
+  const { host, read_at: readAt } = nodeDevice.read;
+  return { ...row,
+    facts: [{ label: "Last reported", fact: fact({ kind: "reported", source: row.layer, receipt: "latest",
+      receivedAt: host.received_at, readAt, field: "host.received_at" }) }],
+    details: [`Line start ${host.epoch}`,
+      `Source: ${row.layer}'s line as Central keeps it. It states a value only when it changes.`] };
 }
 
 /**
- * The Player page's five layer rows, bottom up: Host Management (L0), App Manager and App
- * Effect Broker (L1), Display Host (L1.5) and the Player app (L2). The node rows come from
- * the device read, the Player app's from the snapshot; each fact names its source.
+ * The Player page's layer rows, bottom up: Host Management (L0), Display Host (L1.5) and the
+ * Player app (L2). The node rows come from the device read, the Player app's from the snapshot;
+ * each fact names its source.
  *
  * @param {{nodeDevice: NodeDevice|null, snapshot: object|null, playerId: string|null}} input
  * @returns {LayerRow[]}
  */
 export function layerEvidence({ nodeDevice, snapshot, playerId }) {
-  // Host Management's sample values live in Player › Health (HostHealthSection.jsx, §61);
-  // its layer row keeps when it last reported and its session.
-  const host = nodeRow("host", "L0", "host_core", nodeDevice,
-    (session) => session.host_observation != null, (session, readAt) => ({
-      facts: [{ label: "Last reported", fact: fact({ kind: "reported", source: LAYER_NAMES.host_core,
-        receipt: "latest", receivedAt: session.host_observation?.received_at, readAt,
-        field: "host_observation.received_at" }) }],
-      details: [],
-    }));
-  const manager = nodeRow("manager", "L1", "app_manager", nodeDevice,
-    (session) => session.manager_preparation != null, (session, readAt) => {
-    const preparation = session.manager_preparation;
-    return {
-      facts: [{ label: "Last reported", fact: fact({ kind: "reported", source: LAYER_NAMES.app_manager,
-        receipt: "latest", receivedAt: preparation?.received_at, readAt,
-        value: preparation?.sample?.state ? `preparation ${words(preparation.sample.state)}` : null,
-        field: "manager_preparation.received_at" }) }],
-      details: [
-        ...(preparation?.sample?.fault ? [`Fault: ${words(preparation.sample.fault)}`] : []),
-        "Source: manager preparation samples. Preparation is not activation.",
-      ],
-    };
-  });
-  const broker = nodeRow("broker", "L1", "app_effect_broker", nodeDevice,
-    (session) => processFacts(session).length > 0, (session, readAt) => {
-      const [latest, ...earlier] = processFacts(session);
-      const process = latest === undefined
-        ? fact({ kind: "unknown", why: `${LAYER_NAMES.app_effect_broker} has reported no app process on this session` })
-        : fact({ kind: "reported", source: LAYER_NAMES.app_effect_broker, receipt: "first",
-          value: `the app ${words(latest.state)}`, receivedAt: latest.receivedAt, readAt,
-          field: "projection received_at" });
-      return {
-        facts: [
-          { label: "Last reported", fact: fact({ kind: "unknown", why: BROKER_SILENT }) },
-          { label: "App process", fact: process },
-        ],
-        details: [
-          ...[latest, ...earlier].filter(Boolean).map((item) =>
-            `Process ${item.pid} (epoch ${item.appEpoch}, environment ${String(item.environmentSha256).slice(0, 12)}): ${words(item.state)}`),
-          "Source: the broker's reported process facts. A running process is not visible output.",
-        ],
-      };
-    });
-  return [host, manager, broker, displayRow(nodeDevice), playerAppRow(snapshot, playerId)];
+  return [hostRow(nodeDevice), displayRow(nodeDevice), playerAppRow(snapshot, playerId)];
 }
-
-/** Why the App Effect Broker's last report is Unknown, served or not (§15). */
-export const BROKER_SILENT =
-  `${LAYER_NAMES.app_effect_broker} sends evidence only on change, and Central stores no receipt of its polls`;
 
 /**
  * Display Host's newest exchange per Output on the box's current boot, as three `reported`
@@ -324,24 +207,25 @@ function playerAppRow(snapshot, playerId) {
 }
 
 /**
- * The boot of the box's current node session, as the box claimed it: the kernel boot id
- * every current session carries, with when Central first received that boot's claim.
- * Never linked to a reboot request (a later boot does not show what caused it).
+ * The start of the box's host line now, as Central keeps it: the line's stream creation its host's
+ * birth was written in (a new one at every start of the Pi's bus, every boot among them), with
+ * when Central recorded that birth. Never linked to a reboot request (a later start does not show
+ * what caused it).
  *
  * @param {NodeDevice|null} nodeDevice
- * @returns {{kernelBootId: string, fact: import("./facts.js").Fact}|{none: import("./facts.js").Fact}}
+ * @returns {{epoch: string, fact: import("./facts.js").Fact}|{none: import("./facts.js").Fact}}
  */
-export function currentSessionBoot(nodeDevice) {
+export function hostStart(nodeDevice) {
   const why = nodeUnknown(nodeDevice);
   if (why !== null) return { none: fact({ kind: "unknown", why }) };
   const read = nodeDevice.read;
-  const session = (read.sessions ?? []).find((candidate) => candidate.current) ?? null;
-  const kernelBootId = session?.producer?.kernel_boot_id ?? null;
-  if (kernelBootId === null) return { none: fact({ kind: "set", value: "No current node session" }) };
-  const claim = (read.boot_claims ?? []).find((candidate) => candidate.kernel_boot_id === kernelBootId);
+  const epoch = read.host?.epoch ?? null;
+  if (typeof epoch !== "string") {
+    return { none: fact({ kind: "set", value: `No ${LAYER_NAMES.host_core} line heard` }) };
+  }
   return {
-    kernelBootId,
-    fact: fact({ kind: "claimed", value: `Boot ${kernelBootId}`, source: "the box", receipt: "first",
-      receivedAt: claim?.first_received_at, readAt: read.read_at }),
+    epoch,
+    fact: fact({ kind: "reported", value: `line start ${epoch}`, source: LAYER_NAMES.host_core, receipt: "first",
+      receivedAt: read.host.born_at, readAt: read.read_at, field: "host.born_at" }),
   };
 }

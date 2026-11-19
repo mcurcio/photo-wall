@@ -52,8 +52,6 @@ def _box(registry):
     registry.create_frame(frame_create("lobby", x_mm=100, y_mm=100), by="console")
     registry.bind("lobby", box.player_id, "HDMI-A-1", expected_generation=0, by="console")
     report_readiness(registry, box.player_id)
-    box.preparation()
-    box.app_running()
     box.display_exchange()
     registry.clock.advance(30)
     box.host_sample()

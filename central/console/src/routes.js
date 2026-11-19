@@ -24,9 +24,8 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  *   #/players/<device-id>          {section: "players", id} one Pi's Software and screens page
  *                                  (no list: `#/players` alone is not a route)
  *   #/releases/update/<tag>        {section: "releases", flow: "update", id} Update the wall
- *   #/releases/update/<tag>/try/<player-id>  … with the operator's tried Player (Part E §25a)
- *   #/releases/update/<tag>[/try/<player-id>]/skip/<player-id>[/<player-id>…]  … and the
- *                                  Players the operator skipped in Keep's plan (Part E §25a)
+ *   #/releases/update/<tag>/skip/<player-id>[/<player-id>…]  … with the Players the operator
+ *                                  skipped in Keep's plan (Part E §25a)
  *   #/<section>                    {section} for every section but "players"
  *
  * Steps are the flows' own ids (beads 2-5); any non-empty segment parses. Tabs are the
@@ -42,11 +41,10 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  * @typedef {"overview"|"position"|"lighting"|"picture"|"power"|"hardware"} Tab
  * @typedef {"layout"} Mode
  * @typedef {{section: Section, id?: string, flow?: Flow, step?: string, tab?: Tab,
- *            mode?: Mode, initialTarget?: string, tried?: string, skipped?: string[],
+ *            mode?: Mode, initialTarget?: string, skipped?: string[],
  *            pi?: string}} Route
  *   `pi` is the Pi a Hardware list is focused on (its device id).
- *   `tried` is the Player an Update the wall journey tries the release on, `skipped` the Players
- *   it must never reboot, in the order the operator skipped them, none repeated (its URL holds
+ *   `skipped` is the Players an Update the wall journey must never reboot, in the order the operator skipped them, none repeated (its URL holds
  *   only the operator's choices, never progress: Part E §25a). An empty `skipped` is the same
  *   route as none.
  */
@@ -107,7 +105,7 @@ const WALL_MODES = new Set(["layout"]);
 // The sections whose flow starts at `#/<section>/new/<step>`.
 const NEW_FLOWS = new Set(["scenes", "sources", "schedule"]);
 
-const KEYS = ["section", "id", "flow", "step", "tab", "mode", "initialTarget", "tried", "skipped", "pi"];
+const KEYS = ["section", "id", "flow", "step", "tab", "mode", "initialTarget", "skipped", "pi"];
 
 // The sections that are only ever one instance's page: no route names the section alone.
 const INSTANCE_ONLY = new Set(["players"]);
@@ -196,14 +194,9 @@ function focusRoute(section, query) {
 /** An Update the wall route from its tag and the segments after it, or null. */
 function updateRoute(id, tail) {
   const route = { section: "releases", flow: "update", id };
-  let rest = tail;
-  if (rest[0] === "try" && rest.length >= 2) {
-    route.tried = rest[1];
-    rest = rest.slice(2);
-  }
-  if (rest.length === 0) return route;
-  const skipped = rest.slice(1);
-  if (rest[0] !== "skip" || skipped.length === 0 || new Set(skipped).size !== skipped.length) return null;
+  if (tail.length === 0) return route;
+  const skipped = tail.slice(1);
+  if (tail[0] !== "skip" || skipped.length === 0 || new Set(skipped).size !== skipped.length) return null;
   return { ...route, skipped };
 }
 
@@ -214,7 +207,7 @@ function updateRoute(id, tail) {
  * @returns {string}
  */
 export function formatRoute(route) {
-  const { section, id, flow, step, tab, mode, initialTarget, tried, skipped, pi } = route ?? {};
+  const { section, id, flow, step, tab, mode, initialTarget, skipped, pi } = route ?? {};
   if (initialTarget !== undefined &&
       (section !== "scenes" || flow !== "new" || tab !== undefined ||
         !FRAME_ID_PATTERN.test(initialTarget))) {
@@ -228,7 +221,7 @@ export function formatRoute(route) {
   } else if (flow === "edit") {
     parts = [section, id, "edit", step];
   } else if (flow === "update") {
-    parts = [section, "update", id, ...(tried === undefined ? [] : ["try", tried]),
+    parts = [section, "update", id,
       ...(Array.isArray(skipped) && skipped.length > 0 ? ["skip", ...skipped] : [])];
   } else if (flow !== undefined) {
     parts = [section, flow, step];

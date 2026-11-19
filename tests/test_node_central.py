@@ -1,7 +1,7 @@
 """Durable V2 node admission/evidence, with real PostgreSQL and inert effects."""
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -123,7 +123,6 @@ def test_observation_replay_keeps_sample_and_receipt_age(registry):
     registry.clock.advance(20)
     duplicate = service.record(grant.session_id, claim.credential, encode_host_observation(sample))
     assert duplicate["received_at"] == first["received_at"]
-    assert service.status(DEVICE_ID)["sessions"][0]["host_observation"]["receipt_age_seconds"] == 20
     with pytest.raises(NodeControlError, match="identity_conflict"):
         service.record(grant.session_id, claim.credential,
                        encode_host_observation(replace(sample, sampled_boottime_ms=2000)))
@@ -305,7 +304,7 @@ def test_an_undecodable_display_exchange_fails_only_its_own_output(registry):
         "HDMI-A-2": {"output_id": "HDMI-A-2", "received_at": received, "undecodable": True},
         "HDMI-A-3": {"output_id": "HDMI-A-3", "received_at": received, "undecodable": True},
     }
-    assert "reboot_commands" in status and any(item["current"] for item in status["sessions"])
+    assert "reboot_commands" in status and "sessions" not in status
 
 
 def test_the_default_app_serves_node_routes_and_no_command_poll(registry):
@@ -331,3 +330,23 @@ def test_the_default_app_serves_node_routes_and_no_command_poll(registry):
         admin = {"Authorization": "Bearer " + ADMIN}
         assert client.get("/v1/operator/node/status", headers=admin).status_code == 404
 
+
+# The app operations' routes, gone with what the console showed of the Pi's old path (S4c-2a-iii).
+APP_OPERATION_ROUTES = (
+    ("POST", "/v2/node/app-preparation"), ("POST", "/v2/node/app-effects"),
+    ("POST", "/v2/node/app-responses"), ("GET", "/v2/node/app-desired"), ("GET", "/v2/node/app-commands"),
+    ("GET", f"/v2/node/app-attempts/{UUID(int=1)}/artifacts/root"),
+    ("POST", f"/v1/operator/node/devices/{DEVICE_ID}/app-stages"),
+    ("POST", f"/v1/operator/node/devices/{DEVICE_ID}/app-qualifications"),
+    ("POST", f"/v1/operator/node/app-qualifications/{UUID(int=2)}/sample"),
+    ("GET", f"/v1/operator/node/devices/{DEVICE_ID}/app-attempts"),
+)
+
+
+@pytest.mark.parametrize("method, path", APP_OPERATION_ROUTES)
+def test_the_app_operation_routes_are_not_mounted(registry, method, path):
+    """Mutation probe: re-mount one (the app-attempts read) -> its request answers, fails."""
+    app = create_app(registry.db, registry.clock, ADMIN)
+    with TestClient(app) as client:
+        response = client.request(method, path, content=b"{}", headers={"Authorization": "Bearer " + ADMIN})
+        assert response.status_code in (404, 405), (method, path, response.status_code)

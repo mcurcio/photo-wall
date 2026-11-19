@@ -59,7 +59,7 @@ def validate_qualification(value: dict) -> dict:
         if item["interpreter"] != "/app/.venv/bin/python":
             raise ValueError("qualification_interpreter_changed")
         imports = item["imports"]
-        if type(imports) is not dict or set(imports) != {"central.app", "central.coordination", "central.fleet.node_lifecycle", "contracts.node_protocol"}:
+        if type(imports) is not dict or set(imports) != {"central.app", "central.coordination", "contracts.node_protocol"}:
             raise ValueError("qualification_imports_invalid")
         if any(path != "/app/"+name.replace(".", "/")+".py" for name, path in imports.items()):
             raise ValueError("qualification_source_shadowed")

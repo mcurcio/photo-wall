@@ -65,7 +65,7 @@ out.incidents = hostIncidents(snapshot, silentBoth).map(({ key, text, frames, ha
 out.noRead = hostIncidents(snapshot, null);
 out.reporting = hostIncidents(snapshot, read([row({ host: sample(990, [temp(95)]) })]));
 
-// N1: the firmware flags, CPU, /run free and App Manager's storage refusal.
+// N1: the firmware flags, CPU and /run free; App Manager's storage refusal is gone (S4c-2a-iii).
 const FLAG_NAMES = ["under_voltage", "frequency_capped", "throttled", "soft_temperature_limit"];
 const FLAG_LIMITS = [
   ...FLAG_NAMES.map((n) => ({ name: `${n}_now`, unit: "boolean", notice_at: null, alarm_at: 1 })),
@@ -95,13 +95,6 @@ const refusal = { received_at: 994, state: "refused", fault: "node_storage_capac
   available_bytes: 9e8, required_bytes: 1.4e9 };
 out.refusal = named(row({ host: sample(996, [run]), preparation: refusal }), read([], N1), "preparation");
 out.refusalSeverity = view(row({ host: sample(996, [run]), preparation: refusal }), read([], N1)).severity;
-out.idle = named(row({ host: sample(996, [run]), preparation: { ...refusal, state: "idle", fault: null } }),
-  read([], N1), "preparation");
-out.otherFault = named(row({ host: sample(996, [run]),
-  preparation: { ...refusal, fault: "manager_preparation_fault" } }), read([], N1), "preparation");
-out.oneNumber = named(row({ host: sample(996, [run]), preparation: { ...refusal, available_bytes: null } }),
-  read([], N1), "preparation");
-out.silentRefusal = named(row({ host: sample(880, [run]), preparation: refusal }), read([], N1), "preparation");
 
 // A1: each incident kind from its own row, for the Bound device-a, with the Unbound device-b
 // sent the same row (it must raise nothing).
@@ -249,12 +242,10 @@ def test_throttling_cpu_and_storage():
     assert out["cpu"] == ["cpu_busy", None, "Host Management last reported 4 s ago · 100 % busy"]
     assert out["cpuTwice"] == ["cpu_busy", "unknown", "Unknown: two values reported"]
     assert out["storage"] == ["runtime_available", None, "Host Management last reported 4 s ago · 1.2 GB free in /run"]
-    assert out["refusal"] == ["preparation", "alarm", "App Manager last reported 6 s ago · App Manager "
-                              "refused a preparation: needs 1.4 GB, room 0.9 GB"]
-    assert out["refusalSeverity"] == "alarm"
-    # A newer sample, another fault, a missing number or a silent host: no storage item.
-    for case in ("idle", "otherFault", "oneNumber", "silentRefusal"):
-        assert out[case] is None, case
+    # App Manager's storage refusal left with the Pi's old path: a `preparation` an older Central
+    # served raises no item and no band (mutation probe: restore `storageShort` -> an alarm, fails).
+    assert out["refusal"] is None
+    assert out["refusalSeverity"] == "ok"
 
 
 FACTS_SCRIPT = r"""
@@ -427,11 +418,9 @@ def test_each_host_incident_kind_comes_from_its_own_row_for_bound_players_only()
     assert out["hot"] == [["player:device-a:soc_temperature", "alarm", f"{who}82 °C · hot"]]
     # Notices raise nothing: a warm temperature, a sticky "occurred" flag.
     assert out["warm"] == [] and out["occurred"] == []
-    assert out["storage"] == [["player:device-a:preparation", "alarm",
-                               f"{who}App Manager refused a preparation: needs 1.4 GB, room 0.9 GB"]]
+    assert out["storage"] == []
     assert [text for _, _, text in out["hotAndStorage"]] == [
-        f"{who}82 °C · hot", f"{who}throttled now · under-voltage now",
-        f"{who}App Manager refused a preparation: needs 1.4 GB, room 0.9 GB"]
+        f"{who}82 °C · hot", f"{who}throttled now · under-voltage now"]
 
 
 def test_the_status_chip_names_the_worst_item_else_the_receipt():

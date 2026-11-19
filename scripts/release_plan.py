@@ -348,7 +348,6 @@ NOT_SHIPPED: Final = (
     # Development, documentation and test-harness tooling; no build reads these.
     "scripts/boot_time_fixture.py", "scripts/check_docs.py",
     "scripts/configure.py", "scripts/container_build.py", "scripts/demo_wall.py",
-    "scripts/node_control_demo.py",  # Opt-in software simulator, never a runtime artifact.
     "scripts/node_rollout_image_check.py",
     "scripts/harness_bundle.py", "scripts/harness_failure.py",
     "scripts/immich_actions.py", "scripts/immich_fixture.py", "scripts/immich_runtime.py",

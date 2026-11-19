@@ -706,9 +706,8 @@ ROUTES = [
     {"section": "wall", "id": "layout", "tab": "picture"},
     {"section": "wall", "mode": "layout"},
     {"section": "releases", "flow": "update", "id": "v0.15.0"},
-    {"section": "releases", "flow": "update", "id": "v1/rc ç?#%", "tried": "player/one ç"},
+    {"section": "releases", "flow": "update", "id": "v1/rc ç?#%"},
     {"section": "releases", "flow": "update", "id": "v1", "skipped": ["player/two ç", "try", "skip"]},
-    {"section": "releases", "flow": "update", "id": "v1", "tried": "p", "skipped": ["q"]},
     {"section": "releases", "flow": "update", "id": "v1", "skipped": []},
 ]
 INVALID_HASHES = [
@@ -722,6 +721,8 @@ INVALID_HASHES = [
     "#/sources/new/name?target=frame",
     "#/releases/update", "#/releases/update/v1/try", "#/releases/update/v1/other/p",
     "#/releases/update/v1/try/p/x", "#/releases/v1", "#/releases/update/v1?target=x",
+    # Try left with the app operations (S4c-2a-iii): a tried Player is no longer a route.
+    "#/releases/update/v1/try/p", "#/releases/update/v1/try/p/skip/q",
     "#/releases/update/v1/skip", "#/releases/update/v1/try/p/skip", "#/releases/update/v1/skip/a/a",
     "#/releases/update/v1/skip/a?target=x",
     # No aliases and no Players list: the retired Equipment and Players pages' bookmarks are gone.
@@ -741,6 +742,7 @@ INVALID_ROUTES = [
     {"section": "scenes", "flow": "new", "step": ""}, {"section": "now", "extra": 1}, None,
     {"section": "equipment"}, {"section": "scenes", "id": "x"},
     {"section": "players", "id": "x", "tried": "p"}, {"section": "releases", "flow": "update"},
+    {"section": "releases", "flow": "update", "id": "v1", "tried": "p"},
     {"section": "scenes", "flow": "update", "id": "x"},
     {"section": "players", "id": "x", "skipped": ["p"]},
     {"section": "releases", "flow": "update", "id": "v1", "skipped": ["a", "a"]},

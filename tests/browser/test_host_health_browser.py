@@ -178,10 +178,7 @@ def test_throttling_bands_cpu_unbanded_and_unknowns(page, registry):
     cpu = {"name": "cpu_busy", "value": 23, "unit": "percent", "source": "host_sampler"}
     run = {"name": "runtime_available", "value": 1.2e9, "unit": "bytes", "source": "host_sampler"}
     document = {"read_at": 1000.0, "thresholds": N1_THRESHOLDS, "devices": [
-        {**_n1_row(bound, 0x50005, [cpu, run]),
-         "preparation": {"received_at": 994.0, "state": "refused", "fault": "node_storage_capacity",
-                         "available_bytes": 9e8, "required_bytes": 1.4e9}},
-        _n1_row(spare, 0x10000, [cpu, cpu])]}
+        _n1_row(bound, 0x50005, [cpu, run]), _n1_row(spare, 0x10000, [cpu, cpu])]}
     _stub(page, document)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "hardware")
@@ -198,9 +195,9 @@ def test_throttling_bands_cpu_unbanded_and_unknowns(page, registry):
         # The same cataloged name twice in one sample reads Unknown.
         expect(_line(page, spare_name, "CPU")).to_contain_text("CPU: Unknown: two values reported")
         storage = _line(page, bound_name, "Storage")
-        expect(storage.first).to_contain_text("Storage: Host Management last reported 4 s ago · 1.2 GB free in /run")
-        expect(storage.nth(1)).to_contain_text("App Manager last reported 6 s ago · App Manager refused a "
-                                               "preparation: needs 1.4 GB, room 0.9 GB")
+        # One Storage line: App Manager's storage refusal left with the Pi's old path (S4c-2a-iii).
+        expect(storage).to_have_count(1)
+        expect(storage).to_contain_text("Storage: Host Management last reported 4 s ago · 1.2 GB free in /run")
         expect(_line(page, spare_name, "Storage")).to_contain_text("Storage: Unknown: not reported")
         # One flag missing: the Throttling item reads Unknown.
         document["devices"][0]["host"]["metrics"] = [

@@ -24,7 +24,7 @@ def _dropped(metrics):
 
 
 def test_the_declared_families_fit_one_observation():
-    assert sum(family.max_rows for family in METRIC_FAMILIES) == 38 <= MAX_HOST_METRICS
+    assert sum(family.max_rows for family in METRIC_FAMILIES) == 36 <= MAX_HOST_METRICS
     keys = {family.key: family.max_rows for family in METRIC_FAMILIES}
     # memory_peak: hostcore, base, preparation, app, display (Weston's own service) and bus;
     # oom_kill: base, preparation, app and bus.
