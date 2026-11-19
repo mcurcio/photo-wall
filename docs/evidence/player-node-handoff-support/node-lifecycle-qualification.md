@@ -72,18 +72,20 @@ the host line, the device's version, its reboot records and its Outputs (`GET /f
 
 - **success**: cold (the roots are image mounts, the bus and its memory reach Central on the host
   line, and three signal range restarts of Weston under the running Player each see the broker
-  start it again); the seeded Frame is bound to Virtual-1 and the Pi alone hands the Output to the
-  Player (its MainPID's surface in Weston's scene graph). Install of the success release answers
+  start it again); the seeded Frame is bound to Virtual-1 and the Output document on the Pi's own
+  bus names it, which is all the Display Host hands the Output off by. (The fixture's headless
+  pixman Weston gives the Player no frame protocol, so no Player surface exists to hand off; the
+  handoff rule is `tests/node/display/test_display_handoff.py`'s.) Install of the success release answers
   "restarting" and reboots the Pi over the bus (one reboot record, delivered). Boot B of the same
-  device runs the target root from its next boot offer and the Frame is handed off again with no
-  operator action; the memory lines hold, an induced bus OOM is reported on the host line, and a
+  device runs the target root from its next boot offer and its Output document binds the Frame
+  again with no operator action; the memory lines hold, an induced bus OOM is reported on the host line, and a
   crashed Player then a crashed Weston leave the Player down (issue #125).
 - **failure**: cold, then Install of a target whose entry exits reboots the Pi over the bus; boot
   B's Player exits at start and stays down, and the debug overlay's card reads `app_absent`.
-- **outage**: cold and the Frame handed off; then Central is unreachable for 35 s (every request
+- **outage**: cold and the Frame bound; then Central is unreachable for 35 s (every request
   but the fixture's answers 503 and the hub is stopped): the Player's MainPID, InvocationID and
-  launch epoch never change, no unit fails and its surface stays on Virtual-1; once Central is
-  back it reads the Pi linked again.
+  launch epoch never change, no unit fails and the Pi's Output document still binds the Frame;
+  once Central is back it reads the Pi linked again.
 - **reboot**: cold, then the operator's reboot (`POST /v1/operator/node/devices/{id}/reboots`)
   asks the Pi's host over the bus; boot B, a new bind-mounted kernel `boot_id` for the same
   device and database, boots without operator action, its Player runs, and Central lists the

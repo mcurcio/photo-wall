@@ -5,14 +5,14 @@ name: Player node real-PID1 lifecycle scenarios
 # the disposable test database. One matrix leg per scenario, so the job takes about one scenario
 # plus setup:
 #
-#   success   cold, the Frame bound and handed to the Player by the Pi alone; three signal range
-#             restarts each start the Player again; Install reboots the Pi over the bus and boot
-#             B runs the target root from its next offer, handed off again; a crashed Player,
-#             then a crashed Weston, leave it down (issue #125)
+#   success   cold, the Frame bound and its binding in the Pi's own Output document; three
+#             signal range restarts each start the Player again; Install reboots the Pi over the
+#             bus and boot B runs the target root from its next offer, the binding standing; a
+#             crashed Player, then a crashed Weston, leave it down (issue #125)
 #   failure   Install of a target whose entrypoint exits reboots the Pi; boot B's Player exits
 #             and stays down, and the debug overlay's card shows
-#   outage    Central unreachable (HTTP and hub) for 35 s: the handed-off Player's run never
-#             changes, and Central reads the Pi linked again after
+#   outage    Central unreachable (HTTP and hub) for 35 s: the bound Player's run never changes,
+#             and Central reads the Pi linked again after
 #   reboot    the operator's reboot over the bus; boot B of the same device boots without
 #             operator action and Central lists the reboot delivered
 #   refused   a board below the smallest memory class (a 2 GiB meminfo bound into the storage

@@ -6,15 +6,16 @@ runtime running `RebootPi`). Every scenario reads only the bus path (decision 00
 
 - success: cold (image mounts, the bus and its memory on the host line, three signal range
   restarts of Weston under the running Player: the broker alone starts the Player again), the
-  Frame bound and the Output handed to the Player by the Pi alone, then Install of the success
-  release reboots the Pi over the bus; boot B of the same device runs the target root from its
-  next boot offer and the Frame is handed off again with no operator action; memory lines, an
+  Frame bound and its binding in the Output document on the Pi's own bus (what the Display Host
+  hands off by), then Install of the success release reboots the Pi over the bus; boot B of the
+  same device runs the target root from its next boot offer and the binding stands with no
+  operator action; memory lines, an
   induced bus OOM reported on the host line, and a crashed Player then a crashed Weston leave the
   Player down (issue #125).
 - failure: cold, then Install of a target whose entry exits reboots the Pi; boot B's Player exits
   at start and stays down, and the debug overlay's card reads app_absent.
-- outage: cold, the Frame handed off, then Central unreachable (HTTP and hub) for 35 s: the
-  Player's run never changes and its surface stays; Central reads the Pi linked again after.
+- outage: cold, the Frame bound, then Central unreachable (HTTP and hub) for 35 s: the Player's
+  run never changes and the Pi keeps its binding; Central reads the Pi linked again after.
 - reboot: cold, the operator's reboot over the bus; boot B of the same device boots without
   operator action, its Player runs, and Central lists the reboot asked and delivered.
 - refused: a board below the smallest memory class: storage refuses, nothing after it runs, and
@@ -41,7 +42,6 @@ import datetime
 import hashlib
 import json
 import os
-import re
 import secrets
 import subprocess
 import sys
@@ -678,15 +678,20 @@ class Node:
         (self.work / "reboot-state.json").write_text(json.dumps(state, sort_keys=True))
         return state
 
-    def shows_player(self, pid):
-        """Whether Weston's scene graph has a view of client PID `pid` on DARK_OUTPUT (each view's
-        block names its PID and the Outputs it is on), and the scene graph."""
-        wayland = "WAYLAND_DISPLAY=" + str(WAYLAND_SOCKET)
-        result = self.container.exec("env", wayland, "weston-debug", "scene-graph", timeout=30)
-        scene = result.stdout if result.returncode == 0 else ""
-        blocks = re.split(r"(?m)^(?=\s*View \d+ )", scene)
-        return any(re.search(rf"\bPID {pid}\b", block) and f"({DARK_OUTPUT})" in block
-                   for block in blocks), scene
+    def output_document(self, output_id, *, until, seconds):
+        """The Pi's Output document of `output_id` on its own bus (the bus probe's `output`) once
+        `until(document)` holds, within `seconds`."""
+        self.copy_bus_probe()
+        deadline = time.monotonic() + max(seconds, 1)
+        while True:
+            result = self.container.exec("/usr/bin/python3", "-I", "-B", "/var/lib/node_pid1_bus_probe.py",
+                                         "output", str(NODE_BUS_PORT), output_id, timeout=30)
+            found = json.loads(result.stdout) if result.returncode == 0 else None
+            if found is not None and until(found):
+                return found
+            assert time.monotonic() < deadline, ("the Pi's Output document", output_id, found,
+                                                 result.stderr[-2000:])
+            time.sleep(0.5)
 
     def _bus_answers(self, deadline):
         """The bus's INFO and LISTEN rows, once it answers before `deadline`."""
@@ -829,16 +834,19 @@ class Node:
             "photo-wall-app-broker.service",
             "photo-wall-manager-supervisor.service",
         )
-        # The Player is a collected transient unit (`systemd-run --collect`): once it has died
-        # and nothing started it again (issue #125: the failure phase's stopped release, the
-        # success phase's crash), systemd has unloaded it and `systemctl stop` would fail on it.
-        units = ["photo-wall-node-manager.service"]
-        player = unit_properties_of(self, PLAYER_UNIT, "LoadState,ActiveState")
-        if player["LoadState"] == "loaded":
-            units.append(PLAYER_UNIT)
-        else:
-            assert player["ActiveState"] == "inactive", player
-        run("systemctl", "stop", *units)
+        # The Player and the App Manager are collected transient units (`systemd-run --collect`):
+        # once one has ended and nothing started it again (issue #125: the failure phase's
+        # stopped release, the success phase's crash; an App Manager with nothing to prepare),
+        # systemd has unloaded it and `systemctl stop` would fail on it.
+        units = []
+        for unit in ("photo-wall-node-manager.service", PLAYER_UNIT):
+            shown = unit_properties_of(self, unit, "LoadState,ActiveState")
+            if shown["LoadState"] == "loaded":
+                units.append(unit)
+            else:
+                assert shown["ActiveState"] == "inactive", (unit, shown)
+        if units:
+            run("systemctl", "stop", *units)
         components = json.loads((components_dir / "components.json").read_text())
         # Every root is an image (E2c): staged by the predicate the Node itself uses, and its
         # pool image re-hashed.
@@ -1052,43 +1060,43 @@ def operator_reboot(fixture, node):
 def bind_and_hand_off(fixture, node, name):
     """The seeded Frame bound to the Pi's Virtual-1 (PUT /v1/operator/frames/{frame_id}/binding,
     skipped when it is already bound: after a reboot the Player keeps its id by serial); within
-    HANDOFF_SECONDS Weston's scene graph shows a surface of the Player's MainPID on DARK_OUTPUT,
-    handed off by the Pi alone. Evidence <name>.json + .png (introspect)."""
+    HANDOFF_SECONDS the Output document on the Pi's own bus (the display line, as the Display Host
+    reads it) names the Frame at its generation: what the Pi alone hands the Output off by
+    (appliance/display_host/handoff.py). The fixture's headless pixman Weston gives the Player no
+    frame protocol (its renderer stops at `display_frame_protocol_unavailable`), so no Player
+    surface exists here to hand off; the rule itself is tests/node/display/test_display_handoff.py's.
+    Evidence <name>.json."""
     deadline = time.monotonic() + HANDOFF_SECONDS
     while True:
         pi = pi_of(fixture, node.work)
-        outputs = [output for output in pi["outputs"] if output["output_id"] == DARK_OUTPUT] or pi["outputs"]
-        if len(outputs) == 1:
+        outputs = [output for output in pi["outputs"] if output["output_id"] == DARK_OUTPUT]
+        if outputs:
             break
         assert time.monotonic() < deadline, ("the Pi's Virtual-1 never reached Central", pi)
         time.sleep(0.5)
     [output] = outputs
     frame = pi["frame"]
     if frame["player_id"] is None:
-        operator(fixture, "PUT", f"/v1/operator/frames/{fixture['frame_id']}/binding",
-                 {"player_id": output["player_id"], "output_id": output["output_id"],
-                  "expected_generation": frame["generation"]})
+        bound = operator(fixture, "PUT", f"/v1/operator/frames/{fixture['frame_id']}/binding",
+                         {"player_id": output["player_id"], "output_id": output["output_id"],
+                          "expected_generation": frame["generation"]})
+        frame = pi_of(fixture, node.work)["frame"]
     else:
+        bound = None
         assert (frame["player_id"], frame["output_id"]) == (output["player_id"], output["output_id"]), pi
-    while True:
-        pid = unit_properties_of(node, PLAYER_UNIT, "MainPID")["MainPID"]
-        shown, scene = node.shows_player(pid)
-        if shown:
-            break
-        assert time.monotonic() < deadline, ("the Player's surface never on " + DARK_OUTPUT, pid, scene)
-        time.sleep(0.5)
-    introspected = node.introspect(name + "-introspect")
+    document = node.output_document(DARK_OUTPUT, until=lambda found: found["binding"] is not None
+                                    and (found["binding"]["frame_id"], found["binding"]["generation"])
+                                    == (fixture["frame_id"], frame["generation"]), seconds=deadline - time.monotonic())
     (node.work / (name + ".json")).write_text(json.dumps(
-        {"output": output, "frame": frame, "player_pid": pid, "scene_graph": scene,
-         "capture": introspected["capture"]}, sort_keys=True))
-    return {"output": output, "pid": pid}
+        {"output": output, "bound": bound, "frame": frame, "document": document}, sort_keys=True))
+    return document
 
 
 def survives_outage(fixture, node):
     """Central unreachable for OUTAGE_SECONDS (POST /fixture/outage: its HTTP origin answers 503
     and its hub is stopped): the Player's MainPID and InvocationID never change, the broker never
-    relaunches it (launch epoch unchanged), no photo-wall unit fails, and the scene graph still
-    shows its surface; then Central comes back and within JOIN_SECONDS reads the Pi linked again.
+    relaunches it (launch epoch unchanged), no photo-wall unit fails, and the Pi's Output document
+    still binds the Frame; then Central comes back and within JOIN_SECONDS reads the Pi linked again.
     Evidence outage.json."""
     before = unit_properties_of(node, PLAYER_UNIT, "MainPID,InvocationID")
     epoch = json.loads(node.run("cat", BROKER_LAUNCH))["epoch"]
@@ -1105,14 +1113,15 @@ def survives_outage(fixture, node):
             assert failed == [], failed
             seen_unlinked = seen_unlinked or not pi_of(fixture, node.work)["linked"]
             time.sleep(1)
-        shown, scene = node.shows_player(before["MainPID"])
-        assert shown, ("the Player's surface left " + DARK_OUTPUT + " during the outage", scene)
+        # The Pi keeps the binding it was handed: its own copy of the Output document stands.
+        kept = node.output_document(DARK_OUTPUT, until=lambda found: found["binding"] is not None,
+                                    seconds=10)
     finally:
         ended = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/outage", {"active": False})
     pi = await_true(lambda: (found := pi_of(fixture, node.work))["linked"] and found, JOIN_SECONDS,
                     "Central reads the Pi linked again after the outage")
     evidence = {"player": before, "epoch": epoch, "dropped": ended["dropped"],
-                "seen_unlinked": seen_unlinked, "pi": pi}
+                "seen_unlinked": seen_unlinked, "document": kept, "pi": pi}
     (node.work / "outage.json").write_text(json.dumps(evidence, sort_keys=True))
     return evidence
 
