@@ -1239,20 +1239,39 @@ class PlayerService:
     async def _websocket_loop(self):
         """The session socket: Central pushes the state on it first, then whenever it may have
         changed; the Player's one source of its state (decision 0034), and its liveness while open
-        (central/infra/player_contact_store.py). Its close ends the session cycle."""
+        (central/infra/player_contact_store.py). Its close ends the session cycle.
+
+        Central pushes a state once, when its delivery changes, so a state whose dispatch misses
+        the deadline (MainLoopLate: never started, never applied) is held and tried again every
+        FEEDBACK_INTERVAL until the GLib loop takes it; a newer push replaces it."""
         opening = self.clock.monotonic()
         async with self.link.websocket(self.session, "/v1/player/session",
                                        max_size=MAX_JSON) as socket:
-            async for message in socket:
-                received = self.clock.monotonic()
-                body = _json(message)
-                if body.pop("type", None) != "state":
-                    raise ServiceError("message_type")
-                try:
-                    await self.receive_state(body, opening, received)
-                except MainLoopLate:
-                    # Never started, so never applied; the next delivery carries it.
-                    self._main_loop_late()
+            messages = aiter(socket)
+            arriving = asyncio.ensure_future(anext(messages))
+            held: tuple[dict, float] | None = None
+            try:
+                while True:
+                    await asyncio.wait((arriving,), timeout=None if held is None else FEEDBACK_INTERVAL)
+                    if arriving.done():
+                        try:
+                            message = arriving.result()
+                        except StopAsyncIteration:
+                            break
+                        received = self.clock.monotonic()
+                        arriving = asyncio.ensure_future(anext(messages))
+                        body = _json(message)
+                        if body.pop("type", None) != "state":
+                            raise ServiceError("message_type")
+                        held = (body, received)
+                    try:
+                        await self.receive_state(held[0], opening, held[1])
+                        held = None
+                    except MainLoopLate:
+                        self._main_loop_late()
+            finally:
+                if not arriving.done():
+                    arriving.cancel()
             raise ServiceError("session_closed")
 
     async def run(self):

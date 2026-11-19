@@ -1819,10 +1819,60 @@ def test_a_state_delivered_while_the_loop_is_late_is_skipped_not_fatal(tmp_path,
 
             async def __aiter__(self):
                 yield message               # its dispatch is abandoned at the deadline
+                await asyncio.sleep(.1)
                 for callback in GLib.queued:
                     callback()              # the loop runs again
                 service.dispatcher = immediate
                 yield message
+
+        service.link.websocket_connect = lambda uri, **options: Socket()
+        service.dispatcher = MainLoopDispatcher(GLib)
+        try:
+            with pytest.raises(ServiceError, match="session_closed"):
+                await asyncio.wait_for(service._websocket_loop(), 5)
+            assert len(applied) == 1 and service.last_fault == "main_loop_late"
+        finally:
+            await close(service)
+    asyncio.run(check())
+
+
+def test_a_state_pushed_while_the_loop_is_late_is_applied_once_it_runs(tmp_path, monkeypatch):
+    """PR 156's end review: Central pushes a state once, when its delivery changes, and the
+    Player no longer polls for it. A push whose dispatch misses the deadline (the GLib loop busy at
+    cold boot) is held and applied once the loop runs again, with no further push: the Frame never
+    stays on its old plan while Central reads the Player connected.
+
+    Mutation probe: drop the held state's retry -> nothing is applied."""
+    monkeypatch.setattr("player.service.DISPATCH_DEADLINE", .05)
+    monkeypatch.setattr("player.service.FEEDBACK_INTERVAL", .05)
+
+    class GLib:
+        queued = []
+
+        @classmethod
+        def idle_add(cls, callback, *, priority):
+            cls.queued.append(callback)
+
+    async def check():
+        service, server = await rig(tmp_path)
+        applied = []
+        monkeypatch.setattr(service, "_apply_state", lambda state: applied.append(state))
+        message = json.dumps({"type": "state", **server.state.model_dump(mode="json")})
+
+        class Socket:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                pass
+
+            async def __aiter__(self):
+                yield message               # its dispatch is abandoned at the deadline
+                await asyncio.sleep(.1)
+                for callback in GLib.queued:
+                    callback()              # the loop runs again
+                service.dispatcher = immediate
+                await asyncio.sleep(.5)     # Central pushes nothing more
 
         service.link.websocket_connect = lambda uri, **options: Socket()
         service.dispatcher = MainLoopDispatcher(GLib)
