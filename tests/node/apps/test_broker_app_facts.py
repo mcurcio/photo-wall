@@ -11,12 +11,12 @@ from node.test_node_probe_broker import Session
 from test_node_boot import environment
 
 from appliance.apps import broker_runner
-from appliance.apps.broker import RunningApp
+from appliance.apps.broker import Launch, RunningApp
 from appliance.apps.broker_runner import BrokerLoop
 from appliance.apps.descriptors import DESCRIPTOR_SAMPLE_MS
 from appliance.apps.probe import AppRunKey
 from appliance.feed import Feed
-from appliance.kernel.app_facts import APP_DESCRIPTORS, APP_EXITED, APP_STARTED
+from appliance.kernel.app_facts import APP_DESCRIPTORS, APP_EXITED, APP_STARTED, RUN_RESTATE_MS
 from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
 
 TICKS = 31751781
@@ -41,7 +41,8 @@ def broker_loop(tmp_path, monkeypatch, *, granted: bool):
     online = SimpleNamespace(broker=SimpleNamespace(record=None, service=lambda: None),
                              tick=lambda: None)
     loop = BrokerLoop(broker=SimpleNamespace(reconcile=lambda: None), online=online, store=store,
-                      session=session, driver=SimpleNamespace(current=lambda: state["running"]),
+                      session=session,
+                      driver=SimpleNamespace(current=lambda: state["running"], launched=lambda: None),
                       links=SimpleNamespace(serve_one=lambda: None, remember_grant=lambda: None),
                       probes=probes, feeds=SimpleNamespace(serve=lambda: None),
                       display=SimpleNamespace(tell=lambda run: told.append(run) or True),
@@ -115,6 +116,30 @@ def test_a_pid_now_naming_another_process_is_not_sampled(tmp_path, monkeypatch):
         state["ms"] = DESCRIPTOR_SAMPLE_MS
         loop.turn()
         assert facts(feed, APP_DESCRIPTORS) == []
-        assert [kind for kind, _ in facts(feed, APP_STARTED)] == [APP_STARTED]
+        assert facts(feed, APP_STARTED)  # the run started; only its open files are not sampled
+    finally:
+        store.close()
+
+
+def test_the_holding_run_state_is_restated_until_it_changes(tmp_path, monkeypatch):
+    """A reader that missed a statement (a feed gap, a new broker incarnation, the ring's
+    eviction) reads it again within RUN_RESTATE_MS: `app_started` while the run is current,
+    `app_exited` once it is not. Mutation probe: drop the restatement -> one statement each."""
+    loop, feed, state, store = broker_loop(tmp_path, monkeypatch, granted=False)
+    try:
+        running = running_app(396, 1)
+        loop.driver.launched = lambda: Launch(1, None, 0, running)  # the record outlives the run
+        state["running"] = running
+        for ms in range(0, 2 * RUN_RESTATE_MS, 1000):  # a turn each second
+            state["ms"] = ms
+            loop.turn()
+        state["running"] = None
+        for ms in range(2 * RUN_RESTATE_MS, 4 * RUN_RESTATE_MS, 1000):
+            state["ms"] = ms
+            loop.turn()
+        run = AppRunKey.of(running).document()
+        assert facts(feed, APP_STARTED, APP_EXITED) == [
+            (APP_STARTED, {"run": run}), (APP_STARTED, {"run": run}),
+            (APP_EXITED, {"run": run}), (APP_EXITED, {"run": run})]
     finally:
         store.close()

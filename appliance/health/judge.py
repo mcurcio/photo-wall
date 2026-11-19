@@ -19,6 +19,8 @@ recovers the run. Rules for `app_unresponsive`:
 run), raised after the catalogue's raise window; `app_started` for any other run withdraws a
 pending one (Display's purposeful Weston restart inside the window is never shown) or clears a
 raised one at once. Whether the new run answers is `app_unresponsive`'s question (E-1B-16).
+The broker restates the holding fact (`RUN_RESTATE_MS`): a repeat changes nothing, and after a
+feed gap withdrew a pending condition the next one opens it again.
 
 `app_resource_exhausted` (degraded) follows `app_descriptors` for the run that holds it, or for
 any run while none is open: a run holding at least RESOURCE_PRESSURE_PERCENT of its soft

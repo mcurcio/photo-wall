@@ -424,7 +424,7 @@ def test_a_start_records_its_boottime_and_the_unit_dumps_python_stacks(stop_driv
         monkeypatch.setattr(linux.subprocess, "run", lambda command, **kwargs: (
             commands.append(command), observed.append(expected)))
         assert driver.start(expected.environment, expected.operation_id) == expected
-        assert driver.launched() == Launch(1, "weston-7", 424_242)
+        assert driver.launched() == Launch(1, "weston-7", 424_242, expected)  # the run it saw
         (command,) = commands
         environment = next(value for value in command if value.startswith("Environment="))
         assert "PYTHONFAULTHANDLER=1" in environment.split()

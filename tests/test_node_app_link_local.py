@@ -344,7 +344,7 @@ def loop_turn(node, running, session, *, granted):
     online = SimpleNamespace(broker=SimpleNamespace(record={"phase": "running"}, service=lambda: None),
                              tick=lambda: None)
     loop = BrokerLoop(broker=SimpleNamespace(reconcile=lambda: None), online=online, store=node.store,
-                      session=session, driver=SimpleNamespace(current=lambda: running),
+                      session=session, driver=SimpleNamespace(current=lambda: running, launched=lambda: None),
                       links=SimpleNamespace(serve_one=lambda: None, remember_grant=lambda: None),
                       probes=probes, feeds=SimpleNamespace(serve=lambda: None),
                       display=SimpleNamespace(tell=lambda run: True), clock=lambda: 1000)

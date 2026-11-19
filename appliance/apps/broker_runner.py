@@ -29,6 +29,7 @@ from appliance.kernel.app_facts import (
     APP_EXITED,
     APP_OBSERVATION_FAILED,
     APP_STARTED,
+    RUN_RESTATE_MS,
 )
 from appliance.kernel.boot_store import BootStore
 from appliance.kernel.clock import boot_id, boottime_ms
@@ -88,8 +89,9 @@ def feed_listener(feed: Feed, path: Path = FEED_SOCKET, *, owner_uid: int = 0,
 class BrokerLoop:
     """One main-loop turn. Every blocking call (systemctl, HTTP) lives here, never in the
     probe thread; the loop publishes the current app run to the probe thread each turn. Every
-    known turn also reports the run's start and exit and samples its open files
-    (`appliance.kernel.app_facts`), and tells Display the current run (`display`, a
+    known turn also states the launch's run started or exited, judged from the driver's launch
+    record and the turn's observation, and samples its open files (`appliance.kernel.app_facts`),
+    and tells Display the current run (`display`, a
     `DisplayRuns`: sent only when it changed or Display's controller is new), Central session or
     not. Nothing here kills or restarts the app (issue #125)."""
 
@@ -101,7 +103,9 @@ class BrokerLoop:
         self.display = display
         self.clock, self.proc = clock, proc
         self.last_online_poll = 0.0
-        self.last_run: AppRunKey | None = None  # the run the last known turn saw
+        self.last_run: AppRunKey | None = None  # the launch's run last stated started
+        self.run_exited = False  # whether `last_run`'s exit has been stated
+        self.stated_at = 0  # when `last_run`'s state was last stated
         self.sampled_at: int | None = None  # when the current run's descriptors were sampled
         self.observation_fault: str | None = None  # the boot owner's last fault, until it clears
         self.faults = 0  # consecutive observation faults
@@ -123,7 +127,7 @@ class BrokerLoop:
         known, current, granted = self._observe()
         run = None if current is None else AppRunKey.of(current)
         if known:
-            self._report_run(run)
+            self._report_run(run, self._launch_run(run))
             self.display.tell(run)
             self.probes.publish_run(run)
             # The owed relink is restated every known turn, grant or not (delivery needs one);
@@ -184,19 +188,44 @@ class BrokerLoop:
         except (OSError, subprocess.SubprocessError):
             LOG.warning("broker: the stop was not accepted; asking again on a later turn", exc_info=True)
 
-    def _report_run(self, run: AppRunKey | None) -> None:
-        """The run's start and exit, once each, and its open files every DESCRIPTOR_SAMPLE_MS:
-        node-feed facts for the health judge (`appliance.kernel.app_facts`)."""
+    def _launch_run(self, run: AppRunKey | None) -> AppRunKey | None:
+        """The run the current launch started: `run` (the turn's current run) when there is one,
+        else the driver's launch record's (`AppRunKey.of_launch`); None with no launch, or when
+        the record cannot be read this turn."""
+        if run is not None:
+            return run
+        try:
+            launch = self.driver.launched()
+        except (OSError, ValueError):
+            if self.store.failed:
+                raise
+            return None
+        return None if launch is None else AppRunKey.of_launch(launch)
+
+    def _report_run(self, run: AppRunKey | None, launched: AppRunKey | None) -> None:
+        """The launch's run state and the current run's open files every DESCRIPTOR_SAMPLE_MS:
+        node-feed facts for the health judge (`appliance.kernel.app_facts`). `launched` has
+        started; it has exited once `run` (the turn's current run) is None. Each is stated when it
+        first holds, so a run no turn saw current still starts and exits, and restated every
+        RUN_RESTATE_MS while it holds."""
         feed = self.probes.feed
-        if run != self.last_run:
-            if self.last_run is not None:
+        now = self.clock()
+        if launched != self.last_run:
+            if self.last_run is not None and not self.run_exited:
                 feed.append(APP_EXITED, {"run": self.last_run.document()})
-            if run is not None:
-                feed.append(APP_STARTED, {"run": run.document()})
-            self.last_run, self.sampled_at = run, None
+            if launched is not None:
+                feed.append(APP_STARTED, {"run": launched.document()})
+            self.last_run, self.run_exited, self.stated_at, self.sampled_at = launched, False, now, None
+        if self.last_run is not None:
+            if run is None and not self.run_exited:
+                feed.append(APP_EXITED, {"run": self.last_run.document()})
+                self.run_exited, self.stated_at = True, now
+            elif now - self.stated_at >= RUN_RESTATE_MS:
+                feed.append(APP_EXITED if self.run_exited else APP_STARTED,
+                            {"run": self.last_run.document()})
+                self.stated_at = now
         if run is None:
             return
-        now = self.clock()
         if self.sampled_at is not None and now - self.sampled_at < DESCRIPTOR_SAMPLE_MS:
             return
         self.sampled_at = now

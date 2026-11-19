@@ -145,6 +145,9 @@ class Driver:
         self.calls += 1
         return self.running
 
+    def launched(self):  # the run is current whenever it is known: no launch record needed
+        return None
+
     def kill(self, expected):  # nothing may call it (issue #125): a test asserts it never ran
         self.kills.append(expected)
         return True

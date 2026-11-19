@@ -167,11 +167,13 @@ class SystemdAppProcessDriver:
 
     def launched(self) -> Launch | None:
         """The current launch: its epoch, the Weston incarnation and the boottime recorded when
-        it was spawned (records are per boot, so every one carries `started_ms`)."""
+        it was spawned (records are per boot, so every one carries `started_ms`), and the run
+        `start` or `_adopt` observed, if any."""
         launch = self.store.read("launch")
         if launch is None:
             return None
-        return Launch(launch["epoch"], launch.get("display"), launch["started_ms"])
+        run = running_from(launch["running"]) if launch.get("running") else None
+        return Launch(launch["epoch"], launch.get("display"), launch["started_ms"], run)
 
     def purposeful_restart(self) -> PurposefulRestart | None:
         """Display's mark (PURPOSEFUL_RESTART, written by photo-wall-display-signal.service

@@ -4,9 +4,16 @@ The broker (`appliance.apps.broker_runner.BrokerLoop`) writes them and the judge
 (`appliance.health.judge`) reads them; neither imports the other, so the kinds and value shapes
 live here, the lowest layer both reach. Stdlib only.
 
-- `app_started` / `app_exited`: the loop's current run changed. A run that was the loop's
-  current run on one known turn and is not on a later known turn has exited, once; a run that
-  becomes current has started, once. Observed on every known turn, Central session or not.
+- `app_started` / `app_exited`: the run state, judged from the launch, never from samples
+  alone. A run has started once the driver's launch record names it (`Launch`, written at its
+  spawn or adoption: the run the driver saw, else the launch's epoch alone,
+  `appliance.apps.probe.AppRunKey.of_launch`); a started run that a known turn finds not current
+  has exited. So a run that began and ended between two turns (a Player that exits within the
+  broker's first turn after a cold start) still starts and exits. Each is stated when it first
+  holds and restated every RUN_RESTATE_MS while it holds, so a reader's feed gap, a new broker
+  incarnation or the ring's eviction never loses it (the judge's `forget` drops a pending
+  condition; the next statement opens it again). Judged on every known turn, Central session or
+  not.
 - `app_observation_failed`: the broker could not observe the app's unit (a driver fault, say a
   unit failed with its main process still set); reported once per reason while it lasts, and the
   broker observes again on a backoff (`appliance.apps.broker_runner.OBSERVATION_BACKOFF_MS`),
@@ -34,6 +41,7 @@ APP_DESCRIPTORS: Final = "app_descriptors"
 APP_OBSERVATION_FAILED: Final = "app_observation_failed"
 APP_FRAMES_BLACK: Final = "app_frames_black"
 APP_RUN_OP: Final = "app_run"       # the broker's current run, on Display's ingress
+RUN_RESTATE_MS: Final = 10_000      # how often the holding `app_started`/`app_exited` is stated again
 PLAYER_UID: Final = 10004           # the Player's uid (debian sysusers pw-player): its unit's User=, Display's grant
 
 
@@ -90,5 +98,5 @@ class AppFramesBlackValue(TypedDict):
 
 
 __all__ = ["APP_DESCRIPTORS", "APP_EXITED", "APP_FRAMES_BLACK", "APP_OBSERVATION_FAILED", "APP_RUN_OP", "APP_STARTED",
-           "PLAYER_UID", "AppDescriptorsValue", "AppFramesBlackValue", "AppObservationFailedValue", "AppRunOp",
+           "PLAYER_UID", "RUN_RESTATE_MS", "AppDescriptorsValue", "AppFramesBlackValue", "AppObservationFailedValue", "AppRunOp",
            "AppRunValue", "FrameBlackFact", "RunDocument"]
