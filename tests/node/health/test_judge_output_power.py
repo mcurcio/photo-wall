@@ -23,7 +23,8 @@ def judge() -> HealthJudge:
 
 def outputs(subject: HealthJudge, now: int, *, connected: bool) -> None:
     subject.observe_outputs([{"output_id": "HDMI-A-1", "connected": connected, "admitted": None,
-                              "holding": False, "power": "on"}], now)
+                              "offered": None, "holding": False, "not_handed_off": None,
+                              "power": "on"}], now)
 
 
 def display_affecting(subject: HealthJudge, now: int) -> list[str]:

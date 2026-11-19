@@ -905,6 +905,7 @@ class Executor:
                 cause = frame_black(
                     showing=self.showing(binding),
                     own_drawing=self.renderer.patterned(binding.output_id),
+                    renderer_ok=self.renderer.can_draw,
                     has_plan=has_plan, clock_ok=clock_ok, due=due,
                     unfilled=plan is not None and any(
                         span.output_id == binding.output_id and self._in_force(span.start, span.end, now)

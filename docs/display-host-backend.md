@@ -138,7 +138,10 @@ questions, each answered once: liveness is the lease (above); the hold is asked 
   `{"event":"hold","output":<OutputKey>,"holding":bool,"evidence":"picture_plane"|"display_drawing"|null}`.
   The controller keeps it (`weston.py` `HoldFact`, `domain.py` `DisplayHost.hold`) and puts
   `holding` and the in-force `power` in each display feed snapshot, from which the health judge
-  raises `nothing_to_show`.
+  raises `nothing_to_show`; with them, the run the Output is offered to while none is admitted
+  (`offered`) and why it is handed to no run (`not_handed_off`: `no_frame`, `no_run`;
+  `handoff.py` `not_handed_off`), from which the judge names the cause (`no_frame_placed`,
+  `screen_not_told`).
 
 CI: `tests/native_display_smoke.py` (a picture plane holds; a ground-only app loses the screen to
 the slate and keeps its grant on ping answers; Display's drawing takes the slate off),

@@ -7,7 +7,9 @@ what no longer matches. Both inputs arrive here and nowhere else; no request to 
 handoff (Players self-sufficient; owner, 2026-10-24).
 
 `wanted_surface` and `next_step` are the rule, pure; `Handoffs` holds the inputs and applies the
-rule per Output at the main loop's existing pass (`settle`): no timer of its own.
+rule per Output at the main loop's existing pass (`settle`): no timer of its own. Why a connected
+Output is not handed off is the same rule's to say (`not_handed_off`): Display states it per Output
+in its feed snapshot, and the health judge names the dark Frame's cause from it.
 """
 from __future__ import annotations
 
@@ -25,6 +27,7 @@ from contracts.node_output import OUTPUT_IDS, OutputBinding
 from contracts.node_protocol import NodeProcessIdentity, counter
 
 from .domain import DisplayHost, OutputState
+from .handoff_cause import NotHandedOff
 from .weston import SurfaceGrant
 
 log = logging.getLogger(__name__)
@@ -59,10 +62,22 @@ class AppRun:
             raise ValueError("app_run") from error
 
 
+def not_handed_off(state: OutputState, binding: OutputBinding | None, run: AppRun | None) -> NotHandedOff | None:
+    """Why `wanted_surface` is None for a connected Output: no Frame bound first (the Output's own
+    configuration; a run would not help it), then no run. None when it is disconnected or a Surface
+    is wanted (offered, being handed off or handed off). Pure."""
+    if not state.connected:
+        return None
+    if binding is None:
+        return NotHandedOff.NO_FRAME
+    return NotHandedOff.NO_RUN if run is None else None
+
+
 def wanted_surface(state: OutputState, binding: OutputBinding | None, run: AppRun | None) -> Surface | None:
     """The Surface the Output is to be handed to: its key, the current run and the bound Frame,
-    when the Output is connected, bound and a run is current; None otherwise."""
-    if not state.connected or binding is None or run is None:
+    when the Output is connected and `not_handed_off` finds no reason (bound, a run current);
+    None otherwise."""
+    if not state.connected or not_handed_off(state, binding, run) is not None:
         return None
     return Surface(state.key, run.process, run.app_epoch, binding.generation,
                    binding.configuration_revision, binding.frame_id)
@@ -186,6 +201,12 @@ class Handoffs:
         with self._lock:
             return self._run
 
+    def not_handed_off(self, state: OutputState) -> NotHandedOff | None:
+        """Why `state`'s Output is handed to no run, from the binding and run last told (the
+        rule's `not_handed_off`)."""
+        with self._lock:
+            return not_handed_off(state, self._bindings.get(state.key.output_id), self._run)
+
     def settle(self, host: DisplayHost) -> None:
         """Main loop, each pass, per Output: `next_step` over its state and the Surface wanted,
         applied. Offer -> the backend's grant, then the host's offer; Handoff -> the host's
@@ -235,5 +256,5 @@ class Handoffs:
             self._backend.withdraw(surface, uuid4())
 
 
-__all__ = ["REVISION_TTL_MS", "RETRY_MS", "AppRun", "Handoff", "HandoffBackend", "Handoffs", "Offer",
-           "Revise", "Step", "Withdraw", "next_step", "wanted_surface"]
+__all__ = ["REVISION_TTL_MS", "RETRY_MS", "AppRun", "Handoff", "HandoffBackend", "Handoffs", "NotHandedOff",
+           "Offer", "Revise", "Step", "Withdraw", "next_step", "not_handed_off", "wanted_surface"]

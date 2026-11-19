@@ -148,28 +148,37 @@ def verify_process(grant: SurfaceGrant) -> bool:
         return False
 
 
-def _output_document(state, power: OutputPowerController | None = None) -> dict:
-    """One `OutputState` as the feed snapshot shows it (JSON-native values only), with `holding`
-    (the shell's hold, issue #123) and `power`: the power in force on the Output as the power
-    controller's report says it (`in_force.power`), None without a report or a power in force."""
-    admitted = state.admitted
+def _surface_run(surface) -> dict | None:
+    """A Surface's app run and Frame, as the feed snapshot shows it (JSON-native values only)."""
+    if surface is None:
+        return None
+    return {
+        "pid": surface.process.pid,
+        "start_ticks": surface.process.start_ticks,
+        "invocation_id": str(surface.process.invocation_id),
+        "app_epoch": surface.app_epoch,
+        "frame_id": surface.frame_id,
+    }
+
+
+def _output_document(state, handoffs: Handoffs, power: OutputPowerController | None = None) -> dict:
+    """One `OutputState` as the health judge reads it (JSON-native values only, and nothing it does
+    not read: the feed page has one packet's room, MAX_PACKET; the whole state is the ingress
+    `outputs` op's): `admitted` (the run handed the Output), `offered` (while none is admitted, the
+    run it is offered to, awaiting that run's first picture: the candidate), `holding` (the shell's
+    hold, issue #123), `not_handed_off` (why no run is wanted on it, `Handoffs.not_handed_off`'s
+    value) and `power`: the power in force on the Output as the power controller's report says it
+    (`in_force.power`), None without a report or a power in force."""
     report = None if power is None else power.report(state.key.output_id)
     in_force = None if report is None or report.in_force is None else report.in_force.power
+    reason = handoffs.not_handed_off(state)
     return {
         "output_id": state.key.output_id,
         "connected": state.connected,
-        "admitted": None
-        if admitted is None
-        else {
-            "pid": admitted.process.pid,
-            "start_ticks": admitted.process.start_ticks,
-            "invocation_id": str(admitted.process.invocation_id),
-            "app_epoch": admitted.app_epoch,
-            "frame_id": admitted.frame_id,
-        },
-        "diagnostic": state.diagnostic,
-        "fault": state.fault,
+        "admitted": _surface_run(state.admitted),
+        "offered": _surface_run(state.candidate) if state.admitted is None else None,
         "holding": state.holding,
+        "not_handed_off": None if reason is None else reason.value,
         "power": None if in_force is None else in_force.value,
     }
 
@@ -598,9 +607,10 @@ class Controller:
         )
 
     def outputs_snapshot(self) -> list[dict]:
-        """Every Output the host knows (bounded by its `max_outputs`) with its admission, so a
-        reader that lapped the ring or restarted learns the Output set from any one read."""
-        return [_output_document(state, self._power) for state in self.host.states()]
+        """Every Output the host knows (bounded by its `max_outputs`) with its admission and why it
+        is handed to no run, so a reader that lapped the ring or restarted learns the Output set
+        from any one read."""
+        return [_output_document(state, self.handoffs, self._power) for state in self.host.states()]
 
     def feed_events(self, value: dict) -> dict:
         """The feed socket's one operation: `events` (an absent `op` reads as `events`)."""

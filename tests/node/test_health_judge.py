@@ -24,8 +24,10 @@ from appliance.health.judge import (
     DESCRIPTOR_LIMIT_HEADROOM,
     FRAME_BLACK_CODES,
     MAX_OUTPUTS,
+    NO_FRAME_PLACED,
     NOTHING_TO_SHOW,
     RING_CAPACITY,
+    SCREEN_NOT_TOLD,
     SOFTWARE_RENDERER,
     HealthJudge,
     OutputVerdict,
@@ -83,6 +85,9 @@ def states(judge, now):
 def test_the_catalogue_has_the_m1_row_the_degraded_rows_and_the_absent_app_row():
     assert dict(FAULTS) == {
         NOTHING_TO_SHOW: Fault(NOTHING_TO_SHOW, True, "Nothing to show on this Frame", 120000, 0),
+        SCREEN_NOT_TOLD: Fault(SCREEN_NOT_TOLD, True,
+                               "Photos paused — the screen software has not heard from the player", 120000, 0),
+        NO_FRAME_PLACED: Fault(NO_FRAME_PLACED, True, "No Frame is placed on this screen", 120000, 0),
         APP_DESCRIPTOR_LIMIT: Fault(
             APP_DESCRIPTOR_LIMIT, True, "Photos paused — the player ran out of open files", 0, 0),
         APP_UNRESPONSIVE: Fault(
@@ -98,7 +103,8 @@ def test_the_catalogue_has_the_m1_row_the_degraded_rows_and_the_absent_app_row()
             ("frame_no_photo", "Photos paused — the photo has not arrived"),
             ("frame_cannot_draw", "Photos paused — the photo could not be drawn"),
             ("frame_not_started", "Photos paused — waiting for Central to start it"),
-            ("frame_no_content", "Photos paused — no photo for this Frame"))}}
+            ("frame_no_content", "Photos paused — no photo for this Frame"),
+            ("frame_no_renderer", "Photos paused — the player could not start drawing"))}}
     with pytest.raises(TypeError):
         FAULTS["other"] = FAULTS[APP_UNRESPONSIVE]
 
@@ -316,13 +322,15 @@ LINE = FAULTS[APP_UNRESPONSIVE].household_line
 OFF = ("", "")
 
 
-def output(name="Virtual-1", run=RUN, *, connected=True, fault=None, holding=None, power="on"):
+def output(name="Virtual-1", run=RUN, *, connected=True, holding=None, power="on", offered=None,
+           not_handed_off=None):
     """One entry of Display's `outputs` snapshot (appliance/display_host/runner.py); an admitted
     run holds the Output unless `holding` says otherwise."""
     admitted = None if run is None else {**run, "frame_id": "frame-1"}
     return {"output_id": name, "connected": connected, "admitted": admitted,
-            "diagnostic": "released" if run else "presented", "fault": fault,
-            "holding": run is not None if holding is None else holding, "power": power}
+            "offered": None if offered is None else {**offered, "frame_id": "frame-1"},
+            "holding": run is not None if holding is None else holding,
+            "not_handed_off": not_handed_off, "power": power}
 
 
 def underlays(judge, now):
@@ -339,12 +347,6 @@ def test_each_connected_output_of_the_snapshot_is_live_or_slate_while_healthy():
                            output("HDMI-A-3", NEXT_RUN, connected=False)], 0)
     assert underlays(judge, 0) == [("HDMI-A-2", "slate", ()), ("Virtual-1", "live", ())]
     assert cards(judge, 0) == [("HDMI-A-2", False, OFF), ("Virtual-1", False, OFF)]
-
-
-def test_the_underlay_is_taken_from_the_admission_never_from_the_fault():
-    judge = HealthJudge(**timing())  # E-B10a-7: an admitted Output still shows `app_absent`
-    judge.observe_outputs([output(fault="app_absent")], 0)
-    assert underlays(judge, 0) == [("Virtual-1", "live", ())]
 
 
 def test_the_admitted_unresponsive_run_is_held_and_every_output_shows_the_code():
@@ -366,7 +368,7 @@ def test_after_the_run_is_gone_the_slate_keeps_the_card_and_its_time():
     judge = raised_judge()
     judge.observe_outputs([output()], RAISE)
     judge.observe(fact("app_exited"), 30000)  # a person's kill -9 of the frozen run
-    judge.observe_outputs([output(run=None, fault="surface_lease_or_process_lost")], 30001)
+    judge.observe_outputs([output(run=None)], 30001)
     assert underlays(judge, 30001) == [("Virtual-1", "slate", (APP_UNRESPONSIVE,))]
     assert cards(judge, 30001) == [("Virtual-1", True, (
         f"{LINE} · since 07:17", "app_unresponsive · Output Virtual-1"))]
@@ -424,7 +426,8 @@ def test_the_verdict_sequence_bumps_when_an_outputs_verdict_changes():
         Transition(2, NOTHING_TO_SHOW, {"output": "Virtual-1"}, "pending", "not_held", 2),)
 
 
-HELD = {"holding": False, "power": "on"}
+HELD = {"offered": None, "holding": False, "not_handed_off": None, "power": "on"}
+UNHELD = {"output_id": "V", "connected": True, "admitted": None}
 
 
 @pytest.mark.parametrize("snapshot", [
@@ -436,10 +439,13 @@ HELD = {"holding": False, "power": "on"}
     [{"output_id": "V", "connected": True, "admitted": None, **HELD}] * 2,
     [{"output_id": f"V{index}", "connected": True, "admitted": None, **HELD}
      for index in range(MAX_OUTPUTS + 1)],
-    [{"output_id": "V", "connected": True, "admitted": None, "power": "on"}],     # no holding
-    [{"output_id": "V", "connected": True, "admitted": None, "holding": False}],  # no power
-    [{"output_id": "V", "connected": True, "admitted": None, "holding": 0, "power": "on"}],
-    [{"output_id": "V", "connected": True, "admitted": None, "holding": False, "power": "dim"}],
+    *([{**UNHELD, **{key: value for key, value in HELD.items() if key != missing}}]   # each field missing
+      for missing in HELD),
+    [{**UNHELD, **HELD, "holding": 0}],
+    [{**UNHELD, **HELD, "power": "dim"}],
+    [{**UNHELD, **HELD, "offered": {"pid": 1}}],
+    [{**UNHELD, **HELD, "not_handed_off": "unplugged"}],
+    [{**UNHELD, **HELD, "not_handed_off": ["no_run"]}],
 ])
 def test_a_malformed_snapshot_is_refused_and_changes_nothing(snapshot):
     judge = HealthJudge(**timing())
@@ -517,9 +523,46 @@ def descriptors(open_descriptors, soft_limit=1024, run=RUN):
 
 
 def test_the_card_precedence_puts_the_run_causes_before_the_frame_showing_nothing():
+    """Every known cause of a dark Output comes before `nothing_to_show`, which only says it is
+    dark. Mutation probe: move NOTHING_TO_SHOW ahead of the causes."""
     assert CARD_PRECEDENCE == (APP_ABSENT, APP_UNRESPONSIVE, APP_DESCRIPTOR_LIMIT,
-                               *FRAME_BLACK_CODES.values(), NOTHING_TO_SHOW)
+                               *FRAME_BLACK_CODES.values(), NO_FRAME_PLACED, SCREEN_NOT_TOLD,
+                               NOTHING_TO_SHOW)
     assert all(FAULTS[code].display_affecting for code in CARD_PRECEDENCE)
+
+
+@pytest.mark.parametrize(("reason", "code"), [
+    (None, NOTHING_TO_SHOW), ("no_frame", NO_FRAME_PLACED), ("no_run", SCREEN_NOT_TOLD)])
+def test_an_output_handed_to_no_run_takes_the_cause_display_states(reason, code):
+    """Mutation probe: swap the two causes' codes in the judge's map."""
+    judge = HealthJudge(**timing())
+    judge.observe_outputs([output(run=None, not_handed_off=reason)], 0)
+    assert underlays(judge, WINDOW - 1) == [("Virtual-1", "slate", ())]
+    assert cards(judge, WINDOW)[0][2][1] == f"{code} · Output Virtual-1"
+    assert cards(judge, WINDOW)[0][2][0].startswith(FAULTS[code].household_line + " · since ")
+
+
+def test_a_changed_cause_keeps_the_dark_outputs_since_and_takes_the_new_code():
+    """Display told its run at last: the Output is offered, and only `nothing_to_show` remains
+    until the run draws; held, it clears."""
+    judge = HealthJudge(**timing())
+    judge.observe_outputs([output(run=None, not_handed_off="no_run")], 0)
+    judge.observe_outputs([output(run=None, not_handed_off="no_run")], WINDOW)
+    judge.observe_outputs([output(run=None, offered=RUN)], WINDOW + 5)
+    verdict = judge.verdict(WINDOW + 5).outputs[0]
+    assert (verdict.codes, verdict.card, verdict.card_age_ms) == ((NOTHING_TO_SHOW,), NOTHING_TO_SHOW, WINDOW + 5)
+    judge.observe_outputs([output()], WINDOW + 6)
+    assert [(t.code, t.state, t.reason) for t in judge.transitions()] == [
+        (SCREEN_NOT_TOLD, "pending", "not_held"), (SCREEN_NOT_TOLD, "raised", "window_elapsed"),
+        (NOTHING_TO_SHOW, "raised", "cause_changed"), (NOTHING_TO_SHOW, "cleared", "held")]
+
+
+def test_a_cause_stated_while_pending_raises_after_the_window_from_the_first_evidence():
+    judge = HealthJudge(**timing())
+    judge.observe_outputs([output(run=None)], 0)
+    judge.observe_outputs([output(run=None, not_handed_off="no_frame")], WINDOW - 1)
+    assert cards(judge, WINDOW - 1)[0][1] is False
+    assert cards(judge, WINDOW)[0][2][1] == f"{NO_FRAME_PLACED} · Output Virtual-1"
 
 
 @pytest.mark.parametrize(("open_descriptors", "soft_limit", "at_limit"), [

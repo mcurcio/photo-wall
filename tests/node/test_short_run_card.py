@@ -53,7 +53,8 @@ class Wall:
                                  pulse_deadline_ms=PULSE_DEADLINE_MS, catalogue=FAULTS)
         # Display's snapshot: the Output on, nothing admitted (no Player ever held it).
         self.judge.observe_outputs([{"output_id": OUTPUT, "connected": True, "admitted": None,
-                                     "holding": False, "power": "on"}], 0)
+                                     "offered": None, "holding": False, "not_handed_off": None,
+                                     "power": "on"}], 0)
 
     def turn(self, *, gap: bool = False) -> list[tuple[str, dict]]:
         """One broker turn, then the judge reads the feed until caught up, through the health

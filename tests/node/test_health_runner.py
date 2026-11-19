@@ -70,9 +70,8 @@ def local_reader(feed, *, name="broker"):
 
 def snapshot_output(name="Virtual-1", run=RUN, *, connected=True):
     admitted = None if run is None else {**run, "frame_id": "frame-1"}
-    return {"output_id": name, "connected": connected, "admitted": admitted,
-            "diagnostic": "released", "fault": "app_absent", "holding": run is not None,
-            "power": "on"}
+    return {"output_id": name, "connected": connected, "admitted": admitted, "offered": None,
+            "holding": run is not None, "not_handed_off": None, "power": "on"}
 
 
 def local_display_reader(feed, outputs):

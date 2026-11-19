@@ -27,8 +27,10 @@ from appliance.display_host.handoff import (
     Revise,
     Withdraw,
     next_step,
+    not_handed_off,
     wanted_surface,
 )
+from appliance.display_host.handoff_cause import NotHandedOff
 from appliance.display_host.runner import Controller, OutputReporter
 from appliance.display_host.trials import Trials
 from appliance.display_host.weston import SurfaceGrant
@@ -59,6 +61,29 @@ def test_the_wanted_surface_needs_a_connected_bound_output_and_a_run(connected, 
     state = OutputState(KEY, connected=connected)
     expected = WANTED if (connected and binding is not None and run is not None) else None
     assert wanted_surface(state, binding, run) == expected
+
+
+@pytest.mark.parametrize(("connected", "binding", "run"), list(product((True, False), (BOUND, None), (RUN, None))))
+def test_why_a_connected_output_is_handed_to_no_run(connected, binding, run):
+    """No Frame bound first (a run would not help it), then no run; a reason exactly when a
+    connected Output wants no Surface. Mutation probe: test the run before the binding."""
+    state = OutputState(KEY, connected=connected)
+    expected = (None if not connected else NotHandedOff.NO_FRAME if binding is None
+                else NotHandedOff.NO_RUN if run is None else None)
+    assert not_handed_off(state, binding, run) == expected
+    assert (wanted_surface(state, binding, run) is None) == (not connected or expected is not None)
+
+
+def test_handoffs_state_the_reason_from_what_they_were_last_told(shell):
+    handoffs = Handoffs(shell)
+    state = shell.host.state("HDMI-A-1")
+    assert handoffs.not_handed_off(state) is NotHandedOff.NO_FRAME          # no document yet
+    handoffs.document("HDMI-A-1", BOUND)
+    assert handoffs.not_handed_off(state) is NotHandedOff.NO_RUN
+    handoffs.run(RUN)
+    assert handoffs.not_handed_off(state) is None
+    handoffs.run(None)                                                       # the broker's run is gone
+    assert handoffs.not_handed_off(state) is NotHandedOff.NO_RUN
 
 
 def test_the_wanted_surface_is_the_runs_process_and_the_bound_frame():

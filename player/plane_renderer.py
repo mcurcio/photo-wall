@@ -424,6 +424,7 @@ class PlaneRenderer:
             screens, device, fitter, patterns, luts)
         self._stills, self._videos, self._budget, self._clock = stills, videos, budget, clock
         self.gl_renderer = gl_renderer
+        self.can_draw = True        # made: its screens, GPU and passes are up (player/renderer_root.py)
         self._room_lights: RoomLightsDocument | None = None
         self._player_id: str | None = None
         self._qr: tuple[TargetCode, QrModules] | None = None       # the newest QR made, by its code

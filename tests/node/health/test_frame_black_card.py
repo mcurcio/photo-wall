@@ -61,8 +61,11 @@ def report(*frames, run=RUN):
         {"output": output, "cause": cause} for output, cause in frames]}, "node")
 
 
-def display(*, output=OUTPUT, run=RUN, connected=True, power="on", holding=True):
-    return [{"output_id": output, "connected": connected, "admitted": run, "holding": holding, "power": power}]
+def display(*, output=OUTPUT, run=RUN, connected=True, power="on", holding=True, offered=None):
+    """Display's snapshot: `run` admitted (and so offered), else `offered` alone."""
+    return [{"output_id": output, "connected": connected, "admitted": run,
+             "offered": run if run is not None else offered, "holding": holding,
+             "not_handed_off": None, "power": power}]
 
 
 def on_wall(subject, now=0, **kwargs):
@@ -256,23 +259,28 @@ def local_reader(feed):
 class Wall:
     """A Player executing a Planner's projection, answering a broker's probes, judged by health."""
 
-    def __init__(self, tmp_path, projection, *, player_id="player-one"):
+    def __init__(self, tmp_path, projection, *, player_id="player-one", renderer=None, output=OUTPUT):
+        """`projection` None: no plan reached the Player; `renderer` None: a RecordingRenderer."""
         self.clock, self.now_ms = ManualClock(100), 0
         self.show_clock = ShowClock(self.clock.monotonic)
-        monotonic = self.clock.monotonic()
-        self.show_clock.sample(server_time=projection.now, sent_monotonic=monotonic, received_monotonic=monotonic)
-        self.renderer = RecordingRenderer()
+        if projection is not None:
+            monotonic = self.clock.monotonic()
+            self.show_clock.sample(server_time=projection.now, sent_monotonic=monotonic,
+                                   received_monotonic=monotonic)
+        self.renderer = RecordingRenderer() if renderer is None else renderer
         self.executor = Executor(player_id, Cache(tmp_path / "cache", 1 << 20), self.renderer, self.clock,
                                  self.show_clock)
-        bound = (binding(),)
+        bound = (binding(output=output),)
         self.executor.accept_configuration(PlayerConfiguration(
             player_id=player_id, authority_epoch=1, configuration_revision=1, bindings=bound,
-            enabled_outputs=(OUTPUT,)))
-        proposal = projection.for_player(player_id)
-        self.plan = Plan(plan_id="plan-1", revision=1, player_id=player_id, authority_epoch=1,
-                         issued_at=projection.now, valid_from=projection.now, valid_until=projection.valid_until,
-                         bindings=bound, layers=proposal.layers, unfilled=proposal.unfilled)
-        self.executor.accept_plan(self.plan)
+            enabled_outputs=(output,)))
+        if projection is not None:
+            proposal = projection.for_player(player_id)
+            self.plan = Plan(plan_id="plan-1", revision=1, player_id=player_id, authority_epoch=1,
+                             issued_at=projection.now, valid_from=projection.now,
+                             valid_until=projection.valid_until, bindings=bound, layers=proposal.layers,
+                             unfilled=proposal.unfilled)
+            self.executor.accept_plan(self.plan)
 
         self.feed = Feed(512)
         self.probes = ProbeThread(self.feed, clock=lambda: self.now_ms, timing=FAST)
@@ -288,7 +296,7 @@ class Wall:
         self.probes.publish_run(RUN_KEY)
         self.reader = local_reader(self.feed)
         self.judge = judge()
-        self.judge.observe_outputs(display(), 0)
+        self.judge.observe_outputs(display(output=output), 0)
         self.probes.step(self.now_ms)
 
     def exchange(self):
