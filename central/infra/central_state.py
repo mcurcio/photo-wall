@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
 from collections.abc import Callable
 from typing import Final
 
@@ -111,26 +112,37 @@ class PgCentralStateReads:
 
 class PgStateWakes:
     """hub_api.StateWakes: `changed` returns at a `wake` (something Central's state is read from
-    changed, from any thread) or after CENTRAL_STATE_LOOK_SECONDS, whichever is first."""
+    changed, from any thread) or after CENTRAL_STATE_LOOK_SECONDS, whichever is first. A wake is
+    kept until the next `changed` takes it, whenever it came: before the first `changed` (the loop
+    not known yet) or while the caller reads, so a commit's NOTIFY is never lost to the ceiling."""
 
     def __init__(self, look_seconds: float = CENTRAL_STATE_LOOK_SECONDS) -> None:
         self._look = look_seconds
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._event: asyncio.Event | None = None
+        self._lock = threading.Lock()
+        self._woken = False   # a wake no `changed` has returned for yet
+        self._waiter: tuple[asyncio.AbstractEventLoop, asyncio.Event] | None = None
 
     def wake(self) -> None:
         """Something Central's state reads may have changed: look again now. Safe from any thread."""
-        loop, event = self._loop, self._event
-        if loop is not None and event is not None:
+        with self._lock:
+            self._woken = True
+            waiter, self._waiter = self._waiter, None
+        if waiter is not None:
+            loop, event = waiter
             with contextlib.suppress(RuntimeError):   # that loop is closed: nobody waits there any more
                 loop.call_soon_threadsafe(event.set)
 
     async def changed(self) -> None:
-        if self._event is None:
-            self._loop, self._event = asyncio.get_running_loop(), asyncio.Event()
-        with contextlib.suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(self._event.wait(), self._look)
-        self._event.clear()
+        event = asyncio.Event()
+        with self._lock:
+            waiting = not self._woken
+            if waiting:
+                self._waiter = (asyncio.get_running_loop(), event)
+        if waiting:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(event.wait(), self._look)
+        with self._lock:   # every wake until now is covered by the read that follows this return
+            self._woken, self._waiter = False, None
 
 
 __all__ = ["CENTRAL_STATE_LOOK_SECONDS", "PgCentralStateReads", "PgStateWakes"]

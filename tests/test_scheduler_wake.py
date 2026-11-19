@@ -11,7 +11,8 @@ An Install written by the console wakes FleetHub's look through the worker's LIS
 Mutation probes: (1) return `now + 1` from `Scheduler.tick` -> the idle test counts 600 ticks;
 (2) drop `runtime.next_event_at` from `Coordinator._advance_runtime` -> the window opens at the
 60 s ceiling; (3) call `retain` from `tick` -> the cadence test counts a retention per tick;
-(6) drop `notify_releases_in` from `PgPlayerVersions._set_in` -> FleetHub waits for its ceiling.
+(6) drop `notify_releases_in` from `PgPlayerVersions._set_in` -> FleetHub waits for its ceiling;
+(7) `PgStateWakes.wake` drops a wake while no `changed` waits -> the early-wake test waits 60 s.
 """
 from __future__ import annotations
 
@@ -132,6 +133,33 @@ def test_a_failing_step_tries_again_after_the_shortest_rest():
 
     scheduler = Scheduler(Idle(clock), failing, clock, retentions={})
     assert scheduler.tick() == 1000 + SCHEDULER_MIN_SECONDS
+
+
+def test_central_states_look_takes_a_wake_that_came_before_it_waited():
+    """A commit's NOTIFY that reaches Central's hub session before its look first waits (or while
+    it reads) is looked at at once, never at the CENTRAL_STATE_LOOK_SECONDS ceiling (the install
+    tracer's lost wake: an Install committed while the session's first read ran)."""
+    async def run() -> None:
+        wakes = PgStateWakes(look_seconds=60)
+        wakes.wake()   # before any `changed`: no loop known yet
+        await asyncio.wait_for(wakes.changed(), 1)
+        waiting = asyncio.ensure_future(wakes.changed())
+        await asyncio.sleep(0.05)
+        assert not waiting.done()   # the wake was taken once
+        await asyncio.to_thread(wakes.wake)   # from another thread, while it waits
+        await asyncio.wait_for(waiting, 1)
+        wakes.wake()   # while the caller reads, between two waits
+        await asyncio.wait_for(wakes.changed(), 1)
+    asyncio.run(run())
+
+
+def test_central_states_look_waits_its_ceiling_with_no_wake():
+    async def run() -> None:
+        wakes = PgStateWakes(look_seconds=0.1)
+        started = time.monotonic()
+        await wakes.changed()
+        assert time.monotonic() - started >= 0.09
+    asyncio.run(run())
 
 
 # Through the real app's Scheduler and Coordinator on PostgreSQL.
