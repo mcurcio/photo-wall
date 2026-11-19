@@ -1,14 +1,12 @@
 """The broker's probe thread: its own selector and deadline timer, so probe timing never
 waits on the main loop (which blocks on systemctl and HTTP).
 
-The main loop hands over admitted channels (`adopt`), publishes the current app run each
-turn (`publish_run`) and restates the relink it owes (`owe_relink`). This thread only measures: it sends a nonce every T on
+The main loop hands over admitted channels (`adopt`) and publishes the current app run each
+turn (`publish_run`). This thread only measures: it sends a nonce every T on
 the current run's channel, matches answers, and appends probe facts (audience node) to the
 broker feed, with the renderer the Player reports on its channel (`app_renderer`) and the Frames it states black (`app_frames_black`). It never calls systemctl, HTTP, the store or the driver. A channel is judged
 against every publication after its adoption: one whose run is not the published run is
-closed. An owed relink is a level, not a packet: each channel instance for the owed run gets
-it once per owed episode (each Central refusal is a new episode), so a relink owed while no
-channel is open reaches the next one and a later refusal reaches a long-lived channel again.
+closed.
 Nothing acts on an unanswered run (issue #125): the judge shows it, a person recovers it.
 """
 from __future__ import annotations
@@ -24,7 +22,6 @@ from dataclasses import dataclass
 from appliance.apps.probe import (
     SHIPPED_TIMING,
     AppRunKey,
-    OwedRelink,
     ProbeClock,
     ProbeTiming,
 )
@@ -37,7 +34,6 @@ from contracts.node_app_link import (
     NodeFramesBlackV2,
     NodeRendererV2,
     encode_node_probe,
-    encode_node_relink,
     parse_node_probe_reply,
 )
 
@@ -49,7 +45,6 @@ class _Channel:
     connection: socket.socket
     run: AppRunKey
     adopted_at: int  # publication sequence when the main loop handed it over
-    relinked: str | None = None  # the owed episode this channel instance already carried
 
 
 class ProbeThread:
@@ -60,7 +55,6 @@ class ProbeThread:
         # Main loop -> thread (under the lock).
         self._publication: tuple[int, AppRunKey | None] = (0, None)
         self._adoptions: list[_Channel] = []
-        self._owed: OwedRelink | None = None
         # Thread-owned.
         self._applied = 0
         self._probes: ProbeClock | None = None
@@ -118,17 +112,6 @@ class ProbeThread:
         if run != previous:
             self._wake()
 
-    def owe_relink(self, owed: OwedRelink | None) -> None:
-        """The relink the outbox owes a run's Player (Central refused its link), every turn.
-
-        Idempotent and level-triggered; `None` = nothing owed. Each channel instance for the
-        owed run carries each owed episode once, on adoption or at once if already open.
-        """
-        with self._lock:
-            changed, self._owed = self._owed != owed, owed
-        if changed:
-            self._wake()
-
     def _wake(self) -> None:
         try:
             self._wake_writer.send(b"\0")
@@ -178,9 +161,6 @@ class ProbeThread:
             current = self._probes.run if self._probes is not None else None
             if run != current:
                 self._probes = ProbeClock(run, now, timing=self.timing) if run is not None else None
-                with self._lock:
-                    if self._owed is not None and self._owed.run != run:
-                        self._owed = None
         for channel in adoptions:
             self._close("superseded")  # one channel: the newest open wins
             try:
@@ -194,19 +174,6 @@ class ProbeThread:
         if (self._channel is not None and self._applied > self._channel.adopted_at
                 and self._channel.run != run):
             self._close("run_changed")
-        self._relink()
-
-    def _relink(self) -> None:
-        """Send each owed episode once on this channel; unsent (EAGAIN) is retried next pass."""
-        channel = self._channel
-        with self._lock:
-            owed = self._owed
-        if (channel is None or owed is None or channel.run != owed.run
-                or channel.relinked == owed.episode):
-            return
-        if self._send(encode_node_relink()):
-            channel.relinked = owed.episode
-            self.feed.append("relink_sent", {"run": owed.run.document()})
 
     def _turn(self, now: int, *, late: bool) -> None:
         probes = self._probes

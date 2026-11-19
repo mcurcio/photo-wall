@@ -1,31 +1,24 @@
-"""The broker's probe thread (own selector and timer) and the app-link socket's probe path."""
+"""The broker's probe thread (own selector and timer). Its listener: test_node_app_link_local.py."""
 import socket
 import threading
 import time
-from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 from support.packet_pair import packet_pair
-from test_node_boot import environment
 
-from appliance.apps.broker import RunningApp
-from appliance.apps.probe import AppRunKey, OwedRelink, ProbeTiming
+from appliance.apps.probe import AppRunKey, ProbeTiming
 from appliance.apps.probe_channel import ProbeThread
 from appliance.feed import Feed
-from appliance.node import app_link
-from appliance.node.app_link import BrokerLinkService
 from contracts.node_app_link import (
     FrameBlack,
     FrameBlackCause,
     encode_node_app_link_result,
     encode_node_frames_black,
     encode_node_probe_answer,
-    encode_node_probe_open,
     encode_node_renderer,
     parse_node_probe_channel_message,
 )
-from contracts.node_protocol import NodeProcessIdentity
 
 # Small timing so the thread's real timer is exercised in well under a second per check.
 FAST = ProbeTiming(period_ms=50, miss_limit=2, startup_ms=150)
@@ -33,7 +26,6 @@ FAST = ProbeTiming(period_ms=50, miss_limit=2, startup_ms=150)
 DUE = 9
 RUN = AppRunKey(uuid4(), 4242, 31751781, 1)
 OTHER = AppRunKey(uuid4(), 4343, 31751999, 2)
-OWED = OwedRelink(RUN, "a" * 32)  # one owed episode for RUN (one Central refusal)
 
 
 def monotonic_ms():
@@ -249,171 +241,6 @@ def test_peer_eof_closes_the_channel(probes):
                  == ["open", "closed"])
 
 
-def relinks(player):
-    return [m for m in player.received if type(m).__name__ == "NodeRelinkV2"]
-
-
-def test_relink_reaches_only_the_owed_runs_channel(probes):
-    ours, theirs = packet_pair()
-    player = Player(theirs)
-    try:
-        probes.publish_run(RUN)
-        probes.adopt(ours, RUN)
-        assert until(lambda: facts(probes.feed, "probe_answered"))
-        probes.owe_relink(OwedRelink(OTHER, "a" * 32))
-        time.sleep(0.15)
-        assert relinks(player) == []
-        probes.owe_relink(OWED)
-        assert until(lambda: relinks(player))
-        assert until(lambda: facts(probes.feed, "relink_sent"))  # recorded after the send returns
-        assert [e.value for e in facts(probes.feed, "relink_sent")] == [{"run": RUN.document()}]
-    finally:
-        player.stop()
-
-
-def test_a_relink_owed_while_no_channel_is_open_goes_to_the_next_channel_first(probes):
-    """E-B7-3: the channel is down (broker restart, Player backoff) when the relink is owed."""
-    probes.publish_run(RUN)
-    probes.owe_relink(OWED)
-    time.sleep(0.15)  # several thread passes with nothing to send it on
-    ours, theirs = packet_pair()
-    player = Player(theirs)
-    try:
-        probes.adopt(ours, RUN)
-        assert until(lambda: relinks(player))
-        assert type(player.received[0]).__name__ == "NodeRelinkV2"  # before the first probe
-        assert until(lambda: facts(probes.feed, "relink_sent"))  # recorded after the send returns
-        assert len(facts(probes.feed, "relink_sent")) == 1
-    finally:
-        player.stop()
-
-
-def test_a_relink_is_sent_once_per_channel_instance(probes):
-    probes.publish_run(RUN)
-    first_ours, first_theirs = packet_pair()
-    first = Player(first_theirs)
-    try:
-        probes.adopt(first_ours, RUN)
-        for _ in range(15):  # the main loop restates the owed relink every turn
-            probes.owe_relink(OWED)
-            time.sleep(0.02)
-        assert until(lambda: facts(probes.feed, "probe_answered"))
-        assert len(relinks(first)) == 1
-    finally:
-        first.stop()
-    assert until(lambda: [e.value["state"] for e in facts(probes.feed, "probe_channel")]
-                 == ["open", "closed"])
-    second_ours, second_theirs = packet_pair()
-    second = Player(second_theirs)
-    try:
-        probes.adopt(second_ours, RUN)  # the Player reconnected: a new channel instance
-        assert until(lambda: relinks(second))
-        assert until(lambda: len(facts(probes.feed, "relink_sent")) == 2)  # after the send returns
-        for _ in range(10):
-            probes.owe_relink(OWED)
-            time.sleep(0.02)
-        assert len(relinks(second)) == 1 and len(facts(probes.feed, "relink_sent")) == 2
-    finally:
-        second.stop()
-
-
-def test_each_owed_episode_reaches_a_long_lived_channel_once(probes):
-    """B7c: Central refuses the same run's link again after the Player relinked on this
-    channel; the new episode is sent on the same channel, once, and counted once."""
-    ours, theirs = packet_pair()
-    player = Player(theirs)
-    try:
-        probes.publish_run(RUN)
-        probes.adopt(ours, RUN)
-        probes.owe_relink(OWED)
-        assert until(lambda: len(relinks(player)) == 1)
-        probes.owe_relink(None)  # the Player proved again: the slot holds its new link
-        for episode in ("b" * 32, "c" * 32):  # two later refusals of that link, each restated
-            for _ in range(5):
-                probes.owe_relink(OwedRelink(RUN, episode))
-                time.sleep(0.02)
-        assert until(lambda: len(relinks(player)) == 3)
-        assert until(lambda: len(facts(probes.feed, "relink_sent")) == 3)  # after the send returns
-        time.sleep(0.15)  # restated every turn: still once per episode
-        assert len(relinks(player)) == 3
-        assert [e.value for e in facts(probes.feed, "relink_sent")] == [{"run": RUN.document()}] * 3
-        assert [e.value["state"] for e in facts(probes.feed, "probe_channel")] == ["open"]
-    finally:
-        player.stop()
-
-
-def test_nothing_owed_sends_no_relink(probes):
-    probes.publish_run(RUN)
-    probes.owe_relink(OWED)
-    probes.owe_relink(None)  # the Player proved again: the slot holds its new link
-    ours, theirs = packet_pair()
-    player = Player(theirs)
-    try:
-        probes.adopt(ours, RUN)
-        assert until(lambda: facts(probes.feed, "probe_answered"))
-        time.sleep(0.1)
-        assert relinks(player) == [] and facts(probes.feed, "relink_sent") == []
-    finally:
-        player.stop()
-
-
-def test_a_run_change_drops_the_owed_relink(probes):
-    probes.publish_run(RUN)
-    probes.owe_relink(OWED)
-    probes.publish_run(OTHER)
-    ours, theirs = packet_pair()
-    player = Player(theirs)
-    try:
-        assert until(lambda: facts(probes.feed, "probe_unanswered", run=OTHER))
-        probes.publish_run(RUN)  # the old run's key again: still nothing owed
-        probes.adopt(ours, RUN)
-        assert until(lambda: facts(probes.feed, "probe_answered"))
-        assert relinks(player) == []
-    finally:
-        player.stop()
-
-
-class Unwritable:
-    """A real channel end whose first `blocked` sends report EAGAIN (the Player not reading)."""
-
-    def __init__(self, connection, blocked):
-        self.connection, self.blocked, self.refused = connection, blocked, 0
-
-    def fileno(self):
-        return self.connection.fileno()
-
-    def setblocking(self, flag):
-        self.connection.setblocking(flag)
-
-    def recv(self, size):
-        return self.connection.recv(size)
-
-    def send(self, packet, flags=0):
-        if self.refused < self.blocked:
-            self.refused += 1
-            raise BlockingIOError()
-        return self.connection.send(packet, flags)
-
-    def close(self):
-        self.connection.close()
-
-
-def test_an_unsent_relink_is_retried_on_a_later_pass(probes):
-    ours, theirs = packet_pair()
-    channel = Unwritable(ours, blocked=3)
-    player = Player(theirs)
-    try:
-        probes.publish_run(RUN)
-        probes.owe_relink(OWED)
-        probes.adopt(channel, RUN)
-        assert until(lambda: relinks(player))
-        assert until(lambda: facts(probes.feed, "relink_sent"))  # recorded after the send returns
-        assert channel.refused == 3 and len(relinks(player)) == 1
-        assert len(facts(probes.feed, "relink_sent")) == 1
-    finally:
-        player.stop()
-
-
 def test_a_stopped_thread_is_loud():
     probes = ProbeThread(Feed(8), clock=monotonic_ms, timing=FAST)
     probes.start()
@@ -421,88 +248,6 @@ def test_a_stopped_thread_is_loud():
     probes.close()
     with pytest.raises(RuntimeError, match="probe_thread_stopped"):
         probes.check()
-
-
-# -- the app-link socket's first packet selects the path (appliance/node/app_link.py) --------
-
-
-class Connection:
-    def __init__(self):
-        self.sent, self.closed = [], False
-
-    def setsockopt(self, *args):
-        pass
-
-    def settimeout(self, value):
-        pass
-
-    def send(self, packet):
-        self.sent.append(packet)
-        return len(packet)
-
-    def close(self):
-        self.closed = True
-
-
-def service(monkeypatch, first, *, pid=396, grant=None, probes=True):
-    running = RunningApp(environment("a"), NodeProcessIdentity(pid, 31751781, uuid4()), 1, uuid4())
-    connection = Connection()
-    monkeypatch.setattr(socket, "SO_PASSCRED", 16, raising=False)  # Linux constant; absent on macOS
-    monkeypatch.setattr(app_link, "receive_credential_packet", lambda *a, **k: first)
-    adopted = []
-    links = BrokerLinkService.__new__(BrokerLinkService)
-    links.driver = SimpleNamespace(current=lambda: running)
-    # No Central session and no retained grant: the probe path must not need either.
-    links.session = SimpleNamespace(grant=grant, store=SimpleNamespace(read=lambda name: None))
-    links.probes = SimpleNamespace(adopt=lambda c, run: adopted.append((c, run))) if probes else None
-    links.listener = SimpleNamespace(accept=lambda: (connection, None))
-    return links, connection, adopted, running
-
-
-ORIGINAL_HANDLE = BrokerLinkService.handle
-REFUSED = b'{"schema":2,"kind":"result","status":"refused"}'
-
-
-def test_probe_open_admitted_by_uid_and_running_pid_without_a_grant(monkeypatch):
-    links, connection, adopted, running = service(
-        monkeypatch, ((396, 10004, 10004), encode_node_probe_open()))
-    links.serve_one()
-    assert adopted == [(connection, AppRunKey.of(running))]
-    assert connection.sent == [] and not connection.closed  # no ack; the thread owns it now
-
-
-@pytest.mark.parametrize("credentials, probes", [
-    ((396, 10003, 10003), True),   # not the app uid
-    ((397, 10004, 10004), True),   # the app uid, but not the running app's pid
-    ((396, 10004, 10004), False),  # a broker with no probe thread refuses as before
-])
-def test_probe_open_from_anyone_else_is_refused(monkeypatch, credentials, probes):
-    links, connection, adopted, _ = service(monkeypatch, (credentials, encode_node_probe_open()),
-                                            probes=probes)
-    links.serve_one()
-    assert adopted == [] and connection.sent == [REFUSED] and connection.closed
-
-
-def test_probe_open_with_no_running_app_is_refused(monkeypatch):
-    links, connection, adopted, _ = service(monkeypatch, ((396, 10004, 10004), encode_node_probe_open()))
-    links.driver = SimpleNamespace(current=lambda: None)
-    links.serve_one()
-    assert adopted == [] and connection.sent == [REFUSED] and connection.closed
-
-
-def test_other_first_packets_take_the_proof_path(monkeypatch):
-    first = ((396, 10004, 10004), b'{"schema":2,"kind":"begin"}')
-    links, connection, adopted, _ = service(monkeypatch, first)
-    handled = []
-    monkeypatch.setattr(BrokerLinkService, "handle",
-                        lambda self, c, *, first=None: handled.append((c, first)))
-    links.serve_one()
-    assert handled == [(connection, first)] and adopted == [] and connection.closed
-    garbage = ((396, 10004, 10004), b"not json")
-    links, connection, adopted, _ = service(monkeypatch, garbage)
-    monkeypatch.setattr(BrokerLinkService, "handle", ORIGINAL_HANDLE)
-    links.serve_one()  # today's refusal: no grant, so `handle` refuses
-    assert adopted == [] and connection.sent == [REFUSED] and connection.closed
 
 
 def test_the_players_frames_black_report_is_a_fact_for_the_channels_run_and_keeps_the_channel_open(stepped):

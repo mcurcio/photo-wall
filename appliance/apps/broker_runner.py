@@ -2,26 +2,22 @@
 from __future__ import annotations
 
 import argparse
-import http.client
 import logging
 import subprocess
 import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Final
-from uuid import UUID, uuid4
+from uuid import UUID
 
 from appliance.apps.broker import AppEffectBroker, ColdStart, ForeignAppUnit
 from appliance.apps.descriptors import DESCRIPTOR_SAMPLE_MS, descriptor_use
 from appliance.apps.display_runs import DisplayRuns
-from appliance.apps.import_worker import RootImportWorker
-from appliance.apps.lifecycle_storage import FileEffectJournal, primitive, running_from
-from appliance.apps.online_runner import OnlineRunner
+from appliance.apps.lifecycle_storage import FileEffectJournal
 from appliance.apps.probe import AppRunKey
 from appliance.apps.probe_channel import ProbeThread
+from appliance.apps.probe_listener import ProbeListener
 from appliance.apps.process_linux import SystemdAppProcessDriver
-from appliance.central_session.http import NodeHTTP
-from appliance.central_session.session import NodeSession
 from appliance.feed import Feed, answer_feed_read
 from appliance.feed_socket import FEED_READERS, FEEDS_GROUP, FeedListener
 from appliance.kernel.app_facts import (
@@ -33,19 +29,12 @@ from appliance.kernel.app_facts import (
 )
 from appliance.kernel.boot_store import BootStore
 from appliance.kernel.clock import boot_id, boottime_ms
-from appliance.node.app_link import BrokerLinkService, deliver_app_link, owed_relink
-from appliance.node.recovery_linux import RecoveryClient
 from contracts.app_environment import AppEnvironmentRefV2
-from contracts.node_protocol import (
-    AppProcessFact,
-    NodeEventV2,
-    encode_node_message,
-    parse_node_message,
-)
+from contracts.node_app_link import PROBE_SOCKET
 from contracts.strict_json import loads_object
 
-# The broker's node feed (audience node): probe facts for the health judge. No Central-bound
-# code reads it; Central receives process evidence and app-effect events only.
+# The broker's node feed (audience node): probe and run facts for the health judge. The broker
+# says nothing to Central (decision 0034, S4c).
 FEED_CAPACITY = 512
 FEED_SOCKET = Path("/run/photo-wall-app-feed/feed.sock")
 MAX_FEED_REPLY = 65536  # a reader's receive buffer (the health judge's MAX_FEED_REPLY)
@@ -54,27 +43,6 @@ MAX_FEED_REPLY = 65536  # a reader's receive buffer (the health judge's MAX_FEED
 # starts over. Short: such a fault is a moment between states, and the broker never exits over it.
 OBSERVATION_BACKOFF_MS: Final[tuple[int, ...]] = (1_000, 2_000, 5_000, 10_000)
 LOG = logging.getLogger(__name__)
-
-def emit_process_evidence(store, session, running, state: str) -> None:
-    document = store.read("process-evidence") or {"sequence": 0, "last": None, "pending": []}
-    identity = [str(running.process.invocation_id), running.app_epoch, state]
-    if document["last"] != identity:
-        if len(document["pending"]) >= 128:
-            raise ValueError("process_evidence_capacity")
-        sequence = document["sequence"] + 1
-        event = NodeEventV2(session.grant.producer, uuid4(), sequence, boottime_ms(),
-                            (AppProcessFact(running.process, running.app_epoch,
-                                            running.environment.environment_sha256, state),))
-        document = {"sequence": sequence, "last": identity,
-                    "pending": [*document["pending"], encode_node_message(event).decode()]}
-        store.write("process-evidence", document)
-    for _ in range(min(4, len(document["pending"]))):
-        event = parse_node_message(document["pending"][0].encode())
-        code, _ = session.request("POST", "/v2/node/evidence", encode_node_message(event))
-        if code != 200:
-            break
-        document = {**document, "pending": document["pending"][1:]}
-        store.write("process-evidence", document)
 
 
 def feed_listener(feed: Feed, path: Path = FEED_SOCKET, *, owner_uid: int = 0,
@@ -87,22 +55,21 @@ def feed_listener(feed: Feed, path: Path = FEED_SOCKET, *, owner_uid: int = 0,
 
 
 class BrokerLoop:
-    """One main-loop turn. Every blocking call (systemctl, HTTP) lives here, never in the
-    probe thread; the loop publishes the current app run to the probe thread each turn. Every
-    known turn also states the launch's run started or exited, judged from the driver's launch
-    record and the turn's observation, and samples its open files (`appliance.kernel.app_facts`),
-    and tells Display the current run (`display`, a
-    `DisplayRuns`: sent only when it changed or Display's controller is new), Central session or
-    not. Nothing here kills or restarts the app (issue #125)."""
+    """One main-loop turn. Every blocking call (systemctl) lives here, never in the probe thread;
+    the loop publishes the current app run to the probe thread each turn. Every known turn also
+    states the launch's run started or exited, judged from the driver's launch record and the
+    turn's observation, and samples its open files (`appliance.kernel.app_facts`), and tells
+    Display the current run (`display`, a `DisplayRuns`: sent only when it changed or Display's
+    controller is new). The broker speaks to no Central (decision 0034, S4c): its one listener is
+    the probe socket (`listener`). Nothing here kills or restarts the app (issue #125)."""
 
-    def __init__(self, *, broker, online, store, session, driver, links, probes: ProbeThread,
+    def __init__(self, *, broker, store, driver, listener, probes: ProbeThread,
                  feeds: FeedListener, display: DisplayRuns, clock: Callable[[], int] = boottime_ms,
                  proc: Path = Path("/proc")):
-        self.broker, self.online, self.store, self.session = broker, online, store, session
-        self.driver, self.links, self.probes, self.feeds = driver, links, probes, feeds
+        self.broker, self.store, self.driver = broker, store, driver
+        self.listener, self.probes, self.feeds = listener, probes, feeds
         self.display = display
         self.clock, self.proc = clock, proc
-        self.last_online_poll = 0.0
         self.last_run: AppRunKey | None = None  # the launch's run last stated started
         self.run_exited = False  # whether `last_run`'s exit has been stated
         self.stated_at = 0  # when `last_run`'s state was last stated
@@ -113,46 +80,15 @@ class BrokerLoop:
 
     def turn(self) -> None:
         self.probes.check()
-        if self.online.broker.record is None:
-            self._reconcile()
-        try:
-            self.online.broker.service()
-        except (OSError, ValueError, http.client.HTTPException) as error:
-            if self.store.failed:
-                raise
-            if isinstance(error, ForeignAppUnit):
-                self._stop_foreign()
-        # Local proofs and stop progress must run even without a Central session.
-        self.links.serve_one()
-        known, current, granted = self._observe()
-        run = None if current is None else AppRunKey.of(current)
+        self._reconcile()
+        self.listener.serve_one()
+        known, current = self._observe()
         if known:
+            run = None if current is None else AppRunKey.of(current)
             self._report_run(run, self._launch_run(run))
             self.display.tell(run)
             self.probes.publish_run(run)
-            # The owed relink is restated every known turn, grant or not (delivery needs one);
-            # the boot store keeps it across a broker restart.
-            try:
-                self.probes.owe_relink(owed_relink(self.store, run))
-            except ValueError:
-                if self.store.failed:
-                    raise
-        if known and granted:
-            # Proofs are accepted locally; Central learns of them here, never inside a proof.
-            try:
-                deliver_app_link(self.store, self.session, self.probes, current=run)
-            except (OSError, ValueError, http.client.HTTPException):
-                if self.store.failed:
-                    raise
         self.feeds.serve()
-        # A switch converges even when enrollment or Central is unavailable.
-        if time.monotonic() - self.last_online_poll >= 2:
-            self.last_online_poll = time.monotonic()
-            try:
-                self.online.tick()
-            except (OSError, ValueError, http.client.HTTPException):
-                if self.store.failed:
-                    raise
 
     def _reconcile(self) -> None:
         """The boot owner's turn. No observed state is fatal: a fault is reported once per reason
@@ -238,35 +174,13 @@ class BrokerLoop:
                                           "soft_limit": use.soft_limit})
 
     def _observe(self):
-        """(known, current, granted): one `driver.current()` per turn, Central session or not."""
-        store, session, driver, links = self.store, self.session, self.driver, self.links
-        asked = known = False
-        current = None
+        """(known, current): one `driver.current()` per turn; unknown when it cannot be read."""
         try:
-            links.remember_grant()
-            grant = session.ensure()
-            links.remember_grant()
-            if grant is not None:
-                asked = True
-                current = driver.current()
-                known = True
-                prior = store.read("observed-app")
-                previous = running_from(prior["running"]) if prior and prior.get("running") else None
-                if previous is not None and (current is None or current.process != previous.process):
-                    emit_process_evidence(store, session, previous, "exited")
-                if current is not None:
-                    emit_process_evidence(store, session, current, "running")
-                store.write("observed-app", {"running": primitive(current) if current else None})
-        except (OSError, ValueError, http.client.HTTPException):
-            if store.failed:
+            return True, self.driver.current()
+        except (OSError, ValueError):
+            if self.store.failed:
                 raise
-        if not asked:
-            try:
-                current, known = driver.current(), True
-            except (OSError, ValueError):
-                if store.failed:
-                    raise
-        return known, current, asked
+            return False, None
 
 
 def main() -> None:
@@ -290,26 +204,12 @@ def main() -> None:
     broker = AppEffectBroker(boot_id=kernel_boot_id, offer_id=UUID(value["offer_id"]),
                             authorized_environment=environment,
                             journal=FileEffectJournal(store), driver=driver)
-    # Independently scoped broker credential; no HostCore credential or reboot port.
-    configuration = Path("/run/photo-wall-node/broker.json")
-    status = configuration.lstat()
-    if configuration.is_symlink() or status.st_uid != 0 or status.st_mode & 0o077:
-        raise ValueError("broker_session_configuration_ownership")
-    endpoint = loads_object(configuration.read_bytes(), max_bytes=8192)
-    if endpoint is None or set(endpoint) != {"central", "serial"}:
-        raise ValueError("broker_session_configuration")
-    session = NodeSession(store, NodeHTTP(endpoint["central"], timeout=0.5), owner="app_effect_broker",
-                          serial=endpoint["serial"], offer_id=UUID(value["offer_id"]),
-                          kernel_boot_id=kernel_boot_id)
-    online = OnlineRunner(store, driver, session, RecoveryClient(),
-                          worker=RootImportWorker(store, **measured))
     feed = Feed(FEED_CAPACITY)
     probes = ProbeThread(feed)
-    links = BrokerLinkService(driver, session, Path("/run/photo-wall-app-proof/app-link.sock"),
-                              probes=probes, feed=feed)
+    listener = ProbeListener(driver, Path(PROBE_SOCKET), probes=probes)
     feeds = feed_listener(feed)
-    loop = BrokerLoop(broker=broker, online=online, store=store, session=session, driver=driver,
-                      links=links, probes=probes, feeds=feeds, display=DisplayRuns())
+    loop = BrokerLoop(broker=broker, store=store, driver=driver, listener=listener, probes=probes,
+                      feeds=feeds, display=DisplayRuns())
     try:
         probes.start()
         if broker.journal.current() is None:
@@ -321,8 +221,7 @@ def main() -> None:
     finally:
         probes.close()
         feeds.close()
-        driver.stops.close()
-        links.close()
+        listener.close()
         store.close()
 
 

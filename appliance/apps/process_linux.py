@@ -8,7 +8,7 @@ import subprocess
 import time
 from collections.abc import Sequence
 from dataclasses import replace
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from uuid import UUID
 
 from appliance.apps.broker import (
@@ -21,7 +21,7 @@ from appliance.apps.broker import (
 from appliance.apps.device_grants import DeviceGrant, player_device_grants
 from appliance.apps.environment import mounted_root
 from appliance.apps.lifecycle_storage import primitive, running_from
-from appliance.apps.stop_linux import STOP_TIMEOUT_SECONDS, StopObserver
+from appliance.apps.stop_linux import STOP_TIMEOUT_SECONDS
 from appliance.kernel.app_facts import PLAYER_UID
 from appliance.kernel.boot_store import BootStore
 from appliance.kernel.capacity import ROOT_IMAGES, line
@@ -35,6 +35,7 @@ from appliance.kernel.display_paths import (
 from appliance.kernel.image_mount import ImageMounter, SystemdImageMounter
 from appliance.process_identity import read_proc_start_ticks
 from contracts.app_environment import AppEnvironmentRefV2
+from contracts.node_app_link import PLAYER_PROBE_SOCKET, PROBE_SOCKET
 from contracts.node_boot import APP_PACKAGE
 from contracts.node_protocol import NodeProcessIdentity
 
@@ -125,7 +126,7 @@ def app_unit_properties(root: Path, devices: Sequence[DeviceGrant]) -> tuple[str
         "RestrictNamespaces=yes", "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
         f"MemoryMax={line('app').cap_bytes}", "MemorySwapMax=0", "OOMScoreAdjust=500", "TasksMax=128", "CPUQuota=200%",
         f"TemporaryFileSystem=/run:rw,nosuid,nodev,size=64M /run/photo-wall-wayland:rw,nosuid,nodev,noexec,size=1M,uid={PLAYER_UID},gid={PLAYER_UID},mode=0700 /tmp:rw,nosuid,nodev,size=128M",
-        f"BindReadOnlyPaths=/run/photo-wall-app-proof:/run/photo-wall-client {WAYLAND_DIRECTORY} /etc/photo-wall/public.json:/etc/photo-wall/public.json /etc/resolv.conf:/etc/resolv.conf",
+        f"BindReadOnlyPaths={PurePosixPath(PROBE_SOCKET).parent}:{PurePosixPath(PLAYER_PROBE_SOCKET).parent} {WAYLAND_DIRECTORY} /etc/photo-wall/public.json:/etc/photo-wall/public.json /etc/resolv.conf:/etc/resolv.conf",
         *grants,
         "RuntimeMaxSec=infinity", "Restart=no", "KillMode=control-group",
         f"TimeoutStopSec={STOP_TIMEOUT_SECONDS}", "Delegate=no",
@@ -144,7 +145,6 @@ class SystemdAppProcessDriver:
         self.purposeful = purposeful
         self.cgroups, self.images = cgroups, images
         self.mounter = mounter if mounter is not None else SystemdImageMounter()
-        self.stops = StopObserver(self)
         self.abi = dict(base_abi=base_abi, graphics_abi=graphics_abi, plugin_abi=plugin_abi)
 
     def verify(self, environment: AppEnvironmentRefV2) -> bool:
@@ -340,12 +340,6 @@ class SystemdAppProcessDriver:
         if observed != expected:
             raise ValueError("app_stop_identity_changed")
         return False
-
-    def stop(self, request, *, reattach_only=False):
-        return self.stops.stop(request, reattach_only=reattach_only)
-
-    def service(self, *, now_ms, budget_ms):
-        self.stops.service(now_ms=now_ms, budget_ms=budget_ms)
 
     def _await_unit_unloaded(self, previous: dict | None) -> None:
         """Wait for PID1's asynchronous collection before reusing the fixed name."""

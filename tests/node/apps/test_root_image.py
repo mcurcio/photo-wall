@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import errno
 import hashlib
-import json
 import os
 import subprocess
 from dataclasses import replace
@@ -494,55 +493,6 @@ def test_a_pooled_image_stages_with_no_incoming_file(world):
     world.stage(world.incoming())
     assert world.stage(world.roots.parent / "downloads" / world.sha) == world.roots / world.sha
     assert len(world.mounter.mount_calls) == 1 and len(world.hashes) == 1
-
-
-def _app_manager(world, tmp_path, monkeypatch, command):
-    """AppManager's preparation poll over `command`, with a recording download stand-in."""
-    from appliance.node import manager_desired
-    from appliance.node.manager_desired import DesiredPreparation
-    from contracts.node_lifecycle import encode_stage_command
-    monkeypatch.setattr(manager_desired, "ROOT_IMAGES", world.images)
-    fetched = []
-    monkeypatch.setattr(manager_desired, "DownloadPreparer",
-                        lambda *a, **k: SimpleNamespace(prepare=lambda reference: fetched.append(reference)))
-    desired = json.dumps({"scope": "preparation_read_only",
-                          "commands": [json.loads(encode_stage_command(command))]}).encode()
-    grant = SimpleNamespace(producer=command.producer, offer_id=command.offer_id)
-    rows = {}
-    preparation = DesiredPreparation.__new__(DesiredPreparation)
-    preparation.directory = tmp_path / "preparation"
-    (preparation.directory / "downloads").mkdir(parents=True)
-    preparation.config = {"central": "http://central.test", **ABI}
-    preparation.store = SimpleNamespace(read=rows.get, write=rows.__setitem__)
-    preparation.session = SimpleNamespace(ensure=lambda: grant, claim=None,
-                                          request=lambda method, path, body=None: (200, desired))
-    preparation.observation = SimpleNamespace(flush=lambda: None, sample=lambda *a, **k: None)
-    return SimpleNamespace(poll=preparation.poll, fetched=fetched, rows=rows,
-                           downloads=preparation.directory / "downloads", module=manager_desired)
-
-
-def test_app_manager_downloads_nothing_for_a_pooled_target(world, tmp_path, monkeypatch):
-    """B2 AC6 (Q1 = R): a stage command whose target's image the pool holds downloads nothing."""
-    world.stage(world.incoming())
-    manager = _app_manager(world, tmp_path, monkeypatch, _command(world.reference))
-    manager.poll()
-    assert manager.fetched == [] and manager.rows["prepared"]["archives"] == []
-    monkeypatch.setattr(manager.module, "ROOT_IMAGES", tmp_path / "empty-pool")
-    manager.rows.clear()
-    manager.poll()
-    assert manager.fetched == [world.reference]
-
-
-def test_app_manager_keeps_the_current_downloads_and_drops_only_stale_complete_ones(world, tmp_path, monkeypatch):
-    """After a prepare, a complete download (a bare digest) the operation does not need is
-    unlinked; the operation's own download and the preparer's `.partial` files stay."""
-    manager = _app_manager(world, tmp_path, monkeypatch, _command(world.reference))
-    stale, partial = "e" * 64, "f" * 64 + ".partial"
-    for name in (world.sha, stale, partial):
-        (manager.downloads / name).write_bytes(b"x")
-    manager.poll()
-    assert manager.rows["prepared"]["archives"] == [world.sha]
-    assert sorted(p.name for p in manager.downloads.iterdir()) == sorted([world.sha, partial])
 
 
 def test_app_manager_sees_the_image_pool_read_only():

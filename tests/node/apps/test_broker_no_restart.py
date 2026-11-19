@@ -1,13 +1,13 @@
-"""Issue #125: nothing restarts the Player on its own. Three causes start a run (cold start,
-Display's purposeful Weston restart, a release a person applies); an exit, a missed ping, a Weston
+"""Issue #125: nothing restarts the Player on its own. Two causes start a run (cold start,
+Display's purposeful Weston restart); an exit, a missed ping, a Weston
 crash or a foreign unit never does, and a run that exits under its own Weston is `down` until a
 person reboots. The owner, 2026-10-20: "a human. dont do automated reboots yet. i want to see
 every time it fails for now"; "No auto-restarts at all".
 
 The cold-start owner (`AppEffectBroker`) runs over the demo's recording driver; Display's mark is
 read by the real `SystemdAppProcessDriver.purposeful_restart` from a file, and the unit that
-writes it is read from appliance/systemd. The switch's own cases are in test_node_online_broker.py,
-the kill's in test_node_probe_broker.py, the deadline reboot's in test_node_stop_operation.py.
+writes it is read from appliance/systemd. The kill's case is in test_node_probe_broker.py. The
+release switch went with the online path (decision 0034, S4c).
 """
 from __future__ import annotations
 

@@ -1,10 +1,14 @@
 """What HostCore puts on its host line (appliance/host/bus.py `HostLine`; decision 0034, S4a): its facts
 when they change, and its metrics when a band, a flag, a count, the set of metrics or the fault
 changes, never more often than every HOST_METRICS_EVERY seconds; a gauge moving inside its band is
-never put. HostRunner puts them every tick whether or not Central's HTTP session is up."""
+never put. HostRunner puts them every tick and makes no HTTP request (decision 0034, S4c)."""
 from __future__ import annotations
 
+import http.client
+import socket
 from types import SimpleNamespace
+
+import pytest
 
 from appliance.host.bus import HostLine
 from appliance.host.host_runner import HostRunner
@@ -75,28 +79,44 @@ def test_facts_are_put_when_they_change():
     assert stated == [_facts("192.168.1.40"), _facts("192.168.1.41")]
 
 
-def test_the_runner_puts_on_its_line_without_centrals_session(monkeypatch):
-    """HostRunner's tick puts its metrics, and its facts once per interval, before (and without) the
-    HTTP session: a Pi whose old Central path is gone still states both."""
+@pytest.fixture
+def requests(monkeypatch):
+    """A recording HTTP transport under the host: every HTTP request and every TCP connection the
+    host's code opens is recorded, and none leaves this process."""
+    made: list[tuple] = []
+
+    def request(self, method, url, *args, **kwargs):
+        made.append((method, url))
+        raise OSError("recorded")
+
+    def connect(address, *args, **kwargs):
+        made.append(("connect", address))
+        raise OSError("recorded")
+
+    monkeypatch.setattr(http.client.HTTPConnection, "request", request)
+    monkeypatch.setattr(socket, "create_connection", connect)
+    return made
+
+
+def test_the_runner_puts_on_its_line_and_posts_nothing(monkeypatch, requests):
+    """HostRunner's tick puts its metrics, and its facts once per interval, and the host makes no
+    HTTP request: the Pi's host speaks to Central only over the bus. Mutation probe: restore the
+    old observation post in `tick` -> a request is recorded."""
     clock = [100.0]
-    runner = HostRunner.__new__(HostRunner)
-    runner.monotonic = lambda: clock[0]
-    runner.base_tag = "v2.1.0"
-    runner.recovery = SimpleNamespace(telemetry=lambda: ((), None))
-    runner.store = SimpleNamespace(write=lambda name, value: None, failed=False)
+    puts: list[tuple[float, str]] = []
+    runner = HostRunner(HostLine(lambda key, value: puts.append((clock[0], key)), monotonic=lambda: clock[0]),
+                        base_tag="v2.1.0", monotonic=lambda: clock[0])
     runner.sampler = SimpleNamespace(
         sample=lambda: (("soc_temperature", 50.0, "celsius"), ("uptime", clock[0], "seconds")),
         throttling=lambda: (), supervision=lambda: (), memory_rows=lambda: (),
         facts=lambda: {"kernel_release": "6.6.51+rpt-rpi-v8", "interface": "eth0", "link_state": "up",
                        "address": "192.168.1.40", "wall_clock": "synchronised"},
         failed_units=lambda: ())
-    runner.establish_session = lambda: False
-    puts: list[tuple[float, str]] = []
-    runner.line = HostLine(lambda key, value: puts.append((clock[0], key)), monotonic=lambda: clock[0])
-    monkeypatch.setattr("appliance.host.host_runner.boottime_ms", lambda: int(clock[0] * 1000))
     monkeypatch.setattr("appliance.host.host_runner.reset_cause", lambda path: None)
     monkeypatch.setattr("appliance.host.host_runner.read_boot_report", lambda **kwargs: None)
     while clock[0] < 160:
         runner.tick()
         clock[0] += 2
     assert puts == [(100.0, HOST_METRICS_KEY), (100.0, HOST_FACTS_KEY)]
+    assert requests == []
+    assert not {"session", "transport", "recovery", "journal", "delivery", "core"} & set(vars(runner))

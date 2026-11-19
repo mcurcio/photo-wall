@@ -1,5 +1,4 @@
-"""Broker runner: probe publication and the owed relink each turn, the node feed socket, the
-broker closure."""
+"""Broker runner: probe publication each turn, the node feed socket, the broker closure."""
 import json
 import os
 import socket
@@ -11,7 +10,6 @@ from uuid import uuid4
 
 import pytest
 from node.test_node_linux_adapters import store as boot_store
-from support.packet_pair import packet_pair
 from support.repo import REPO
 from test_node_boot import environment
 
@@ -19,12 +17,10 @@ from appliance import feed_socket
 from appliance.apps import broker_runner
 from appliance.apps.broker import RunningApp
 from appliance.apps.broker_runner import BrokerLoop
-from appliance.apps.probe import AppRunKey, OwedRelink, ProbeTiming
+from appliance.apps.probe import AppRunKey, ProbeTiming
 from appliance.apps.probe_channel import ProbeThread
 from appliance.feed import Feed
-from appliance.node import app_link
-from contracts.node_app_link import parse_node_probe_channel_message
-from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
+from contracts.node_protocol import NodeProcessIdentity
 
 FAST = ProbeTiming(period_ms=50, miss_limit=2, startup_ms=100)
 # Turns until the unanswered run is reported (the first pass is at 0), with a margin.
@@ -122,21 +118,6 @@ def test_the_broker_serves_its_feed_through_the_kernel_listener_not_a_copy(liste
 # -- the main-loop turn --------------------------------------------------------------------
 
 
-class Session:
-    """Records every Central request the broker makes."""
-
-    def __init__(self, producer, *, granted=True):
-        self.grant = SimpleNamespace(producer=producer) if granted else None
-        self.requests = []
-
-    def ensure(self):
-        return self.grant
-
-    def request(self, method, path, body=None):
-        self.requests.append((method, path, body or b""))
-        return 200, b"{}"
-
-
 class Driver:
     def __init__(self, running):
         self.running, self.calls, self.kills = running, 0, []
@@ -156,27 +137,22 @@ class Driver:
         self.kills.append("stop_foreign")
 
 
-def loop_for(tmp_path, monkeypatch, *, granted=True, producer=None, running=None, links=None):
+def loop_for(tmp_path, monkeypatch, *, running=None, listener=None):
     """A turn over fakes, a real BootStore and a real probe thread (no channel: misses), not
     started: `turns` runs its passes on the test's clock, `loop.now`."""
     monkeypatch.setattr(broker_runner, "boottime_ms", monotonic_ms)  # CLOCK_BOOTTIME is Linux-only
-    producer = producer or NodeProducerV2("site", "device-" + "a" * 64, 1, uuid4(), "app_effect_broker",
-                                          uuid4())
     running = running or RunningApp(environment("a"), NodeProcessIdentity(396, 31751781, uuid4()), 1, uuid4())
-    store = boot_store(tmp_path / f"broker-{granted}", producer.kernel_boot_id)
+    store = boot_store(tmp_path / "broker", uuid4())
     feed = Feed(512)
     probes = ProbeThread(feed, clock=lambda: loop.now, timing=FAST)
     probes.check = lambda: None  # alive by construction: the test runs its passes
-    session, driver = Session(producer, granted=granted), Driver(running)
-    online = SimpleNamespace(broker=SimpleNamespace(record={"phase": "running"}, service=lambda: None),
-                             tick=lambda: None)
-    links = links or SimpleNamespace(serve_one=lambda: None, remember_grant=lambda: None)
-    loop = BrokerLoop(broker=SimpleNamespace(reconcile=lambda: None), online=online, store=store,
-                      session=session, driver=driver, links=links, probes=probes,
-                      feeds=SimpleNamespace(serve=lambda: None),
+    driver = Driver(running)
+    listener = listener or SimpleNamespace(serve_one=lambda: None)
+    loop = BrokerLoop(broker=SimpleNamespace(reconcile=lambda: None), store=store, driver=driver,
+                      listener=listener, probes=probes, feeds=SimpleNamespace(serve=lambda: None),
                       display=SimpleNamespace(tell=lambda run: True), clock=lambda: loop.now)
     loop.now = 0
-    return loop, feed, session, driver, running, store
+    return loop, feed, driver, running, store
 
 
 def turns(loop, count):
@@ -188,42 +164,39 @@ def turns(loop, count):
         loop.now += FAST.period_ms
 
 
-def test_probe_facts_never_reach_a_central_request(tmp_path, monkeypatch):
-    loop, feed, session, _, running, store = loop_for(tmp_path, monkeypatch)
+def test_probe_facts_go_on_the_node_feed_alone(tmp_path, monkeypatch):
+    """The broker makes no Central request (decision 0034, S4c): its loop has no session, and an
+    unanswered run is a node-feed fact for the judge."""
+    loop, feed, _, running, store = loop_for(tmp_path, monkeypatch)
     try:
+        assert not {"online", "session", "links"} & set(vars(loop))
         turns(loop, DUE)
         page = feed.read(0, incarnation=None, limit=8)
         kinds = {event.kind for event in page.events}
         assert "probe_unanswered" in kinds, kinds
         assert page.events[0].value["run"] == AppRunKey.of(running).document()
-        assert [path for _, path, _ in session.requests] == ["/v2/node/evidence"]
-        for _, _, body in session.requests:
-            assert b"probe" not in body and b"rtt_ms" not in body and b"unanswered" not in body
         assert all(e.audience == "node" for e in page.events)
     finally:
         loop.probes.close()
         store.close()
 
 
-def test_each_turn_asks_the_driver_once_and_publishes_with_or_without_a_session(tmp_path, monkeypatch):
-    for granted in (True, False):
-        loop, feed, session, driver, running, store = loop_for(tmp_path, monkeypatch, granted=granted)
-        try:
-            turns(loop, 3)
-            assert driver.calls == 3
-            assert feed.read(0, incarnation=None).events[0].value["run"] == AppRunKey.of(running).document()
-            if not granted:
-                assert session.requests == []
-        finally:
-            loop.probes.close()
-            store.close()
+def test_each_turn_asks_the_driver_once_and_publishes(tmp_path, monkeypatch):
+    loop, feed, driver, running, store = loop_for(tmp_path, monkeypatch)
+    try:
+        turns(loop, 3)
+        assert driver.calls == 3
+        assert feed.read(0, incarnation=None).events[0].value["run"] == AppRunKey.of(running).document()
+    finally:
+        loop.probes.close()
+        store.close()
 
 
 def test_an_unanswered_run_is_never_killed(tmp_path, monkeypatch):
     """Issue #125, the removed kill after missed pings: a run that never answers is reported on
     the feed (the judge's card) for as long as it stays unanswered, and nothing signals, stops or
     restarts it. Mutation probe: put the kill-due latch and `_consume_kill_due` back -> fails."""
-    loop, feed, _, driver, _, store = loop_for(tmp_path, monkeypatch)
+    loop, feed, driver, _, store = loop_for(tmp_path, monkeypatch)
     try:
         turns(loop, DUE * 20)
         kinds = {event.kind for event in feed.read(0, incarnation=None, limit=512).events}
@@ -236,7 +209,7 @@ def test_an_unanswered_run_is_never_killed(tmp_path, monkeypatch):
 
 
 def test_a_dead_probe_thread_stops_the_broker(tmp_path, monkeypatch):
-    loop, _, _, _, _, store = loop_for(tmp_path, monkeypatch)
+    loop, _, _, _, store = loop_for(tmp_path, monkeypatch)
     try:
         del loop.probes.check
         loop.probes.start()
@@ -244,99 +217,6 @@ def test_a_dead_probe_thread_stops_the_broker(tmp_path, monkeypatch):
         with pytest.raises(RuntimeError, match="probe_thread_stopped"):
             loop.turn()
     finally:
-        store.close()
-
-
-def test_a_relink_owed_before_a_broker_restart_reaches_the_next_channel(tmp_path, monkeypatch):
-    """Refusal, then the broker restarts before any probe channel opens (E-B7-3): the boot
-    store keeps the owed relink and the new broker's first known turn restates it."""
-    producer = NodeProducerV2("site", "device-" + "a" * 64, 1, uuid4(), "app_effect_broker", uuid4())
-    running = RunningApp(environment("a"), NodeProcessIdentity(396, 31751781, uuid4()), 1, uuid4())
-    run = AppRunKey.of(running)
-    store = boot_store(tmp_path / "broker-True", producer.kernel_boot_id)
-    app_link._refused(store, SimpleNamespace(feed=Feed(8)), run, status=409, reason="central_refused")
-    store.close()  # the broker exits with no probe channel ever open: nothing was sent
-    pending = []
-    links = SimpleNamespace(remember_grant=lambda: None,
-                            serve_one=lambda: pending and loop.probes.adopt(*pending.pop()))
-    loop, feed, _, _, _, store = loop_for(tmp_path, monkeypatch, producer=producer, running=running,
-                                          links=links)
-    ours, theirs = packet_pair()
-    theirs.settimeout(2)
-    try:
-        turns(loop, 2)
-        pending.append((ours, run))  # the Player's responder reconnects to the new broker
-        turns(loop, 2)
-        first = parse_node_probe_channel_message(theirs.recv(9000))
-        assert type(first).__name__ == "NodeRelinkV2"
-        relinked = [e for e in feed.read(0, incarnation=None, limit=8).events if e.kind == "relink_sent"]
-        assert [e.value for e in relinked] == [{"run": run.document()}]
-    finally:
-        loop.probes.close()
-        theirs.close()
-        store.close()
-
-
-def test_every_refusal_on_a_long_lived_channel_is_relinked(tmp_path, monkeypatch):
-    """B7c: one probe channel lives across two Central refusals of the same run's link (the
-    Player re-proved in between): each refusal sends its own relink on that channel."""
-    pending = []
-    links = SimpleNamespace(remember_grant=lambda: None,
-                            serve_one=lambda: pending and loop.probes.adopt(*pending.pop()))
-    loop, feed, _, _, running, store = loop_for(tmp_path, monkeypatch, granted=False, links=links)
-    run = AppRunKey.of(running)
-    ours, theirs = packet_pair()
-    theirs.settimeout(2)
-
-    def relinks_received():
-        kinds = []
-        theirs.setblocking(False)
-        try:
-            while True:
-                kinds.append(type(parse_node_probe_channel_message(theirs.recv(9000))).__name__)
-        except BlockingIOError:
-            pass
-        return kinds.count("NodeRelinkV2")
-
-    try:
-        pending.append((ours, run))
-        turns(loop, 2)
-        for refusal in range(2):
-            app_link._refused(store, SimpleNamespace(feed=feed), run, status=409, reason="central_refused")
-            turns(loop, 3)  # restated every turn
-            assert relinks_received() == 1, refusal
-            store.write(app_link.OUTBOX, {"run": run.document(), "player_id": "p", "link": "{}"})
-            turns(loop, 1)  # the Player re-proved: nothing owed until Central refuses again
-        events = feed.read(0, incarnation=None, limit=8)
-        kinds = []
-        after = 0
-        while events.events:
-            kinds += [(e.kind, e.value.get("state")) for e in events.events
-                      if e.kind in ("relink_sent", "probe_channel", "app_link_refused")]
-            after = events.events[-1].sequence
-            events = feed.read(after, incarnation=None, limit=8)
-        assert kinds == [("probe_channel", "open"),
-                         ("app_link_refused", None), ("relink_sent", None),
-                         ("app_link_refused", None), ("relink_sent", None)]
-    finally:
-        loop.probes.close()
-        theirs.close()
-        store.close()
-
-
-def test_a_turn_owes_nothing_when_the_slot_holds_no_relink(tmp_path, monkeypatch):
-    loop, _, _, _, running, store = loop_for(tmp_path, monkeypatch, granted=False)
-    owed = []
-    loop.probes.owe_relink = owed.append
-    try:
-        loop.turn()
-        store.write(app_link.OUTBOX, {"relink": AppRunKey.of(running).document(), "episode": "e1"})
-        loop.turn()
-        store.write(app_link.OUTBOX, {"relink": AppRunKey(uuid4(), 1, 2, 3).document(), "episode": "e2"})
-        loop.turn()
-        assert owed == [None, OwedRelink(AppRunKey.of(running), "e1"), None]
-    finally:
-        loop.probes.close()
         store.close()
 
 

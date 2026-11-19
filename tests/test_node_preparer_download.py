@@ -17,8 +17,8 @@ import pytest
 from support.image_mount import FakeImageMounter
 
 from appliance.boot import node_bootstrap as bootstrap
+from appliance.boot import preparer
 from appliance.kernel import boot_stage
-from appliance.node import preparer
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.read_through import READ_THROUGH_WAIT_SECONDS
 from uplink import fetch
@@ -123,7 +123,7 @@ def test_status_bound_is_the_read_through_contract_not_a_literal():
     # The attempt deadline starts before the request: it absorbs the status wait plus a
     # 974 MB environment at 2.3 MiB/s.
     assert preparer.ATTEMPT_SECONDS >= preparer.STATUS_TIMEOUT + 974_000_000 / (2.3 * 1024**2)
-    assert not re.search(r"timeout\s*=\s*\d", (REPO / "appliance/node/preparer.py").read_text())
+    assert not re.search(r"timeout\s*=\s*\d", (REPO / "appliance/boot/preparer.py").read_text())
 
 
 def test_boot_window_fits_the_prepare_unit_timeout():

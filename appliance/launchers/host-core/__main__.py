@@ -8,11 +8,8 @@ import sys
 
 PATH: tuple[str, ...] = (
     "/usr/lib/photo-wall/common",
-    "/usr/lib/photo-wall/node-apps",
-    "/usr/lib/photo-wall/node-central-session",
     "/usr/lib/photo-wall/node-host",
     "/usr/lib/photo-wall/node-kernel",
-    "/usr/lib/photo-wall/node-manager",
     "/usr/lib/photo-wall/uplink",
 )
 ENTRY: str = "appliance.host.host_runner"

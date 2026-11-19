@@ -75,7 +75,7 @@ def cold_start(tmp_path, monkeypatch):
     """`cold_start(spawned)`: the broker's real cold start, whose spawn runs `spawned(unit)`;
     returns the Wall and the record. The unit is then gone (the Player exited and `--collect`
     unloaded it) before the broker's first turn."""
-    loop, feed, _session, _driver, _running, store = loop_for(tmp_path, monkeypatch, granted=False)
+    loop, feed, _driver, _running, store = loop_for(tmp_path, monkeypatch)
     driver = linux.SystemdAppProcessDriver(tmp_path / "roots", store, base_abi="base-v2",
                                            graphics_abi="graphics-v2", plugin_abi="plugins-v2",
                                            proc=tmp_path / "proc", cgroups=tmp_path / "cgroups",
@@ -96,7 +96,6 @@ def cold_start(tmp_path, monkeypatch):
                                   authorized_environment=command.environment, journal=journal,
                                   driver=driver)
     loop.driver = driver
-    loop.online.broker.record = None  # the cold start owns the app
 
     def start(spawned):
         def run(command_line, *args, **kwargs):

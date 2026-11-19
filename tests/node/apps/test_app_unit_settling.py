@@ -66,7 +66,7 @@ def broker_turn(tmp_path, monkeypatch):
     """A broker turn on a cold start whose Player runs (pid 321), on a Weston that Display has
     since restarted on purpose (its mark names the Weston the Player was launched under, so a
     Player that Weston took down starts again once)."""
-    loop, _feed, _session, _driver, _running, store = loop_for(tmp_path, monkeypatch)
+    loop, _feed, _driver, _running, store = loop_for(tmp_path, monkeypatch)
     command = ColdStart(uuid4(), uuid4(), uuid4(), environment("a"))
     running = RunningApp(command.environment, NodeProcessIdentity(321, 1234, uuid4()), 1, command.operation_id)
     launched_under = uuid4()
@@ -101,7 +101,6 @@ def broker_turn(tmp_path, monkeypatch):
                                   authorized_environment=command.environment, journal=journal,
                                   driver=driver)
     loop.driver = driver
-    loop.online.broker.record = None                                 # the cold start owns the app
     yield loop, unit, journal
     loop.probes.close()
     store.close()

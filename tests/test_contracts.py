@@ -140,11 +140,9 @@ def test_node_probe_channel_messages_are_bounded_and_closed():
     from contracts.node_app_link import (
         MAX_NODE_LINK_BYTES,
         NodeProbeV2,
-        NodeRelinkV2,
         encode_node_probe,
         encode_node_probe_answer,
         encode_node_probe_open,
-        encode_node_relink,
         parse_node_probe_answer,
         parse_node_probe_channel_message,
         parse_node_probe_open,
@@ -154,8 +152,6 @@ def test_node_probe_channel_messages_are_bounded_and_closed():
     assert parse_node_probe_open(encode_node_probe_open()) is None
     assert json.loads(encode_node_probe(nonce)) == {"schema": 2, "kind": "probe", "nonce": nonce}
     assert parse_node_probe_channel_message(encode_node_probe(nonce)) == NodeProbeV2(nonce)
-    assert parse_node_probe_channel_message(encode_node_relink()) == NodeRelinkV2()
-    assert json.loads(encode_node_relink()) == {"schema": 2, "kind": "relink"}
     assert parse_node_probe_answer(encode_node_probe_answer(nonce)) == nonce
     for bad in ("A" * 64, "a" * 63, "a" * 65, 7, None):
         with pytest.raises(ValueError, match="probe_channel_message"):
@@ -169,6 +165,7 @@ def test_node_probe_channel_messages_are_bounded_and_closed():
         b'{"schema":2,"kind":"probe","nonce":"' + nonce.encode() + b'","extra":1}',
         b'{"schema":2,"kind":"probe"}',
         b'{"schema":1,"kind":"probe","nonce":"' + nonce.encode() + b'"}',
+        b'{"schema":2,"kind":"relink"}',                       # retired with the app link (0034, S4c)
         b'{"schema":2,"kind":"relink","nonce":"' + nonce.encode() + b'"}',
         b'{"schema":2,"kind":"probe","kind":"relink"}',
         b'{"schema":2,"kind":"relink","pad":"' + b"x" * MAX_NODE_LINK_BYTES + b'"}',

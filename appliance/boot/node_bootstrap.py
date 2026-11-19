@@ -12,12 +12,12 @@ from pathlib import Path
 
 from appliance.apps.environment import mounted_root, stage_image
 from appliance.boot.bus_environment import write_bus_environment
+from appliance.boot.preparer import DownloadPreparer
 from appliance.boot.storage_mount import mount_storage
 from appliance.kernel.boot_stage import run_stage
 from appliance.kernel.capacity import STORE, admit_cold, memory_values
 from appliance.kernel.clock import boot_id
 from appliance.kernel.image_mount import ImageMounter, SystemdImageMounter
-from appliance.node.preparer import DownloadPreparer
 from appliance.node_boot_handoff import HANDOFF, read_node_handoff
 from contracts.strict_json import loads_object
 from uplink.files import write_atomically
@@ -50,11 +50,12 @@ def materialize_handoff(*, root: Path = Path("/")) -> tuple:
     # Host-only configuration is written as soon as the offer is this boot's, before the base
     # marker and ABI checks, so Host Management runs and reports their failures (boot stage
     # records). The base tag is the node's own record of the base this boot runs: the offer
-    # whose base the initramfs verified and mounted (Host Management reports it in its facts).
+    # whose base the initramfs verified and mounted (Host Management puts it on the host line).
+    # The host, the broker and Display speak to Central only over the bus (decision 0034, S4c):
+    # none is given Central's origin, the serial or the offer.
     directory = root / "run/photo-wall-node"
     directory.mkdir(parents=True, mode=0o700, exist_ok=True)
-    host = {"central": central, "serial": offer.serial, "offer_id": str(offer.offer_id),
-            "base_tag": offer.base.tag}
+    host = {"base_tag": offer.base.tag}
     write_atomically(directory / "host.json", json.dumps(host).encode(), mode=0o600)
     # The bus needs only the origin and the serial, so it runs (and Central can reach it) even
     # when the checks below refuse this boot's base.
@@ -68,8 +69,7 @@ def materialize_handoff(*, root: Path = Path("/")) -> tuple:
         raise ValueError("node_measured_graphics_abi_mismatch")
     configs = {
         "host": host,
-        "broker": {"central": central, "serial": offer.serial},
-        "display": {"central": central, "serial": offer.serial, "offer_id": str(offer.offer_id)},
+        "display": {},
         "manager-client": {"central": central, "serial": offer.serial, "offer_id": str(offer.offer_id), **abi},
         "manager": {"primary": asdict(offer.manager_primary),
                     "fallback": asdict(offer.manager_fallback) if offer.manager_fallback else None, **abi},

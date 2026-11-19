@@ -42,6 +42,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -252,6 +253,21 @@ def pi_of(fixture, work):
     pi = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/pi")
     (work / "pi-latest.json").write_text(json.dumps(pi, sort_keys=True))
     return pi
+
+
+# A Pi's only calls on Central's old node routes (decision 0034, S4c): the boot offer and its
+# artifacts. The Player's control and media routes are /v1/player/* and /v1/...; anything else under
+# /v2/node/ is the old path speaking.
+HTTP_PATH_SETTLE_SECONDS = 5
+NODE_PATH_ALLOWED = re.compile(r"/v2/node/boot-offers(/[0-9a-f-]{36}/artifacts/[a-z-]+)?")
+
+
+def old_path_calls(fixture, work):
+    """The /v2/node/* paths a Node asked of Central's HTTP origin that are not the boot offer or its
+    artifacts, every path kept as node-requests.json."""
+    paths = request(fixture["host_origin"], fixture["fixture_token"], "/fixture/requests")["paths"]
+    (work / "node-requests.json").write_text(json.dumps(paths))
+    return [path for path in paths if path.startswith("/v2/node/") and not NODE_PATH_ALLOWED.fullmatch(path)]
 
 
 def operator(fixture, method, path, body):
@@ -652,6 +668,10 @@ class Node:
             raise AssertionError(f"no broker-launched Player linked on the hub: {work} launched "
                                  f"{current} pi {json.dumps(pi, sort_keys=True)}")
         (work / "cold-current.json").write_text(json.dumps(current, sort_keys=True))
+        # The HTTP-path check: a few of the host's 2 s ticks and the broker's turns after the link,
+        # the Pi has asked Central's old node routes for nothing but its boot (decision 0034, S4c).
+        time.sleep(HTTP_PATH_SETTLE_SECONDS)
+        assert old_path_calls(fixture, work) == [], ("the Pi spoke the old path", str(work))
         # Startup responsiveness evidence: boot to Central reading the Pi linked on its hub.
         (work / "cold-link-timing.json").write_text(json.dumps({
             "boot_to_link_seconds": round(time.monotonic() - booted, 1),

@@ -277,8 +277,15 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
         if not secrets.compare_digest(request.headers.get("X-Fixture-Token", ""), token):
             raise HTTPException(403, "fixture_token_required")
 
+    # Every path a Node asks of Central's HTTP origin (requests without the fixture's token; the
+    # fixture's own boot-offer ask is one of them), in order: GET /fixture/requests.
+    node_requests: list[str] = []
+
     @app.middleware("http")
     async def central_outage(request, call_next):
+        if "X-Fixture-Token" not in request.headers:
+            with state_lock:
+                node_requests.append(request.url.path)
         if outage["active"] and not request.url.path.startswith("/fixture/"):
             outage["dropped"] += 1
             return JSONResponse({"fixture": "central_unreachable"}, status_code=503)
@@ -352,6 +359,14 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
                                                                             "host metrics")
         return {"facts": facts,
                 "metrics": [] if metrics is None else [[row.name, row.value] for row in metrics.metrics]}
+
+    @app.get("/fixture/requests")
+    def requests_made(request: Request):
+        """Every path a Node asked of Central's HTTP origin so far, in order (S4c: a Pi's only
+        /v2/node/* calls are the boot offer and its artifacts)."""
+        authenticate(request)
+        with state_lock:
+            return {"paths": list(node_requests)}
 
     @app.post("/fixture/outage")
     def set_outage(request: Request, value: dict):

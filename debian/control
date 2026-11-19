@@ -84,25 +84,15 @@ Description: Photo Wall Node kernel
  The Node's primitives (appliance.kernel): clock, boot store, credentials,
  capacity and the memory line table, boot-stage records, image mounts.
 
-Package: photo-wall-node-central-session
-Architecture: all
-Depends: python3,
- photo-wall-common (= ${pw-version:photo-wall-common}),
- photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
- ${misc:Depends}
-Description: Photo Wall Node's Central session (retiring)
- The appliance.central_session context.
-
 Package: photo-wall-node-host
 Architecture: all
 Depends: python3,
  photo-wall-common (= ${pw-version:photo-wall-common}),
- photo-wall-node-central-session (= ${pw-version:photo-wall-node-central-session}),
  photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
  ${misc:Depends}
 Description: Photo Wall HostCore
- The appliance.host context: host metrics and facts, operator reboot, local
- recovery deadlines.
+ The appliance.host context: host metrics and facts and the operator's reboot,
+ on the Node's bus.
 
 # The display's overlay client is Python on pywayland and pycairo. Weston is Photo Wall's own
 # build of Debian's (debian-packaging/weston/, its 64-bit plane masks), named at exactly that
@@ -141,10 +131,9 @@ Depends: python3,
  photo-wall-common (= ${pw-version:photo-wall-common}),
  photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
  photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
- photo-wall-node-central-session (= ${pw-version:photo-wall-node-central-session}),
  ${misc:Depends}
 Description: Photo Wall app lifecycle
- The appliance.apps context: effect broker, progress probe, app process, stop,
+ The appliance.apps context: effect broker, progress probe, app process,
  root import and release images.
 
 Package: photo-wall-node-boot
@@ -162,9 +151,7 @@ Package: photo-wall-node-manager
 Architecture: all
 Depends: python3,
  photo-wall-common (= ${pw-version:photo-wall-common}),
- photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
  photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
- photo-wall-node-central-session (= ${pw-version:photo-wall-node-central-session}),
  photo-wall-node-host (= ${pw-version:photo-wall-node-host}),
  photo-wall-node-apps (= ${pw-version:photo-wall-node-apps}),
  ${misc:Depends}
@@ -229,7 +216,6 @@ Architecture: all
 Depends: photo-wall-common (= ${pw-version:photo-wall-common}),
  photo-wall-uplink (= ${pw-version:photo-wall-uplink}),
  photo-wall-node-kernel (= ${pw-version:photo-wall-node-kernel}),
- photo-wall-node-central-session (= ${pw-version:photo-wall-node-central-session}),
  photo-wall-node-host (= ${pw-version:photo-wall-node-host}),
  photo-wall-node-display (= ${pw-version:photo-wall-node-display}),
  photo-wall-node-health (= ${pw-version:photo-wall-node-health}),

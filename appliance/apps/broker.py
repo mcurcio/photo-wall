@@ -152,7 +152,7 @@ class Launch:
 
 # -- Issue #125: no automatic Player restart ---------------------------------------------------
 # The owner, 2026-10-20: "a human. dont do automated reboots yet. i want to see every time it fails
-# for now"; asked whether that covers the Player program alone: "No auto-restarts at all". Three
+# for now"; asked whether that covers the Player program alone: "No auto-restarts at all". Two
 # causes start a run, and nothing else does: an exit, a missed ping, open files, a Weston crash, a
 # failed release or a foreign unit never starts one (a foreign unit is stopped, nothing in its place).
 # systemd's Restart= is not used, and no dependency lets a job on another unit start the app
@@ -160,8 +160,7 @@ class Launch:
 StartCause = Literal[
     "cold_start",                    # once per boot (AppEffectBroker.cold_start)
     "display_restarted_on_purpose",  # Display restarted Weston itself (a signal range change) under a live run
-    "release_switch",                # a person applied a release: the new release starts once (online_broker)
-]
+]  # a release a person applies starts at the Pi's next boot (decision 0034, S4c)
 _INVOCATION_ID = re.compile(r"[0-9a-f]{32}")
 
 

@@ -28,7 +28,6 @@ CONTENTS = {
     "photo-wall-common": ("contracts", "nodeapi"),
     "photo-wall-uplink": ("uplink",),
     "photo-wall-node-kernel": ("appliance.kernel", "appliance.feed", "appliance.feed_socket"),
-    "photo-wall-node-central-session": ("appliance.central_session",),
     "photo-wall-node-host": ("appliance.host",),
     "photo-wall-node-display": ("appliance.display_host",),
     "photo-wall-node-health": ("appliance.health",),
@@ -120,9 +119,9 @@ def test_each_module_imports_from_the_runtime_directories_alone(report, package)
 
 
 def test_an_exempt_edge_puts_its_target_on_the_path_without_a_depends(report):
-    """HostCore's retiring host_runner -> node.recovery: node-manager's directory is on the
-    host's path although photo-wall-node-host does not Depend on it."""
-    assert "/usr/lib/photo-wall/node-manager" in report["photo-wall-node-host"]["directories"]
+    """The retiring lifecycle_storage -> node.manager: node-manager's directory is on the app
+    lifecycle's path although photo-wall-node-apps does not Depend on it."""
+    assert "/usr/lib/photo-wall/node-manager" in report["photo-wall-node-apps"]["directories"]
 
 
 def test_the_installed_nats_is_the_locked_nats_py(report):

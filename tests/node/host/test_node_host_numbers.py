@@ -1,15 +1,11 @@
-"""Node numbers and App Manager's storage room (console DDD §63, §65, bead N1), node side: the
+"""Node numbers and the preparation's storage room (console DDD §63, §65, bead N1), node side: the
 sampler's firmware throttle flags, `cpu_busy` and `link_speed` (each omitted when unreadable,
-never zero, each name once), `preparation_room` as the one admission decision, and a storage
-refusal reaching the wire as a parsed `refused` sample with both byte fields. No database."""
-import json
-import shutil
-from dataclasses import replace
+never zero, each name once), `preparation_room` as the one admission decision, and the throttle
+flags on the host line. No database."""
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
-from test_node_boot import environment
 
 from appliance.host.host_linux import LinuxHostSampler
 from appliance.kernel.capacity import (
@@ -20,9 +16,6 @@ from appliance.kernel.capacity import (
     device_class,
     preparation_room,
 )
-from appliance.node.manager_desired import DesiredPreparation
-from appliance.node.manager_observation import PreparationObservation
-from contracts.node_lifecycle import StageCommandV2, encode_stage_command, stage_digest
 from contracts.node_observation import (
     MAX_OBSERVATION_BYTES,
     HostMetricV2,
@@ -30,8 +23,7 @@ from contracts.node_observation import (
     encode_host_observation,
     valid_metrics,
 )
-from contracts.node_preparation import parse_manager_preparation
-from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2
+from contracts.node_protocol import NodeProducerV2
 
 MIB = 1024**2
 FLAGS = ("under_voltage", "frequency_capped", "throttled", "soft_temperature_limit")
@@ -58,9 +50,8 @@ def _firmware(tmp_path, text):
 
 @pytest.fixture(autouse=True)
 def _boot_clock(monkeypatch):
-    # CLOCK_BOOTTIME is Linux-only; the sampler's uptime and App Manager's sample read it.
+    # CLOCK_BOOTTIME is Linux-only; the sampler's uptime reads it.
     monkeypatch.setattr("appliance.host.host_linux.boottime_ms", lambda: 5000)
-    monkeypatch.setattr("appliance.node.manager_observation.boottime_ms", lambda: 5000)
 
 
 def test_get_throttled_0x50005_sets_under_voltage_and_throttled_now_and_occurred(tmp_path):
@@ -181,66 +172,14 @@ def test_admit_preparation_refuses_exactly_when_preparation_room_is_short(size, 
         assert isinstance(refused.value, ValueError) and room >= 0
 
 
-class _Store:
-    def __init__(self):
-        self.rows = {}
-
-    def read(self, key):
-        return self.rows.get(key)
-
-    def write(self, key, row):
-        self.rows[key] = row
-
-
-def test_a_storage_refusal_reaches_the_wire_as_a_refused_sample_with_both_numbers(tmp_path, monkeypatch):
-    kernel_boot_id, offer_id = uuid4(), uuid4()
-    manager = NodeProducerV2("site", "device-" + "a" * 64, 1, kernel_boot_id, "app_manager", uuid4())
-    broker = replace(manager, owner="app_effect_broker", incarnation_id=uuid4())
-    # Today's app image size: more than the 88 MiB room below (an image is counted once, E2c).
-    old, target = environment("a"), replace(environment("b"), size_bytes=288 * MIB)
-    command = StageCommandV2(uuid4(), uuid4(), "0" * 64, broker, uuid4(), offer_id,
-                             NodeProcessIdentity(100, 200, uuid4()), 1, old, target, old)
-    command = replace(command, command_sha256=stage_digest(command))
-    desired = json.dumps({"scope": "preparation_read_only",
-                          "commands": [json.loads(encode_stage_command(command))]}).encode()
-    posted = []
-
-    def request(method, path, body=None):
-        if path == "/v2/node/app-desired":
-            return 200, desired
-        assert path == "/v2/node/app-preparation"
-        posted.append(parse_manager_preparation(body))
-        return 200, b"{}"
-
-    grant = SimpleNamespace(producer=manager, offer_id=offer_id)
-    preparation = DesiredPreparation.__new__(DesiredPreparation)
-    preparation.directory = tmp_path
-    preparation.config = {"central": "http://central.test", "base_abi": target.base_abi,
-                          "graphics_abi": target.graphics_abi, "plugin_abi": target.plugin_abi}
-    preparation.store = _Store()
-    preparation.session = SimpleNamespace(ensure=lambda: grant, grant=grant, claim=None, request=request)
-    preparation.observation = PreparationObservation(preparation.store, preparation.session)
-    preparation.active_command = None
-    # 600 MiB MemAvailable leaves 88 MiB above the emergency headroom: the room.
-    monkeypatch.setattr("appliance.node.preparer.memory_values", lambda: (8 * GIB, 600 * MIB))
-    monkeypatch.setattr(shutil, "disk_usage", lambda path: SimpleNamespace(total=8 * GIB, used=0, free=4 * GIB))
-    preparation.poll()
-    refused = posted[-1]
-    assert [sample.state for sample in posted] == ["preparing", "refused"]
-    assert refused.fault == "node_storage_capacity" and refused.operation_id == command.operation_id
-    assert (refused.available_bytes, refused.required_bytes) == (88 * MIB, target.size_bytes)
-    # Nothing is recorded as prepared, so the next poll retries, as after any other failure.
-    assert preparation.store.read("prepared") is None
-    preparation.poll()
-    assert [sample.state for sample in posted[2:]] == ["preparing", "refused"]
-
-
-def test_host_management_posts_the_throttle_flags_in_its_observation(monkeypatch):
-    from test_node_host_cadence import _runner
-    clock = [100.0]
-    runner, posts, session_for = _runner(monkeypatch, clock)
-    runner.sampler.throttling = lambda: (("throttled_now", 1, "boolean", "firmware"),)
-    session_for(uuid4())
+def test_host_management_puts_the_throttle_flags_on_its_line():
+    from appliance.host.host_runner import HostRunner
+    stated = []
+    runner = HostRunner(SimpleNamespace(metrics=stated.append, facts=lambda state: None),
+                        monotonic=lambda: 100.0)
+    runner._line_facts_at = 100.0    # facts are not this test's
+    runner.sampler = SimpleNamespace(sample=lambda: (), supervision=lambda: (), memory_rows=lambda: (),
+                                     throttling=lambda: (("throttled_now", 1, "boolean", "firmware"),))
     runner.tick()
-    [(_, observation)] = posts
-    assert HostMetricV2("throttled_now", 1, "boolean", "firmware") in observation.metrics
+    [state] = stated
+    assert HostMetricV2("throttled_now", 1, "boolean", "firmware") in state.metrics

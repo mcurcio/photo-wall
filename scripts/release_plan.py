@@ -246,7 +246,7 @@ _NODE_DEBS: Final = (*_PROJECT, ".github/workflows/node-components.yml", "debian
                      "scripts/uplink_device_harness.py",
                      "contracts/**", "nodeapi/**", "uplink/**", "player/**", "appliance/kernel/**",
                      "appliance/feed.py", "appliance/feed_socket.py",
-                     "appliance/central_session/**", "appliance/host/**",
+                     "appliance/host/**",
                      "appliance/display_host/**", "appliance/health/**", "appliance/apps/**",
                      "appliance/process_identity.py",
                      "appliance/boot/**", "appliance/node_boot_handoff.py",

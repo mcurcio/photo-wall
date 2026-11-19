@@ -146,8 +146,10 @@ def test_each_entry_imports_from_its_launchers_path_alone(report, launcher):
 
 
 def test_an_exempt_edge_puts_its_target_on_the_launchers_path(report):
-    """HostCore's retiring host_runner -> node.recovery reaches node-manager's directory."""
-    assert "/usr/lib/photo-wall/node-manager" in report["launchers"]["host-core"]["path"]
+    """The broker's retiring lifecycle_storage -> node.manager reaches node-manager's directory;
+    the host reaches it no more (decision 0034, S4c)."""
+    assert "/usr/lib/photo-wall/node-manager" in report["launchers"]["app-broker"]["path"]
+    assert "/usr/lib/photo-wall/node-manager" not in report["launchers"]["host-core"]["path"]
 
 
 def test_every_unit_starts_an_installed_launcher_or_binary(report):

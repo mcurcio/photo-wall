@@ -61,15 +61,6 @@ class AppRunKey:
 
 
 @dataclass(frozen=True, slots=True)
-class OwedRelink:
-    """The outbox owes `run`'s Player a relink; `episode` names the refusal that owed it, so
-    each new refusal of the same run is a new relink (once per channel instance per episode)."""
-
-    run: AppRunKey
-    episode: str
-
-
-@dataclass(frozen=True, slots=True)
 class ProbeFact:
     kind: str  # probe_unanswered
     value: dict
@@ -128,6 +119,6 @@ class ProbeClock:
 
 
 __all__ = [
-    "MISS_LIMIT", "PROBE_PERIOD_MS", "SHIPPED_TIMING", "STARTUP_BUDGET_MS", "AppRunKey", "OwedRelink",
+    "MISS_LIMIT", "PROBE_PERIOD_MS", "SHIPPED_TIMING", "STARTUP_BUDGET_MS", "AppRunKey",
     "UNSEEN_INVOCATION", "ProbeClock", "ProbeFact", "ProbeTiming",
 ]

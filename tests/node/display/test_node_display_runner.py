@@ -232,6 +232,23 @@ def test_main_starts_the_display_session_without_the_central_config(monkeypatch,
     assert started == [DISPLAY_SLICE.digest]
 
 
+@pytest.mark.parametrize(("config", "accepted"), [
+    ({}, True), ({"runtime": "/run/elsewhere"}, True),
+    # Display is given no Central origin, serial or offer (decision 0034, S4c).
+    ({"central": "http://central.test"}, False), ({"serial": "s"}, False), ({"offer_id": "o"}, False),
+])
+def test_the_config_takes_the_runtime_path_alone(monkeypatch, tmp_path, config, accepted):
+    monkeypatch.setattr(runner, "_unit", lambda unit: {"MainPID": "1"})
+    monkeypatch.setattr(runner, "display_session", lambda digest: SimpleNamespace(start=lambda: None))
+    path = tmp_path / "node-config"
+    path.write_text(json.dumps(config))
+    monkeypatch.setattr(sys, "argv", ["display-controller", "--runtime", str(tmp_path),
+                                      "--config", str(path)])
+    monkeypatch.setattr(os, "umask", lambda mask: 0)
+    with pytest.raises(OSError if accepted else ValueError):   # accepted: no compositor socket here
+        runner.main()
+
+
 def test_the_feed_socket_answers_events_and_nothing_else():
     controller = controller_with(2)
     page = controller.feed_events({"op": "events", "after": 0, "incarnation": None})

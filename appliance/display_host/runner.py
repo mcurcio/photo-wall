@@ -685,9 +685,8 @@ def main() -> None:
     config = {}
     if args.config is not None:
         config = json.loads(args.config.read_bytes(), object_pairs_hook=_pairs)
-        # `central`, `serial` and `offer_id` stay accepted and unused until S4c removes them from
-        # the handoff writer: no request to Central decides a handoff (decision 0034, S4b part 4).
-        if type(config) is not dict or set(config) - {"runtime", "central", "serial", "offer_id"}:
+        # The runtime path alone: Display speaks to Central only over the bus (decision 0034, S4c).
+        if type(config) is not dict or set(config) - {"runtime"}:
             raise ValueError("display_config_fields")
         if "runtime" in config:
             args.runtime = Path(config["runtime"])
@@ -697,7 +696,7 @@ def main() -> None:
     # systemd stops the unit with SIGTERM: exit through the finally below (CEC `--clear`).
     signal.signal(signal.SIGTERM, lambda _signal, _frame: sys.exit(0))
     peer = _unit(DISPLAY_UNIT)
-    # The display line's session: always, with or without the retiring Central config. It connects
+    # The display line's session: always. It connects
     # on its own thread forever, so the compositor loop never waits on the bus.
     session = display_session(DISPLAY_SLICE.digest)
     session.start()

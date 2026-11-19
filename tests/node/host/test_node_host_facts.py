@@ -1,7 +1,7 @@
 """Host facts record (console DDD §63-§64, G13, bead F1), contract and node side: the
 HostFactsV2 wire rule, the sampler's `facts()` (kernel, default-route interface, operstate,
-the fib_trie address) and Host Management's in-memory sender. No database; Central's ingest
-and G12 are proven in tests/test_node_host_facts_ingest.py."""
+the fib_trie address) and what Host Management states of them on its line (decision 0034: it posts
+nothing). No database; Central's ingest and G12 are proven in tests/test_node_host_facts_ingest.py."""
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,10 +26,7 @@ from contracts.node_host_facts import (
     stored_fact_values,
     valid_fact,
 )
-from contracts.node_observation import HOST_OBSERVATION_INTERVAL_SECONDS
 from contracts.node_protocol import NodeProducerV2
-
-INTERVAL = HOST_OBSERVATION_INTERVAL_SECONDS
 
 
 def _producer(owner="host_core"):
@@ -126,9 +123,9 @@ def test_the_wall_clock_round_trips_and_is_one_of_its_states():
 
 def test_the_kernels_wall_clock_verdict_reaches_the_facts_record(monkeypatch, tmp_path):
     clock = [100.0]
-    runner, sent = _runner(monkeypatch, clock, {**VALUES, "wall_clock": "unsynchronised"}, {})
+    runner, stated = _runner(monkeypatch, clock, {**VALUES, "wall_clock": "unsynchronised"})
     _run(runner, clock, 110)
-    assert [parse_host_facts(body).wall_clock for _, body in sent] == ["unsynchronised"]
+    assert [state.wall_clock for _, state in stated] == ["unsynchronised"]
 
 
 def _watchdog(tmp_path, bootstatus, options="0x8120"):
@@ -160,10 +157,10 @@ def test_the_host_reads_the_watchdogs_bootstatus(tmp_path, bootstatus, options, 
 
 def test_a_watchdog_start_reaches_the_facts_record(monkeypatch, tmp_path):
     clock = [100.0]
-    runner, sent = _runner(monkeypatch, clock, dict(VALUES), {})
+    runner, stated = _runner(monkeypatch, clock, dict(VALUES))
     runner.watchdog_bootstatus = _watchdog(tmp_path, "32\n")
     _run(runner, clock, 110)
-    assert [parse_host_facts(body).reset_cause for _, body in sent] == ["watchdog"]
+    assert [state.reset_cause for _, state in stated] == ["watchdog"]
 
 
 # The boot stage report (docs/node-4gb-memory-design.md §4.3 T2).
@@ -397,45 +394,19 @@ def test_a_field_the_contract_refuses_is_null_not_a_broken_record(tmp_path):
     assert facts["interface"] == "eth0" and facts["address"] == "192.168.1.40"
 
 
-# Node: the sender (§64 state machine).
+# Node: what HostRunner states on its line.
 
-class _Store:
-    failed = False
-
-    def write(self, name, value):
-        pass
-
-
-def _runner(monkeypatch, clock, facts, answers):
-    """A HostRunner with fake session and sampler. `facts` is the sampler's current values
-    (mutable); `answers` maps a path to the status it answers, or an exception to raise."""
-    runner = HostRunner.__new__(HostRunner)
-    runner.monotonic = lambda: clock[0]
-    runner.recovery = SimpleNamespace(telemetry=lambda: ((), None))
-    runner.store = _Store()
+def _runner(monkeypatch, clock, facts):
+    """A HostRunner over a fake sampler, its line recording each facts state it is given:
+    (clock, HostFactsState). `facts` is the sampler's current values (mutable)."""
+    stated = []
+    line = SimpleNamespace(metrics=lambda state: None,
+                           facts=lambda state: stated.append((clock[0], state)))
+    runner = HostRunner(line, monotonic=lambda: clock[0])
     runner.sampler = SimpleNamespace(sample=lambda: (("uptime", 1, "seconds"),), throttling=lambda: (),
                                      supervision=lambda: (), memory_rows=lambda: (), facts=lambda: dict(facts))
-    runner.delivery = SimpleNamespace(flush=lambda *args, **kwargs: 0)
-    sequence = iter(range(1, 10_000))
-    runner.journal = SimpleNamespace(next_sequence=lambda: next(sequence))
     runner.watchdog_bootstatus = Path("/nonexistent/watchdog0/bootstatus")   # not read: None
-    sent = []
-
-    def request(method, path, body=None):
-        if path == "/v2/node/host-facts":
-            sent.append((clock[0], body))
-        answer = answers.get(path, 200)
-        if isinstance(answer, Exception):
-            raise answer
-        return answer, b""
-
-    producer = _producer()
-    runner.core = SimpleNamespace(producer=producer, session_id=uuid4())
-    runner.session = SimpleNamespace(claim=SimpleNamespace(session_id=runner.core.session_id),
-                                     request=request)
-    runner.establish_session = lambda: True
-    monkeypatch.setattr("appliance.host.host_runner.boottime_ms", lambda: int(clock[0] * 1000))
-    return runner, sent
+    return runner, stated
 
 
 VALUES = {"kernel_release": "6.6.51+rpt-rpi-v8", "interface": "eth0", "link_state": "up",
@@ -448,121 +419,14 @@ def _run(runner, clock, until):
         clock[0] += 2
 
 
-def test_facts_are_sent_once_per_process_start_and_unchanged_facts_send_nothing(monkeypatch):
-    clock, facts = [100.0], dict(VALUES)
-    runner, sent = _runner(monkeypatch, clock, facts, {})
-    _run(runner, clock, 200)
-    assert len(sent) == 1 and sent[0][0] == 100.0
-    assert fact_values_document(parse_host_facts(sent[0][1])) == {**VALUES, "base_tag": None, "reset_cause": None,
-                                                                 "wall_clock": None, "boot": None}
-    # A process start (a new runner) sends again; Central answers duplicate or keeps
-    # first_received_at.
-    again, resent = _runner(monkeypatch, clock, facts, {})
-    _run(again, clock, 210)
-    assert len(resent) == 1
-
-
 @pytest.mark.parametrize(("configured", "reported"), [("2026.10.01", "2026.10.01"), ("bad tag", None),
                                                      (None, None)])
-def test_the_runner_reports_its_configured_base_tag_and_nulls_one_the_contract_refuses(
+def test_the_runner_states_its_configured_base_tag_and_nulls_one_the_contract_refuses(
         monkeypatch, configured, reported):
     # The node's own record of its base (host.json's base_tag, from the boot handoff) rides in
-    # the facts record; a value the contract refuses becomes null, never a broken record.
-    clock, facts = [100.0], dict(VALUES)
-    runner, sent = _runner(monkeypatch, clock, facts, {})
+    # the facts; a value the contract refuses becomes null, never a broken record.
+    clock = [100.0]
+    runner, stated = _runner(monkeypatch, clock, dict(VALUES))
     runner.base_tag = configured
     _run(runner, clock, 110)
-    assert len(sent) == 1 and parse_host_facts(sent[0][1]).base_tag == reported
-
-
-def test_a_change_sends_a_new_document_and_a_flapping_link_at_most_once_per_interval(monkeypatch):
-    clock, facts = [100.0], dict(VALUES)
-    runner, sent = _runner(monkeypatch, clock, facts, {})
-    _run(runner, clock, 120)
-    facts["address"] = "192.168.1.41"
-    _run(runner, clock, 140)
-    assert len(sent) == 2
-    first, second = (parse_host_facts(body) for _, body in sent)
-    assert second.address == "192.168.1.41" and second.sequence > first.sequence
-    # The link changes on every 2 s tick: facts are read only once per observation post.
-    sent.clear()
-    states, ticks = ("up", "down", "dormant"), 0
-    while clock[0] < 400:
-        facts["link_state"] = states[ticks % 3]
-        ticks += 1
-        runner.tick()
-        clock[0] += 2
-    times = [at for at, _ in sent]
-    assert ticks > 100 and len(times) >= 10
-    assert all(later - earlier >= INTERVAL for earlier, later in zip(times, times[1:]))
-
-
-@pytest.mark.parametrize("failure", [OSError("no answer"), 500, 503, 429], ids=str)
-def test_a_failed_send_repeats_the_same_document_at_the_next_post(monkeypatch, failure):
-    clock, facts = [100.0], dict(VALUES)
-    answers = {"/v2/node/host-facts": failure}
-    runner, sent = _runner(monkeypatch, clock, facts, answers)
-    _run(runner, clock, 100 + 3 * INTERVAL + 1)
-    assert len(sent) >= 3 and len({body for _, body in sent}) == 1
-    times = [at for at, _ in sent]
-    assert all(later - earlier >= INTERVAL for earlier, later in zip(times, times[1:]))
-    answers["/v2/node/host-facts"] = 200
-    _run(runner, clock, clock[0] + 3 * INTERVAL)
-    assert len({body for _, body in sent}) == 1
-    count = len(sent)
-    _run(runner, clock, clock[0] + 3 * INTERVAL)
-    assert len(sent) == count  # stored: nothing more until a value changes
-
-
-@pytest.mark.parametrize("off", [404, 422])
-def test_404_or_422_stops_sending_for_the_retry_period_even_when_values_change(monkeypatch, off):
-    # 404: a replica without the route; 422: an older Central whose strict parse refuses a newer
-    # node's document (skew). Both retry on the same timer instead of dropping for the boot.
-    clock, facts = [100.0], dict(VALUES)
-    answers = {"/v2/node/host-facts": off}
-    runner, sent = _runner(monkeypatch, clock, facts, answers)
-    _run(runner, clock, 140)
-    facts["link_state"] = "down"
-    _run(runner, clock, 200)
-    assert len(sent) == 1
-    restarted, resent = _runner(monkeypatch, clock, facts, {})
-    _run(restarted, clock, 210)
-    assert len(resent) == 1
-    # A replica without the route (rolling deploy, rollback) is not final for the boot: after
-    # the retry period the current document is sent again, and stored.
-    answers["/v2/node/host-facts"] = 200
-    _run(runner, clock, 100 + HostRunner.FACTS_ROUTE_RETRY_SECONDS - 2 * INTERVAL)
-    assert len(sent) == 1
-    _run(runner, clock, 100 + HostRunner.FACTS_ROUTE_RETRY_SECONDS + 2 * INTERVAL)
-    assert len(sent) == 2 and parse_host_facts(sent[1][1]).link_state == "down"
-    count = len(sent)
-    _run(runner, clock, clock[0] + 3 * INTERVAL)
-    assert len(sent) == count
-
-
-@pytest.mark.parametrize("refused", [401, 403])
-def test_a_refused_session_resends_the_same_document_once_re_enrolled(monkeypatch, refused):
-    """401 `node_session_unavailable` (an expired session) is temporary: the session re-enrolls
-    under the same producer, and the same document is resent, not dropped for the boot."""
-    clock, facts = [100.0], dict(VALUES)
-    answers = {"/v2/node/host-facts": refused}
-    runner, sent = _runner(monkeypatch, clock, facts, answers)
-    _run(runner, clock, 102)
-    answers["/v2/node/host-facts"] = 200
-    _run(runner, clock, 100 + 2 * INTERVAL + 2)
-    assert len(sent) == 2 and sent[0][1] == sent[1][1]
-    count = len(sent)
-    _run(runner, clock, clock[0] + 3 * INTERVAL)
-    assert len(sent) == count  # stored
-
-
-def test_another_4xx_drops_until_the_next_value_change(monkeypatch):
-    clock, facts = [100.0], dict(VALUES)
-    answers = {"/v2/node/host-facts": 409}
-    runner, sent = _runner(monkeypatch, clock, facts, answers)
-    _run(runner, clock, 160)
-    assert len(sent) == 1
-    answers["/v2/node/host-facts"] = 200
-    facts["interface"] = "wlan0"
-    _run(runner, clock, 200)
-    assert len(sent) == 2 and parse_host_facts(sent[1][1]).interface == "wlan0"
+    assert [state.base_tag for _, state in stated] == [reported]

@@ -330,9 +330,9 @@ def test_the_judge_closure_is_small_and_the_base_ships_its_unit():
     assert {"appliance.health.runner", "appliance.health.judge", "contracts.node_faults",
             "appliance.kernel", "appliance.kernel.probe_timing",
             "appliance.display_host.overlay.instruction"} <= modules
-    # The judge pulls in no broker, no Central session and no compositor code.
+    # The judge pulls in no broker and no compositor code.
     assert not [module for module in modules if module.startswith((
-        "appliance.central_session", "appliance.apps.broker", "appliance.apps.probe_channel",
+        "appliance.apps.broker", "appliance.apps.probe_channel",
         "appliance.display_host.weston", "appliance.display_host.runner"))]
     assert (REPO / "appliance/launchers/health-judge/__main__.py").is_file()
     unit = (REPO / "appliance/systemd/photo-wall-health.service").read_text().splitlines()

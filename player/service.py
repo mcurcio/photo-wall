@@ -50,8 +50,6 @@ from contracts.node_link import NODE_BUS_URL
 from contracts.node_state import FrameReport, FrameReports
 from contracts.player_control import (
     ControlAck,
-    ControlAckResponse,
-    ControlAppliedReceipt,
     ControlHello,
     ControlSelection,
 )
@@ -72,7 +70,6 @@ from player.identity import Identity, load_identity
 from player.impediment import impeded
 from player.luts import LutWants, PlayerLuts
 from player.mainloop import DispatchRefused, LatePosts, LoopLate, MainLoopDispatcher, Tick
-from player.node_app_link import NodeAppLinkClient
 from player.output_discovery import discover_outputs
 from player.player_line import PlayerLine
 from player.probe_responder import ProbeResponder
@@ -123,9 +120,6 @@ BACKOFF = SESSION_BACKOFF
 FEEDBACK_INTERVAL = 0.5
 # A failed media download retries on its own schedule; it is not a liveness contract.
 MEDIA_RETRY_BACKOFF = (1, 5, 15, 60)
-# The app link is tried the moment an applied receipt (or a relink) arrives; this is only
-# the backoff after a refusal or a socket failure, and the idle safety net.
-APP_LINK_RETRY = 5.0
 # How long a thread-to-main handoff may wait for the GLib loop before the Player raises the
 # main_loop_late fault instead of waiting on a starved loop in silence (G8). Readiness
 # is left as last sent: a late loop never withdraws prepared playback (E-G8-8 decision).
@@ -387,7 +381,6 @@ class PlayerService:
                  time_client: httpx.AsyncClient | None = None,
                  clock_record: Callable[[], ClockRecord | None] = RunClockRecord().read,
                  websocket_connect=None, cache_factory=Cache, executor_factory=Executor,
-                 node_link_client: NodeAppLinkClient | None = None,
                  boot_id_path: Path = Path("/proc/sys/kernel/random/boot_id"),
                  boot_context: BootContext, luts: LutWants, room_lights_dispatch: Callable | None = None,
                  node_bus_url: str = NODE_BUS_URL, release_digest: str = "unknown"):
@@ -450,12 +443,6 @@ class PlayerService:
         self._verify_due = threading.Event()
         self._worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="player-media")
         self._stop = threading.Event()
-        self.node_link_client = node_link_client or NodeAppLinkClient()
-        self._proof_active = False
-        self._proof_generation = 0
-        self._relink = threading.Event()
-        # The running app-link loop's wake-up, set from any thread through its loop.
-        self._link_wake: tuple[asyncio.AbstractEventLoop, asyncio.Event] | None = None
         self._thread = None
         self._loop = None
         self._task = None
@@ -465,8 +452,6 @@ class PlayerService:
         self._control_selection: ControlSelection | None = None
         self._highest_control_sequence = 0
         self._highest_control_delivery_id: str | None = None
-        self._applied_proof_receipt: tuple[Session, ControlAppliedReceipt] | None = None
-        self._control_proof_revision = 0
         # The last acknowledgment Central answered (session, delivery id, result): the same state
         # again (a state sent again unchanged) is not acknowledged again.
         self._acknowledged: tuple[Session, str, str] | None = None
@@ -706,10 +691,6 @@ class PlayerService:
         previous = self._session
         self._session = (Session(found.central) if previous is None
                          else previous.relocated(found.central))
-        if self._session is not previous:
-            with self._lock:
-                self._applied_proof_receipt = None
-                self._control_proof_revision += 1
         self._located = True
         LOG.info("player: central %s (%s root %s)", found.central.origin, found.source,
                  found.root)
@@ -778,9 +759,7 @@ class PlayerService:
         self._highest_control_sequence = 0
         self._highest_control_delivery_id = None
         with self._lock:
-            self._applied_proof_receipt = None
             self._acknowledged = None
-            self._control_proof_revision += 1
             self._offered = False
             self._jobs = ()
         self._reports.clear()
@@ -852,8 +831,6 @@ class PlayerService:
             else:
                 self._highest_control_sequence = sequence
                 self._highest_control_delivery_id = state.delivery_id
-                self._applied_proof_receipt = None
-                self._control_proof_revision += 1
         if self.executor is None:
             return "parsed_execution_unavailable"
         with self._lock:
@@ -910,39 +887,13 @@ class PlayerService:
         acknowledgment = (session, state.delivery_id, result)
         if self._acknowledged == acknowledgment:
             return      # Central answered this one: the same state again changes nothing
-        with self._lock:
-            if result != "applied":
-                self._applied_proof_receipt = None
-                self._control_proof_revision += 1
-            revision = self._control_proof_revision
         report = ControlAck(authority_epoch=registration.authority_epoch,
                             delivery_id=state.delivery_id, result=result)
         # A superseded delivery can return accepted=false; the next state retries with a
-        # fresh challenge. This is not plan readiness or OS management evidence.
-        response = await self.request("POST", "/v1/player/control-acks",
-                                      body=report.model_dump(mode="json"))
+        # fresh challenge. This is not plan readiness or OS management evidence. The receipt Central
+        # answers an applied acknowledgment with is no longer read here (decision 0034, S4c).
+        await self.request("POST", "/v1/player/control-acks", body=report.model_dump(mode="json"))
         self._acknowledged = acknowledgment
-        if result != "applied":
-            return
-        try:
-            outcome = ControlAckResponse.model_validate(response, strict=True)
-        except ValidationError:
-            LOG.debug("player: applied ACK receipt invalid")
-            return
-        receipt = outcome.receipt
-        if (not outcome.accepted or receipt is None
-                or receipt.authority_epoch != registration.authority_epoch
-                or receipt.delivery_id != state.delivery_id
-                or receipt.delivery_sequence != state.delivery_sequence):
-            return
-        with self._lock:
-            if (self._control_proof_revision == revision and self._session is session
-                    and session.registration is registration
-                    and self._highest_control_sequence == receipt.delivery_sequence
-                    and self._highest_control_delivery_id == receipt.delivery_id
-                    and self._applied_proof_receipt != (session, receipt)):
-                self._applied_proof_receipt = (session, receipt)
-                self._wake_link_loop()
 
     def tick_main(self):
         self._main()
@@ -1304,83 +1255,9 @@ class PlayerService:
                     self._main_loop_late()
             raise ServiceError("session_closed")
 
-    async def _app_link_loop(self) -> None:
-        """Link this process to its latest applied control receipt over the node's app-link
-        socket, apart from Central liveness and rendering.
-
-        Only the process-local enrollment key enters the blocking socket worker. A new
-        delivery, a re-enrollment or a relocation invalidates that worker before it signs or
-        sends a response.
-        """
-        recorded: tuple[Session, ControlAppliedReceipt] | None = None
-        wake = asyncio.Event()
-        self._link_wake = (asyncio.get_running_loop(), wake)
-        while self._proof_active and not self._stop.is_set():
-            # Cleared before reading the receipt, so one that lands during a turn wakes the next.
-            wake.clear()
-            backoff = False
-            if self._relink.is_set():
-                # The broker could not deliver the recorded link: prove it again.
-                self._relink.clear()
-                recorded = None
-            session = self._session
-            registration = session.registration if session is not None else None
-            generation = self._proof_generation
-            with self._lock:
-                applied = self._applied_proof_receipt
-                revision = self._control_proof_revision
-            if (registration is not None and applied is not None
-                    and applied[0] is session and applied != recorded
-                    and self.boot_id):
-                receipt = applied[1]
-
-                def applied_current() -> bool:
-                    with self._lock:
-                        return (self._proof_active and self._proof_generation == generation
-                                and not self._stop.is_set() and self._session is session
-                                and session.registration is registration
-                                and self._control_proof_revision == revision
-                                and self._applied_proof_receipt == applied
-                                and self._highest_control_sequence == receipt.delivery_sequence
-                                and self._highest_control_delivery_id == receipt.delivery_id)
-
-                try:
-                    outcome = await asyncio.to_thread(
-                        self.node_link_client.exchange_applied, identity=self.identity,
-                        player_id=registration.player_id,
-                        authority_epoch=registration.authority_epoch,
-                        device_id=self.boot_context.device_id,
-                        kernel_boot_id=self.boot_id, receipt=receipt,
-                        enrollment_current=applied_current,
-                    )
-                    if outcome == "recorded" and applied_current():
-                        recorded = applied
-                    elif outcome == "rejected":
-                        backoff = True
-                        LOG.warning("player: the broker refused the app link; retrying in %.0f s",
-                                    APP_LINK_RETRY)
-                    else:
-                        LOG.info("player: app link stale (a newer control delivery or "
-                                 "enrollment); retrying on the next applied delivery")
-                except (ValueError, OSError, TimeoutError) as error:
-                    backoff = True
-                    LOG.debug("player: node process linkage unavailable: %s", type(error).__name__)
-                except Exception as error:
-                    backoff = True
-                    LOG.warning("player: node process linkage failed: %s", type(error).__name__)
-            if backoff:
-                await asyncio.sleep(APP_LINK_RETRY)
-            else:
-                # The next applied receipt or relink wakes this at once; the timeout is a net.
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(wake.wait(), APP_LINK_RETRY)
-
     async def run(self):
         self._loop = asyncio.get_running_loop()
         self._task = asyncio.current_task()
-        self._proof_generation += 1
-        self._proof_active = True
-        proof_task = None
         attempt = 0
         try:
             while not self._stop.is_set():
@@ -1392,8 +1269,6 @@ class PlayerService:
                         await self.locate_central()
                     if self.registration is None:
                         await self.enroll()
-                    if proof_task is None:
-                        proof_task = asyncio.create_task(self._app_link_loop())
                     await self.hello_protocol()
                     # The state arrives over the session socket, pushed first on its open, and
                     # anchors the show clock too, so a failing time route never holds the plan
@@ -1418,9 +1293,7 @@ class PlayerService:
                     if self._session is not None:
                         self._session = self._session.unregistered()
                     with self._lock:
-                        self._applied_proof_receipt = None
                         self._acknowledged = None
-                        self._control_proof_revision += 1
                     self.fault("registration_required")
                     if not self._stop.is_set():
                         await self._publish_player_on_retry()
@@ -1448,7 +1321,7 @@ class PlayerService:
             # stop() cancels this task, and that cancel may land after run() already saw the stop
             # and left its loop, inside this cleanup: shielded, so it never surfaces to run()'s
             # caller nor cuts the cleanup short.
-            closing = asyncio.ensure_future(self._close_run(proof_task))
+            closing = asyncio.ensure_future(self._close_run())
             while not closing.done():
                 try:
                     await asyncio.shield(closing)
@@ -1456,17 +1329,10 @@ class PlayerService:
                     pass
             closing.result()
 
-    async def _close_run(self, proof_task: asyncio.Task | None) -> None:
-        """run()'s end: the app link stopped, the clients and the cache closed."""
-        self._proof_active = False
-        self._proof_generation += 1
+    async def _close_run(self) -> None:
+        """run()'s end: the clients and the cache closed."""
         with self._lock:
-            self._applied_proof_receipt = None
             self._acknowledged = None
-            self._control_proof_revision += 1
-        if proof_task is not None:
-            proof_task.cancel()
-            await asyncio.gather(proof_task, return_exceptions=True)
         await self.link.aclose()
         if self.cache is not None:
             await asyncio.get_running_loop().run_in_executor(self._worker, self.cache.close)
@@ -1498,18 +1364,6 @@ class PlayerService:
         """Which Frames are black while content is wanted (GLib thread: the probe's answer). None
         with no executor: this Player cannot tell, which is never the same as nothing black."""
         return None if self.executor is None else self.executor.frames_black()
-
-    def request_relink(self):
-        """Thread-safe: the proof loop forgets its recorded app link and proves it again now."""
-        self._relink.set()
-        self._wake_link_loop()
-
-    def _wake_link_loop(self) -> None:
-        """Thread-safe: the app-link loop takes its next turn now, not at its safety net."""
-        if (link_wake := self._link_wake) is not None:
-            loop, wake = link_wake
-            with contextlib.suppress(RuntimeError):  # the loop has closed: nothing to wake
-                loop.call_soon_threadsafe(wake.set)
 
     def stop(self):
         self._stop.set()
@@ -1616,7 +1470,7 @@ def main():
     Tick(GLib, PLANNING_TICK_MS, tick)
     service.start()
     # Probes are answered at control dispatch's priority (own one-slot lane), never here.
-    ProbeResponder(dispatcher, on_relink=service.request_relink, frames_black=service.frames_black,
+    ProbeResponder(dispatcher, frames_black=service.frames_black,
                    gl_renderer=lambda: root.renderer.gl_renderer).start()
     try:
         with contextlib.suppress(KeyboardInterrupt):

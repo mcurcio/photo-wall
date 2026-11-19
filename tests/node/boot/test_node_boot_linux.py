@@ -114,9 +114,9 @@ def test_host_config_survives_missing_graphics_handoff(tmp_path, monkeypatch):
     with pytest.raises(FileNotFoundError):
         bootstrap.materialize_handoff(root=tmp_path)
     host = json.loads((tmp_path / "run/photo-wall-node/host.json").read_bytes())
-    assert host["offer_id"] == str(selected.offer_id)
-    # The node's own record of the base it booted, reported in its host facts record.
-    assert host["base_tag"] == selected.base.tag
+    # The node's own record of the base it booted, stated in its host facts: the host's whole
+    # configuration (it speaks to Central only over the bus, decision 0034 S4c).
+    assert host == {"base_tag": selected.base.tag}
     assert not (tmp_path / "run/photo-wall-node/cold.json").exists()
 
 
@@ -129,6 +129,10 @@ def test_no_app_handoff_creates_no_cold_start_authority(tmp_path, monkeypatch):
     assert (tmp_path / "run/photo-wall-node/host.json").exists()
     assert (tmp_path / "run/photo-wall-node/manager.json").exists()
     assert not (tmp_path / "run/photo-wall-node/cold.json").exists()
+    # No program but the bus and the App Manager's client is given Central's origin or the serial
+    # (decision 0034, S4c): the broker's configuration is gone and Display's is empty.
+    assert not (tmp_path / "run/photo-wall-node/broker.json").exists()
+    assert json.loads((tmp_path / "run/photo-wall-node/display.json").read_bytes()) == {}
 
 
 @pytest.mark.parametrize("unsafe_staging", [False, True])

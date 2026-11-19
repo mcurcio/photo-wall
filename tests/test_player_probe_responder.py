@@ -1,6 +1,5 @@
 """Progress probes are answered from the Player's GLib control queue, never a helper thread."""
 
-import asyncio
 import json
 import logging
 import socket
@@ -8,7 +7,6 @@ import threading
 from queue import Empty, Queue
 
 import pytest
-from test_player_service import close, rig
 
 from contracts.node_app_link import (
     MAX_FRAMES_BLACK,
@@ -18,12 +16,10 @@ from contracts.node_app_link import (
     NodeProbeV2,
     NodeRendererV2,
     encode_node_probe,
-    encode_node_relink,
     parse_node_probe_answer,
     parse_node_probe_open,
     parse_node_probe_reply,
 )
-from contracts.player_control import ControlAppliedReceipt
 from player.mainloop import CONTROL, DispatchRefused, MainLoopDispatcher
 from player.probe_responder import RETRY_DELAYS, ProbeResponder
 
@@ -57,6 +53,8 @@ class Channel:
         self.closed = False
         self.flags = []
         self.full = False
+        self.delivered = 0      # packets the peer put on this end
+        self.receives = 0       # recv calls on this end
 
     def settimeout(self, _timeout):
         pass
@@ -67,10 +65,12 @@ class Channel:
         if self.full:
             raise BlockingIOError("EAGAIN")
         self.flags.append(flags)
+        self.peer.delivered += 1
         self.peer.incoming.put(bytes(raw))
         return len(raw)
 
     def recv(self, size):
+        self.receives += 1
         raw = self.incoming.get(timeout=5)
         return raw[:size]
 
@@ -90,15 +90,11 @@ class Rig:
     def __init__(self, dispatcher=None, frames_black=None):
         self.glib = FakeGLib()
         self.dispatcher = dispatcher or MainLoopDispatcher(self.glib)
-        self.relinks = 0
         self.player, self.broker = channel_pair()
         self.report = None      # no executor unless a test says otherwise: nothing is sent
-        self.responder = ProbeResponder(self.dispatcher, on_relink=self.relink,
+        self.responder = ProbeResponder(self.dispatcher,
                                         frames_black=frames_black or (lambda: self.report),
                                         connector=lambda _path: self.player)
-
-    def relink(self):
-        self.relinks += 1
 
     def open(self):
         self.thread = threading.Thread(target=self.responder._channel, daemon=True)
@@ -109,13 +105,10 @@ class Rig:
         self.broker.send(encode_node_probe(nonce))
 
     def settle(self):
-        """Wait until the responder thread handled every packet sent so far.
-
-        Packets are handled in order, so a trailing `relink` marks the point."""
-        expected = self.relinks + 1
-        self.broker.send(encode_node_relink())
+        """Wait until the responder thread handled every packet sent so far: it is back in
+        `recv` once for each packet it took, plus the one it waits in."""
         for _ in range(2500):
-            if self.relinks >= expected:
+            if self.player.receives > self.player.delivered and self.player.incoming.empty():
                 return
             threading.Event().wait(.002)
         raise AssertionError("responder did not settle")
@@ -286,14 +279,30 @@ def test_callback_queued_across_a_closed_channel_sends_nothing_and_stays_single(
     rig_.shut()
 
 
-def test_relink_calls_back_and_unknown_packets_end_the_channel():
+@pytest.mark.parametrize("packet", [
+    {"schema": 2, "kind": "relink"},                    # retired with the app link (0034, S4c)
+    {"schema": 2, "kind": "probe", "nonce": "x"},
+])
+def test_anything_but_a_probe_ends_the_channel(packet):
     rig_ = Rig()
     rig_.open()
-    rig_.settle()
-    assert rig_.relinks == 1 and rig_.glib.callbacks == []
-    rig_.broker.send(json.dumps({"schema": 2, "kind": "probe", "nonce": "x"}).encode())
+    rig_.broker.send(json.dumps(packet).encode())
     rig_.thread.join(timeout=3)
-    assert not rig_.thread.is_alive() and rig_.player.closed
+    assert not rig_.thread.is_alive() and rig_.player.closed and rig_.glib.callbacks == []
+
+
+def test_the_player_opens_its_probe_channel_with_no_link():
+    """The Player's first and only opening packet is `probe_open`: no app link's `begin` before it
+    (decision 0034, S4c). Mutation probe: send a `begin` packet before `probe_open` -> the
+    broker's listener refuses the channel (tests/test_node_app_link_local.py) and this fails."""
+    rig_ = Rig()
+    rig_.open()            # the first packet parses as `probe_open` (Rig.open)
+    rig_.probe(NONCES[0])
+    rig_.settle()
+    rig_.glib.run_idle()
+    assert rig_.answers() == [NONCES[0]]
+    assert not hasattr(rig_.responder, "on_relink")
+    rig_.shut()
 
 
 def test_todays_broker_refusal_retries_with_slow_capped_backoff():
@@ -319,8 +328,7 @@ def test_todays_broker_refusal_retries_with_slow_capped_backoff():
         if len(delays) == 8:
             raise Stop
 
-    responder = ProbeResponder(MainLoopDispatcher(FakeGLib()), on_relink=lambda: None,
-                               frames_black=lambda: None,
+    responder = ProbeResponder(MainLoopDispatcher(FakeGLib()), frames_black=lambda: None,
                                connector=connector, sleep=sleep)
     with pytest.raises(Stop):
         responder._run()
@@ -356,8 +364,7 @@ def test_unavailable_socket_retries_and_a_probed_channel_resets_the_backoff():
         if len(delays) == 4:
             raise Stop
 
-    responder = ProbeResponder(MainLoopDispatcher(FakeGLib()), on_relink=lambda: None,
-                               frames_black=lambda: None,
+    responder = ProbeResponder(MainLoopDispatcher(FakeGLib()), frames_black=lambda: None,
                                connector=connector, sleep=sleep)
     with pytest.raises(Stop):
         responder._run()
@@ -371,8 +378,7 @@ def test_start_runs_one_daemon_thread_named_player_probe():
         started.set()
         raise OSError("socket_unavailable")
 
-    responder = ProbeResponder(MainLoopDispatcher(FakeGLib()), on_relink=lambda: None,
-                               frames_black=lambda: None,
+    responder = ProbeResponder(MainLoopDispatcher(FakeGLib()), frames_black=lambda: None,
                                connector=connector, sleep=lambda _s: threading.Event().wait(60))
     responder.start()
     assert started.wait(2)
@@ -381,55 +387,13 @@ def test_start_runs_one_daemon_thread_named_player_probe():
         responder.start()
 
 
-def test_relink_request_clears_the_recorded_link_on_the_next_turn(tmp_path, monkeypatch):
-    receipt_base = ControlAppliedReceipt(authority_epoch=7, delivery_id="e" * 32,
-                                         delivery_sequence=5, state_digest="f" * 64,
-                                         ack_nonce="b" * 64)
-
-    class Link:
-        def __init__(self):
-            self.calls = 0
-
-        def exchange_applied(self, **_kwargs):
-            self.calls += 1
-            return "recorded"
-
-    async def run():
-        service, server = await rig(tmp_path)
-        link = Link()
-        service.node_link_client = link
-        service.boot_id = BOOT_ID
-        service._proof_active = True
-        registration = service.registration
-        receipt = receipt_base.model_copy(update={"authority_epoch": registration.authority_epoch})
-        service._highest_control_sequence = 5
-        service._highest_control_delivery_id = "e" * 32
-        service._applied_proof_receipt = (service._session, receipt)
-        monkeypatch.setattr("player.service.APP_LINK_RETRY", .01)
-        task = asyncio.create_task(service._app_link_loop())
-        try:
-            await asyncio.sleep(.08)
-            assert link.calls == 1          # recorded once, then held
-            await asyncio.to_thread(service.request_relink)    # from another thread
-            await asyncio.sleep(.08)
-            assert link.calls == 2
-        finally:
-            service._proof_active = False
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-            await close(service)
-
-    asyncio.run(run())
-
-
 def test_real_seqpacket_channel_round_trip():
     try:
         player, broker = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
     except OSError:
         pytest.skip("SOCK_SEQPACKET is Linux-only")
     glib = FakeGLib()
-    responder = ProbeResponder(MainLoopDispatcher(glib), on_relink=lambda: None,
-                               frames_black=lambda: None,
+    responder = ProbeResponder(MainLoopDispatcher(glib), frames_black=lambda: None,
                                connector=lambda _path: player)
     thread = threading.Thread(target=responder._channel, daemon=True)
     thread.start()

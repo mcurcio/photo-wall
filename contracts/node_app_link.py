@@ -1,8 +1,8 @@
-"""LAN-serial operational process/Registry linkage, with a separate signing domain.
+"""The broker's probe socket on a Pi, and Central's record of an app link.
 
-The control receipt remains the existing Registry receipt, serialized verbatim
-as canonical JSON. Central owns its validation. Base checks the connected kernel
-process before emitting a challenge and after receiving the signed response.
+The probe channel (below) is the Player's one exchange with the broker: progress probes and the
+facts the health judge reads. The app link's signed challenge (`NodeAppLinkV2`) is what Central
+still reads of the old path until its node sessions go (decision 0034, S4c-2a-v); no Pi sends one.
 """
 from __future__ import annotations
 
@@ -18,6 +18,11 @@ from contracts.node_protocol import NodeProcessIdentity, NodeProducerV2, counter
 from contracts.strict_json import loads_object
 
 MAX_NODE_LINK_BYTES = 8192
+# The broker's probe socket, the one home of its path: the broker binds it, and the Player's unit
+# sees its directory at PLAYER_PROBE_SOCKET's (appliance/apps/process_linux.py binds one onto the
+# other), where the Player connects.
+PROBE_SOCKET: Final = "/run/photo-wall-app-proof/app-link.sock"
+PLAYER_PROBE_SOCKET: Final = "/run/photo-wall-client/app-link.sock"
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,18 +105,6 @@ def node_app_link_message(challenge: NodeAppLinkChallengeV2) -> bytes:
     return b"photo-wall-node-app-link-v2\x00" + _json(_challenge_document(challenge))
 
 
-def encode_node_app_link_challenge(value: NodeAppLinkChallengeV2) -> bytes:
-    return _json({"schema": 2, "kind": "challenge", "challenge": _challenge_document(value)})
-
-
-def parse_node_app_link_challenge(raw: bytes) -> NodeAppLinkChallengeV2:
-    value = loads_object(raw, max_bytes=MAX_NODE_LINK_BYTES)
-    if (value is None or set(value) != {"schema", "kind", "challenge"}
-            or type(value["schema"]) is not int or value["schema"] != 2 or value["kind"] != "challenge"):
-        raise ValueError("node_link_challenge_invalid")
-    return _challenge(value["challenge"])
-
-
 def encode_node_app_link(value: NodeAppLinkV2) -> bytes:
     return _json({"schema": 2, "kind": "app_link", "challenge": _challenge_document(value.challenge),
                   "public_key": value.public_key, "signature": value.signature})
@@ -123,29 +116,6 @@ def parse_node_app_link(raw: bytes) -> NodeAppLinkV2:
             or type(value["schema"]) is not int or value["schema"] != 2 or value["kind"] != "app_link"):
         raise ValueError("node_link_invalid")
     return NodeAppLinkV2(_challenge(value["challenge"]), value["public_key"], value["signature"])
-
-
-def encode_node_app_link_begin(*, player_id: str, authority_epoch: int,
-                               control_receipt: str) -> bytes:
-    raw = _json({"schema": 2, "kind": "begin", "player_id": player_id,
-                 "authority_epoch": authority_epoch, "control_receipt": control_receipt})
-    parse_node_app_link_begin(raw)
-    return raw
-
-
-def parse_node_app_link_begin(raw: bytes) -> dict:
-    value = loads_object(raw, max_bytes=MAX_NODE_LINK_BYTES)
-    if (value is None or set(value) != {"schema", "kind", "player_id", "authority_epoch", "control_receipt"}
-            or type(value["schema"]) is not int or value["schema"] != 2 or value["kind"] != "begin"
-            or not isinstance(value["player_id"], str)
-            or not re.fullmatch(r"p-[0-9a-f]{32}", value["player_id"])
-            or not isinstance(value["control_receipt"], str)):
-        raise ValueError("node_link_begin_invalid")
-    counter(value["authority_epoch"], 1)
-    receipt = loads_object(value["control_receipt"].encode(), max_bytes=1024)
-    if receipt is None or receipt.get("authority_epoch") != value["authority_epoch"]:
-        raise ValueError("node_link_receipt_invalid")
-    return {key: value[key] for key in ("player_id", "authority_epoch", "control_receipt")}
 
 
 NODE_APP_LINK_RESULTS = ("accepted", "recorded", "refused")
@@ -171,9 +141,8 @@ def parse_node_app_link_result(raw: bytes) -> str:
     return value["status"]
 
 
-# Progress-probe channel. The Player opens it on the app-link socket and speaks
-# first (`probe_open`); the broker then sends `probe` and `relink`, and the
-# Player answers each probe it got to on its control queue (`probe_answer`).
+# Progress-probe channel. The Player opens it on the broker's probe socket and speaks
+# first (`probe_open`); the broker then sends `probe`, and the Player answers each probe it got to on its control queue (`probe_answer`).
 # Once per channel the Player also reports its GL renderer (`renderer`), a fact
 # for the health judge. The Player also states, on change and at each channel
 # open, which of its Frames are black when content is wanted (`frames_black`),
@@ -253,11 +222,6 @@ class NodeFramesBlackMalformed(ValueError):
     channel: the broker drops the report and keeps probing."""
 
 
-@dataclass(frozen=True, slots=True)
-class NodeRelinkV2:
-    """The broker could not deliver this run's link: prove it again."""
-
-
 def _probe_packet(raw: bytes, *, kind: str, fields: frozenset[str]) -> dict:
     value = loads_object(raw, max_bytes=MAX_NODE_LINK_BYTES)
     if (value is None or set(value) != {"schema", "kind", *fields}
@@ -323,17 +287,6 @@ def parse_node_probe_reply(raw: bytes) -> NodeProbeV2 | NodeRendererV2 | NodeFra
     return NodeProbeV2(parse_node_probe_answer(raw))
 
 
-def encode_node_relink() -> bytes:
-    return _json({"schema": 2, "kind": "relink"})
-
-
-def parse_node_probe_channel_message(raw: bytes) -> NodeProbeV2 | NodeRelinkV2:
-    """A broker → Player packet on an open probe channel."""
-    value = loads_object(raw, max_bytes=MAX_NODE_LINK_BYTES)
-    kind = value.get("kind") if value is not None else None
-    if kind == "probe":
-        return NodeProbeV2(_probe_packet(raw, kind="probe", fields=frozenset({"nonce"}))["nonce"])
-    if kind == "relink":
-        _probe_packet(raw, kind="relink", fields=frozenset())
-        return NodeRelinkV2()
-    raise ValueError("probe_channel_message")
+def parse_node_probe_channel_message(raw: bytes) -> NodeProbeV2:
+    """A broker → Player packet on an open probe channel: a probe, the only one."""
+    return NodeProbeV2(_probe_packet(raw, kind="probe", fields=frozenset({"nonce"}))["nonce"])

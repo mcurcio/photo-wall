@@ -10,7 +10,7 @@ or 504; a 503 that is not Central's (a proxy's, without Central's error body); a
 own 503 only when it carries a Retry-After (Central sends one only when the refusal is
 transient: a cache miss outlived its read-through wait, the waiter slots are full). Any other
 failure is terminal, Central's 503 without a Retry-After included. Without a window, a caller
-retries on its own cadence (DesiredPreparation: the next poll)."""
+retries on its own cadence. Its one caller is the prepare boot stage (node_bootstrap.prepare_roots)."""
 from __future__ import annotations
 
 import hashlib

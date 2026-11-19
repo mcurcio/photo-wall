@@ -1,19 +1,16 @@
 """Host-health tracer, node and derivation side (console DDD §63, bead T1): the sampler's
-`soc_temperature` (omitted when unreadable, never zero), Host Management's per-interval posting
-on its own monotonic clock, and Central's cap and silence limit derived from the one contract
+`soc_temperature` (omitted when unreadable, never zero), Host Management's sampling and its facts
+read on its own monotonic clock, and Central's cap and silence limit derived from the one contract
 constant. No database."""
 import json
 import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import uuid4
 
 from appliance.host.host_linux import LinuxHostSampler
 from appliance.host.host_runner import HostRunner
 from central.fleet.host_thresholds import HOST_SILENT_AFTER_SECONDS, thresholds_document
-from contracts.node_observation import HOST_OBSERVATION_INTERVAL_SECONDS, parse_host_observation
-from contracts.node_protocol import NodeProducerV2
 from contracts.node_state import HOST_METRICS_EVERY
 
 ROOT = Path(__file__).parents[1]
@@ -52,69 +49,24 @@ def test_no_readable_thermal_zone_sends_no_temperature_row(tmp_path, monkeypatch
     assert "soc_temperature" not in _rows(LinuxHostSampler(proc, tmp_path, tmp_path / "sys"))
 
 
-class _Store:
-    failed = False
-
-    def __init__(self):
-        self.writes = 0
-
-    def write(self, name, value):
-        self.writes += name == "observation"
-
-
-def _runner(monkeypatch, clock):
-    """A HostRunner with fake session, transport and sampler; `clock` is its monotonic clock."""
-    runner = HostRunner.__new__(HostRunner)
-    runner.monotonic = lambda: clock[0]
-    runner.recovery = SimpleNamespace(telemetry=lambda: ((), None))
-    runner.store = _Store()
-    runner.sampler = SimpleNamespace(sample=lambda: (("uptime", 1, "seconds"),), throttling=lambda: (),
-                                     supervision=lambda: (), memory_rows=lambda: (), facts=lambda: dict.fromkeys(
-                                         ("kernel_release", "interface", "link_state", "address")))
-    runner.delivery = SimpleNamespace(flush=lambda *args, **kwargs: 0)
-    sequence = iter(range(1, 10_000))
-    runner.journal = SimpleNamespace(next_sequence=lambda: next(sequence))
-    posts = []
-
-    def request(method, path, body=None):
-        if path == "/v2/node/observations":
-            posts.append((clock[0], parse_host_observation(body)))
-        return 404, b""
-
-    def session_for(session_id):
-        producer = NodeProducerV2("site", "device-" + "a" * 64, 1, uuid4(), "host_core", uuid4())
-        runner.core = SimpleNamespace(producer=producer, session_id=session_id)
-        runner.session = SimpleNamespace(claim=SimpleNamespace(session_id=session_id),
-                                         ensure=lambda: object(), request=request)
-
-    runner.establish_session = lambda: True
-    monkeypatch.setattr("appliance.host.host_runner.boottime_ms", lambda: int(clock[0] * 1000))
-    return runner, posts, session_for
-
-
-def test_the_runner_posts_at_session_start_then_once_per_interval_while_sampling_every_2_s(monkeypatch):
-    clock = [100.0]
-    runner, posts, session_for = _runner(monkeypatch, clock)
-    session_for(uuid4())
-    ticks = 0
+def test_the_runner_samples_every_tick_and_reads_its_facts_once_per_interval():
+    """Every 2 s tick samples the metrics for the host line; the facts are read once per
+    HOST_METRICS_EVERY on the runner's own monotonic clock (decision 0034: nothing is posted)."""
+    clock, sampled, read = [100.0], [], []
+    runner = HostRunner(SimpleNamespace(metrics=lambda state: None, facts=lambda state: None),
+                        monotonic=lambda: clock[0])
+    runner.sampler = SimpleNamespace(
+        sample=lambda: sampled.append(clock[0]) or (("uptime", 1, "seconds"),), throttling=lambda: (),
+        supervision=lambda: (), memory_rows=lambda: (),
+        facts=lambda: read.append(clock[0]) or dict.fromkeys(("kernel_release", "interface",
+                                                              "link_state", "address")))
+    runner.watchdog_bootstatus = Path("/nonexistent/watchdog0/bootstatus")
     while clock[0] < 160:
         runner.tick()
-        ticks += 1
         clock[0] += 2
-    assert runner.store.writes == ticks == 30  # every tick samples and journals
-    interval = HOST_OBSERVATION_INTERVAL_SECONDS
-    times = [at for at, _ in posts]
-    assert times[0] == 100.0  # the first at once
-    assert all(later - earlier >= interval for earlier, later in zip(times, times[1:]))
-    assert all(later - earlier < interval + 2 for earlier, later in zip(times, times[1:]))
-    assert len(times) == 4
-    # A new session posts at once, even inside the interval.
-    session_for(uuid4())
-    runner.tick()
-    assert posts[-1][0] == clock[0] and clock[0] - times[-1] < interval
-    # Sequences rise only with posts (the shared journal counter is not spent on coalesced ticks);
-    # the process's first host facts document (§64) takes 2, and its 404 turns facts off.
-    assert [observation.sequence for _, observation in posts] == [1, 3, 4, 5, 6]
+    assert len(sampled) == 30
+    assert read[0] == 100.0 and len(read) == 60 // HOST_METRICS_EVERY
+    assert all(later - earlier >= HOST_METRICS_EVERY for earlier, later in zip(read, read[1:]))
 
 
 def test_the_silence_limit_derives_from_the_one_constant():

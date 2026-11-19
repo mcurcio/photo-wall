@@ -278,13 +278,12 @@ class Wall:
         self.probes = ProbeThread(self.feed, clock=lambda: self.now_ms, timing=FAST)
         self.glib = FakeGLib()
         self.player_end, self.broker_end = packet_pair()
-        self.responder = ProbeResponder(MainLoopDispatcher(self.glib), on_relink=lambda: None,
+        self.responder = ProbeResponder(MainLoopDispatcher(self.glib),
                                         frames_black=self.executor.frames_black,
                                         connector=lambda _path: self.player_end)
         self.thread = threading.Thread(target=self.responder._channel, daemon=True)
         self.thread.start()
         parse_node_probe_open(self.broker_end.recv(9000))
-        self.feed.append("app_link_accepted", {"run": RUN, "player_id": player_id})
         self.probes.adopt(self.broker_end, RUN_KEY)
         self.probes.publish_run(RUN_KEY)
         self.reader = local_reader(self.feed)
@@ -353,7 +352,9 @@ def test_a_frame_with_no_photo_it_can_show_says_so(walls, case):
     assert not wall.card(WINDOW - 1)[0].tint
     (card,) = wall.card(1)
     assert card.tint and card.lines[0].startswith(f"{NO_CONTENT} · since ")
-    assert card.lines[1] == f"frame_no_content · Player player-one · Output {OUTPUT}"
+    # No app link names the Player to the broker any more (decision 0034, S4c): the card's second
+    # line is the code and the Output.
+    assert card.lines[1] == f"frame_no_content · Output {OUTPUT}"
 
 
 def test_a_frame_with_no_active_run_stays_silent(walls):
