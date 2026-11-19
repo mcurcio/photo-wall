@@ -433,3 +433,90 @@ def test_the_brokers_run_told_over_the_ingress_is_what_the_output_is_handed_to(s
     runner.settle(controller, shell, wiring)
     assert steps(shell) == ["allow", "candidate"]
     assert shell.host.state("HDMI-A-1").candidate == WANTED
+
+
+def test_the_outputs_op_says_what_each_output_is_held_for_and_which_input_is_missing(shell):
+    """Root's `outputs` op on the ingress answers each Output's state and the handoff's two inputs,
+    so an Output left unhanded says why: no run told, no binding, or offered and awaiting the
+    Player. tests/node_pid1_display_probe.py `handed_to` reads it, as the real-PID1 scenarios do.
+    Mutation probe: `outputs` answers without "handoff" -> KeyError here and in the scenarios."""
+    import json
+
+    from node_pid1_display_probe import handed_to, held
+
+    controller = Controller(shell)
+    wiring = SimpleNamespace(cards=Cards())
+
+    def answer() -> dict:   # as answer_ingress puts it on the wire
+        return json.loads(json.dumps({"accepted": True, **controller.receive({"op": "outputs"})},
+                                     default=str))
+
+    pid, invocation = RUN.process.pid, str(RUN.process.invocation_id)
+    first = answer()
+    assert first["handoff"] == {"run": None, "bindings": {}}
+    assert held(first, "HDMI-A-1") is None
+    controller.handoffs.document("HDMI-A-1", BOUND)
+    runner.settle(controller, shell, wiring)
+    assert answer()["handoff"] == {"run": None, "bindings": {"HDMI-A-1": {
+        "frame_id": "kitchen", "generation": 3, "configuration_revision": 5}}}
+    assert held(answer(), "HDMI-A-1") is None          # bound, but no run: nothing offered
+    controller.receive({"op": APP_RUN_OP, "run": {
+        "invocation_id": invocation, "pid": pid, "start_ticks": RUN.process.start_ticks, "app_epoch": 1}})
+    runner.settle(controller, shell, wiring)
+    offered = answer()
+    assert offered["handoff"]["run"] == {"invocation_id": invocation, "pid": pid,
+                                         "start_ticks": RUN.process.start_ticks, "app_epoch": 1}
+    assert held(offered, "HDMI-A-1")["frame_id"] == "kitchen"
+    assert handed_to(offered, "HDMI-A-1", pid=pid, invocation_id=invocation.replace("-", ""), frame_id="kitchen")
+    assert not handed_to(offered, "HDMI-A-1", pid=pid, invocation_id=invocation, frame_id="den")
+    assert not handed_to(offered, "HDMI-A-1", pid=OTHER_RUN.process.pid,
+                         invocation_id=str(OTHER_RUN.process.invocation_id), frame_id="kitchen")
+    with pytest.raises(AssertionError):
+        held(offered, "HDMI-A-2")
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"),
+                    reason="the ingress is SOCK_SEQPACKET with SO_PASSCRED (Linux)")
+def test_the_scenarios_probe_reads_the_offer_over_a_real_ingress(shell):
+    """The real-PID1 scenarios' own probe (`DISPLAY_OUTPUTS`, a separate process) over a real
+    ingress socket answered by `answer_ingress`: it reads the offer the broker's run and the
+    binding made."""
+    import json
+    import os
+    import socket
+    import subprocess
+    import threading
+    from pathlib import Path
+
+    from node_pid1_display_probe import DISPLAY_OUTPUTS, handed_to
+
+    from appliance.display_host.runner import answer_ingress
+
+    controller = Controller(shell)
+    controller.handoffs.document("HDMI-A-1", BOUND)
+    controller.handoffs.run(RUN)
+    runner.settle(controller, shell, SimpleNamespace(cards=Cards()))
+    directory = Path(f"/tmp/pw-outputs-{uuid4().hex[:8]}")
+    directory.mkdir()
+    path = directory / "ingress.sock"
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_PASSCRED, 1)
+            listener.bind(str(path))
+            listener.listen(1)
+
+            def serve() -> None:
+                connection, _ = listener.accept()
+                with connection:
+                    answer_ingress(connection, controller, root=os.getuid())
+
+            serving = threading.Thread(target=serve, daemon=True)
+            serving.start()
+            printed = subprocess.run([sys.executable, "-I", "-c", DISPLAY_OUTPUTS, str(path)],
+                                     check=True, capture_output=True, text=True, timeout=10).stdout
+            serving.join(5)
+    finally:
+        path.unlink(missing_ok=True)
+        directory.rmdir()
+    assert handed_to(json.loads(printed), "HDMI-A-1", pid=RUN.process.pid,
+                     invocation_id=str(RUN.process.invocation_id), frame_id="kitchen")

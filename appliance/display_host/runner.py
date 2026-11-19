@@ -618,7 +618,10 @@ class Controller:
                 "outputs": self.outputs_snapshot(),
             }
         if operation == "outputs":
-            return {"outputs": [asdict(state) for state in self.host.states()]}
+            # Each Output's whole state (its candidate, presented and admitted surfaces) and the
+            # handoff's two inputs: what root reads on a Pi when an Output is not handed off.
+            return {"outputs": [asdict(state) for state in self.host.states()],
+                    "handoff": self.handoffs.inputs()}
         if operation == APP_RUN_OP:
             # The app broker's current run (appliance/apps/display_runs.py); None: no run.
             if set(value) != {"op", "run"}:

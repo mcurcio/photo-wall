@@ -73,7 +73,11 @@ the host line, the device's version, its reboot records and its Outputs (`GET /f
 - **success**: cold (the roots are image mounts, the bus and its memory reach Central on the host
   line, and three signal range restarts of Weston under the running Player each see the broker
   start it again); the seeded Frame is bound to Virtual-1 and the Pi alone hands the Output to the
-  Player (its MainPID's surface in Weston's scene graph). Install of the success release answers
+  Player's run (Display's root ingress `outputs`: Virtual-1 offered to, or admitted for, the
+  Player's MainPID and InvocationID and the bound Frame, the broker's run told being the same).
+  The fixture has no GPU, so the Player's renderer is never made and it never presents: its
+  drawing is the [render bench](../../runbook.md#the-render-bench-and-pi-testing-before-merge)'s,
+  never this scenario's. Install of the success release answers
   "restarting" and reboots the Pi over the bus (one reboot record, delivered). Boot B of the same
   device runs the target root from its next boot offer and the Frame is handed off again with no
   operator action; the memory lines hold, an induced bus OOM is reported on the host line, and a
@@ -82,7 +86,8 @@ the host line, the device's version, its reboot records and its Outputs (`GET /f
   B's Player exits at start and stays down, and the debug overlay's card reads `app_absent`.
 - **outage**: cold and the Frame handed off; then Central is unreachable for 35 s (every request
   but the fixture's answers 503 and the hub is stopped): the Player's MainPID, InvocationID and
-  launch epoch never change, no unit fails and its surface stays on Virtual-1; once Central is
+  launch epoch never change, no unit fails, Display keeps both handoff inputs (the run and the
+  binding) and still hands Virtual-1 to that run; once Central is
   back it reads the Pi linked again.
 - **reboot**: cold, then the operator's reboot (`POST /v1/operator/node/devices/{id}/reboots`)
   asks the Pi's host over the bus; boot B, a new bind-mounted kernel `boot_id` for the same

@@ -66,7 +66,7 @@ from contracts.time import SystemClock
 from nodeapi.buffers import state_prefix, state_stream
 
 REBOOT_SECONDS: Final = 60      # Install's or the operator's reboot: asked, delivered, PID1 stopping
-HANDOFF_SECONDS: Final = 60     # bound Output to the Player's surface on Virtual-1
+HANDOFF_SECONDS: Final = 60     # bound Output handed to the Player's run on Virtual-1
 OUTAGE_SECONDS: Final = 35      # how long Central stays unreachable
 # The hub as Compose deploys it: the worker's client URL and the monitor, on the deployed listeners.
 HUB_URL = f"nats://127.0.0.1:{HUB_LISTENERS.client_port}"

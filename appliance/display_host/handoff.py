@@ -186,6 +186,23 @@ class Handoffs:
         with self._lock:
             return self._run
 
+    def inputs(self) -> dict:
+        """Both inputs as last told, JSON-native, for the root ingress's `outputs` op: `run` (the
+        broker's `RunDocument`, None when no run is current or none was told) and `bindings`
+        (each Output whose document came: its `OutputBinding` fields, None when unbound). An
+        Output left dark for want of an input says which one here, never only in a log."""
+        with self._lock:
+            run, bindings = self._run, dict(self._bindings)
+        return {
+            "run": None if run is None else {
+                "invocation_id": str(run.process.invocation_id), "pid": run.process.pid,
+                "start_ticks": run.process.start_ticks, "app_epoch": run.app_epoch},
+            "bindings": {output_id: None if binding is None else {
+                "frame_id": binding.frame_id, "generation": binding.generation,
+                "configuration_revision": binding.configuration_revision}
+                for output_id, binding in sorted(bindings.items())},
+        }
+
     def settle(self, host: DisplayHost) -> None:
         """Main loop, each pass, per Output: `next_step` over its state and the Surface wanted,
         applied. Offer -> the backend's grant, then the host's offer; Handoff -> the host's

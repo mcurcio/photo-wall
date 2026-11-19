@@ -61,7 +61,9 @@ trap 'rm -rf "$work"' EXIT
 # the release's app root while running the real program. The source package cannot give it: a
 # version there is a hash of the installed tree (debian/content-versions), so the same bytes
 # always rebuild at the release's version. dpkg-deb's own unpack and build re-version it; nothing
-# else of the package changes. `failure` needs no real bytes, so it is an equivs stub.
+# else of the package changes. `failure` needs no real bytes, so it is an equivs stub; it depends
+# on photo-wall-frame-client, as the Player does, because the prepare stage refuses an app root
+# without the frame bridge (appliance/boot/node_bootstrap.py, node_player_frame_bridge_missing).
 for role in success failure; do
 	mkdir "$work/$role-repo"
 	find "$repo" -maxdepth 1 -name '*.deb' ! -name 'photo-wall-player_*' -exec cp {} "$work/$role-repo/" \;
@@ -81,7 +83,7 @@ docker run --rm -i --platform "linux/$ARCHITECTURE" --volume "$repo:/repo:ro" \
 	Package: photo-wall-player
 	Version: $version+failure
 	Architecture: all
-	Depends: python3
+	Depends: python3, photo-wall-frame-client
 	Files: __main__.py /usr/lib/photo-wall/player/
 	Description: The PID1 scenarios failure target
 	 A Player whose entry exits.
