@@ -75,13 +75,13 @@ def base_bundle(root: Path) -> Path:
 
 
 def node_components(root: Path, revision: str = REVISION) -> Path:
-    """A component set stamped for `revision`: the app and the primary manager roots with their
-    .debs, the node base and display .debs, components.json and build-provenance.json."""
+    """A component set stamped for `revision`: the app root with its .deb, the node base and
+    display .debs, components.json and build-provenance.json."""
     components = root / "components"
     components.mkdir(parents=True)
     abi = {"base_abi": "node-v2-test", "graphics_abi": "weston14-test", "plugin_abi": "frame-v2"}
     refs = {}
-    for role, name in (("manager-primary", "photo-wall-app-manager"), ("app", "photo-wall-player")):
+    for role, name in (("app", "photo-wall-player"),):
         deb = (role + "-deb").encode()
         archive = (role + "-root").encode()
         (components / (role + ".deb")).write_bytes(deb)
@@ -92,8 +92,7 @@ def node_components(root: Path, revision: str = REVISION) -> Path:
     for role in ("node-base", "node-display"):
         (components / (role + ".deb")).write_bytes(role.encode())
     (components / "components.json").write_text(json.dumps({
-        "schema": COMPONENTS_SCHEMA, "abi": abi, "app_environment": refs["app"],
-        "manager_primary": refs["manager-primary"], "manager_fallback": None}))
+        "schema": COMPONENTS_SCHEMA, "abi": abi, "app_environment": refs["app"]}))
     (components / "build-provenance.json").write_text(json.dumps(
         {"schema": COMPONENTS_SCHEMA, "abi": abi, "inputs_sha256": COMPONENT_INPUTS}))
     write_stamp(components, revision=revision, inputs_sha256=COMPONENT_INPUTS)

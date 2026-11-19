@@ -1,13 +1,14 @@
 """A root's package is judged where the root is built and where it is launched, never when
 Central parses a stored document (contracts.node_boot, E-0019-FIX-16): the seal and the Node's
-two launchers each refuse a root naming another package. The release writer's own refusal is
+launchers each refuse a root naming another package. The release writer's own refusal is
 tests/test_node_release_writer.py's `test_a_root_sealed_for_another_package_or_abi_is_refused`."""
 from __future__ import annotations
 
 import pytest
 
+from appliance.node.manager_launcher import MANAGER_PACKAGE
 from contracts.app_environment import AppEnvironmentRefV2
-from contracts.node_boot import APP_PACKAGE, MANAGER_PACKAGE
+from contracts.node_boot import APP_PACKAGE
 
 EARLIER_MANAGER = "photo-wall-node-manager"
 ABI = {"base_abi": "base-v2", "graphics_abi": "graphics-v1", "plugin_abi": "plugin-v1"}
@@ -22,7 +23,7 @@ def test_the_seal_refuses_a_deb_of_another_package(tmp_path, monkeypatch):
     from scripts import seal_root
     monkeypatch.setattr(seal_root, "_deb_fields", lambda deb: (EARLIER_MANAGER, "1.0.0"))
     with pytest.raises(seal_root.SealError, match="^seal_root_package_mismatch$"):
-        seal_root.seal(tmp_path / "rootfs", role="manager-primary", deb=tmp_path / "x.deb",
+        seal_root.seal(tmp_path / "rootfs", role="app", deb=tmp_path / "x.deb",
                        base_abi={}, display_abi={}, output=tmp_path)
 
 

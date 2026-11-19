@@ -91,17 +91,17 @@ One pull request; the slices are build order within it. Migrations are forward-o
 
 ## Deploying it
 
-**Pis first, through the old Central.** Install sets a Pi's version, and its next boot offer carries that version (`central/infra/player_versions.py`). So:
+**Central first, then each Pi rebooted once by hand** (engineering call 2026-11-19, superseding the Pi-first order of 2026-11-18). The release names no manager root (S4c part 2b-i), and the Central before it requires one in every release it ingests (`parse_node_release`), so the old Central cannot ingest this release and nothing can Install it through the old Central. So:
 
-1. The merge releases as usual (semantic-release; images and Pi packages).
-2. Through the Central still running the previous release, Install the new release on the test Pi, then check its Frame plays. Its old HTTP reboot path still works there.
-3. Install it on every other Pi the same way. Until Central is deployed, the old Central shows those installs as still pending (it reads completion from host facts the new Pi no longer posts); the Frames play.
-4. Deploy Central (an iac pull request) **stop-then-start**: every old pod stops before the new one starts and migrates (Kubernetes `Recreate`). Central is down for about a minute; the Players keep playing through it (the Wall e2e's Central-outage step, `scripts/demo_wall.py`, [wall demo](../module-wall-demo.md)).
+1. The merge releases as usual (semantic-release; images and Pi packages). The old Central records the new tag as a release it cannot ingest; harmless: migration 129 forgets that record.
+2. Deploy Central (an iac pull request) **stop-then-start**: every old pod stops before the new one starts and migrates (Kubernetes `Recreate`), migrations 116 to 129 running. In the same deploy, the TFTP boot tree is staged from this release: stage 1 parses a boot offer strictly, so an old `initrd.img` refuses the new offers and a new one the old, and they move together (check what the iac stager stages before deploying). Central is down for about a minute.
+3. Central's release sync ingests this release and fetches its files. Migration 129 cleared every Pi's version, so each Pi is offered the newest ready stable release at its next boot: this one, once its files are in Central's cache. Until then an offer is refused and stage 1 retries.
+4. Reboot each Pi once by hand (the owner's one Pi: the agent, over SSH): software from before this release has no bus reboot method, so neither Install nor the console's reboot reaches it.
 5. Measure the write rates on the primary (pg_stat deltas by `application_name`).
 
 **Why stop-then-start:** the migrations copy rows into merged tables and drop the old ones (copy-then-drop, *Refactoring Databases*, Sadalage and Ambler, in one forward migration), and an old pod's SQL fails against a merged table; rolling deploys overlap (`central/infra/node_link_store.py`).
 
-**The other order breaks a Frame:** a Pi still on the old release has no handoff answer from the new Central, so its Frame stays dark until someone reboots it by hand (SSH or a power cycle); it then boots the version Install set.
+**Costs of this order:** between steps 2 and 4 a Pi still on the old release keeps its last plan, but its Display Host and Player call routes this Central no longer serves: it may show its last picture or go dark until its reboot (not verified). A Pi that reboots by itself before step 3 finishes is refused an offer until the release is ready. Every older tag shows on the Releases page as a release that cannot be ingested. Boot offer history and calibration mode reset until each Pi's next boot. A rollback is a forward fix: the migrations are forward-only, and an older release could not run against this Central anyway.
 
 ## What it gives up
 
@@ -113,6 +113,7 @@ One pull request; the slices are build order within it. Migrations are forward-o
 - The console's "Central has not looked at its hub for …" becomes two facts: the worker is not running (its queue heartbeat lapsed), or Central cannot reach its hub. A worker whose bus task hangs while its job loops still beat reads as running.
 - A one-time enrolment nonce lives in memory; one issued before a Central restart is refused and retried.
 - Central is down about a minute at the deploy.
+- A release published before this delivery can no longer be ingested (it names a manager root), and migration 129 forgets every stored release, deployment and boot offer: each Pi's version is cleared and its next boot takes the newest ready stable release. Each Pi is rebooted once by hand at the deploy ([Deploying it](#deploying-it)).
 - **Deferred:** moving every repository onto a query builder that stamps audit fields itself. This delivery adds the columns and one repository per aggregate, so that move can later go one repository at a time.
 - **Not planned:** changing Procrastinate's tables.
 

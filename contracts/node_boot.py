@@ -63,8 +63,6 @@ class NodeBootOfferV2:
     base: NodeBaseRefV2
     app_status: str
     app_environment: AppEnvironmentRefV2 | None
-    manager_primary: AppEnvironmentRefV2
-    manager_fallback: AppEnvironmentRefV2 | None
 
     def __post_init__(self) -> None:
         for value in (self.offer_id, self.kernel_boot_id, self.cold_operation_id):
@@ -80,36 +78,30 @@ class NodeBootOfferV2:
         counter(self.expires_at_utc_ms, 1)
         if self.expires_at_utc_ms <= self.created_at_utc_ms:
             raise ValueError("node_boot_expiry_invalid")
-        if type(self.base) is not NodeBaseRefV2 or type(self.manager_primary) is not AppEnvironmentRefV2:
-            raise ValueError("node_boot_base_or_manager_invalid")
+        if type(self.base) is not NodeBaseRefV2:
+            raise ValueError("node_boot_base_invalid")
         if self.app_status not in ("unconfigured", "selected") or (
                 self.app_status == "selected") != (self.app_environment is not None):
             raise ValueError("node_boot_app_selection_invalid")
-        validate_node_environment_roles(self.base, self.app_environment, self.manager_primary, self.manager_fallback)
+        validate_node_environment_roles(self.base, self.app_environment)
 
 
-# Each release root's package (decision 0019, debian/control), which its reference's deb_name
-# names: the manager root's AppManager launcher and the app root's Player. Judged where a root
-# is built (scripts/seal_root.py, scripts/node_release_writer.py) and launched
-# (appliance/node/manager_launcher.py, appliance/apps/process_linux.py), never when a stored
-# document is parsed: Central re-reads releases, deployments and offers an earlier build wrote,
-# whose roots named the packages of their day (E-0019-FIX-16).
-MANAGER_PACKAGE = "photo-wall-app-manager"
+# The release root's package (decision 0019, debian/control), which its reference's deb_name
+# names: the app root's Player. Judged where the root is built (scripts/seal_root.py,
+# scripts/node_release_writer.py) and launched (appliance/apps/process_linux.py), never when a
+# stored document is parsed.
 APP_PACKAGE = "photo-wall-player"
 
 
-def validate_node_environment_roles(base, app_environment, manager_primary, manager_fallback):
+def validate_node_environment_roles(base: NodeBaseRefV2, app_environment: AppEnvironmentRefV2 | None) -> None:
     """Shared cold-offer/release role and ABI compatibility rules."""
-    if manager_fallback is not None and manager_fallback.environment_sha256 == manager_primary.environment_sha256:
-        raise ValueError("node_boot_role_invalid")
-    for environment in (app_environment, manager_primary, manager_fallback):
-        if environment is None:
-            continue
-        if type(environment) is not AppEnvironmentRefV2 or environment.size_bytes > MAX_ENVIRONMENT_BYTES:
-            raise ValueError("node_boot_environment_invalid")
-        if (environment.base_abi, environment.graphics_abi, environment.plugin_abi) != (
-                base.base_abi, base.graphics_abi, base.plugin_abi):
-            raise ValueError("node_boot_environment_abi_mismatch")
+    if app_environment is None:
+        return
+    if type(app_environment) is not AppEnvironmentRefV2 or app_environment.size_bytes > MAX_ENVIRONMENT_BYTES:
+        raise ValueError("node_boot_environment_invalid")
+    if (app_environment.base_abi, app_environment.graphics_abi, app_environment.plugin_abi) != (
+            base.base_abi, base.graphics_abi, base.plugin_abi):
+        raise ValueError("node_boot_environment_abi_mismatch")
 
 
 def _json(value: dict) -> bytes:
@@ -152,9 +144,8 @@ def parse_node_boot_offer(raw: bytes) -> NodeBootOfferV2:
         for name in ("offer_id", "kernel_boot_id", "cold_operation_id"):
             value[name] = UUID(value[name])
         value["base"] = NodeBaseRefV2(**value["base"])
-        for name in ("app_environment", "manager_primary", "manager_fallback"):
-            if value[name] is not None:
-                value[name] = AppEnvironmentRefV2(**value[name])
+        if value["app_environment"] is not None:
+            value["app_environment"] = AppEnvironmentRefV2(**value["app_environment"])
         return NodeBootOfferV2(**value)
     except (KeyError, TypeError, AttributeError) as exc:
         raise ValueError("node_boot_offer_invalid") from exc

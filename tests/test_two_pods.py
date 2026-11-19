@@ -10,7 +10,7 @@ coordination, with the REAL entry points.
 
 The read path is exercised through a node boot offer's artifact route
 (`/v2/node/boot-offers/{id}/artifacts/{role}`), the unauthenticated byte route a Node boots
-from: the pods run `central.app:create_app`, a node deployment whose manager environment is
+from: the pods run `central.app:create_app`, a node deployment whose app environment is
 the fake release's environment blob is written and selected as the release
 sync's ingest does it, and one Node's offer names it. The base tarball answers 404, so the only
 download that can hold or throttle is the environment's.
@@ -79,7 +79,7 @@ ENVIRONMENT_FETCH = "photo_wall.sealed_environment.fetch"
 SERIAL = "10000000beef0001"
 SQUASHFS_BYTES = 64 * 1024
 BASE_ABI = "sha256:" + "c" * 64
-ROLE = "manager-primary"
+ROLE = "app"
 ALL_LOOPS = 2 * (JOB_LOOPS + MEDIA_LOOP)  # two job runtimes and two media loops
 
 
@@ -242,14 +242,14 @@ class TwoPods:
         operator route, whose Prefetch publishes the selected environment's fetch."""
         self.origin.releases[release.tag] = release
         url = f"{self.origin.api_base}/dl/{release.tag}"
-        manager = AppEnvironmentRefV2(environment_sha(release), len(release.environment), "e" * 64,
-                                      "photo-wall-app-manager", "1.0.0", "arm64", "f" * 64,
-                                      "1" * 64, "/usr/bin/app", BASE_ABI, "graphics-v1",
-                                      "plugin-v1")
+        app = AppEnvironmentRefV2(environment_sha(release), len(release.environment), "e" * 64,
+                                  "photo-wall-player", "1.0.0", "arm64", "f" * 64,
+                                  "1" * 64, "/usr/bin/app", BASE_ABI, "graphics-v1",
+                                  "plugin-v1")
         base = NodeBaseRefV2(release.tag, release.tarball_sha, release.squashfs_sha,
                              SQUASHFS_BYTES, BASE_ABI, "graphics-v1", "plugin-v1")
-        deployment = released(NodeDeployment(uuid4(), base, None, manager, None, {
-            manager.environment_sha256: f"{url}/{ENVIRONMENT_NAME}"}))
+        deployment = released(NodeDeployment(uuid4(), base, app, {
+            app.environment_sha256: f"{url}/{ENVIRONMENT_NAME}"}))
         publish_deployment(self.db, deployment, SystemClock(), source=OriginLocator(
             f"{url}/{TARBALL_NAME}", release.tarball_sha, len(release.tarball)))
         keep_version(self.db, SERIAL, deployment.deployment_id, time.time())

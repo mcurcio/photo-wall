@@ -7,8 +7,8 @@ version is on its `devices` row (121, central/infra/player_versions.py). A deplo
 its `asset_references` rows, owner `node-deployment:<hex>`.
 
 * **Deployment writer** (`write_deployment`): used by the release sync's ingest. An existing id
-  with the same canonical bytes is a `duplicate`, with other bytes a refusal. A base's manager pins
-  and an environment's reference are read from the other stored deployment documents: never a
+  with the same canonical bytes is a `duplicate`, with other bytes a refusal. An environment's
+  reference is read from the other stored deployment documents: never a
   second copy.
 * **Observations** (`_OBSERVED`, from `ingest` and `record_problem`): a tag's stable flag and
   deployment decide whether it is in the window. A tag once catalogued keeps its manifest: any
@@ -112,15 +112,6 @@ def _owner(deployment_id: UUID) -> str:
     return _OWNER + deployment_id.hex
 
 
-def _manager_pins(deployment: NodeDeployment) -> dict[str, Any]:
-    """What a base's managers are pinned to: the same for every deployment of that base."""
-    base = deployment.base
-    return {"base_abi": base.base_abi, "graphics_abi": base.graphics_abi,
-            "plugin_abi": base.plugin_abi,
-            "primary": asdict(deployment.manager_primary),
-            "fallback": asdict(deployment.manager_fallback) if deployment.manager_fallback else None}
-
-
 def _stored_deployments(conn: Any) -> list[NodeDeployment]:
     """Every stored deployment, parsed from its release row's document."""
     return [parse_node_deployment(bytes(row["deployment_document"])) for row in conn.execute(
@@ -142,9 +133,8 @@ def write_deployment(conn: Any, deployment: NodeDeployment, base_source: OriginL
     """Write one deployment onto the release row whose manifest built it, and its asset
     references; True when it already existed (duplicate, nothing written).
 
-    Refuses (`NodeReleaseRefused`) an existing id with other bytes, a base whose manager pins
-    differ from another stored deployment of the same base, an environment digest another stored
-    deployment names with another reference, and a deployment no catalogued release builds.
+    Refuses (`NodeReleaseRefused`) an existing id with other bytes, an environment digest another
+    stored deployment names with another reference, and a deployment no catalogued release builds.
     `base_source` names where the base tarball is downloaded. Holds the release writer's lock
     (`RELEASE_WRITER_LOCK`) before its first read, so two writers serialize and the second sees
     the first's deployment."""
@@ -157,9 +147,6 @@ def write_deployment(conn: Any, deployment: NodeDeployment, base_source: OriginL
             raise NodeReleaseRefused("node_deployment_identity_conflict")
         return True
     base, others = deployment.base, _stored_deployments(conn)
-    pins = _manager_pins(deployment)
-    if any(other.base.content_key == base.content_key and _manager_pins(other) != pins for other in others):
-        raise NodeReleaseRefused("node_base_manager_pins_immutable")
     known = {item.environment_sha256: item for other in others for item in other.environments()}
     environments = deployment.environments()
     if any(known.get(item.environment_sha256, item) != item for item in environments):

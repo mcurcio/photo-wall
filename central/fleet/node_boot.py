@@ -5,9 +5,8 @@ Deployments are written only by the release sync's ingest. Which one a Pi boots 
 the newest ready stable release). The offer's wire is unchanged: a release's base carries the
 release's own tag (scripts/node_release_artifacts.py), so `offer.base.tag` is the Pi's version.
 
-Fleet chooses references; the shared content worker owns acquired bytes. Manager
-roots are immutable properties of the selected base content, not a separate
-mutable manager policy. No offer receipt proves download, boot, or playback.
+Fleet chooses references; the shared content worker owns acquired bytes. An offer names the
+base and, when selected, the app root; no other root. No offer receipt proves download, boot, or playback.
 """
 from __future__ import annotations
 
@@ -133,11 +132,9 @@ class NodeBootService:
             if role == "base":
                 return OfferAsset("base", offer.base.tag, offer.base.content_key,
                                   offer.base.squashfs_sha256, offer.base.size_bytes)
-            refs = {"app": offer.app_environment, "manager-primary": offer.manager_primary,
-                    "manager-fallback": offer.manager_fallback}
-            if role not in refs:
+            if role != "app":
                 raise NodeControlError("node_artifact_role_invalid", 404)
-            ref = refs[role]
+            ref = offer.app_environment
             if ref is None:
                 raise NodeControlError("node_artifact_unconfigured", 404)
             return OfferAsset("environment", offer.base.tag, ref.environment_sha256,

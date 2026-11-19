@@ -915,6 +915,15 @@ The release of [0033](decisions/0033-central-write-load.md) stops the pool check
    - **If Central's log repeats `canceling statement due to statement timeout` at migration 113**, the start rolls back whole (112 and 113 together, nothing changed) and every restart repeats it: Central is down. Revert the deploy pull request, so the previous release starts on the unchanged schema, then time 113's copy statements on the replica (`EXPLAIN (ANALYZE, BUFFERS)`, read-only) and raise its `statement_timeout` in a new pull request before deploying again (113 was never applied, so it may still change).
 3. **Watch `/healthz`**: `node-retention` and `retention` read `ok`. The first hours drain the queue's backlog of finished media jobs (about 20,000 an hour); after that each node table commits a trim about twice an hour.
 
+## Deploying the schema consolidation release
+
+The release of [0034](decisions/0034-central-schema-consolidation.md) (pull request #156) is deployed Central first, then each Pi rebooted once by hand ([0034, Deploying it](decisions/0034-central-schema-consolidation.md#deploying-it)): its releases name no manager root, which the Central before it cannot ingest, and the software before it has no bus reboot.
+
+1. **Take a `pg_dump` of Central's database.** Migrations 116 to 129 merge and drop tables in place, and 129 forgets every stored release, deployment and boot offer; only the dump brings them back.
+2. **Deploy Central** stop-then-start (Kubernetes `Recreate`) through the usual pull request to the deployment repository, with the TFTP boot tree staged from this release in the same deploy (an old `initrd.img` refuses the new boot offers and a new one the old).
+3. **Wait for the release to be ready** on the Releases page (Central ingests it and fetches its files). Every Pi now has no version and is offered the newest ready stable release at its next boot.
+4. **Reboot each Pi once over SSH** (`sudo systemctl reboot`). It boots this release and appears on the bus; from then on Install and the console's reboot reach it.
+
 ## Recovery
 
 ```sh

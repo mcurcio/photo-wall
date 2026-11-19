@@ -26,7 +26,7 @@ REPO = Path(__file__).resolve().parents[3]
 ENABLE_VARIABLE = "PHOTO_WALL_IMAGE_MOUNT_TESTS"
 COMPONENTS_VARIABLE = "PHOTO_WALL_NODE_COMPONENTS"
 # components.json field -> the image scripts/node_release_writer.py ships beside it.
-IMAGES = {"app_environment": "app" + IMAGE_SUFFIX, "manager_primary": "manager-primary" + IMAGE_SUFFIX}
+IMAGES = {"app_environment": "app" + IMAGE_SUFFIX}
 
 pytestmark = pytest.mark.skipif(
     os.environ.get(ENABLE_VARIABLE) != "1",

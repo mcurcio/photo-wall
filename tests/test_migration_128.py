@@ -85,7 +85,7 @@ def test_128_drops_the_old_paths_20_tables_and_leaves_the_decisions_schema(datab
                     "FROM pg_constraint WHERE contype='f'").fetchall()
                     if row["target"] in DROPPED and row["source"] not in DROPPED}
                 _seed(conn)
-            db.migrate()
+            migrate_before(db, "129")   # 128 alone: 129 forgets the boot offers
             with db.transaction() as conn:
                 after = _tables(conn)
                 offers = [row["offer_id"] for row in conn.execute("SELECT offer_id FROM node_boot_offers")]

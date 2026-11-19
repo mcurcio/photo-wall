@@ -29,14 +29,13 @@ def _components(directory):
     whose references name their exact bytes; returns (directory, the success phase's ref, archive)."""
     directory.mkdir()
     refs = {}
-    for name, deb in (("app", "photo-wall-player"), ("manager-primary", "photo-wall-app-manager"),
-                      ("success", "photo-wall-player")):
+    for name, deb in (("app", "photo-wall-player"), ("success", "photo-wall-player")):
         data = f"archive of {name}".encode()
         (directory / f"{name}.squashfs").write_bytes(data)
         refs[name] = replace(environment("d", deb),
                              environment_sha256=hashlib.sha256(data).hexdigest(), size_bytes=len(data))
     (directory / "components.json").write_text(json.dumps(
-        {"app_environment": asdict(refs["app"]), "manager_primary": asdict(refs["manager-primary"])}))
+        {"app_environment": asdict(refs["app"])}))
     return directory, refs["success"], directory / "success.squashfs"
 
 

@@ -130,12 +130,12 @@ def test_readiness_is_derived_from_the_cache_for_each_row(registry, sync_world):
     world = sync_world(upstream)
     sync(world)
     store_files(world, ready)
-    store_files(world, partial, missing={partial.release.manager_primary.environment_sha256})
+    store_files(world, partial, missing={partial.release.app_environment.environment_sha256})
     by_tag = {row["version"]: row for row in read(registry, world)["releases"]}
     assert (by_tag["v2.1.0"]["readiness"], by_tag["v2.1.0"]["missing_bytes"]) == ("ready", 0)
     # Wanted (in the window) with a file absent: downloading, with the absent file's size left.
     assert by_tag["v2.2.0"]["readiness"] == "downloading"
-    assert by_tag["v2.2.0"]["missing_bytes"] == partial.release.manager_primary.size_bytes
+    assert by_tag["v2.2.0"]["missing_bytes"] == partial.release.app_environment.size_bytes
     # Not wanted (out of the window, never selected): not downloaded.
     assert by_tag["v2.0.0"]["in_window"] is False
     assert by_tag["v2.0.0"]["readiness"] == "not_downloaded"

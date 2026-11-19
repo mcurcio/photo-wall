@@ -6,7 +6,7 @@ The signed appliance image, its VM boot gate, the reusable OS base (`scripts/os_
 |---|---|---|
 | [`node-components.yml`](../.github/workflows/node-components.yml), job `weston` | Restores Photo Wall's Weston (`weston`, `libweston-14-0`, `libweston-14-dev`) from its cache, or builds it with `debian-packaging/build-weston.sh` and saves it (**Weston cache** below); uploads it for `debs` | yes |
 | `node-components.yml`, job `debs` | Builds the `photo-wall` source package in the pinned build container, twice (the two `Packages` indexes must agree), proves the local repo with `tests/debs`, uploads it | yes |
-| `node-components.yml`, job `build` | Builds the app and manager release roots from the pin and the local repo, seals them, writes the component set (`scripts/node_release_writer.py`) | yes |
+| `node-components.yml`, job `build` | Builds the app release root from the pin and the local repo, seals it, writes the component set (`scripts/node_release_writer.py`) | yes |
 | `node-components.yml`, job `pid1-fixture` | Derives the PID1 scenarios' stage targets and fixture image from the repo and the set | yes |
 | [`base-image.yml`](../.github/workflows/base-image.yml) | rpi-image-gen builds the base squashfs installing `photo-wall-node` from the local repo; builds the scratch root with `photo-wall-netboot-init` and assembles the netboot bundle | yes |
 | [`node-pid1.yml`](../.github/workflows/node-pid1.yml) | The Node lifecycle under real systemd, one leg per scenario, plus the `display-harness` leg | yes |
@@ -197,11 +197,11 @@ push. Its entry is visible only to that pull request; the cost is a few MB of ca
 pull request. The `debs` job `needs` it, which adds the hit path (checkout, restore, upload,
 under a minute) to the critical path.
 
-**Release roots cache.** The roots are cached whole (`actions/cache`, exact key `node-roots-v1-<digest>`, written only
+**Release roots cache.** The roots are cached whole (`actions/cache`, exact key `node-roots-v2-<digest>`, written only
 from `main`, like `linux-media`'s). The key is `scripts/node_release_writer.py key`: the recipe (the
 build and seal scripts and the first-party modules they import), the ABI pair and, per root
 package, the `Package=Version` lines `debian-packaging/build-root.sh --resolve` prints. A
-miss builds each root twice and requires equal digests; the writer and its proofs run on every
+miss builds the root twice and requires equal digests; the writer and its proofs run on every
 run, so the set's `.deb`s and ABI are always that run's. The base squashfs cache is keyed on the
 layers, the pin and the `Package=Version` lines of the packages `photo-wall-node` pulls from the
 local repo, and the ABI check refuses a hit whose installed ABI differs from the set's.

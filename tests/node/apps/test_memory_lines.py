@@ -131,7 +131,5 @@ def test_a_line_table_that_leaves_no_content_line_is_refused() -> None:
 def test_a_shipped_image_over_its_line_fails_the_component_build() -> None:
     """The release writer (scripts/node_release_writer.py) ships no image over its line."""
     check_line("app", line("app-image").cap_bytes)
-    check_line("manager-primary", line("manager-image").cap_bytes)
-    for role, size in (("app", 321 * MIB), ("manager-primary", line("manager-image").cap_bytes + 1)):
-        with pytest.raises(WriterError, match="^node_components_image_over_line$"):
-            check_line(role, size)
+    with pytest.raises(WriterError, match="^node_components_image_over_line$"):
+        check_line("app", 321 * MIB)

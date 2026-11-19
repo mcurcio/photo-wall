@@ -215,18 +215,16 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
     clock = SystemClock()
     registry = Registry(registry.db, clock, lighting=registry.lighting)
     components = json.loads((components_dir / "components.json").read_text())
-    manager = AppEnvironmentRefV2(**components["manager_primary"])
     original = AppEnvironmentRefV2(**components["app_environment"])
     refs = {"cold": original}
     archives = {
         original.environment_sha256: components_dir / "app.squashfs",
-        manager.environment_sha256: components_dir / "manager-primary.squashfs",
     }
     for phase, (reference, archive) in extra_refs_and_archives.items():
         reference = AppEnvironmentRefV2(**reference) if isinstance(reference, dict) else reference
         refs[phase] = reference
         archives[reference.environment_sha256] = Path(archive)
-    references = {r.environment_sha256: r for r in [manager, *refs.values()]}
+    references = {r.environment_sha256: r for r in refs.values()}
     store = CacheStore(CacheLayout(workdir / "cache"))
     records, transactions = PgAssetRecords(clock), PgTransactions(registry.db)
     # Copy and independently measure exact fixture archives before serving them.
@@ -257,8 +255,7 @@ def _central_fixture(registry, components_dir, extra_refs_and_archives, workdir,
     deployments, tags = {}, {}
     for number, (phase, ref) in enumerate(refs.items()):
         selected = released(NodeDeployment(
-            uuid4(), base, ref, manager, None,
-            {r.environment_sha256: origin + "/fixture/origin/" + r.environment_sha256 for r in [manager, ref]},
+            uuid4(), base, ref, {ref.environment_sha256: origin + "/fixture/origin/" + ref.environment_sha256},
         ))
         tags[phase] = f"v99.0.{number}"
         publish_deployment(registry.db, selected, clock, tag=tags[phase])

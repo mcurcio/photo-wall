@@ -19,13 +19,11 @@ from test_fleet_attempts import (
     BASE_TAG,
     BASE_TARBALL_SHA,
     BOOT_ID,
-    DEVICE_ID,
     SERIAL,
     _seed,
 )
 
 from central.content_catalog.catalog import device_id_for_serial
-from central.content_catalog.ports import NodeReleaseRefused
 from central.db import Database
 from central.fleet.models import NodeControlError
 from central.fleet.node_boot import (
@@ -62,13 +60,11 @@ def _release_of(deployment) -> tuple[bytes, dict]:
     files = {"base": (base.content_key, base.size_bytes)}
     for role in ("boot", "node-base-deb", "node-display-deb", "build-provenance"):
         files[role] = (sha256(f"{role}:{base.content_key}".encode()).hexdigest(), 1)
-    for role, ref in (("manager-primary", deployment.manager_primary), ("app", deployment.app_environment),
-                      ("manager-fallback", deployment.manager_fallback)):
-        if ref is not None:
-            files[role] = (ref.environment_sha256, ref.size_bytes)
-            files[role + "-deb"] = (ref.deb_sha256, 1)
-    release = NodeReleaseV2("a" * 40, base, deployment.app_environment, deployment.manager_primary,
-                            deployment.manager_fallback,
+    ref = deployment.app_environment
+    if ref is not None:
+        files["app"] = (ref.environment_sha256, ref.size_bytes)
+        files["app-deb"] = (ref.deb_sha256, 1)
+    release = NodeReleaseV2("a" * 40, base, ref,
                             tuple(NodeReleaseAssetV2(role, f"{role}.bin", sha, size)
                                   for role, (sha, size) in files.items()))
     locators = {role: {"url": deployment.environment_sources.get(sha, f"https://example.invalid/{role}.bin"),
@@ -171,11 +167,10 @@ def boot_service(db: Database, clock: Clock, *, readiness: AssetReadiness = NOTH
 def cold_setup(registry, *, app=True):
     """(the boot offer, the deployment the Pi `SERIAL` keeps as its version)."""
     _seed(registry)
-    manager = environment("2", "photo-wall-app-manager")
     selected = environment() if app else None
-    refs = [manager] + ([selected] if selected else [])
+    refs = [selected] if selected else []
     deployment = released(NodeDeployment(uuid4(), NodeBaseRefV2(BASE_TAG, BASE_TARBALL_SHA, BASE_SHA, 1024,
-        BASE_ABI, "graphics-v1", "plugin-v1"), selected, manager, None,
+        BASE_ABI, "graphics-v1", "plugin-v1"), selected,
         {ref.environment_sha256: "https://example.invalid/" + ref.environment_sha256 for ref in refs}))
     publish_deployment(registry.db, deployment, registry.clock)
     keep_version(registry.db, SERIAL, deployment.deployment_id, registry.clock.utc())   # as Install keeps it
@@ -188,11 +183,10 @@ def test_frozen_offer_selection_exact_retry_and_no_app(registry):
     offer = service.offer(request)
     assert parse_node_boot_offer(encode_node_boot_offer(offer)) == offer
     assert offer.installation_audience == NODE_AUDIENCE == "photo-wall"
-    assert offer.app_status == "unconfigured" and offer.manager_fallback is None
+    assert offer.app_status == "unconfigured"
     assert publish_deployment(registry.db, deployment, registry.clock)  # a duplicate
     assert service.offer(request) == offer
     assert service.asset(offer.offer_id, "base").sha256 == BASE_SHA
-    assert service.asset(offer.offer_id, "manager-primary").format == "sealed-environment-v2"
     with pytest.raises(NodeControlError, match="artifact_unconfigured"):
         service.asset(offer.offer_id, "app")
     with pytest.raises(NodeControlError, match="nonce_conflict"):
@@ -211,18 +205,26 @@ def test_frozen_offer_selection_exact_retry_and_no_app(registry):
         service.asset(offer.offer_id, "base")
 
 
-def test_manager_pins_and_environment_identity_are_immutable(registry):
+def test_an_offer_and_a_deployment_name_no_manager_root(registry):
+    """S4c-2b-i: an offer carries the base and the app root alone, and a stored document naming a
+    manager root (written before it) is refused, as Central's migration 129 assumes."""
+    import json
+
+    from central.content_catalog.deployment import encode_node_deployment, parse_node_deployment
     service, deployment = cold_setup(registry)
-    changed = environment("3", "photo-wall-app-manager")
-    sources = {**deployment.environment_sources, changed.environment_sha256: "https://example.invalid/new"}
-    del sources[deployment.manager_primary.environment_sha256]
-    with pytest.raises(NodeReleaseRefused, match="manager_pins_immutable"):
-        publish_deployment(registry.db, released(replace(deployment, manager_primary=changed,
-                           environment_sources=sources)), registry.clock, tag="v1.0.1")
-    with pytest.raises(ValueError, match="role_invalid"):  # a fallback must be another root
-        replace(deployment, manager_fallback=deployment.manager_primary).offer(offer_id=uuid4(), audience="a",
-            request=NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64), device_id=DEVICE_ID,
-            generation=1, revision=1, now=1)
+    offer = service.offer(NodeBootRequestV2(SERIAL, BOOT_ID, "a" * 64))
+    encoded = json.loads(encode_node_boot_offer(offer))
+    assert not any("manager" in name for name in encoded)
+    with pytest.raises(NodeControlError, match="node_artifact_role_invalid"):
+        service.asset(offer.offer_id, "manager-primary")
+    assert service.asset(offer.offer_id, "app").sha256 == deployment.app_environment.environment_sha256
+    manager = json.loads(encode_node_deployment(deployment))
+    manager["manager_primary"], manager["manager_fallback"] = manager["app_environment"], None
+    with pytest.raises(ValueError, match="node_deployment_invalid"):
+        parse_node_deployment(json.dumps(manager, sort_keys=True, separators=(",", ":")).encode())
+    encoded["manager_primary"], encoded["manager_fallback"] = encoded["app_environment"], None
+    with pytest.raises(ValueError, match="node_boot_offer_invalid"):
+        parse_node_boot_offer(json.dumps(encoded).encode())
 
 
 def test_refusal_is_frozen_and_never_retargeted(registry):
@@ -322,7 +324,7 @@ def test_every_pis_version_and_previous_are_desired_and_older_ones_are_not(regis
     for deployment in (second, third, fourth):
         publish_deployment(registry.db, deployment, registry.clock)
     jobs = _desired(registry)
-    assert {_env(first.app_environment), _env(first.manager_primary),
+    assert {_env(first.app_environment),
             FetchOsImage(tarball_sha256=BASE_TARBALL_SHA)} <= jobs
     assert _env(second.app_environment) not in jobs  # published, no Pi's version: not wanted
     now = registry.clock.utc()

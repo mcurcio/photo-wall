@@ -45,9 +45,11 @@ def test_the_node_release_names_the_releases_own_base_and_boot_tarballs(tmp_path
                    for path in output.iterdir() if path.name.endswith(".tar.gz"))
     assert (bundle / "boot/cmdline.txt").read_text() == cmdline_template()
     assert {x.filename for x in manifest.artifacts} <= {x.name for x in result.assets}
-    # The release roots ship as their images (E2c), never as tar archives.
-    roots = {x.role: x.filename for x in manifest.artifacts if x.role in ("app", "manager-primary")}
-    assert len(roots) == 2 and all(name.endswith(".squashfs") for name in roots.values())
+    # The release's one root, the app's, ships as its image (E2c), never as a tar archive; no
+    # manager root (S4c-2b-i).
+    assert {x.role for x in manifest.artifacts} == {
+        "base", "boot", "node-base-deb", "node-display-deb", "build-provenance", "app", "app-deb"}
+    assert next(x.filename for x in manifest.artifacts if x.role == "app").endswith(".squashfs")
 
 
 def test_node_asset_corruption_blocks_whole_release(tmp_path):

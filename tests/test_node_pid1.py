@@ -844,8 +844,8 @@ class Node:
         )
 
     def stop_and_verify_roots(self, components_dir, references):
-        """Stop the units, then verify every app root in `references` (this boot's) and the
-        manager root as the Node's own predicate stages them, each pool image re-hashed."""
+        """Stop the units, then verify every app root in `references` (this boot's) as the Node's
+        own predicate stages them, each pool image re-hashed (no manager root: S4c-2b-i)."""
         run = self.run
         assert "health_storage" not in run(
             "journalctl", "--no-pager", "-u", "photo-wall-node-player.service"
@@ -885,8 +885,7 @@ for kind,ref in refs:
  assert file_sha256(images/(sha+IMAGE_SUFFIX))==sha,sha
  count+=1
 print(json.dumps({'verified_runtime_roots_after_stop':count}))"""
-        refs = [("manager-roots", components["manager_primary"]),
-                *(("app-roots", reference) for reference in references)]
+        refs = [("app-roots", reference) for reference in references]
         verified = run(
             "/usr/bin/python3",
             "-c",
@@ -930,9 +929,11 @@ print(json.dumps(out,sort_keys=True))"""
         rootfs."""
         components = json.loads((components_dir / "components.json").read_text())
         app = components["app_environment"]["environment_sha256"]
-        self._assert_image_mounts(
-            [("app-roots", app), ("manager-roots", components["manager_primary"]["environment_sha256"])],
-            "image-mounts.json")
+        self._assert_image_mounts([("app-roots", app)], "image-mounts.json")
+        # The boot stage stages no manager root and writes no manager configuration (S4c-2b-i).
+        assert self.run("/bin/sh", "-c", "ls -A /run/photo-wall-node-storage/manager-roots; "
+                        "ls /run/photo-wall-node/manager.json /run/photo-wall-node/manager-client.json "
+                        "2>/dev/null; true").strip() == "", "a manager root or its configuration"
         self._assert_player_root(app)
 
     def verify_target_mount(self, reference):

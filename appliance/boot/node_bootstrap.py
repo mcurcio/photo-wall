@@ -29,7 +29,7 @@ STAGING_MARGIN_SECONDS = 300
 DOWNLOAD_WINDOW_SECONDS = 900
 COLD_STAGING = ".cold-staging"
 # The directories holding one mount point per staged root; PID1 creates the mount points.
-_ROOT_DIRECTORIES = ("manager-roots", "app-roots")
+_ROOT_DIRECTORIES = ("app-roots",)
 IMAGE_POOL = "root-images"
 
 
@@ -70,9 +70,6 @@ def materialize_handoff(*, root: Path = Path("/")) -> tuple:
     configs = {
         "host": host,
         "display": {},
-        "manager-client": {"central": central, "serial": offer.serial, "offer_id": str(offer.offer_id), **abi},
-        "manager": {"primary": asdict(offer.manager_primary),
-                    "fallback": asdict(offer.manager_fallback) if offer.manager_fallback else None, **abi},
     }
     if offer.app_environment is not None:
         configs["cold"] = {"boot_id": str(offer.kernel_boot_id), "offer_id": str(offer.offer_id),
@@ -108,9 +105,8 @@ def prepare_roots(*, root: Path = Path("/"), mounter: ImageMounter | None = None
     node_store = root / str(STORE).lstrip("/")
     images = node_store / IMAGE_POOL
     _clear_cold_staging(node_store)
-    selected = (("manager-primary", offer.manager_primary, "manager-roots"),
-                ("manager-fallback", offer.manager_fallback, "manager-roots"),
-                ("app", offer.app_environment, "app-roots"))
+    # The offer's one root: the app, when selected (S4c-2b-i: no manager root).
+    selected = (("app", offer.app_environment, "app-roots"),)
     resident = set()
     for _, environment, destination in selected:
         if environment is None:

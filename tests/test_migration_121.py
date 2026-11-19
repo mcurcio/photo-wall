@@ -276,9 +276,10 @@ def test_121b_folds_each_release_into_one_row(registry):
                        "published_at": None, "created_at": 30.0, "created_by": "unknown",
                        "changed_at": 30.0, "changed_by": "unknown"},
         }
-        # Every deployment asset is still an asset reference, found by its owner.
+        # Every deployment asset is still an asset reference, found by its owner: the base and,
+        # with an app, its root (the seeded documents name no manager root since S4c-2b-i).
         jobs = deployment_jobs(conn, [with_app.deployment_id, without_app.deployment_id])
-        assert {len(jobs[with_app.deployment_id]), len(jobs[without_app.deployment_id])} == {3, 2}
+        assert (len(jobs[with_app.deployment_id]), len(jobs[without_app.deployment_id])) == (2, 1)
         assert {row["created_by"] for row in conn.execute(
             "SELECT created_by FROM asset_references UNION SELECT created_by FROM assets")} == {"unknown"}
         assert conn.execute("SELECT created_at, changed_at, created_by, changed_by FROM job_outcomes"

@@ -31,8 +31,7 @@ from contracts.node_release import (
 )
 
 REPO = "test/repo"
-_ROLES = ("base", "boot", "node-base-deb", "node-display-deb", "manager-primary-deb",
-          "manager-primary", "build-provenance", "app", "app-deb")
+_ROLES = ("base", "boot", "node-base-deb", "node-display-deb", "build-provenance", "app", "app-deb")
 _IDS = itertools.count(1)
 
 
@@ -55,26 +54,32 @@ class NodeUpload:
 
 
 def node_upload(tag: str, *, revision: str = "a" * 40, salt: str = "", app: bool = True,
-                size: int = 0, manager_package: str = "photo-wall-app-manager") -> NodeUpload:
-    """A valid node release for `tag`; `salt` re-cuts every artifact (new digests);
-    `manager_package` is the manager root's deb_name."""
+                size: int = 0) -> NodeUpload:
+    """A valid node release for `tag`; `salt` re-cuts every artifact (new digests)."""
     roles = _ROLES if app else _ROLES[:-2]
     bodies = {role: f"{tag}{salt}:{role}".encode() + b"x" * size for role in roles}
     artifacts = tuple(NodeReleaseAssetV2(role, f"{role}.bin", sha256(data).hexdigest(), len(data))
                       for role, data in bodies.items())
     refs = {asset.role: asset for asset in artifacts}
-    manager = replace(environment("2", manager_package),
-                      environment_sha256=refs["manager-primary"].sha256,
-                      size_bytes=refs["manager-primary"].size_bytes,
-                      deb_sha256=refs["manager-primary-deb"].sha256)
     app_ref = replace(environment(), environment_sha256=refs["app"].sha256,
                       size_bytes=refs["app"].size_bytes,
                       deb_sha256=refs["app-deb"].sha256) if app else None
     base = NodeBaseRefV2(tag, refs["base"].sha256, sha256(f"{tag}{salt}:squashfs".encode()).hexdigest(),
                          100, BASE_ABI, "graphics-v1", "plugin-v1")
-    release = NodeReleaseV2(revision, base, app_ref, manager, None, artifacts)
+    release = NodeReleaseV2(revision, base, app_ref, artifacts)
     return NodeUpload(tag, release, encode_node_release(release),
                       {f"{role}.bin": data for role, data in bodies.items()})
+
+
+def _with_a_manager_root(manifest: bytes, *, references: bool) -> bytes:
+    """`manifest` as a build before S4c-2b-i wrote it: a manager root among its artifacts and,
+    with `references`, the manager references beside the app's."""
+    value = json.loads(manifest)
+    value["artifacts"].append({"role": "manager-primary", "filename": "manager-primary.bin",
+                               "sha256": "1" * 64, "size_bytes": 1})
+    if references:
+        value["manager_primary"], value["manager_fallback"] = value["app_environment"], None
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
 class Upstream:
@@ -140,6 +145,8 @@ def test_a_valid_node_manifest_is_published_with_its_own_asset_version():
     ("tag_mismatch", "node_release_tag_mismatch"),
     ("missing_artifact", "node_artifact_missing"),
     ("manifest_gone", "node_manifest_missing"),
+    ("manager_root", "node_release_invalid"),
+    ("manager_references", "node_release_invalid"),
 ])
 def test_one_bad_node_manifest_is_that_release_problem_and_the_others_still_list(cause, problem):
     upstream, good, bad = Upstream(), node_upload("v2.0.0"), node_upload("v2.1.0")
@@ -150,6 +157,8 @@ def test_one_bad_node_manifest_is_that_release_problem_and_the_others_still_list
         upstream.put(bad, manifest=b"{" + b" " * 40_000 + b"}")
     elif cause == "tag_mismatch":
         upstream.put(bad, manifest=node_upload("v9.9.9").manifest)
+    elif cause.startswith("manager_"):  # a release made before S4c-2b-i: it names a manager root
+        upstream.put(bad, manifest=_with_a_manager_root(bad.manifest, references=cause == "manager_references"))
     elif cause == "missing_artifact":
         upstream.put(bad, drop=("node-display-deb.bin",))
     else:
@@ -287,8 +296,7 @@ def test_ingest_writes_references_with_the_derived_id_and_never_selects(registry
                               ("node-deployment:" + upload.deployment_id.hex,)).fetchall()
         assert conn.execute("SELECT 1 FROM devices WHERE deployment_id IS NOT NULL").fetchone() is None
     assert [(row["kind"], row["identity"]) for row in assets] == [
-        ("os-image", upload.release.base.content_key),
-        ("sealed-environment", upload.release.manager_primary.environment_sha256)]
+        ("os-image", upload.release.base.content_key)]  # no app, no manager root: the base alone
     assert upload.deployment_id.hex[12] == "8"  # UUIDv8; no app: variant bit clear
     # A second tick of the same bytes is a no-op (deterministic id: the writer's duplicate path).
     sync(world)
@@ -351,7 +359,7 @@ def test_a_hand_deployment_holding_the_derived_id_with_other_contents_is_that_ta
     upstream.put(upload)
     world = sync_world(upstream)
     squatter = replace(deployment_for_release(other.sha, other.release, {
-        role: {"url": "https://example.invalid/" + role} for role in ("app", "manager-primary")}),
+        role: {"url": "https://example.invalid/" + role} for role in ("app",)}),
         deployment_id=upload.deployment_id)
     with registry.db.transaction() as conn:  # another tag's row holding the derived id
         conn.execute("INSERT INTO node_releases(tag,is_prerelease,observed_at,manifest_sha256,revision,document,"
@@ -365,27 +373,20 @@ def test_a_hand_deployment_holding_the_derived_id_with_other_contents_is_that_ta
     assert observations(registry)["v2.0.0"]["manifest_sha256"] is None
 
 
-@pytest.mark.parametrize("change", ["manager_pin", "environment_reference"])
-def test_another_pin_for_a_known_base_or_reference_for_a_known_digest_is_refused(registry, change):
-    """A base's manager pins and an environment digest's reference are read from the other
-    releases' stored deployments (no table of their own, 121b): a second release that changes
-    either is refused, and nothing of it is written. Mutation probe: skip the other releases'
-    documents in `write_deployment`'s check -> the conflicting deployment is accepted."""
-    from test_node_boot import cold_setup, environment, publish_deployment, released
+def test_another_reference_for_a_known_digest_is_refused(registry):
+    """An environment digest's reference is read from the other releases' stored deployments (no
+    table of its own, 121b): a second release that changes it is refused, and nothing of it is
+    written. Mutation probe: skip the other releases' documents in `write_deployment`'s check ->
+    the conflicting deployment is accepted."""
+    from test_node_boot import cold_setup, publish_deployment, released
 
     from central.content_catalog.ports import NodeReleaseRefused
     _, first = cold_setup(registry)
-    if change == "manager_pin":  # the same base, another manager
-        manager = environment("3", "photo-wall-app-manager")
-        sources = {**first.environment_sources, manager.environment_sha256: "https://example.invalid/3"}
-        del sources[first.manager_primary.environment_sha256]
-        second = released(replace(first, manager_primary=manager, environment_sources=sources))
-        refusal = "node_base_manager_pins_immutable"
-    else:  # another base, the same app digest under another reference
-        base = replace(first.base, tag="v1.1.0", content_key="7" * 64, squashfs_sha256="8" * 64)
-        second = released(replace(first, base=base,
-                                  app_environment=replace(first.app_environment, deb_version="9.9.9")))
-        refusal = "node_environment_identity_conflict"
+    # Another base, the same app digest under another reference.
+    base = replace(first.base, tag="v1.1.0", content_key="7" * 64, squashfs_sha256="8" * 64)
+    second = released(replace(first, base=base,
+                              app_environment=replace(first.app_environment, deb_version="9.9.9")))
+    refusal = "node_environment_identity_conflict"
     with pytest.raises(NodeReleaseRefused, match=refusal):
         publish_deployment(registry.db, second, registry.clock, tag="v1.1.0")
     assert count(registry, DEPLOYED) == 1

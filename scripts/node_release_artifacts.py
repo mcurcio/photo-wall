@@ -70,11 +70,9 @@ def append(components: Path, destination: Path, *, revision: str, tag: str,
     records = [NodeReleaseAssetV2(role, str(tarballs[role]["filename"]), str(tarballs[role]["sha256"]),
                                   int(tarballs[role]["size"])) for role in TARBALL_ROLES]
     inputs = [("node-base-deb", "node-base.deb"), ("node-display-deb", "node-display.deb"),
-              ("manager-primary-deb", "manager-primary.deb"), ("manager-primary", "manager-primary" + IMAGE_SUFFIX),
               ("build-provenance", "build-provenance.json")]
-    for role, field in (("app", "app_environment"), ("manager-fallback", "manager_fallback")):
-        if metadata[field] is not None:
-            inputs.extend(((role + "-deb", role + ".deb"), (role, role + IMAGE_SUFFIX)))
+    if metadata["app_environment"] is not None:
+        inputs.extend((("app-deb", "app.deb"), ("app", "app" + IMAGE_SUFFIX)))
     for role, filename in inputs:
         name = f"photo-wall-node-{revision}-{filename}"
         target = destination / name
@@ -87,8 +85,6 @@ def append(components: Path, destination: Path, *, revision: str, tag: str,
                         **metadata["abi"])
     manifest = NodeReleaseV2(revision, ref,
                             AppEnvironmentRefV2(**metadata["app_environment"]) if metadata["app_environment"] else None,
-                            AppEnvironmentRefV2(**metadata["manager_primary"]),
-                            AppEnvironmentRefV2(**metadata["manager_fallback"]) if metadata["manager_fallback"] else None,
                             tuple(records))
     (destination / NODE_RELEASE_MANIFEST).write_bytes(encode_node_release(manifest))
     return manifest

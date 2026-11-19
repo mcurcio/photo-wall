@@ -43,10 +43,8 @@ shared parent-directory metadata is not attributed to one package.
 docker compose -f tests/integration/compose.test-database.yml up -d --wait
 debian-packaging/build-repo.sh --output "$WORK/debs"
 mkdir "$WORK/roots"
-for pair in photo-wall-player:app photo-wall-app-manager:manager-primary; do
-  debian-packaging/build-root.sh --repo "$WORK/debs" --package "${pair%%:*}" \
-    --output "$WORK/roots/${pair#*:}.squashfs"
-done
+debian-packaging/build-root.sh --repo "$WORK/debs" --package photo-wall-player \
+  --output "$WORK/roots/app.squashfs"
 .venv/bin/python -m scripts.node_release_writer write --repo "$WORK/debs" --images "$WORK/roots" \
   --output "$WORK/components" --revision "$REVISION" --inputs-sha256 "$INPUTS_SHA256"
 tests/node_pid1_fixture/build.sh --repo "$WORK/debs" --components "$WORK/components" --output "$WORK/fixture"

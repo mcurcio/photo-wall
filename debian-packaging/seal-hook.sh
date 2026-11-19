@@ -4,7 +4,7 @@
 #
 #   debian-packaging/seal-hook.sh ROOT ROLE DEB ABI OUTPUT
 #
-# ROOT is mmdebstrap's finished root directory, ROLE `app` or `manager-primary`, DEB the root
+# ROOT is mmdebstrap's finished root directory, ROLE `app`, DEB the root
 # package's .deb in the local repo, ABI a directory holding base.json and display.json (the
 # repo's photo-wall-node and photo-wall-node-display abi.json) and OUTPUT the image's top
 # directory, which holds ROOT as rootfs/ and gets environment.json, dependency-lock.json and

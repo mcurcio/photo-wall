@@ -15,10 +15,11 @@ from appliance.kernel.clock import boot_id, boottime_ms
 from appliance.node.manager import ManagerRecovery
 from appliance.process_identity import read_proc_start_ticks
 from contracts.app_environment import AppEnvironmentRefV2
-from contracts.node_boot import MANAGER_PACKAGE
 from contracts.strict_json import loads_object
 
 UNIT = "photo-wall-node-manager.service"
+# Its root's package; this launcher has no input since S4c-2b-i and goes in S4c-2b-ii.
+MANAGER_PACKAGE = "photo-wall-app-manager"
 
 
 class SystemdManagerLauncher:

@@ -282,8 +282,7 @@ PACKAGES: Final = (
            "scripts/service_base.py", "scripts/registry_pull.py", "scripts/docker_diagnostics.py",
            ".github/workflows/service-base.yml"),
     # photo-wall-node, the composition (launchers, units, bus configuration), ships byte for byte
-    # as the node release's node-base.deb; photo-wall-player and photo-wall-app-manager as its
-    # app.deb and manager-primary.deb.
+    # as the node release's node-base.deb; photo-wall-player as its app.deb.
     Package("node-debs", "the Node's Debian packages from the one source package, and their "
             "local repo", _NODE_DEBS),
     # photo-wall-node-display from the one source package, built by debhelper's Meson build
@@ -291,11 +290,11 @@ PACKAGES: Final = (
     Package("node-display-deb", "the native Weston display .deb from the local repo",
             (*_PROJECT, "debian/**", "debian-packaging/**", "appliance/display_host/**",
              ".github/workflows/node-components.yml")),
-    # The release roots (decision 0019, steps 3 and 4): mmdebstrap builds the app and manager
-    # roots from the pin and the local repo (debian-packaging/build-root.sh), the seal
-    # (debian-packaging/seal-hook.sh, scripts/seal_root.py) seals them and the release writer
+    # The release root (decision 0019, steps 3 and 4): mmdebstrap builds the app root from the
+    # pin and the local repo (debian-packaging/build-root.sh), the seal
+    # (debian-packaging/seal-hook.sh, scripts/seal_root.py) seals it and the release writer
     # (scripts/node_release_writer.py) writes the component set's components.json.
-    Package("release-roots", "the app and manager release roots (squashfs images) and the "
+    Package("release-roots", "the app release root (squashfs image) and the "
             "component set's components.json",
             (*_NODE_DEBS, "appliance/__init__.py", "scripts/seal_root.py",
              "scripts/node_release_writer.py", "scripts/node_release_artifacts.py",
