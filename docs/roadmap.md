@@ -146,7 +146,8 @@ G6 follows the existing release choices in [console DDD Part E](operator-console
 | Amend U1 so intentional operational darkness (the power schedule, Pause, All off, a display powered off on purpose) counts as intended and shows as Resting | 2a, 3b-i | **Decided** 2026-10-12, owner: "Amend U1" ([system gate](https://claude.ai/artifact/HHNRy2Hs1CpEm5VVK58DWm)); the amended text is [U1](requirements.md#failure-visibility-and-recovery) |
 | Allow a Scene to ask for its displays on or off (operational state in authored content) | Settings #70 and #89 only; nothing else waits | **Not now**, owner 2026-10-12: "Not now" ([system gate](https://claude.ai/artifact/HHNRy2Hs1CpEm5VVK58DWm)); the power timetable can take Scene requests later ([design §7](operator-console-design.md#7-power)) |
 | D13, visible-history accounting ([design decisions](design-decisions.md)) | Nothing now: for 5a, "shown" means displayed and no-repeat only ranks (decided 2026-10-11) | The rest of D13 (partial coverage, motion limits) stays open |
-| What Pause does to the screen (freeze the photo, or stand aside) | F8 in 3b-i | Freeze the current photo |
+| What Pause does to the screen (freeze the photo, or stand aside) | F8 in 3b-i | **Decided** 2026-11-22, owner: "Freeze the photo" ([0036](decisions/0036-home-frame-status-and-wall-actions.md#pause)); what word a paused Frame reads is that record's finding F3 |
+| How people sign in | A2 in 3b-i | **Decided** 2026-11-22, owner: "I want keycloak compatibility"; accounts in the identity provider only, a required role ([0035](decisions/0035-operator-sign-in-through-an-identity-provider.md)) |
 
 ### 1a. The Frame page
 
@@ -250,6 +251,7 @@ The owner's first ask: "Central needs another UI pass to make sure that all of t
 
 ### 3b-i. Home and phone
 
+- **Status (2026-11-22):** designed, not built. Sign-in is [0035](decisions/0035-operator-sign-in-through-an-identity-provider.md) (slice 1); a Frame's status, Home and the everyday actions are [0036](decisions/0036-home-frame-status-and-wall-actions.md) (slices 2 and 3), with its findings and open questions for the owner. The owner account of A2 is a user in the deployment's identity provider (Keycloak), not an account Central keeps.
 - **Outcome:** signed in with his own account on a phone, the owner sees one status word per Frame, skips a photo, puts one on the Never show list, pauses a Frame for an hour, restarts a stuck app, and starts Show now with an end time.
 - **In scope:** A2 (settings #135, #138), G1, G2, G3 (Restart app with progress), F2, F3 (with the Never show list page, #71), F4 (#84, #85), F6, F8 (#86). The six status words, the problems strip and the error template. "Getting ready" shows per-Frame progress after a power cut (U2).
 - **Out of scope:** the live picture of what each Pi presents (3b-ii); notifications (7); household roles (deferred).
