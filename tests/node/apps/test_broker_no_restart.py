@@ -1,5 +1,6 @@
-"""Issue #125: nothing restarts the Player on its own. Two causes start a run (cold start,
-Display's purposeful Weston restart); an exit, a missed ping, a Weston
+"""Issue #125: nothing restarts the Player on its own. Two causes start a run by themselves (cold
+start, Display's purposeful Weston restart), and a third only when a person asks (Restart app,
+decision 0036: tests/node/apps/test_app_restart.py); an exit, a missed ping, a Weston
 crash or a foreign unit never does, and a run that exits under its own Weston is `down` until a
 person reboots. The owner, 2026-10-20: "a human. dont do automated reboots yet. i want to see
 every time it fails for now"; "No auto-restarts at all".

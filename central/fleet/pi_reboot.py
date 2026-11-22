@@ -12,6 +12,8 @@ The operator's reboot (`OperatorReboots`, S4c) is the same job: the route fences
 `RebootPi` with the console's command id as its `request_id`, and writes an ask row (kind
 'reboot-asked', body {"request_id", "reason", "by"}) in that transaction, so a queued ask is listed
 before the worker runs it. `reboot_records_in` folds the two by `request_id` for the device read.
+The queueing and the fold are central/fleet/link_asks.py's, shared with Restart app
+(central/fleet/app_restart.py).
 Both are `events` rows, kept a week: the old path's reboot commands table kept every reboot forever.
 """
 from __future__ import annotations
@@ -25,12 +27,11 @@ from uuid import UUID
 
 from central.actor import Actor
 from central.db import Database
-from central.fleet.device_fence import fence_in
+from central.fleet.link_asks import AskKinds, asks_in, queue_ask_in
 from central.fleet.models import NodeControlError
 from central.infra.events import link_action_in
-from central.infra.job_queue import pending_in
 from central.infra.node_links import NodeLinks
-from central.infra.transactions import PgTransaction, PgTransactions, pg_connection
+from central.infra.transactions import PgTransactions, pg_connection
 from central.kernel.job_types import RebootPi
 from central.kernel.publishing import Publisher
 from contracts.node_link import Pipe
@@ -47,6 +48,7 @@ log = logging.getLogger(__name__)
 REBOOT_CALL_SECONDS: Final = 5.0   # how long the host has to answer `reboot`
 REBOOT_ACTION: Final = "reboot"    # the `events` link action's kind
 REBOOT_ASKED_ACTION: Final = "reboot-asked"   # the operator's ask, written with its job
+REBOOT_KINDS: Final = AskKinds(asked=REBOOT_ASKED_ACTION, outcome=REBOOT_ACTION)
 REBOOT_HISTORY: Final = 64         # the device read's reboot records, newest first
 # A reboot's reason: one word (the console's `console/<date>[/<note>]`, Install's `install:<tag>`).
 _REASON: Final = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/-]{0,255}")
@@ -145,56 +147,60 @@ class OperatorReboots:
         if self._publisher is None:
             raise NodeControlError("node_reboot_unavailable", 503)
         request_id = str(request.command_id)
+        job = RebootPi(request_id=request_id, device_id=device_id, reason=request.reason, by=by)
         with self._db.transaction() as conn:
-            fence_in(conn, device_id, "act").generation()
-            if conn.execute(_ASKED_SQL, (device_id, REBOOT_ASKED_ACTION, request_id)).fetchone() is not None:
-                return {"duplicate": True}
-            job = RebootPi(request_id=request_id, device_id=device_id, reason=request.reason, by=by)
-            self._publisher.publish(job, within=PgTransaction(conn))
-            # A defer merged into another pending copy (the queueing lock: one per Pi) leaves that
-            # copy, not this one, pending; it waited for that copy's commit, so this read sees it.
-            if not any(status == "todo" and queued == job for queued, status in pending_in(conn, job)):
-                raise NodeControlError("node_reboot_outstanding", 409)
-            link_action_in(conn, device_id, Pipe.FLEET, REBOOT_ASKED_ACTION,
-                           {"request_id": request_id, "reason": request.reason, "by": by})
-        return {"duplicate": False}
-
-
-# One device's ask of `request_id` (one `%s` each for the device, the ask's kind and the id).
-_ASKED_SQL: Final = ("SELECT 1 FROM events WHERE kind = 'link-action' AND device_id = %s "
-                     "AND body->>'kind' = %s AND body->'body'->>'request_id' = %s LIMIT 1")
-# The device's asks and outcomes, newest first (one `%s` each for the device, the two kinds, the limit).
-_RECORDS_SQL: Final = ("SELECT body->>'kind' AS kind, body->'body' AS body, recorded_at FROM events "
-                       "WHERE kind = 'link-action' AND device_id = %s AND body->>'kind' IN (%s, %s) "
-                       "ORDER BY recorded_at DESC, id DESC LIMIT %s")
+            queued = queue_ask_in(conn, self._publisher, job, REBOOT_KINDS, device_id=device_id,
+                                  request_id=request_id, outstanding="node_reboot_outstanding",
+                                  body={"request_id": request_id, "reason": request.reason, "by": by})
+        return {"duplicate": not queued}
 
 
 def reboot_records_in(conn: Any, device_id: str) -> list[dict]:
     """The device's reboots, newest first: each ask folded with its outcome by `request_id`
-    (`command_id`, `reason`, `by`, `requested_at`, `delivered`: true asked and accepted, false not
-    delivered, None not run yet; `answered_at` the outcome's time; `outstanding`: not run and its
-    job still queued or running). An Install's reboot has no ask: its outcome alone is listed."""
-    rows = conn.execute(_RECORDS_SQL, (device_id, REBOOT_ASKED_ACTION, REBOOT_ACTION,
-                                       2 * REBOOT_HISTORY)).fetchall()
+    (`asks_in`; `command_id`, `reason`, `by`, `requested_at`, `delivered`: true asked and accepted,
+    false not delivered, None not run yet; `answered_at` the outcome's time; `outstanding`: not run
+    and its job still queued or running). An Install's reboot has no ask: its outcome alone is listed."""
     probe = RebootPi(request_id="read", device_id=device_id, reason="read", by="central")
-    running = {queued.request_id for queued, _ in pending_in(conn, probe)}
-    records: dict[str, dict] = {}
-    for row in rows:   # newest first: an outcome is seen before its ask
+    return [{"command_id": ask.request_id, "reason": ask.body.get("reason"), "by": ask.body.get("by"),
+             "requested_at": ask.requested_at,
+             "delivered": None if ask.outcome is None else ask.outcome.get("delivered") is True,
+             "answered_at": ask.answered_at, "outstanding": ask.outstanding}
+            for ask in asks_in(conn, device_id, REBOOT_KINDS, probe, REBOOT_HISTORY)]
+
+
+@dataclass(frozen=True, slots=True)
+class NewestReboot:
+    """A device's newest reboot as `events` records it: when it was asked (None: an Install's
+    reboot, which has no ask), and its outcome when its job ran (`answered_at`; `delivered`: the
+    host accepted it). Times are the database's clock."""
+    asked_at: float | None
+    answered_at: float | None
+    delivered: bool | None
+
+
+# Every device's asks and outcomes since a time, newest first (one `%s` each for the two kinds, the time).
+_SINCE_SQL: Final = ("SELECT device_id, body->>'kind' AS kind, body->'body' AS body, recorded_at FROM events "
+                     "WHERE kind = 'link-action' AND body->>'kind' IN (%s, %s) AND recorded_at >= %s "
+                     "ORDER BY recorded_at DESC, id DESC")
+
+
+def newest_reboots_in(conn: Any, since: float) -> dict[str, NewestReboot]:
+    """device id -> its newest reboot whose ask or outcome was recorded at or after `since`, in the
+    caller's transaction: `reboot_records_in`'s fold by `request_id` for every device in one
+    statement, without the queue's read (a Frame's status, central/infra/frame_status_store.py)."""
+    newest: dict[str, tuple[str, NewestReboot]] = {}
+    for row in conn.execute(_SINCE_SQL, (REBOOT_ASKED_ACTION, REBOOT_ACTION, since)).fetchall():
         body = row["body"]
-        request_id = str(body.get("request_id"))
-        record = records.setdefault(request_id, {
-            "command_id": request_id, "reason": body.get("reason"), "by": body.get("by"),
-            "requested_at": float(row["recorded_at"]), "delivered": None, "answered_at": None})
-        if row["kind"] == REBOOT_ACTION and record["answered_at"] is None:
-            record["delivered"] = body.get("delivered") is True
-            record["answered_at"] = float(row["recorded_at"])
-        elif row["kind"] == REBOOT_ASKED_ACTION:
-            record["requested_at"] = float(row["recorded_at"])
-    listed = sorted(records.values(), key=lambda item: item["requested_at"], reverse=True)[:REBOOT_HISTORY]
-    for record in listed:
-        record["outstanding"] = record["answered_at"] is None and record["command_id"] in running
-    return listed
+        request_id, at = str(body.get("request_id")), float(row["recorded_at"])
+        held = newest.get(row["device_id"])
+        if held is None:      # newest first: an outcome is seen before its ask
+            newest[row["device_id"]] = (request_id, NewestReboot(None, at, body.get("delivered") is True)
+                                        if row["kind"] == REBOOT_ACTION else NewestReboot(at, None, None))
+        elif held[0] == request_id and row["kind"] == REBOOT_ASKED_ACTION:
+            newest[row["device_id"]] = (request_id, NewestReboot(at, held[1].answered_at, held[1].delivered))
+    return {device_id: reboot for device_id, (_, reboot) in newest.items()}
 
 
-__all__ = ["REBOOT_ACTION", "REBOOT_ASKED_ACTION", "BusPiReboot", "NoHubReboot", "OperatorReboot",
-           "OperatorReboots", "PiReboot", "RebootPiHandler", "parse_operator_reboot", "reboot_records_in"]
+__all__ = ["REBOOT_ACTION", "REBOOT_ASKED_ACTION", "BusPiReboot", "NewestReboot", "NoHubReboot", "OperatorReboot",
+           "OperatorReboots", "PiReboot", "RebootPiHandler", "newest_reboots_in", "parse_operator_reboot",
+           "reboot_records_in"]

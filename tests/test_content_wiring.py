@@ -22,6 +22,7 @@ from central.content_wiring import (
     build_content_services,
     build_job_runtime,
 )
+from central.fleet.app_restart import NoHubAppRestart
 from central.fleet.pi_reboot import NoHubReboot
 from central.infra.outcome_feed import OutcomeFeed
 from central.infra.queue_ops import QueueRescue
@@ -60,7 +61,8 @@ def test_build_job_runtime_passes_every_boot_check(tmp_path):
     # JobRuntime.__init__ raises unless every CATALOG type has exactly one handler and the
     # concurrency is a positive whole number.
     runtime = build_job_runtime(StubDatabase(), ManualClock(0.0), cache_root=tmp_path, env=ENV,
-                                thumbnails=NoLibrary(), media_maker=PrepareMediaStub(), reboot=NoHubReboot())
+                                thumbnails=NoLibrary(), media_maker=PrepareMediaStub(), reboot=NoHubReboot(),
+                                app_restart=NoHubAppRestart())
     assert isinstance(runtime, JobRuntime)
     assert WORKER_CONCURRENCY == 6   # one worker over every queue: today's 2 per queue, summed
 
@@ -68,7 +70,8 @@ def test_build_job_runtime_passes_every_boot_check(tmp_path):
 def test_the_job_runtime_owns_and_closes_its_queue_ops_pool(tmp_path):
     # No caller-held pool: `run()` closes it when the runtime ends (JobRuntime tests prove when).
     runtime = build_job_runtime(StubDatabase(), ManualClock(0.0), cache_root=tmp_path, env=ENV,
-                                thumbnails=NoLibrary(), media_maker=PrepareMediaStub(), reboot=NoHubReboot())
+                                thumbnails=NoLibrary(), media_maker=PrepareMediaStub(), reboot=NoHubReboot(),
+                                app_restart=NoHubAppRestart())
     assert [type(owned) for owned in runtime._owned] == [QueueRescue]
     (start,) = runtime._on_start                       # the rescue at the worker's start
     assert start.__self__ is runtime._owned[0] and start.__name__ == "rescue_at_start"

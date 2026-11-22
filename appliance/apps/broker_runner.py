@@ -10,7 +10,8 @@ from pathlib import Path
 from typing import Final
 from uuid import UUID
 
-from appliance.apps.broker import AppEffectBroker, ColdStart, ForeignAppUnit
+from appliance.apps.broker import AppEffectBroker, ColdStart, ForeignAppUnit, Restart
+from appliance.apps.bus import APPS_SLICE, BusRestartLine, apps_session
 from appliance.apps.descriptors import DESCRIPTOR_SAMPLE_MS, descriptor_use
 from appliance.apps.display_runs import DisplayRuns
 from appliance.apps.lifecycle_storage import FileEffectJournal
@@ -18,6 +19,7 @@ from appliance.apps.probe import UNSEEN_INVOCATION, AppRunKey
 from appliance.apps.probe_channel import ProbeThread
 from appliance.apps.probe_listener import ProbeListener
 from appliance.apps.process_linux import SystemdAppProcessDriver
+from appliance.apps.restart import RestartAsks, RestartSteps
 from appliance.feed import Feed, answer_feed_read
 from appliance.feed_socket import FEED_READERS, FEEDS_GROUP, FeedListener
 from appliance.kernel.app_facts import (
@@ -34,8 +36,9 @@ from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_app_link import PROBE_SOCKET
 from contracts.strict_json import loads_object
 
-# The broker's node feed (audience node): probe and run facts for the health judge. The broker
-# says nothing to Central (decision 0034, S4c).
+# The broker's node feed (audience node): probe and run facts for the health judge. To Central the
+# broker says one thing, on its bus line: the steps of a restart a person asked for
+# (appliance/apps/bus.py, decision 0036); the run facts stay here (decision 0034, S4c).
 FEED_CAPACITY = 512
 FEED_SOCKET = Path("/run/photo-wall-app-feed/feed.sock")
 MAX_FEED_REPLY = 65536  # a reader's receive buffer (the health judge's MAX_FEED_REPLY)
@@ -105,16 +108,23 @@ class BrokerLoop:
     states the launch's run started or exited, judged from the driver's launch record and the
     turn's observation, and samples its open files (`appliance.kernel.app_facts`), and tells
     Display the current run (`display`, a `DisplayRuns`: sent only when it changed or Display's
-    controller is new). The broker speaks to no Central (decision 0034, S4c): its one listener is
-    the probe socket (`listener`). Nothing here kills or restarts the app (issue #125)."""
+    controller is new). Nothing here kills or restarts the app by itself (issue #125). A person's
+    Restart app (decision 0036) is the one exception, and it is a person's: each turn hands the
+    request the bus method accepted (`asks`) to the broker once (`AppEffectBroker.restart`: one
+    stop, one start, never repeated) and states the restart's steps as the journal holds them
+    (`restarts`)."""
 
     def __init__(self, *, broker, store, driver, listener, probes: ProbeThread,
                  feeds: FeedListener, display: DisplayRuns, facts: RunFacts | None = None,
+                 asks: RestartAsks | None = None, restarts: RestartSteps | None = None,
                  clock: Callable[[], int] = boottime_ms, proc: Path = Path("/proc")):
         self.broker, self.store, self.driver = broker, store, driver
         self.listener, self.probes, self.feeds = listener, probes, feeds
         self.display = display
         self.facts = RunFacts(probes.feed) if facts is None else facts
+        self.asks = RestartAsks() if asks is None else asks
+        self.restarts = RestartSteps(lambda request_id, step: None) if restarts is None else restarts
+        self.restart: Restart | None = None  # the broker's newest restart, as its last answer held it
         self.clock, self.proc = clock, proc
         self.sampled_at: int | None = None  # when the current run's descriptors were sampled
         self.observation_fault: str | None = None  # the boot owner's last fault, until it clears
@@ -123,6 +133,7 @@ class BrokerLoop:
 
     def turn(self) -> None:
         self.probes.check()
+        self._ask()
         self._reconcile()
         self.listener.serve_one()
         known, current = self._observe()
@@ -131,7 +142,38 @@ class BrokerLoop:
             self._report_run(run, self._launch_run(run))
             self.display.tell(run)
             self.probes.publish_run(run)
+        self._tell_restart()
         self.feeds.serve()
+
+    def _ask(self) -> None:
+        """Hand the request a person's Restart app left waiting to the broker, once. A request the
+        broker did not take (a fault writing it, or no launch yet) is over: nothing asks again."""
+        request_id = self.asks.take()
+        if request_id is None:
+            return
+        LOG.warning("broker: a person asked for the app to restart (request %s)", request_id)
+        try:
+            record = self.broker.restart(request_id)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            if self.store.failed:
+                raise
+            LOG.warning("broker: the restart was not begun", exc_info=True)
+            record = None
+        if record is None or record.restart is None or record.restart.request_id != request_id:
+            self.asks.settle(request_id)
+        else:
+            self.restart = record.restart
+
+    def _tell_restart(self) -> None:
+        """State the steps the broker's restart has reached (the record its last `restart` or
+        `reconcile` answered), each once, and end a restart that is no longer in flight (the next
+        request is then a new one)."""
+        restart = self.restart
+        if restart is None:
+            return
+        self.restarts.tell(restart)
+        if not restart.in_flight:
+            self.asks.settle(restart.request_id)
 
     def _reconcile(self) -> None:
         """The boot owner's turn. No observed state is fatal: a fault is reported once per reason
@@ -142,7 +184,9 @@ class BrokerLoop:
         if now < self.observe_after:
             return
         try:
-            self.broker.reconcile()
+            record = self.broker.reconcile()
+            if record is not None:
+                self.restart = record.restart
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             if self.store.failed:
                 raise
@@ -238,9 +282,18 @@ def main() -> None:
     listener = ProbeListener(driver, Path(PROBE_SOCKET), probes=probes)
     facts = RunFacts(feed)
     feeds = feed_listener(feed, facts)
+    # The apps line's session: it connects on its own thread forever, so the broker never waits on
+    # the bus. Both ends of a person's restart start from the journal's, so a broker that started
+    # again within this boot serves no request twice.
+    journalled = broker.journal.current()
+    newest = None if journalled is None else journalled.restart
+    asks = RestartAsks(newest)
+    session = apps_session(APPS_SLICE.digest, asks)
     loop = BrokerLoop(broker=broker, store=store, driver=driver, listener=listener, probes=probes,
-                      feeds=feeds, display=DisplayRuns(), facts=facts)
+                      feeds=feeds, display=DisplayRuns(), facts=facts, asks=asks,
+                      restarts=RestartSteps(BusRestartLine(session).state, newest))
     try:
+        session.start()
         probes.start()
         if broker.journal.current() is None:
             broker.cold_start(ColdStart(UUID(value["operation_id"]), kernel_boot_id,
@@ -249,6 +302,7 @@ def main() -> None:
             loop.turn()
             time.sleep(0.1)
     finally:
+        session.stop()
         probes.close()
         feeds.close()
         listener.close()
