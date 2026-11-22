@@ -85,7 +85,7 @@ The console is a React single-page app in `central/console/`, bundled by Vite an
 **The shell** (`Shell.jsx`). `routes.js` parses and formats the hash routes and has no React; `useRoute.js` is the only writer of `location.hash`. Sections come from three route tables:
 - `showRoutes.jsx` (Now, Scenes, Schedule, Sources): always mounted. The pages that are not current carry the HTML `hidden` attribute, so a draft never unmounts and their status regions leave the accessibility tree. Each page tells its subtree whether it is hidden (`pageVisibility.js`), and `ConfirmAction` puts a hidden page's modal dialog away.
 - `wallRoutes.jsx` (Wall, Equipment): mounted only while current. The Wall state that must outlive the page lives in `wallState.js`, which imports no component.
-- `neutralRoutes.jsx` (Needs attention): mounted only while current.
+- `neutralRoutes.jsx` (Home, the landing: [0036](decisions/0036-home-frame-status-and-wall-actions.md)): mounted only while current. It reads what Home lists beside Central's own problems and hands the page its writes (`homeCommands.js`).
 
 The shell is keyed on the provider's `sessionEpoch`, which Log out bumps, so Log out remounts it and discards every draft. A 401 while signed in keeps the snapshot and leaves the shell mounted, `hidden` and `inert`, under the sign-in `<dialog>` (`SignInScreen.jsx`), with the poll paused ([flow design §6](operator-console-ux-pass2-flow.md#6-navigation-routes-and-modules) (a)–(e)).
 

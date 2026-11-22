@@ -1,6 +1,6 @@
 # 0036 — Home: a Frame's status, the house word and the wall's everyday actions
 
-**Date:** 2026-11-22 · **Layer:** system (Central's read of a Frame's live health; four new everyday commands; the console's landing page and phone layout) · **Status:** accepted design (owner, 2026-11-22: "I'll take your recommendations. Proceed"), not built. It is slices 2 and 3 of [roadmap 3b-i](../roadmap.md#3b-i-home-and-phone); slice 1 is [0035](0035-operator-sign-in-through-an-identity-provider.md). **Builds on:** the six status words ([design language §6](../design-language.md#6-status-and-severity)), the health verdict (issue #126), the power timetable ([0021](0021-power-timetable-and-repeating-schedules.md)), the wall plan ([Planner](../module-planner.md#the-wall-plan)) and [0032](0032-the-player-continues-centrals-plan.md).
+**Date:** 2026-11-22 · **Layer:** system (Central's read of a Frame's live health; four new everyday commands; the console's landing page and phone layout) · **Status:** accepted design (owner, 2026-11-22: "I'll take your recommendations. Proceed"). Slice 2 is built, in [#158](https://github.com/mcurcio/photo-wall/pull/158): where the build differs from this record is [As built](#as-built-slice-2), and what it proved is [Verified, and not](#verified-and-not). Slice 3 is not built. It is slices 2 and 3 of [roadmap 3b-i](../roadmap.md#3b-i-home-and-phone); slice 1 is [0035](0035-operator-sign-in-through-an-identity-provider.md). **Builds on:** the six status words ([design language §6](../design-language.md#6-status-and-severity)), the health verdict (issue #126), the power timetable ([0021](0021-power-timetable-and-repeating-schedules.md)), the wall plan ([Planner](../module-planner.md#the-wall-plan)) and [0032](0032-the-player-continues-centrals-plan.md).
 
 **Decision owner:** the owner. His words below are his; everything not quoted from him is a design choice, not his ruling.
 
@@ -198,7 +198,7 @@ Roadmap G3 asks for "Restart app with progress". Issue #125 removed every automa
 
 - A person pressing **Restart app** is not an automatic restart. This design adds a fourth `StartCause`, `asked_by_a_person`, reached by one new method on the app broker's bus line, called by a Central job as `RebootPi` is.
 - The broker stops the current run and starts one. It never repeats the request by itself; a run that dies again stays down.
-- Progress is `StepProgress`: requested → app stopped → app started → showing, each with its time, from the broker's existing `app_started` and `app_exited` events.
+- Progress is `StepProgress`: requested → app stopped → app started → showing, each with its time, from the broker's existing `app_started` and `app_exited` events. (Built otherwise: the broker states the restart's own steps on a new bus line, [As built](#restart-app-as-built).)
 - **Open O1:** the alternative is no Restart app at all, with **Reboot the Pi** as the only fix, which is what #125 left. The default here is to build it: a reboot takes minutes and blacks both of a Pi's Frames for one stuck app.
 
 ## Module map
@@ -284,6 +284,114 @@ The owner took each default on 2026-11-22 (R1), F3's change to U1's sentence inc
 | O2 | Is Previous in 3b-i? The roadmap's outcome names only Skip | In, as the same command |
 | O3 | The silence limit of row 4 and the continuation limit of row 11 | Today's console threshold for the first; one hour for the second, to tune |
 
-## Not verified
+## As built (slice 2)
 
-Nothing here has run. The Planner's and Runtime's part of Skip, Pause and a Run on chosen Frames is stated as a contract; how each fits the hour-ahead wall plan and its locked layers was not traced through the code, and is slice 3's design pass. The bench debt the roadmap records (1b, 1c and 2a's steps marked NOT RUN) stands: Home will report on power behaviour that has not been seen on a panel.
+Added 2026-11-22, when slice 2 was built in [#158](https://github.com/mcurcio/photo-wall/pull/158). The record above is the design as accepted; this section lists every place the build differs from it or settles what it left open. Nothing here is the owner's ruling unless it says so.
+
+### Central's status
+
+- **`Part`'s code for the photo app is `"photo app"`**, with a space, as this record writes it.
+- **`can` is a sorted tuple**, not a frozenset, so the document serialises the same every time; the change number depends on it. In slice 2 it carries only `reboot-pi` and `restart-app`.
+- **`Problem` has two more fields:** `frame_id` (none for a house problem) and `explains` (the Frames whose problems a house problem replaces). `HouseStatus.problems` is the whole worst-first list Home draws: the house problems, then each Frame problem no house problem explains.
+- **A house problem speaks a word for the house.** Hub unreachable and worker stopped are Can't tell; no library answering, a failing scheduler step and an untargeted planning issue are Needs a look. `Problem` does not carry that word, so the console restates the rule in a two-entry map.
+- **A fourth house problem:** a planning issue that names no Frame, so the planning rows the Needs attention page held are not lost.
+- **"No library connection answers"** is read as: every connection needs a look, whatever its problem.
+- **A fourteenth row, before row 10: nothing is to play.** The table has no row for a Frame that is black on purpose with its display on: no Scene targets it now, or its Scene blacks it. Its Player then states no black cause (`player/frame_black.py`), so no verdict ever comes, and row 10 read it as a photo app failure for good. The build adds the fact the row needs, whether a picture is to play on the Frame now (the Runtime's visible Intent is media: `PgStatusReading.wanted`), and a row `nothing-wanted`: the report says no picture is on screen, no verdict and no impediment speak, and nothing is to play, so the Frame is **Resting** ("Nothing to show right now"). Row 10 now asks that a picture is to play. Found in review; the owner has not ruled on it, and design language §6's Resting says it.
+- **Row 3's install has a ceiling and starts at the restart.** As accepted, row 3 matched for as long as `devices.install` was set. Built: only the install's `restarting` step counts, for `REBOOT_ALLOWED_SECONDS` from when the step began (`devices.changed_at`, which only the install's own steps write while a Pi has one). While Central is `downloading` the release nothing has happened on the Pi, so the rows below speak, and a Pi that never came back from an install's restart reads Can't tell since it was last heard (row 4, U6). `ProgressStep` has no `install-downloading`.
+- **Row 4 stands aside for the Pi's own verdict.** "Heard" is the photo app's session socket, so a dead or frozen app goes silent too. While Central's hub holds the Pi's link and the Pi's verdict says the screen is dark, row 4 does not match and the verdict speaks (rows 6 and 8): a dead app stays "Not showing · photo app · Restart app" past the silence limit, with one `since` and one event. Not linked, or linked with no verdict, is row 4 as before.
+- **Row 2 does not match a wall with no hub configured** (hub state `no_hub`). Such a wall falls to row 13 unless its Pis report.
+- **Since when.** A kept row's `since` stands while its key (word, setup step, row, problem code) stands. A new key begins at the time its row's own fact states when Central's clock has one (the hub's last change, when the Pi was last heard, the last report), else at now. Home never writes: between ticks it serves the fact's time or the read's time, and the row follows at the next tick, up to 60 s later. A health verdict, a Frame report, a presence change, a hold or an install does not wake the scheduler.
+- **Clocks.** Many inputs are stamped by the database's clock. The reading asks that clock for its own now, judges power and holds against it, and hands the policy each such time shifted by the whole-second difference to Central's clock (0 in deployment).
+- **Row 3's reboot** is in progress while it is asked and not yet run, or accepted and the host line's birth is not newer than the answer, for at most `REBOOT_ALLOWED_SECONDS` = 600. The ceiling is the builder's number, to tune.
+- **O3's limits as built:** row 4's silence limit is `contracts/liveness.py` `SILENT_AFTER_SECONDS` (51 s; what the console read from the inventory until now), exported to the console as a constant. Row 11's is `CONTINUATION_LIMIT_SECONDS` = 3600, compared between the Player's show time and Central's clock.
+- **Preparation per Frame** comes from a new `Coordinator.frame_plans_in`: the media layers not yet over in the Player's newest valid offer, and how many of them its readiness for that offer names prepared or failed. "Being prepared" is: some planned, not all prepared, none failed.
+- **A Pi's health:** "throttled" is any `_now` flag at its alarm in `contracts`' `HOST_METRIC_BANDS`, looked up in the store; "clock in doubt" is the kernel's `wall_clock` fact. No judge module was added on Central.
+- **Row 7** names the two power results as problems in `frame_status` (`DISPLAY_PROBLEMS`); a test holds that set equal to what `why/explain.py`'s `is_resting` refuses.
+- **Planning codes:** four source codes (`source_missing`, `source_empty`, `source_not_ready`, `asset_preparation_failed`) map to source trouble (immich). Every other code, an unknown one among them, maps to a planning issue (central) with the Planner's code under Details.
+- **Restated vocabularies:** `PlayingKind` restates `central/why/model.py` `ContentKind`, and `HubState` and `InstallStep` are restated in `ports.py`, because those modules' imports reach `central.fleet`. A test holds each pair equal. So the package does not import `central.why` or `central.photo_library`, though the import rule above names them as read.
+- **`Override`:** `by` is none for a hold (`HoldSource` records no person yet), and a takeover's `until` is none (no end time until slice 3). The pause kind exists and nothing produces it.
+- **The `change` number** is 48 bits of the SHA-256 of the rest of the document: stable across processes and restarts, and safe in a JavaScript number.
+- **A second read**, `GET /v1/operator/frames/{frame_id}/status`: the Frame's status and its newest 32 changes from the event log. No console page reads it yet.
+- **`Scheduler` takes `status=`** as a required keyword.
+- **Not surfaced:** Output interruptions and "No Panel listed at enrolment" have no row in the decision table, so `FrameStatus` does not carry them.
+- **Never raised today:** `pi-storage-low` (Central holds no such fact; it is only a boot stage's refusal), and `software-renderer` and `app-resource-exhausted` (the Pi's health line carries a code only for a dark Output). Their rows exist.
+- **More modules than the map:** `central/infra/frame_report_store.py` (the Player line's Frame reports), migration 132, and `central/fleet/link_asks.py` (below).
+- **Tables:** migration 132 makes Central's 44, 48 with Procrastinate's four ([0034](0034-central-schema-consolidation.md#the-tables-after-each-migration)).
+
+### Restart app, as built
+
+- **The broker had no bus line** ([0034](0034-central-schema-consolidation.md), S4c: "the broker says nothing to Central"). It now declares the `apps` store line that `contracts/node_link.py` already reserved (fleet pipe), using two of its three streams: a record buffer and a state bucket with one key. Wire names are in a new `contracts/node_apps.py`.
+- **Progress does not come from `app_started` and `app_exited`.** Those are node-feed facts that never reach Central, and a restart of an already dead app emits no `app_exited`. The broker states the restart's own steps on its line, each naming the request: `app_stopped`, `app_started`, or the failures `not_stopped` and `not_started`.
+- **The broker's answers:** `accepted`; `in_flight` for any request while a restart is in flight; `duplicate` for the newest request once served. Only the newest request id is remembered (in the journal, so it survives a broker restart within a boot). An older id sent again after a newer restart would be served again; Central never sends one twice.
+- **Edges:** a dead (`down`) run is restarted with no stop asked. A refused stop ends the restart `not_stopped` with nothing started. A start that raises ends it `not_started` and is never retried. A broker that died between the stop and the start never starts for that request.
+- **The route** is `POST /v1/operator/node/devices/{id}/app-restarts` with `{"request_id": "<uuid>"}`. Answers: 200 `{"duplicate": bool}`; 409 `node_app_restart_outstanding` while one is queued for the Pi; 403 `node_device_unavailable`; 422 `invalid_operator_app_restart`; 503 `node_app_restart_unavailable` without a queue.
+- **It asks for `operate`,** as this record says an everyday action does: the first route that does (`mount_node_routes(operate=…)`). Its progress read and both of Home's reads take `admin`, which asks `read` on a GET. The reboot route is the fleet's own and still asks `admin` (`configure`).
+- **A request reached too late is not carried out.** A `RestartApp` job the worker reaches more than `APP_RESTART_SECONDS` after its ask (the worker stopped, its queue stalled) asks no Pi and is recorded not delivered: by then the read has said timed out and nobody is watching. The reboot job has no such check.
+- **The progress read** is `GET` on the same address: `{"restart": AppRestartView | null}`, the Pi's newest restart only: its request id, by whom, a state (`in_progress`, `done`, `failed`), a closed failure (`not_delivered`, `in_flight`, `not_stopped`, `not_started`, `timed_out`) and the four steps with their times. Nothing is stored; it is folded on read from the ask and outcome events, the broker's records, the line's state key as a fallback for a lost record, and the Player's report.
+- **"Showing"** is the Player's newest Frame reports saying any Frame is showing, recorded at or after "app stopped", and only after "app started". Central keeps only the newest report, so this time moves when the Player reports again.
+- **`timed_out`** is judged on read, on the database's clock, 180 s after the request (`APP_RESTART_SECONDS`). No timer exists. Under Night off nothing shows, so a restart that worked reads timed out there.
+- **Step times** are when Central recorded them, never the Pi's clock. "App stopped" and "app started" usually land in one batch with one time.
+- **`RestartApp` and `RebootPi` are separate job types,** each one pending copy per Pi, so a queued reboot does not block Restart app. What they share moved to `central/fleet/link_asks.py`; `pi_reboot.py` uses it with unchanged behaviour.
+- **The restart's address has one home,** `central/fleet/app_restart.py` `APP_RESTARTS_PATH`: the route is mounted at it and `central/home_routes.py` names it for a Frame's `can`.
+- **Its views are in the generated contract:** `AppRestartsView`, the closed `AppRestartRefusal` codes, and the two waits the console's progress uses (`APP_RESTART_SECONDS`, `REBOOT_ALLOWED_SECONDS`). The console words every failure and refusal in `domain/restart-words.ts`; a code it does not know is never shown as it is.
+- **Frame status does not show a restart's step.** Row 3 knows a reboot and an install, not a Restart app in progress; Home shows that from its own read of the progress.
+
+### The console
+
+- **Home rides the snapshot.** Its document is read with the snapshot read (`homeApi.js`, `useSnapshot.js`) and sits on it as `snapshot.home`: one mechanism gives the 5 s cadence, the read after an action and the write fence. A failed Home read never fails the snapshot. A status Central has not served is drawn as Can't tell, never guessed.
+- **Where Home sits.** In `neutralRoutes.jsx`; the sidebar's groups are Home, Frames (holding the Wall), Show, Fleet, Settings. The header's Menu button is gone: on a phone **More** opens the drawer.
+- **Other reads stay on Home's list.** After Central's problems Home lists what Central's status does not carry yet: a Pi's host incidents, room lights in doubt, library connections that need a look, and the photo app's readiness reports. A fault Central already names is not repeated. This record's "one list" holds; its "one read" does not yet. Their words are Home's own (`domain/home-reports.ts`): the box is "Pi 3f2a9c", a Frame is its name, and the fleet page's line ("Player …", "Host Management …") is under Details only. They are drawn without "since": the host read keeps no such time.
+- **What was asked of a Pi is kept outside the page** (`domain/pi-asks.ts`), so leaving Home and coming back shows the same steps and asks nothing again; a reload of the tab forgets it. A tile says "requested" only while Central has taken the request and the Pi has not finished it: not while a reboot's dialog is open, and not after the request finished, failed or was refused.
+- **While Home's read is failing nothing is offered to ask of a Pi,** in a tile's menu or on a card: `can` and a fix are Central's to say now.
+- **No Refresh on Home.** The top bar's Refresh is not drawn while Home is shown; the other pages keep it until the push stream.
+- **Reboot from Home is confirmed first** (it cannot be taken back and blacks every Frame of the Pi) and goes through the fleet's one send path. Its steps are Requested, Accepted by the Pi, Showing again, the last from Home's statuses with a 600 s wait. Restart app is not confirmed.
+- **A fix of "open Central" draws no button.** The console has no page for Central's own health, so the hub, worker, scheduler and continuation problems show a card without an action.
+- **Takeovers are served and not drawn** until slice 3; only power holds are.
+- **Tile actions.** The menu holds Restart app and Reboot the Pi when `can` has them, then Why is this playing? and Open Frame; both links open the Frame page. Skip, Previous, Pause and Never show are slice 3. The button is named "More actions for <Frame>".
+- **`WallMap`** draws to scale from 640 px of its own width and falls back to tiles side by side when a Frame's size is unknown, two Frames overlap, or the smallest Frame would be under 160 × 112 px.
+- **A stale tile is sunk and dashed** with "Can't tell since …", not greyed: fainter text failed contrast.
+- **Empty** leads to the Wall ("Add your first Frame on the Wall"), not the Setup checklist, which does not exist yet.
+- **Icons are our own inline paths** in `ui/icon.tsx`; `@mdi/js`, the design language's earlier recommendation, was not added.
+- **The phone switch is one token,** 768 px (`--breakpoint-md`, `PHONE_BELOW_PX`); the shell and the flow footer used 850 px before. A new `--spacing-tabs` lifts a page's sticky bar above the 56 px tabs. **Show now**'s quick action is hidden on a phone because a tab carries it.
+- **Words.** The setup chip says "Needs a Pi". A Pi is named "Pi <last six of its serial>". "Since" and "until" are said to the minute. The photo app's readiness reports name the photo app and the Pi. Refusal words passed through the Reboot dialog still say "Player". The Pi's own Central card now ends "see Home in Photo Wall" (`central/room_light/policy.py`), since the Needs attention page it named is gone.
+- **Pattern changes:** `AckBadge` gained optional `words`; `OverrideBanner`'s `kind` is required; `Menu` takes link entries and opens as a sheet on a phone. The catalogue's members are the [design language's](../design-language.md#members-for-home-3b-i-slice-2).
+- **Stories built beyond this record's list:** WallTile/Stale; WallMap/NotToScale, /Loading, /Phone; StepProgress/Finished, /Phone; Home/Empty, /NoAnswer, /CantTell, /Held, /WontShow, /RestartInProgress. WallMap/TwoWalls, the OverrideBanner kinds and the Home stories this record names are built.
+- **Not built in slice 2:** the Frame page's recent problems (G2); Restart app on the Pi page (G3); stories for the Reboot dialog, "Not restarted", "Not back" and Home's Pi-fault and readiness cards (the browser tests hold them; the catalogue does not draw them).
+
+### Review findings left as they are
+
+Recorded so they are not lost; none is the owner's ruling.
+
+- **A display wanted on that did not answer the power-on** (or shows another input) reads Showing: rows 7 and 11 read the power result only while the display is wanted off, and the table has no row for it. Many displays never answer a power command, so a row needs the owner's word.
+- **After a Central start that did not close its sockets,** each photo app's "last heard" is when its socket last opened, so until it reconnects row 4 can say "Can't tell since" a time days ago, and the first tick records it.
+- **Two targets on Home are under 44 px on a phone:** the house word in the top bar and a problem card's fix when it is a link.
+- **Outside Home, three legacy places colour a Frame's status by a `health--<severity>` class on text** (the Wall plan's tile, the target picker, the Now badges) rather than by the one chip. They read Central's status; only the drawing is old.
+- **Home's Pi-fault and readiness cards** are drawn as setup cards, without "since" and "what Photo Wall is doing".
+
+## Verified, and not
+
+Added 2026-11-22, rewritten when slice 2 was reviewed and integrated. What ran, on a development machine with a throwaway PostgreSQL 16 and no Docker, on the tree as committed. CI has not run on it.
+
+**Passed:**
+
+- Static: `ruff check .`; `lint-imports` (39 contracts kept, "Frame status is pure" among them); `scripts.console_types --check`; `scripts/check_docs.py` (151 documents).
+- The console: `npm run typecheck`, `lint`, `build` and `build-storybook`.
+- The unit tier: 6556 passed, 141 skipped, 1 failed (below). In it: the decision table, the cause table and the house word (`tests/test_frame_status_policy.py`, 39), the broker's side of Restart app (`tests/node/apps/test_app_restart.py`, 26), and the console's model tests (`tests/test_console_*.py`, 218), the ones that pinned `frameHealth`, `wallAttention` and `attention.js` rewritten against `domain/frame-status.ts`.
+- The DB tier, with the pinned nats-server: 1243 passed, 0 failed, 29 skipped (12 need the Immich fixture, 9 Keycloak, 5 the PID1 fixture, the rest an interactive fixture or another missing service). In it: since when and the event (`tests/test_frame_status_store.py`, with a Frame no Scene targets read through the real stores), Home's routes, Restart app through Central's routes (`tests/test_app_restart.py`), an install's step and its beginning (`tests/test_player_versions.py`).
+- The Node bus tier (`tests/integration -k node_bus`): 63 passed and 1 existing strict xfail; the restart method across a real nats-server pair is among them.
+- The browser tier but the catalogue file: 496 passed, 0 failed. `tests/browser/test_home_browser.py` holds 17: the six words and setup, the house word and counts, a 390-pixel phone, each fixture fault naming its part, the hub's house problem, menus following `can`, Restart app step by step, a restart that fails, one Central refuses, one left for another page and found in progress on coming back, Reboot the Pi (nothing asked before the dialog is confirmed, then its three steps) and one the Pi did not take, a failed Home read, a fault during intended darkness ("Won't show …"), now and next with a Frame nothing plays on, and landing on Home in token and provider mode.
+- Mutation probes, each failing tests and then restored. Central: rows 11 and 12 swapped, rows 3 and 4 swapped, a cause table row dropped, a write on every tick; the three review fixes undone together (row 4 not standing aside, an install with no ceiling, row 10 without "is a picture to play") fail 4 policy tests. Restart app: a second restart, a start after a later death, an answer always `accepted`, a showing report counted before "app stopped", the pending-copy check dropped. The console, one build with eight changes (any restart read as this request's, no "Not restarted" card, a failed Home read drawn as current on the page and in the top bar, "Won't show" dropped, the now/next strip dropped, actions offered from a stale document, "requested" whatever the request's state): 8 of the 17 Home browser tests fail.
+
+**Failed, and why:**
+
+- `tests/test_build_netboot_bundle.py::test_the_bundle_initrd_is_the_floors_layer_then_the_cached_initrd`: `cpio: not found`. The machine has no `cpio` and none can be installed here; the test does not touch this work.
+
+**NOT RUN:**
+
+- **Bench: Restart app on the test Pi, watched to "showing". NOT RUN.** No Pi was used. Not proven: that PID1 stops and starts the Player's unit and collects the old one; that the broker's sandbox reaches the bus and it stays inside its memory and task limits with the bus client loaded; that the bus's memory fence holds with the `apps` line; that Display hands the Output to the new run and the old planes are released; that the health judge shows no card during a normal restart and withdraws `app_absent` at the new start; the real time to showing and whether 180 s is right; that "showing" does not wait for a second report when the first reaches Central before the "app stopped" record; a restart while Weston restarts or with the unit failed; the real Debian package importing `nodeapi` on the Pi.
+- The catalogue walker (`tests/browser/test_console_catalog_browser.py`): not run here (its screenshot baselines are CI's image's). The new and changed stories have no baselines yet, so that leg fails in CI until they are fetched.
+- Node packages (`tests/debs`, the build's import check); the PID1 scenarios, which now run a broker with an `apps` session; the arm64 bus memory fence; image smoke; the wall e2e. Each needs Docker or CI.
+- A real hub or a real Pi under Central's status: the hub-unreachable, worker-stopped and linked or unlinked paths are held by the pure policy tests and by browser tests over Central's own stores, never a live hub. An install's restart on the Frame's status is held in the policy tests, and its step's time in the store's own test.
+- A restart that times out (180 s) and a reboot past its 600 s: built, not exercised. Home's 304 is seen against the real Central in the landing test.
+
+**Still open from the design:** slice 3. The Planner's and Runtime's part of Skip, Pause and a Run on chosen Frames is stated as a contract; how each fits the hour-ahead wall plan and its locked layers was not traced through the code, and is slice 3's design pass. The bench debt the roadmap records (1b, 1c and 2a's steps marked NOT RUN) stands: Home reports on power behaviour that has not been seen on a panel.

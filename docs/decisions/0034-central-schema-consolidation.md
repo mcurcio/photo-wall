@@ -270,7 +270,7 @@ Recorded 2026-11-19, after the last code slice (S4c-2b-ii). The design above sta
 
 Counted on a fresh database migrated one file at a time, 2026-11-19 (Procrastinate's four are not in these counts). At 130 it holds **41 tables**: the 40 domain tables of [the target](#the-target-40-tables-21-kinds-of-thing) and `schema_migrations`; 45 with Procrastinate's four.
 
-Since then (added 2026-11-22; the counts above are as they were on 2026-11-19): migration 131 ([0035](0035-operator-sign-in-through-an-identity-provider.md)) adds `operators` and `operator_sessions`, one table per aggregate as this record asks. From 131 Central holds **43 tables**, 42 domain tables and `schema_migrations`; 47 with Procrastinate's four. `tests/test_migration_128.py` holds the set.
+Since then (added 2026-11-22; the counts above are as they were on 2026-11-19): migration 131 ([0035](0035-operator-sign-in-through-an-identity-provider.md)) adds `operators` and `operator_sessions`, one table per aggregate as this record asks. From 131 Central holds **43 tables**, 42 domain tables and `schema_migrations`; 47 with Procrastinate's four. Migration 132 ([0036](0036-home-frame-status-and-wall-actions.md#since-when)) adds `frame_status`, one row per Frame, and one more kind in `events`: from 132 Central holds **44 tables**, 43 domain tables and `schema_migrations`; 48 with Procrastinate's four. `tests/test_migration_128.py` holds the set.
 
 | Migration | Slice | Central's tables after |
 |---|---|---|
