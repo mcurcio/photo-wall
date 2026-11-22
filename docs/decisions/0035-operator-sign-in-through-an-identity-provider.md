@@ -1,6 +1,6 @@
 # 0035 — Operator sign-in through an identity provider (Keycloak)
 
-**Date:** 2026-11-22 · **Layer:** module (Central's operator access: who may call `/v1/operator/`, and who changed a record) · **Status:** proposed design, not built. It is slice 1 of [roadmap 3b-i](../roadmap.md#3b-i-home-and-phone); slices 2 and 3 are [0036](0036-home-frame-status-and-wall-actions.md). **Replaces:** the token sign-in of [pass A](../operator-console-ux-pass2-session.md) wherever a provider is configured.
+**Date:** 2026-11-22 · **Layer:** module (Central's operator access: who may call `/v1/operator/`, and who changed a record) · **Status:** accepted design (owner, 2026-11-22: "I'll take your recommendations. Proceed"), being built. It is slice 1 of [roadmap 3b-i](../roadmap.md#3b-i-home-and-phone); slices 2 and 3 are [0036](0036-home-frame-status-and-wall-actions.md). **Replaces:** the token sign-in of [pass A](../operator-console-ux-pass2-session.md) wherever a provider is configured.
 
 **Decision owner:** the owner. His words below are his; everything not quoted from him is a design choice, not his ruling.
 
@@ -12,6 +12,7 @@
 | Q1 | Accounts: "OIDC only": Central is a relying party and stores no passwords; the deployment injects the provider; with no provider configured, today's token sign-in stays as the only fallback | owner, 2026-11-22 (question card) | a pick, revisable |
 | Q2 | Machine access: "No opinion. Is this like a service account?" | owner, 2026-11-22 (question card) | no ruling; the design's choice is [below](#machines-service-accounts) |
 | Q3 | Authorization: "A required role": one role from a configurable claim, the same claim later carrying member and guest roles | owner, 2026-11-22 (question card) | a pick, revisable |
+| R1 | "I'll take your recommendations. Proceed": every default of this record's open questions and findings stands as the owner's pick | owner, 2026-11-22 (chat) | a pick, revisable |
 | — | "The immich url and api key should be injected by iac" | owner, 2026-10-12 | guidance, applied here to the provider's settings |
 
 ## The problem
@@ -268,9 +269,11 @@ The 52 test files that send the admin token keep working unchanged: they run Cen
 - When it is set, every browser is signed out once and signs in through the provider. Scripts keep working while `PHOTO_WALL_ADMIN_TOKEN` stays set.
 - The deployment's Keycloak needs, once: a confidential client for Central with its redirect address and back-channel logout address, the client role `owner`, that role granted to the owner, and a service-account client per script that should stop using the break-glass token. The runbook gets these as steps, and an `mcurcio/iac` change carries them.
 
-## Open, and what waits on them
+## Open questions, decided
 
-| # | Question | The design's default |
+The owner took each default on 2026-11-22 (R1).
+
+| # | Question | Decided |
 |---|---|---|
 | O1 | Keep `PHOTO_WALL_ADMIN_TOKEN` set in production as break-glass, or unset it once the service accounts exist? | Keep it set until every script has a service account, then unset it |
 | O2 | Should a role removed in Keycloak take effect within the access token's life (five minutes by default), or at once? | Within the token's life; at once needs Keycloak to send a logout, which a role change does not |

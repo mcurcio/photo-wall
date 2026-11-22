@@ -1,6 +1,6 @@
 # 0036 — Home: a Frame's status, the house word and the wall's everyday actions
 
-**Date:** 2026-11-22 · **Layer:** system (Central's read of a Frame's live health; four new everyday commands; the console's landing page and phone layout) · **Status:** proposed design, not built. It is slices 2 and 3 of [roadmap 3b-i](../roadmap.md#3b-i-home-and-phone); slice 1 is [0035](0035-operator-sign-in-through-an-identity-provider.md). **Builds on:** the six status words ([design language §6](../design-language.md#6-status-and-severity)), the health verdict (issue #126), the power timetable ([0021](0021-power-timetable-and-repeating-schedules.md)), the wall plan ([Planner](../module-planner.md#the-wall-plan)) and [0032](0032-the-player-continues-centrals-plan.md).
+**Date:** 2026-11-22 · **Layer:** system (Central's read of a Frame's live health; four new everyday commands; the console's landing page and phone layout) · **Status:** accepted design (owner, 2026-11-22: "I'll take your recommendations. Proceed"), not built. It is slices 2 and 3 of [roadmap 3b-i](../roadmap.md#3b-i-home-and-phone); slice 1 is [0035](0035-operator-sign-in-through-an-identity-provider.md). **Builds on:** the six status words ([design language §6](../design-language.md#6-status-and-severity)), the health verdict (issue #126), the power timetable ([0021](0021-power-timetable-and-repeating-schedules.md)), the wall plan ([Planner](../module-planner.md#the-wall-plan)) and [0032](0032-the-player-continues-centrals-plan.md).
 
 **Decision owner:** the owner. His words below are his; everything not quoted from him is a design choice, not his ruling.
 
@@ -9,6 +9,7 @@
 | # | Words | Source | Kind |
 |---|---|---|---|
 | Q4 | Pause: "Freeze the photo": the Frame holds the photo it shows for the Pause length, then carries on by itself | owner, 2026-11-22 (question card) | a pick, revisable |
+| R1 | "I'll take your recommendations. Proceed": every default of this record's open questions and findings stands as the owner's pick | owner, 2026-11-22 (chat) | a pick, revisable |
 | — | "Proceed" (to this design, after the recommendation of 3b-i as the next delivery) | owner, 2026-11-22 (chat) | guidance |
 | — | "No auto-restarts at all" | owner, issue #125 | guidance, bearing on [Restart app](#restart-app) |
 | — | "Amend U1" (intended darkness reads Resting) | owner, 2026-10-12 | a ruling, bearing on [the decision table](#the-decision-table) |
@@ -270,9 +271,11 @@ The other homes take a spec each when their slice starts: **F6 phone layout** (`
 
 Slices 1 and 2 touch disjoint files and can be built in parallel. Slice 3 needs both: its commands ask for `operate` and stamp a person.
 
-## Findings and open questions
+## Findings and open questions, decided
 
-| # | What | Default this design builds on |
+The owner took each default on 2026-11-22 (R1), F3's change to U1's sentence included.
+
+| # | What | Decided |
 |---|---|---|
 | F1 | A failure during intended darkness has no word in the design language | Needs a look until the display is next due on, then Not showing |
 | F2 | Home is polled, not pushed, until 3b-ii | Listed as a polled exception |

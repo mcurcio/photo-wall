@@ -251,7 +251,7 @@ The owner's first ask: "Central needs another UI pass to make sure that all of t
 
 ### 3b-i. Home and phone
 
-- **Status (2026-11-22):** designed, not built. Sign-in is [0035](decisions/0035-operator-sign-in-through-an-identity-provider.md) (slice 1); a Frame's status, Home and the everyday actions are [0036](decisions/0036-home-frame-status-and-wall-actions.md) (slices 2 and 3), with its findings and open questions for the owner. The owner account of A2 is a user in the deployment's identity provider (Keycloak), not an account Central keeps.
+- **Status (2026-11-22):** design accepted (owner: "I'll take your recommendations. Proceed"); slice 1 (sign-in) being built. Sign-in is [0035](decisions/0035-operator-sign-in-through-an-identity-provider.md) (slice 1); a Frame's status, Home and the everyday actions are [0036](decisions/0036-home-frame-status-and-wall-actions.md) (slices 2 and 3), with its findings and open questions for the owner. The owner account of A2 is a user in the deployment's identity provider (Keycloak), not an account Central keeps.
 - **Outcome:** signed in with his own account on a phone, the owner sees one status word per Frame, skips a photo, puts one on the Never show list, pauses a Frame for an hour, restarts a stuck app, and starts Show now with an end time.
 - **In scope:** A2 (settings #135, #138), G1, G2, G3 (Restart app with progress), F2, F3 (with the Never show list page, #71), F4 (#84, #85), F6, F8 (#86). The six status words, the problems strip and the error template. "Getting ready" shows per-Frame progress after a power cut (U2).
 - **Out of scope:** the live picture of what each Pi presents (3b-ii); notifications (7); household roles (deferred).
