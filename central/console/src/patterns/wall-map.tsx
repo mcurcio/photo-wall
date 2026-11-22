@@ -128,7 +128,9 @@ export function WallMap({ name, room, frames, loading = false, below }: WallMapP
             </svg>
           </div>
         ) : (
-          <div className="grid min-w-0 grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-4">
+          // Two across in a box under SCALE_FROM (a phone, or a narrow column on a wide screen); the
+          // screen's width adds columns only from there.
+          <div className={`grid min-w-0 grid-cols-2 gap-2 ${width >= SCALE_FROM ? "md:grid-cols-3 xl:grid-cols-4" : ""}`}>
             {tiles.map((entry) => <div key={entry.key} className="flex min-w-0 flex-col *:grow">{entry.tile}</div>)}
           </div>
         )}
