@@ -59,6 +59,6 @@ export const RestartInProgress: Story = {
 };
 /** At phone width: one column, tiles two across, each menu a sheet; Show now is in the bottom tabs. */
 export const Phone: Story = {
-  args: { state: { kind: "ready", home: PROBLEMS, staleSince: null }, menuAs: "sheet" },
+  args: { state: { kind: "ready", home: PROBLEMS, staleSince: null }, menuAs: "sheet", showNowIn: "tab" },
   parameters: { phone: true },
 };

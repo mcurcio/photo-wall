@@ -58,6 +58,9 @@ export interface HomeBoardProps {
   more?: React.ReactNode;
   /** How a tile's menu opens (the catalogue fixes it; the app follows the screen). */
   menuAs?: "auto" | "popup" | "sheet";
+  /** Where **Show now** is: "auto", a quick action above the phone switch and the bottom tab below
+   * it, by the screen; "tab", the bottom tab alone (the catalogue's phone box in a wide view). */
+  showNowIn?: "auto" | "tab";
 }
 
 const WALL_HREF = formatRoute({ section: "wall" });
@@ -128,7 +131,7 @@ function Problem({ view, busy, stale, requested, onFix }: {
  * judges nothing: every word and severity is domain/frame-status.ts's reading of Central's codes.
  */
 export function HomeBoard(props: HomeBoardProps) {
-  const { state, now, pis, requested, busy, said, onFix, onHold, onResume, progress, more } = props;
+  const { state, now, pis, requested, busy, said, onFix, onHold, onResume, progress, more, showNowIn = "auto" } = props;
   if (state.kind === "loading") {
     return (
       <Stack>
@@ -194,9 +197,11 @@ export function HomeBoard(props: HomeBoardProps) {
         );
       })}
       <Inline label="Quick actions">
-        <WideOnly>
-          <Button variant="primary" nativeButton={false} render={<a href={SHOW_NOW_HREF} />}>Show now</Button>
-        </WideOnly>
+        {showNowIn === "auto" && (
+          <WideOnly>
+            <Button variant="primary" nativeButton={false} render={<a href={SHOW_NOW_HREF} />}>Show now</Button>
+          </WideOnly>
+        )}
         <Button disabled={busy} onClick={() => onHold("off")}>{POWER.allOff}</Button>
         <Button disabled={busy} onClick={() => onHold("on")}>{POWER.allOn}</Button>
         {said !== null && <Note live>{said}</Note>}
