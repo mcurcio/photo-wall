@@ -60,7 +60,9 @@ from support.workers import (
 from test_node_boot import keep_version, publish_deployment, released
 
 from central.fleet.node_boot import NodeDeployment
+from central.infra.runtime import STALLED_WORKER_SECONDS
 from central.kernel.assets import OriginLocator
+from central.kernel.job_types import RESCUE_EVERY
 from contracts.app_environment import AppEnvironmentRefV2
 from contracts.node_boot import (
     NodeBaseRefV2,
@@ -434,6 +436,13 @@ def test_a1b_request_driven_miss_on_both_pods_downloads_once(pods, v1):
     assert pods.app_files() == [f"environment-{sha}.tar"]
 
 
+# How long a dead worker's job may wait and still be within what the rescue promises: its
+# heartbeat lapses, then at worst a whole cadence passes (a run just before the lapse sees a live
+# worker), then the retry downloads. 300 s was less than the cadence alone leaves, so a kill within
+# 30 s before a five-minute mark timed out (Pipeline run 822).
+RESCUED_WITHIN = STALLED_WORKER_SECONDS + RESCUE_EVERY.total_seconds() + 60
+
+
 def test_a2_kill_9_mid_download_is_rescued_by_the_other_worker(pods, v1):
     """Flow (d): kill -9 the downloading worker; rescue re-publishes; the other worker finishes
     and the waiting Node is served. The victim is known by construction: it is the only job
@@ -445,7 +454,7 @@ def test_a2_kill_9_mid_download_is_rescued_by_the_other_worker(pods, v1):
     pods.origin.hold = threading.Event()
     try:
         with ThreadPoolExecutor(1) as pool:
-            player = pool.submit(fetch_package, pods, "central-a", sha, retry_for=300)
+            player = pool.submit(fetch_package, pods, "central-a", sha, retry_for=RESCUED_WITHIN)
             wait_for(lambda: pods.origin.count(v1.tag, "environment") == before + 1, seconds=60,
                      what="worker-1's download to start")
             wait_for(lambda: any(f.startswith(".tmp-") for f in pods.app_files()), seconds=30,
@@ -455,8 +464,9 @@ def test_a2_kill_9_mid_download_is_rescued_by_the_other_worker(pods, v1):
             victim.send_signal(signal.SIGKILL)
             victim.wait()
             pods.origin.hold.set()
-            # RescueStalledJobs: the heartbeat lapses (30 s), then its 1-minute tick.
-            wait_for(lambda: f"environment-{sha}.tar" in pods.app_files(), seconds=300,
+            # RescueStalledJobs: the heartbeat lapses (STALLED_WORKER_SECONDS), then its next run
+            # (every RESCUE_EVERY, on the clock's marks).
+            wait_for(lambda: f"environment-{sha}.tar" in pods.app_files(), seconds=RESCUED_WITHIN,
                      what="the rescued fetch")
             fetch = player.result()
     finally:
