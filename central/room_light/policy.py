@@ -138,7 +138,7 @@ def doubt_words(name: str, doubt: Doubt, last: Kept[Dimmer] | Kept[Measured] | N
     line 1 what is wrong and since when ("Photo Wall can't read Family Room Lights · since 29 Oct
     18:05"; "Family Room Lights: its light can't tell · since …"; "Photo Wall lost the link to
     Family Room Lights · since …"), line 2 the last word the Frame is drawn with and where to look
-    ("Its last word: off (26 Oct 15:35) · see Needs attention in Photo Wall"). A light whose last
+    ("Its last word: off (26 Oct 15:35) · see Home in Photo Wall"). A light whose last
     word is a reading says "its sensor". Dates on the house's `clock` (its zone, 12 or 24 hours); a name too long for its line
     is shortened, so "since" always shows. Names the light, never an integration. Pure."""
     return _words(name, doubt, last, clock, sensor=last is not None and isinstance(last.value, Measured))
@@ -153,7 +153,7 @@ def _words(name: str, doubt: Doubt, last: Kept[Dimmer] | Kept[Measured] | None, 
     room = CENTRAL_LINE_MAX - len(before) - len(after) - len(since)
     said = "none yet" if last is None else f"{_said(last.value)} ({clock.instant_words(last.at)})"
     return CentralWords(line1=f"{before}{_fit(name, room)}{after}{since}",
-                        line2=f"Its last word: {said} · see Needs attention in Photo Wall")
+                        line2=f"Its last word: {said} · see Home in Photo Wall")
 
 
 def _said(value: Dimmer | Measured) -> str:

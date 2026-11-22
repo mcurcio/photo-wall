@@ -53,7 +53,7 @@ export const IMPEDED: FrameImpedimentView = {
       lights: ["family-room-lights"],
       words: {
         line1: "Photo Wall can't read Family Room Lights · since 29 Oct 18:05",
-        line2: "Its last word: off (26 Oct 15:35) · see Needs attention in Photo Wall",
+        line2: "Its last word: off (26 Oct 15:35) · see Home in Photo Wall",
       },
     },
   },

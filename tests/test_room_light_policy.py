@@ -327,11 +327,11 @@ def test_doubt_words_name_the_light_its_last_word_and_since_when_in_the_house_s_
     off = Kept(Dimmer(on=False, brightness=0.0), _at(26, 15, 35))
     assert doubt_words("Family Room Lights", Doubt(DoubtReason.CANT_READ, _at(29, 18, 5)), off, ZONE) == CentralWords(
         line1="Photo Wall can't read Family Room Lights · since 29 Oct 18:05",
-        line2="Its last word: off (26 Oct 15:35) · see Needs attention in Photo Wall")
+        line2="Its last word: off (26 Oct 15:35) · see Home in Photo Wall")
     dark = Kept(Measured(lux=0.0), _at(26, 18, 2))
     assert doubt_words("Daylight (windows)", Doubt(DoubtReason.CANT_TELL, _at(26, 18, 2)), dark, ZONE) == CentralWords(
         line1="Daylight (windows): its sensor can't tell · since 26 Oct 18:02",
-        line2="Its last word: 0 lx (26 Oct 18:02) · see Needs attention in Photo Wall")
+        line2="Its last word: 0 lx (26 Oct 18:02) · see Home in Photo Wall")
     half = Kept(Dimmer(on=True, brightness=0.5), _at(26, 9, 0))
     closed = doubt_words("Lamp", Doubt(DoubtReason.LINK_CLOSED, _at(27, 7, 1)), half, ZONE)
     assert closed.line1 == "Photo Wall lost the link to Lamp · since 27 Oct 07:01"
