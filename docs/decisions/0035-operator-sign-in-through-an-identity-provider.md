@@ -132,8 +132,9 @@ One pure function judges a token given the issuer's keys and the clock; the adap
 
 - The signature must verify under a key from the issuer's JWKS. Algorithms are an allow-list (RS256, PS256, ES256); `none` and the HMAC family are refused whatever the provider metadata says.
 - `iss` equals the configured issuer exactly. `exp` and `nbf` are read on Central's clock with 60 s of leeway.
-- **ID token:** `aud` contains Central's client id, `nonce` equals the transaction's.
-- **Access token:** `aud` contains Central's client id. Keycloak adds a client to `aud` when the user or service account holds one of its client roles, which the required role is.
+- **A token is addressed to Central** when its `aud` contains Central's client id, or its `azp` (the party it was issued to) is Central's client id. Only Central, holding its client secret, is issued a token as its own client. Both arms are needed for Keycloak's defaults: a person's access token, issued to Central's client, carries `azp` and an `aud` without that client, because Keycloak's audience mapper leaves the requesting client itself out; a service account's token is issued to its own client and carries Central's client in `aud` while it holds one of Central's client roles. (The first draft of this record asked for `aud` alone; the real-Keycloak leg showed that an owner could then not sign in without an extra mapper in the realm.)
+- **ID token:** addressed to Central, and its `nonce` equals the transaction's.
+- **Access token:** addressed to Central, and not an ID or logout token ([as built](#as-built)).
 - An unknown key id refetches the JWKS once, at most once a minute, then refuses.
 
 ### Staying judged
@@ -257,9 +258,9 @@ Slice 1, 2026-11-22. Where the build differs from the design above, the build st
 
 - **Sign-in's redirects back to the console are relative** (`/#/route`, `/?sign_in=<code>`), not built from the stated origin. `origin` at `start` is an unauthenticated query parameter, so an absolute redirect built from it would send a browser wherever a crafted link said. The stated origin still builds the redirect address the provider checks, and is the Origin the session is bound to.
 - **An ID token or a logout token is never a credential.** Both are signed by the same keys for the same audience as an access token, and Log out hands the ID token to the browser. A Bearer token carrying `at_hash`, `c_hash` or `events`, or a `typ` claim other than an access token's, is refused.
-- **`not_allowed` also answers an access token whose `aud` lacks Central's client** when the ID token stood, because Keycloak leaves the client out of `aud` exactly when the person holds none of its roles. It lets nobody in; it picks the message.
+- **A person's access token is never a Bearer credential.** With the `azp` arm of the address rule, the access token a sign-in gets (issued to Central's own client) would pass as a machine's and be recorded as `client:<id>`. Central asks for that token with its client secret and hands it to nobody, so a Bearer token whose `azp` is Central's client id is refused (`TokenJudge.credential`, 401). A person is let in by the session, which carries the write checks, the hard end and the provider's logout; a machine by its own client's token. The judge stays one: sign-in and the Bearer read the same validation and the same roles, and the Bearer adds this one refusal.
 - **PyJWT sits behind a port.** `infra/jwt_signature.py` is its only importer and checks the signature alone. The algorithm allow-list is checked before any key is asked for, and every claim is read on Central's clock, in `policy.py`.
-- **More modules than the map above:** `operator_access/settings.py` (the six variables), `service.py` (the use cases over the ports), `views.py` (the answers, from which the console's types are generated), `infra/transaction_seal.py`. Migration 131 makes the two tables.
+- **More modules than the map above:** `operator_access/settings.py` (the six variables), `service.py` (the use cases over the ports), `views.py` (the answers, from which the console's types are generated), `infra/transaction_seal.py`. Migration 131 makes the two tables: Central's 43, 47 with Procrastinate's four ([0034](0034-central-schema-consolidation.md#the-tables-after-each-migration)).
 - **`PHOTO_WALL_OIDC_ROLE` is the provider's name for Central's `owner`**, not a second role.
 - **One refresh per session is guarded inside the API process**, with no database lock held across the call to the provider; the store's write is a compare-and-set on the old refresh token. Central runs one API process. With several, two could refresh one session at once and, where the provider rotates refresh tokens, one of them could end it.
 - **Session retention runs only in provider mode**; token mode has no rows.
@@ -294,6 +295,7 @@ The owner took each default on 2026-11-22 (R1).
 | O1 | Keep `PHOTO_WALL_ADMIN_TOKEN` set in production as break-glass, or unset it once the service accounts exist? | Keep it set until every script has a service account, then unset it |
 | O2 | Should a role removed in Keycloak take effect within the access token's life (five minutes by default), or at once? | Within the token's life; at once needs Keycloak to send a logout, which a role change does not |
 
-## Not verified
+## Verified, and not
 
-Nothing here has run. The Keycloak facts this design leans on (client roles under `resource_access.<client>.roles` in the access token, the client added to `aud` when the principal holds its role, back-channel logout carrying `sid`) are from Keycloak's documentation as recalled, not from a test. The Keycloak CI leg above is what pins them, at a named Keycloak version, before slice 1 merges.
+- **Against a real Keycloak 26.8.2**, run natively during the build and by the `keycloak` CI job: where the roles are, what `typ` each token states, the audience rule above, a service account's access, the ID token and a person's access token refused as a Bearer credential, the refresh and its refusal after the role is removed, back-channel logout on an admin's sign-out, and Log out ending Keycloak's session.
+- **Not verified on hardware or in production:** nothing here touches a Pi. The deployment's own realm is set up by the runbook's steps, which the CI realm file mirrors.

@@ -310,7 +310,7 @@ An issuer without a client id or secret stops Central at start with one line nam
 
 **Log out** ends the sign-in in Central and then in Keycloak, and comes back to the sign-in page. It discards unsaved drafts in that tab, as in token mode.
 
-**Scripts.** A script asks Keycloak for a token with its own client (the client-credentials grant) and sends it as `Authorization: Bearer`. Central lets it in by the same rule as a person: a valid access token from the issuer that carries the role. Its writes are recorded as `client:<id>`, a person's as `person:<id>` ([who changed a record](decisions/0035-operator-sign-in-through-an-identity-provider.md#who-changed-a-record)).
+**Scripts.** A script asks Keycloak for a token with its own client (the client-credentials grant) and sends it as `Authorization: Bearer`. Central lets it in by the same rule as a person: a valid access token from the issuer that carries the role. The token must be the script's own client's: one issued to Central's client (a person's, from a sign-in) is refused as a Bearer header. Its writes are recorded as `client:<id>`, a person's as `person:<id>` ([who changed a record](decisions/0035-operator-sign-in-through-an-identity-provider.md#who-changed-a-record)).
 
 **The admin token as break-glass.** With a provider set, `PHOTO_WALL_ADMIN_TOKEN` is optional. While it is set, it still works as a Bearer header (the `curl` examples here, the calibration reader, the demo), also when Keycloak is down; it never signs a browser in. Unset it once every script has its own client.
 
