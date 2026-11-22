@@ -1,20 +1,15 @@
 import { fact, factText, LAYER_NAMES, receiptText } from "./facts.js";
-import { boundOutput, frameForOutput, isBound, liveRunsFor } from "./join.js";
-import { clockTime } from "./timeWords.js";
+import { frameForOutput, isBound, liveRunsFor } from "./join.js";
 
 // The one definition lives with the bound-output join; consumers read it through here.
 export { isBound };
 
 /**
- * Wall health: the ONE classifier (console pass 2, slice 1 — design
- * docs/operator-console-ux-pass2.md §4). Every surface that says whether a frame
- * or Player is alright — the plan tile, the Frame page header, Position,
- * Binding, the Players pages, the Unplaced tray, the Showrunner frame list and
- * the attention strip — reads it through here, so the states, their precedence
- * and their wording live in exactly one place. Equipment standing (slice 2,
- * docs/operator-console-ux-pass2-onboarding.md §4; standing words per
- * docs/operator-console-ddd.md §3) lives here too: a Player's standing, each
- * Output's state, the bindable set, and the one Output wording.
+ * Equipment standing and a Player's liveness (console pass 2; standing words per
+ * docs/operator-console-ddd.md §3): a Player's standing, each Output's state, the bindable set,
+ * the one Output wording, and Central's record of its contact with a Player. A FRAME's status is
+ * not worked out here or anywhere in the console: Central composes it and serves it on Home's
+ * read, and domain/frame-status.ts words it (decision 0036).
  *
  * LIVENESS is Central's record of its contact with a Player on that Player's
  * current authority epoch (`last_report_at`: the read time while its session
@@ -26,35 +21,15 @@ export { isBound };
  * never hard-coded here; so is the session socket's keepalive
  * (`socket_keepalive_seconds`), from which the enrollment grace below is derived.
  *
- * Honesty rules: a label states a fact and its age, nothing more; `ok` never
- * implies playback (R2); nothing here says "LIVE", "online" or "connected".
- * Comparisons are written `!(age <= limit)` so a missing threshold or read time
- * fails CLOSED (reads as overdue), never open.
+ * Honesty rules: a label states a fact and its age, nothing more; nothing here says "LIVE",
+ * "online" or "connected". Comparisons are written `!(age <= limit)` so a missing threshold or
+ * read time fails CLOSED (reads as overdue), never open.
  */
 
 /**
- * @typedef {"ok"|"todo"|"alarm"} Severity
- * @typedef {"unbound"|"dark"|"awaiting-report"|"player-silent"|"output-interrupted"|
- *           "no-panel-at-enrollment"|"display-changed"|"needs-calibration"|"ok"} FrameState
- * @typedef {import("./routes.js").Tab} Tab
- * @typedef {"liveness"|"binding"|"dark"|"output"|"panel"|"display"|"calibration"} Cause
- * @typedef {{state: FrameState, severity: Severity, cause: Cause|null,
- *            label: string, tileLabel: string, settling: boolean,
- *            tab: Tab|null}} FrameHealth
  * @typedef {{state: "heard"|"silent"|"awaiting-report", age: number,
  *            overdue: boolean, settling: boolean, label: string}} Liveness
- *
- * `cause` groups states by what must change: "liveness" (awaiting-report and
- * player-silent — the Player's reports are not reaching Central), "binding"
- * (unbound), "dark" (dark — the Pi's health judge tinted the bound Output's debug overlay, issue
- * #126), "output" (output-interrupted — a node layer reported the bound Output
- * lost while its Run continues), "panel" (no-panel-at-enrollment), "display"
- * (display-changed: another display is on the Frame's port, resolved on the Hardware tab),
- * "calibration" (needs-calibration); null when ok. `label` is the full fact with its age;
- * `tileLabel` is the same fact without the age, short enough for a plan tile.
- * `settling` marks an awaiting-report frame enrolled within the grace (one
- * socket keepalive): it is still never ok, but the attention strip does not
- * count the moment between a Player's (re)enrollment and its socket's open.
+ *   `settling` marks a Player enrolled within the grace (one socket keepalive).
  */
 
 /**
@@ -83,7 +58,7 @@ export function gigabytes(bytes) {
 /**
  * The Player app's liveness, aged against the snapshot's `read_at`. Its label is the one
  * `reported` fact of the Player app layer (`livenessFact`), so the Wall, the Frame page,
- * Needs attention, Binding and the Player page name the same layer in the same words.
+ * Home, Binding and the Player page name the same layer in the same words.
  *
  *  - "awaiting-report": enrolled, but no report accepted on its current epoch;
  *    `age` is the time since enrollment and `overdue` is set past the threshold.
@@ -166,110 +141,8 @@ export function ageAt(readAt, timestamp) {
 }
 
 /**
- * The health of one frame: the first matching state, in design §4 order.
- * A dark Frame (its Pi's health judge, issue #126) follows unbound and precedes the liveness
- * rows. Rows 1–3 make the facts below them stale; an Output interruption Central has
- * linked to the current Binding (console DDD §15) follows them; a physical cause (no Panel
- * listed at enrollment) precedes a configuration to-do (calibration). Only alarms are alarms.
- *
- * @param {object|null} snapshot
- * @param {string} frameId
- * @returns {FrameHealth|null} null when the frame is not in the inventory
- */
-export function frameHealth(snapshot, frameId) {
-  const frame = (snapshot?.inventory?.frames ?? []).find((candidate) => candidate.id === frameId);
-  if (!frame) {
-    return null;
-  }
-  if (!isBound(frame)) {
-    return healthOf("unbound", "todo", "binding", "Needs a Player", "Needs a Player", "hardware");
-  }
-  // The Pi's own health judge says the bound Output is dark: it holds whatever the Player app's
-  // reports say (a frozen Player may still answer, a dead one says nothing), so it precedes them.
-  if (frame.dark != null) {
-    return healthOf("dark", "alarm", "dark", darkLabel(frame.dark), "Dark", "hardware");
-  }
-  const liveness = playerLiveness(snapshot, frame.player_id);
-  if (liveness === null || liveness.state === "awaiting-report") {
-    // A bound Player missing from the inventory is unreachable (the binding's
-    // foreign key); it is classified as the worst case of this row.
-    return {
-      ...healthOf(
-        "awaiting-report",
-        liveness === null || liveness.overdue ? "alarm" : "todo",
-        "liveness",
-        liveness?.label ?? "No report from the Player yet",
-        "No report yet",
-        "hardware",
-      ),
-      settling: liveness?.settling === true,
-    };
-  }
-  if (liveness.state === "silent") {
-    const { label } = liveness;
-    return healthOf("player-silent", "alarm", "liveness", label, playerAppSilent(), "hardware");
-  }
-  const interruption = interruptionFor(snapshot, frameId);
-  if (interruption !== null) {
-    const tile = interruption.suffix === null ? "Output interrupted"
-      : `Output interrupted · ${interruption.suffix}`;
-    return healthOf("output-interrupted", "alarm", "output", interruption.label, tile, "hardware");
-  }
-  // Fail closed: a missing output row reads as no Panel listed. It stays an alarm (console
-  // DDD §19): the enrollment record is the Wall's only signal for an unplugged Panel. Its
-  // tab is Hardware, where the Panel at enrollment is shown.
-  if (!displayDetected(boundOutput(snapshot, frameId))) {
-    return healthOf(
-      "no-panel-at-enrollment",
-      "alarm",
-      "panel",
-      NO_PANEL_AT_ENROLLMENT,
-      NO_PANEL_LISTED,
-      "hardware",
-    );
-  }
-  if (frame.readiness === "display-changed") {
-    return healthOf("display-changed", "todo", "display", DISPLAY_CHANGED, DISPLAY_CHANGED, "hardware");
-  }
-  if (frame.readiness !== "ready") {
-    return healthOf(
-      "needs-calibration",
-      "todo",
-      "calibration",
-      "Needs calibration",
-      "Needs calibration",
-      "position",
-    );
-  }
-  return healthOf("ok", "ok", null, liveness.label, "Heard recently", null);
-}
-
-/**
- * A dark Frame in words (issue #126): "Dark since 08:10 · out of open files". The time is when
- * the card's evidence began on the Pi's own clock (`dark.since`, a UTC set time), shown to the
- * minute on the house's clock and never compared with Central's; the cause is the catalogue's
- * household line Central served (central/fleet/frame_dark.py).
- *
- * @param {{code: string, line: string, since: string}} dark the inventory Frame's `dark`
- * @returns {string}
- */
-export function darkLabel(dark) {
-  const seconds = Date.parse(dark.since) / 1000;
-  const since = Number.isFinite(seconds) ? clockTime(Math.floor(seconds / 60) * 60) : dark.since;
-  return `Dark since ${since} · ${dark.line}`;
-}
-
-/**
- * A Frame whose port shows another display than its Position was set against (readiness
- * `display-changed`): a to-do the Hardware tab's card resolves (confirm the new Display, then
- * check the Position), so it opens Hardware, not Position.
- */
-export const DISPLAY_CHANGED = "Display changed";
-
-/**
  * The Panel record at the Player app's last enrollment when no Panel is listed as connected
- * (console DDD §19): the one wording players.js `panelAtEnrollment` and the Frame-health
- * alarm both use. `connected=false` is Central's own record, so it may be stale.
+ * (console DDD §19): the one wording players.js `panelAtEnrollment` uses. `connected=false` is Central's own record, so it may be stale.
  */
 export const NO_PANEL_AT_ENROLLMENT =
   "No Panel listed as connected at the Player app's last enrollment (may be stale)";
@@ -300,7 +173,7 @@ const LOSS_REPORTS = Object.freeze({
 /**
  * The Output interruption of a Frame, from Central's interruption read
  * (`snapshot.outputInterruptions`, the snapshot's `output_interruptions`; design §15-§16):
- * the one function the Frame-health state and the Player page's Output row both read.
+ * the one function the Player page's Output row reads.
  *
  * Central serves only unresolved losses that fence the Frame's CURRENT Binding, so a row
  * is matched by Frame id alone and never re-matched to a Binding here. The fact is
@@ -327,51 +200,6 @@ export function interruptionFor(snapshot, frameId) {
   const value = fact({ kind: "derived", value: "Output interrupted", basis: `${report}${recorded}` });
   const suffix = liveRunsFor(snapshot?.runtime, frameId).length > 0 ? RUN_CONTINUES : null;
   return { fact: value, suffix, label: suffix === null ? factText(value) : `${factText(value)} · ${suffix}` };
-}
-
-/** One FrameHealth; only an awaiting-report frame can be settling. */
-function healthOf(state, severity, cause, label, tileLabel, tab) {
-  return { state, severity, cause, label, tileLabel, settling: false, tab };
-}
-
-/**
- * The Frame page tab that shows the cause of a frame's health; `ok` opens the caller's
- * fallback (Overview, routes.js `DEFAULT_TAB`).
- *
- * @param {FrameHealth|null} health
- * @param {Tab} fallback
- * @returns {Tab}
- */
-export function tabFor(health, fallback) {
-  return health?.tab ?? fallback;
-}
-
-/**
- * Every frame that needs attention (its alarms), in frame-id order: evidence only (console
- * DDD G2). A structural to-do (unbound, needs calibration) is never an attention row; it is
- * the Wall's To finish item (unfinished.js `wallUnfinished`). A frame awaiting its Player's
- * first report within the silence limit (settling or not) is no alarm yet and is counted in
- * `awaiting`, so the all-clear never claims a report that has not arrived.
- *
- * @param {object|null} snapshot
- * @returns {{frameCount: number, awaiting: number,
- *            alarms: Array<{frame: object, health: FrameHealth}>}}
- */
-export function wallAttention(snapshot) {
-  const frames = [...(snapshot?.inventory?.frames ?? [])].sort((a, b) =>
-    a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
-  );
-  const alarms = [];
-  let awaiting = 0;
-  for (const frame of frames) {
-    const health = frameHealth(snapshot, frame.id);
-    if (health.severity === "alarm") {
-      alarms.push({ frame, health });
-    } else if (health.state === "awaiting-report") {
-      awaiting += 1;
-    }
-  }
-  return { frameCount: frames.length, awaiting, alarms };
 }
 
 // --- Equipment standing (slice 2 §4).

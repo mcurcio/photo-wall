@@ -10,12 +10,20 @@ import React, {
 
 import { apiWrite } from "./apiWrite.js";
 import { signInResultNotice } from "./domain/operator-access/access.ts";
+import { HOME_NOT_READ, readHome } from "./homeApi.js";
 import { CONSOLE_HEADER, onOriginRefused, writeCount } from "./session.js";
 
 /**
  * @typedef {{inventory: object, runtime: object, media: object|null, at: number,
  *            readAt: number, playerReportsReadAt: number,
- *            readinessDiagnostics: object[], outputInterruptions: object[]}} Snapshot
+ *            readinessDiagnostics: object[], outputInterruptions: object[],
+ *            home: import("./generated/contract").HomeView|null, homeFailed: boolean,
+ *            homeReadAt: number|null}} Snapshot
+ *   `home` is Home's document (homeApi.js; decision 0036), read with the snapshot: every Frame's
+ *   status as Central composed it, which every chip reads (domain/frame-status.ts). It is the
+ *   last document read (null before the first), and `homeFailed` says the newest read of it
+ *   failed: what it holds is then not current, and is as of `homeReadAt` (Central's time of the
+ *   snapshot it was last read with).
  * @typedef {"checking"|"signedIn"|"signedOut"} Auth
  * @typedef {"rejected"|"expired"|"blocked"|"failed"|"signOutFailed"|"notAllowed"|
  *           "providerUnreachable"|"providerFailed"|null} AuthNotice
@@ -147,6 +155,9 @@ export function SnapshotProvider({ children }) {
   const [inFlight, setInFlight] = useState(0);
   const issuedRef = useRef(0);
   const appliedRef = useRef(0);
+  // Home's last read (its document and entity tag): the next read asks from it (If-None-Match).
+  const homeRef = useRef(HOME_NOT_READ);
+  const homeReadAtRef = useRef(/** @type {number|null} */ (null));
   const pollingRef = useRef(false);
 
   const setAuth = useCallback((next) => {
@@ -165,6 +176,10 @@ export function SnapshotProvider({ children }) {
     // and `playerReportsReadAt` retain Central's distinct timing facts.
     let next = null;
     let failure = null;
+    // Home's document rides the same read: the same cadence, the same refresh after an action
+    // and the same write fence. It never fails the snapshot: its own failure is said beside it.
+    const homeBefore = homeRef.current;
+    const homeRead = readHome(homeBefore);
     try {
       const aggregate = await fetchJson("/v1/operator/snapshot");
       if (!aggregate?.inventory || !aggregate?.runtime || !aggregate?.media ||
@@ -190,11 +205,30 @@ export function SnapshotProvider({ children }) {
     } catch (error) {
       failure = error;
     }
+    const home = await homeRead;
+    if (failure === null && home.unauthorized === true) {
+      // Central refused Home's read for want of a session while it answered the snapshot (two
+      // concurrent reads at the moment a session ends): the session has ended all the same.
+      failure = Object.assign(new Error("HTTP 401"), { status: 401 });
+      next = null;
+    }
+    if (next !== null) {
+      next.home = home.view;
+      next.homeFailed = home.failed;
+      next.homeReadAt = home.failed ? homeReadAtRef.current : next.readAt;
+    }
     if (ticket <= appliedRef.current || writeCount() !== writesAtStart) {
       // Superseded by a newer read, or overlapped by a write: dropped whole.
       return null;
     }
     appliedRef.current = ticket;
+    if (homeRef.current === homeBefore) {
+      // Kept only from an applied read: a superseded or fenced one may predate a write.
+      homeRef.current = home;
+      if (next !== null) {
+        homeReadAtRef.current = next.homeReadAt;
+      }
+    }
     if (failure !== null) {
       setRefreshFailed(true);
       // No session (401 on the first read OR mid-session: expired, token
@@ -324,6 +358,8 @@ export function SnapshotProvider({ children }) {
     }
     // Any read in flight overlapped this write and is dropped by the fence.
     setSnapshot(null);
+    homeRef.current = HOME_NOT_READ;
+    homeReadAtRef.current = null;
     setAuth("signedOut");
     setAuthNotice(null);
     setRefreshFailed(false);

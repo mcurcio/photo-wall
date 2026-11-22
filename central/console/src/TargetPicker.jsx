@@ -1,15 +1,14 @@
 import React from "react";
 
-import { frameChip } from "./domain/frame-health-chip.ts";
+import { frameChip, frameStatusIn, tabForStatus } from "./domain/frame-status.ts";
 import { FRAME_ID_PATTERN } from "./framesApi.js";
-import { frameHealth } from "./health.js";
 import { formatRoute } from "./routes.js";
 import { StatusChip } from "./ui/status-chip.tsx";
 
 /**
  * The one target-frame picker (pass 2 slice 3 §3), in both authoring modes:
- * the Frames grouped by Surface, each with its health from the one classifier
- * (health.js, the plan tile's short label). A checkbox's accessible name is
+ * the Frames grouped by Surface, each with its status as Central serves it
+ * (domain/frame-status.ts, the one chip's words). A checkbox's accessible name is
  * exactly `Target frame <id>`; the health reaches it only as its description
  * (`aria-describedby`), never in the name. A legacy id outside the one target
  * rule (a `:`) is listed with its reason and cannot be ticked: no Scene can
@@ -17,7 +16,7 @@ import { StatusChip } from "./ui/status-chip.tsx";
  *
  * With `tileFor` (the Scene's Frames step, follow-ups review) each Frame is a card: its tile at
  * its Frame output's shape, with how many of the Scene's photos fit it, beside its checkbox, so a
- * Frame is chosen by what it would show, and its health is a chip (domain/frame-health-chip.ts:
+ * Frame is chosen by what it would show, and its status is the one chip (domain/frame-status.ts:
  * the Frame page header's words and severity).
  *
  * @param {{id: string, reason?: string|null, snapshot: object|null,
@@ -49,7 +48,7 @@ export function TargetPicker({ id, reason = null, snapshot, targets, onToggle, t
           <div key={surface ?? ""} className="target-picker__surface" role="group" aria-label={name}>
             <p className="target-picker__surface-name">{name}</p>
             {group.map((frame) => {
-              const health = frameHealth(snapshot, frame.id);
+              const chip = frameChip(frameStatusIn(snapshot, frame.id));
               const describedId = `${id}-${frame.id}-health`;
               const targetable = FRAME_ID_PATTERN.test(frame.id);
               return (
@@ -66,12 +65,12 @@ export function TargetPicker({ id, reason = null, snapshot, targets, onToggle, t
                   <span className="target-picker__id">{frame.id}</span>
                   {tileFor !== null && targetable ? (
                     <span id={describedId} className="target-picker__health">
-                      <StatusChip severity={frameChip(health, true).severity}>{frameChip(health, true).label}</StatusChip>
+                      <StatusChip severity={chip.severity}>{chip.label}</StatusChip>
                     </span>
                   ) : (
-                    <span id={describedId} className={`target-picker__health health--${health.severity}`}>
+                    <span id={describedId} className={`target-picker__health health--${chip.severity}`}>
                       {targetable
-                        ? health.tileLabel
+                        ? chip.label
                         : "Outside the target id rule (a ':' or over 96 characters): no Scene can target it"}
                     </span>
                   )}
@@ -91,8 +90,8 @@ export function TargetPicker({ id, reason = null, snapshot, targets, onToggle, t
 }
 
 /**
- * Frames as chips, each with the plan tile's health label (health.js
- * `tileLabel`): the one rendering of "which frames, and are they alright" in
+ * Frames as chips, each with its status in the one chip's words (domain/frame-status.ts):
+ * the one rendering of "which frames, and are they alright" in
  * Run rows (§9) and Scene rows (§13). A chip is status only and never wraps;
  * with `recoveryLinks`, a Frame that needs a look gets "Open Frame <id>" on a
  * line of links under the chips, never inside one.
@@ -101,9 +100,12 @@ export function TargetPicker({ id, reason = null, snapshot, targets, onToggle, t
  */
 export function FrameChips({ snapshot, frameIds, recoveryLinks = false }) {
   const frames = frameIds.map((frameId) => {
-    const health = frameHealth(snapshot, frameId);
-    // The chip's severity and words are the Frame page header's (domain/frame-health-chip.ts).
-    return { frameId, chip: health === null ? null : frameChip(health, true), tab: recoveryLinks ? health?.tab ?? null : null };
+    const listed = (snapshot?.inventory?.frames ?? []).some((frame) => frame.id === frameId);
+    const status = frameStatusIn(snapshot, frameId);
+    // The chip's severity and words are the Frame page header's (domain/frame-status.ts). A Frame
+    // that needs a look links to the tab its status is about; one that is fine gets no link.
+    const tab = tabForStatus(status, null);
+    return { frameId, chip: listed ? frameChip(status) : null, tab: recoveryLinks ? tab : null };
   });
   const chips = (
     <span className="run-control__frames">

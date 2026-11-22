@@ -1,4 +1,5 @@
-import { frameHealth, gigabytes } from "./health.js";
+import { frameChip, frameStatusIn, statusLine } from "./domain/frame-status.ts";
+import { gigabytes } from "./health.js";
 import { fact, factText, plannedNothing, words } from "./facts.js";
 import { isBound, LIVE_PHASES, plannedFact, rankedContributions, toTarget } from "./join.js";
 import { cycleWording, runScene } from "./showState.js";
@@ -282,11 +283,13 @@ export function whyNothingNew(snapshot, frameId, check = null, pools = {}) {
     state: worker?.severity === "ok" ? "ok" : "stop",
     text: worker === null ? "Its state was not served." : `The media worker ${worker.label}.`,
   });
-  const health = frameHealth(snapshot, frameId);
+  // The Frame's status as Central serves it (domain/frame-status.ts): only Showing or Resting passes.
+  const listed = (snapshot?.inventory?.frames ?? []).some((frame) => frame.id === frameId);
+  const status = frameStatusIn(snapshot, frameId);
   steps.push({
     title: "Frame health",
-    state: health?.severity === "ok" ? "ok" : "stop",
-    text: health === null ? `${frameId} is not in the inventory.` : health.label,
+    state: listed && frameChip(status).severity === "ok" ? "ok" : "stop",
+    text: listed ? statusLine(status, { pi: null, now: snapshot?.readAt ?? null }) : `${frameId} is not in the inventory.`,
   });
 
   const first = steps.findIndex((step) => step.state === "stop");

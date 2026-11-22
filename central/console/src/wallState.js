@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 
-import { frameHealth, tabFor } from "./health.js";
+import { frameStatusIn, tabForStatus } from "./domain/frame-status.ts";
 import { DEFAULT_TAB } from "./routes.js";
 
 // The Wall's state that outlives the Wall page (flow design §6): the shell holds it,
@@ -34,8 +34,8 @@ function findFrame(snapshot, frameId) {
  * sidebar link from another section; Edit layout (`#/wall/layout`) is never remembered.
  *
  * Opening a Frame (a plan tile or tray entry: `openFrame`, at Overview) or visiting one from
- * outside the plan (the attention strip, the Needs attention page, a Player page: the tab that
- * shows its cause, health.js `tabFor`) asks the Frame page to take focus ONCE: `focusRequest`
+ * outside the plan (the attention strip, the Home page, a Player page: the tab that
+ * shows what its status is about, domain/frame-status.ts `tabForStatus`) asks the Frame page to take focus ONCE: `focusRequest`
  * is a fresh number each time, and the page clears it when spent, so a later remount does not
  * refocus.
  *
@@ -80,7 +80,7 @@ export function useWallMemory(route, snapshot, navigate) {
     const frameRoute = (frameId) => ({
       section: "wall",
       id: frameId,
-      tab: tabFor(frameHealth(snapshot, frameId), DEFAULT_TAB),
+      tab: tabForStatus(frameStatusIn(snapshot, frameId), DEFAULT_TAB),
     });
     const prepareVisit = (frameId) => {
       const frame = findFrame(snapshot, frameId);

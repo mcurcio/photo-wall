@@ -100,9 +100,13 @@ SHARED_WITH_SHOW = {
     "placement.js",
     "turn-words.ts",
     "libraryApi.js",  # the photo sheet's one photo's facts
-    # A Frame's health as a chip (design review round 2): the Frame page header's words and
-    # severity, also the Show side's Frame chips and the Scene's Frame picker. Words only.
-    "frame-health-chip.ts",
+    # (A Frame's status in words, domain/frame-status.ts, is the shell's own since decision 0036:
+    # its top bar says the house word.)
+    # The one host classifier and the Pis' names: Home's list of a Pi's own faults (the neutral
+    # table), the Hardware pages and the Frame page's host chip. The shell's attention strip
+    # reached them until Home took its place (decision 0036). Words and judgements, no write.
+    "hostHealth.js",
+    "players.js",
     # Display power's one copy home (Night off, holds, Resting, the power line): the week page and
     # the Frame page's Why, Power tab and status chip. Words only.
     "powerWords.js",
@@ -126,16 +130,16 @@ SHARED_WITH_SHOW = {
 # Every write path reaches `apiWrite.js`, so a closure that holds none of these holds no write.
 WRITE_MODULES = {"apiWrite.js", "framesApi.js", "ConfirmAction.jsx", "useMutate.js",
                  "equipmentApi.js"}
-# G1's list modules (console DDD §49): Needs attention (its page, its list and the strip), the
-# Wall's To finish list and model, the one host classifier they read, and the Overview host chip.
-G1_LIST_MODULES = ["AttentionPage.jsx", "attention.js", "AttentionStrip.jsx", "WallUnfinished.jsx",
-                   "unfinished.js", "hostHealth.js", "domain/host-health-link.tsx"]
+# G1's list modules (console DDD §49): the Wall's To finish list and model, the one host
+# classifier, the Overview host chip, and the one module that words a Frame's status. Needs
+# attention's three (its page, its list and the strip) went when Home took their place (decision
+# 0036); Home itself is a page, and its writes are its own.
+G1_LIST_MODULES = ["WallUnfinished.jsx", "unfinished.js", "hostHealth.js", "domain/host-health-link.tsx",
+                   "domain/frame-status.ts"]
 # The shell's own page-level modules, besides the route tables and every `*Page.jsx`.
 SHELL_PAGES = {"main.jsx", "App.jsx", "Shell.jsx"}
 # sceneTargets.js is not listed: since S1 join.js reads a Run's origin from showState.js, which
 # re-exports it, so the shell's own modules reach it.
-# players.js is not listed: since T1 the shell's own attention strip reaches it (host incidents
-# name each Bound Player, hostHealth.js), so it is one of the shell's own modules.
 
 
 class ScanError(Exception):
@@ -580,7 +584,9 @@ def test_the_modules_shared_with_the_show_side_are_declared_and_control_nothing(
 @pytest.mark.parametrize("table", ["show", "fleet", "neutral"])
 def test_readiness_guidance_is_shared_without_reaching_display_controls(graph, table):
     modules = reachable(graph, TABLES[table])
-    assert {"ReadinessNotice.jsx", "readinessRecovery.js"} <= modules
+    # Home (the neutral table) words a report on its own problem card: the mapping, not the notice.
+    shared = {"readinessRecovery.js"} if table == "neutral" else {"ReadinessNotice.jsx", "readinessRecovery.js"}
+    assert shared <= modules
     assert not modules & DISPLAY_CONTROLS
 
 
@@ -599,7 +605,6 @@ def test_the_wall_routes_do_reach_display_controls(graph):
 def test_g1_list_modules_reach_no_page_and_no_write_module(graph, name):
     modules = reachable(graph, name)
     assert Path(name).name in modules and len(modules) > 1  # the walk reached past the module itself
-    # The Needs attention page is itself a page; what it reaches must not be one.
     reached = modules - {Path(name).name}
     assert not g1_forbidden(reached), sorted(g1_forbidden(reached))
 
@@ -617,14 +622,13 @@ def test_g1_list_modules_are_in_the_graph_and_the_homes_do_reach_writes(graph):
 def test_g1_catches_the_classifier_reaching_the_polling_hook(tmp_path):
     # A mutation of the guarded files, in a copy: the classifier importing its lookup from the
     # polling hook again (as batch 4 first did) puts the write primitive in the closure of
-    # Needs attention, and the check names it.
+    # every list that reads it, and the check names it.
     src = tmp_path / "src"
     shutil.copytree(SRC, src)
-    assert not g1_forbidden(scan_closure(src / "attention.js", tmp_path))
+    assert not g1_forbidden(scan_closure(src / "domain/host-health-link.tsx", tmp_path))
     classifier = src / "hostHealth.js"
     classifier.write_text('import { useFleetHosts } from "./fleetHosts.js";\n' + classifier.read_text())
-    for name in ("AttentionPage.jsx", "attention.js", "AttentionStrip.jsx", "hostHealth.js",
-                 "domain/host-health-link.tsx"):
+    for name in ("hostHealth.js", "domain/host-health-link.tsx"):
         assert "apiWrite.js" in g1_forbidden(scan_closure(src / name, tmp_path)), name
 
 
@@ -643,7 +647,7 @@ def test_every_section_is_in_exactly_one_route_table():
     assert sorted(sections) == sorted(
         ["now", "scenes", "schedule", "sources", "wall", "hardware", "players", "releases",
          "photo-library", "photo-fit", "house", "lights", "home-assistant", "paper-profiles",
-         "people-and-access", "attention"])
+         "people-and-access", "home"])
 
 
 ROUND_TRIP = r"""
@@ -683,7 +687,7 @@ console.log(JSON.stringify(out));
 ROUTES = [
     {"section": section} for section in
     ("now", "scenes", "schedule", "sources", "wall", "hardware", "releases", "photo-library",
-     "photo-fit", "lights", "home-assistant", "paper-profiles", "people-and-access", "attention")
+     "photo-fit", "lights", "home-assistant", "paper-profiles", "people-and-access", "home")
 ] + [
     {"section": "hardware", "id": "device-" + "a" * 64},
     {"section": "hardware", "id": "a/b ç?#%"},
@@ -775,8 +779,8 @@ def test_routes_parse_format_and_round_trip():
     assert all(trip["same"] for trip in out["roundTrips"]), out["roundTrips"]
     assert out["invalidHashes"] == [None] * len(INVALID_HASHES)
     assert out["invalidRoutes"] == ["refused"] * len(INVALID_ROUTES)
-    # The landing route is always the Wall, with no Frames and with five (console DDD §48).
-    assert out["landing"] == [{"section": "wall"}] * 3
+    # The landing route is always Home, with no Frames and with five (decision 0036).
+    assert out["landing"] == [{"section": "home"}] * 3
     # No aliases (owner rule): the retired Equipment page's bookmark parses to nothing.
     assert out["equipment"] is None
     # No aliases (owner rule): the retired Inspector facets' bookmarks parse to nothing.

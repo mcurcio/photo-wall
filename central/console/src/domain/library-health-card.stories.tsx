@@ -34,5 +34,5 @@ export const OtherUser: Story = {
   args: { connection: connectionWith({ kind: "other_user", expected: "Anna", found: "Ben" }) },
 };
 
-/** On Needs attention: the fix is a link to Settings › Photo library. */
+/** On Home: the fix is a link to Settings › Photo library. */
 export const OnNeedsAttention: Story = { args: { onFix: undefined } };

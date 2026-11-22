@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type * as React from "react";
 
-import type { FrameChip } from "../domain/frame-health-chip";
+import type { FrameChip } from "../domain/frame-status";
 import { EntityHeader } from "../patterns/entity-header";
 import { Note } from "../patterns/fact-row";
 import { HealthBadge } from "../patterns/health-badge";
@@ -61,7 +61,7 @@ function FrameName({ name, onRename }: { name: string; onRename: (next: string) 
 export interface FramePageHeaderProps {
   /** The Frame's name (its id when it has none). */
   name: string;
-  /** The Frame's status chip (domain/frame-health-chip.ts), Resting included; null: none yet. */
+  /** The Frame's status chip (domain/frame-status.ts), Resting included; null: none yet. */
   chip: FrameChip | null;
   /** The Frame's wall, named when the house has more than one. */
   wall: string | null;

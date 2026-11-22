@@ -289,13 +289,17 @@ def test_send_reboot_is_the_only_poster_of_reboots():
 
 def test_the_hardware_pi_page_reboots_only_through_send_reboot():
     # H1 (console by domain § Fleet): Reboot lives on the Pi's Hardware page unchanged. The only
-    # callers of `sendReboot` are the reboot dialog (PlayerCommands.jsx) and the Update the
-    # wall journey; the Pi pages and the Health section send nothing themselves.
+    # callers of `sendReboot` are the reboot dialog (PlayerCommands.jsx), the Update the wall
+    # journey and Home's port of writes (homeCommands.js `askReboot`, decision 0036: the same
+    # request, frozen from the Pi's newest node read, confirmed first); the Pi pages and the
+    # Health section send nothing themselves.
     call = re.compile(r"\bsendReboot\(")
     modules = [*SRC.rglob("*.js"), *SRC.rglob("*.jsx"), *SRC.rglob("*.ts"), *SRC.rglob("*.tsx")]
     callers = sorted(module.name for module in modules
                      if module.name != "fleetCommands.js" and call.search(module.read_text()))
-    assert callers == ["PlayerCommands.jsx", "UpdateWallPage.jsx"]
+    assert callers == ["PlayerCommands.jsx", "UpdateWallPage.jsx", "homeCommands.js"]
+    home = (SRC / "homeCommands.js").read_text()
+    assert len(call.findall(home)) == 1 and "rebootRequest(rebootTarget(latest)" in home
     commands = (SRC / "PlayerCommands.jsx").read_text()
     assert len(call.findall(commands)) == 1
     dialog = commands.index("function RebootDialog(")

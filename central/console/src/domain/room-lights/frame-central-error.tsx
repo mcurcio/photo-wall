@@ -34,17 +34,17 @@ export interface FrameCentralErrorProps {
   read: ImpedimentRead;
   /** Each room light's name by its id (none read: the ids are said). */
   names: Readonly<Record<string, string>>;
-  /** Needs attention, where each doubt says what to do. */
-  attentionHref: string;
+  /** Home, where each doubt says what to do. */
+  homeHref: string;
   /** House › Lights, where each light is. */
   lightsHref: string;
 }
 
 /** The impeded Frame's card: Central's two lines as its Pi draws them, labelled Central's. */
-function Impeded({ impediment, names, attentionHref, lightsHref }: {
+function Impeded({ impediment, names, homeHref, lightsHref }: {
   impediment: Extract<FrameImpediment, { kind: "impeded" }>;
   names: Readonly<Record<string, string>>;
-  attentionHref: string;
+  homeHref: string;
   lightsHref: string;
 }) {
   const { by } = impediment;
@@ -52,7 +52,7 @@ function Impeded({ impediment, names, attentionHref, lightsHref }: {
     <>
       <ProblemCard scope="central" verdict={{ severity: "alarm", label: "Central's error", receipt: null }}
         what={impedimentWords(impediment)} doing={null}
-        action={{ label: "See what to do on Needs attention", href: attentionHref }}
+        action={{ label: "See what to do on Home", href: homeHref }}
         details={<Note>{`Reported for output ${by.output_id}, under grant ${by.grant_id}`}</Note>} />
       <FactRow label="Central's card, line 1" tone="reported">{by.words.line1}</FactRow>
       <FactRow label="Line 2" tone="reported">{by.words.line2}</FactRow>
@@ -69,7 +69,7 @@ function Impeded({ impediment, names, attentionHref, lightsHref }: {
  * attention, where each says what to do. Clear, or not reported (an older Pi, or never connected): one
  * line saying so. A read that failed says so and keeps the last word.
  */
-export function FrameCentralError({ read, names, attentionHref, lightsHref }: FrameCentralErrorProps) {
+export function FrameCentralError({ read, names, homeHref, lightsHref }: FrameCentralErrorProps) {
   const impediment = read.view?.impediment ?? null;
   return (
     <Section title="Central's error">
@@ -80,7 +80,7 @@ export function FrameCentralError({ read, names, attentionHref, lightsHref }: Fr
       )}
       {impediment === null ? (!read.failed && <Note>Loading…</Note>)
         : impediment.kind === "impeded"
-          ? <Impeded impediment={impediment} names={names} attentionHref={attentionHref} lightsHref={lightsHref} />
+          ? <Impeded impediment={impediment} names={names} homeHref={homeHref} lightsHref={lightsHref} />
           : <FactRow tone="reported">{impedimentWords(impediment)}</FactRow>}
     </Section>
   );

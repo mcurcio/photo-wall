@@ -146,6 +146,21 @@ export function clockTime(epochSeconds) {
 }
 
 /**
+ * One of Central's times to the minute, never with seconds: "21:04". Since when a status or a
+ * problem has stood and until when something lasts (design language §7, "since 21:04"; seconds
+ * are for acknowledgement times). The zone as `clockTime` says it.
+ *
+ * @param {number} epochSeconds
+ * @returns {string}
+ */
+export function minuteTime(epochSeconds) {
+  const date = toDate(epochSeconds);
+  const { hours, minutes } = zonedParts(date);
+  const words = clockWords(hours, minutes);
+  return house.zone === null ? `${words} ${zoneLabel(date)}` : words;
+}
+
+/**
  * A time of day with its seconds and no zone, "21:04:07": when the Pi acknowledged a live
  * change (Central's time of it), or when this browser saved or left one.
  *

@@ -35,7 +35,7 @@ import { formatRoute } from "./routes.js";
  *            worst: {fact: import("./facts.js").Fact, severity: HostSeverity, item: HostItem}|null,
  *            severity: HostSeverity}} HostHealth
  * @typedef {{key: string, deviceId: string, name: string, frames: string[], hardwareHref: string,
- *            severity: "alarm"|"unknown", text: string}} HostIncident
+ *            severity: "alarm"|"unknown", state: HostState, words: string, text: string}} HostIncident
  */
 
 const HOST = LAYER_NAMES.host_core;
@@ -605,7 +605,7 @@ export function hostWords(entry, { brief = false } = {}) {
 
 /**
  * The incidents of one box's classification (§62): exactly the classifier's alarm items, so
- * Needs attention, the Hardware list and the chip cannot disagree. Silent and Refused carry one
+ * Home, the Hardware list and the chip cannot disagree. Silent and Refused carry one
  * alarm item (the receipt), because the classifier bands nothing else outside `reporting`; a
  * Reporting row's alarms are its threshold items (a now flag, the temperature alarm, App
  * Manager's storage refusal) and its boot items (a stopped boot stage, a failed base unit).
@@ -617,7 +617,7 @@ function incidentItems(health) {
 }
 
 /**
- * The host incidents Needs attention lists (§62): Bound Players only (an Unbound Player raises
+ * The host incidents Home lists (§62): Bound Players only (an Unbound Player raises
  * none), from a read that did not fail. Each names the Player and its Frames: "pi-07 (Frame
  * lobby-left) — throttled now".
  *
@@ -638,6 +638,9 @@ export function hostIncidents(snapshot, read, bootFacts = null) {
         key: `player:${row.deviceId}:${entry.name}`, deviceId: row.deviceId, name: row.name, frames,
         hardwareHref: formatRoute({ section: "hardware", id: row.deviceId }),
         severity: entry.band === "alarm" ? "alarm" : "unknown",
+        // What Home words for itself (domain/home-reports.ts): the box's state, and the judged
+        // item in its own words, which only a reporting box's are plain enough to show.
+        state: health.state, words: hostWords(entry),
         text: `${row.name} (${framesWord(frames)}) — ${hostWords(entry)}`,
       }));
     }

@@ -18,7 +18,7 @@ export function SaveBar({ label, children, message }: SaveBarProps) {
     <div
       role="group"
       aria-label={label}
-      className="sticky bottom-0 z-10 flex min-w-0 flex-wrap items-center gap-3 border-t border-line bg-surface px-1 py-3"
+      className="sticky bottom-tabs z-10 flex min-w-0 flex-wrap items-center gap-3 border-t border-line bg-surface px-1 py-3"
     >
       {children}
       {message ? <div className="min-w-0 text-sm text-muted">{message}</div> : null}

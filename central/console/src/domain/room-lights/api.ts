@@ -65,7 +65,7 @@ export function readRefusedReports(): Promise<Answer<"refused", RefusedReportsVi
   return callApi("refused", REFUSED, { method: "GET" }) as Promise<Answer<"refused", RefusedReportsView>>;
 }
 
-/* Central's errors (central/central_errors/: Needs attention's source rows and the Frame page's
+/* Central's errors (central/central_errors/: Home's source rows and the Frame page's
  * "Central's error"): the room lights' references Central is in doubt of, and what a Frame's Pi said. */
 const CENTRAL_ERRORS = "/v1/operator/central-errors";
 

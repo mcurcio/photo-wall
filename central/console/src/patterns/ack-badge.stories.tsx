@@ -12,6 +12,8 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const Requested: Story = {};
+/** An action asked of a Pi that is not a preview: its own words, the same wait. */
+export const RequestedAction: Story = { args: { state: "requested", words: "Restart requested" } };
 export const Acknowledged: Story = { args: { state: "acknowledged", at: "21:04:07" } };
 /** The Pi presents the change before one Central refused: said in brackets. */
 export const AcknowledgedRefused: Story = {

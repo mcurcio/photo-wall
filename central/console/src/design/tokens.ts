@@ -26,3 +26,14 @@ export type TruthKind = (typeof TRUTH_KINDS)[number];
  * read) ranks below a judged notice and above work to finish and ok.
  */
 export const WORST_FIRST: readonly Severity[] = ["alarm", "notice", "unknown", "todo", "ok"];
+
+/**
+ * The one structural switch (design language §2, Breakpoints; tokens.css `--breakpoint-md`): below
+ * this width, in CSS pixels, the console is on a phone. A class reads it as `md:` or `max-md:`;
+ * script that must ask (the shell's drawer, a menu that opens as a sheet) asks `PHONE_QUERY`.
+ */
+export const PHONE_BELOW_PX = 768;
+
+/** The media query that matches a phone, and the one that matches everything wider. */
+export const PHONE_QUERY = `(max-width: ${PHONE_BELOW_PX - 0.02}px)`;
+export const WIDE_QUERY = `(min-width: ${PHONE_BELOW_PX}px)`;

@@ -2,7 +2,7 @@ import React, { useId, useRef, useState } from "react";
 
 import { FRAME_ID_PATTERN } from "./frameIds.js";
 import { factText } from "./facts.js";
-import { frameHealth } from "./health.js";
+import { frameChip, frameStatusIn, statusLine } from "./domain/frame-status.ts";
 import { isBound, plannedFor } from "./join.js";
 import { pointToPlacement, project, unsizedOutlinePx } from "./projection.js";
 
@@ -30,9 +30,8 @@ import { pointToPlacement, project, unsizedOutlinePx } from "./projection.js";
  * Alongside each drawn frame the plan renders a status readout (Bead 2; console DDD §34):
  * the frame's `planned` fact ("On top: <scene_id> · <origin> (Central's Runs; …)", from
  * join.js `plannedFor`), its full text as the line's accessible name, with "Ending
- * (outro)" beneath it only in the outro phase, and the frame's health — a severity dot plus its short tile label (the fact
- * without its age, so it fits the tile) whose accessible name is the full label
- * — from the one classifier, `frameHealth` (health.js). The readout is clipped
+ * (outro)" beneath it only in the outro phase, and the frame's status — a severity dot plus the one chip's words, whose accessible
+ * name is the status in one line with its time — as Central serves it (domain/frame-status.ts). The readout is clipped
  * to the tile's rect, so no text ever spills over a neighbouring tile. The planned fact is Central's projection, never
  * confirmed playback — the word "LIVE" is deliberately absent (design §6a).
  *
@@ -355,7 +354,8 @@ export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit
           const selected = selection === id;
           const planned = plannedFor(snapshot?.runtime, id, isBound(framesById.get(id)));
           const plannedText = factText(planned.fact);
-          const health = frameHealth(snapshot, id);
+          const status = frameStatusIn(snapshot, id);
+          const health = { ...frameChip(status), line: statusLine(status, { pi: null, now: snapshot?.readAt ?? null }) };
           return (
             <React.Fragment key={id}>
               <g
@@ -438,9 +438,9 @@ export function Plan({ snapshot, surfaceId, selection, onSelect, regionRef, edit
                   y={rect.y + 44}
                   className={`plan__health health--${health.severity}`}
                   role="img"
-                  aria-label={health.label}
+                  aria-label={health.line}
                 >
-                  {health.tileLabel}
+                  {health.label}
                 </text>
               </g>
             </React.Fragment>

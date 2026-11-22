@@ -6,7 +6,7 @@ import { ProblemCard } from "../../patterns/problem-card";
 import { Stack } from "../../ui/stack";
 import { causeAndFix, doubtVerdict, KEEPING_WORDS, referenceWords, subjectWords } from "./model";
 
-/** What Needs attention read of Central's errors: not read yet (null view, not failed), read, or a
+/** What Home read of Central's errors: not read yet (null view, not failed), read, or a
  * read that failed (the last view kept, if any). */
 export interface SourcesRead {
   view: CentralErrorsView | null;
@@ -19,13 +19,13 @@ export interface SourcesInDoubtProps {
   names: Readonly<Record<string, string>>;
   /** An instant in words, on the house clock. */
   since: (epochSeconds: number) => string;
-  /** The link to a Frame's page that Needs attention renders. */
+  /** The link to a Frame's page that Home renders. */
   frameLink: (frameId: string) => React.ReactNode;
   /** House › Lights, where each light is. */
   lightsHref: string;
 }
 
-/** Whether Needs attention may say "Nothing needs attention" for Central's errors: only once a read
+/** Whether Home may say "Nothing needs attention" for Central's errors: only once a read
  * answered with none (a failed or pending read is never "nothing"). */
 export function noneInDoubt(read: SourcesRead): boolean {
   return !read.failed && read.view !== null && read.view.in_doubt.length === 0;
@@ -37,7 +37,7 @@ export function sourcesToShow(read: SourcesRead): boolean {
 }
 
 /**
- * Needs attention's source rows (Central's errors): one `ProblemCard` per reference Central is in
+ * Home's source rows (Central's errors): one `ProblemCard` per reference Central is in
  * doubt of now — the room lights it reports, by name, with the doubt and since when; why, and what
  * to do, in Central's words (`what_to_do`, its source's advice); that the Frames using it draw with
  * its last word meanwhile; a link to House › Lights; the Frames whose lighting names those lights,

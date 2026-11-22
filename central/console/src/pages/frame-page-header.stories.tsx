@@ -16,7 +16,7 @@ type Story = StoryObj<typeof meta>;
 
 /** Showing, on the house's one wall. */
 export const Showing: Story = {};
-/** In Night off: Central says Resting (Why's `power.resting`), so the chip says Resting. */
+/** In Night off: Central's status says Resting, so the chip says Resting. */
 export const Resting: Story = { args: { chip: { severity: "ok", label: "Resting" }, wall: "Upstairs" } };
 /** At phone width, Resting. */
 export const RestingPhone: Story = { args: { chip: { severity: "ok", label: "Resting" } }, parameters: { phone: true } };

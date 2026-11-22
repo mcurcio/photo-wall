@@ -183,9 +183,9 @@ export function connectionSubject(connection: LibraryConnectionView): string {
 
 /**
  * LibraryHealthCard: a connection that needs a look, as the error template (ProblemCard) with its
- * one fix, for Needs attention and Settings › Photo library: "Archive (Immich): Needs a look since
+ * one fix, for Home and Settings › Photo library: "Archive (Immich): Needs a look since
  * Sun 03:39. Immich rejected the API key. Photos keep playing." The fix is the same button on both
- * pages; on Needs attention it opens Settings › Photo library, where the fix is made. Nothing when
+ * pages; on Home it opens Settings › Photo library, where the fix is made. Nothing when
  * the connection needs no look.
  */
 export function LibraryHealthCard({ connection, onFix, href = "#/photo-library" }: LibraryHealthCardProps) {

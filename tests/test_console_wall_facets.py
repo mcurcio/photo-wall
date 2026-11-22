@@ -1,5 +1,6 @@
 """The Wall facets' pure parts (console DDD §19-§21; bead D1): players.js `identifyOffer` and
-`enrolledFact`, health.js's Calibration and Panel-at-enrollment words, run under Node as
+`enrolledFact`, health.js's Panel-at-enrollment words and the setup steps as domain/frame-status.ts
+words Central's status (decision 0036), run under Node as
 tests/test_console_players.py runs them, plus the source scans for the retired words and
 modules. The browser half is tests/browser/test_console_frame_page_browser.py (the Frame
 page's Position, Picture and Frame profile),
@@ -11,12 +12,14 @@ import re
 import subprocess
 from pathlib import Path
 
+from support.console_status import STATUS_JS
 from test_console_flow import _require_node
 
 SRC = Path(__file__).parents[1] / "central/console/src"
 
-SCRIPT = r"""
+SCRIPT = STATUS_JS + r"""
 const health = await import(process.argv[1]);
+const status = await import(process.argv[4]);
 const players = await import(process.argv[2]);
 const { factText } = await import(process.argv[3]);
 const out = {};
@@ -53,18 +56,15 @@ out.enrolled = [
   factText(players.enrolledFact(player("p-bound"), null)),
   factText(players.enrolledFact(null, 1000)),
 ];
-// --- Frame health: needs-calibration, and the Panel alarm in the one enrollment wording.
-const calibrate = health.frameHealth(snapshot, "lobby");
-const unplugged = health.frameHealth({ inventory: { ...snapshot.inventory,
-  outputs: snapshot.inventory.outputs.map((output) => output.output_id === "HDMI-A-1"
-    && output.player_id === "p-bound" ? { ...output, observation: { connected: false } } : output),
-} }, "lobby");
-const pick = ({ state, severity, cause, label, tileLabel, tab }) =>
-  ({ state, severity, cause, label, tileLabel, tab });
-const swapped = health.frameHealth({ inventory: { ...snapshot.inventory,
-  frames: snapshot.inventory.frames.map((frame) => ({ ...frame, readiness: "display-changed" })),
-} }, "lobby");
-out.health = [pick(calibrate), pick(unplugged), pick(swapped)];
+// --- A Frame in setup: Central serves the step (no status word); the console words it and opens
+// the tab where that step is done.
+const setup = (step) => {
+  const served = frameStatus("lobby", null, { setup: step });
+  return { ...status.frameChip(served), tab: status.tabForStatus(served, "overview"),
+    line: status.statusLine(served) };
+};
+out.setup = ["check-position", "display-changed", "needs-a-pi"].map(setup);
+out.noPanel = [health.NO_PANEL_AT_ENROLLMENT, health.NO_PANEL_LISTED];
 out.panelWording = factText(players.panelAtEnrollment({ connected: false }, null, null));
 console.log(JSON.stringify(out));
 """
@@ -74,7 +74,8 @@ def _run():
     _require_node()
     result = subprocess.run(
         ["node", "--input-type=module", "-e", SCRIPT, "--", (SRC / "health.js").as_uri(),
-         (SRC / "players.js").as_uri(), (SRC / "facts.js").as_uri()],
+         (SRC / "players.js").as_uri(), (SRC / "facts.js").as_uri(),
+         (SRC / "domain/frame-status.ts").as_uri()],
         capture_output=True, text=True, timeout=30, check=True)
     return json.loads(result.stdout)
 
@@ -100,22 +101,21 @@ def test_the_enrolled_fact_is_centrals_record_with_centrals_age():
     ]
 
 
-def test_frame_health_says_calibration_and_keeps_the_panel_alarm_worded_as_a_record():
+def test_a_frame_in_setup_says_its_step_and_opens_where_it_is_done_and_the_panel_record_keeps_its_one_wording():
     out = _run()
-    assert out["health"] == [
-        {"state": "needs-calibration", "severity": "todo", "cause": "calibration",
-         "label": "Needs calibration", "tileLabel": "Needs calibration", "tab": "position"},
-        # An unplugged-at-enrollment Panel on a bound Frame is still an alarm (§19), in the
-        # one wording panelAtEnrollment renders, and opens Hardware, where that record is shown.
-        {"state": "no-panel-at-enrollment", "severity": "alarm", "cause": "panel",
-         "label": "No Panel listed as connected at the Player app's last enrollment (may be stale)",
-         "tileLabel": "No Panel listed at the last enrollment", "tab": "hardware"},
+    assert out["setup"] == [
+        {"severity": "todo", "label": "Check its Position", "tab": "position",
+         "line": "Check its Position · Check where the picture sits on its display"},
         # Another display on the Frame's port: the Hardware tab's card resolves it (confirm the
         # Frame profile, then Position), so it is worded as such and opens Hardware (1b K1).
-        {"state": "display-changed", "severity": "todo", "cause": "display",
-         "label": "Display changed", "tileLabel": "Display changed", "tab": "hardware"},
+        {"severity": "todo", "label": "Display changed", "tab": "hardware",
+         "line": "Display changed · Another display is on its HDMI port: confirm it"},
+        {"severity": "todo", "label": "Needs a Pi", "tab": "hardware",
+         "line": "Needs a Pi · Choose which Pi and HDMI port feeds this Frame"},
     ]
-    assert out["health"][1]["label"] == out["panelWording"]
+    # The Panel-at-enrollment record is no status any more (it has no row in Central's decision
+    # table, decision 0036); the Hardware page still words it in the one way panelAtEnrollment does.
+    assert out["noPanel"] == [out["panelWording"], "No Panel listed at the last enrollment"]
 
 
 _RETIRED_WORDS = re.compile(r"Commission|commission|Trial\b|\bT1\b|\bT2\b")

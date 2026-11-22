@@ -331,13 +331,13 @@ export function smartSensor(name: string, entity: string): Sensor {
 }
 
 /*
- * Central's errors in the console's words (central/central_errors/: Needs attention's source rows and
+ * Central's errors in the console's words (central/central_errors/: Home's source rows and
  * the Frame page's "Central's error"). Central judges which reference it is in doubt of, why and what
  * to do (`what_to_do`, its source's advice, in the owner's terms); a Frame's Pi judges whether that
  * doubt blacks its Frame. The console only words them. Pure: no React, no request.
  */
 
-/** Why a source's word is in doubt, as the cause of a Needs attention row: every reason Central has. */
+/** Why a source's word is in doubt, as the cause of a Home row: every reason Central has. */
 const CAUSE_WORDS: Record<DoubtReason, string> = {
   "cant-read": "Photo Wall can't read what its source reports.",
   "cant-tell": "Its source says it can't tell.",
@@ -352,7 +352,7 @@ function sentence(words: string): string {
   return /[.!?]$/.test(words) ? words : `${words}.`;
 }
 
-/** A Needs attention row's verdict: its doubt in the status words, on the one severity scale. */
+/** A Home row's verdict: its doubt in the status words, on the one severity scale. */
 export function doubtVerdict(row: SourceAttentionView): Verdict {
   return { severity: doubtSeverity(row.doubt.reason), label: DOUBT_WORDS[row.doubt.reason], receipt: null };
 }

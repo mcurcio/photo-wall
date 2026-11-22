@@ -52,6 +52,6 @@
     "people-and-access": ["#/people-and-access"]
   },
   "neutral": {
-    "attention": ["#/attention"]
+    "home": ["#/home"]
   }
 }

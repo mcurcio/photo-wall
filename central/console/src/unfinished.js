@@ -14,7 +14,7 @@ import { isUnplaced } from "./projection.js";
  *    Position tab. An unbound Frame has no position to save, so it is never asked for one.
  *
  * No `reported` or `derived` fact (liveness, readiness, host health) adds or removes an
- * item: those are Needs attention's incidents (health.js `wallAttention`). Nothing counts
+ * item: those are Home's incidents (Central's problems, served on Home's read). Nothing counts
  * this list and no route depends on it; it empties itself as the records arrive.
  *
  * @typedef {"place"|"bind"|"display"|"calibrate"} Step

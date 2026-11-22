@@ -98,7 +98,7 @@ export function LivePreviewEditor({
         role="group"
         aria-label={label}
         className={cn(
-          "z-10 flex min-w-0 flex-wrap items-center gap-3 border-t border-line max-md:sticky max-md:bottom-0",
+          "z-10 flex min-w-0 flex-wrap items-center gap-3 border-t border-line max-md:sticky max-md:bottom-tabs",
           "bg-surface-raised py-3",
         )}
       >
