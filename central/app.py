@@ -39,7 +39,9 @@ from central.fleet.leaf_bridge import mount_bus_bridges
 from central.fleet.node_boot import NodeBootConfig
 from central.fleet.node_routes import mount_node_routes
 from central.frame_lighting.paper_profiles import LUT_RECIPE_ID
+from central.frame_status.ports import FailingStep
 from central.home_assistant_routes import mount_home_assistant_routes
+from central.home_routes import mount_home_routes
 from central.house_routes import mount_house_routes
 from central.infra.central_errors_store import PgCentralErrors
 from central.infra.display_store import (
@@ -51,6 +53,7 @@ from central.infra.display_store import (
 from central.infra.fit_analysis_store import PgFitAnalysisReader
 from central.infra.fit_settings_store import PgFitSettings
 from central.infra.frame_lighting_store import PgFrameLighting, PgHouseLock
+from central.infra.frame_status_store import PgFrameStatus
 from central.infra.home_assistant import references as home_assistant_references
 from central.infra.home_assistant.advice import HomeAssistantAdvice
 from central.infra.home_assistant.settings import PgHomeAssistantSettings
@@ -951,10 +954,19 @@ def create_app(
                                profiles=PgPaperProfiles(db, clock, house_lock))
     if content is not None:
         mount_content_routes(app, content)
-    mount_node_routes(app, db=db, clock=clock, admin=admin, config=node_boot,
+    mount_node_routes(app, db=db, clock=clock, admin=admin, operate=operator_auth.operate, config=node_boot,
                       times=media_times, content=content)
+    # A Frame's status (decision 0036): Home's read, and the scheduler's `status` step, which keeps
+    # since when each word began. It reads the scheduler's own failing steps, so it is built first.
+    frame_status = PgFrameStatus(
+        db, clock, times=media_times, inventory=registry.inventory_in,
+        plans=lambda conn, now: coordinator.frame_plans_in(conn, now), runtime=RuntimeStore.read_in,
+        failing_steps=lambda: tuple(FailingStep(step, health.since) for step, health
+                                    in sorted(app.state.scheduler.health().steps.items())
+                                    if health.status == "failing"))
+    mount_home_routes(app, admin=admin, home=frame_status)
     app.state.scheduler = Scheduler(coordinator, media_application.request_measurements, clock,
-                                    retentions=retentions)
+                                    status=frame_status.record, retentions=retentions)
     # A Node's leaf and Home Assistant's door arrive at Central's origin (erratum E-E3D-CUT-4): relayed to the hub.
     hub_leaf_url = hub_leaf_url or os.environ.get("PHOTO_WALL_HUB_LEAF_URL")
     if hub_leaf_url:

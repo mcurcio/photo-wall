@@ -782,6 +782,22 @@ class PgPhotoLibrary:
                 answer[ref] = (tuple(members[key]), ready[key])
         return answer
 
+    @staticmethod
+    def connection_health_in(conn: Any) -> dict[str, LibraryHealth]:
+        """connection ref -> that connection's health as its last check left it, for every
+        connection. Read-only, in the caller's transaction (a Frame's status)."""
+        return {row["connection_ref"]: _HEALTH.validate_python(row["health"]) for row in conn.execute(
+            "SELECT connection_ref,health FROM library_connections").fetchall()}
+
+    @staticmethod
+    def source_connections_in(conn: Any, source_refs: set[str]) -> dict[str, str]:
+        """Each named Source revision's connection ref (its query's own); a ref naming no revision,
+        or one whose query names no connection, is left out. Read-only, in the caller's transaction."""
+        return {row["source_ref"]: row["connection_ref"] for row in conn.execute(
+            "SELECT source_ref,query->>'connection_ref' AS connection_ref FROM media_sources s WHERE "
+            f"source_ref=ANY(%s) AND {_REVISION_ROW}",  # noqa: S608
+            (list(source_refs),)).fetchall() if row["connection_ref"] is not None}
+
     @classmethod
     def source_lines_in(cls, conn: Any, source_refs: set[str]) -> dict[str, SourceLine]:
         """ScenePoolReader (follow-up S3): each named Source revision's pool key (None: no

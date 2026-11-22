@@ -8,6 +8,20 @@ export interface AccessView {
   session_cap_days?: number;
 }
 
+export type Action = "restart-app" | "reboot-pi";
+
+export interface AppRestartView {
+  by: string;
+  failure: RestartFailure | null;
+  request_id: string;
+  state: RestartState;
+  steps: RestartStepView[];
+}
+
+export interface AppRestartsView {
+  restart: AppRestartView | null;
+}
+
 export interface AtFull {
   kind: "at-full";
 }
@@ -15,6 +29,12 @@ export interface AtFull {
 export interface AtReading {
   kind: "at-reading";
   lux: LuxOnFrame;
+}
+
+export interface Because {
+  power?: ("night-off" | "hold" | "test" | "on-underneath") | null;
+  row: Row;
+  until?: number | null;
 }
 
 export interface BulbColour {
@@ -27,6 +47,11 @@ export interface Calibration {
   revision?: number;
 }
 
+export interface CarryOn {
+  kind: "carry-on";
+  pause_id: string;
+}
+
 export interface CentralErrorsView {
   in_doubt: SourceAttentionView[];
 }
@@ -36,6 +61,11 @@ export type CentralLine = string;
 export interface CentralWords {
   line1: CentralLine;
   line2: CentralLine;
+}
+
+export interface CheckNow {
+  connection_ref: string;
+  kind: "check-now";
 }
 
 export interface CloseLight {
@@ -91,6 +121,8 @@ export interface DisplayRefView {
   name: string;
 }
 
+export type DoingCode = "reconnecting" | "keeps-playing";
+
 export type DoubtReason = "cant-read" | "cant-tell" | "link-closed";
 
 export interface DoubtView {
@@ -104,6 +136,15 @@ export interface DrawnView {
 
 export type EntityId = string;
 
+export interface Evidence {
+  at?: number | null;
+  detail?: string | null;
+  layer: EvidenceLayer;
+  pi_time?: string | null;
+}
+
+export type EvidenceLayer = "hub" | "presence" | "health-verdict" | "frame-report" | "power-report" | "impediment" | "plan" | "library" | "host" | "scheduler";
+
 export interface FarLight {
   from_degrees: number;
   kind: "far";
@@ -113,6 +154,8 @@ export interface FarLight {
   softness_degrees: number;
   steep_degrees: number;
 }
+
+export type Fix = RestartApp | RebootPi | ResumeSchedule | CarryOn | CheckNow | Open;
 
 export interface FixedEntry {
   colour: KelvinColour;
@@ -151,9 +194,38 @@ export interface FrameNotReported {
   kind: "not-reported";
 }
 
+export interface FramePlace {
+  device_id?: string | null;
+  frame_id: string;
+  name: string;
+  player_id?: string | null;
+  playing?: Playing | null;
+  size_mm: [number, number] | null;
+  status: FrameStatus;
+  x_mm: number;
+  y_mm: number;
+}
+
 export interface FrameRefView {
   id: string;
   name: string;
+}
+
+export interface FrameStatus {
+  because: Because;
+  can?: Action[];
+  frame_id: string;
+  override?: Override | null;
+  problem?: Problem | null;
+  progress?: Progress | null;
+  setup: SetupStep | null;
+  since: number;
+  word: StatusWord | null;
+}
+
+export interface FrameStatusView {
+  recent: StatusChangeView[];
+  status: FrameStatus;
 }
 
 export interface FrameTurnChange {
@@ -206,6 +278,19 @@ export interface HomeAssistantStatesView {
   galleria: GalleriaView;
   heard_at: number | null;
   refused: RefusedReportView[];
+}
+
+export interface HomeView {
+  change: number;
+  house: HouseStatus;
+  now_next: NowNext[];
+  overrides: Override[];
+  walls: WallView[];
+}
+
+export interface HouseStatus {
+  problems?: Problem[];
+  word: StatusWord | "all-good";
 }
 
 export interface Impeded {
@@ -276,7 +361,34 @@ export interface NotReported {
   kind: "not-reported";
 }
 
+export interface NowNext {
+  next?: Upcoming | null;
+  now?: Playing | null;
+  surface_id: string;
+}
+
+export interface Open {
+  id?: string | null;
+  kind: "open";
+  page: OpenPage;
+}
+
+export type OpenPage = "frame" | "pi" | "scene" | "library" | "central";
+
 export type OutputId = string;
+
+export interface Override {
+  by?: string | null;
+  frame_ids: string[];
+  id: string;
+  kind: OverrideKind;
+  name?: string | null;
+  power?: Power | null;
+  started_at?: number | null;
+  until?: number | null;
+}
+
+export type OverrideKind = "power-hold" | "pause" | "takeover";
 
 export interface Paper {
   ink_density: number;
@@ -295,6 +407,8 @@ export interface PaperProfileView {
 export interface PaperProfilesView {
   paper_profiles: PaperProfileView[];
 }
+
+export type Part = "display" | "pi" | "photo app" | "network" | "central" | "immich";
 
 export type PictureEntryKind = "kept-done" | "kept-copied" | "kept-unrecorded" | "sent-draft" | "sent-back" | "sent-kept";
 
@@ -341,6 +455,14 @@ export interface PlayerVersionView {
   version: ReleaseTag | null;
 }
 
+export interface Playing {
+  kind: "program" | "show-now" | "default-scene";
+  name: string;
+  program_id?: string | null;
+  scene_id: string;
+  until?: number | null;
+}
+
 export interface PositionBox {
   height?: number;
   left?: number;
@@ -378,6 +500,29 @@ export interface PositionRestore {
 
 export type PositionRestoreRefusal = "other_frame" | "made_for_other_turn" | "made_for_other_display";
 
+export type Power = "on" | "off";
+
+export interface Problem {
+  code: ProblemCode;
+  doing?: DoingCode | null;
+  evidence: Evidence;
+  explains?: string[];
+  fix?: Fix | null;
+  frame_id?: string | null;
+  part: Part;
+  since: number;
+}
+
+export type ProblemCode = "hub-unreachable" | "worker-stopped" | "scheduler-failing" | "no-instruction" | "central-blacks" | "no-photo-placed" | "planning-issue" | "continuing-past-limit" | "pi-not-linked" | "pi-not-heard" | "no-report" | "cannot-draw" | "software-renderer" | "pi-clock" | "pi-throttled" | "pi-storage-low" | "pi-clock-in-doubt" | "dark-unknown" | "app-absent" | "app-unresponsive" | "app-resource-exhausted" | "app-descriptor-limit" | "picture-not-on-screen" | "display-did-not-answer" | "display-another-input" | "no-photos" | "source-trouble" | "library-needs-a-look" | "no-library-answers";
+
+export interface Progress {
+  done?: number | null;
+  step: ProgressStep;
+  total?: number | null;
+}
+
+export type ProgressStep = "install-restarting" | "rebooting" | "starting" | "waiting-to-start" | "preparing-photos";
+
 export interface ProviderView {
   issuer_host: string;
   last_reached_at: number | null;
@@ -386,6 +531,11 @@ export interface ProviderView {
 }
 
 export type Reading = Measured | Unavailable;
+
+export interface RebootPi {
+  device_id: string;
+  kind: "reboot-pi";
+}
 
 export interface RefusedReportView {
   address: string;
@@ -444,6 +594,27 @@ export interface ReporterRef {
   source: string;
 }
 
+export interface RestartApp {
+  device_id: string;
+  kind: "restart-app";
+}
+
+export type RestartFailure = "not_delivered" | "in_flight" | "not_stopped" | "not_started" | "timed_out";
+
+export type RestartState = "in_progress" | "done" | "failed";
+
+export type RestartStepName = "requested" | "app_stopped" | "app_started" | "showing";
+
+export interface RestartStepView {
+  at: number | null;
+  step: RestartStepName;
+}
+
+export interface ResumeSchedule {
+  hold_id: string;
+  kind: "resume-schedule";
+}
+
 export interface RgbColour {
   kind: "rgb";
   rgb: [number, number, number];
@@ -468,6 +639,8 @@ export interface RoomLightsView {
   lights: RoomLightView[];
   sensors: SensorView[];
 }
+
+export type Row = "setup" | "central-cant-hear" | "on-the-way" | "pi-not-heard" | "resting" | "wont-show" | "display-stayed-on" | "dark" | "central-blacks" | "nothing-wanted" | "not-on-screen" | "showing-with-trouble" | "showing" | "nothing-known";
 
 export interface SensedColour {
   kind: "colour-sensor";
@@ -505,6 +678,8 @@ export interface SessionView {
   roles: "owner"[];
 }
 
+export type SetupStep = "needs-a-pi" | "display-changed" | "check-position";
+
 export interface SignInView {
   method: "provider" | "token";
   name?: string | null;
@@ -528,6 +703,17 @@ export interface SourceAttentionView {
 }
 
 export type StatedKelvin = number;
+
+export interface StatusChangeView {
+  problem: ProblemCode | null;
+  recorded_at: number;
+  row: Row;
+  setup: SetupStep | null;
+  since: number;
+  word: StatusWord | null;
+}
+
+export type StatusWord = "not-showing" | "cant-tell" | "needs-a-look" | "getting-ready" | "showing" | "resting";
 
 export type TestPattern = "white" | "grey-ramp" | "black-level" | "target-pre-software" | "target-post-software";
 
@@ -559,8 +745,22 @@ export interface Unavailable {
   kind: "unavailable";
 }
 
+export interface Upcoming {
+  at: number;
+  name: string;
+  program_id: string;
+  scene_id: string;
+}
+
 export interface VersionChoice {
   version: ReleaseTag;
+}
+
+export interface WallView {
+  frames: FramePlace[];
+  name: string;
+  room: string;
+  surface_id: string;
 }
 
 export interface WashLight {
@@ -591,6 +791,11 @@ export const LIMITS = {
       minimum: 1,
     },
   },
+  CarryOn: {
+    pause_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
   CentralLine: {
     value: {
       maxLength: 96,
@@ -605,6 +810,11 @@ export const LIMITS = {
     line2: {
       maxLength: 96,
       minLength: 1,
+    },
+  },
+  CheckNow: {
+    connection_ref: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
     },
   },
   CloseLight: {
@@ -718,8 +928,18 @@ export const LIMITS = {
       multipleOf: 0.5,
     },
   },
+  FramePlace: {
+    frame_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
   FrameRefView: {
     id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
+  FrameStatus: {
+    frame_id: {
       pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
     },
   },
@@ -750,6 +970,12 @@ export const LIMITS = {
     entity: {
       maxLength: 255,
       pattern: "^[a-z0-9_]+\\.[a-z0-9_]+$",
+    },
+  },
+  HomeView: {
+    change: {
+      integer: true,
+      minimum: 0,
     },
   },
   Impeded: {
@@ -819,9 +1045,19 @@ export const LIMITS = {
       pattern: "^[a-z0-9][a-z0-9-]{0,31}$",
     },
   },
+  NowNext: {
+    surface_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
   OutputId: {
     value: {
       pattern: "^[A-Za-z0-9][A-Za-z0-9_.:/-]{0,127}$",
+    },
+  },
+  Override: {
+    id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
     },
   },
   Paper: {
@@ -859,6 +1095,11 @@ export const LIMITS = {
       pattern: "^[A-Za-z0-9:_.-]{1,128}$",
     },
   },
+  Playing: {
+    scene_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
   PositionBox: {
     height: {
       exclusiveMinimum: 0,
@@ -887,6 +1128,11 @@ export const LIMITS = {
     expected_sequence: {
       integer: true,
       minimum: 1,
+    },
+  },
+  RebootPi: {
+    device_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
     },
   },
   RefusedReportView: {
@@ -923,6 +1169,16 @@ export const LIMITS = {
     },
     source: {
       pattern: "^[a-z][a-z0-9-]{0,31}$",
+    },
+  },
+  RestartApp: {
+    device_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
+  ResumeSchedule: {
+    hold_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
     },
   },
   RgbColour: {
@@ -1037,10 +1293,23 @@ export const LIMITS = {
       multipleOf: 100,
     },
   },
+  Upcoming: {
+    program_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+    scene_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
   VersionChoice: {
     version: {
       maxLength: 128,
       pattern: "^v(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$",
+    },
+  },
+  WallView: {
+    surface_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
     },
   },
   WashLight: {
@@ -1065,13 +1334,18 @@ export const PATTERNS = {
 } as const;
 
 export const CONSTANTS = {
+  APP_RESTARTS_PATH: "/v1/operator/node/devices/{device_id}/app-restarts",
+  APP_RESTART_SECONDS: 180,
   BEAM_DEGREES_MAX: 170,
   CENTRAL_LINE_MAX: 96,
   CLOSE_REACH_MM: 5000,
   COLOUR_SENSORS_MAX: 32,
+  CONTINUATION_LIMIT_SECONDS: 3600,
   FRAME_LIGHTS_MAX: 4,
+  FRAME_STATUS_PATH: "/v1/operator/frames/{frame_id}/status",
   GLOSS_INK: 2.3,
   HOME_ASSISTANT_SOURCE: "home-assistant",
+  HOME_PATH: "/v1/operator/home",
   INK_DENSITY_MAX: 5,
   INK_DENSITY_MIN: 0.5,
   KELVIN_STATED_MAX: 40000,
@@ -1087,16 +1361,25 @@ export const CONSTANTS = {
   PANEL_BLACK_MAX: 0.05,
   PANEL_BLACK_MIN: 1e-05,
   PI_SOURCE: "pi",
+  REBOOTS_PATH: "/v1/operator/node/devices/{device_id}/reboots",
+  REBOOT_ALLOWED_SECONDS: 600,
   ROOM_LIGHTS_MAX: 32,
   ROOM_LIGHT_ID_PATTERN: "[a-z0-9][a-z0-9-]{0,31}",
   ROOM_LIGHT_NAME_MAX: 64,
   SENSORS_MAX: 32,
   SHEET_WHITENESS: 0.9,
+  SILENT_AFTER_SECONDS: 51,
   TRANSITION_FREE_SECONDS: 5,
   WHITENESS_MIN: 0.5,
 } as const;
 
 export const REFUSALS = {
+  AppRestartRefusal: [
+    "node_app_restart_outstanding",
+    "node_app_restart_unavailable",
+    "invalid_operator_app_restart",
+    "node_device_unavailable",
+  ],
   DrawnReportRefusal: [
     "room_lights_drawn_too_large",
     "room_lights_drawn_invalid",
@@ -1159,6 +1442,7 @@ export const REFUSALS = {
     "calibration_trial_baseline_changed",
   ],
 } as const;
+export type AppRestartRefusal = (typeof REFUSALS)["AppRestartRefusal"][number];
 export type DrawnReportRefusal = (typeof REFUSALS)["DrawnReportRefusal"][number];
 export type FrameLightingRefusal = (typeof REFUSALS)["FrameLightingRefusal"][number];
 export type InstallRefusal = (typeof REFUSALS)["InstallRefusal"][number];

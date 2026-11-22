@@ -2,9 +2,11 @@
 
 One tick runs, in order: the coordinator's three steps ("runtime": the Runtime moves to now;
 "planning": plan and offer; "settle": commits due, pin expiry and cleanup,
-central/coordination.py `Coordinator.advance`) and the measurement requests of the plan
-("measurement"). A step that fails never skips a later one: the Runtime keeps moving when
-planning fails. Measurement alone needs an earlier step's answer (the plan): when planning fails
+central/coordination.py `Coordinator.advance`), every Frame's status ("status": decision 0036,
+central/infra/frame_status_store.py `PgFrameStatus.record`, which keeps since when each word
+began) and the measurement requests of the plan ("measurement"). A step that fails never skips a
+later one: the Runtime keeps moving when planning fails, and status is composed whatever the steps
+before it did. Measurement alone needs an earlier step's answer (the plan): when planning fails
 it is "skipped" this tick, so no facet claims a step ran that did not.
 
 The tick answers when to tick next (decision 0034, class F: timers where events exist): the
@@ -87,14 +89,16 @@ class SchedulerHealth:
 
 
 class Scheduler:
-    """`coordinator.advance() -> Advance`, `measurements(requests)` and
+    """`coordinator.advance() -> Advance`, `status()`, `measurements(requests)` and
     each of `retentions`' calls are the steps; `clock` stamps their facets and the completed
     tick. Each retention is its own step and `/healthz` facet, named by its key, so a failing
     trim never hides behind another (decision 0033)."""
 
     def __init__(self, coordinator, measurements: Callable[[Sequence[MeasureRequest]], object],
-                 clock: Clock, *, retentions: Mapping[str, Callable[[], object]]) -> None:
+                 clock: Clock, *, status: Callable[[], object],
+                 retentions: Mapping[str, Callable[[], object]]) -> None:
         self.coordinator = coordinator
+        self.status = status
         self.measurements, self.clock = measurements, clock
         self.retentions = dict(retentions)
         self._steps: dict[str, StepHealth] = {}
@@ -112,6 +116,7 @@ class Scheduler:
             failing = not self._run(step, call) or failing
 
         advance = self._coordinate()
+        run("status", self.status)
         if advance is not None and advance.projection is not None:
             projection = advance.projection
             run("measurement", lambda: self.measurements(projection.measurements))

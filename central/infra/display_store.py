@@ -1205,6 +1205,18 @@ def power_facts_in(conn: Any, frame_id: str) -> FramePowerFacts | None:
                            document=_stored_document(frame), report=_stored_report(frame))
 
 
+def power_facts_of_frames_in(conn: Any) -> dict[str, FramePowerFacts]:
+    """Every Frame's power facts by Frame id, in the caller's transaction: `power_facts_in`'s read
+    for the whole wall in one statement (a Frame's status, central/infra/frame_status_store.py)."""
+    rows = conn.execute(
+        f"SELECT f.id, f.player_id, seen.display_report AS report, seen.document, {_TEST_COLUMNS} FROM frames f "  # noqa: S608
+        f"{SEEN_DISPLAY_JOIN} "
+        f"LEFT JOIN power_requests r ON r.frame_id=f.id AND r.reason='{_CONSOLE_TEST}'").fetchall()
+    return {row["id"]: FramePowerFacts(bound=row["player_id"] is not None, test=_power_test(row),
+                                       document=_stored_document(row), report=_stored_report(row))
+            for row in rows}
+
+
 def _json_bytes(value: Mapping[str, Any]) -> bytes:
     """A wire record stored as JSONB, back to bytes its strict decoder reads."""
     return json.dumps(value, ensure_ascii=False).encode()
@@ -1587,4 +1599,4 @@ __all__ = ["DOCUMENT_STREAM", "OUTPUT_DOCUMENTS_CHANNEL", "POSITION_COLUMNS", "P
            "PgPictureSessions",
            "commit_position", "frame_position", "frame_readiness", "frame_readiness_in",
            "output_documents",
-           "power_facts_in", "record_picture_report", "record_report", "resolve_output", "write_picture"]
+           "power_facts_in", "power_facts_of_frames_in", "record_picture_report", "record_report", "resolve_output", "write_picture"]

@@ -126,14 +126,18 @@ def test_the_environment_configures_the_provider_and_a_partial_setting_stops_cen
 
 def test_every_operator_route_of_the_real_app_requires_the_operator_login():
     """Per method and path, so one route losing its `admin` dependency (a GET beside a guarded
-    POST) fails here, whichever slice added it."""
+    POST) fails here, whichever slice added it. The everyday actions ask for `operate` instead
+    (decision 0036): exactly Restart app so far."""
     app = create_app(Database("postgresql://unused@127.0.0.1:1/unused", application_name="photo-wall-test"), ManualClock(0), ADMIN,
                      run_scheduler=False)
-    admin = app.state.operator_auth.admin
-    open_routes = {(method, route.path) for route in app.routes
-                   if isinstance(route, APIRoute) and route.path.startswith(OPERATOR_PREFIX)
-                   and not _guarded(route.dependant, admin) for method in route.methods}
-    assert open_routes == SESSION_ROUTES
+    admin, operate = app.state.operator_auth.admin, app.state.operator_auth.operate
+    without_admin = {(method, route.path) for route in app.routes
+                     if isinstance(route, APIRoute) and route.path.startswith(OPERATOR_PREFIX)
+                     and not _guarded(route.dependant, admin) for method in route.methods}
+    everyday = {(method, route.path) for route in app.routes
+                if isinstance(route, APIRoute) and _guarded(route.dependant, operate) for method in route.methods}
+    assert everyday == {("POST", "/v1/operator/node/devices/{device_id}/app-restarts")}
+    assert without_admin - everyday == SESSION_ROUTES
     # Non-vacuous: the Power tab's routes are among the guarded ones.
     guarded = {(method, route.path) for route in app.routes
                if isinstance(route, APIRoute) and _guarded(route.dependant, admin) for method in route.methods}

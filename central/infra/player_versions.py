@@ -106,6 +106,17 @@ def pi_versions_in(conn: Any, clock: Clock, readiness: AssetReadiness) -> PiVers
     return PiVersions(tuple(pis), default)
 
 
+def installs_in(conn: Any) -> dict[str, tuple[InstallProgress, float]]:
+    """device id -> the progress of the install on that Pi now and when that step began, for every
+    Pi with one, in the caller's transaction: the `install` column and the row's `changed_at`
+    (Central's clock; while a Pi has an install, only the install's own steps write its row: `_set_in`
+    and `advance_installs`), with none of `pi_versions_in`'s release reads (a Frame's status,
+    central/infra/frame_status_store.py)."""
+    return {row["device_id"]: (row["install"], float(row["changed_at"])) for row in conn.execute(
+        "SELECT device_id, install, changed_at FROM devices WHERE install IS NOT NULL AND retired_at IS NULL"
+    ).fetchall()}
+
+
 def _tags_by_deployment(deployments: Mapping[str, UUID]) -> dict[UUID, str]:
     """deployment -> the newest tag naming it."""
     found: dict[UUID, str] = {}
@@ -261,4 +272,5 @@ class InstallEnds:
             notify_releases_in(conn)
 
 
-__all__ = ["InstallEnds", "PgPlayerVersions", "PiVersionRow", "PiVersions", "default_deployment_in", "pi_versions_in"]
+__all__ = ["InstallEnds", "PgPlayerVersions", "PiVersionRow", "PiVersions", "default_deployment_in", "installs_in",
+           "pi_versions_in"]

@@ -459,13 +459,16 @@ def test_players_ignore_operator_cookies(client):
 
 
 def test_every_operator_route_but_the_session_routes_depends_on_admin(registry):
+    """Or on `operate`, the everyday actions' guard (decision 0036): Restart app is the first."""
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
-    admin = app.state.operator_auth.admin
+    admin, operate = app.state.operator_auth.admin, app.state.operator_auth.operate
     routes = [r for r in app.routes if getattr(r, "path", "").startswith(OPERATOR_PREFIX)]
-    guarded = {(r.path, tuple(sorted(r.methods))): any(d.call == admin
-                                                        for d in r.dependant.dependencies)
-               for r in routes}
+    guards = {(r.path, tuple(sorted(r.methods))): {d.call for d in r.dependant.dependencies} & {admin, operate}
+              for r in routes}
+    guarded = {route: bool(found) for route, found in guards.items()}
     assert len(guarded) > 20
+    assert {route for route, found in guards.items() if operate in found} == {
+        ("/v1/operator/node/devices/{device_id}/app-restarts", ("POST",))}
     # Decision 0035: the door also answers how to sign in (open) and who is signed in (guarded).
     open_routes = {(SESSION_PATH, ("POST",)), (SESSION_PATH, ("DELETE",)), (SIGN_IN_PATH, ("GET",))}
     for (path, methods), has_admin in guarded.items():
