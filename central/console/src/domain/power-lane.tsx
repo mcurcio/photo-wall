@@ -258,7 +258,7 @@ export function HoldBanner({ holds, names, now, busy, onResume }: HoldBannerProp
   const title = heldWords(holds, now);
   if (title === null) return null;
   return (
-    <OverrideBanner label="Holds" title={title}>
+    <OverrideBanner kind="power-hold" label="Holds" title={title}>
       {holds.map((hold) => {
         const row = powerWords("holdRow", { who: holdWords(hold.power, hold.source), until: holdUntilWords(hold, now),
           frames: hold.frame_ids.map((frameId) => names[frameId] ?? frameId).join(", ") });

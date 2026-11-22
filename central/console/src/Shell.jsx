@@ -1,14 +1,16 @@
 import React, { memo, useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 
-import { AttentionStrip } from "./AttentionStrip.jsx";
 import { bootFactsFrom } from "./bootFacts.js";
+import { WIDE_QUERY } from "./design/tokens.ts";
+import { houseVerdict } from "./domain/frame-status.ts";
 import { fleetRoutes } from "./fleetRoutes.jsx";
 import { useHandOff } from "./flow/useHandOff.js";
 import { useHouseClock } from "./houseClock.js";
-import { CloseIcon, MenuIcon } from "./icons.jsx";
+import { CloseIcon } from "./icons.jsx";
 import { neutralRoutes } from "./neutralRoutes.jsx";
 import { useFleetHosts } from "./fleetHosts.js";
 import { PageHiddenContext } from "./pageVisibility.js";
+import { BottomTabs, HouseWord } from "./patterns/app-shell.tsx";
 import { formatRoute, isPlainClick, landingRoute } from "./routes.js";
 import { settingsRoutes } from "./settingsRoutes.jsx";
 import { showRoutes } from "./showRoutes.jsx";
@@ -28,7 +30,10 @@ import { wallRoutes } from "./wallRoutes.jsx";
  *            markDraft: (section: import("./routes.js").Section, dirty: boolean) => void,
  *            handOffs: ReturnType<typeof import("./flow/useHandOff.js").useHandOff>,
  *            hosts: import("./fleetHosts.js").FleetHosts|null,
- *            houseClock: string|null}} RouteContext
+ *            houseClock: string|null,
+ *            refresh: () => Promise<object|null>, refreshFailed: boolean}} RouteContext
+ *   `refresh` reads the snapshot (and Home's document with it) now, after an action;
+ *   `refreshFailed` says the newest read failed, so what a page shows is the last one that answered.
  *   `recentScene` is the Scene the operator last saved or picked on a Scene card
  *   (`rememberScene`, called by the Scene flow): the Schedule and Show-now flows
  *   prefill their Scene step from its `sceneId`. Each hand-over is an event with its own
@@ -52,18 +57,24 @@ import { wallRoutes } from "./wallRoutes.jsx";
 // The Central pill's colour: the shared health severity for each /healthz state.
 const PILL_SEVERITY = { ok: "ok", degraded: "alarm", unavailable: "alarm", unreachable: "alarm" };
 
-// The drawer serves narrow screens only (index.css repeats this breakpoint).
-const WIDE = "(min-width: 850px)";
+// The drawer and the bottom tabs serve a phone only: below the one structural switch
+// (design/tokens.ts; index.css repeats its value, as a media query cannot read a token).
 
-// Sidebar groups, in a fixed order (console DDD §48): Wall; Show (Now, Scenes, Schedule,
-// Sources); Fleet (Hardware, Releases); Settings (Photo library, Photo fit); Needs attention. Nothing reorders or counts on state.
+// Sidebar groups, in a fixed order (decision 0036; console DDD §48): Home; Frames (the Wall, for
+// setup); Show (Now, Scenes, Schedule, Sources); Fleet (Hardware, Releases); Settings. Nothing
+// reorders or counts on state.
 const GROUPS = [
-  { name: "Wall", table: wallRoutes },
+  { name: "Home", table: neutralRoutes },
+  { name: "Frames", table: wallRoutes },
   { name: "Show", table: showRoutes },
   { name: "Fleet", table: fleetRoutes },
   { name: "Settings", table: settingsRoutes },
-  { name: "Needs attention", table: neutralRoutes },
 ];
+
+// Where each bottom tab leads (design language F6): Home · Show now · Schedule · More.
+const HOME = { section: "home" };
+const SHOW_NOW = { section: "now", flow: "show", step: "scene" };
+const SCHEDULE = { section: "schedule" };
 const ENTRIES = GROUPS.flatMap((group) => group.table);
 const SHOW = new Set(showRoutes.map((entry) => entry.section));
 
@@ -170,13 +181,17 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
 });
 
 /**
- * The navigation shell (flow design §3, §6): header, sidebar (a modal drawer under
- * 850 px) and the page for the current hash route.
+ * The navigation shell (flow design §3, §6; decision 0036, F6): header, sidebar, the page for
+ * the current hash route and, on a phone, the bottom tabs.
  *
- * HEADER: the menu button (narrow screens), the wordmark, Central's health pill, the
- * snapshot age with Refresh, and Log out; below them the attention strip (slice 1),
- * whose frame entries navigate on the Wall side and the Needs attention page and are
- * plain text on Show pages (R4).
+ * HEADER: the wordmark, the house word (Central's, from Home's read: one chip that links to
+ * Home, where it is explained and every problem is listed), Central's health pill, the
+ * snapshot age with Refresh (on every page but Home, which updates by itself), and Log out.
+ *
+ * PHONE (below the one structural switch, design/tokens.ts): the sidebar is not drawn; the
+ * bottom tabs are (patterns/app-shell.tsx): Home · Show now · Schedule · More, where More opens
+ * the sidebar's links as a modal drawer. Nothing scrolls sideways, and every page ends above
+ * the tabs.
  *
  * PAGES. Show sections are ALWAYS MOUNTED and those not current carry the HTML
  * `hidden` attribute (rule 2: a draft never unmounts; `hidden`, not CSS, so their
@@ -185,14 +200,14 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
  * (R4) and a Pi page's node read stops when it is left.
  * Content waits for the first snapshot ("Loading…"); the route itself is parsed at
  * once, and an unknown route is replaced by the landing route once the first snapshot
- * is in. The landing route is always the Wall (routes.js `landingRoute`).
+ * is in. The landing route is always Home (routes.js `landingRoute`).
  *
  * FOCUS. "Skip to content" is a button (a link would change the route) that focuses
  * `<main>`. Each page has an `<h1 tabIndex=-1>`. The drawer is a native `<dialog>`
  * opened with `showModal()`, so the page behind is inert and focus stays inside;
- * Escape closes it and returns focus to the menu button, and choosing a link closes
- * it and focuses the new page's heading, as "Show all" in the attention strip does for
- * Needs attention; a click that opens the link in another tab asks for nothing, and a
+ * Escape closes it and returns focus to the More tab, and choosing a link closes
+ * it and focuses the new page's heading, as the house word and a bottom tab do for their
+ * pages; a click that opens the link in another tab asks for nothing, and a
  * route that goes elsewhere first drops the request. A sidebar link on a wide screen
  * leaves focus on the link.
  *
@@ -204,7 +219,7 @@ const Page = memo(function Page({ entry, ctx, ready, hidden = false }) {
 export function Shell({ hidden = false }) {
   const { snapshot, refresh, auth, signOut, refreshFailed, refreshing } = useSnapshot();
   const { route, navigate } = useRoute();
-  // The ~10 s /healthz poll: the pill, the attention strip and the pages read it.
+  // The ~10 s /healthz poll: the pill and the pages read it.
   const health = useHealth();
   // The fleet host read (console DDD §63 G12): ONE poll, here, for every page and the strip.
   // It runs on every page, so it waits for sign-in to be confirmed: a read sent while sign-in
@@ -269,7 +284,7 @@ export function Shell({ hidden = false }) {
   }, [entry]);
 
   const mainRef = useRef(/** @type {HTMLElement|null} */ (null));
-  const menuRef = useRef(/** @type {HTMLButtonElement|null} */ (null));
+  const tabsRef = useRef(/** @type {HTMLDivElement|null} */ (null));
   const drawerRef = useRef(/** @type {HTMLDialogElement|null} */ (null));
   const choosingRef = useRef(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -285,13 +300,14 @@ export function Shell({ hidden = false }) {
     const onClose = () => {
       setDrawerOpen(false);
       if (!choosingRef.current) {
-        menuRef.current?.focus();
+        // Back to what opened it: the More tab.
+        tabsRef.current?.querySelector("button")?.focus();
       }
       choosingRef.current = false;
     };
     dialog.addEventListener("close", onClose);
     // Widening past the breakpoint leaves the sidebar, so the drawer closes.
-    const wide = window.matchMedia(WIDE);
+    const wide = window.matchMedia(WIDE_QUERY);
     const onWide = () => {
       if (wide.matches) {
         dialog.close();
@@ -349,10 +365,33 @@ export function Shell({ hidden = false }) {
       handOffs,
       hosts,
       houseClock,
+      refresh,
+      refreshFailed,
     }),
     [snapshot, bootFacts, health, route, navigate, wall, recentScene, rememberScene, markDraft, handOffs,
-      hosts, houseClock],
+      hosts, houseClock, refresh, refreshFailed],
   );
+
+  // A plain click on a link to a section moves focus to its page's heading (a phone's tab, the
+  // house word); one that opens another tab asks for nothing.
+  const chooseSection = (section) => (event) => {
+    if (isPlainClick(event)) {
+      focusHeadingOf(section);
+    }
+  };
+  const openDrawer = () => {
+    drawerRef.current?.showModal();
+    setDrawerOpen(true);
+  };
+  const tabs = [
+    { key: "home", label: "Home", icon: "home", href: formatRoute(HOME), current: current === "home",
+      onChoose: chooseSection("home") },
+    { key: "show-now", label: "Show now", icon: "play", href: formatRoute(SHOW_NOW),
+      current: current === "now" && route?.flow === "show", onChoose: chooseSection("now") },
+    { key: "schedule", label: "Schedule", icon: "calendar", href: formatRoute(SCHEDULE),
+      current: current === "schedule", onChoose: chooseSection("schedule") },
+    { key: "more", label: "More", icon: "more", onOpen: openDrawer, expanded: drawerOpen },
+  ];
 
   return (
     <div className="shell" hidden={hidden} inert={hidden}>
@@ -361,22 +400,17 @@ export function Shell({ hidden = false }) {
       </button>
       <header className="shell__header">
         <div className="shell__bar">
-          <button
-            ref={menuRef}
-            type="button"
-            className="shell__menu"
-            aria-label="Menu"
-            aria-haspopup="dialog"
-            aria-expanded={drawerOpen}
-            onClick={() => {
-              drawerRef.current?.showModal();
-              setDrawerOpen(true);
-            }}
-          >
-            <MenuIcon />
-          </button>
           <span className="shell__wordmark">Photo Wall</span>
           <div className="shell__status">
+            {snapshot !== null && (
+              // The house word, everywhere: Central's (Home's read), or Can't tell while that read
+              // has no current answer. Never worked out here.
+              <HouseWord
+                verdict={houseVerdict(snapshot.homeFailed || refreshFailed ? null : snapshot.home?.house)}
+                href={formatRoute(HOME)}
+                onChoose={chooseSection("home")}
+              />
+            )}
             <CentralPill health={health} />
             {snapshot !== null && (
               <div
@@ -386,13 +420,17 @@ export function Shell({ hidden = false }) {
                 aria-busy={refreshing ? "true" : undefined}
               >
                 <SnapshotAge refreshFailed={refreshFailed} />
-                <button
-                  type="button"
-                  className="console__button"
-                  onClick={() => refresh().catch(() => {})}
-                >
-                  Refresh
-                </button>
+                {/* Home updates by itself and has no Refresh button (console design §9; decision
+                    0036, F2). The other pages keep it until they do too. */}
+                {current !== HOME.section && (
+                  <button
+                    type="button"
+                    className="console__button"
+                    onClick={() => refresh().catch(() => {})}
+                  >
+                    Refresh
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -402,16 +440,6 @@ export function Shell({ hidden = false }) {
             </button>
           )}
         </div>
-        {snapshot !== null && (
-          <AttentionStrip
-            snapshot={snapshot}
-            central={health}
-            hosts={hosts}
-            bootFacts={bootFacts}
-            onNavigate={current === null || SHOW.has(current) ? null : wall.visitFrame}
-            onShowAll={() => focusHeadingOf("attention")}
-          />
-        )}
       </header>
 
       <div className="shell__body">
@@ -433,6 +461,10 @@ export function Shell({ hidden = false }) {
             <Page key={entry.section} entry={entry} ctx={ctx} ready={ready} />
           )}
         </main>
+      </div>
+
+      <div ref={tabsRef} className="shell__tabs">
+        <BottomTabs label="Main" tabs={tabs} />
       </div>
 
       <dialog ref={drawerRef} className="drawer" aria-label="Menu">

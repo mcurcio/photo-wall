@@ -63,6 +63,7 @@ from contracts.models import (
     PlayerConfiguration,
     Readiness,
     Revocation,
+    UnfilledSpan,
 )
 from contracts.on_screen import Extent
 from contracts.time import DRIFT_RATE, Clock
@@ -103,6 +104,18 @@ class Advance:
     projection: Projection | None
     failures: tuple[StepFailure, ...]
     wake_at: float | None = None
+
+
+@dataclass(frozen=True)
+class FramePlan:
+    """What a Player's newest valid plan offer holds for one Frame (`Coordinator.frame_plans_in`):
+    its unfilled spans not yet over, its media layers not yet over, and how many of those layers
+    the Player's readiness for that offer names prepared or failed."""
+
+    unfilled: tuple[UnfilledSpan, ...]
+    layers: int
+    prepared: int
+    failed: int
 
 
 def next_due_cue_in(conn, now: float) -> float | None:
@@ -1121,6 +1134,41 @@ class Coordinator:
             "WHERE l.resolved_at IS NULL ORDER BY l.frame_id"
         ).fetchall()
         return tuple(OutputInterruption.model_validate(dict(row)) for row in rows)
+
+    @staticmethod
+    def frame_plans_in(conn, now: float) -> dict[str, FramePlan]:
+        """Frame id -> what each Player's newest plan offer, still valid at `now`, holds for it,
+        from a caller-owned transaction: its unfilled spans ending after `now`, and of its layers
+        ending after `now` how many there are and how many the Player's readiness for that same
+        offer (plan and revision) names prepared or failed (no such readiness: none). A Frame the
+        offer has neither a layer nor a span for is absent. Read-only; takes no lock."""
+        rows = conn.execute(
+            "SELECT o.manifest, s.readiness FROM players p "
+            "JOIN LATERAL (SELECT manifest,valid_until FROM plan_offers "
+            "WHERE player_id=p.id AND authority_epoch=p.authority_epoch "
+            "ORDER BY revision DESC LIMIT 1) o ON TRUE "
+            "LEFT JOIN player_show_state s ON s.player_id=p.id AND s.authority_epoch=p.authority_epoch "
+            "WHERE p.retired_at IS NULL AND o.valid_until > %s", (now,)).fetchall()
+        plans: dict[str, FramePlan] = {}
+        for row in rows:
+            plan = Plan.model_validate(row["manifest"])
+            report = None if row["readiness"] is None else Readiness.model_validate(row["readiness"])
+            if report is not None and (report.plan_id, report.revision) != (plan.plan_id, plan.revision):
+                report = None
+            prepared = frozenset(()) if report is None else frozenset(report.prepared)
+            failed = frozenset(()) if report is None else frozenset(each.assignment_id for each in report.failures)
+            frames = {binding.output_id: binding.frame_id for binding in plan.bindings}
+            for frame_id in frames.values():
+                layers = [layer for layer in plan.layers if layer.frame_id == frame_id and layer.end > now
+                          and layer.presentation == "media"]
+                spans = tuple(span for span in plan.unfilled
+                              if frames.get(span.output_id) == frame_id and span.end > now)
+                if layers or spans:
+                    plans[frame_id] = FramePlan(
+                        unfilled=spans, layers=len(layers),
+                        prepared=sum(layer.assignment_id in prepared for layer in layers),
+                        failed=sum(layer.assignment_id in failed for layer in layers))
+        return plans
 
     def readiness(self, player_id: str, report: Readiness) -> bool:
         """Accept the Player's readiness; False for one already held (its number at or below the

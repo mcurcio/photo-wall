@@ -5,7 +5,7 @@ import { FrameCentralError } from "./frame-central-error";
 import { causeAndFix, subjectWords } from "./model";
 import { SourcesInDoubt } from "./sources-in-doubt";
 
-/* Central's errors: Needs attention's source rows and the Frame page's "Central's error". */
+/* Central's errors: Home's source rows and the Frame page's "Central's error". */
 
 const meta = {
   title: "Domain/CentralErrors",
@@ -37,16 +37,16 @@ export const Phone: Story = { tags: WHOLE, parameters: { phone: true } };
 
 /** The Frame page's Central's error: its Pi reports the Frame black under Central's card. */
 export const FrameImpeded: Story = {
-  render: () => <FrameCentralError read={{ view: IMPEDED, failed: false }} names={LIGHT_NAMES} attentionHref="#/attention" lightsHref="#/lights" />,
+  render: () => <FrameCentralError read={{ view: IMPEDED, failed: false }} names={LIGHT_NAMES} homeHref="#/home" lightsHref="#/lights" />,
 };
 /** Its Pi reports no error of Central's blacks the Frame. */
-export const FrameClear: Story = { render: () => <FrameCentralError read={{ view: CLEAR, failed: false }} names={LIGHT_NAMES} attentionHref="#/attention" lightsHref="#/lights" /> };
+export const FrameClear: Story = { render: () => <FrameCentralError read={{ view: CLEAR, failed: false }} names={LIGHT_NAMES} homeHref="#/home" lightsHref="#/lights" /> };
 /** Its Pi has not said (an older release). */
 export const FrameNotReported: Story = {
-  render: () => <FrameCentralError read={{ view: NOT_REPORTED, failed: false }} names={LIGHT_NAMES} attentionHref="#/attention" lightsHref="#/lights" />,
+  render: () => <FrameCentralError read={{ view: NOT_REPORTED, failed: false }} names={LIGHT_NAMES} homeHref="#/home" lightsHref="#/lights" />,
 };
 /** Central did not answer the Frame's read. */
-export const FrameReadFailed: Story = { render: () => <FrameCentralError read={{ view: null, failed: true }} names={LIGHT_NAMES} attentionHref="#/attention" lightsHref="#/lights" /> };
+export const FrameReadFailed: Story = { render: () => <FrameCentralError read={{ view: null, failed: true }} names={LIGHT_NAMES} homeHref="#/home" lightsHref="#/lights" /> };
 
 /** The rows' words are Central's facts and advice, never judged here: a pure check the catalogue runs
  * before any story renders. */

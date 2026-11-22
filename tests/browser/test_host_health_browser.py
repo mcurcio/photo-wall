@@ -1,11 +1,11 @@
 """The host-health tracer in the console (console DDD §61-§63, bead T1), against a stubbed
 fleet host read (G12): the banded temperature fact on the Hardware list, the Bound Player's
-host-silence row on Needs attention with its [Frame] and [Player] links (plain text on a Show
-page, R4), no row for an Unbound Player, no band and no incident without a served threshold,
+host-silence card among Home's problems with its link to the Pi (decision 0036 folded Needs
+attention into Home), no card for an Unbound Player, no band and no incident without a served threshold,
 and silence wording composed from the served limit. Console by Domain (E1 U1): the Hardware
 list's groups (Driving a Frame worst first, Not driving a Frame, Retired), the Pi's Hardware
-page with Health and its raw disclosure, and the tables scrolling sideways at phone width. A1 (§61-§62): the strip's Frames-then-Players summary and
-its " · host health not read" suffix, Player rows after Frame rows, and the Status host chip.
+page with Health and its raw disclosure, and the tables scrolling sideways at phone width. A1 (§61-§62): on Home a Pi's host
+fault follows Central's Frame problems and is not said when one of them names that Pi; the Status host chip.
 
 The rest of the app is real (production app on the loopback harness, node control on); only
 `GET /v1/operator/node/hosts` is fulfilled by the test, so its `read_at` and receipts are
@@ -17,10 +17,19 @@ import os
 import re
 
 import pytest
-from console_tasks import connect, go, hardware_list, open_frame, open_pi, player_name, visible_page
-from operator_harness import assert_fits_width, operator_server, report_readiness
+from console_tasks import (
+    connect,
+    go,
+    hardware_list,
+    home_problems,
+    open_frame,
+    open_pi,
+    player_name,
+)
+from operator_harness import assert_fits_width, operator_server, report_presenting, report_readiness
 from playwright.sync_api import expect
 from support.frames import frame_create
+from support.position import save_position
 from test_registry import enroll
 
 pytestmark = pytest.mark.skipif(
@@ -68,8 +77,20 @@ def _card(page, name):
     return hardware_list(page).get_by_role("row").filter(has=page.get_by_role("link", name=name, exact=True))
 
 
-def _attention(page):
-    return visible_page(page).get_by_role("list", name="Frames and Players needing attention", exact=True)
+def _home(page):
+    return page.get_by_role("main")
+
+
+STOPPED = "It has stopped reporting its own health."
+# The words Home never says outside Details (decision 0036, Copy; design language §7).
+INTERNAL = re.compile(r"\b(Player|Host Management)\b")
+
+
+def _incidents(page):
+    """Home's cards for a Pi's own host faults (hostHealth.js `hostIncidents`, worded for Home by
+    domain/home-reports.ts): "Pi <handle>: Pi fault." then what it reports and the Frames it feeds,
+    listed among Home's problems after Central's own. The fleet page's own line is under Details."""
+    return home_problems(page).get_by_role("group").filter(has_text=re.compile(r"Pi \S+: (Pi fault|No Pi report)\."))
 
 
 def test_a_hot_reporting_player_shows_the_banded_fact_and_no_attention_row(page, registry):
@@ -82,8 +103,8 @@ def test_a_hot_reporting_player_shows_the_banded_fact_and_no_attention_row(page,
             "Temperature: 81.2 °C · hot (Central's inference: at or above 80 °C, Central's threshold)")
         expect(_card(page, spare_name)).to_contain_text(
             "Temperature: Host Management last reported 1 s ago · 62 °C")
-        go(page, "attention")
-        expect(visible_page(page)).not_to_contain_text("Host Management silent")
+        go(page, "home")
+        expect(_home(page)).not_to_contain_text(STOPPED)
 
 
 def test_a_silent_bound_player_raises_one_row_with_both_links_and_an_unbound_one_none(page, registry):
@@ -97,24 +118,22 @@ def test_a_silent_bound_player_raises_one_row_with_both_links_and_an_unbound_one
         expect(_card(page, bound_name)).to_contain_text(
             "Temperature: Host Management last reported 2 min ago · 95 °C at last report")
         expect(_card(page, bound_name)).not_to_contain_text("hot")
-        go(page, "attention")
-        rows = _attention(page).get_by_role("listitem").filter(has_text="Host Management silent")
+        go(page, "home")
+        rows = _incidents(page).filter(has_text=STOPPED)
         expect(rows).to_have_count(1)
+        # In Home's words: the box is "Pi …" and the Frame its name; nothing internal on the page.
+        expect(rows.get_by_role("paragraph")).to_have_text(re.compile(rf"^{re.escape(STOPPED)} It feeds Frame \d+\.$"))
+        assert not INTERNAL.search(_home(page).inner_text())
+        # The fleet page's own line is the evidence, under Details.
+        rows.get_by_role("button", name="Details", exact=True).click()
         expect(rows).to_contain_text(
             f"{bound_name} (Frame {FRAME}) — Host Management silent · last reported 2 min ago")
-        expect(rows.get_by_role("link", name=f"Frame {FRAME}", exact=True)).to_have_attribute(
-            "href", re.compile(rf"^#/wall/frames/{FRAME}/"))
-        expect(rows.get_by_role("link", name=bound_name, exact=True)).to_have_attribute(
+        rows.get_by_role("button", name="Details", exact=True).click()
+        # Its one fix: the Pi's own page.
+        expect(rows.get_by_role("link")).to_have_text(["Open the Pi"])
+        expect(rows.get_by_role("link", name="Open the Pi", exact=True)).to_have_attribute(
             "href", f"#/hardware/{bound}")
-        expect(visible_page(page)).not_to_contain_text(spare_name)
-        # On a Show page the strip's rows are plain text (R4).
-        go(page, "now")
-        page.get_by_role("button", name="Show list", exact=True).click()
-        strip = page.get_by_role("region", name="Wall attention", exact=True)
-        entry = strip.get_by_role("listitem").filter(has_text="Host Management silent")
-        expect(entry).to_have_count(1)
-        expect(entry.get_by_role("link")).to_have_count(0)
-        expect(entry.get_by_role("button")).to_have_count(0)
+        expect(_home(page)).not_to_contain_text(spare_name)
 
 
 def test_no_served_threshold_shows_the_value_unbanded_and_raises_nothing(page, registry):
@@ -126,8 +145,9 @@ def test_no_served_threshold_shows_the_value_unbanded_and_raises_nothing(page, r
         expect(_card(page, bound_name)).to_contain_text(
             "Temperature: Host Management last reported 4 s ago · 95 °C")
         expect(_card(page, bound_name)).not_to_contain_text("Central's inference")
-        go(page, "attention")
-        expect(visible_page(page)).not_to_contain_text("Host Management")
+        go(page, "home")
+        expect(_home(page)).not_to_contain_text("Host Management")
+        expect(_incidents(page)).to_have_count(0)
 
 
 def test_the_served_limit_composes_and_moves_the_silence_judgement(page, registry):
@@ -136,15 +156,14 @@ def test_the_served_limit_composes_and_moves_the_silence_judgement(page, registr
                 "devices": [_row(bound, 880.0, 50)]}
     _stub(page, document)
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "attention")
-        # 120 s against a served 150 s: reporting, no row.
-        expect(visible_page(page)).not_to_contain_text("Host Management silent")
+        connect(page, origin, "home")
+        # 120 s against a served 150 s: reporting, no card.
+        expect(_home(page)).not_to_contain_text(STOPPED)
         document["thresholds"] = {**THRESHOLDS, "host_silent_after_seconds": 90}
         page.reload()
         go(page, "hardware")
-        go(page, "attention")
-        expect(_attention(page).get_by_role("listitem").filter(
-            has_text="Host Management silent")).to_have_count(1)
+        go(page, "home")
+        expect(_incidents(page).filter(has_text=STOPPED)).to_have_count(1)
         go(page, "hardware")
         expect(_card(page, bound_name)).to_contain_text("· 50 °C at last report")
         expect(_card(page, bound_name)).to_contain_text(
@@ -268,8 +287,10 @@ def test_rows_run_worst_first_alarm_notice_unknown_ok(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "hardware")
         expect(_card(page, unknown_name)).to_contain_text("Host Management: Unknown: not read")
-        assert _table_names(page) == [alarm_name, notice_name, unknown_name, ok_name]
+        # The host read has landed (before it, every row reads "not read" and the names are read
+        # in the wrong order): only then is the order the list's.
         expect(_card(page, alarm_name)).to_have_attribute("data-severity", "alarm")
+        assert _table_names(page) == [alarm_name, notice_name, unknown_name, ok_name]
         # Every Pi drives a Frame: one group, one table; no card list beside it, no counts line.
         expect(hardware_list(page).get_by_role("table")).to_have_count(1)
         expect(hardware_list(page).get_by_role("table", name="Driving a Frame", exact=True)).to_be_visible()
@@ -309,8 +330,8 @@ def test_spares_are_never_alarms_and_retired_boxes_sort_below_healthy_players(pa
                             ("Retired", retired_name)):
             expect(hardware_list(page).get_by_role("table", name=group, exact=True).get_by_role(
                 "link", name=name, exact=True)).to_be_visible()
-        go(page, "attention")
-        expect(visible_page(page)).not_to_contain_text(spare_name)
+        go(page, "home")
+        expect(_home(page)).not_to_contain_text(spare_name)
 
 
 def test_player_health_shows_both_bases_and_names_a_mismatch(page, registry):
@@ -332,8 +353,8 @@ def test_player_health_shows_both_bases_and_names_a_mismatch(page, registry):
             "(Central's inference: the reported tag and the offered tag differ)")
         # A derived fact, not an alarm: no band and no incident.
         expect(software.locator("[data-band=alarm]")).to_have_count(0)
-        go(page, "attention")
-        expect(visible_page(page)).not_to_contain_text("Base differs")
+        go(page, "home")
+        expect(_home(page)).not_to_contain_text("Base differs")
 
 
 def test_a_spare_is_listed_under_not_driving_a_frame_with_its_hint(page, registry):
@@ -405,84 +426,86 @@ def test_the_hardware_tables_scroll_sideways_at_phone_width_and_the_page_does_no
         expect(page.get_by_role("list", name="Players", exact=True)).to_have_count(0)
 
 
-# A1 (console DDD §61-§62): the strip and Needs attention count Players too; the Status chip.
+# A1 (console DDD §61-§62): Home lists a Pi's host fault too, after Central's problems; the Status chip.
 
 
-def _frames_with_players(registry, frame_ids, device_ids=None):
+def _frames_with_players(registry, frame_ids, device_ids=None, *, positioned=False):
     """One Frame per id, each bound to its own newly enrolled Player: (player id, device id,
-    name) each. `device_ids` fixes the boxes' ids (else random, so name order is random)."""
+    name) each. `device_ids` fixes the boxes' ids (else random, so name order is random).
+    `positioned`: each Frame's Position is saved, so it is past setup and has a status."""
     boxes = []
     for index, frame_id in enumerate(frame_ids):
         identity, _, request = enroll(registry, count=1, device_id=device_ids[index] if device_ids else None)
         registry.create_frame(frame_create(frame_id, x_mm=100 + 400 * index, y_mm=100), by="console")
         registry.bind(frame_id, identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
+        if positioned:
+            save_position(registry, frame_id)
         boxes.append((identity["player_id"], request.device_id, player_name(registry, identity["player_id"])))
     return boxes
 
 
-def _summary(page):
-    return page.get_by_role("region", name="Wall attention", exact=True).get_by_role("status")
-
-
-def test_the_strip_counts_frames_then_players_and_player_rows_follow_frame_rows(page, registry):
-    (_, host_device, host_name), _, _ = _frames_with_players(registry, ["host-sick", "quiet-a", "quiet-b"])
-    # The two other Players never report: their Frames are alarms after four minutes.
+def test_home_lists_frame_problems_first_then_a_pis_host_fault(page, registry):
+    (host_player, host_device, host_name), _, _ = _frames_with_players(
+        registry, ["host-sick", "quiet-a", "quiet-b"], positioned=True)
+    # The two other Players are never heard: Central can't tell about their Frames after four
+    # minutes. host-sick's Pi is heard and presents, so its host's silence is its only fault.
     registry.clock.advance(240)
+    report_presenting(registry, host_player)
     _stub(page, {"read_at": 1000.0, "thresholds": THRESHOLDS, "devices": [_row(host_device, 880.0, 50)]})
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "attention")
-        expect(_summary(page)).to_have_text("3 Frames · 1 Player need attention")
-        items = _attention(page).get_by_role("listitem")
-        expect(items).to_have_count(4)
-        # Frame rows first, then the Player row; no host item on any Frame row.
-        expect(items.last).to_contain_text(
-            f"{host_name} (Frame host-sick) — Host Management silent · last reported 2 min ago")
-        for index in range(3):
-            expect(items.nth(index)).not_to_contain_text("Host Management")
-        expect(items.last.get_by_role("link", name=host_name, exact=True)).to_have_attribute(
+        connect(page, origin, "home")
+        cards = home_problems(page).get_by_role("group")
+        expect(cards).to_have_count(3)
+        # Central's Frame problems first, then the Pi's; no host item on any Frame card.
+        expect(cards.last).to_contain_text(re.compile(r"Pi \S+: Pi fault\."))
+        expect(cards.last.get_by_role("paragraph")).to_have_text(re.compile(rf"^{re.escape(STOPPED)} It feeds Frame \d+\.$"))
+        for index in range(2):
+            expect(cards.nth(index)).to_contain_text("Can't tell since")
+            expect(cards.nth(index)).not_to_contain_text("its own health")
+        # One page, one name for the box: no card says "Player" or names the host's service.
+        assert host_name.startswith("Player") and not INTERNAL.search(_home(page).inner_text())
+        expect(cards.last.get_by_role("link", name="Open the Pi", exact=True)).to_have_attribute(
             "href", f"#/hardware/{host_device}")
-        # On a Show page every row, the Player row too, is plain text (R4).
-        go(page, "now")
-        strip = page.get_by_role("region", name="Wall attention", exact=True)
-        strip.get_by_role("button", name="Show list", exact=True).click()
-        expect(strip.get_by_role("listitem")).to_have_count(4)
-        expect(strip.get_by_role("list").get_by_role("link")).to_have_count(0)
-        expect(strip.get_by_role("list").get_by_role("button")).to_have_count(0)
 
 
-def test_two_frame_alarms_and_one_player_incident(page, registry):
-    boxes = _frames_with_players(registry, ["a-quiet", "b-quiet", "c-hot"])
+def test_a_pi_one_of_centrals_problems_names_is_not_said_twice(page, registry):
+    """A Pi Central can't hear is already a problem naming the Pi: its host's silence, read by the
+    console beside it, raises no second card. A Pi that presents and runs hot is its own card."""
+    boxes = _frames_with_players(registry, ["a-quiet", "b-quiet", "c-hot"], positioned=True)
     registry.clock.advance(240)
-    report_readiness(registry, boxes[2][0])
-    _stub(page, {"read_at": 1000.0, "thresholds": THRESHOLDS, "devices": [_row(boxes[2][1], 999.0, 82)]})
+    report_presenting(registry, boxes[2][0])
+    _stub(page, {"read_at": 1000.0, "thresholds": THRESHOLDS, "devices": [
+        _row(boxes[0][1], 880.0, 50), _row(boxes[2][1], 999.0, 82)]})
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "attention")
-        expect(_summary(page)).to_have_text("2 Frames · 1 Player need attention")
-        expect(_attention(page).get_by_role("listitem").last).to_contain_text(
-            f"{boxes[2][2]} (Frame c-hot) — 82 °C · hot")
+        connect(page, origin, "home")
+        expect(home_problems(page).get_by_role("group")).to_have_count(3)
+        expect(_incidents(page)).to_have_count(1)
+        expect(_incidents(page).get_by_role("paragraph")).to_have_text(re.compile(r"^It reports: 82 °C · hot\. It feeds Frame \d+\.$"))
+        expect(_home(page)).not_to_contain_text(STOPPED)
 
 
-def test_a_player_incident_alone_makes_the_strip_an_alarm(page, registry):
-    ((player_id, device, name),) = _frames_with_players(registry, [FRAME])
-    report_readiness(registry, player_id)  # the Frame is heard: no Frame incident
+def test_a_pis_host_fault_alone_is_an_alarm_card(page, registry):
+    ((player_id, device, name),) = _frames_with_players(registry, [FRAME], positioned=True)
+    report_presenting(registry, player_id)  # the Frame presents: no Frame problem
     _stub(page, {"read_at": 1000.0, "thresholds": N1_THRESHOLDS, "devices": [_n1_row(device, 0x4)]})
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "attention")
-        expect(_summary(page)).to_have_text("1 Player needs attention")
-        expect(_summary(page)).to_have_class(re.compile(r"\bhealth--alarm\b"))
-        expect(_attention(page).get_by_role("listitem")).to_have_text(
-            [re.compile(rf"^{re.escape(name)} \(Frame {FRAME}\) — throttled now")])
+        connect(page, origin, "home")
+        expect(_incidents(page)).to_have_count(1)
+        expect(_incidents(page).locator("[data-severity]")).to_have_attribute("data-severity", "alarm")
+        expect(_incidents(page).get_by_role("paragraph")).to_have_text(re.compile(r"^It reports: throttled now\. It feeds Frame \d+\.$"))
+        assert name.startswith("Player") and not INTERNAL.search(_home(page).inner_text())
 
 
-def test_a_failing_host_read_is_named_and_no_host_row_claims_health(page, registry):
+def test_a_failing_host_read_claims_no_health_and_no_host_fault(page, registry):
     ((player_id, _, _),) = _frames_with_players(registry, [FRAME])
     report_readiness(registry, player_id)
     page.route(HOSTS, lambda route: route.fulfill(status=500, content_type="application/json",
                                                   body=json.dumps({"detail": "boom"})))
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "attention")
-        expect(_summary(page)).to_have_text("No Frame or Player needs attention · host health not read")
-        expect(visible_page(page)).not_to_contain_text("Host Management")
+        connect(page, origin, "home")
+        expect(_home(page).get_by_role("heading", level=1, name="Home", exact=True)).to_be_visible()
+        expect(_home(page)).not_to_contain_text("Host Management")
+        expect(_incidents(page)).to_have_count(0)
         # The Overview's host chip does not judge a box it could not read: in plain words on
         # the page, in the classifier's words under Details.
         inspector = open_frame(page, FRAME, "overview")

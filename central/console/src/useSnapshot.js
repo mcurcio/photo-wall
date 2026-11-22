@@ -9,18 +9,65 @@ import React, {
 } from "react";
 
 import { apiWrite } from "./apiWrite.js";
+import { signInResultNotice } from "./domain/operator-access/access.ts";
+import { HOME_NOT_READ, readHome } from "./homeApi.js";
 import { CONSOLE_HEADER, onOriginRefused, writeCount } from "./session.js";
 
 /**
  * @typedef {{inventory: object, runtime: object, media: object|null, at: number,
  *            readAt: number, playerReportsReadAt: number,
- *            readinessDiagnostics: object[], outputInterruptions: object[]}} Snapshot
+ *            readinessDiagnostics: object[], outputInterruptions: object[],
+ *            home: import("./generated/contract").HomeView|null, homeFailed: boolean,
+ *            homeReadAt: number|null}} Snapshot
+ *   `home` is Home's document (homeApi.js; decision 0036), read with the snapshot: every Frame's
+ *   status as Central composed it, which every chip reads (domain/frame-status.ts). It is the
+ *   last document read (null before the first), and `homeFailed` says the newest read of it
+ *   failed: what it holds is then not current, and is as of `homeReadAt` (Central's time of the
+ *   snapshot it was last read with).
  * @typedef {"checking"|"signedIn"|"signedOut"} Auth
- * @typedef {"rejected"|"expired"|"blocked"|"failed"|"signOutFailed"|null} AuthNotice
+ * @typedef {"rejected"|"expired"|"blocked"|"failed"|"signOutFailed"|"notAllowed"|
+ *           "providerUnreachable"|"providerFailed"|null} AuthNotice
+ * @typedef {{status: "loading"|"failed"|"read", method: "token"|"provider"|null,
+ *            name: string|null}} SignInMethod
+ *   How this Central signs a person in (decision 0035): with the deployment's operator token, or
+ *   through its identity provider, whose name the sign-in button says. `method` is null until
+ *   Central has answered once; a later read that fails keeps the last answer.
  */
 
-// Sign in (POST) and Log out (DELETE): pass A §5.
+// Sign in (POST), who am I (GET) and Log out (DELETE): pass A §5, decision 0035.
 const SESSION_PATH = "/v1/operator/session";
+// How to sign in: answered without a session.
+const SIGN_IN_PATH = "/v1/operator/sign-in";
+
+const METHOD_NOT_READ = Object.freeze({ status: "loading", method: null, name: null });
+
+let signInResult;
+
+/**
+ * Why a sign-in through the provider did not finish: Central lands the browser back on the console
+ * with `?sign_in=<code>`. Read ONCE per page load and removed from the address at once, so a reload
+ * or a shared link never repeats it.
+ *
+ * @returns {AuthNotice}
+ */
+function takeSignInResult() {
+  if (signInResult !== undefined) {
+    return signInResult;
+  }
+  signInResult = null;
+  try {
+    const url = new URL(window.location.href);
+    const code = url.searchParams.get("sign_in");
+    if (code !== null) {
+      signInResult = signInResultNotice(code);
+      url.searchParams.delete("sign_in");
+      window.history.replaceState(window.history.state, "", url.pathname + url.search + url.hash);
+    }
+  } catch {
+    // No address to read (not a browser page): no result.
+  }
+  return signInResult;
+}
 
 async function fetchJson(path) {
   // The session cookie travels with this same-origin fetch; no credential is held here.
@@ -90,7 +137,11 @@ export function SnapshotProvider({ children }) {
   // notice instead of silently blanking (design R3).
   const [auth, setAuthState] = useState(/** @type {Auth} */ ("checking"));
   const authRef = useRef(/** @type {Auth} */ ("checking"));
-  const [authNotice, setAuthNotice] = useState(/** @type {AuthNotice} */ (null));
+  const [authNotice, setAuthNotice] = useState(/** @type {AuthNotice} */ (takeSignInResult));
+  // How Central signs a person in; this provider is its one reader.
+  const [signInMethod, setSignInMethod] = useState(/** @type {SignInMethod} */ (METHOD_NOT_READ));
+  const methodReadsRef = useRef(0);
+  const sessionCheckRef = useRef(false);
   // Whether Central refused a write for its origin (apiWrite reports it).
   const [originRefused, setOriginRefused] = useState(false);
   // Whether the newest applied refresh failed (never inferred from age).
@@ -104,6 +155,9 @@ export function SnapshotProvider({ children }) {
   const [inFlight, setInFlight] = useState(0);
   const issuedRef = useRef(0);
   const appliedRef = useRef(0);
+  // Home's last read (its document and entity tag): the next read asks from it (If-None-Match).
+  const homeRef = useRef(HOME_NOT_READ);
+  const homeReadAtRef = useRef(/** @type {number|null} */ (null));
   const pollingRef = useRef(false);
 
   const setAuth = useCallback((next) => {
@@ -122,6 +176,10 @@ export function SnapshotProvider({ children }) {
     // and `playerReportsReadAt` retain Central's distinct timing facts.
     let next = null;
     let failure = null;
+    // Home's document rides the same read: the same cadence, the same refresh after an action
+    // and the same write fence. It never fails the snapshot: its own failure is said beside it.
+    const homeBefore = homeRef.current;
+    const homeRead = readHome(homeBefore);
     try {
       const aggregate = await fetchJson("/v1/operator/snapshot");
       if (!aggregate?.inventory || !aggregate?.runtime || !aggregate?.media ||
@@ -147,11 +205,30 @@ export function SnapshotProvider({ children }) {
     } catch (error) {
       failure = error;
     }
+    const home = await homeRead;
+    if (failure === null && home.unauthorized === true) {
+      // Central refused Home's read for want of a session while it answered the snapshot (two
+      // concurrent reads at the moment a session ends): the session has ended all the same.
+      failure = Object.assign(new Error("HTTP 401"), { status: 401 });
+      next = null;
+    }
+    if (next !== null) {
+      next.home = home.view;
+      next.homeFailed = home.failed;
+      next.homeReadAt = home.failed ? homeReadAtRef.current : next.readAt;
+    }
     if (ticket <= appliedRef.current || writeCount() !== writesAtStart) {
       // Superseded by a newer read, or overlapped by a write: dropped whole.
       return null;
     }
     appliedRef.current = ticket;
+    if (homeRef.current === homeBefore) {
+      // Kept only from an applied read: a superseded or fenced one may predate a write.
+      homeRef.current = home;
+      if (next !== null) {
+        homeReadAtRef.current = next.homeReadAt;
+      }
+    }
     if (failure !== null) {
       setRefreshFailed(true);
       // No session (401 on the first read OR mid-session: expired, token
@@ -164,7 +241,11 @@ export function SnapshotProvider({ children }) {
       if (failure?.status === 401) {
         const wasSignedIn = authRef.current === "signedIn";
         setAuth("signedOut");
-        setAuthNotice(wasSignedIn ? "expired" : null);
+        // A tab that was never signed in keeps its notice: why the provider's sign-in did not
+        // finish (`?sign_in=`), which the first read finds still signed out.
+        if (wasSignedIn) {
+          setAuthNotice("expired");
+        }
       }
       throw failure;
     }
@@ -185,6 +266,22 @@ export function SnapshotProvider({ children }) {
     }
   }, [read]);
 
+  // A session exists again (a token accepted, or the provider's sign-in finished in another tab).
+  const resume = useCallback(async () => {
+    setAuthNotice(null);
+    // SigningIn -> Checking on 204 (pass A §7): the cookie is set, so the poller resumes
+    // and a first read that fails (network/5xx) is retried, not left on the sign-in form.
+    setAuth("checking");
+    try {
+      await refresh();
+    } catch (error) {
+      // Central issued the cookie but the browser did not send it back.
+      if (error?.status === 401) {
+        setAuthNotice("blocked");
+      }
+    }
+  }, [refresh, setAuth]);
+
   const signIn = useCallback(
     async (token) => {
       let result;
@@ -199,21 +296,54 @@ export function SnapshotProvider({ children }) {
         setAuthNotice(result.status === 401 ? "rejected" : result.status === 403 ? null : "failed");
         return;
       }
-      setAuthNotice(null);
-      // SigningIn -> Checking on 204 (pass A §7): the cookie is set, so the poller resumes
-      // and a first read that fails (network/5xx) is retried, not left on the sign-in form.
-      setAuth("checking");
-      try {
-        await refresh();
-      } catch (error) {
-        // Central issued the cookie but the browser did not send it back.
-        if (error?.status === 401) {
-          setAuthNotice("blocked");
-        }
-      }
+      await resume();
     },
-    [refresh, setAuth],
+    [resume],
   );
+
+  // Read how Central signs a person in. The newest read wins; one that fails keeps the method
+  // already known (it is the deployment's, and changes only when Central restarts).
+  const readSignInMethod = useCallback(async () => {
+    const ticket = ++methodReadsRef.current;
+    setSignInMethod((previous) => (previous.method === null ? METHOD_NOT_READ : previous));
+    let next = null;
+    try {
+      const answer = await fetchJson(SIGN_IN_PATH);
+      if (answer?.method === "token") {
+        next = { status: "read", method: "token", name: null };
+      } else if (answer?.method === "provider" && typeof answer.name === "string" && answer.name !== "") {
+        next = { status: "read", method: "provider", name: answer.name };
+      }
+    } catch {
+      // Central did not answer: said below.
+    }
+    if (ticket !== methodReadsRef.current) {
+      return;
+    }
+    setSignInMethod((previous) =>
+      next ?? (previous.method === null ? { status: "failed", method: null, name: null } : previous));
+  }, []);
+
+  // While signed out through the provider with the shell still mounted, the sign-in itself happens
+  // in another tab: ask Central whether this browser has a session again, and resume if so. The
+  // sign-in screen calls this on its own cadence while it is shown (decision 0035).
+  const checkSession = useCallback(async () => {
+    if (authRef.current !== "signedOut" || sessionCheckRef.current) {
+      return;
+    }
+    sessionCheckRef.current = true;
+    try {
+      await fetchJson(SESSION_PATH);
+    } catch {
+      // 401: still signed out. Anything else: Central did not answer; the next check asks again.
+      return;
+    } finally {
+      sessionCheckRef.current = false;
+    }
+    if (authRef.current === "signedOut") {
+      await resume();
+    }
+  }, [resume]);
 
   const signOut = useCallback(async () => {
     let result = null;
@@ -228,12 +358,20 @@ export function SnapshotProvider({ children }) {
     }
     // Any read in flight overlapped this write and is dropped by the fence.
     setSnapshot(null);
+    homeRef.current = HOME_NOT_READ;
+    homeReadAtRef.current = null;
     setAuth("signedOut");
     setAuthNotice(null);
     setRefreshFailed(false);
     // A new session epoch: the shell is keyed on it, so it remounts and every
     // draft is discarded (flow design §6 (b)).
     setSessionEpoch((epoch) => epoch + 1);
+    // Through a provider, Central answers the provider's own log-out address: going there ends the
+    // provider's session too, and it comes back to the console's sign-in page (decision 0035).
+    const endSession = result.data?.end_session;
+    if (typeof endSession === "string" && endSession !== "") {
+      window.location.assign(endSession);
+    }
   }, [setAuth]);
 
   const dismissOriginRefused = useCallback(() => setOriginRefused(false), []);
@@ -243,6 +381,15 @@ export function SnapshotProvider({ children }) {
     // (non-401) initial load leaves Plane A null; the next poll retries.
     refresh().catch(() => {});
   }, [refresh]);
+
+  const signedIn = auth === "signedIn";
+  useEffect(() => {
+    // On load, and again each time a signed-in tab is signed out: the deployment may have
+    // changed how (setting a provider signs every browser out once).
+    if (!signedIn) {
+      readSignInMethod();
+    }
+  }, [signedIn, readSignInMethod]);
 
   useEffect(() => {
     let id = null;
@@ -295,6 +442,9 @@ export function SnapshotProvider({ children }) {
       authNotice,
       signIn,
       signOut,
+      signInMethod,
+      readSignInMethod,
+      checkSession,
       refreshFailed,
       refreshing: inFlight > 0,
       originRefused,
@@ -308,6 +458,9 @@ export function SnapshotProvider({ children }) {
       authNotice,
       signIn,
       signOut,
+      signInMethod,
+      readSignInMethod,
+      checkSession,
       refreshFailed,
       inFlight,
       originRefused,
@@ -324,7 +477,9 @@ export function SnapshotProvider({ children }) {
  * Returns the current atomic snapshot, a refresh fn that replaces Plane A
  * wholesale and NEVER merges into Plane B (it resolves null when its read was
  * superseded or fenced off by a write), the sign-in state `auth` with its
- * `authNotice`, `signIn(token)` and `signOut()`, `refreshFailed` (true while the
+ * `authNotice`, `signIn(token)` and `signOut()`, `signInMethod` (how Central signs a person in:
+ * the token, or its provider by name), `readSignInMethod()` (read it again) and `checkSession()`
+ * (resume if this browser has a session again), `refreshFailed` (true while the
  * newest applied refresh failed), `refreshing` (a Plane A read is in flight),
  * `originRefused` (Central refused a write for its origin; `dismissOriginRefused`
  * clears it) and `sessionEpoch` (bumped
@@ -334,6 +489,8 @@ export function SnapshotProvider({ children }) {
  * @returns {{snapshot: Snapshot|null, refresh: () => Promise<Snapshot|null>,
  *            auth: Auth, authNotice: AuthNotice,
  *            signIn: (token: string) => Promise<void>, signOut: () => Promise<void>,
+ *            signInMethod: SignInMethod, readSignInMethod: () => Promise<void>,
+ *            checkSession: () => Promise<void>,
  *            refreshFailed: boolean, originRefused: boolean,
  *            dismissOriginRefused: () => void, sessionEpoch: number}}
  */

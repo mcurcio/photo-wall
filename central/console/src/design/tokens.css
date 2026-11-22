@@ -97,12 +97,21 @@
   --spacing-row: 8px;
   /* The tallest a live editor's drawing is on a phone, so its sticky bar below never covers it. */
   --spacing-drawing-phone: 45vh;
+  /* The height of the phone's bottom tabs where they are drawn (the shell sets it below the
+     switch, index.css), else nothing: a page's own sticky bar sits this far above the bottom. */
+  --spacing-tabs: 0px;
 
   /* Radius. */
   --radius-button: 12px;
   --radius-input: 8px;
   --radius-card: 16px;
   --radius-pill: 999px;
+
+  /* The one structural switch (design language §2, Breakpoints): below it is phone (bottom
+     tabs, tables as cards, sheets from the bottom, a menu as a sheet). `md:` and `max-md:` read
+     it; tokens.ts names the same width for the few hooks that must ask in script, and a legacy
+     media query repeats its value (a media query cannot read a custom property). */
+  --breakpoint-md: 48rem;
 
   /* Type. */
   --font-sans: "Console Sans", system-ui, sans-serif;

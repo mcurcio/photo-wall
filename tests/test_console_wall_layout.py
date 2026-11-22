@@ -5,18 +5,21 @@ write module, by the R4 test's own fail-closed import scan, followed transitivel
 and tray write lives in LayoutEditor.jsx (Edit layout, `#/wall/layout`), which is the
 positive control.
 
-Model: unfinished.js `wallUnfinished` (G2: structural, from `set` records only) and health.js
-`wallAttention` (evidence only) never share an item, and health.js `tabFor` opens the cause
-tab or the Frame page's Overview fallback. Run under Node as the other console model tests are.
+Model: unfinished.js `wallUnfinished` (G2: structural, from `set` records only) and Central's
+problems on Home (evidence only; decision 0036) never share an item, and domain/frame-status.ts
+`tabForStatus` opens the cause tab or the Frame page's Overview fallback. Run under Node as the
+other console model tests are.
 
 The browser half is tests/browser/test_operator_wall_browser.py.
 """
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
+from support.console_status import STATUS_JS
 from test_console_flow import _require_node
 from test_console_routes_r4 import WRITE_MODULES, scan_closure
 
@@ -47,18 +50,16 @@ def test_edit_layout_owns_the_plan_and_tray_writes():
 
 def test_the_scan_catches_a_write_import_added_to_a_read_only_module(tmp_path):
     # A mutation of the guarded files, in a copy: one added write import fails the check.
+    # The whole tree: Plan.jsx reads a Frame's status through domain/frame-status.ts.
     src = tmp_path / "src"
-    src.mkdir()
-    for module in SRC.iterdir():
-        if module.is_file():
-            (src / module.name).write_bytes(module.read_bytes())
+    shutil.copytree(SRC, src)
     plan = src / "Plan.jsx"
     plan.write_text('import { placeFrame } from "./framesApi.js";\n' + plan.read_text())
     assert "framesApi.js" in _closure(plan, tmp_path)
 
 
-SCRIPT = r"""
-const health = await import(process.argv[1]);
+SCRIPT = STATUS_JS + r"""
+const status = await import(process.argv[1]);
 const { wallUnfinished } = await import(process.argv[2]);
 const player = (id, extra = {}) => ({ id, device_id: `device-${id}`, authority_epoch: 1,
   registered_at: 10, last_seen: 900, retired_at: null, last_report_at: 995, ...extra });
@@ -67,7 +68,14 @@ const frame = (id, extra = {}) => ({ id, surface_id: "wall", x_mm: 10, y_mm: 10,
   ...extra });
 const output = (player_id, output_id) => ({ player_id, output_id,
   observation: { connected: true } });
-const snapshot = { inventory: {
+// Central's status of each Frame, as Home's read serves it: the silent Pi's Frame has a problem
+// naming its Pi; the Frames still in setup have a step and no word.
+const silent = frameStatus("dark", "cant-tell", { row: "pi-not-heard",
+  problem: frameProblem("dark", "pi", "pi-not-heard", { layer: "presence" }) });
+const statuses = [frameStatus("unbound", null, { setup: "needs-a-pi" }), silent, frameStatus("ok", "showing"),
+  frameStatus("raw", null, { setup: "check-position" }), frameStatus("moved", null, { setup: "display-changed" }),
+  frameStatus("origin", null, { setup: "needs-a-pi" })];
+const snapshot = { home: homeOf(statuses, [silent.problem]), inventory: {
   read_at: 1000, silent_after_seconds: 30, socket_keepalive_seconds: 10,
   players: [player("heard"), player("silent", { last_report_at: 100 }), player("raw")],
   outputs: [output("heard", "HDMI-A-1"), output("heard", "HDMI-A-2"), output("silent", "HDMI-A-1"),
@@ -81,12 +89,11 @@ const snapshot = { inventory: {
     frame("origin", { x_mm: 0, y_mm: 0 }),
   ],
 } };
-const attention = health.wallAttention(snapshot);
 console.log(JSON.stringify({
   unfinished: wallUnfinished(snapshot),
-  attention: { ...attention, alarms: attention.alarms.map((entry) => entry.frame.id) },
-  tab: ["unbound", "ok", "dark", "raw", "moved"].map(
-    (id) => health.tabFor(health.frameHealth(snapshot, id), "overview")),
+  problems: snapshot.home.house.problems.map((problem) => problem.frame_id),
+  tab: ["unbound", "ok", "dark", "raw", "moved", "never-served"].map(
+    (id) => status.tabForStatus(status.frameStatusIn(snapshot, id), "overview")),
   empty: wallUnfinished({ inventory: { frames: [] } }),
 }));
 """
@@ -95,13 +102,13 @@ console.log(JSON.stringify({
 def _run():
     _require_node()
     result = subprocess.run(
-        ["node", "--input-type=module", "-e", SCRIPT, "--", (SRC / "health.js").as_uri(),
+        ["node", "--input-type=module", "-e", SCRIPT, "--", (SRC / "domain/frame-status.ts").as_uri(),
          (SRC / "unfinished.js").as_uri()],
         capture_output=True, text=True, timeout=30, check=True)
     return json.loads(result.stdout)
 
 
-def test_to_finish_is_structural_and_attention_is_evidence():
+def test_to_finish_is_structural_and_homes_problems_are_evidence():
     out = _run()
     wall = lambda **extra: {"section": "wall", **extra}  # noqa: E731
     # Frame order; each Frame's missing `set` records in bring-up order. An unbound Frame
@@ -114,14 +121,15 @@ def test_to_finish_is_structural_and_attention_is_evidence():
         {"frameId": "raw", "step": "calibrate", "route": wall(id="raw", tab="position")},
         {"frameId": "unbound", "step": "bind", "route": wall(id="unbound", tab="hardware")},
     ]
-    # The silent bound Player's Frame is an attention row and not a To finish item; the
-    # unbound Frame is a To finish item and not an attention row. No `todos` remain.
-    assert out["attention"] == {"frameCount": 6, "awaiting": 0, "alarms": ["dark"]}
-    assert "dark" not in {item["frameId"] for item in out["unfinished"]}
+    # The silent bound Pi's Frame is one of Central's problems on Home and not a To finish item;
+    # a Frame still in setup is a To finish item and has no problem (setup is not status).
+    assert out["problems"] == ["dark"]
+    assert not set(out["problems"]) & {item["frameId"] for item in out["unfinished"]}
     assert out["empty"] == []
 
 
 def test_tab_for_opens_the_cause_or_overview():
-    # Unbound -> Hardware; ok -> the Frame page's Overview fallback; a silent Player ->
-    # Hardware; needs calibration -> Position; display changed -> Hardware.
-    assert _run()["tab"] == ["hardware", "overview", "hardware", "position", "hardware"]
+    # Needs a Pi -> Hardware; Showing -> the Frame page's Overview fallback; a problem naming
+    # the Pi -> Hardware; check its Position -> Position; display changed -> Hardware; a status
+    # Central has not served -> the fallback.
+    assert _run()["tab"] == ["hardware", "overview", "hardware", "position", "hardware", "overview"]

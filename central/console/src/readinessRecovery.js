@@ -1,19 +1,21 @@
-import { ageAt, formatAge, frameHealth } from "./health.js";
+import { frameStatusIn, piSilent } from "./domain/frame-status.ts";
+import { ageAt, formatAge, playerLiveness } from "./health.js";
 
-/** Plain operator recovery wording for Player readiness failure codes. */
+/** Plain operator recovery wording for the photo app's readiness failure codes. Home draws these, so
+ * they name the photo app and the Pi, never the Player (decision 0036, Copy). */
 const RECOVERY = Object.freeze({
   capacity:
-    "The Player could not prepare this assignment within its available capacity. Reduce concurrent video or effect work, or use lighter media.",
+    "The photo app could not prepare this assignment within what its Pi can do at once. Reduce concurrent video or effect work, or use lighter media.",
   decode:
-    "The Player could not decode this assignment. Check that the media is supported, or choose another item.",
+    "The photo app could not decode this assignment. Check that the media is supported, or choose another item.",
   download:
-    "The Player could not secure this assignment. Check Player storage and its network path to Central, then check Central media delivery.",
+    "The photo app could not secure this assignment. Check the Pi's storage and its network path to Central, then check Central media delivery.",
   integrity:
-    "The Player found that its cached copy did not pass the integrity check. Check the Player cache and Central media delivery so it can reacquire a valid copy.",
+    "The photo app found that its cached copy did not pass the integrity check. Check the Pi's cache and Central media delivery so it can reacquire a valid copy.",
 });
 
 const UNKNOWN_RECOVERY =
-  "The Player reported an unrecognized readiness failure. Check Player and Central diagnostics.";
+  "The photo app reported an unrecognized readiness failure. Check the Pi's and Central's diagnostics.";
 
 /**
  * Convert a protocol failure code to bounded, plain-language recovery guidance.
@@ -34,8 +36,13 @@ export function readinessRecoveryForFrame(snapshot, frameId) {
 
 /** Current report wording plus its safe age, measured on Central's snapshot clock. */
 export function readinessReportForFrame(snapshot, frameId) {
-  const health = frameHealth(snapshot, frameId);
-  if (health === null || health.cause === "liveness") return null;
+  // Central can't hear the Frame's Pi (its served status, domain/frame-status.ts): what the Pi
+  // reported before is no guide to it now.
+  const status = frameStatusIn(snapshot, frameId);
+  if (piSilent(status)) return null;
+  // Setup is not status: for a Frame still in setup the status says nothing of its Pi, so the
+  // Pi's liveness as Central records it decides (health.js `playerLiveness`).
+  if (status?.setup != null && !heardFrame(snapshot, frameId)) return null;
   const diagnostics = (snapshot?.readinessDiagnostics ?? []).filter(
     (diagnostic) => diagnostic.frame_id === frameId,
   );
@@ -47,6 +54,12 @@ export function readinessReportForFrame(snapshot, frameId) {
     messages: [...codes].map(readinessRecoveryText),
     age: Number.isFinite(age) && age >= 0 ? formatAge(age) : null,
   };
+}
+
+/** Whether the Frame's Pi is live by Central's record, within its silence limit (no Pi: not live). */
+function heardFrame(snapshot, frameId) {
+  const playerId = (snapshot?.inventory?.frames ?? []).find((frame) => frame.id === frameId)?.player_id;
+  return playerId != null && playerLiveness(snapshot, playerId)?.state === "heard";
 }
 
 /** Frames with a current accepted readiness failure, ordered by Frame id. */

@@ -28,6 +28,10 @@ dependencies = [
   # reads (the slim image has none). Central only; the Pi never imports them.
   "astral==3.2",
   "tzdata==2026.3",
+  # Operator sign-in through an identity provider (decision 0035): the provider's tokens are
+  # validated by PyJWT over `cryptography` (pinned above), never by hand. Only
+  # central/infra/jwt_signature.py imports it.
+  "pyjwt[crypto]==2.15.1",
 ]
 
 [dependency-groups]
@@ -258,6 +262,44 @@ type = "protected"
 protected_modules = ["central.infra.home_assistant"]
 allowed_importers = ["central.node_bus_wiring", "central.infra.central_state", "central.app",
                      "central.home_assistant_routes", "central.console_contract"]
+
+[[tool.importlinter.contracts]]
+# Decision 0036: a Frame's status composes what each owner already judged; it judges nothing and does
+# no I/O. It reads the vocabularies of displays, power, why, Central's errors and the photo library.
+name = "Frame status is pure"
+type = "forbidden"
+source_modules = ["central.frame_status"]
+forbidden_modules = ["media", "httpx", "nodeapi", "psycopg", "psycopg_pool", "procrastinate", "fastapi",
+                     "starlette", "central.infra", "central.db", "central.registry", "central.app",
+                     "central.coordination", "central.planner", "central.fleet", "central.scheduler",
+                     "central.operator_auth"]
+
+[[tool.importlinter.contracts]]
+# Decision 0035: operator access's vocabulary, rules and use cases do no I/O and import no HTTP
+# client, database, FastAPI or JWT library; the provider and the two tables are behind its ports.
+name = "Operator access is pure"
+type = "forbidden"
+source_modules = ["central.operator_access"]
+forbidden_modules = ["media", "httpx", "nodeapi", "jwt", "cryptography", "psycopg", "psycopg_pool",
+                     "procrastinate", "fastapi", "starlette", "central.infra", "central.db",
+                     "central.registry", "central.app", "central.coordination", "central.planner",
+                     "central.operator_auth"]
+
+[[tool.importlinter.contracts]]
+# The one OpenID Connect client is reached only from the API's composition root and the operator's
+# door (which names its type; app.py builds it).
+name = "Only the operator's door reaches the identity provider's client"
+type = "protected"
+protected_modules = ["central.infra.oidc_provider"]
+allowed_importers = ["central.app", "central.operator_auth"]
+
+[[tool.importlinter.contracts]]
+# JWT validation is never written by hand and never spread: PyJWT checks a signature in one module,
+# and every claim is judged by central/operator_access/policy.py on Central's clock.
+name = "Only the signature check imports PyJWT"
+type = "protected"
+protected_modules = ["jwt"]
+allowed_importers = ["central.infra.jwt_signature"]
 
 [[tool.importlinter.contracts]]
 # Fleet and the registry write a Frame's lighting through central/frame_lighting's port, never the

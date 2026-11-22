@@ -1,6 +1,6 @@
 import React from "react";
 
-import { frameHealth } from "./health.js";
+import { frameChip, frameStatusIn } from "./domain/frame-status.ts";
 import { project } from "./projection.js";
 
 /**
@@ -59,7 +59,7 @@ export function UnplacedTray({ snapshot, onSelect, edit = null }) {
       ) : (
         <ul className="tray__list">
           {unplacedIds.map((id) => {
-            const health = frameHealth(snapshot, id);
+            const health = frameChip(frameStatusIn(snapshot, id));
             return (
               <li key={id}>
                 <button

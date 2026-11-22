@@ -48,9 +48,10 @@
     "house": ["#/house"],
     "lights": ["#/lights"],
     "home-assistant": ["#/home-assistant"],
-    "paper-profiles": ["#/paper-profiles"]
+    "paper-profiles": ["#/paper-profiles"],
+    "people-and-access": ["#/people-and-access"]
   },
   "neutral": {
-    "attention": ["#/attention"]
+    "home": ["#/home"]
   }
 }

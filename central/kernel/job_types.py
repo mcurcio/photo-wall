@@ -99,8 +99,21 @@ class RebootPi(Job[None], name="node.reboot", delivery=Delivery(queue=QueueName.
     by: Actor
 
 
+class RestartApp(Job[None], name="node.app_restart", delivery=Delivery(queue=QueueName.UPKEEP),
+                 queued_by=("device_id",)):
+    """Ask one Pi's app broker to restart the photo app, over its fleet-pipe link
+    (central/fleet/app_restart.py `RestartAppHandler`; decision 0036), and record the ask in
+    `events`. `request_id` names the request (the console's), `by` who asked. Queued once per Pi.
+    Never retried: a person's request is never repeated; a Pi with no link now is not asked again."""
+
+    request_id: str
+    device_id: str
+    by: Actor
+
+
 AssetJob: TypeAlias = (FetchOsImage | FetchSealedEnvironment | FetchLibraryThumbnail
                        | PrepareMedia)
 CATALOG: Final[tuple[type[Job[Any]], ...]] = (
     FetchOsImage, FetchSealedEnvironment, FetchLibraryThumbnail, PrepareMedia,
-    SyncReleases, Prefetch, MaintainCache, RescueStalledJobs, PurgeFinishedJobs, RebootPi)
+    SyncReleases, Prefetch, MaintainCache, RescueStalledJobs, PurgeFinishedJobs, RebootPi,
+    RestartApp)

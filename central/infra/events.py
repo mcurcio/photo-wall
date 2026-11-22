@@ -1,10 +1,12 @@
 """Central's one event log over PostgreSQL (decision 0034, migration 119): the one writer of
 `events`, and the home of how long it is kept. Every Pi event record (a `RECORD_*` stream, or any
 stream that is not a KV bucket), every gap Central's link counted, every action Central's link took
-(nodeapi's action log) and every refused room-light report go here, append-only, and are trimmed
+(nodeapi's action log), every refused room-light report and every change of a Frame's status
+(decision 0036) go here, append-only, and are trimmed
 past a week (`EVENTS_KEPT_SECONDS`, central/infra/node_record_retention.py's `events` rule).
 
-`EventKind` is the vocabulary's code home; migration 119's CHECK is its other, and
+`EventKind` is the vocabulary's code home; the CHECK on `events.kind` (migration 119, widened by
+132) is its other, and
 tests/test_events.py keeps the two equal. Times are the database's clock (`DatabaseTransactionClock`
 on the caller's connection, or the stamp a caller read from it), never a Pi's.
 """
@@ -19,7 +21,7 @@ from psycopg.types.json import Jsonb
 from central.db import DatabaseTransactionClock
 from contracts.node_link import Pipe
 
-EventKind = Literal["record", "gap", "link-action", "refusal"]
+EventKind = Literal["record", "gap", "link-action", "refusal", "frame-status"]
 EVENTS_KEPT_SECONDS: Final = 7 * 86400     # decision 0033's week, its one home for `events`
 
 _CLOCK: Final = DatabaseTransactionClock()
@@ -124,5 +126,28 @@ def refusals_in(conn: Any, source: str | None, limit: int) -> tuple[RefusalEvent
                  for row in rows)
 
 
-__all__ = ["EVENTS_KEPT_SECONDS", "EventKind", "GapEvent", "RecordEvent", "RefusalEvent",
-           "gap_events_in", "link_action_in", "record_events_in", "refusal_in", "refusals_in"]
+@dataclass(frozen=True, slots=True)
+class FrameStatusEvent:
+    """One change of a Frame's status: the body its writer gave, and when it was recorded."""
+    body: Mapping[str, Any]
+    recorded_at: float
+
+
+def frame_status_in(conn: Any, frame_id: str, body: Mapping[str, object]) -> None:
+    """One change of `frame_id`'s status (kind 'frame-status', no device), body {"frame_id", **body}."""
+    conn.execute(
+        "INSERT INTO events (kind, body, recorded_at, recorded_by) VALUES ('frame-status', %s, %s, 'central')",
+        (Jsonb({**body, "frame_id": frame_id}), _CLOCK.now_in(conn)))
+
+
+def frame_statuses_in(conn: Any, frame_id: str, limit: int) -> tuple[FrameStatusEvent, ...]:
+    """`frame_id`'s newest `limit` status changes still kept, newest first."""
+    rows = conn.execute(
+        "SELECT body, recorded_at FROM events WHERE kind = 'frame-status' AND body->>'frame_id' = %s"
+        " ORDER BY recorded_at DESC, id DESC LIMIT %s", (frame_id, limit)).fetchall()
+    return tuple(FrameStatusEvent(body=row["body"], recorded_at=float(row["recorded_at"])) for row in rows)
+
+
+__all__ = ["EVENTS_KEPT_SECONDS", "EventKind", "FrameStatusEvent", "GapEvent", "RecordEvent", "RefusalEvent",
+           "frame_status_in", "frame_statuses_in", "gap_events_in", "link_action_in", "record_events_in", "refusal_in",
+           "refusals_in"]

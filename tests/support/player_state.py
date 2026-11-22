@@ -15,15 +15,20 @@ def player_state(client: TestClient, token: str) -> dict:
     with client.websocket_connect("/v1/player/session",
                                   headers={"Authorization": "Bearer " + token}) as socket:
         message = socket.receive_json()
-    assert message.pop("type") == "state", message
-    socket_closed(client, message["configuration"]["player_id"])
+        assert message.pop("type") == "state", message
+        # Closed and waited for in here, while the session's event loop still runs: a client used
+        # outside `with` ends that loop as the socket's block ends, and a close still queued for
+        # a worker thread is then cancelled and never written (seen under load, run 824).
+        socket.close()
+        socket_closed(client, message["configuration"]["player_id"])
     return message
 
 
 def socket_closed(client: TestClient, player_id: str, seconds: float = 5) -> None:
-    """Wait until Central wrote the socket's close (`closed_in`): the test client cancels the
-    session as it leaves, so the close is written on its own thread a moment later, which a
-    test counting writes must not see."""
+    """Wait until Central wrote the socket's close (`closed_in`): the session writes it on its
+    own thread a moment after the socket closes, which a test counting writes must not see. The
+    session's event loop must still be running: inside the socket's block after `close()`, or
+    under `with TestClient(...)`."""
     deadline = time.monotonic() + seconds
     while True:
         with client.app.state.registry.db.transaction() as conn:

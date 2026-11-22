@@ -13,8 +13,11 @@ import time
 from contextlib import contextmanager
 
 import uvicorn
+from operator_provider_fake import OWNER, FakeProvider
 from playwright.sync_api import expect
+from support.devices import seed_device
 from support.player_state import heard_in
+from support.trial_bus import draw
 from test_registry import ADMIN
 
 from central.app import create_app
@@ -44,11 +47,14 @@ _IDLE_CONNECTION_SECONDS = 600
 
 
 @contextmanager
-def operator_server(db, clock, *, cache_root=None, media_queue=None, admin_token=ADMIN):
-    """Run the production app on an ephemeral loopback listener with real lifespan."""
+def operator_server(db, clock, *, cache_root=None, media_queue=None, admin_token=ADMIN, oidc=None):
+    """Run the production app on an ephemeral loopback listener with real lifespan.
+
+    `oidc`: the identity provider's settings (decision 0035; `provider_server` below); None is
+    token mode."""
     app = create_app(db, clock, admin_token, run_scheduler=False,
                      cache_root=cache_root, media_queue=media_queue,
-                     central_version=CENTRAL_VERSION)
+                     central_version=CENTRAL_VERSION, oidc=oidc)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen()
@@ -96,6 +102,43 @@ def submit_sign_in(page, token=ADMIN):
     page.get_by_role("button", name="Sign in", exact=True).click()
 
 
+# What the provider-mode harness names its identity provider and the person it signs in.
+PROVIDER = "Fake ID"
+PERSON = "Ada Owner"
+PERSON_SUBJECT = "user-1"
+
+
+@contextmanager
+def provider_server(db, clock, *, roles=(OWNER,), **server):
+    """Run the production app in provider mode (decision 0035): yields `(origin, fake)`.
+
+    `fake` is a `FakeProvider` (tests/operator_provider_fake.py) served as a minimal OpenID Connect
+    issuer on its own loopback port; Central's real client talks to it over HTTP, and the browser
+    is redirected through it. It reads Central's clock, so a test that advances `clock` ages the
+    tokens and the session's judgement together. It signs in `PERSON` (subject `PERSON_SUBJECT`)
+    holding `roles`. `server`: `operator_server`'s other arguments."""
+    fake = FakeProvider(clock=clock)
+    fake.add_user(PERSON_SUBJECT, PERSON, roles=roles)
+    with fake.serving(), operator_server(db, clock, oidc=fake.settings(name=PROVIDER), **server) as origin:
+        yield origin, fake
+
+
+def provider_sign_in_button(page):
+    """The sign-in screen's one button in provider mode."""
+    return page.get_by_role("dialog", name="Sign in to Photo Wall", exact=True).get_by_role(
+        "button", name=f"Sign in with {PROVIDER}", exact=True)
+
+
+def sign_in_with_provider(page, origin, route=""):
+    """Open the console at `origin` (at hash `route`, "#/…", when given) and sign in through the
+    provider: the first-load screen's button navigates the page to Central's `session/start`,
+    the fake provider approves at once, and Central's callback lands back on the console.
+    Cookies are cleared first, as in `sign_in`."""
+    page.context.clear_cookies()
+    page.goto(origin + "/console" + route)
+    provider_sign_in_button(page).click()
+
+
 def inventory(page, origin, token=ADMIN):
     """Read-only proof through the complete public Installation contract."""
     response = page.request.get(origin + "/v1/operator/inventory", headers={
@@ -122,15 +165,28 @@ def report_readiness(registry, player_id):
         heard_in(conn, player_id, epoch, registry.clock.utc())
 
 
+def report_presenting(registry, player_id):
+    """Central hears the Player (`report_readiness`), and the Player reports each of its Frames'
+    pictures presented: its `frames` report on the Player line, as Central's link records it
+    (support/trial_bus.draw). With both, Central's status for a positioned Frame is Showing
+    (decision 0036, row 12). The Player's box is a device first, as a netbooted Pi's is."""
+    report_readiness(registry, player_id)
+    device_id = next(p.device_id for p in registry.inventory().players if p.id == player_id)
+    with registry.db.transaction() as conn:
+        seed_device(conn, device_id, None)
+    draw(registry, device_id)
+
+
 def tile_status(page, frame_id):
     """A plan tile's status readout, located by frame identity (never by coordinates)."""
     return page.get_by_role("group", name=f"Frame {frame_id} status", exact=True)
 
 
 def tile_health(page, frame_id):
-    """A plan tile's health: its visible text is the short tile label, and its accessible
-    name is the full label with the age (health.js `tileLabel` / `label`). The tile's planned
-    fact is an image too (console DDD §35), so the health line is picked by its class."""
+    """A plan tile's health: its visible text is the status word Central serves (or the setup
+    step), and its accessible name is the status in one line with since when
+    (domain/frame-status.ts `frameChip` / `statusLine`). The tile's planned fact is an image too
+    (console DDD §35), so the health line is picked by its class."""
     return tile_status(page, frame_id).locator(".plan__health")
 
 

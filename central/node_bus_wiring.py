@@ -34,6 +34,7 @@ from central import cache_layout
 from central.content_wiring import build_release_services
 from central.coordination import OutputLossLedger
 from central.db import Database, DatabaseTransactionClock, PoolName
+from central.fleet.app_restart import AppRestarter, BusAppRestart
 from central.fleet.node_bus_hub import HUB_LISTENERS, FleetHub
 from central.fleet.node_calibration import NodeCalibration, TrialReportJudge
 from central.fleet.node_release_catalog import NodeReleaseCatalog
@@ -156,8 +157,15 @@ class NodeBus:
 
     def pi_reboot(self) -> PiReboot:
         """A Pi's reboot over its fleet-pipe link (the worker's `RebootPi` handler's)."""
+        return BusPiReboot(self._fleet_links())
+
+    def app_restart(self) -> AppRestarter:
+        """A Pi's Restart app over its fleet-pipe link (the worker's `RestartApp` handler's)."""
+        return BusAppRestart(self._fleet_links())
+
+    def _fleet_links(self) -> NodeLinks:
         [fleet] = (links for links in self._links if links.pipe is Pipe.FLEET)
-        return BusPiReboot(fleet)
+        return fleet
 
     def _room_lights_changed(self) -> None:
         self.room_lights.wake()

@@ -25,6 +25,13 @@ from central.content_routes import (
 )
 from central.content_wiring import ContentServices
 from central.db import Database, TransactionClock
+from central.fleet.app_restart import (
+    APP_RESTARTS_PATH,
+    AppRestartRefusal,
+    AppRestartsView,
+    OperatorAppRestarts,
+    parse_operator_app_restart,
+)
 from central.fleet.bytes import OfferByteReader
 from central.fleet.models import FleetError, NodeControlError, TrialRefusal, TrialRefused
 from central.fleet.node_boot import NodeBootConfig, NodeBootService
@@ -55,6 +62,7 @@ _OPERATION: TypeAdapter[TrialOperation] = TypeAdapter(TrialOperation)
 
 
 MAX_REBOOT_BYTES = 1024   # the operator's reboot body: a command id and a one-word reason
+MAX_APP_RESTART_BYTES = 256   # the operator's Restart app body: a request id
 
 
 def _trial_body[T](adapter: TypeAdapter[T], raw: bytes) -> T:
@@ -70,10 +78,15 @@ def _trial_body[T](adapter: TypeAdapter[T], raw: bytes) -> T:
 
 def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
                       admin: Callable[..., None], config: NodeBootConfig,
-                      times: TransactionClock, content: ContentServices | None = None) -> None:
+                      times: TransactionClock, content: ContentServices | None = None,
+                      operate: Callable[..., None] | None = None) -> None:
+    """`operate`: the dependency an everyday action asks for (decision 0036; central/operator_auth.py
+    `OperatorAuth.operate`), `admin` where the caller has none."""
+    operate = admin if operate is None else operate
     observations = NodeObservations(db)
     bytes_reader = OfferByteReader(content.reader if content else None)
     reboots = OperatorReboots(db, content.publisher if content else None)
+    app_restarts = OperatorAppRestarts(db, content.publisher if content else None)
     # Each Pi's version needs the cache's readiness: without content services (a fake database) no
     # release is ready, so no boot is offered and the Releases routes are not mounted.
     readiness = content.readiness if content else None
@@ -190,6 +203,23 @@ def mount_node_routes(app: FastAPI, *, db: Database, clock: Clock,
         except ValueError as exc:
             raise NodeControlError("invalid_operator_reboot", 422) from exc
         return await invoke(lambda: reboots.request_operator_reboot(device_id, command, by=by))
+
+    @app.post(APP_RESTARTS_PATH)
+    async def app_restart(device_id: str, request: Request, by: Actor = Depends(operate)):
+        """Restart app (decision 0036), an everyday action, so it asks for `operate`: {"request_id"};
+        one job to the Pi's app broker, never repeated."""
+        raw = await body(request, MAX_APP_RESTART_BYTES)
+        try:
+            command = parse_operator_app_restart(loads_object(raw, max_bytes=MAX_APP_RESTART_BYTES))
+        except ValueError as exc:
+            raise NodeControlError(AppRestartRefusal.INVALID.value, 422) from exc
+        return await invoke(lambda: app_restarts.request(device_id, command, by=by))
+
+    @app.get(APP_RESTARTS_PATH, dependencies=[Depends(admin)],
+             response_model=AppRestartsView)
+    async def app_restart_progress(device_id: str) -> AppRestartsView:
+        """The Pi's newest restart and its progress: requested, app stopped, app started, showing."""
+        return await invoke(app_restarts.newest, device_id)
 
     @app.get("/v1/operator/node/hosts", dependencies=[Depends(admin)])
     async def fleet_hosts():

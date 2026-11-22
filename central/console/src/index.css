@@ -8,7 +8,6 @@
      in a media query, so a query repeats the breakpoint's value. */
   --sidebar-width: 16rem;
   --header-height: calc(4.5rem + 4px);
-  --breakpoint-sidebar: 850px;
   /* The flow's sticky Back and Continue bar below the sidebar breakpoint: a 44 px button
      between 12 px paddings. */
   --flow-footer-height: 68px;
@@ -127,7 +126,6 @@ label {
 
 /* The labels of text fields. */
 .field__label,
-.console__token-field,
 .console__surface-field,
 .plan__new-frame-field,
 .confirm__typed {
@@ -166,7 +164,6 @@ label {
   line-height: 1.5;
 }
 
-.console__token-field,
 .console__surface-field {
   display: flex;
   flex-direction: column;
@@ -197,102 +194,6 @@ label {
   text-transform: uppercase;
   letter-spacing: 0.5px;
   font-size: 11px;
-}
-
-/* Attention strip (pass 2 §5): one fixed-height line; its list overlays the
-   content below instead of pushing it down. */
-.attention {
-  position: relative;
-  height: 2.25rem;
-  margin-bottom: 16px;
-}
-
-.attention__line {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  height: 100%;
-  padding: 0 12px;
-  border: 1px solid var(--color-line);
-  border-radius: 6px;
-  font-size: 13px;
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-.attention__summary {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.attention__toggle {
-  margin-left: auto;
-}
-
-.attention__panel {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  z-index: 10;
-  padding: 8px;
-  background: var(--color-surface-raised);
-  border: 1px solid var(--color-line);
-  border-radius: 6px;
-  box-shadow: 0 8px 24px var(--color-shadow);
-}
-
-.attention__list,
-.attention-page__list {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.attention__all {
-  display: inline-block;
-  margin: 6px 6px 0;
-  font-size: 13px;
-  color: var(--color-accent);
-}
-
-/* The Needs attention page: the same list, full width, one row per entry. */
-.attention-page__list .attention__item {
-  padding: 10px 12px;
-  font-size: 14px;
-  border-bottom: 1px solid var(--color-line);
-}
-
-.attention-page__link,
-.attention__scene {
-  color: inherit;
-}
-
-.attention__item {
-  padding: 4px 6px;
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}
-
-.attention__entry {
-  padding: 0;
-  background: none;
-  border: 0;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.attention__entry:hover,
-.attention__entry:focus-visible {
-  text-decoration: underline;
-}
-
-.attention__more {
-  padding: 4px 6px;
-  font-size: 12px;
-  color: var(--color-muted);
 }
 
 .console__guidance {
@@ -1600,7 +1501,7 @@ label {
   border-radius: var(--radius-pill);
 }
 
-@media (max-width: 849.98px) {
+@media (max-width: 767.98px) {
   .stepper__list {
     display: none;
   }
@@ -1613,7 +1514,7 @@ label {
      (--flow-footer-height). */
   .flow__footer {
     position: sticky;
-    bottom: 0;
+    bottom: var(--spacing-tabs);
     z-index: 1;
     box-sizing: border-box;
     min-height: var(--flow-footer-height);
@@ -1626,11 +1527,11 @@ label {
   /* So nothing stays hidden under the bar (design fix round 3): the page ends one bar
      lower, and a field scrolled into view (focus, a refusal) stops above the bar. */
   html:has(.flow__footer) {
-    scroll-padding-bottom: var(--flow-footer-height);
+    scroll-padding-bottom: calc(var(--flow-footer-height) + var(--spacing-tabs));
   }
 
   .shell__main:has(.flow__footer) {
-    padding-bottom: calc(48px + var(--flow-footer-height));
+    padding-bottom: calc(48px + var(--flow-footer-height) + var(--spacing-tabs));
   }
 
   .review {
@@ -1691,9 +1592,9 @@ label {
   margin-left: 8px;
 }
 
-/* Navigation shell (flow design §6): the header, the sidebar (a modal drawer under
-   850 px, which is --breakpoint-sidebar; a media query cannot read a custom
-   property) and the current page. */
+/* Navigation shell (flow design §6): the header, the sidebar (a modal drawer on a phone:
+   below the one structural switch, design/tokens.css `--breakpoint-md`, whose value each
+   media query here repeats, as a media query cannot read a custom property) and the current page. */
 
 /* `hidden` always hides, whatever a class sets: a hidden Show page and the shell
    under the sign-in overlay rely on it. */
@@ -1740,7 +1641,6 @@ label {
   padding: 8px 0;
 }
 
-.shell__menu,
 .drawer__close {
   display: inline-flex;
   padding: 8px;
@@ -1750,13 +1650,8 @@ label {
   border-radius: var(--radius-pill);
 }
 
-.shell__menu:hover,
 .drawer__close:hover {
   background: var(--color-surface-sunken);
-}
-
-.shell__menu {
-  display: none;
 }
 
 .shell__wordmark {
@@ -1779,10 +1674,6 @@ label {
 
 .shell__status .console__health {
   margin-left: 0;
-}
-
-.shell__header .attention {
-  margin-bottom: 12px;
 }
 
 .shell__body {
@@ -1936,11 +1827,7 @@ label {
   padding-left: 20px;
 }
 
-@media (max-width: 849.98px) {
-  .shell__menu {
-    display: inline-flex;
-  }
-
+@media (max-width: 767.98px) {
   .shell__header {
     padding: 0 16px;
   }
@@ -1963,8 +1850,15 @@ label {
     display: none;
   }
 
+  /* The phone's bottom tabs (patterns/app-shell.tsx `BottomTabs`, 56 px) are pinned over the
+     page's end: every page ends that much lower, and a sticky bar sits above them. More opens the
+     menu. */
+  html:has(.shell) {
+    --spacing-tabs: 56px;
+  }
+
   .shell__main {
-    padding: 16px 16px 40px;
+    padding: 16px 16px calc(40px + var(--spacing-tabs));
   }
 }
 
@@ -1996,28 +1890,9 @@ label {
   padding: 24px 16px;
 }
 
+/* The card is the catalog's (domain/operator-access/sign-in.tsx); only its width is the screen's. */
 .signin__card {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
   width: min(100%, 24rem);
-  padding: 24px;
-  background: var(--color-surface-raised);
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-card);
-  box-shadow: 0 1px 3px var(--color-shadow);
-}
-
-.signin__title {
-  margin: 0;
-  font-size: 22px;
-  font-weight: 600;
-  color: var(--color-text);
-}
-
-.signin__kept {
-  margin: 0;
-  color: var(--color-muted);
 }
 
 /* Now (flow design §7 J7, bead 5): the Show-now flow, Run cards and the

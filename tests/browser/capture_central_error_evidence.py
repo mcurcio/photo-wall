@@ -54,8 +54,8 @@ def _open(page, registry, scheme):
 def test_needs_attention(page, registry, scheme):
     _open(page, registry, scheme)
     with operator_server(registry.db, registry.clock) as origin:
-        connect(page, origin, "attention")
-        expect(page.get_by_role("heading", name="Needs attention", level=1)).to_be_visible()
+        connect(page, origin, "home")    # Home took Needs attention's place (decision 0036)
+        expect(page.get_by_role("heading", name="Home", level=1)).to_be_visible()
         _shot(page, "needs-attention", scheme)
 
 

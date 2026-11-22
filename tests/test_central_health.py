@@ -45,6 +45,7 @@ class FakeCoordinator:
 
     def __init__(self):
         self.media = FakeMedia()
+        self.status = NoStatus()
         self.fail_planning = False
         self.calls = 0
         self.first_tick = threading.Event()
@@ -75,6 +76,18 @@ class NoRetention:
         return 0
 
 
+class NoStatus:
+    """The `status` step (central/infra/frame_status_store.py `PgFrameStatus`) with no database
+    behind it: it keeps nothing, or fails while `fail` is set."""
+
+    fail = False
+
+    def record(self):
+        if self.fail:
+            raise RuntimeError("private status failure")
+        return 0
+
+
 def app_with(fake_db, fake_coordinator, clock, monkeypatch, *, enabled):
     monkeypatch.setattr(central_app, "Coordinator", lambda *_args, **_kwargs: fake_coordinator)
     monkeypatch.setattr(
@@ -83,6 +96,7 @@ def app_with(fake_db, fake_coordinator, clock, monkeypatch, *, enabled):
         lambda *_args, **_kwargs: fake_coordinator.media,
     )
     monkeypatch.setattr(central_app, "NodeRecordRetention", lambda *_args, **_kwargs: NoRetention())
+    monkeypatch.setattr(central_app, "PgFrameStatus", lambda *_args, **_kwargs: fake_coordinator.status)
     return central_app.create_app(fake_db, clock, ADMIN, run_scheduler=enabled)
 
 
@@ -185,7 +199,7 @@ def test_measurement_request_failure_is_its_own_facet_and_clears(monkeypatch):
         steps = failed.json()["scheduler"]["steps"]
         assert steps["measurement"]["status"] == "failing"
         assert {name: step["status"] for name, step in steps.items() if name != "measurement"} == {
-            "planning": "ok", "runtime": "ok", "settle": "ok",
+            "planning": "ok", "runtime": "ok", "settle": "ok", "status": "ok",
             "node-retention": "ok"}
         coordinator.media.fail = False
         assert wait_for(client, lambda response: response.json()["status"] == "ok").status_code == 200
@@ -265,14 +279,14 @@ def test_a_failing_step_never_skips_a_later_one():
 
     coordinator = SettleFails()
     measured = []
-    scheduler = Scheduler(coordinator, measured.append, ManualClock(1000),
+    scheduler = Scheduler(coordinator, measured.append, ManualClock(1000), status=lambda: 0,
                           retentions={"node-retention": lambda: 0})
     scheduler.tick()
     scheduler.retain()
     health = scheduler.health()
     assert coordinator.calls == 1 and measured == [()]
     assert {name: step.status for name, step in health.steps.items()} == {
-        "runtime": "ok", "planning": "ok", "settle": "failing", "measurement": "ok",
+        "runtime": "ok", "planning": "ok", "settle": "failing", "status": "ok", "measurement": "ok",
         "node-retention": "ok"}
     assert "private" not in health.steps["settle"].reason
     assert health.last_tick_monotonic is not None
@@ -288,7 +302,7 @@ def test_a_coordinator_that_raises_fails_its_three_steps_and_skips_measurement()
             raise RuntimeError("private coordinator failure")
 
     clock = ManualClock(1000)
-    scheduler = Scheduler(FakeCoordinator(), lambda _requests: 0, clock,
+    scheduler = Scheduler(FakeCoordinator(), lambda _requests: 0, clock, status=lambda: 0,
                           retentions={"node-retention": lambda: 0})
     scheduler.tick()
     scheduler.retain()
@@ -297,7 +311,7 @@ def test_a_coordinator_that_raises_fails_its_three_steps_and_skips_measurement()
     scheduler.tick()
     health = scheduler.health()
     assert {name: step.status for name, step in health.steps.items()} == {
-        "runtime": "failing", "planning": "failing", "settle": "failing",
+        "runtime": "failing", "planning": "failing", "settle": "failing", "status": "ok",
         "measurement": "skipped", "node-retention": "ok"}
     assert all("private" not in health.steps[name].reason
                for name in ("runtime", "planning", "settle"))
@@ -311,7 +325,7 @@ def test_a_step_failing_tick_after_tick_keeps_its_first_since():
     coordinator = FakeCoordinator()
     coordinator.fail_planning = True
     clock = ManualClock(1000)
-    scheduler = Scheduler(coordinator, lambda _requests: 0, clock,
+    scheduler = Scheduler(coordinator, lambda _requests: 0, clock, status=lambda: 0,
                           retentions={"node-retention": lambda: 0})
     scheduler.tick()
     clock.advance(30)
@@ -319,3 +333,42 @@ def test_a_step_failing_tick_after_tick_keeps_its_first_since():
     planning = scheduler.health().steps["planning"]
     assert (planning.status, planning.since) == ("failing", 1000)
     assert scheduler.health().steps["measurement"].since == 1000
+
+
+def test_the_status_step_runs_after_settle_whatever_failed_before_it_with_its_own_facet():
+    """Decision 0036: every Frame's status is composed each tick, after the coordinator's steps and
+    before measurement, also when planning failed (a Frame's word does not wait for a plan); its
+    failure is its own facet, fails no other step and makes the tick try again soon. Mutation
+    probes: run status only when planning ran through (`ran` stays ["coordinate"]); run it inside
+    the coordinator's try (settle reads failing with it)."""
+    ran: list[str] = []
+
+    class Ordered(FakeCoordinator):
+        def advance(self):
+            ran.append("coordinate")
+            return super().advance()
+
+    coordinator = Ordered()
+    status = NoStatus()
+    clock = ManualClock(1000)
+
+    def record():
+        ran.append("status")
+        return status.record()
+
+    scheduler = Scheduler(coordinator, lambda _requests: ran.append("measurement"), clock, status=record,
+                          retentions={})
+    assert scheduler.tick() == 1000 + 60 and ran == ["coordinate", "status", "measurement"]
+    coordinator.fail_planning = True
+    del ran[:]
+    scheduler.tick()
+    assert ran == ["coordinate", "status"]
+    assert {name: step.status for name, step in scheduler.health().steps.items()} == {
+        "runtime": "ok", "planning": "failing", "settle": "ok", "status": "ok", "measurement": "skipped"}
+    coordinator.fail_planning, status.fail = False, True
+    clock.advance(5)
+    assert scheduler.tick() == 1005 + 1
+    steps = scheduler.health().steps
+    assert {name: step.status for name, step in steps.items()} == {
+        "runtime": "ok", "planning": "ok", "settle": "ok", "status": "failing", "measurement": "ok"}
+    assert steps["status"].since == 1005 and "private" not in steps["status"].reason

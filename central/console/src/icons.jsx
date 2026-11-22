@@ -26,15 +26,6 @@ function Icon({ children }) {
   );
 }
 
-/** Three horizontal bars: opens the navigation drawer. */
-export function MenuIcon() {
-  return (
-    <Icon>
-      <path d="M4 6h16M4 12h16M4 18h16" />
-    </Icon>
-  );
-}
-
 /** A cross: closes the navigation drawer. */
 export function CloseIcon() {
   return (

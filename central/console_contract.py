@@ -27,6 +27,7 @@ from pydantic import BaseModel, TypeAdapter
 from central.central_errors.views import CentralErrorsView, FrameImpedimentView
 from central.content_catalog.views import ReleasesView, VersionChoice
 from central.displays.views import LightView, PictureHistoryView
+from central.fleet.app_restart import APP_RESTART_SECONDS, AppRestartRefusal, AppRestartsView
 from central.fleet.models import TrialRefusal
 from central.fleet.node_calibration import TrialBegin, TrialEdit, TrialStep
 from central.fleet.position_history import PositionRestoreRefusal
@@ -34,9 +35,13 @@ from central.fleet.position_views import PositionHistoryView, PositionRestore
 from central.frame_lighting.model import FrameLightingRefusal
 from central.frame_lighting.paper_profiles import PaperProfileRefusal
 from central.frame_lighting.views import PaperProfilesView, PaperProfileView
+from central.frame_status.policy import CONTINUATION_LIMIT_SECONDS, REBOOT_ALLOWED_SECONDS
+from central.frame_status.views import FrameStatusView, HomeView
+from central.home_routes import APP_RESTARTS, FRAME_STATUS, HOME, REBOOTS
 from central.infra.home_assistant import references
 from central.infra.home_assistant.views import HomeAssistantStatesView
 from central.infra.light_sensor_judge import PI_SOURCE
+from central.operator_access.views import AccessView, LoggedOut, SessionView, SignInView
 from central.registry import FrameTurnChange, FrameVideoChange
 from central.room_light.model import (
     COLOUR_SENSORS_MAX,
@@ -71,6 +76,7 @@ from contracts.kelvin import (
     KELVIN_TABLE_MIN,
     KELVIN_TABLE_STEP,
 )
+from contracts.liveness import SILENT_AFTER_SECONDS
 from contracts.models import PREPARE_SECONDS
 from contracts.node_picture import (
     MATCHED_LUX_MAX,
@@ -94,7 +100,8 @@ CONSOLE_BODIES: Final[tuple[type[BaseModel], ...]] = (   # bodies the console se
 CONSOLE_VIEWS: Final[tuple[type[BaseModel], ...]] = (    # answers the console reads
     RoomLightsView, DrawnView, RefusedReportsView, PaperProfileView, PaperProfilesView,
     PositionHistoryView, PictureHistoryView, LightView, HomeAssistantStatesView, ReleasesView, InstallStarted,
-    CentralErrorsView, FrameImpedimentView)
+    CentralErrorsView, FrameImpedimentView, SignInView, SessionView, LoggedOut, AccessView, HomeView, FrameStatusView,
+    AppRestartsView)
 CONSOLE_ALIASES: Final[Mapping[str, object]] = {     # named types a view's fields take, by their name
     "Lux": Lux, "LightColour": LightColour, "Reading": Reading}
 # The seconds of each photo a Transition must leave free: the Player's preparation time
@@ -112,10 +119,18 @@ CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
     "MATCHED_LUX_MIN": MATCHED_LUX_MIN, "MATCHED_LUX_MAX": MATCHED_LUX_MAX, "PANEL_BLACK_MIN": PANEL_BLACK_MIN,
     "PANEL_BLACK_MAX": PANEL_BLACK_MAX, "CENTRAL_LINE_MAX": CENTRAL_LINE_MAX,
     "TRANSITION_FREE_SECONDS": TRANSITION_FREE_SECONDS,
+    # A Frame's status (decision 0036): the silence limit of its row 4, Central's one number (the
+    # console's own threshold until now), the continuation limit of its row 11, and where Home is
+    # read and each of a Frame's actions asked.
+    "SILENT_AFTER_SECONDS": SILENT_AFTER_SECONDS, "CONTINUATION_LIMIT_SECONDS": CONTINUATION_LIMIT_SECONDS,
+    "HOME_PATH": HOME, "FRAME_STATUS_PATH": FRAME_STATUS, "REBOOTS_PATH": REBOOTS, "APP_RESTARTS_PATH": APP_RESTARTS,
+    # How long a reboot counts as on its way (row 3), and after how long a Restart app that is not
+    # showing reads timed out: the console's progress waits by the same numbers.
+    "REBOOT_ALLOWED_SECONDS": REBOOT_ALLOWED_SECONDS, "APP_RESTART_SECONDS": APP_RESTART_SECONDS,
 }
 CONSOLE_REFUSALS: Final[tuple[type[StrEnum], ...]] = (   # each context's closed refusal enum
     RoomLightRefusal, FrameLightingRefusal, PaperProfileRefusal, ReportRefusal, DrawnReportRefusal, TrialRefusal,
-    PositionRestoreRefusal, InstallRefusal,
+    PositionRestoreRefusal, InstallRefusal, AppRestartRefusal,
 )
 
 

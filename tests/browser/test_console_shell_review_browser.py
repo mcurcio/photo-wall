@@ -16,12 +16,14 @@ import pytest
 from console_tasks import (
     LABELS,
     author_scene,
+    bottom_tabs,
     connect,
     current_hash,
     edit_layout,
     frame_heading,
     frame_name,
     go,
+    house_word,
     open_pi,
     player_name,
     show_now,
@@ -267,8 +269,8 @@ def test_a_route_typed_before_the_first_snapshot_is_never_replaced(page, registr
         page.wait_for_timeout(300)
         assert current_hash(page) == "#/hardware"
         visit(page, "#/nope")
-        expect(_heading(page, "wall")).to_be_visible()
-        assert current_hash(page) == "#/wall"
+        expect(_heading(page, "home")).to_be_visible()
+        assert current_hash(page) == "#/home"
 
 
 # --- The Surface follows a routed frame (item 4).
@@ -295,26 +297,26 @@ def test_a_typed_frame_route_shows_that_frames_surface(page, registry):
         expect(page.get_by_role("button", name="Frame b1", exact=True)).to_be_visible()
 
 
-# --- Focus after "Show all" and a drawer link opened elsewhere (item 5).
+# --- Focus after the house word and a drawer link opened elsewhere (item 5).
 
 
-def test_show_all_focuses_the_needs_attention_heading(page, registry):
-    # An incident (a Player enrolled long ago that never reported), so the strip lists a row.
+def test_the_house_word_focuses_homes_heading(page, registry):
+    # A problem (a Pi enrolled long ago that never reported), so the house word is not All good.
+    # The house word took the attention strip's "Show all" (decision 0036): it leads to Home,
+    # where every problem is listed.
     identity, _key, _request = enroll(registry, count=1)
     _frame(registry, "dark")
     registry.bind("dark", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
     registry.clock.advance(240)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "schedule")
-        strip = page.get_by_role("region", name="Wall attention", exact=True)
-        strip.get_by_role("button", name="Show list", exact=True).click()
-        strip.get_by_role("link", name="Show all", exact=True).click()
-        expect(_heading(page, "attention")).to_be_focused()
-        assert current_hash(page) == "#/attention"
+        house_word(page).click()
+        expect(_heading(page, "home")).to_be_focused()
+        assert current_hash(page) == "#/home"
         # Again from the page itself: the route does not change, and focus still moves.
-        strip.get_by_role("button", name="Show list", exact=True).click()
-        strip.get_by_role("link", name="Show all", exact=True).click()
-        expect(_heading(page, "attention")).to_be_focused()
+        page.get_by_role("button", name="Skip to content", exact=True).focus()
+        house_word(page).click()
+        expect(_heading(page, "home")).to_be_focused()
 
 
 def test_a_drawer_link_opened_in_another_tab_leaves_no_focus_request(page, registry):
@@ -322,7 +324,7 @@ def test_a_drawer_link_opened_in_another_tab_leaves_no_focus_request(page, regis
     page.set_viewport_size(NARROW)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
-        menu = page.get_by_role("button", name="Menu", exact=True)
+        menu = bottom_tabs(page).get_by_role("button", name="More", exact=True)
         menu.click()
         drawer = page.get_by_role("dialog", name="Menu", exact=True)
         new_tab_modifier = "Meta" if sys.platform == "darwin" else "Control"
@@ -348,8 +350,8 @@ def test_a_drawer_link_opened_in_another_tab_leaves_no_focus_request(page, regis
         assert page.evaluate("window.__newTabClicks") == 1
         assert page.evaluate("window.__appPrevented") is False
         assert len(page.context.pages) == 1
-        # This tab did not follow the link: still on the Wall, the drawer still open.
-        assert current_hash(page) == "#/wall"
+        # This tab did not follow the link: still on Home, the drawer still open.
+        assert current_hash(page) == "#/home"
         expect(drawer).to_be_visible()
         page.keyboard.press("Escape")
         expect(menu).to_be_focused()

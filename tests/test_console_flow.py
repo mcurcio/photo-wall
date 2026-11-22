@@ -543,65 +543,66 @@ def test_hand_offs():
 
 
 PLANNING_SCRIPT = r"""
-const attention = await import(process.argv[1]);
-const failing = { planning: { status: "failing", since: 14 * 3600 + 3 * 60, reason: "X at y.py:1" } };
-const refused = { planning: { issues: [
-  { code: "intent_refused", scene_id: "s", run_id: "run-1", reason: "refused" },
-  { code: "no_photo_free", scene_id: "t", target: "frame:hall" } ] } };
-const noFrames = { inventory: { frames: [] } };
-const rows = (snapshot, central) => attention.attentionView(snapshot, central).rows
-  .map((row) => ({ key: row.key, text: row.text, href: row.href ?? null }));
+const status = await import(process.argv[1]);
+const time = await import(process.argv[2]);
+time.setHouseClock({ zone: "UTC", clock: "24h" });
+// Central's house problems as Home's read serves them (central/frame_status/policy.py
+// `house_problems`): no Frame, the scheduler's failing steps or the Planner's code under Details.
+const house = (code, part, { since, detail, fix = { kind: "open", page: "central", id: null }, layer } = {}) => ({
+  part, code, since, doing: null, fix, evidence: { layer, detail, at: null, pi_time: null }, frame_id: null, explains: [] });
+const view = (problem) => {
+  const said = status.problemView(problem, null, null, { pi: null, now: 15 * 3600 });
+  return { subject: said.subject, label: said.verdict.label, since: said.since, what: said.what,
+    fix: said.fix === null ? null : [said.fix.label, said.fix.href ?? null], details: Object.fromEntries(said.details) };
+};
 const out = {
-  failing: rows(noFrames, { scheduler: null, steps: failing }),
-  ok: rows(noFrames, { scheduler: null, steps: { planning: { status: "ok", since: null } } }),
-  refused: rows({ ...noFrames, ...refused }, { scheduler: null, steps: {} }),
-  summary: attention.attentionSummary(attention.attentionView(noFrames,
-    { scheduler: null, steps: failing })),
-  steps: rows(noFrames, { scheduler: null, steps: {
-    settle: { status: "failing", since: 14 * 3600 }, measurement: { status: "failing", since: null },
-    planning: { status: "skipped", since: 14 * 3600 } } }),
-  shortened: rows({ ...noFrames, planning: { dropped: 3, issues: [
-    { code: "plan_shortened", reason: "runtime_events" },
-    { code: "plan_shortened", reason: "slots" } ] } }, { scheduler: null, steps: {} }),
+  failing: view(house("scheduler-failing", "central", { since: 14 * 3600 + 3 * 60, detail: "planning", layer: "scheduler" })),
+  steps: view(house("scheduler-failing", "central", { since: 14 * 3600, detail: "measurement,settle", layer: "scheduler" })),
+  refused: view(house("planning-issue", "central", { since: 14 * 3600, detail: "intent_refused", layer: "plan",
+    fix: { kind: "open", page: "scene", id: "s" } })),
+  source: view(house("source-trouble", "immich", { since: 14 * 3600, detail: "source_missing", layer: "plan" })),
+  hub: view(house("hub-unreachable", "central", { since: 14 * 3600, detail: "unreachable", layer: "hub" })),
 };
 console.log(JSON.stringify(out));
 """
 
 
-def test_planning_failing_and_a_refused_scene_need_attention_without_silent_frames():
-    """Central's planning rows stand on their own: while the planning step fails, Needs attention
-    says so with no Frame silent, and each Scene the last pass refused is a row linking to it.
-    Mutation probe: gate the planning row on `silenced.length > 0` again (no row here)."""
+def _house_problems():
     _require_node()
     result = subprocess.run(
         ["node", "--input-type=module", "-e", PLANNING_SCRIPT, "--",
-         (SRC / "attention.js").as_uri()],
+         (SRC / "domain/frame-status.ts").as_uri(), (SRC / "timeWords.js").as_uri()],
         capture_output=True, text=True, timeout=30, check=True, env={**os.environ, "TZ": "UTC"})
-    out = json.loads(result.stdout)
-    assert out["failing"] == [
-        {"key": "planning", "text": "Planning is failing since Thu 14:03", "href": None}]
-    assert out["ok"] == []
-    assert out["refused"] == [{"key": "scene:s", "text": "Scene s could not be planned: refused",
-                               "href": "#/scenes/s/edit/review"}]
-    assert out["summary"].startswith("Central needs attention")
+    return json.loads(result.stdout)
 
 
-def test_every_failing_scheduler_step_and_a_shortened_plan_need_attention():
-    """Each scheduler step that fails is its own Central row, in the operator's words (a skipped
-    step is not a failure), and a pass that cut the plan short, or counted issues it could not
-    keep, says so. Mutation probe: list only planning and the Runtime in `STEP_WORDS` (no
-    settle or measurement row)."""
-    _require_node()
-    result = subprocess.run(
-        ["node", "--input-type=module", "-e", PLANNING_SCRIPT, "--",
-         (SRC / "attention.js").as_uri()],
-        capture_output=True, text=True, timeout=30, check=True, env={**os.environ, "TZ": "UTC"})
-    out = json.loads(result.stdout)
-    assert out["steps"] == [
-        {"key": "settle", "text": "Plans are not being committed since Thu 14:00", "href": None},
-        {"key": "measurement", "text": "Photos are not being measured", "href": None}]
-    assert out["shortened"] == [
-        {"key": "plan_shortened", "href": None,
-         "text": "Plans are cut short (too many schedule changes in the hour ahead; too many "
-                 "photo turns in the hour ahead); Frames may go dark past the cut"},
-        {"key": "planning_dropped", "text": "3 more planning issues were not kept", "href": None}]
+def test_planning_failing_and_a_refused_scene_are_house_problems_without_silent_frames():
+    """Central's own trouble stands on its own, with no Frame silent (decision 0036: the Needs
+    attention page's planning rows are Home's house problems, composed by Central,
+    tests/test_frame_status_policy.py). The console words each: who (the house), the word, since
+    when, the failing part in plain words, and a link to the Scene a refused pass names.
+    Mutation probe: drop "scheduler-failing" from frame-status.ts's words (the typecheck fails,
+    and this test with it)."""
+    out = _house_problems()
+    assert out["failing"] == {
+        "subject": "The house", "label": "Needs a look", "since": "14:03", "fix": None,
+        "what": "Central is not keeping the show up to date: one of its regular jobs keeps failing.",
+        "details": {"Failing part": "Central", "Evidence from": "Central's scheduler",
+                    "Code": "scheduler-failing (planning)"}}
+    assert out["refused"]["what"] == "Central could not work out part of what to show next."
+    assert out["refused"]["fix"] == ["Open the Scene's Photo source", "#/scenes/s/edit/photos"]
+    assert out["refused"]["details"]["Code"] == "planning-issue (intent_refused)"
+
+
+def test_every_failing_scheduler_step_a_source_and_the_hub_are_worded_as_house_problems():
+    """Each scheduler step that fails is named under Details of the one house problem (Central
+    lists them; a skipped step is not a failure there), a Photo source the pass could not read
+    names Immich, and Central's hub down is Can't tell, never Needs a look. None has a fix
+    button: the console has no page for Central's own health (0036, As built)."""
+    out = _house_problems()
+    assert out["steps"]["details"]["Code"] == "scheduler-failing (measurement,settle)"
+    assert (out["steps"]["label"], out["steps"]["fix"]) == ("Needs a look", None)
+    assert (out["source"]["label"], out["source"]["details"]["Failing part"]) == ("Needs a look", "Immich")
+    assert out["source"]["what"] == "A Photo source this Frame's Scene uses could not be read from Immich."
+    assert (out["hub"]["label"], out["hub"]["fix"]) == ("Can't tell", None)
+    assert out["hub"]["what"].startswith("Central can't hear any Pi")

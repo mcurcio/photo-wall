@@ -1,5 +1,6 @@
 export type AckBadgeProps =
-  | { state: "requested" }
+  /** `words`: what was asked, when it is not a preview ("Restart requested"); it too waits for the Pi. */
+  | { state: "requested"; words?: string }
   /** `at`: when the Pi acknowledged it, already worded ("21:04:07"); null when not known. `note`: a
    * plain aside in brackets after it ("your last change was refused"). */
   | { state: "acknowledged"; at: string | null; note?: string };
@@ -18,7 +19,7 @@ export function AckBadge(props: AckBadgeProps) {
       data-state={props.state}
       className="inline-flex max-w-full items-center gap-1.5 rounded-pill border border-line px-2.5 py-0.5 text-xs text-text"
     >
-      {presented === null ? "Previewing — waiting for the Pi"
+      {presented === null ? `${props.state === "requested" && props.words !== undefined ? props.words : "Previewing"} — waiting for the Pi`
         : props.state === "acknowledged" && props.note !== undefined ? `${presented} (${props.note})` : presented}
     </span>
   );

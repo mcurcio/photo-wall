@@ -1,6 +1,7 @@
 import { appHandle, fact, words } from "./facts.js";
 import { hostEpoch, rebootCommandState, rebootOffer, rebootTarget } from "./fleetCommands.js";
-import { frameHealth, outputStates } from "./health.js";
+import { frameStatusIn, piReports } from "./domain/frame-status.ts";
+import { outputStates, playerLiveness } from "./health.js";
 import { playersByDevice } from "./players.js";
 import { readinessRecoveryForFrame } from "./readinessRecovery.js";
 import { bootsNext, deployable, downloadSize, readinessLine, wallOn } from "./domain/releases/model";
@@ -66,10 +67,13 @@ import { WALL_SCOPE } from "./releases.js";
 /** Rebooting or Rejoining for this long (the page's own monotonic time) reads Not rejoined. */
 export const KEEP_WAIT_MS = 10 * 60 * 1000;
 
-// A bound Output is live when its Frame's health is past every liveness and Output cause;
-// calibration is kept across a reboot, so a Frame that needed it before still does. Liveness
-// is not readiness: a current readiness failure is read separately (`readinessFailures`).
-const LIVE = new Set(["ok", "display-changed", "needs-calibration"]);
+// A bound Output is live when Central's status of its Frame says its Pi reports for it
+// (domain/frame-status.ts `piReports`: Showing, Resting or Needs a look). Setup is kept across a
+// reboot, so a Frame whose display or Position still waits on a person has no status word: it
+// is live once its photo app is heard again (health.js `playerLiveness`, Central's contact
+// record). Liveness is not readiness: a current readiness failure is read separately
+// (`readinessFailures`).
+const SETUP_KEPT = new Set(["display-changed", "check-position"]);
 // Rows that hold no reboot and need none: the rollout moves past them.
 const SETTLED = new Set(["rejoined", "skipped", "not_in_rollout"]);
 
@@ -252,7 +256,11 @@ function boundFrames(snapshot, playerId) {
 
 /** Whether every bound Output's Frame is live (a recent accepted report, nothing interrupted). */
 function outputsLive(snapshot, playerId) {
-  return boundFrames(snapshot, playerId).every((frameId) => LIVE.has(frameHealth(snapshot, frameId)?.state));
+  const heard = playerLiveness(snapshot, playerId)?.state === "heard";
+  return boundFrames(snapshot, playerId).every((frameId) => {
+    const status = frameStatusIn(snapshot, frameId);
+    return piReports(status) || (heard && SETUP_KEPT.has(status?.setup));
+  });
 }
 
 /**

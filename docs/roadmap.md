@@ -94,7 +94,7 @@ How to read the journey tables. **P** (priority): M = broken without it, S = sho
 | F3 | Never show | Two taps, undoable; the photo goes on the wall's Never show list | M | missing | Re-tag the photo in Immich | [3b-i](#3b-i-home-and-phone) |
 | F4 | Show now | An album or person on chosen Frames, for 1 hour | M | exists | Exists; no Frame choice, no end time | [3b-i](#3b-i-home-and-phone) |
 | F5 | All off/on | One button | M | missing | Nothing | [2a](#2a-power-night-off-and-all-offon) |
-| F6 | Phone layout | Bottom tabs, usable while standing at the display | M | missing | Tables scroll sideways off the screen | [3b-i](#3b-i-home-and-phone) |
+| F6 | Phone layout | Bottom tabs, usable while standing at the display | M | exists | Being built in 3b-i ([#158](https://github.com/mcurcio/photo-wall/pull/158)): bottom tabs Home · Show now · Schedule · More below 768 px, and Home with no sideways scroll at a phone's width. The pages built before it are not re-checked at that width | [3b-i](#3b-i-home-and-phone) |
 | F7 | Home Assistant | Frames, power, Scenes and status in Home Assistant; motion, room light and away mode drive the wall | S | missing | Nothing | [3](#3-home-assistant) |
 | F8 | Pause | Freeze a Frame on a photo for an hour; it carries on by itself | S | missing | Nothing | [3b-i](#3b-i-home-and-phone) |
 
@@ -102,9 +102,9 @@ How to read the journey tables. **P** (priority): M = broken without it, S = sho
 
 | # | Step | What the user expects | P | Today | Now | Delivery |
 |---|---|---|---|---|---|---|
-| G1 | Health at a glance | One status word per Frame and for the house | M | exists | Repeated in five places, internal words, a manual Refresh | [3b-i](#3b-i-home-and-phone) |
-| G2 | Diagnose | A plain cause naming the failing part, with a time | M | exists | Detailed but full of internal terms | [3b-i](#3b-i-home-and-phone) |
-| G3 | Restart | Restart the app, reboot the Pi, with progress | M | exists | Reboot only | [3b-i](#3b-i-home-and-phone) |
+| G1 | Health at a glance | One status word per Frame and for the house | M | exists | Being built in 3b-i ([#158](https://github.com/mcurcio/photo-wall/pull/158)): Central decides one word per Frame and for the house; Home and the top bar show it, and every chip reads it. Read every 5 s; the manual Refresh remains until 3b-ii | [3b-i](#3b-i-home-and-phone) |
+| G2 | Diagnose | A plain cause naming the failing part, with a time | M | exists | Being built in 3b-i ([#158](https://github.com/mcurcio/photo-wall/pull/158)): Home's problem cards name the part (display, Pi, photo app, Central, Immich), since when and one fix; internal terms only under Details. Central serves a Frame's recent changes; the Frame page does not show them yet | [3b-i](#3b-i-home-and-phone) |
+| G3 | Restart | Restart the app, reboot the Pi, with progress | M | exists | Being built in 3b-i ([#158](https://github.com/mcurcio/photo-wall/pull/158)): Restart app and Reboot the Pi from Home, each with its steps. Restart app has not run on a Pi (bench step NOT RUN) and is not on the Pi page yet | [3b-i](#3b-i-home-and-phone) |
 | G4 | Replace a Pi | "Which Frame did you plug this into?" One tap | M | exists | Unbind and rebind by hand across pages | [1a](#1a-the-frame-page) (Replace with…), [6](#6-setup-and-hardware-life) (New Pis waiting) |
 | G5 | Display changed | Picture and power follow the display; the Frame is not ready until its position is re-checked ([requirements](requirements.md#installation-model)) | M | exists | Display identity from the EDID (1b); the Hardware tab's display-changed card: re-check Position (the Frame profile step went with the profile, [0030](decisions/0030-frame-box.md)) | [1b](#1b-display-identity-and-power) |
 | G6 | Updates | New releases pre-download; you click Apply | M | exists | Exists behind a gate the console can't open | [7](#7-peace-of-mind) |
@@ -131,7 +131,7 @@ G6 follows the existing release choices in [console DDD Part E](operator-console
 | [4](#4-real-photo-sources) | Real photo sources | L | Connect Immich and build a real Photo source in the console | none | [#81](https://github.com/mcurcio/photo-wall/pull/81) |
 | [2a](#2a-power-night-off-and-all-offon) | Power: Night off and All off/on | L, with 2b | Displays go off at 23:00 and on at 07:00 | 1b; U1 amended (2026-10-12) | [#86](https://github.com/mcurcio/photo-wall/pull/86) |
 | [2b](#2b-the-week) | The week | L, with 2a | One repeating Schedule; every Frame says why it plays | 2a | [#86](https://github.com/mcurcio/photo-wall/pull/86) |
-| [3b-i](#3b-i-home-and-phone) | Home and phone | L | Check and act on the wall from a phone, signed in | 2a, 2b | — |
+| [3b-i](#3b-i-home-and-phone) | Home and phone | L | Check and act on the wall from a phone, signed in | 2a, 2b | being built: slices 1 and 2 in [#158](https://github.com/mcurcio/photo-wall/pull/158); slice 3 not started |
 | [3b-ii](#3b-ii-the-live-map) | The live map | M | Each tile shows what its Pi presents | 3b-i | — |
 | [5a](#5a-photo-fit-and-order) | Photo fit and order | L | Every photo fills its Frame, never on two Frames at once; Scenes shuffle | 4 | [#82](https://github.com/mcurcio/photo-wall/pull/82) |
 | [5b](#5b-video-captions-and-transitions) | Video, captions and transitions | M | Muted, capped videos; captions on request | 5a | — |
@@ -143,10 +143,11 @@ G6 follows the existing release choices in [console DDD Part E](operator-console
 
 | Decision | Blocks | Recommendation |
 |---|---|---|
-| Amend U1 so intentional operational darkness (the power schedule, Pause, All off, a display powered off on purpose) counts as intended and shows as Resting | 2a, 3b-i | **Decided** 2026-10-12, owner: "Amend U1" ([system gate](https://claude.ai/artifact/HHNRy2Hs1CpEm5VVK58DWm)); the amended text is [U1](requirements.md#failure-visibility-and-recovery) |
+| Amend U1 so intentional operational darkness (the power schedule, Pause, All off, a display powered off on purpose) counts as intended and shows as Resting | 2a, 3b-i | **Decided** 2026-10-12, owner: "Amend U1" ([system gate](https://claude.ai/artifact/HHNRy2Hs1CpEm5VVK58DWm)); the amended text is [U1](requirements.md#failure-visibility-and-recovery). Pause left its list on 2026-11-22: a paused Frame holds a lit photo and reads Showing ([0036, finding F3](decisions/0036-home-frame-status-and-wall-actions.md#pause)) |
 | Allow a Scene to ask for its displays on or off (operational state in authored content) | Settings #70 and #89 only; nothing else waits | **Not now**, owner 2026-10-12: "Not now" ([system gate](https://claude.ai/artifact/HHNRy2Hs1CpEm5VVK58DWm)); the power timetable can take Scene requests later ([design §7](operator-console-design.md#7-power)) |
 | D13, visible-history accounting ([design decisions](design-decisions.md)) | Nothing now: for 5a, "shown" means displayed and no-repeat only ranks (decided 2026-10-11) | The rest of D13 (partial coverage, motion limits) stays open |
-| What Pause does to the screen (freeze the photo, or stand aside) | F8 in 3b-i | Freeze the current photo |
+| What Pause does to the screen (freeze the photo, or stand aside) | F8 in 3b-i | **Decided** 2026-11-22, owner: "Freeze the photo" ([0036](decisions/0036-home-frame-status-and-wall-actions.md#pause)); what word a paused Frame reads is that record's finding F3 |
+| How people sign in | A2 in 3b-i | **Decided** 2026-11-22, owner: "I want keycloak compatibility"; accounts in the identity provider only, a required role ([0035](decisions/0035-operator-sign-in-through-an-identity-provider.md)) |
 
 ### 1a. The Frame page
 
@@ -250,6 +251,7 @@ The owner's first ask: "Central needs another UI pass to make sure that all of t
 
 ### 3b-i. Home and phone
 
+- **Status (2026-11-22):** being built. Design accepted (owner: "I'll take your recommendations. Proceed"). Slice 1 (sign-in) and slice 2 (a Frame's status in Central, Home, the phone layout, Restart app) are built in [#158](https://github.com/mcurcio/photo-wall/pull/158); what slice 2 proved and did not is [0036's record](decisions/0036-home-frame-status-and-wall-actions.md#verified-and-not), and Restart app's bench step is NOT RUN. Slice 3 (Skip and Previous, Never show, Pause, Show now on chosen Frames with an end) is not started, so F2, F3, F4's Frames and end time, and F8 are still missing. Sign-in is [0035](decisions/0035-operator-sign-in-through-an-identity-provider.md) (slice 1); a Frame's status, Home and the everyday actions are [0036](decisions/0036-home-frame-status-and-wall-actions.md) (slices 2 and 3), with its findings and open questions for the owner. The owner account of A2 is a user in the deployment's identity provider (Keycloak), not an account Central keeps.
 - **Outcome:** signed in with his own account on a phone, the owner sees one status word per Frame, skips a photo, puts one on the Never show list, pauses a Frame for an hour, restarts a stuck app, and starts Show now with an end time.
 - **In scope:** A2 (settings #135, #138), G1, G2, G3 (Restart app with progress), F2, F3 (with the Never show list page, #71), F4 (#84, #85), F6, F8 (#86). The six status words, the problems strip and the error template. "Getting ready" shows per-Frame progress after a power cut (U2).
 - **Out of scope:** the live picture of what each Pi presents (3b-ii); notifications (7); household roles (deferred).

@@ -25,7 +25,7 @@ from central.content_catalog.catalog import device_id_for_serial
 from central.infra.job_queue import task_name
 from central.infra.node_link_store import PgLinkStores
 from central.infra.node_releases import wanted_deployments
-from central.infra.player_versions import InstallEnds
+from central.infra.player_versions import InstallEnds, installs_in
 from central.kernel.job_types import RebootPi
 from contracts.node_boot import NodeBootRequestV2, encode_node_boot_request, parse_node_boot_offer
 from contracts.node_link import Pipe
@@ -149,10 +149,15 @@ def test_an_install_restarts_its_pi_once_ready_and_ends_when_its_host_line_state
     versions = client.app.state.player_versions
     versions.advance_installs()
     assert _pis(client)[A]["install"] == "downloading"
+    device, asked_at = device_id_for_serial(A), registry.clock.utc()
+    with registry.db.read_snapshot() as conn:      # a Frame's status reads the step and since when
+        assert installs_in(conn) == {device: ("downloading", asked_at)}
+    registry.clock.advance(100)
     store_files(world, uploads["v2.2.0"])
     versions.advance_installs()
     assert _pis(client)[A]["install"] == "restarting"
-    device = device_id_for_serial(A)
+    with registry.db.read_snapshot() as conn:      # the step's own beginning, not the install's
+        assert installs_in(conn) == {device: ("restarting", asked_at + 100)}
     assert _reboots(registry) == [{"device_id": device, "reason": "install:v2.2.0", "by": "central"}]
     # A second Install while that reboot is queued queues no second one.
     assert _install(client, A, "v2.2.0").json()["install"] == "restarting"
@@ -163,6 +168,8 @@ def test_an_install_restarts_its_pi_once_ready_and_ends_when_its_host_line_state
     _host_states_base(registry, A, "v2.2.0", 2)
     versions.advance_installs()
     assert _pis(client)[A]["install"] is None
+    with registry.db.read_snapshot() as conn:
+        assert installs_in(conn) == {}
 
 
 def test_the_keep_set_holds_every_pis_version_and_previous(registry, wall):

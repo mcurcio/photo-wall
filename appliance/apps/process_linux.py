@@ -51,6 +51,14 @@ DISPLAY_PROPERTIES = ("ActiveState", "InvocationID", "Job")
 SETTLING_STATES = frozenset({"activating", "deactivating", "reloading"})
 
 
+def _ask_stop() -> None:
+    """`systemctl --no-block stop` of the app's unit: the one stop the broker asks of PID1 (a unit
+    that is not its launch's, or a person's restart); CalledProcessError when PID1 refuses it."""
+    subprocess.run(["/usr/bin/systemctl", "--no-block", "stop", UNIT], check=True, timeout=5,
+                   stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   env={"PATH": "/usr/bin", "LANG": "C"})
+
+
 def systemctl_show(unit: str, properties: tuple[str, ...] = APP_PROPERTIES) -> dict[str, str]:
     result = subprocess.run(["/usr/bin/systemctl", "show", unit, "--property=" + ",".join(properties)],
                             capture_output=True, text=True, timeout=5, check=True,
@@ -265,9 +273,17 @@ class SystemdAppProcessDriver:
     def stop_foreign(self) -> None:
         """Ask PID1 to stop whatever runs under the app's unit name (a ForeignAppUnit), without
         waiting; later turns observe the stop, and nothing starts in its place."""
-        subprocess.run(["/usr/bin/systemctl", "--no-block", "stop", UNIT], check=True, timeout=5,
-                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       env={"PATH": "/usr/bin", "LANG": "C"})
+        _ask_stop()
+
+    def stop(self) -> None:
+        """Ask PID1 to stop the launch's run, without waiting (a person's restart,
+        `AppEffectBroker.restart`); later turns observe the stop. A unit PID1 no longer holds
+        (it exited and was collected between the broker's look and this ask) is no fault."""
+        try:
+            _ask_stop()
+        except subprocess.CalledProcessError:
+            if systemctl_show(UNIT)["LoadState"] != "not-found":
+                raise
 
     def absent_and_quiescent(self) -> bool:
         if self.current() is not None:

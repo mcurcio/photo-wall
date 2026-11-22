@@ -25,12 +25,15 @@ from console_tasks import (
     LABELS,
     add_source,
     author_scene,
+    bottom_tabs,
     choose_source,
     connect,
     current_hash,
     frame_heading,
     frame_name,
     go,
+    home_problems,
+    house_word,
     scene_continue,
     scene_form,
     section_heading,
@@ -161,37 +164,40 @@ def test_root_serves_the_console_shell_after_cutover(page, registry):
 # --- Landing, unknown routes and deep links (§6 hash routing details).
 
 
-def test_landing_is_always_the_wall(page, registry):
-    # Console DDD §48: the landing never depends on state. With no Frames the Wall's face
-    # is the first step (Guidance); with Frames it is the daily face.
+def test_landing_is_always_home(page, registry):
+    # Decision 0036: the landing never depends on state. With no Frames, Home says where to
+    # start (the Wall); with Frames it shows each one's status.
+    first_step = "Add your first Frame on the Wall"
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        _expect_on(page, "wall")
-        assert current_hash(page) == "#/wall"
-        expect(page.get_by_role("note", name="Getting started")).to_be_visible()
+        _expect_on(page, "home")
+        assert current_hash(page) == "#/home"
+        expect(page.get_by_role("main").get_by_role("link", name=first_step, exact=True)).to_be_visible()
     for index in range(5):
         _frame(registry, f"frame-{index}")
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
-        _expect_on(page, "wall")
-        assert current_hash(page) == "#/wall"
-        expect(page.get_by_role("note", name="Getting started")).to_have_count(0)
+        _expect_on(page, "home")
+        assert current_hash(page) == "#/home"
+        expect(page.get_by_role("region", name="Wall 1", exact=True).get_by_role("group")).to_have_count(5)
+        expect(page.get_by_role("main").get_by_role("link", name=first_step, exact=True)).to_have_count(0)
 
 
-def test_the_sidebar_groups_wall_show_fleet_settings_and_needs_attention_in_a_fixed_order(
+def test_the_sidebar_groups_home_frames_show_fleet_and_settings_in_a_fixed_order(
         page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         nav = page.get_by_role("navigation", name="Sections", exact=True)
         expect(nav.get_by_role("list")).to_have_count(5)
-        for group, labels in (("Wall", ["Wall"]),
+        for group, labels in (("Home", ["Home"]),
+                              ("Frames", ["Wall"]),
                               ("Show", [LABELS[s] for s in ("now", "scenes", "schedule", "sources")]),
                               ("Fleet", ["Hardware", "Releases"]),
-                              ("Settings", ["Photo library", "Photo fit", "House", "House › Lights", "Home Assistant", "Paper profiles"]),
-                              ("Needs attention", ["Needs attention"])):
+                              ("Settings", ["Photo library", "Photo fit", "House", "House › Lights", "Home Assistant", "Paper profiles",
+                                            "People and access"])):
             expect(nav.get_by_role("list", name=group, exact=True).get_by_role("link")
                    ).to_have_text(labels)
-        expect(nav.get_by_role("list").first).to_have_accessible_name("Wall")
+        expect(nav.get_by_role("list").first).to_have_accessible_name("Home")
 
 
 def test_an_unknown_route_is_replaced_by_the_landing_route(page, registry):
@@ -200,9 +206,9 @@ def test_an_unknown_route_is_replaced_by_the_landing_route(page, registry):
         connect(page, origin, "scenes")
         before = page.evaluate("history.length")
         visit(page, "#/no-such-page")
-        _expect_on(page, "wall")
-        assert current_hash(page) == "#/wall"
-        # Replaced, not pushed: the unknown route's own entry now reads #/wall, and Back
+        _expect_on(page, "home")
+        assert current_hash(page) == "#/home"
+        # Replaced, not pushed: the unknown route's own entry now reads #/home, and Back
         # returns to the page before it, never to the unknown route.
         assert page.evaluate("history.length") == before + 1
         page.go_back()
@@ -283,6 +289,7 @@ def test_the_poll_keeps_running_across_sections(page, registry):
     identity, _key, _request = enroll(registry, count=1)
     _frame(registry, "first")
     registry.bind("first", identity["player_id"], "HDMI-A-1", expected_generation=0, by="console")
+    save_position(registry, "first", PORTRAIT_ON_WIDE)
     reads = []
     legacy_reads = []
 
@@ -298,9 +305,10 @@ def test_the_poll_keeps_running_across_sections(page, registry):
         connect(page, origin, "now", paused_at=registry.clock.utc())
         badge = page.get_by_role("group", name="Frame health", exact=True).get_by_label(
             re.compile(r"^Frame first: "))
-        # The badge is the one Frame chip (domain/frame-health-chip.ts): a Pi enrolled, no report yet.
+        # The badge is the one Frame chip (domain/frame-status.ts) of the status Central serves:
+        # a Pi enrolled and not heard yet.
         expect(badge).to_have_accessible_name("Frame first: Getting ready")
-        for section in ("wall", "attention", "hardware", "schedule"):
+        for section in ("wall", "home", "hardware", "schedule"):
             go(page, section)
             count = len(reads)
             drive_poll(page)
@@ -310,7 +318,8 @@ def test_the_poll_keeps_running_across_sections(page, registry):
         report_readiness(registry, identity["player_id"])
         drive_poll(page)
         go(page, "now")
-        expect(badge).to_have_accessible_name("Frame first: Needs calibration")
+        # Heard now, with no report about the Frame's picture: nothing is claimed.
+        expect(badge).to_have_accessible_name("Frame first: Can't tell")
 
 
 def test_a_malformed_aggregate_keeps_the_last_whole_snapshot(page, registry):
@@ -416,42 +425,43 @@ def test_no_show_fleet_or_neutral_route_holds_display_controls(page, registry):
                               for paths in SAMPLES[table].values())
 
 
-# --- The Needs attention page.
+# --- Home's tiles lead to the Frame page.
 
 
-def test_needs_attention_links_each_frame_to_the_tab_showing_its_cause(page, registry):
-    # Incidents only (console DDD G2): the unbound and needs-calibration Frames are the
-    # Wall's To finish items, never rows here; a silent Player is an incident whose cause
-    # shows on the Frame page's Hardware tab.
+def test_home_links_each_frame_to_the_tab_showing_its_cause(page, registry):
+    # Decision 0036 ("What Home replaces"): Home is the one list of what is wrong. A silent Pi is
+    # a problem whose cause shows on the Frame page's Hardware tab; an unbound Frame and one
+    # whose Position is not checked are setup, on a `todo` chip, never a problem.
     _bound_commissioned(registry, "silent", x_mm=900)
     registry.clock.advance(240)
     _frame(registry, "no-player", x_mm=100)
     _bound_commissioned(registry, "to-commission", x_mm=500, commissioned=False)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "scenes")
-        # "Show all" in the strip opens the page; on a Show page the strip's entries are text.
-        strip = page.get_by_role("region", name="Wall attention", exact=True)
-        strip.get_by_role("button", name="Show list", exact=True).click()
-        expect(strip.get_by_role("list").get_by_role("button")).to_have_count(0)
-        strip.get_by_role("link", name="Show all", exact=True).click()
-        _expect_on(page, "attention")
+        # The house word is on every page and leads to Home.
+        house_word(page).click()
+        _expect_on(page, "home")
 
-        entries = visible_page(page).get_by_role("list", name="Frames and Players needing attention")
-        entry = "silent — Player app silent · last reported 4 min ago"
-        expect(entries.get_by_role("link")).to_have_text([entry])
-        expect(entries.get_by_role("link", name=entry)).to_have_attribute(
-            "href", "#/wall/frames/silent/hardware")
-        expect(visible_page(page).get_by_text(re.compile("to set up", re.I))).to_have_count(0)
-        entries.get_by_role("link", name=entry).click()
+        name = frame_name(registry, "silent")
+        # One Frame problem (a Pi's own host faults are listed after it, and are not Frame problems).
+        problems = home_problems(page).get_by_role("group").filter(has_text=": Can't tell since")
+        expect(problems).to_have_count(1)
+        expect(problems).to_contain_text(f"{name}: Can't tell since")
+        tiles = page.get_by_role("region", name="Wall 1", exact=True)
+        for frame_id, setup in (("no-player", "Needs a Pi"), ("to-commission", "Check its Position")):
+            expect(tiles.get_by_role("group", name=frame_name(registry, frame_id), exact=True)).to_contain_text(setup)
+        tile = tiles.get_by_role("group", name=name, exact=True).get_by_role("link", name=name, exact=True)
+        expect(tile).to_have_attribute("href", "#/wall/frames/silent/hardware")
+        tile.click()
 
         _expect_on(page, "wall")
         expect(page.get_by_role("tab", name="Hardware", exact=True)).to_have_attribute(
             "aria-selected", "true")
-        expect(frame_heading(page, frame_name(registry, "silent"))).to_be_focused()
+        expect(frame_heading(page, name)).to_be_focused()
         assert current_hash(page) == "#/wall/frames/silent/hardware"
 
 
-# --- The drawer under 850 px.
+# --- The drawer below 768 px, opened by the bottom tabs' More.
 
 
 def test_the_drawer_traps_focus_closes_on_escape_and_a_link_focuses_the_page_heading(
@@ -460,7 +470,7 @@ def test_the_drawer_traps_focus_closes_on_escape_and_a_link_focuses_the_page_hea
     page.set_viewport_size(NARROW)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
-        menu = page.get_by_role("button", name="Menu", exact=True)
+        menu = bottom_tabs(page).get_by_role("button", name="More", exact=True)
         expect(menu).to_be_visible()
         expect(page.get_by_role("navigation", name="Sections", exact=True)).to_be_hidden()
 
@@ -475,11 +485,11 @@ def test_the_drawer_traps_focus_closes_on_escape_and_a_link_focuses_the_page_hea
             ? document.activeElement.textContent || document.activeElement.ariaLabel
             : document.activeElement === document.body ? '(browser)' : '(page)'"""
         reached = set()
-        for key in ["Tab"] * 14 + ["Shift+Tab"] * 14:
+        for key in ["Tab"] * 15 + ["Shift+Tab"] * 15:
             page.keyboard.press(key)
             reached.add(page.evaluate(focused))
         assert "(page)" not in reached, reached
-        assert {"Close menu", "Now", "Needs attention"} <= reached, reached
+        assert {"Close menu", "Now", "Home"} <= reached, reached
 
         page.keyboard.press("Escape")
         expect(drawer).to_be_hidden()
@@ -500,7 +510,7 @@ def test_the_drawer_slides_in_unless_reduced_motion_is_asked(page, registry):
     animation = "getComputedStyle(document.querySelector('dialog[open]')).animationName"
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin)
-        menu = page.get_by_role("button", name="Menu", exact=True)
+        menu = bottom_tabs(page).get_by_role("button", name="More", exact=True)
         menu.click()
         assert page.evaluate(animation) == "drawer-in"
         page.keyboard.press("Escape")

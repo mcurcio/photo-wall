@@ -1,0 +1,45 @@
+# The disposable Keycloak the real-Keycloak sign-in tests run against, locally and in CI's
+# `keycloak` job (tests/integration/test_keycloak_sign_in.py, decision 0035). It runs in
+# development mode on a store inside the container (gone with it) and imports one realm,
+# keycloak/realm.json: it holds only that throwaway realm, never deployment data, so the
+# administrator's credential below and every secret in the realm file are fixed, test-only
+# values bound to loopback.
+#
+#   docker compose -f tests/integration/compose.keycloak.yml up -d --wait
+#   PHOTO_WALL_KEYCLOAK=http://127.0.0.1:18180 .venv/bin/python scripts/test_local.py -q -m keycloak
+#
+# The pin is the release tag and the digest quay.io answers for it (an image index: amd64 and
+# arm64). KC_HOSTNAME states the address the tests and Central reach Keycloak at, so every token's
+# `iss` is that address whoever asked (Central on the host, an administrator's sign-out).
+# host.docker.internal is the Docker host: the realm's back-channel logout address names Central
+# there (tests/integration/keycloak_rig.py).
+name: photo-wall-test-keycloak
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.2@sha256:7e66a96e4739239070aeaf72e4c5decf0f7f682cfc725b9f7ea2b336eaba38b3
+    command: [start-dev, --import-realm]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: isolated-test-only
+      KC_HEALTH_ENABLED: "true"
+      KC_HOSTNAME: http://127.0.0.1:${PHOTO_WALL_TEST_KEYCLOAK_PORT:-18180}
+    ports:
+      - "127.0.0.1:${PHOTO_WALL_TEST_KEYCLOAK_PORT:-18180}:8080"
+    volumes:
+      - ./keycloak/realm.json:/opt/keycloak/data/import/realm.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # The image carries no curl: bash asks the management port (9000) itself. Ready means the
+    # realm is imported: Keycloak imports before it listens.
+    healthcheck:
+      test:
+        - CMD
+        - bash
+        - -c
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000
+          && printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3
+          && read -r status <&3 && [[ "$$status" == *" 200 "* ]]
+      interval: 2s
+      timeout: 5s
+      retries: 90

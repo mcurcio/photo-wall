@@ -65,4 +65,17 @@ def _impeded_in(conn: Any, device_id: str) -> ImpededFrames | None:
     return None
 
 
-__all__ = ["IMPEDED_SUBJECT", "PLAYER_STATE_STREAM", "PgCentralErrors"]
+def impeded_reports_in(conn: Any) -> dict[str, ImpededFrames]:
+    """device id -> what its Player last said on IMPEDED_KEY, for every enrolled Player's device
+    that said anything, in the caller's transaction: `_impeded_in`'s read for the whole wall in one
+    statement (a Frame's status, central/infra/frame_status_store.py). A removed key reads as no
+    Frame impeded; a record that does not decode is absent (logged)."""
+    reports: dict[str, ImpededFrames] = {}
+    for latest in latest_values_in(conn, PLAYER_LINE, IMPEDED_KEY):
+        report = ImpededFrames(frames=()) if latest.removed else latest.decoded(decode_impeded, "impeded report")
+        if report is not None:
+            reports[latest.device_id] = report
+    return reports
+
+
+__all__ = ["IMPEDED_SUBJECT", "PLAYER_STATE_STREAM", "PgCentralErrors", "impeded_reports_in"]

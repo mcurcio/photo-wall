@@ -74,7 +74,7 @@ function rawLines(host: HostSample | null): string[] {
 
 /**
  * A Pi's Health (console DDD §52, §61, §62): its host values from the shell's one fleet host
- * read, judged and worded by hostHealth.js `judgeHost`, so the Hardware list, Needs attention
+ * read, judged and worded by hostHealth.js `judgeHost`, so the Hardware list, Home
  * and this section agree. Host Management's receipt and the host facts record's receipt line
  * come first, then the groups; "Every reported metric" holds the raw sample lines, the fault
  * code and the pixels caveat. It reads nothing itself.

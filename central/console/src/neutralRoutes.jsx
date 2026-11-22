@@ -1,13 +1,15 @@
 import React, { useCallback } from "react";
 
-import { AttentionPage } from "./AttentionPage.jsx";
 import { readCentralErrors, readRoomLights } from "./domain/room-lights/api.ts";
 import { lightNames } from "./domain/room-lights/model.ts";
+import { homeCommands } from "./homeCommands.js";
 import { useLibraryConnections } from "./libraryApi.js";
+import { HomePage } from "./pages/home-page.tsx";
 import { usePolledRead } from "./polledRead.js";
+import { readinessRecoveryFrames } from "./readinessRecovery.js";
 import SAMPLES from "./routeSamples.json";
 
-// How often Needs attention re-reads the photo library connections while it is shown.
+// How often Home re-reads the photo library connections while it is shown.
 const LIBRARY_CADENCE_MS = 15000;
 // How often it re-reads the room lights Central is in doubt of: as often as House › Lights' Frames
 // read the house's lights, so a doubt cleared leaves the page within it.
@@ -31,36 +33,38 @@ function useSourcesInDoubt() {
 }
 
 /**
- * Needs attention with the photo library connections and the room lights in doubt it lists (roadmap
- * 4, K1; Central's errors): the reads live here, beside the page, so the page itself reaches no write
- * module (G1).
+ * Home with what it lists beside Central's own problems (decision 0036, "What Home replaces"): the
+ * photo library connections that need a look, the room lights Central is in doubt of and the photo
+ * app's reports, read here, and Home's writes (homeCommands.js), handed in here, so the page and
+ * its domain components name neither a legacy read nor a write of another owner.
  */
-function AttentionWithLibrary({ snapshot, central, wall, hosts, bootFacts }) {
+function HomeWithReads({ snapshot, refresh, refreshFailed, wall, hosts, bootFacts }) {
   const library = useLibraryConnections({ cadenceMs: LIBRARY_CADENCE_MS });
   const sources = useSourcesInDoubt();
   return (
-    <AttentionPage snapshot={snapshot} central={central} wall={wall} hosts={hosts} bootFacts={bootFacts}
-      library={library} sources={sources} lightNames={sources.names} />
+    <HomePage snapshot={snapshot} refresh={refresh} refreshFailed={refreshFailed} commands={homeCommands}
+      hosts={hosts} bootFacts={bootFacts} library={library} sources={sources} lightNames={sources.names}
+      readiness={readinessRecoveryFrames(snapshot)} onVisitFrame={wall.prepareVisit} />
   );
 }
 
 /**
- * The neutral sections (flow design §6): pages that belong to neither side. They see
- * frame health as status and link to the Wall; like the Show sections they never
- * import the Frame page or its live adjustment (R4; tests/test_console_routes_r4.py).
- * The shell mounts a neutral section only while it is current.
+ * The neutral section (flow design §6): Home, which belongs to neither side. It shows every Frame's
+ * status and links to the Wall; like the Show sections it never imports the Frame page or its live
+ * adjustment (R4; tests/test_console_routes_r4.py). The shell mounts it only while it is current.
  *
  * @type {ReadonlyArray<import("./Shell.jsx").RouteEntry>}
  */
 export const neutralRoutes = Object.freeze(
   [
     {
-      section: "attention",
-      label: "Needs attention",
-      render: ({ snapshot, central, wall, hosts, bootFacts }) => (
-        <AttentionWithLibrary snapshot={snapshot} central={central} wall={wall} hosts={hosts} bootFacts={bootFacts} />
+      section: "home",
+      label: "Home",
+      render: ({ snapshot, refresh, refreshFailed, wall, hosts, bootFacts }) => (
+        <HomeWithReads snapshot={snapshot} refresh={refresh} refreshFailed={refreshFailed} wall={wall} hosts={hosts}
+          bootFacts={bootFacts} />
       ),
-      samplePaths: SAMPLES.neutral.attention,
+      samplePaths: SAMPLES.neutral.home,
     },
   ].map(Object.freeze),
 );

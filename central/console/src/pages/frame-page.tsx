@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { BindingFacet } from "../BindingFacet.jsx";
 import { FrameCentralError, useFrameImpediment } from "../domain/room-lights/frame-central-error";
 import { FrameDisplay } from "../domain/frame-display";
-import { frameChip, type FrameHealth } from "../domain/frame-health-chip";
+import { frameChip, type HomeHeld, frameStatusIn } from "../domain/frame-status";
 import { FrameOverview } from "../domain/frame-overview";
 import { FrameLightingTab } from "../domain/frame-lighting/frame-lighting-tab";
 import type { PaperProfileChoice } from "../domain/frame-lighting/model";
@@ -23,7 +23,6 @@ import { readDrawn, readRoomLights } from "../domain/room-lights/api";
 import { DrawnLine } from "../domain/room-lights/drawn-line";
 import { colourLineSaid, colourSensorNames, drawnOf, lightNames } from "../domain/room-lights/model";
 import type { DrawnView, RoomLightsView } from "../generated/contract";
-import { frameHealth } from "../health.js";
 import { isBound } from "../join.js";
 import { useFrameAdjustment } from "../liveAdjustment.js";
 import { renameFrame } from "../framesApi.js";
@@ -122,8 +121,8 @@ function useHouseLights(open: boolean): { rooms: RoomLightsView | null; drawn: D
 
 /**
  * One Frame's page (`#/wall/frames/<id>/<tab>`): every setting of one place on the wall, one
- * tab each. The header names the Frame, its way back to the Wall and its health (health.js,
- * the plan tile's words). Overview is Central's error (whether its Pi reports the Frame black because
+ * tab each. The header names the Frame, its way back to the Wall and its status as Central
+ * serves it (domain/frame-status.ts, the one chip). Overview is Central's error (whether its Pi reports the Frame black because
  * Central can't stand behind a room light it uses: Central's own, apart from Hardware, which holds the
  * Pi's faults), what Central puts on it and why, and its Photos: one Fit board
  * row per Scene that shows photos here (follow-ups C1); Position is where the
@@ -195,10 +194,9 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
     );
   }
   const walls = new Set(frames.map((candidate) => candidate.surface_id));
-  const classified = frameHealth(snapshot, frameId) as FrameHealth | null;
-  // Resting is Central's one answer (Why's `power.resting`), never worked out here.
-  const resting = why !== null && why.ok && why.why.power?.resting === true;
-  const health = classified === null ? null : frameChip(classified, false, resting);
+  // The Frame's status is Central's one answer (Home's read, domain/frame-status.ts), Resting
+  // included: never worked out here.
+  const health = frameChip(frameStatusIn(snapshot as HomeHeld | null, frameId));
   const piHref = isBound(frame) ? playerPageHref(snapshot, frame.player_id as string) : null;
   return (
     <EntityPage header={
@@ -218,7 +216,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
         {tab === "overview" && (
           <>
             <FrameCentralError read={impediment} names={lightNames(rooms)}
-              attentionHref={formatRoute({ section: "attention" })} lightsHref={formatRoute({ section: "lights" })} />
+              homeHref={formatRoute({ section: "home" })} lightsHref={formatRoute({ section: "lights" })} />
             <FrameOverview snapshot={snapshot} bootFacts={bootFacts} frameId={frameId} frameName={frame.name ?? frameId}
               hosts={hosts} why={why} />
             <FramePhotos key={`${frameId}:photos`} snapshot={snapshot} frameId={frameId} />

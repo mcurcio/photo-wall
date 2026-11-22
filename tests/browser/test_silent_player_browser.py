@@ -34,9 +34,12 @@ def test_the_wall_marks_a_silent_players_frame_and_its_pages_show_the_apps_age_a
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         label = tile_health(page, FRAME)
-        expect(label).to_have_text("Player app silent")
-        expect(label).to_have_accessible_name(f"Player app silent · last reported {silent_for} s ago")
-        expect(label).to_have_class(re.compile(r"\bhealth--alarm\b"))
+        # Central's status (decision 0036, row 4): nothing can be said of a Frame whose Pi it has
+        # not heard past the silence limit. Can't tell, never an alarm and never a guess.
+        expect(label).to_have_text("Can't tell")
+        expect(label).to_have_accessible_name(re.compile(
+            r"^Can't tell since \d\d:\d\d(:\d\d)? · Can't reach its Pi since \d\d:\d\d(:\d\d)?: it stopped reporting\.$"))
+        expect(label).to_have_class(re.compile(r"\bhealth--unknown\b"))
 
         inspector = open_frame(page, FRAME, "hardware")
         expect(inspector).to_contain_text("The Pi: Not heard from lately")

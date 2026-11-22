@@ -11,12 +11,13 @@ Tests that are *about* a form (its validation, focus, descriptions or chooser co
 their direct locators; these helpers are for tests that only need the task done.
 
 As of bead 1b each section is a page with its own hash route (#/now, #/scenes, #/schedule,
-#/sources, #/wall, #/hardware, #/attention), reached from the sidebar (a drawer under
-850 px). As of Console by Domain (E1 U1) the boxes live on Hardware: a list with one row per
+#/sources, #/wall, #/hardware), reached from the sidebar. As of decision 0036 the console lands on
+Home (#/home), which holds what is wrong (the attention strip and the Needs attention page are
+gone), and below 768 px the sidebar is a drawer opened by the bottom tabs' More. As of Console by Domain (E1 U1) the boxes live on Hardware: a list with one row per
 Pi in groups, and one Hardware page per Pi (#/hardware/<device-id>), opened with `open_pi`;
 the Pi's Software and screens page (#/players/<device-id>) is reached from its Pi header,
 opened with `open_player`.
-Signing in always lands on #/wall (console DDD §48), so a test that needs another page goes
+Signing in always lands on #/home (decision 0036), so a test that needs another page goes
 to it. As of console DDD W1 the Wall's daily face is read-only: drawing, moving and deleting
 Frames happen in Edit layout (#/wall/layout), opened with `edit_layout`.
 
@@ -51,13 +52,16 @@ from support.console_words import SCENE
 SHOW_SECTIONS = frozenset({"now", "scenes", "schedule", "sources"})
 WALL_SECTIONS = frozenset({"wall"})
 FLEET_SECTIONS = frozenset({"hardware", "releases"})
-SETTINGS_SECTIONS = frozenset({"photo-library", "photo-fit", "house", "lights", "home-assistant", "paper-profiles"})
-SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | FLEET_SECTIONS | SETTINGS_SECTIONS | {"attention"}
+SETTINGS_SECTIONS = frozenset({"photo-library", "photo-fit", "house", "lights", "home-assistant", "paper-profiles",
+                              "people-and-access"})
+SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | FLEET_SECTIONS | SETTINGS_SECTIONS | {"home"}
 LABELS = {
+    "home": "Home",
     "now": "Now", "scenes": "Scenes", "schedule": "Schedule", "sources": "Sources",
-    "wall": "Wall", "hardware": "Hardware", "releases": "Releases", "attention": "Needs attention",
+    "wall": "Wall", "hardware": "Hardware", "releases": "Releases",
     "photo-library": "Photo library", "photo-fit": "Photo fit", "house": "House", "lights": "House › Lights",
     "home-assistant": "Home Assistant", "paper-profiles": "Paper profiles",
+    "people-and-access": "People and access",
     # No sidebar link: one Pi's Software and screens page, reached from its Pi header.
     "players": "Software and screens",
 }
@@ -68,18 +72,18 @@ TABS = {"overview": "Overview", "position": "Position", "lighting": "Lighting", 
 
 
 def go(page, section):
-    """Show `section`: one of "now", "scenes", "schedule", "sources", "wall", "hardware",
-    "releases" or "attention". Name the section the test is about (a Run test goes to "now", a
+    """Show `section`: one of "home", "now", "scenes", "schedule", "sources", "wall", "hardware",
+    "releases" or a Settings page. Name the section the test is about (a Run test goes to "now", a
     Schedule test to "schedule").
 
     Clicks the section's sidebar link by its accessible name; on a narrow screen, where
-    the sidebar is a drawer, opens the drawer with "Menu" first. Waits for the page's
-    heading. The Wall link returns to the Wall as it was last shown (a Frame's page and tab).
+    the sidebar is a drawer, opens the drawer with the bottom tabs' "More" first. Waits for the
+    page's heading. The Wall link returns to the Wall as it was last shown (a Frame's page and tab).
     """
     if section not in SECTIONS:
         raise ValueError(f"unknown console section {section!r}; expected one of {sorted(SECTIONS)}")
     sidebar = page.get_by_role("navigation", name="Sections", exact=True)
-    menu = page.get_by_role("button", name="Menu", exact=True)
+    menu = bottom_tabs(page).get_by_role("button", name="More", exact=True)
     expect(sidebar.or_(menu)).to_be_visible()  # the shell is shown (signed in)
     if menu.is_visible():
         menu.click()
@@ -87,6 +91,23 @@ def go(page, section):
             "navigation", name="Sections", exact=True)
     sidebar.get_by_role("link", name=LABELS[section], exact=True).click()
     expect(section_heading(page, section)).to_be_visible()
+
+
+def bottom_tabs(page):
+    """The phone's navigation (below 768 px): Home, Show now, Schedule and More, which opens the
+    drawer "Menu" holding the sidebar's sections."""
+    return page.get_by_role("navigation", name="Main", exact=True)
+
+
+def home_problems(page):
+    """Home's one list of what is wrong (decision 0036, "What Home replaces"): the group
+    "Problems", absent while nothing is."""
+    return page.get_by_role("main").get_by_role("group", name="Problems", exact=True)
+
+
+def house_word(page):
+    """The house word in the top bar, on every page: a link to Home named "House: <word>"."""
+    return page.get_by_role("banner").get_by_role("link", name=re.compile(r"^House: "))
 
 
 def section_heading(page, section):

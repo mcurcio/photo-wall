@@ -36,6 +36,7 @@ from central.content_catalog.catalog import ReleaseCatalog
 from central.content_catalog.sync import SyncReleasesHandler
 from central.db import Database
 from central.execution_repository import PostgresExecutionRepository
+from central.fleet.app_restart import AppRestarter, RestartAppHandler
 from central.fleet.pi_reboot import PiReboot, RebootPiHandler
 from central.health.probe import PodProbe
 from central.infra.asset_records import PgAssetRecords
@@ -177,14 +178,17 @@ def build_release_services(db: Database, clock: Clock, *, cache_root: Path) -> t
 
 def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path,
                       env: Mapping[str, str], thumbnails: ThumbnailOrigin,
-                      media_maker: Handler[PrepareMedia, MediaReady], reboot: PiReboot) -> JobRuntime:
+                      media_maker: Handler[PrepareMedia, MediaReady], reboot: PiReboot,
+                      app_restart: AppRestarter) -> JobRuntime:
     """Every CATALOG handler behind one `JobRuntime`; its boot checks run here.
 
     `thumbnails` is the media worker's library origin (R22): the thumbnail handler is Central's,
     its library half is injected, so Central imports no library client. `media_maker` is the
     media worker's `PrepareMedia` handler (media/media_maker.py), injected for the same reason.
     `reboot` asks a Pi's host to reboot (`RebootPi`): the worker's Node bus links
-    (`NodeBus.pi_reboot()`), or `NoHubReboot` with no hub deployed.
+    (`NodeBus.pi_reboot()`), or `NoHubReboot` with no hub deployed. `app_restart` asks a Pi's app
+    broker to restart the photo app (`RestartApp`) over the same links (`NodeBus.app_restart()`,
+    or `NoHubAppRestart`).
 
     The runtime owns the queue-ops pool (`QueueRescue`, opened on first use) and closes it when
     `run()` ends, so no caller has a pool to remember; the rescue also runs at its start.
@@ -210,6 +214,7 @@ def build_job_runtime(db: Database, clock: Clock, *, cache_root: Path,
         PurgeFinishedJobsHandler(FinishedJobs(db.transaction), transactions=core.transactions,
                                  outcomes=core.outcomes, clock=clock),
         RebootPiHandler(reboot, core.transactions),
+        RestartAppHandler(app_restart, core.transactions),
     )
     return JobRuntime(db.dsn, handlers, WORKER_CONCURRENCY, transactions=core.transactions,
                       assets=core.assets, clock=clock, owned=(rescue,),

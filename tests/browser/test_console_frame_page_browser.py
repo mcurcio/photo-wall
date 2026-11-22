@@ -21,7 +21,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from console_tasks import frame_heading, frame_name, open_frame, visit
+from console_tasks import frame_heading, frame_name, go, open_frame, visit
 from operator_harness import operator_server, sign_in
 from playwright.sync_api import expect
 from support.frames import frame_create
@@ -305,6 +305,7 @@ def test_one_click_on_a_wall_tile_opens_the_frame_page_and_its_position_is_kept_
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
+        go(page, "wall")
         fake = sessions
 
         # One click on the tile opens the Frame's page at Overview, named by its own heading.

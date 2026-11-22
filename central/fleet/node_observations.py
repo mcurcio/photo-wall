@@ -100,6 +100,14 @@ def host_line_in(conn, device_id: str) -> dict | None:
             "received_at": max(stated, default=None)}
 
 
+def host_births_in(conn) -> dict[str, float]:
+    """device id -> when Central recorded its host's current birth (`host_line_in`'s `born_at`),
+    for every device whose host line holds one, in the caller's transaction."""
+    return {row["device_id"]: float(row["recorded_at"]) for row in conn.execute(
+        "SELECT device_id,recorded_at FROM node_states WHERE stream=%s AND subject=%s AND NOT removed",
+        (state_stream(HOST_LINE), state_prefix(HOST_LINE) + BIRTH_KEY)).fetchall()}
+
+
 class NodeObservations:
     def __init__(self, db: Database) -> None:
         self.db = db

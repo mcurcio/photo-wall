@@ -92,6 +92,10 @@ const snapshotOf = ({ interrupted = [], silent = [], failing = [] } = {}) => ({
   readinessDiagnostics: failing.map((id) => ({ player_id: id, frame_id: `f-${id}`, output_id: "HDMI-A-1",
     failure_code: "decode", received_at: 995 })),
   runtime: null,
+  // Central's status of each bound Frame, served on Home's read (decision 0036): the one source of
+  // "its Pi reports for it". A silent Pi's Frame is Can't tell; one whose app is gone, Not showing.
+  home: { walls: [{ frames: ["p-a", "p-b", "p-c"].map((id) => ({ frame_id: `f-${id}`, status: {
+    word: silent.includes(id) ? "cant-tell" : interrupted.includes(id) ? "not-showing" : "showing", setup: null } })) }] },
 });
 const boot = new Map([["dev-p-a", { serial: "SER-AAA" }], ["dev-p-b", { serial: "SER-BBB" }], ["dev-p-c", { serial: "SER-CCC" }]]);
 out.plan = uw.keepPlan(snapshotOf(), { devices: boot }).map((entry) => entry.playerId);
@@ -383,7 +387,7 @@ def test_the_journey_modules_name_no_route():
         assert gone not in page, gone
 
 
-DECODE = "The Player could not decode this assignment. Check that the media is supported, or choose another item."
+DECODE = "The photo app could not decode this assignment. Check that the media is supported, or choose another item."
 
 
 def test_a_current_readiness_failure_is_not_rejoined_and_holds_the_rollout():

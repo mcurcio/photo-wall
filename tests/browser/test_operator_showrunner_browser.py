@@ -50,7 +50,7 @@ from operator_harness import (
     answer_first,
     assert_fits_width,
     operator_server,
-    report_readiness,
+    report_presenting,
     tile_health,
 )
 from photo_seed import begin, connected, filled, in_pool, library_of, saved_source, step
@@ -212,24 +212,25 @@ def test_showrunner_hides_wall_surfaces_and_shows_regions(page, registry):
 
 def test_showrunner_frame_health_badges_match_the_wall(page, registry):
     for player_id in _seed(registry):
-        report_readiness(registry, player_id)
+        report_presenting(registry, player_id)
     registry.clock.advance(3)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        # The wall's labels, read first so the show layer can be held to them.
-        valid_label = "Player app last reported 3 s ago"
-        invalid_label = "Needs calibration"
-        expect(tile_health(page, VALID_FRAME)).to_have_accessible_name(valid_label)
-        expect(tile_health(page, INVALID_FRAME)).to_have_accessible_name(invalid_label)
+        # The wall's words (Central's status, decision 0036), read first so the show layer can
+        # be held to them.
+        valid_label = "Showing"
+        invalid_label = "Check its Position"
+        expect(tile_health(page, VALID_FRAME)).to_have_text(valid_label)
+        expect(tile_health(page, INVALID_FRAME)).to_have_text(invalid_label)
         go(page, "now")
 
         health = page.get_by_role("group", name="Frame health", exact=True)
         expect(health).to_be_visible()
 
         # Each Frame's health renders as a STATUS badge, located by its accessible
-        # identity label, with exactly the label the wall shows — a committed,
-        # heard frame reads as heard; a bound-only frame needs calibration (a
-        # to-do, never the alarm colour).
+        # identity label, with exactly the word the wall shows — a positioned Frame
+        # whose Pi presents it reads Showing; a bound-only Frame has its Position to
+        # check (a to-do, never the alarm colour).
         expect(
             health.get_by_label(f"Frame {VALID_FRAME}: {valid_label}", exact=True)
         ).to_be_visible()
@@ -1069,11 +1070,11 @@ def test_the_target_picker_groups_by_surface_with_health_in_the_description(page
         wall = form.get_by_role("group", name="Frames on wall", exact=True)
         picked = lobby.get_by_role("checkbox", name=f"Target frame {LOBBY_FRAME}", exact=True)
         expect(picked).to_have_accessible_name(f"Target frame {LOBBY_FRAME}")
-        expect(picked).to_have_accessible_description("Needs a Player")
+        expect(picked).to_have_accessible_description("Needs a Pi")
         valid = wall.get_by_role("checkbox", name=f"Target frame {VALID_FRAME}", exact=True)
         expect(valid).to_have_accessible_name(f"Target frame {VALID_FRAME}")
         # A Pi enrolled that has not reported yet is "Getting ready" (design language §6), as on
-        # the Frame page's header (domain/frame-health-chip.ts).
+        # the Frame page's header (domain/frame-status.ts).
         expect(valid).to_have_accessible_description("Getting ready")
         expect(wall.get_by_role("checkbox")).to_have_count(2)
 
