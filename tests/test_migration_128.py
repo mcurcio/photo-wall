@@ -7,6 +7,10 @@ with their rows; no foreign key from a kept table reached them. What stays is th
 schema: 40 domain tables and `schema_migrations` (41), and Procrastinate's four (45). A boot offer
 outlives the admission that named it.
 
+The last test holds the whole table set of the database Central runs on today: 128's 41, each
+table a later migration added (`SINCE`, by migration), and Procrastinate's four. A migration that
+adds or drops a table states it there.
+
 Mutation probe: leave `node_sessions` out of 128's DROP -> the table list differs, fails.
 """
 from __future__ import annotations
@@ -36,6 +40,8 @@ CENTRAL = frozenset({
     "photo_pools", "photo_selections", "picture_history", "plan_offers", "player_contacts",
     "player_show_state", "players", "position_entries", "power_holds", "power_requests", "room_light_facts",
     "runtime_state", "shown_photos", "singletons", "walls", "schema_migrations"})
+# Every table a migration after 128 added, by migration. 131 (decision 0035): who signs in.
+SINCE = {"131": frozenset({"operators", "operator_sessions"})}
 PROCRASTINATE = frozenset({"procrastinate_events", "procrastinate_jobs", "procrastinate_periodic_defers",
                            "procrastinate_workers"})
 
@@ -97,7 +103,11 @@ def test_128_drops_the_old_paths_20_tables_and_leaves_the_decisions_schema(datab
     assert offers == [OFFER]
 
 
-def test_after_128_central_has_45_tables_with_procrastinates(registry):
-    """The database Central runs on (its template holds Procrastinate's schema): 41 + 4."""
+def test_central_runs_on_128s_tables_those_added_since_and_procrastinates(registry):
+    """The database Central runs on (its template holds Procrastinate's schema): 128's 41, the
+    two of 131, and Procrastinate's four: 47."""
+    added = frozenset().union(*SINCE.values())
+    assert added.isdisjoint(CENTRAL | PROCRASTINATE) and len(added) == 2
     with registry.db.transaction() as conn:
-        assert _tables(conn) == CENTRAL | PROCRASTINATE
+        tables = _tables(conn)
+    assert tables == CENTRAL | added | PROCRASTINATE and len(tables) == 47
