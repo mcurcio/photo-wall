@@ -56,7 +56,7 @@ Permission  = "read" | "operate" | "configure"
 
 - **`operator_id`** is Central's own short id for a provider identity `(issuer, subject)`. A person's is their user; a machine's is its service account. Central never keys anything by a name or e-mail, which the provider may change.
 - **Roles come from one claim.** `roles_in(claims, path) -> frozenset[Role]` reads a dotted path, by default `resource_access.<client id>.roles`, Keycloak's client roles. Unknown role names are ignored, never an error, so the realm can carry roles Central does not know yet.
-- **Permissions are what routes ask for.** `allows(roles, permission) -> bool` is the one policy table. Today `owner` has all three. Every existing route keeps its meaning: reads ask for `read`, writes for `configure`. 0036's everyday actions (Skip, Pause, Show now, Never show, All off and on) ask for `operate`. This is the seam Q3 asked for: a guest role that may only `read` and `operate` is one row in the table and one mapper in Keycloak, with no route touched.
+- **Permissions are what routes ask for.** `allows(roles, permission) -> bool` is the one policy table. Today `owner` has all three. Every existing route keeps its dependency, `admin`, which now asks for `read` on a read method (GET, HEAD, OPTIONS) and `configure` on any other, so none of its 123 uses changes. A second dependency, `operate`, is for the everyday actions. 0036's everyday actions (Skip, Pause, Show now, Never show, All off and on) ask for `operate`. This is the seam Q3 asked for: a guest role that may only `read` and `operate` is one row in the table and one mapper in Keycloak, with no route touched.
 - **`BreakGlass` holds every permission** and is named in audit as `api-token`, as today.
 
 ### Who changed a record
@@ -95,11 +95,12 @@ All under `/v1/operator/session`, so the existing cookie path and the `no-store`
 |---|---|---|
 | `GET /v1/operator/sign-in` | the console, signed out | Unauthenticated. Answers how to sign in: `{"method": "provider", "name": "<provider name>"}` or `{"method": "token"}` |
 | `GET /v1/operator/session/start?origin=…&return=…` | the browser, as a navigation | 302 to the provider's authorization endpoint with `state`, `nonce`, a PKCE S256 challenge and `scope=openid` |
-| `GET /v1/operator/session/callback?code=…&state=…` | the provider's redirect | Exchanges the code, judges, creates the session, sets the cookie, 302 to the console at `return` |
+| `GET /v1/operator/session/callback?code=…&state=…` | the provider's redirect | Exchanges the code, judges, creates the session, sets the cookie, 302 to the console at `return`. A sign-in that fails lands on the console with `?sign_in=` and one of `not_allowed`, `provider_unreachable`, `failed`, which the sign-in page words |
 | `GET /v1/operator/session` | the console | Who am I: name, roles, provider name. 401 when signed out |
 | `DELETE /v1/operator/session` | the console's **Log out** | Deletes the row, clears the cookie, answers the provider's end-session address to go to |
 | `POST /v1/operator/session/backchannel-logout` | the provider | OpenID Connect Back-Channel Logout: ends every session with that `sid` |
 | `POST /v1/operator/session` | the console in token mode | Today's token sign-in. Answers 404 when a provider is configured |
+| `GET /v1/operator/access` | Settings › People and access | The provider's name, its host, whether Central reaches it and when it last did; the 30-day ceiling |
 
 ### Sign-in
 
@@ -190,8 +191,8 @@ A partial setting (an issuer without a secret) stops Central at start with one l
 | `central/operator_access/ports.py` | `IdentityProvider` (metadata, keys, exchange, refresh, the end-session address), `Sessions`, `Operators` |
 | `central/infra/oidc_provider.py` | The one OpenID Connect client (httpx): the only module that speaks to the provider |
 | `central/infra/operator_session_store.py` | `operator_sessions`, `operators` |
-| `central/operator_auth.py` | The FastAPI side: the routes above and `require(permission)`, which replaces `admin` |
-| `central/operator_session.py` | Removed with its scrypt key: token mode's cookie becomes a session row too, with no operator, so there is one session path |
+| `central/operator_auth.py` | The FastAPI side: the routes above and the two dependencies, `admin` and `operate`; token mode and provider mode are two strategies behind one interface |
+| `central/operator_session.py` | Unchanged: token mode's signed cookie, exactly as [pass A](../operator-console-ux-pass2-session.md) built it. The first draft of this record moved token mode onto session rows too, for one session path; it stays as it is so that a Central with no provider behaves, and is tested, exactly as before |
 | `central/actor.py` | The audit grammar |
 
 - **Import rule:** a new import-linter contract, "Operator access is pure". Only `central.app` and `central.operator_auth` import `central.infra.oidc_provider`.
