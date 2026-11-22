@@ -273,7 +273,7 @@ The design, its protocol and its failure table are owned by [pass A](operator-co
 
 ### Signing in through Keycloak
 
-Central is an OpenID Connect client of the deployment's identity provider. It is tested against Keycloak; any provider whose access tokens are signed JWTs carrying roles should work, and one with opaque access tokens does not. **Status: built; the real-Keycloak CI leg is what proves the Keycloak steps below, and it has not passed yet** (see the pull request).
+Central is an OpenID Connect client of the deployment's identity provider. It is tested against Keycloak; any provider whose access tokens are signed JWTs carrying roles should work, and one with opaque access tokens does not. **Status: built; the real-Keycloak CI leg is what proves the Keycloak steps below, and it has passed** (`e2e / keycloak`, Pipeline run 820 on `66b52d3`).
 
 **Set up Keycloak, once.** In the realm people sign in to:
 
