@@ -12,9 +12,10 @@ Both forms are one state machine (`_grant`), and tests/test_operator_provider_co
 holds the in-process port and the production client over HTTP to one suite.
 
 Tokens are real: RS256 under an RSA key generated once per process (`rotate_keys` makes
-another). Access tokens are shaped as Keycloak's: client roles under
-`resource_access.<client id>.roles`, and the client in `aud` only while the principal holds one of
-its roles. Refresh tokens are opaque and single use.
+another). Access tokens are shaped as Keycloak's (`access_claims`): client roles under
+`resource_access.<client id>.roles`, `azp` the client a token was issued to, and Central's client
+in `aud` only of another client's token, while its principal holds one of Central's roles.
+Refresh tokens are opaque and single use.
 
 Switches: `drop_role`, `grant_role`, `disable` (its refresh is refused), `unreachable`
 (every call raises `ProviderUnreachable`; over HTTP every answer is 503), `end_session`,
@@ -172,14 +173,24 @@ class FakeProvider:
         return {"iss": self.issuer, "iat": int(now), "exp": int(now + seconds), "jti": secrets.token_hex(8)}
 
     def access_claims(self, subject: str, sid: str | None = None) -> dict[str, Any]:
+        """As Keycloak 26.8.2 states them by default (tests/integration/test_keycloak_sign_in.py):
+        `azp` is the client the token was issued to; that client is never in its own token's
+        `aud` (the "audience resolve" mapper leaves it out); another client is in `aud` while the
+        principal holds one of its roles. So a person's token, issued to Central's client, has
+        `azp` = Central's client and no `aud`; a service account's has `azp` = its own client and
+        `aud` = Central's client only while it holds a role of Central's. No role, no
+        `resource_access`."""
         user = self.users[subject]
+        issued_to = next((client_id for client_id, account in self.service_accounts.items()
+                          if account.user is user), self.client_id)
         claims: dict[str, Any] = {
-            **self._times(self.access_seconds), "sub": subject, "typ": "Bearer", "azp": self.client_id,
-            # Keycloak adds a client to `aud` only while the principal holds one of its roles.
-            "aud": [self.client_id, "account"] if user.roles else ["account"],
-            "resource_access": {self.client_id: {"roles": sorted(user.roles)}},
+            **self._times(self.access_seconds), "sub": subject, "typ": "Bearer", "azp": issued_to,
             "name": user.name, "preferred_username": user.name.lower().replace(" ", "."),
         }
+        if user.roles:
+            claims["resource_access"] = {self.client_id: {"roles": sorted(user.roles)}}
+            if issued_to != self.client_id:
+                claims["aud"] = self.client_id
         if sid is not None:
             claims["sid"] = sid
         return claims

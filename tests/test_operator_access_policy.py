@@ -211,15 +211,52 @@ def test_another_issuer_is_refused(provider, issuer):
     assert refusal(lambda: judge_of(provider).access(token, NOW)) is TokenRefusal.ISSUER
 
 
-@pytest.mark.parametrize("aud", ["account", ["account"], ["photo-wall-2"], [], None, {"photo-wall": 1}, CLIENT_ID + "x"])
-def test_an_audience_without_centrals_client_is_refused(provider, aud):
-    token = provider.access_token("user-1", aud=aud)
+NOT_CENTRAL = ["account", ["account"], ["photo-wall-2"], [], None, {"photo-wall": 1}, CLIENT_ID + "x"]
+"""An `aud`, and likewise an `azp`, that does not name Central's client."""
+
+
+def test_a_token_is_addressed_to_central_when_its_audience_holds_the_client(provider):
+    """`aud` as one string or a list holding the client, whoever the token was issued to: a
+    machine's token (another client's service account that holds one of Central's roles)."""
+    for aud in (CLIENT_ID, [CLIENT_ID], ["account", CLIENT_ID]):
+        for azp in ("reader-script", None):
+            token = provider.access_token("user-1", aud=aud, azp=azp)
+            assert judge_of(provider).access(token, NOW).subject == "user-1"
+
+
+@pytest.mark.parametrize("aud", NOT_CENTRAL)
+def test_a_token_issued_to_centrals_own_client_is_addressed_to_central_whatever_its_audience(provider, aud):
+    """Keycloak leaves the requesting client out of its own token's `aud`: a person's token."""
+    token = provider.access_token("user-1", aud=aud, azp=CLIENT_ID)
+    assert judge_of(provider).access(token, NOW).subject == "user-1"
+
+
+def test_a_persons_token_as_the_provider_issues_it_is_addressed_by_azp_alone(provider):
+    claims = provider.access_claims("user-1")
+    assert claims["azp"] == CLIENT_ID and "aud" not in claims
+    assert policy.addressed_to(claims, CLIENT_ID)
+    assert not policy.addressed_to({**claims, "azp": "reader-script"}, CLIENT_ID)
+
+
+@pytest.mark.parametrize("aud", NOT_CENTRAL)
+@pytest.mark.parametrize("azp", ["reader-script", [CLIENT_ID], {CLIENT_ID: 1}, CLIENT_ID + "x", "", None, True])
+def test_a_token_neither_addressed_nor_issued_to_centrals_client_is_refused(provider, aud, azp):
+    """Another client's `azp` with an `aud` that lacks Central's client is the role-less machine;
+    no `azp` at all, or one that is not exactly the client id, addresses nothing."""
+    token = provider.access_token("user-1", aud=aud, azp=azp)
     assert refusal(lambda: judge_of(provider).access(token, NOW)) is TokenRefusal.AUDIENCE
 
 
-def test_the_audience_may_be_one_string_or_a_list_holding_the_client(provider):
-    for aud in (CLIENT_ID, [CLIENT_ID], ["account", CLIENT_ID]):
-        assert judge_of(provider).access(provider.access_token("user-1", aud=aud), NOW).subject == "user-1"
+def test_a_machines_token_is_addressed_to_central_only_while_it_holds_a_role(provider):
+    provider.add_service_account("reader-script")
+    provider.add_service_account("no-role-script", roles=())
+    judge = judge_of(provider)
+    held = provider.access_claims("service-account-reader-script")
+    assert (held["azp"], held["aud"]) == ("reader-script", CLIENT_ID)
+    assert judge.access(provider.service_token("reader-script"), NOW).roles == {"owner"}
+    without = provider.access_claims("service-account-no-role-script")
+    assert without["azp"] == "no-role-script" and "aud" not in without
+    assert refusal(lambda: judge.access(provider.service_token("no-role-script"), NOW)) is TokenRefusal.AUDIENCE
 
 
 def test_expiry_is_read_on_centrals_clock_with_a_minute_of_leeway(provider):
@@ -251,7 +288,8 @@ def test_an_id_token_needs_exactly_the_transactions_nonce(provider):
     for stated in ("n-2", None, ["n-1"]):
         wrong = provider.id_token("user-1", nonce=stated, sid="sid-1")
         assert refusal(lambda wrong=wrong: judge.identity(wrong, "n-1", NOW)) is TokenRefusal.NONCE
-    for_another = provider.id_token("user-1", nonce="n-1", sid="sid-1", aud="another-client")
+    for_another = provider.id_token("user-1", nonce="n-1", sid="sid-1", aud="another-client",
+                                    azp="another-client")
     assert refusal(lambda: judge.identity(for_another, "n-1", NOW)) is TokenRefusal.AUDIENCE
 
 
@@ -269,6 +307,34 @@ def test_an_id_token_or_a_logout_token_is_never_a_credential(provider):
     # A provider that states no `typ` claim, or RFC 9068's, is an access token.
     for typ in (None, "at+jwt", "Bearer"):
         assert judge.access(provider.access_token("user-1", typ=typ), NOW).subject == "user-1"
+
+
+def test_a_token_issued_to_centrals_own_client_is_never_a_bearer_credential(provider):
+    """A person's sign-in token stands for the sign-in (`access`) and is refused as a Bearer
+    (`credential`), whatever role or audience it states; a machine's own client's token is both."""
+    provider.add_service_account("reader-script")
+    judge = judge_of(provider)
+    roles = {"resource_access": {CLIENT_ID: {"roles": ["owner"]}}}
+    persons = [provider.access_token("user-1"), provider.access_token("user-1", aud=CLIENT_ID),
+               provider.access_token("user-1", aud=["account", CLIENT_ID], **roles),
+               provider.access_token("service-account-reader-script", azp=CLIENT_ID)]
+    for token in persons:
+        assert judge.access(token, NOW).roles == {"owner"}
+        assert refusal(lambda token=token: judge.credential(token, NOW)) is TokenRefusal.ISSUED_TO_CENTRAL
+    machines = provider.service_token("reader-script")
+    assert judge.credential(machines, NOW) == judge.access(machines, NOW)
+    assert judge.credential(provider.access_token("user-1", aud=CLIENT_ID, azp=None), NOW).subject == "user-1"
+
+
+def test_a_bearer_credential_is_refused_by_every_rule_an_access_token_is_and_by_those_first(provider):
+    judge = judge_of(provider)
+    own = {"azp": CLIENT_ID}
+    assert refusal(lambda: judge.credential(provider.access_token("user-1", exp=NOW - 61), NOW)) is TokenRefusal.EXPIRED
+    assert refusal(lambda: judge.credential(
+        provider.access_token("user-1", aud="account", azp="another"), NOW)) is TokenRefusal.AUDIENCE
+    id_token = provider.id_token("user-1", nonce="n-1", sid="sid-1", **own)
+    assert refusal(lambda: judge.credential(id_token, NOW)) is TokenRefusal.NOT_AN_ACCESS_TOKEN
+    assert refusal(lambda: judge.credential(provider.access_token("user-1", sub=None), NOW)) is TokenRefusal.SUBJECT
 
 
 def test_a_logout_token_needs_its_event_a_session_or_subject_and_no_nonce(provider):

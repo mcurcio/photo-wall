@@ -147,6 +147,7 @@ class TokenRefusal(StrEnum):
     NONCE = "nonce"
     SUBJECT = "subject"              # no `sub`
     NOT_AN_ACCESS_TOKEN = "not_an_access_token"   # an ID or logout token sent as a credential
+    ISSUED_TO_CENTRAL = "issued_to_central"   # a person's sign-in token sent as a Bearer credential
     NOT_A_LOGOUT = "not_a_logout"    # a logout token without its event, or with a nonce
     NO_SESSION_NAMED = "no_session_named"   # a logout token with neither `sid` nor `sub`
 

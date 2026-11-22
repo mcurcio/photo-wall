@@ -127,9 +127,8 @@ def test_a_refresh_answers_new_tokens_and_the_roles_as_they_are_now(harness):
     assert judgement.roles == {"owner"} and judgement.fresh_until == NOW + 200 + 300
     harness.fake.drop_role("user-1")
     third = harness.provider.refresh(second.refresh_token)
-    # Without the role Keycloak leaves Central's client out of `aud`: the token is refused whole.
-    with pytest.raises(policy.TokenRefused):
-        harness.judge().access(third.access_token, harness.clock.utc())
+    # Without the role the token is still Central's (`azp`): it stands and carries no role.
+    assert harness.judge().access(third.access_token, harness.clock.utc()).roles == frozenset()
 
 
 def test_a_refresh_is_refused_for_a_disabled_user_an_ended_session_and_a_used_token(harness):

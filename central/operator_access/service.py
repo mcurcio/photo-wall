@@ -29,7 +29,6 @@ from central.operator_access.model import (
     Session,
     SessionSecrets,
     SignInRefusal,
-    TokenRefusal,
     TokenRefused,
     Transaction,
 )
@@ -100,7 +99,7 @@ class ProviderAccess:
             if tokens.id_token is None:
                 raise SignInRefused(SignInRefusal.FAILED, "no ID token")
             identity = self._judge.identity(tokens.id_token, transaction.nonce, now)
-            judgement = self._access_of_the_signed_in(tokens.access_token, now)
+            judgement = self._judge.access(tokens.access_token, now)
         except ProviderUnreachable:
             raise SignInRefused(SignInRefusal.PROVIDER_UNREACHABLE) from None
         except ProviderRefused as refused:
@@ -124,18 +123,6 @@ class ProviderAccess:
             by=encode("person", operator.operator_id))
         return SignedIn(cookie_value, session)
 
-    def _access_of_the_signed_in(self, access_token: str, now: float) -> policy.Judgement:
-        """The access token of a person whose ID token just stood. One that is not addressed to
-        Central is how a provider says "no role here" (Keycloak adds a client to `aud` only while
-        the principal holds one of its roles): signed in, not allowed. It lets nobody in either
-        way; this only chooses what the console tells the person."""
-        try:
-            return self._judge.access(access_token, now)
-        except TokenRefused as refused:
-            if refused.reason is TokenRefusal.AUDIENCE:
-                raise SignInRefused(SignInRefusal.NOT_ALLOWED, "token: audience") from None
-            raise
-
     # ---- who a request is ----
 
     def person(self, cookie_value: str | None) -> Person | None:
@@ -156,10 +143,12 @@ class ProviderAccess:
                       session_id=session.session_id, origin=session.origin)
 
     def machine(self, token: str) -> Machine | None:
-        """Who a provider access token is: a machine holding a role that may read, or None.
-        A provider whose keys cannot be fetched lets no machine in."""
+        """Who a provider access token sent as a Bearer credential is: a machine holding a role
+        that may read, or None. A token issued to Central's own client is a person's and never a
+        machine's (`TokenJudge.credential`). A provider whose keys cannot be fetched lets no
+        machine in."""
         try:
-            judgement = self._judge.access(token, self._clock.utc())
+            judgement = self._judge.credential(token, self._clock.utc())
         except (TokenRefused, ProviderUnreachable):
             return None
         if not policy.allows(judgement.roles, "read"):

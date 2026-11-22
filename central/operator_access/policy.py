@@ -6,8 +6,9 @@ clock by the caller.
 - **Roles and permissions:** `roles_in`, `allows` (the one policy table, `PERMISSIONS`),
   `permits`, `permission_for`, `actor_of`.
 - **Validating a token:** `TokenJudge`: the algorithm allow-list before any key is asked for,
-  then the signature, then `iss`, `aud`, `exp` and `nbf` on Central's clock; the ID token's
-  nonce, a logout token's event.
+  then the signature, then `iss`, the address (`addressed_to`: `aud` or `azp`), `exp` and `nbf`
+  on Central's clock; the ID token's nonce, a logout token's event; a Bearer credential
+  (`TokenJudge.credential`), which a token issued to Central's own client never is.
 - **The Bearer order:** `bearer_principal`.
 - **A cookie write:** `write_refusal`, pass A's three checks.
 - **Staying judged:** `standing`, `rejudge`, the hard end.
@@ -150,10 +151,27 @@ def token_header(token: object) -> Mapping[str, object]:
     return header
 
 
-def _audience_holds(aud: object, audience: str) -> bool:
-    if isinstance(aud, str):
-        return aud == audience
-    return isinstance(aud, (list, tuple)) and audience in aud
+def addressed_to(claims: Claims, client_id: str) -> bool:
+    """Whether a token is addressed to the client `client_id` (Central's): its `aud` contains the
+    client id (one string, or a list holding it), or its `azp` equals it.
+
+    `azp` is the party the token was issued to. Only Central, holding its client secret, can be
+    issued a token as its own client, so such a token is Central's. The `azp` arm is needed
+    because Keycloak's default audience mapper ("audience resolve",
+    `AudienceResolveProtocolMapper.setAudience`: "Don't add client itself to the audience")
+    leaves the requesting client itself out of `aud`: a person's access token issued to Central's
+    client carries `azp` = that client and no `aud` naming it, while a machine's (another
+    client's service account) carries Central's client in `aud` while it holds one of its roles.
+    Pinned against Keycloak 26.8.2 by tests/integration/test_keycloak_sign_in.py."""
+    aud = claims.get("aud")
+    in_audience = aud == client_id if isinstance(aud, str) else (
+        isinstance(aud, (list, tuple)) and client_id in aud)
+    return in_audience or issued_to(claims, client_id)
+
+
+def issued_to(claims: Claims, client_id: str) -> bool:
+    """Whether a token was issued to the client `client_id`: its `azp` is exactly that id."""
+    return claims.get("azp") == client_id
 
 
 def name_in(claims: Claims) -> str:
@@ -205,7 +223,8 @@ class TokenJudge:
         """The claims of a token this issuer signed for Central that is valid at `now`.
         TokenRefused otherwise, by the first rule that fails, in this order: the shape, the
         algorithm allow-list (before any key is asked for), the key and signature, `iss`
-        (exactly), `aud` (contains Central's client id), `exp` and `nbf` with `LEEWAY_SECONDS`."""
+        (exactly), the address (`addressed_to`: `aud` contains Central's client id, or `azp` is
+        it), `exp` and `nbf` with `LEEWAY_SECONDS`."""
         header = token_header(token)
         algorithm = header.get("alg")
         if not isinstance(algorithm, str) or algorithm not in ALGORITHMS:
@@ -216,7 +235,7 @@ class TokenJudge:
             raise TokenRefused(TokenRefusal(verified.value))
         if verified.get("iss") != self.issuer:
             raise TokenRefused(TokenRefusal.ISSUER)
-        if not _audience_holds(verified.get("aud"), self.audience):
+        if not addressed_to(verified, self.audience):
             raise TokenRefused(TokenRefusal.AUDIENCE)
         expires = _number(verified.get("exp"))
         if expires is None:
@@ -234,7 +253,24 @@ class TokenJudge:
     def access(self, token: str, now: float) -> Judgement:
         """An access token: valid, with a subject. Its roles may be none; the caller decides
         what no role means (no session, 401, the session's end)."""
+        return self._access(self.claims(token, now))
+
+    def credential(self, token: str, now: float) -> Judgement:
+        """An access token presented as a Bearer credential: `access`, and not one issued to
+        Central's own client (`issued_to`), which is refused.
+
+        A token issued to Central's client is a person's, from a sign-in: Central asked for it
+        with its client secret and never hands it to the browser or to anyone, so nobody is meant
+        to hold it. A person is let in by the session that sign-in opened, which carries the
+        origin and marker checks, the hard end and the provider's logout; a Bearer has none of
+        them. A machine has its own client, so its token's `azp` is never Central's."""
         claims = self.claims(token, now)
+        judgement = self._access(claims)
+        if issued_to(claims, self.audience):
+            raise TokenRefused(TokenRefusal.ISSUED_TO_CENTRAL)
+        return judgement
+
+    def _access(self, claims: Claims) -> Judgement:
         if not _may_be_an_access_token(claims):
             raise TokenRefused(TokenRefusal.NOT_AN_ACCESS_TOKEN)
         return Judgement(subject=_subject(claims), name=name_in(claims),

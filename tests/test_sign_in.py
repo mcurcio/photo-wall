@@ -308,21 +308,36 @@ def test_without_the_role_there_is_no_session(registry, client, fake):
     assert sign_in(client, fake)[0].headers["location"] == "/?sign_in=not_allowed"
 
 
-def test_an_access_token_not_addressed_to_central_is_not_allowed_and_one_refused_otherwise_is_failed(
-        registry, client, fake, monkeypatch, caplog):
-    """Keycloak leaves Central's client out of `aud` for a principal without its role: the person
-    signed in (the ID token stands) and is told they are not allowed, not that sign-in broke."""
-    real = fake._tokens
-
-    def without_the_client(subject, sid, nonce):
-        return {**real(subject, sid, nonce), "access_token": fake.access_token(
-            subject, sid, aud="account", resource_access={CLIENT_ID: {"roles": ["owner"]}})}
-
-    monkeypatch.setattr(fake, "_tokens", without_the_client)
+def test_a_person_without_the_role_is_addressed_by_azp_and_not_allowed_for_the_role_alone(
+        registry, client, fake, caplog):
+    """As Keycloak issues it: the role-less person's access token is Central's (`azp`), names no
+    audience and carries no role. Signed in, not allowed: never "sign-in broke"."""
+    fake.add_user("user-2", "Guest Person", roles=())
+    claims = fake.access_claims("user-2")
+    assert claims["azp"] == CLIENT_ID and "aud" not in claims and "resource_access" not in claims
     with caplog.at_level(logging.WARNING, logger="central.operator_auth"):
         response, cookie = sign_in(client, fake)
     assert response.headers["location"] == "/?sign_in=not_allowed" and cookie is None
-    assert "operator sign-in refused: not_allowed (token: audience)" in caplog.text
+    assert "operator sign-in refused: not_allowed" in caplog.text and "audience" not in caplog.text
+    assert session_rows(registry) == []
+
+
+def test_an_access_token_neither_addressed_nor_issued_to_central_is_a_failed_sign_in(
+        registry, client, fake, monkeypatch, caplog):
+    """Another client's token beside Central's own ID token is not a person without the role: the
+    sign-in failed, whatever role the token states."""
+    real = fake._tokens
+
+    def for_another_client(subject, sid, nonce):
+        return {**real(subject, sid, nonce), "access_token": fake.access_token(
+            subject, sid, aud="account", azp="another-client",
+            resource_access={CLIENT_ID: {"roles": ["owner"]}})}
+
+    monkeypatch.setattr(fake, "_tokens", for_another_client)
+    with caplog.at_level(logging.WARNING, logger="central.operator_auth"):
+        response, cookie = sign_in(client, fake)
+    assert response.headers["location"] == "/?sign_in=failed" and cookie is None
+    assert "operator sign-in refused: failed (token: audience)" in caplog.text
     assert session_rows(registry) == []
 
 
@@ -416,6 +431,7 @@ def test_a_provider_token_central_does_not_accept_is_401(registry, client, fake)
     roles = {"resource_access": {CLIENT_ID: {"roles": ["owner"]}}}
     refused = {
         "no role": fake.service_token("no-role-script"),
+        "a person's token with no role": fake.access_token("user-1", resource_access=None),
         "addressed to Central, no role": fake.access_token(subject, resource_access={}),
         "a role Central does not know": fake.access_token(subject, resource_access={CLIENT_ID: {"roles": ["gardener"]}}),
         "another audience": fake.access_token(subject, aud=["account"]),
@@ -435,6 +451,28 @@ def test_a_provider_token_central_does_not_accept_is_401(registry, client, fake)
     both = {**cookie, "Authorization": "Bearer " + refused["another audience"]}
     assert client.get(READ, headers=both).status_code == 401
     assert client.get(READ, headers={"Authorization": "Bearer " + fake.service_token("reader-script")}).status_code == 200
+
+
+def test_a_persons_access_token_is_never_a_bearer_credential(registry, client, fake):
+    """The access token a sign-in gets is issued to Central's own client (`azp`): Central keeps it
+    to itself, the browser never holds it, and sent as a Bearer it lets nobody in and records
+    nobody, with the role and beside the person's own session alike. A person is let in by the
+    session; a machine by its own client's token."""
+    cookie = signed_in(client, fake)
+    before = rows(registry, "SELECT kind, subject, changed_at FROM operators")
+    assert [(row["kind"], row["subject"]) for row in before] == [("person", "user-1")]
+    token = fake.access_token("user-1", sid="sid-1")
+    assert fake.access_claims("user-1")["resource_access"] == {CLIENT_ID: {"roles": ["owner"]}}
+    for stated in (token, fake.access_token("user-1", aud=[CLIENT_ID, "account"])):
+        bearer = {"Authorization": "Bearer " + stated}
+        for headers in (bearer, {**cookie, **bearer}):
+            assert client.get(READ, headers=headers).status_code == 401
+            refused = client.put(HOUSE, json=HOUSE_BODY, headers=headers)
+            assert (refused.status_code, refused.json()) == (401, {"error": "unauthorized"})
+    assert rows(registry, "SELECT kind, subject, changed_at FROM operators") == before
+    house = rows(registry, "SELECT changed_by FROM singletons WHERE name='house'")
+    assert [row for row in house if row["changed_by"].startswith(("client:", "person:"))] == []
+    assert client.get(READ, headers=cookie).status_code == 200
 
 
 # ---- the break-glass token ----
