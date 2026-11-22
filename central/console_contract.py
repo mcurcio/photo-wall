@@ -37,6 +37,7 @@ from central.frame_lighting.views import PaperProfilesView, PaperProfileView
 from central.infra.home_assistant import references
 from central.infra.home_assistant.views import HomeAssistantStatesView
 from central.infra.light_sensor_judge import PI_SOURCE
+from central.operator_access.views import AccessView, LoggedOut, SessionView, SignInView
 from central.registry import FrameTurnChange, FrameVideoChange
 from central.room_light.model import (
     COLOUR_SENSORS_MAX,
@@ -94,7 +95,7 @@ CONSOLE_BODIES: Final[tuple[type[BaseModel], ...]] = (   # bodies the console se
 CONSOLE_VIEWS: Final[tuple[type[BaseModel], ...]] = (    # answers the console reads
     RoomLightsView, DrawnView, RefusedReportsView, PaperProfileView, PaperProfilesView,
     PositionHistoryView, PictureHistoryView, LightView, HomeAssistantStatesView, ReleasesView, InstallStarted,
-    CentralErrorsView, FrameImpedimentView)
+    CentralErrorsView, FrameImpedimentView, SignInView, SessionView, LoggedOut, AccessView)
 CONSOLE_ALIASES: Final[Mapping[str, object]] = {     # named types a view's fields take, by their name
     "Lux": Lux, "LightColour": LightColour, "Reading": Reading}
 # The seconds of each photo a Transition must leave free: the Player's preparation time

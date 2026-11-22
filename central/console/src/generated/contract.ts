@@ -2,6 +2,12 @@
 // Central's types, limits, patterns, constants and refusal codes for the console (one home, in Python).
 /* eslint-disable */
 
+export interface AccessView {
+  method: "provider" | "token";
+  provider: ProviderView | null;
+  session_cap_days?: number;
+}
+
 export interface AtFull {
   kind: "at-full";
 }
@@ -229,6 +235,10 @@ export interface LightView {
   matched_lux: number;
 }
 
+export interface LoggedOut {
+  end_session: string | null;
+}
+
 export interface LutRef {
   profile_sha256: string;
   recipe_id: string;
@@ -368,6 +378,13 @@ export interface PositionRestore {
 
 export type PositionRestoreRefusal = "other_frame" | "made_for_other_turn" | "made_for_other_display";
 
+export interface ProviderView {
+  issuer_host: string;
+  last_reached_at: number | null;
+  name: string;
+  reachable: boolean;
+}
+
 export type Reading = Measured | Unavailable;
 
 export interface RefusedReportView {
@@ -479,6 +496,18 @@ export interface SensorView {
   reading: Measured | null;
   reports: RoomLightId | null;
   sensor: Sensor;
+}
+
+export interface SessionView {
+  method: "provider" | "token";
+  name: string | null;
+  provider: string | null;
+  roles: "owner"[];
+}
+
+export interface SignInView {
+  method: "provider" | "token";
+  name?: string | null;
 }
 
 export type SignalRange = "auto" | "full" | "limited";

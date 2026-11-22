@@ -251,6 +251,21 @@ Specs follow the [console-ux](../../.claude/skills/console-ux/SKILL.md) template
 **Acceptance:** automated: below.
 **Departs from DL §8 row:** yes. The row's save model, Autosave, becomes none: nothing here is edited in Photo Wall.
 
+## As built
+
+Slice 1, 2026-11-22. Where the build differs from the design above, the build stands:
+
+- **Sign-in's redirects back to the console are relative** (`/#/route`, `/?sign_in=<code>`), not built from the stated origin. `origin` at `start` is an unauthenticated query parameter, so an absolute redirect built from it would send a browser wherever a crafted link said. The stated origin still builds the redirect address the provider checks, and is the Origin the session is bound to.
+- **An ID token or a logout token is never a credential.** Both are signed by the same keys for the same audience as an access token, and Log out hands the ID token to the browser. A Bearer token carrying `at_hash`, `c_hash` or `events`, or a `typ` claim other than an access token's, is refused.
+- **`not_allowed` also answers an access token whose `aud` lacks Central's client** when the ID token stood, because Keycloak leaves the client out of `aud` exactly when the person holds none of its roles. It lets nobody in; it picks the message.
+- **PyJWT sits behind a port.** `infra/jwt_signature.py` is its only importer and checks the signature alone. The algorithm allow-list is checked before any key is asked for, and every claim is read on Central's clock, in `policy.py`.
+- **More modules than the map above:** `operator_access/settings.py` (the six variables), `service.py` (the use cases over the ports), `views.py` (the answers, from which the console's types are generated), `infra/transaction_seal.py`. Migration 131 makes the two tables.
+- **`PHOTO_WALL_OIDC_ROLE` is the provider's name for Central's `owner`**, not a second role.
+- **One refresh per session is guarded inside the API process**, with no database lock held across the call to the provider; the store's write is a compare-and-set on the old refresh token. Central runs one API process. With several, two could refresh one session at once and, where the provider rotates refresh tokens, one of them could end it.
+- **Session retention runs only in provider mode**; token mode has no rows.
+- **Stories** are `Domain/SignIn` and `Domain/PeopleAndAccess`, the catalogue's convention, with Loading and NoAnswer added. People and access shows only its empty state in token mode.
+- **The Keycloak leg** is `tests/integration/test_keycloak_sign_in.py` in the software e2e's `keycloak` job.
+
 ## Acceptance
 
 CI tests, named so each is one behaviour:

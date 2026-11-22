@@ -57,6 +57,8 @@ from central.infra.home_assistant.settings import PgHomeAssistantSettings
 from central.infra.house_store import PgHouse, seed_house
 from central.infra.light_sensor_judge import PI_SOURCE, PiMeterAdvice, is_player
 from central.infra.node_record_retention import NodeRecordRetention
+from central.infra.oidc_provider import OidcProvider
+from central.infra.operator_session_store import PgOperators, PgOperatorSessions, SessionRetention
 from central.infra.paper_profile_store import PgPaperProfiles
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.player_contact_store import (
@@ -68,6 +70,7 @@ from central.infra.player_contact_store import (
 from central.infra.player_state_wakes import PlayerStateWakes
 from central.infra.power_store import PgPower
 from central.infra.room_light_store import PgRoomLights
+from central.infra.transaction_seal import AesGcmTransactionSeal
 from central.infra.tuning_history_store import PgTuningHistory
 from central.infra.why_store import PgWhy
 from central.installation_models import FrameName, InstallationInventory, WallInventory, WallNaming
@@ -76,6 +79,9 @@ from central.lock_waits import mount_lock_refusal
 from central.media_ports import MediaApplication
 from central.media_queue import MediaTaskQueue, ProcrastinateMediaQueue
 from central.media_repository import MediaRepository
+from central.operator_access.ports import IdentityProvider
+from central.operator_access.service import ProviderAccess
+from central.operator_access.settings import OidcSettings, oidc_settings_in
 from central.operator_auth import OperatorAuth
 from central.operator_snapshot import OperatorSnapshot, OperatorSnapshotReader, runtime_document
 from central.paper_profile_routes import mount_paper_profile_routes
@@ -198,16 +204,27 @@ def create_app(
     media_times: TransactionClock | None = None,
     hub_leaf_url: str | None = None,
     central_version: str | None = None,
+    oidc: OidcSettings | None = None,
+    identity_provider: IdentityProvider | None = None,
 ) -> FastAPI:
     """`central_version`: Central's own version (central/version.py); None reads the installed
-    distribution's, as uvicorn's factory call does. A harness running from source passes its own."""
+    distribution's, as uvicorn's factory call does. A harness running from source passes its own.
+
+    `oidc`: the identity provider operators sign in through (decision 0035); None reads the
+    environment's `PHOTO_WALL_OIDC_*` (central/operator_access/settings.py), where none set is
+    token mode and a partial setting stops Central here. `identity_provider`: the provider's
+    client; None is the OpenID Connect client for `oidc` (a test passes its fake). With a
+    provider, `admin_token` (`PHOTO_WALL_ADMIN_TOKEN`) is the optional break-glass token;
+    without one it is required."""
     run_scheduler = clock is None if run_scheduler is None else run_scheduler
     clock_injected = clock
     owns_db = db is None
     db = db or Database(os.environ["PHOTO_WALL_DATABASE_URL"], application_name="photo-wall-web")
     clock = clock or SystemClock()
-    admin_token = admin_token or os.environ["PHOTO_WALL_ADMIN_TOKEN"]
-    if len(admin_token) < 32:
+    oidc = oidc or oidc_settings_in(os.environ)
+    admin_token = admin_token or (os.environ["PHOTO_WALL_ADMIN_TOKEN"] if oidc is None
+                                  else os.environ.get("PHOTO_WALL_ADMIN_TOKEN") or None)
+    if admin_token is not None and len(admin_token) < 32:
         raise ValueError("PHOTO_WALL_ADMIN_TOKEN must contain at least 32 characters")
     house_lock = PgHouseLock()   # the house's lock and "which Frames name it"
     registry = Registry(db, clock, lighting=PgFrameLighting(LUT_RECIPE_ID))
@@ -338,9 +355,22 @@ def create_app(
     app.state.photo_library = photo_library
     app.state.content = content
     bearer = HTTPBearer(auto_error=False)
-    # The operator principal (pass A): bearer or signed session cookie. The key derives from the
-    # token here, once, so a wrong-length or unencodable token fails at construction.
-    operator_auth = OperatorAuth(admin_token, clock)
+    # The operator principal: token mode (pass A: bearer or signed session cookie) or, when the
+    # deployment configures an identity provider, provider mode (decision 0035). The key derives
+    # from the token here, once, so a wrong-length or unencodable token fails at construction.
+    retentions = {"node-retention": NodeRecordRetention(db.transaction).prune}
+    provider_access = None
+    if oidc is not None:
+        provider_access = (
+            ProviderAccess(
+                oidc,
+                identity_provider or OidcProvider(issuer=oidc.issuer, client_id=oidc.client_id,
+                                                  client_secret=oidc.client_secret, clock=clock),
+                PgOperatorSessions(db, clock), PgOperators(db, clock), clock),
+            AesGcmTransactionSeal(oidc.client_secret))
+        # Sessions past their hard end, off the tick like every retention.
+        retentions["operator-session-retention"] = SessionRetention(db.transaction, clock).prune
+    operator_auth = OperatorAuth(admin_token, clock, provider=provider_access)
     app.state.operator_auth = operator_auth
     admin = operator_auth.admin
 
@@ -924,7 +954,7 @@ def create_app(
     mount_node_routes(app, db=db, clock=clock, admin=admin, config=node_boot,
                       times=media_times, content=content)
     app.state.scheduler = Scheduler(coordinator, media_application.request_measurements, clock,
-                                    retentions={"node-retention": NodeRecordRetention(db.transaction).prune})
+                                    retentions=retentions)
     # A Node's leaf and Home Assistant's door arrive at Central's origin (erratum E-E3D-CUT-4): relayed to the hub.
     hub_leaf_url = hub_leaf_url or os.environ.get("PHOTO_WALL_HUB_LEAF_URL")
     if hub_leaf_url:

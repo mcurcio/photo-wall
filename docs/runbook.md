@@ -241,6 +241,9 @@ The operator console edits the wall plan through admin-authenticated routes on c
 
 ## Operator console: signing in and Log out
 
+Two modes, chosen by the deployment ([0035](decisions/0035-operator-sign-in-through-an-identity-provider.md)). With `PHOTO_WALL_OIDC_ISSUER` set, people sign in through an identity provider (Keycloak) and Central keeps no passwords: [Signing in through Keycloak](#signing-in-through-keycloak). Without it, Central uses one shared token, and the rest of this section describes that mode.
+
+
 The design, its protocol and its failure table are owned by [pass A](operator-console-ux-pass2-session.md); what happens to unsaved work is owned by [passes C and D §6](operator-console-ux-pass2-flow.md#6-navigation-routes-and-modules).
 
 **Sign in once per browser.** With no session, the console opens on **Sign in to Photo Wall**. Paste `PHOTO_WALL_ADMIN_TOKEN` into **Operator token** and press **Sign in**. Central sets an `HttpOnly` session cookie that lasts 30 days from sign-in; reloads and new tabs in that browser stay signed in. The token is never stored in the browser. The cookie holds only an expiry, the address you signed in at and a signature. A console address you opened before signing in (for example `…/#/scenes`) is kept and shown once the first snapshot has loaded.
@@ -268,6 +271,56 @@ The design, its protocol and its failure table are owned by [pass A](operator-co
 
 **Why the cookie is scoped to `/v1/operator/`.** Browsers send a host's cookies to every port on that host. If the NAS also runs, for example, a photo library on another port, a cookie scoped to `/` would be sent to that library with every request. Scoping the cookie to `/v1/operator/` means the browser sends it only with the console's API requests. This limits exposure; it is not an isolation boundary.
 
+### Signing in through Keycloak
+
+Central is an OpenID Connect client of the deployment's identity provider. It is tested against Keycloak; any provider whose access tokens are signed JWTs carrying roles should work, and one with opaque access tokens does not. **Status: built; the real-Keycloak CI leg is what proves the Keycloak steps below, and it has not passed yet** (see the pull request).
+
+**Set up Keycloak, once.** In the realm people sign in to:
+
+1. Create a client for Central, for example `photo-wall`: client authentication on (a confidential client), standard flow on, PKCE method S256.
+2. Valid redirect URI: `<console address>/v1/operator/session/callback`, exactly, once per address the console is opened at (the name and the IP are two addresses). Valid post-logout redirect URI: `<console address>/`.
+3. Back-channel logout URL: `<an address Keycloak can reach Central at>/v1/operator/session/backchannel-logout`, with "Backchannel logout session required" on. Without it a sign-out made in Keycloak reaches Central only at the next re-check (below).
+4. On that client, create the client role `owner` and give it to each person who may use Photo Wall.
+5. For each script that should stop using the admin token: a second client with client authentication and service accounts on, and the `owner` role of Central's client given to its service account.
+
+**Set Central's environment** (the deployment does this, as it does for Immich; nothing is typed into the console):
+
+| Variable | Value |
+|---|---|
+| `PHOTO_WALL_OIDC_ISSUER` | `https://<keycloak host>/realms/<realm>`. Setting it turns this mode on |
+| `PHOTO_WALL_OIDC_CLIENT_ID` | Central's client, `photo-wall` above |
+| `PHOTO_WALL_OIDC_CLIENT_SECRET` | that client's secret |
+| `PHOTO_WALL_OIDC_ROLE` | the role that lets someone in; default `owner` |
+| `PHOTO_WALL_OIDC_ROLES_CLAIM` | where the access token lists roles; default `resource_access.<client id>.roles`, Keycloak's client roles |
+| `PHOTO_WALL_OIDC_NAME` | what the sign-in button calls the provider; default the issuer's host |
+
+An issuer without a client id or secret stops Central at start with one line naming what is missing. A Keycloak that is down when Central starts does not stop Central.
+
+**Signing in.** The console opens on **Sign in with <name>**, which goes to Keycloak and comes back signed in, to the page you asked for. Central sets the same `HttpOnly`, `SameSite=Strict` cookie as in token mode, scoped to `/v1/operator/`; its value is random and names a row in Central's database. Keycloak's tokens never reach the browser.
+
+| The sign-in page says | Means | Do |
+|---|---|---|
+| "Your account is not allowed to use Photo Wall. Ask for the owner role in <name>." | Keycloak signed you in, but your access token does not carry the role | Give the person the `owner` role on Central's client |
+| "Can't reach <name>. Photo Wall keeps playing. Try again." | Central could not reach Keycloak | Check Keycloak and the network between it and Central; the wall is not affected |
+| "Sign-in failed. Try again." | Anything else: a sign-in left open more than ten minutes, a redirect address Keycloak does not have, a token Central refused | Try again; Central's log has one line saying which |
+
+**How long a sign-in lasts is Keycloak's decision.** Central re-checks each signed-in browser with Keycloak whenever its access token runs out (five minutes by Keycloak's default; the realm's "Access Token Lifespan"). A person disabled, a role removed or a session ended in Keycloak therefore signs that browser out within that time, and at once when Keycloak sends a back-channel logout. If Keycloak does not answer, the browser stays signed in on its last check and Central asks again a minute later. Whatever Keycloak says, a sign-in ends 30 days after it began. To stay signed in for weeks, raise the realm's SSO session idle and maximum times.
+
+**When the sign-in ends while the console is open**, the sign-in dialog opens over the console, which keeps your unsaved work. **Sign in with <name>** opens Keycloak in a new tab; when it finishes, the first tab carries on by itself and the new tab can be closed.
+
+**Log out** ends the sign-in in Central and then in Keycloak, and comes back to the sign-in page. It discards unsaved drafts in that tab, as in token mode.
+
+**Scripts.** A script asks Keycloak for a token with its own client (the client-credentials grant) and sends it as `Authorization: Bearer`. Central lets it in by the same rule as a person: a valid access token from the issuer that carries the role. Its writes are recorded as `client:<id>`, a person's as `person:<id>` ([who changed a record](decisions/0035-operator-sign-in-through-an-identity-provider.md#who-changed-a-record)).
+
+**The admin token as break-glass.** With a provider set, `PHOTO_WALL_ADMIN_TOKEN` is optional. While it is set, it still works as a Bearer header (the `curl` examples here, the calibration reader, the demo), also when Keycloak is down; it never signs a browser in. Unset it once every script has its own client.
+
+**Settings › People and access** (`#/people-and-access`) shows who is signed in, the provider the deployment set and whether Central reaches it. Nothing there is edited: accounts are Keycloak's.
+
+**Costs you should know.**
+- **Central keeps Keycloak's refresh token and ID token for each signed-in browser** in its database, in clear, as it keeps the Immich key ([0020](decisions/0020-immich-key-in-central-database.md)). No route answers them and no log line carries them. A database backup holds them.
+- **One Central API process.** One refresh per browser at a time is guarded inside the process. Several API processes could refresh the same sign-in at once; Central runs one today.
+- **A role change is not instant** unless Keycloak sends a logout: it takes effect at the next re-check.
+
 **Costs you should know.**
 - **No rate limit on sign-in**, as for the bearer header. A token generated by `scripts/configure.py` is 256 bits.
 - **No HSTS.** Central does not pin the host to https, so a first visit over http can be downgraded. Prefer https; over http the cookie also crosses the LAN in clear text.
@@ -290,7 +343,7 @@ The console is one page: a header (Central's health, the snapshot age with **Ref
 | **Photo library** (group Settings) | `#/photo-library` | [Connecting Immich](#connecting-immich): connections, keys, counts, health. |
 | **Needs attention** | `#/attention` | Every Frame and Player incident, and every Immich connection that needs a look, each linked to where it shows. |
 
-**Show and Wall are organization, not permission.** There is one shared admin token and no roles (design D-c/Q5 in the [console design](operator-console-ux-design.md)); the sections change what you are looking at, never what you may do. Display controls ([a Frame's Position and Picture tabs](#operator-console-calibration-and-conflict-states)) are reachable only from the Wall. The four Show sections and Needs attention show frame health as status only (R4). This is checked by a test that walks what the Show and Needs attention pages import, and a browser test that visits each of their sample addresses (`tests/test_console_routes_r4.py`, `tests/browser/test_console_shell_browser.py`).
+**Show and Wall are organization, not permission.** Everyone who may sign in holds the one role, owner ([signing in](#operator-console-signing-in-and-log-out)), and in token mode there is one shared admin token and no roles (design D-c/Q5 in the [console design](operator-console-ux-design.md)); the sections change what you are looking at, never what you may do. Display controls ([a Frame's Position and Picture tabs](#operator-console-calibration-and-conflict-states)) are reachable only from the Wall. The four Show sections and Needs attention show frame health as status only (R4). This is checked by a test that walks what the Show and Needs attention pages import, and a browser test that visits each of their sample addresses (`tests/test_console_routes_r4.py`, `tests/browser/test_console_shell_browser.py`).
 
 **Where an address leads.**
 - An address the console does not know goes to the Wall (`#/wall`), always; with no Frames its first-run guidance is there.

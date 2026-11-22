@@ -26,6 +26,7 @@ from central.operator_auth import (
     OPERATOR_PREFIX,
     SECURE_COOKIE,
     SESSION_PATH,
+    SIGN_IN_PATH,
 )
 from central.operator_session import SESSION_SECONDS, SessionCodec, session_key
 from contracts.time import ManualClock
@@ -465,7 +466,9 @@ def test_every_operator_route_but_the_session_routes_depends_on_admin(registry):
                                                         for d in r.dependant.dependencies)
                for r in routes}
     assert len(guarded) > 20
+    # Decision 0035: the door also answers how to sign in (open) and who is signed in (guarded).
+    open_routes = {(SESSION_PATH, ("POST",)), (SESSION_PATH, ("DELETE",)), (SIGN_IN_PATH, ("GET",))}
     for (path, methods), has_admin in guarded.items():
-        assert has_admin == (path != SESSION_PATH), (path, methods)
+        assert has_admin == ((path, methods) not in open_routes), (path, methods)
     assert {methods for (path, methods) in guarded if path == SESSION_PATH} == {
-        ("POST",), ("DELETE",)}
+        ("POST",), ("DELETE",), ("GET",)}

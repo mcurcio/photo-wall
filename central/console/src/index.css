@@ -127,7 +127,6 @@ label {
 
 /* The labels of text fields. */
 .field__label,
-.console__token-field,
 .console__surface-field,
 .plan__new-frame-field,
 .confirm__typed {
@@ -166,7 +165,6 @@ label {
   line-height: 1.5;
 }
 
-.console__token-field,
 .console__surface-field {
   display: flex;
   flex-direction: column;
@@ -1996,28 +1994,9 @@ label {
   padding: 24px 16px;
 }
 
+/* The card is the catalog's (domain/operator-access/sign-in.tsx); only its width is the screen's. */
 .signin__card {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
   width: min(100%, 24rem);
-  padding: 24px;
-  background: var(--color-surface-raised);
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius-card);
-  box-shadow: 0 1px 3px var(--color-shadow);
-}
-
-.signin__title {
-  margin: 0;
-  font-size: 22px;
-  font-weight: 600;
-  color: var(--color-text);
-}
-
-.signin__kept {
-  margin: 0;
-  color: var(--color-muted);
 }
 
 /* Now (flow design §7 J7, bead 5): the Show-now flow, Run cards and the

@@ -115,8 +115,8 @@ SHARED_WITH_SHOW = {
     "api.ts",
     "model.ts",
     "drawn-line.tsx",
-    # Central's types, limits and refusal codes (generated), and the one answer a request folds to.
-    "contract.ts",
+    # The one answer a request folds to. (Central's generated types, contract.ts, are the shell's
+    # own since sign-in: its sign-in card reads Central's answers through them, decision 0035.)
     "answer.ts",
     # (Power and the week's houseApi.js and weekApi.js are the shell's own: its house clock,
     # houseClock.js, reads Settings › House for every time the console shows.)
@@ -642,7 +642,8 @@ def test_every_section_is_in_exactly_one_route_table():
     sections = [section for group in SAMPLES.values() for section in group]
     assert sorted(sections) == sorted(
         ["now", "scenes", "schedule", "sources", "wall", "hardware", "players", "releases",
-         "photo-library", "photo-fit", "house", "lights", "home-assistant", "paper-profiles", "attention"])
+         "photo-library", "photo-fit", "house", "lights", "home-assistant", "paper-profiles",
+         "people-and-access", "attention"])
 
 
 ROUND_TRIP = r"""
@@ -682,7 +683,7 @@ console.log(JSON.stringify(out));
 ROUTES = [
     {"section": section} for section in
     ("now", "scenes", "schedule", "sources", "wall", "hardware", "releases", "photo-library",
-     "photo-fit", "lights", "home-assistant", "paper-profiles", "attention")
+     "photo-fit", "lights", "home-assistant", "paper-profiles", "people-and-access", "attention")
 ] + [
     {"section": "hardware", "id": "device-" + "a" * 64},
     {"section": "hardware", "id": "a/b ç?#%"},

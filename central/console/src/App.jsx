@@ -1,17 +1,9 @@
 import React from "react";
 
+import { authNoticeWords } from "./domain/operator-access/access.ts";
 import { Shell } from "./Shell.jsx";
 import { SignInScreen } from "./SignInScreen.jsx";
 import { useSnapshot } from "./useSnapshot.js";
-
-// Why the tab is signed out or a sign-in / log-out failed (pass A §7).
-const AUTH_NOTICES = {
-  rejected: "Operator token was not accepted. Re-enter the token to sign in.",
-  expired: "Signed out: the session expired or the token changed. Sign in again.",
-  blocked: "Your browser did not keep the sign-in; allow cookies for this site.",
-  failed: "Sign-in failed: Central did not answer. Try again.",
-  signOutFailed: "Log out failed: Central did not answer. Try again.",
-};
 
 // A write Central refused because it did not come from the signed-in page (403
 // request_unmarked / origin_mismatch; pass A §7). A header-stripping proxy reads the same.
@@ -26,20 +18,23 @@ const ORIGIN_REFUSED_MESSAGE =
  * The shell is keyed on `sessionEpoch`, which Log out bumps, so Log out remounts it
  * and discards every draft. Signed out, the shell is hidden and inert but stays
  * mounted: a session that expires under a draft keeps it (and the last snapshot)
- * behind the sign-in overlay until the operator signs in again. The notices are the
- * same either way, so a sign-in refused for its origin shows the same alert as a
- * write; while signed out they sit inside the sign-in screen, a modal dialog that
- * leaves everything outside it inert.
+ * behind the sign-in overlay until the operator signs in again. A sign-in refused for its
+ * origin shows the same alert as a write; while signed out it sits inside the sign-in screen, a
+ * modal dialog that leaves everything outside it inert, and the session's own notice (why the
+ * tab is signed out) is said in the sign-in card.
  */
 export default function App() {
-  const { auth, authNotice, originRefused, dismissOriginRefused, sessionEpoch } = useSnapshot();
+  const { auth, authNotice, signInMethod, originRefused, dismissOriginRefused, sessionEpoch } =
+    useSnapshot();
   const signedOut = auth === "signedOut";
 
+  // Why the tab is signed out or a sign-in / log-out failed (pass A §7; decision 0035): the words'
+  // one home is domain/operator-access/access.ts. Signed out, the sign-in card says it.
   const notices = (
     <>
-      {authNotice !== null && (
+      {authNotice !== null && !signedOut && (
         <p className="console__auth-error" role="alert">
-          {AUTH_NOTICES[authNotice]}
+          {authNoticeWords(authNotice, signInMethod)}
         </p>
       )}
       {originRefused && (
@@ -57,7 +52,9 @@ export default function App() {
     <div className="console">
       {!signedOut && notices}
       <Shell key={sessionEpoch} hidden={signedOut} />
-      <SignInScreen open={signedOut}>{signedOut && notices}</SignInScreen>
+      <SignInScreen open={signedOut} notice={signedOut ? authNotice : null}>
+        {signedOut && notices}
+      </SignInScreen>
     </div>
   );
 }

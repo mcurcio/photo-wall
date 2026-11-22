@@ -470,6 +470,15 @@ Built on `feat/configuration-snapshots` ([0025](decisions/0025-configuration-sna
 | `PictureHistory` | domain | The Picture tab's History: a Display's picture entries as `HistoryList` rows (each kind in words, display settings named from the tab's own read), Restore into the live picture session and what did not come back | Kept, NotKept, Unrecorded, Skipped, NoSession |
 | `PositionHistory` | domain | The Position tab's History: a Frame's Position entries in the editor's pixels (the box's left and top and its size, how the screen hung; the lighting's mat depth and lights; the paper and the shares of the screen under Details), Restore into the live draft, and why an entry made for a screen hung another way (with the way to the Hardware tab) or another display cannot be restored. The oldest row shown says its position, how the screen hung and its mat and lights; a turn says "Screen turned: it hangs with its top to the right. Position kept: …"; any other row what changed, or "No change:" with its position | Kept, NotKept, ScreenSizeChanged, OtherDisplay, TurnedScreen, NoSession |
 
+### Members for sign-in (3b-i, slice 1)
+
+Built for [0035](decisions/0035-operator-sign-in-through-an-identity-provider.md). `Input` was not needed: token mode's field is the existing `TextInput`.
+
+| Member | Layer | Purpose | States |
+|---|---|---|---|
+| `SignIn` | domain (`domain/operator-access/`) | The sign-in card, by the method Central states: the provider's one button, or the token field. Its notice sits inside the card | Provider, ProviderOverlay, Token, NotAllowed, ProviderUnreachable, Loading, NoAnswer, Phone |
+| `PeopleAndAccess` | domain (`domain/operator-access/`) | Settings › People and access: who is signed in, the provider the deployment set and its check, how long a sign-in lasts. Its rows are `SettingRow`s of kind `house` whose control is a read-only stated value | Provider, TokenMode, ProviderUnreachable, Phone |
+
 ### Later patterns (props written when their delivery starts)
 
 | Pattern | Purpose | Delivery |
@@ -520,7 +529,7 @@ Live changes to equipment do not conflict with the next-start rule, which covers
 
 ### Live updates
 
-- Every view updates by push; there is no **Refresh** button anywhere (design §9). The exception, recorded where it applies: House › Lights and Settings › Home Assistant (every 3 s while shown) and Settings › Paper profiles (every 10 s) are each a `PolledPage`, read again on that cadence and after each change; a Frame's paper profile picker reads the list when the Lighting tab opens; Needs attention's room lights in doubt and the Frame page's Central's error read every 5 s while shown. Polling these pages rather than pushing is the console lane's choice for the room-light delivery ([0028](decisions/0028-room-light.md)), pending the owner's confirmation. A view whose push stream drops keeps its data greyed with "Can't tell since …", not a reload prompt.
+- Every view updates by push; there is no **Refresh** button anywhere (design §9). The exception, recorded where it applies: House › Lights and Settings › Home Assistant (every 3 s while shown) and Settings › Paper profiles (every 10 s) are each a `PolledPage`, read again on that cadence and after each change; a Frame's paper profile picker reads the list when the Lighting tab opens; Needs attention's room lights in doubt and the Frame page's Central's error read every 5 s while shown. The sign-in dialog, while it is shown over an open console in provider mode, reads the session every 2 s so that a sign-in finished in another tab closes it; People and access reads once when it opens. Polling these pages rather than pushing is the console lane's choice for the room-light delivery ([0028](decisions/0028-room-light.md)), pending the owner's confirmation. A view whose push stream drops keeps its data greyed with "Can't tell since …", not a reload prompt.
 - An update never moves what the user is pointing at: a list re-sorts only when the pointer leaves it or after an action.
 
 ### Optimistic and confirmed state
@@ -634,8 +643,8 @@ Every journey step in the [roadmap](roadmap.md#the-journey), one row per home (p
 | Step | Home | Template | Patterns | Save | Status and feedback | Empty / error |
 |---|---|---|---|---|---|---|
 | A1 Install Central | Setup checklist › Server | T7 | Checklist, ProblemCard | none | each step green from a real check | "Network boot files not staged" with the fix |
-| A2 Sign in | Sign-in page | exception (no template) | Field, Button | Action | lands on Home | wrong password inline, without saying which part was wrong |
-| A2 Owner account | Settings › People and access | T8 | SettingRow | Autosave | "Signed in as …" | none |
+| A2 Sign in | Sign-in page | exception (no template) | Field, Button | Action | lands on Home | no password is typed into Photo Wall ([0035](decisions/0035-operator-sign-in-through-an-identity-provider.md)): "Your account is not allowed to use Photo Wall…", "Can't reach <provider>…", "Sign-in failed. Try again." inside the card |
+| A2 Owner account | Settings › People and access (`#/people-and-access`) | T8 | SettingRow (read-only), StatusChip | none (read-only); Action (Log out) | "Signed in as …"; the provider "Set by your deployment" with whether Central reaches it | token mode: "No accounts: this Photo Wall uses one shared token…" |
 | A3 Connect Immich | Settings › Photo library | T8 | SettingRow, Field (the key a password field, then "Key ending …1234"), Button (Check now), ProblemCard | Save (Save checks at once) | "41,203 photos · 2,110 videos · 212 albums · 96 people" (Immich's totals, archived photos included) and the Immich user; Connected, Checking, Paste the address and key, or Needs a look; the deployment's connection reads "Set by your deployment. Change its address or key there." with Check now and no Change, Paste a new key or Remove | EmptyState "Connect your photo library: paste the address of your Immich and an API key below."; a ProblemCard per problem with its one fix, for example "Immich rejected the API key." → Paste a new key (on the deployment's connection: "Set a new API key in your deployment; Photo Wall uses it from its next start." → Check again), each saying "Photos keep playing." |
 | A4 House basics | Settings › House (`#/house`; built in 2b: timezone, location, units, clock format) | T8 | SettingRow, SegmentedControl | Autosave | none | the seeded zone is Central's own and not confirmed (Night off waits until the house is saved once); when the browser's differs it is offered ("Use this browser's timezone (…)?"), never applied by itself; an unknown zone refused in plain words |
 | A5 Ready for Pis | Setup checklist › Ready for Pis | T7 | Checklist, ProblemCard | none | "Network boot OK · release 1.4.2 ready" | the problem names the piece (DHCP, files, release) |
