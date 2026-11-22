@@ -8,18 +8,37 @@ cookie jar: that is how a rotated token and "another address" are exercised for 
 Signed in, the console lands on the Wall (console DDD §48), whose plan tile for the frame is the
 proof that the inventory rendered. A session that ends while signed in shows the sign-in screen
 as an overlay over the kept, hidden console (flow design §6 (a)).
+
+Provider mode (decision 0035) runs the same app with an identity provider configured
+(operator_harness.provider_server: a FakeProvider served over HTTP, which Central's real OpenID
+Connect client and the browser both reach). Central and the provider read one controlled clock.
 """
 
 import os
 import re
+from urllib.parse import parse_qs, urlsplit
 
+import jwt
 import pytest
-from console_tasks import open_pi
-from operator_harness import answer_first, operator_server, sign_in, submit_sign_in
+from console_tasks import current_hash, go, open_pi, section_heading
+from operator_harness import (
+    PERSON,
+    PERSON_SUBJECT,
+    PROVIDER,
+    answer_first,
+    assert_fits_width,
+    operator_server,
+    provider_server,
+    provider_sign_in_button,
+    sign_in,
+    sign_in_with_provider,
+    submit_sign_in,
+)
 from playwright.sync_api import expect
 from support.frames import frame_create
 from test_registry import ADMIN, enroll
 
+from central.operator_access.model import ProviderRefused
 from central.operator_session import SESSION_SECONDS, SessionCodec
 
 pytestmark = pytest.mark.skipif(
@@ -255,3 +274,270 @@ def test_a_write_from_another_address_explains_the_origin_refusal(page, registry
         dialog.get_by_label(f"Type {player_id[-6:]} to confirm", exact=True).fill(player_id[-6:])
         dialog.get_by_role("button", name="Confirm retire", exact=True).click()
         expect(player).to_contain_text("Standing: Retired")
+
+
+# --- Provider mode (decision 0035): sign-in through the deployment's identity provider.
+
+SESSION = "/v1/operator/session"
+NARROW = {"width": 390, "height": 844}
+# The access token's life (FakeProvider `access_seconds`): how long a session's judgement is fresh.
+JUDGEMENT_SECONDS = 300
+
+
+def _dialog(page):
+    return page.get_by_role("dialog", name="Sign in to Photo Wall", exact=True)
+
+
+def _expect_not_signed_in(page, words):
+    """The sign-in screen with its one notice, in the card: the chip, then why."""
+    expect(provider_sign_in_button(page)).to_be_visible()
+    alert = _dialog(page).get_by_role("alert")
+    expect(alert).to_have_count(1)
+    expect(alert).to_contain_text("Not signed in")
+    expect(alert).to_contain_text(words)
+    expect(_frame(page)).to_have_count(0)
+
+
+def _people(page):
+    return page.get_by_role("region", name="People and access", exact=True)
+
+
+def test_first_load_in_provider_mode_signs_in_through_the_provider_and_lands_on_the_wall(
+        page, registry):
+    _seed(registry)
+    with provider_server(registry.db, registry.clock) as (origin, fake):
+        page.context.clear_cookies()
+        page.goto(origin + "/console")
+        expect(provider_sign_in_button(page)).to_be_visible()
+        # Provider mode offers no token field, and names no token.
+        expect(page.get_by_label("Operator token")).to_have_count(0)
+        expect(_dialog(page)).not_to_contain_text("token")
+        provider_sign_in_button(page).click()
+        expect(_frame(page)).to_be_visible()
+        expect(section_heading(page, "wall")).to_be_visible()
+        expect(_dialog(page)).to_be_hidden()
+        expect(page.get_by_role("alert")).to_have_count(0)
+        # One code flow, asked of the provider by Central; the page holds no credential.
+        assert [request["grant_type"] for request in fake.token_requests] == ["authorization_code"]
+        assert page.evaluate("document.cookie") == ""
+        assert page.evaluate("localStorage.length + sessionStorage.length") == 0
+        [cookie] = page.context.cookies()
+        assert (cookie["name"], cookie["path"], cookie["httpOnly"], cookie["sameSite"]) == (
+            "photo_wall_session", "/v1/operator/", True, "Strict")
+        page.reload()
+        expect(_frame(page)).to_be_visible()
+        expect(_dialog(page)).to_be_hidden()
+
+
+def test_a_deep_link_is_returned_to_after_signing_in_through_the_provider(page, registry):
+    _seed(registry)
+    with provider_server(registry.db, registry.clock) as (origin, _fake):
+        sign_in_with_provider(page, origin, "#/scenes")
+        expect(section_heading(page, "scenes")).to_be_visible()
+        assert current_hash(page) == "#/scenes"
+        assert urlsplit(page.url).query == ""
+
+
+def test_a_person_without_the_role_is_told_they_are_not_allowed(page, registry):
+    _seed(registry)
+    with provider_server(registry.db, registry.clock, roles=()) as (origin, _fake):
+        sign_in_with_provider(page, origin)
+        _expect_not_signed_in(
+            page, f"Your account is not allowed to use Photo Wall. Ask for the owner role in {PROVIDER}.")
+        # The result is read once and taken out of the address: a reload does not repeat it.
+        assert "sign_in" not in page.url
+        assert page.context.cookies(origin + SESSION) == []
+        assert page.request.get(origin + SESSION).status == 401
+        page.reload()
+        expect(provider_sign_in_button(page)).to_be_visible()
+        expect(page.get_by_role("alert")).to_have_count(0)
+
+
+def test_a_provider_that_cannot_be_reached_says_so_on_the_sign_in_screen(page, registry):
+    _seed(registry)
+    with provider_server(registry.db, registry.clock) as (origin, fake):
+        page.context.clear_cookies()
+        page.goto(origin + "/console")
+        expect(provider_sign_in_button(page)).to_be_visible()
+        fake.unreachable = True
+        provider_sign_in_button(page).click()
+        _expect_not_signed_in(page, f"Can't reach {PROVIDER}. Photo Wall keeps playing. Try again.")
+        assert "sign_in" not in page.url
+        # Trying again once the provider answers signs in.
+        fake.unreachable = False
+        provider_sign_in_button(page).click()
+        expect(_frame(page)).to_be_visible()
+        expect(page.get_by_role("alert")).to_have_count(0)
+
+
+def test_a_session_ending_in_provider_mode_signs_in_again_in_a_new_tab_and_keeps_the_draft(
+        page, registry):
+    _seed(registry)
+    with provider_server(registry.db, registry.clock) as (origin, fake):
+        sign_in_with_provider(page, origin)
+        expect(_frame(page)).to_be_visible()
+        go(page, "house")
+        # By its label alone: get_by_label, unlike get_by_role, still finds it under the overlay.
+        latitude = page.get_by_label("Latitude", exact=True)
+        latitude.fill("40.7")  # an unsaved draft
+        page.evaluate("window.__notReloaded = true")
+
+        # The provider's own session ends; Central learns it when the judgement goes stale.
+        with registry.db.transaction() as conn:
+            [row] = conn.execute("SELECT provider_session FROM operator_sessions").fetchall()
+        fake.end_session(row["provider_session"])
+        registry.clock.advance(JUDGEMENT_SECONDS)
+        page.get_by_role("button", name="Refresh", exact=True).click()
+
+        expect(provider_sign_in_button(page)).to_be_visible()
+        alert = _dialog(page).get_by_role("alert")
+        expect(alert).to_contain_text("Not signed in")
+        expect(alert).to_contain_text("Signed out: your sign-in ended. Sign in again.")
+        expect(_dialog(page).get_by_text("Your unsaved work is kept until you sign in again.")
+               ).to_be_visible()
+        # The console is kept underneath, hidden and inert, with the draft.
+        assert page.evaluate("document.querySelector('.shell').inert") is True
+        expect(latitude).to_be_hidden()
+        assert latitude.evaluate("(input) => input.value") == "40.7"
+        assert page.request.get(origin + SESSION).status == 401
+
+        # Signing in again happens in a new tab, which lands signed in on the same route.
+        with page.context.expect_page() as opened:
+            provider_sign_in_button(page).click()
+        tab = opened.value
+        expect(section_heading(tab, "house")).to_be_visible()
+        assert urlsplit(tab.url).path == "/" and urlsplit(tab.url).fragment == "/house"
+
+        # This tab notices within its 2 s check and resumes where it was, without a reload.
+        expect(_dialog(page)).to_be_hidden()
+        expect(section_heading(page, "house")).to_be_visible()
+        expect(latitude).to_be_visible()
+        expect(latitude).to_have_value("40.7")
+        expect(page.get_by_role("alert")).to_have_count(0)
+        assert page.evaluate("window.__notReloaded") is True
+        assert current_hash(page) == "#/house"
+        tab.close()
+
+
+def test_log_out_in_provider_mode_ends_the_session_at_central_and_at_the_provider(page, registry):
+    _seed(registry)
+    with provider_server(registry.db, registry.clock) as (origin, fake):
+        visits = []
+        page.on("request", lambda request: visits.append(request.url)
+                if request.url.startswith(fake.issuer + "/logout") else None)
+        sign_in_with_provider(page, origin)
+        expect(_frame(page)).to_be_visible()
+        [cookie] = page.context.cookies()
+        held = {"Cookie": f"{cookie['name']}={cookie['value']}"}
+        assert page.request.get(origin + SESSION, headers=held).status == 200
+
+        page.get_by_role("banner").get_by_role("button", name="Log out", exact=True).click()
+        # The provider's end-session address comes back to the console's sign-in page.
+        expect(provider_sign_in_button(page)).to_be_visible()
+        expect(_frame(page)).to_have_count(0)
+        expect(page.get_by_role("alert")).to_have_count(0)
+        assert urlsplit(page.url)._replace(fragment="").geturl() == origin + "/"
+
+        # The cookie is gone, and the value it held authenticates nothing any more.
+        assert page.context.cookies() == []
+        assert page.request.get(origin + SESSION).status == 401
+        assert page.request.get(origin + SESSION, headers=held).status == 401
+        with registry.db.transaction() as conn:
+            assert conn.execute("SELECT count(*) AS n FROM operator_sessions").fetchone()["n"] == 0
+
+        # The browser went to the provider's end-session address with the person's ID token.
+        [visit] = visits
+        query = parse_qs(urlsplit(visit).query)
+        assert query["post_logout_redirect_uri"] == [origin + "/"]
+        [hint] = query["id_token_hint"]
+        claims = fake.signature(hint, "RS256", jwt.get_unverified_header(hint)["kid"])
+        assert (claims["sub"], claims["typ"]) == (PERSON_SUBJECT, "ID")
+        # So the provider's session ended too: its refresh token is refused.
+        [issued] = fake.issued
+        with pytest.raises(ProviderRefused, match="invalid_grant"):
+            fake.refresh(issued["refresh_token"])
+
+
+def test_people_and_access_in_provider_mode_names_the_person_the_provider_and_the_limit(
+        page, registry):
+    _seed(registry)
+    with provider_server(registry.db, registry.clock) as (origin, _fake):
+        sign_in_with_provider(page, origin)
+        expect(_frame(page)).to_be_visible()
+        go(page, "people-and-access")
+        assert current_hash(page) == "#/people-and-access"
+        people = _people(page)
+        expect(people.get_by_label("Signed in as", exact=True)).to_have_text(f"{PERSON} · Owner")
+        expect(people.get_by_role("button", name="Log out", exact=True)).to_be_visible()
+        expect(people.get_by_label("Accounts", exact=True)).to_have_text(
+            f"Set by your deployment: {PROVIDER}")
+        expect(people).to_contain_text("Connected")
+        expect(people).not_to_contain_text("Can't tell")
+        expect(people.get_by_label("Sign-in lasts", exact=True)).to_have_text(
+            f"As {PROVIDER} decides, at most 30 days")
+        expect(page.get_by_text("No accounts:")).to_have_count(0)
+
+
+def test_people_and_access_says_cant_tell_while_central_cannot_reach_the_provider(page, registry):
+    _seed(registry)
+    with provider_server(registry.db, registry.clock) as (origin, fake):
+        sign_in_with_provider(page, origin)
+        expect(_frame(page)).to_be_visible()
+        fake.unreachable = True
+        go(page, "people-and-access")
+        people = _people(page)
+        # The person stays signed in; the check is never a guess that the provider is down.
+        expect(people.get_by_label("Signed in as", exact=True)).to_have_text(f"{PERSON} · Owner")
+        expect(people).to_contain_text("Can't tell")
+        expect(people).not_to_contain_text("Connected")
+        expect(people).to_contain_text(f"Nobody new can sign in until Central reaches {PROVIDER}.")
+
+
+def test_log_out_on_people_and_access_logs_out(page, registry):
+    _seed(registry)
+    with provider_server(registry.db, registry.clock) as (origin, _fake):
+        sign_in_with_provider(page, origin)
+        expect(_frame(page)).to_be_visible()
+        go(page, "people-and-access")
+        _people(page).get_by_role("button", name="Log out", exact=True).click()
+        expect(provider_sign_in_button(page)).to_be_visible()
+        assert page.request.get(origin + SESSION).status == 401
+
+
+def test_people_and_access_in_token_mode_says_there_are_no_accounts(page, registry):
+    _seed(registry)
+    with operator_server(registry.db, registry.clock) as origin:
+        sign_in(page, origin)
+        expect(_frame(page)).to_be_visible()
+        go(page, "people-and-access")
+        expect(page.get_by_text(
+            "No accounts: this Photo Wall uses one shared token."
+            " Your deployment can connect an identity provider.", exact=True)).to_be_visible()
+        expect(page.get_by_text("Signed in as")).to_have_count(0)
+        expect(page.get_by_text("Sign-in lasts")).to_have_count(0)
+
+
+def test_provider_sign_in_and_people_and_access_never_scroll_sideways_on_a_phone(page, registry):
+    _seed(registry)
+    page.set_viewport_size(NARROW)
+    with provider_server(registry.db, registry.clock, roles=()) as (origin, fake):
+        # The sign-in screen, plain and with its longest notice.
+        page.context.clear_cookies()
+        page.goto(origin + "/console")
+        button = provider_sign_in_button(page)
+        expect(button).to_be_visible()
+        assert_fits_width(page, "provider sign-in")
+        # Phone: the button is full width (of the card) and at least 44 px high.
+        box, card = button.bounding_box(), page.locator(".signin__card").bounding_box()
+        assert box["height"] >= 44, box
+        assert box["width"] >= card["width"] * .8, (box, card)
+        button.click()
+        expect(_dialog(page).get_by_role("alert")).to_contain_text("is not allowed to use Photo Wall")
+        assert_fits_width(page, "provider sign-in, not allowed")
+
+        fake.grant_role(PERSON_SUBJECT)
+        provider_sign_in_button(page).click()
+        expect(_frame(page)).to_be_visible()
+        go(page, "people-and-access")
+        expect(_people(page).get_by_label("Sign-in lasts", exact=True)).to_be_visible()
+        assert_fits_width(page, "People and access")

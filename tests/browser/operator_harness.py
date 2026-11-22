@@ -13,6 +13,7 @@ import time
 from contextlib import contextmanager
 
 import uvicorn
+from operator_provider_fake import OWNER, FakeProvider
 from playwright.sync_api import expect
 from support.player_state import heard_in
 from test_registry import ADMIN
@@ -44,11 +45,14 @@ _IDLE_CONNECTION_SECONDS = 600
 
 
 @contextmanager
-def operator_server(db, clock, *, cache_root=None, media_queue=None, admin_token=ADMIN):
-    """Run the production app on an ephemeral loopback listener with real lifespan."""
+def operator_server(db, clock, *, cache_root=None, media_queue=None, admin_token=ADMIN, oidc=None):
+    """Run the production app on an ephemeral loopback listener with real lifespan.
+
+    `oidc`: the identity provider's settings (decision 0035; `provider_server` below); None is
+    token mode."""
     app = create_app(db, clock, admin_token, run_scheduler=False,
                      cache_root=cache_root, media_queue=media_queue,
-                     central_version=CENTRAL_VERSION)
+                     central_version=CENTRAL_VERSION, oidc=oidc)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen()
@@ -94,6 +98,43 @@ def submit_sign_in(page, token=ADMIN):
     after a session ends mid-use the screen overlays the console, which keeps its state."""
     page.get_by_label("Operator token").fill(token)
     page.get_by_role("button", name="Sign in", exact=True).click()
+
+
+# What the provider-mode harness names its identity provider and the person it signs in.
+PROVIDER = "Fake ID"
+PERSON = "Ada Owner"
+PERSON_SUBJECT = "user-1"
+
+
+@contextmanager
+def provider_server(db, clock, *, roles=(OWNER,), **server):
+    """Run the production app in provider mode (decision 0035): yields `(origin, fake)`.
+
+    `fake` is a `FakeProvider` (tests/operator_provider_fake.py) served as a minimal OpenID Connect
+    issuer on its own loopback port; Central's real client talks to it over HTTP, and the browser
+    is redirected through it. It reads Central's clock, so a test that advances `clock` ages the
+    tokens and the session's judgement together. It signs in `PERSON` (subject `PERSON_SUBJECT`)
+    holding `roles`. `server`: `operator_server`'s other arguments."""
+    fake = FakeProvider(clock=clock)
+    fake.add_user(PERSON_SUBJECT, PERSON, roles=roles)
+    with fake.serving(), operator_server(db, clock, oidc=fake.settings(name=PROVIDER), **server) as origin:
+        yield origin, fake
+
+
+def provider_sign_in_button(page):
+    """The sign-in screen's one button in provider mode."""
+    return page.get_by_role("dialog", name="Sign in to Photo Wall", exact=True).get_by_role(
+        "button", name=f"Sign in with {PROVIDER}", exact=True)
+
+
+def sign_in_with_provider(page, origin, route=""):
+    """Open the console at `origin` (at hash `route`, "#/…", when given) and sign in through the
+    provider: the first-load screen's button navigates the page to Central's `session/start`,
+    the fake provider approves at once, and Central's callback lands back on the console.
+    Cookies are cleared first, as in `sign_in`."""
+    page.context.clear_cookies()
+    page.goto(origin + "/console" + route)
+    provider_sign_in_button(page).click()
 
 
 def inventory(page, origin, token=ADMIN):

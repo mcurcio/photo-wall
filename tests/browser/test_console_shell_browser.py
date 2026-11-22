@@ -476,7 +476,7 @@ def test_the_drawer_traps_focus_closes_on_escape_and_a_link_focuses_the_page_hea
             ? document.activeElement.textContent || document.activeElement.ariaLabel
             : document.activeElement === document.body ? '(browser)' : '(page)'"""
         reached = set()
-        for key in ["Tab"] * 14 + ["Shift+Tab"] * 14:
+        for key in ["Tab"] * 15 + ["Shift+Tab"] * 15:
             page.keyboard.press(key)
             reached.add(page.evaluate(focused))
         assert "(page)" not in reached, reached
