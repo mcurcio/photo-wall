@@ -3,8 +3,10 @@
 The production app on the loopback harness, with a real Output loss recorded through
 Central's own services (tests/support/node_rig.py `rig`): two Frames bound to one Player's two
 Outputs inside one Run, and Display Host reporting Output 0 disconnected on its display line. Central serves the loss on the operator
-snapshot (current Bindings only), and the one classifier shows it on the plan tile, the Run's
-Frame chips, Attention and the Player page's Output row. Every assertion is behavioural.
+snapshot (current Bindings only), and the Player page's Output row states it. Since decision 0036
+a Frame's tile, the Run's Frame chips and Home say only the status Central composes, whose table
+has no row for an Output's interruption: they claim nothing about it (and never Showing for a Frame
+whose Pi sent no report). Every assertion is behavioural.
 """
 
 import os
@@ -31,7 +33,6 @@ NAME = f"Player …{SERIAL[-6:]}"
 LOST, KEPT = "node-f0", "node-f1"
 FULL = ("Output interrupted (Central's inference: Display Host reported the app surface invalidated"
         " or withdrawn · recorded 0 s ago) · the Run continues")
-SHORT = "Output interrupted · the Run continues"
 
 
 def _seed(registry):
@@ -46,33 +47,26 @@ def _seed(registry):
     return player["player_id"], surfaces[0]
 
 
-def _attention(page):
-    strip = page.get_by_role("region", name="Wall attention", exact=True)
-    toggle = strip.get_by_role("button", name=re.compile(r"^(Show|Hide) list$"))
-    if toggle.get_attribute("aria-expanded") != "true":
-        toggle.click()
-    return strip.get_by_role("list", name="Frames and Players needing attention", exact=True)
+NO_REPORT = re.compile(r"^Can't tell since \d\d:\d\d(:\d\d)?( UTC)? · Its Pi has sent no report about this Frame\.$")
 
 
-def test_a_served_interruption_shows_on_the_tile_run_chip_attention_and_output_row(page, registry):
+def test_a_served_interruption_shows_on_the_output_row_and_no_tile_claims_the_frame_shows(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
-        lost = tile_health(page, LOST)
-        expect(lost).to_have_text(SHORT)
-        expect(lost).to_have_accessible_name(FULL)
-        expect(lost).to_have_class(re.compile(r"\bhealth--alarm\b"))
-        # The other Output's Frame, in the same Run on the same Player, shows nothing of it.
-        expect(tile_health(page, KEPT)).to_have_text("Heard recently")
-
-        expect(_attention(page)).to_contain_text(f"{LOST} — {FULL}")
-        expect(_attention(page)).not_to_contain_text(f"{KEPT} —")
-        page.keyboard.press("Escape")  # the list overlays the page
+        # The tile says Central's status: its Pi is heard and sent no report about the Frame, so
+        # nothing is claimed of either Frame, the interrupted one least of all.
+        for frame_id in (LOST, KEPT):
+            health = tile_health(page, frame_id)
+            expect(health).to_have_text("Can't tell")
+            expect(health).to_have_accessible_name(NO_REPORT)
+            expect(health).to_have_class(re.compile(r"\bhealth--unknown\b"))
 
         go(page, "now")
-        expect(page.get_by_text(f"{LOST}: {SHORT}", exact=True).first).to_be_visible()
-        expect(page.get_by_text(f"{KEPT}: Heard recently", exact=True).first).to_be_visible()
+        for frame_id in (LOST, KEPT):
+            expect(page.get_by_text(f"{frame_id}: Can't tell", exact=True).first).to_be_visible()
 
+        # The interruption itself is stated where the Output is: the Pi's page, on that Output alone.
         open_player(page, NAME)
         outputs = page.get_by_role("list", name=f"Outputs of {NAME}", exact=True)
         rows = outputs.get_by_role("listitem")
@@ -89,14 +83,15 @@ def test_a_frame_newly_bound_to_the_lost_output_shows_nothing(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "wall")
         replacement = tile_health(page, "replacement")
-        expect(replacement).to_have_text("Needs calibration")
+        expect(replacement).to_have_text("Check its Position")
         expect(replacement).not_to_have_accessible_name(re.compile("interrupted"))
-        # Needs calibration is the Wall's To finish item, not an incident (console DDD G2),
+        # Its Position to check is the Wall's To finish item, not a problem (console DDD G2),
         # and nothing anywhere claims the old interruption for it.
         expect(page.get_by_role("list", name="To finish", exact=True)).to_contain_text(
             "replacement · needs calibration")
-        expect(page.get_by_role("region", name="Wall attention", exact=True)).not_to_contain_text(
-            "interrupted")
+        go(page, "home")
+        expect(page.get_by_role("main").get_by_role("heading", level=1, name="Home", exact=True)).to_be_visible()
+        expect(page.get_by_role("main")).not_to_contain_text("interrupted")
         open_player(page, NAME)
         outputs = page.get_by_role("list", name=f"Outputs of {NAME}", exact=True)
         expect(outputs).to_contain_text("Bound to Frame replacement")

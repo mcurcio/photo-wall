@@ -418,7 +418,7 @@ def test_a_player_skipped_before_a_reload_gets_zero_reboots_after_resume(page, r
         assert len(fleet.reboots) == 2 and skipped_device not in fleet.reboots
 
 
-DECODE_RECOVERY = ("The Player could not decode this assignment. Check that the media is supported, "
+DECODE_RECOVERY = ("The photo app could not decode this assignment. Check that the media is supported, "
                    "or choose another item.")
 
 

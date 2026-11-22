@@ -88,8 +88,10 @@ def test_the_overview_names_the_winner_and_resting_and_a_display_that_did_not_an
         why = _why(overview)
         expect(why).to_contain_text("Evenings is playing; it beat calm, the Default Scene, which has lower priority.")
         expect(why).to_contain_text(resting_line("07:00"))
-        # Its Pi has never reported: a failure beats Resting, so the header's chip keeps the alarm.
-        expect(page.get_by_role("main").locator('[data-severity="alarm"]').first).to_be_visible()
+        # Its Position is not checked yet: setup is not status (decision 0036, row 1), so the
+        # header's chip says the step and never Resting.
+        expect(_chip(page, "Check its Position")).to_be_visible()
+        expect(_chip(page, "Check its Position")).to_have_attribute("data-severity", "todo")
         expect(_chip(page, POWER["resting"])).to_have_count(0)
         # Once the Frame is positioned and its Pi reports, the chip says Resting from the same
         # answer (Why's `resting`).
@@ -107,3 +109,4 @@ def test_the_overview_names_the_winner_and_resting_and_a_display_that_did_not_an
         expect(why).to_contain_text(power_line(POWER["didNotAnswer"]))
         expect(why).not_to_contain_text(POWER["resting"])
         expect(_chip(page, POWER["resting"])).to_have_count(0)
+        expect(_chip(page, "Needs a look")).to_be_visible()    # the display's problem, in the night (0036 row 7)

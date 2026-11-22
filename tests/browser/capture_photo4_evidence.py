@@ -122,7 +122,7 @@ def test_before_pages(page, registry, scheme):
         expect(form.get_by_role("region", name="Saved Source freshness", exact=True)).to_contain_text("holiday")
         _shot(page, "show-now-before", scheme)
 
-        go(page, "attention")
+        go(page, "home")    # Home took Needs attention's place (decision 0036)
         _shot(page, "attention-before", scheme)
 
 
@@ -299,6 +299,6 @@ def test_after_photo_library_and_attention(page, registry, scheme, suffix):
         expect(_region(page, "Archive").get_by_text("Immich rejected the API key.")).to_be_visible()
         _shot(page, f"photo-library-after{suffix}", scheme)
 
-        go(page, "attention")
-        expect(_region(page, "Photo library").get_by_text("Immich rejected the API key.")).to_be_visible()
+        go(page, "home")
+        expect(page.get_by_role("main").get_by_text("Immich rejected the API key.")).to_be_visible()
         _shot(page, f"attention-after{suffix}", scheme)

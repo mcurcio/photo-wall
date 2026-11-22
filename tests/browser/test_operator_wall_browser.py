@@ -144,17 +144,19 @@ def test_tile_shows_the_planned_fact_frame_health_and_never_claims_live(page, re
         expect(showing).to_contain_text(DIRECT_PLANNED)
         expect(showing.get_by_role("img", name=DIRECT_PLANNED, exact=True)).to_have_count(1)
         expect(showing).not_to_contain_text("Ending (outro)")
-        # Its bound output had a display at Player start; it was never commissioned.
-        expect(tile_health(page, SHOWING)).to_have_accessible_name("Needs calibration")
+        # Its Position was never checked: setup, in Central's words (decision 0036, row 1).
+        expect(tile_health(page, SHOWING)).to_have_text("Check its Position")
+        expect(tile_health(page, SHOWING)).to_have_accessible_name(
+            "Check its Position · Check where the picture sits on its display")
 
-        # The second frame's bound output reported no display: its health says so,
-        # scoped to that frame's identity (compound-key join -- the two frames
-        # share a player but resolve to different ports).
+        # The second frame shares the Player and resolves to its own port and its own status
+        # (compound-key join). Its bound output reported no display at the last enrollment; since
+        # decision 0036 the tile says Central's status, whose table has no row for that, so it too
+        # reads its setup step.
         offline = page.get_by_role("group", name=f"Frame {OFFLINE} status", exact=True)
-        expect(tile_health(page, OFFLINE)).to_have_accessible_name(
-            "No Panel listed as connected at the Player app's last enrollment (may be stale)")
-        expect(offline).to_contain_text("No Panel listed at the last enrollment")
-        expect(showing).not_to_contain_text("No Panel listed at the last enrollment")
+        expect(tile_health(page, OFFLINE)).to_have_text("Check its Position")
+        expect(offline).to_contain_text(NOTHING_PLANNED)
+        expect(showing).not_to_contain_text(NOTHING_PLANNED)
 
         # Honesty (design §6a): the surface asserts intent, never confirmed
         # playback -- the literal "LIVE" appears nowhere on the console.
@@ -350,11 +352,12 @@ def test_first_frame_can_be_drawn_when_installation_has_no_frames(page, registry
 
 
 def test_first_run_guidance_has_no_dismiss_and_opens_edit_layout(page, registry):
-    # With no Frames the landing route is the Wall, whose own face is the first step
+    # With no Frames Home leads to the Wall (decision 0036), whose own face is the first step
     # (console DDD §48, §61): the Guidance banner, with no Dismiss.
     assert not registry.inventory().frames
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
+        page.get_by_role("main").get_by_role("link", name="Add your first Frame on the Wall", exact=True).click()
         guidance = page.get_by_role("note", name="Getting started")
         expect(guidance).to_be_visible()
         assert current_hash(page) == "#/wall"
@@ -772,7 +775,7 @@ def test_drop_tray_frame_onto_plan_gives_distinct_geometry(page, registry):
 def test_snapshot_clock_advances_and_refresh_resets_the_age(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "wall")    # Home, the landing, has no Refresh button
 
         # The global bar shows the snapshot age in the "updated N s ago" form.
         expect(page.get_by_text(re.compile(r"updated \d+ s ago"))).to_be_visible()
@@ -805,7 +808,7 @@ def test_guidance_banner_leaves_by_itself_when_the_first_frame_exists(page, regi
     # No frames seeded -> first-run empty wall -> the guidance banner shows. It has no
     # dismissal (console DDD §54): it leaves when a Frame exists, at the next snapshot.
     with operator_server(registry.db, registry.clock) as origin:
-        sign_in(page, origin)
+        connect(page, origin, "wall")
         guidance = page.get_by_role("note", name="Getting started")
         expect(guidance).to_be_visible()
         registry.create_frame(frame_create(PLACED, x_mm=100, y_mm=100), by="console")

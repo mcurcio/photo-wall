@@ -3,8 +3,8 @@
 import os
 
 import pytest
-from console_tasks import connect, go, open_player, player_name
-from operator_harness import operator_server, report_readiness
+from console_tasks import connect, frame_name, go, home_problems, open_player, player_name
+from operator_harness import operator_server, report_presenting
 from playwright.sync_api import expect
 from test_operator_showrunner_browser import INVALID_FRAME, VALID_FRAME, _seed
 
@@ -14,11 +14,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 DECODE_RECOVERY = (
-    "The Player could not decode this assignment. Check that the media is supported, "
+    "The photo app could not decode this assignment. Check that the media is supported, "
     "or choose another item."
 )
 UNKNOWN_RECOVERY = (
-    "The Player reported an unrecognized readiness failure. Check Player and Central diagnostics."
+    "The photo app reported an unrecognized readiness failure. Check the Pi's and Central's diagnostics."
 )
 
 
@@ -69,7 +69,7 @@ def _inject_diagnostics(page, diagnostics):
 
 def test_readiness_recovery_is_consistent_across_operator_views_and_silence_wins(page, registry):
     players = _seed(registry)
-    report_readiness(registry, players[0])
+    report_presenting(registry, players[0])     # heard and presenting; the other Pi was never heard
     # One known failure plus an unknown future code on the healthy Frame. An
     # unknown code attached to the silent Frame must be suppressed by liveness.
     diagnostics = [
@@ -96,14 +96,15 @@ def test_readiness_recovery_is_consistent_across_operator_views_and_silence_wins
         expect(note).to_contain_text(UNKNOWN_RECOVERY)
         expect(note).to_contain_text("Central accepted this report 5 s ago.")
 
-        # A current report is actionable from the full Needs attention page even
-        # when heartbeat health itself is good. A silent Player has no stale
-        # readiness diagnosis surfaced.
-        go(page, "attention")
-        reports = page.get_by_role("region", name="Player readiness reports", exact=True)
-        expect(reports).to_contain_text(f"Frame {VALID_FRAME}")
+        # A current report is actionable from Home's problems even when the Frame's status
+        # itself is good. A Pi Central has not heard has no stale readiness diagnosis surfaced.
+        go(page, "home")
+        reports = home_problems(page).get_by_role("group", name="Reported by the photo app", exact=True)
+        expect(reports).to_have_count(1)
+        expect(reports).to_contain_text(f"{frame_name(registry, VALID_FRAME)}: Reported by the photo app")
         expect(reports).to_contain_text(DECODE_RECOVERY)
-        expect(reports.get_by_text(f"Frame {INVALID_FRAME}", exact=True)).to_have_count(0)
+        expect(reports.get_by_role("link", name="Open the Frame", exact=True)).to_have_attribute(
+            "href", f"#/wall/frames/{VALID_FRAME}/overview")
 
         # The Player page places the same diagnosis with the bound Output.
         name = player_name(registry, players[0])

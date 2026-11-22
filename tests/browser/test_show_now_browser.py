@@ -29,7 +29,7 @@ from operator_harness import (
     answer_first,
     drive_poll,
     operator_server,
-    report_readiness,
+    report_presenting,
     submit_sign_in,
 )
 from photo_seed import connected, filled, library_of, saved_source
@@ -219,18 +219,19 @@ def test_unhealthy_scene_frame_opens_its_recovery_tab_and_keeps_show_draft(page,
     with operator_server(registry.db, registry.clock) as origin:
         connect(page, origin, "now", paused_at=registry.clock.utc())
         form = show_now(page, SCENE_ID, submit=False)
-        # Enrolled, no report yet: "Getting ready", the Frame page header's words
-        # (domain/frame-health-chip.ts).
-        expect(form).to_contain_text(f"{INVALID_FRAME}: Getting ready")
+        # Bound, its Position not checked: setup's step, the Frame page header's words
+        # (domain/frame-status.ts), with the tab that step is on.
+        expect(form).to_contain_text(f"{INVALID_FRAME}: Check its Position")
         expect(form.get_by_role("link", name=f"Open Frame {INVALID_FRAME}", exact=True)).to_have_attribute(
-            "href", f"#/wall/frames/{INVALID_FRAME}/hardware")
+            "href", f"#/wall/frames/{INVALID_FRAME}/position")
         # A chip is status only (design fix round 4): its link sits on the line under the chips.
-        expect(form.get_by_text(f"{INVALID_FRAME}: Getting ready", exact=True).get_by_role("link")).to_have_count(0)
+        expect(form.get_by_text(f"{INVALID_FRAME}: Check its Position", exact=True).get_by_role("link")).to_have_count(0)
 
+        # Its Pi heard and presenting changes nothing for it: setup comes first (decision 0036, row 1).
         for player_id in players:
-            report_readiness(registry, player_id)
+            report_presenting(registry, player_id)
         drive_poll(page)
-        expect(form).to_contain_text(f"{INVALID_FRAME}: Needs calibration")
+        expect(form).to_contain_text(f"{INVALID_FRAME}: Check its Position")
         recovery = form.get_by_role("link", name=f"Open Frame {INVALID_FRAME}", exact=True)
         expect(recovery).to_have_attribute(
             "href", f"#/wall/frames/{INVALID_FRAME}/position")
@@ -247,7 +248,7 @@ def test_unhealthy_scene_frame_opens_its_recovery_tab_and_keeps_show_draft(page,
         visit(page, "#/now/show/review")
         form = show_form(page)
         expect(form.get_by_text(SCENE_ID, exact=True)).to_be_visible()
-        expect(form).to_contain_text(f"{INVALID_FRAME}: Needs calibration")
+        expect(form).to_contain_text(f"{INVALID_FRAME}: Check its Position")
         show_advanced(form)
         expect(form.get_by_label("Activation priority", exact=True)).to_have_value("0")
 
@@ -255,7 +256,7 @@ def test_unhealthy_scene_frame_opens_its_recovery_tab_and_keeps_show_draft(page,
         page.get_by_role("navigation", name="Steps", exact=True).get_by_role(
             "button", name="Scene", exact=True).click()
         form.get_by_label("Scene", exact=True).select_option("healthy")
-        expect(form).to_contain_text(f"{VALID_FRAME}: Heard recently")
+        expect(form).to_contain_text(f"{VALID_FRAME}: Showing")
         expect(form.get_by_role("link", name=f"Open Frame {VALID_FRAME}", exact=True)).to_have_count(0)
 
 

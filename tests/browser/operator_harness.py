@@ -15,7 +15,9 @@ from contextlib import contextmanager
 import uvicorn
 from operator_provider_fake import OWNER, FakeProvider
 from playwright.sync_api import expect
+from support.devices import seed_device
 from support.player_state import heard_in
+from support.trial_bus import draw
 from test_registry import ADMIN
 
 from central.app import create_app
@@ -163,15 +165,28 @@ def report_readiness(registry, player_id):
         heard_in(conn, player_id, epoch, registry.clock.utc())
 
 
+def report_presenting(registry, player_id):
+    """Central hears the Player (`report_readiness`), and the Player reports each of its Frames'
+    pictures presented: its `frames` report on the Player line, as Central's link records it
+    (support/trial_bus.draw). With both, Central's status for a positioned Frame is Showing
+    (decision 0036, row 12). The Player's box is a device first, as a netbooted Pi's is."""
+    report_readiness(registry, player_id)
+    device_id = next(p.device_id for p in registry.inventory().players if p.id == player_id)
+    with registry.db.transaction() as conn:
+        seed_device(conn, device_id, None)
+    draw(registry, device_id)
+
+
 def tile_status(page, frame_id):
     """A plan tile's status readout, located by frame identity (never by coordinates)."""
     return page.get_by_role("group", name=f"Frame {frame_id} status", exact=True)
 
 
 def tile_health(page, frame_id):
-    """A plan tile's health: its visible text is the short tile label, and its accessible
-    name is the full label with the age (health.js `tileLabel` / `label`). The tile's planned
-    fact is an image too (console DDD §35), so the health line is picked by its class."""
+    """A plan tile's health: its visible text is the status word Central serves (or the setup
+    step), and its accessible name is the status in one line with since when
+    (domain/frame-status.ts `frameChip` / `statusLine`). The tile's planned fact is an image too
+    (console DDD §35), so the health line is picked by its class."""
     return tile_status(page, frame_id).locator(".plan__health")
 
 

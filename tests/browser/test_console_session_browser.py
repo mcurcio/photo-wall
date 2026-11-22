@@ -5,8 +5,8 @@ the token: every operator fetch carries the console marker and the browser's Htt
 no request carries a bearer. Cookies ignore the port, so two servers on 127.0.0.1 share one
 cookie jar: that is how a rotated token and "another address" are exercised for real.
 
-Signed in, the console lands on the Wall (console DDD §48), whose plan tile for the frame is the
-proof that the inventory rendered. A session that ends while signed in shows the sign-in screen
+Signed in, the console lands on Home (decision 0036), whose tile for the Frame is the proof that
+Central's reads rendered. A session that ends while signed in shows the sign-in screen
 as an overlay over the kept, hidden console (flow design §6 (a)).
 
 Provider mode (decision 0035) runs the same app with an identity provider configured
@@ -55,8 +55,9 @@ def _seed(registry):
 
 
 def _frame(page):
-    """The frame's plan tile status on the Wall: visible only while signed in and shown."""
-    return page.get_by_role("group", name=f"Frame {FRAME} status", exact=True)
+    """The Frame's tile on Home (Central names a new Frame "Frame 1"): visible only while signed in
+    and shown."""
+    return page.get_by_role("region", name="Wall 1", exact=True).get_by_role("group", name="Frame 1", exact=True)
 
 
 def _sign_in_button(page):
@@ -108,7 +109,8 @@ def test_session_expiry_after_thirty_days_returns_to_the_sign_in_screen(page, re
         expect(_frame(page)).to_be_visible()
         page.evaluate("window.__notReloaded = true")
         registry.clock.advance(SESSION_SECONDS)
-        page.get_by_role("button", name="Refresh", exact=True).click()
+        # Home has no Refresh button: its next read (every 5 s) finds the session ended.
+        expect(_sign_in_button(page)).to_be_visible(timeout=15000)
         _expect_signed_out(page)
         expect(page.get_by_role("alert")).to_contain_text(
             "Signed out: the session expired or the token changed")
@@ -116,8 +118,9 @@ def test_session_expiry_after_thirty_days_returns_to_the_sign_in_screen(page, re
         # and inert (flow design §6 (a)), and says the work is kept.
         expect(page.get_by_text("Your unsaved work is kept until you sign in again.")
                ).to_be_visible()
-        expect(page.get_by_label(re.compile(rf"^Frame {FRAME}: "))).to_be_attached()
-        expect(page.get_by_label(re.compile(rf"^Frame {FRAME}: "))).to_be_hidden()
+        kept = page.get_by_role("link", name="Frame 1", exact=True, include_hidden=True)   # Home's tile
+        expect(kept).to_be_attached()
+        expect(kept).to_be_hidden()
         # Signing in again shows the same console, without a reload.
         submit_sign_in(page)
         expect(_frame(page)).to_be_visible()
@@ -231,6 +234,7 @@ def test_the_console_marks_every_operator_fetch_and_never_sends_a_bearer(page, r
     with operator_server(registry.db, registry.clock) as origin:
         sign_in(page, origin)
         expect(_frame(page)).to_be_visible()
+        go(page, "wall")    # Home has no Refresh button
         page.get_by_role("button", name="Refresh", exact=True).click()
         page.get_by_role("button", name="Log out", exact=True).click()
         _expect_signed_out(page)
@@ -302,7 +306,7 @@ def _people(page):
     return page.get_by_role("region", name="People and access", exact=True)
 
 
-def test_first_load_in_provider_mode_signs_in_through_the_provider_and_lands_on_the_wall(
+def test_first_load_in_provider_mode_signs_in_through_the_provider_and_lands_on_home(
         page, registry):
     _seed(registry)
     with provider_server(registry.db, registry.clock) as (origin, fake):
@@ -314,7 +318,7 @@ def test_first_load_in_provider_mode_signs_in_through_the_provider_and_lands_on_
         expect(_dialog(page)).not_to_contain_text("token")
         provider_sign_in_button(page).click()
         expect(_frame(page)).to_be_visible()
-        expect(section_heading(page, "wall")).to_be_visible()
+        expect(section_heading(page, "home")).to_be_visible()
         expect(_dialog(page)).to_be_hidden()
         expect(page.get_by_role("alert")).to_have_count(0)
         # One code flow, asked of the provider by Central; the page holds no credential.

@@ -866,7 +866,9 @@ def test_output_first_bind_opens_the_frame(page, registry):
         _frame_select(page, player_id).select_option("lobby-left")
         _card_outputs(page, name).get_by_role("button", name="Bind HDMI-A-1", exact=True).click()
         expect(frame_heading(page, frame_name(registry, "lobby-left"))).to_be_focused()
-        expect(page.get_by_role("tab", name="Hardware", exact=True)
+        # At the tab its status is about (decision 0036): fed by a Pi now, its next setup step
+        # is to check its Position.
+        expect(page.get_by_role("tab", name="Position", exact=True)
                ).to_have_attribute("aria-selected", "true")
         frame = registry.inventory().frames[0]
         assert (frame.player_id, frame.output_id) == (player_id, "HDMI-A-1")

@@ -6,14 +6,14 @@ connection's health is what the media worker would record, seeded through the st
 (`PgPhotoLibrary.begin_contact` / `record_contact`), with no worker and no Immich.
 
 Mutation probes: echo the key in the row -> the DOM assertion of the first case fails; drop the
-Needs attention card -> the problems case fails.
+Home card -> the problems case fails.
 """
 
 import os
 import re
 
 import pytest
-from console_tasks import connect, current_hash, go
+from console_tasks import connect, current_hash, go, home_problems
 from operator_harness import operator_server
 from playwright.sync_api import expect
 from runtime_fakes import apply_procrastinate_schema
@@ -165,8 +165,7 @@ PROBLEMS = {
 
 
 @pytest.mark.parametrize("problem", sorted(PROBLEMS))
-def test_each_problem_says_its_sentence_and_its_fix_and_needs_attention_lists_it(page, registry, library,
-                                                                                 problem):
+def test_each_problem_says_its_sentence_and_its_fix_and_home_lists_it(page, registry, library, problem):
     seed, sentence, fix = PROBLEMS[problem]
     ref = _added(registry)
     seed(library, ref)
@@ -184,9 +183,10 @@ def test_each_problem_says_its_sentence_and_its_fix_and_needs_attention_lists_it
         expect(row.get_by_text(re.compile(r"^Family \(Immich\): Needs a look since \w{3} \d{2}:\d{2}\.$"))
                ).to_be_visible()
 
-        go(page, "attention")
-        cards = _region(page, "Photo library")
-        expect(cards.get_by_role("group", name="Needs a look")).to_have_count(1)
+        # Home lists it among its problems (decision 0036), beside the house's own word for it.
+        go(page, "home")
+        cards = home_problems(page).get_by_role("group", name="Needs a look").filter(has_text="Family (Immich): ")
+        expect(cards).to_have_count(1)
         expect(cards.get_by_text(sentence)).to_be_visible()
         expect(cards.get_by_text(re.compile(r"^Family \(Immich\): Needs a look since \w{3} \d{2}:\d{2}\.$"))
                ).to_be_visible()
@@ -198,8 +198,9 @@ def test_each_problem_says_its_sentence_and_its_fix_and_needs_attention_lists_it
         _contact(library, ref, _answer() if problem != "other_user" else _answer(user=ANNA))
         go(page, "photo-library")
         expect(_region(page, "Family").get_by_text("Connected")).to_be_visible()
-        go(page, "attention")
-        expect(_region(page, "Photo library")).to_have_count(0)
+        go(page, "home")
+        expect(page.get_by_role("main").get_by_role("heading", level=1, name="Home", exact=True)).to_be_visible()
+        expect(home_problems(page)).to_have_count(0)
 
 
 def test_remove_is_refused_in_plain_words_while_a_source_uses_the_connection(page, registry, library):
@@ -277,7 +278,7 @@ def test_the_connection_the_deployment_sets_is_read_only_with_its_health_and_che
         assert KEY not in page.content()
         # A key problem's fix is made in the deployment; the one button here is Check again.
         _contact(library, connection.connection_ref, ContactRefused(problem=KeyRejected()))
-        go(page, "attention")
+        go(page, "home")
         go(page, "photo-library")
         expect(row.get_by_text("Immich rejected the API key. Set a new API key in your deployment; "
                                "Photo Wall uses it from its next start.")).to_be_visible()

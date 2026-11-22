@@ -114,7 +114,7 @@ def test_after(page, registry, monkeypatch, scheme, suffix):
         _shot(page, f"photo-library-after{suffix}", scheme)
 
         _checked(library, ref, KeyRejected())
-        go(page, "attention")
+        go(page, "home")
         go(page, "photo-library")
         expect(row.get_by_text("Immich rejected the API key.", exact=False)).to_be_visible()
         _shot(page, f"photo-library-key-rejected-after{suffix}", scheme)

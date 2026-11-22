@@ -308,7 +308,7 @@ def test_a_retired_player_page_reads_no_node_records(page, registry):
         assert sent == []
 
 
-def test_the_retired_list_bookmarks_land_on_the_wall(page, registry):
+def test_the_retired_list_bookmarks_land_on_home(page, registry):
     # No aliases (owner rule): the Equipment and Players lists' bookmarks are unknown routes,
     # which land where every unknown route does; the sidebar's Fleet group is Hardware.
     enroll(registry, count=1)
@@ -316,8 +316,8 @@ def test_the_retired_list_bookmarks_land_on_the_wall(page, registry):
         connect(page, origin)
         for bookmark in ("#/equipment", "#/players"):
             page.goto(origin + "/console" + bookmark)
-            expect(page.get_by_role("heading", level=1, name="Wall", exact=True)).to_be_visible()
-            assert current_hash(page) == "#/wall"
+            expect(page.get_by_role("heading", level=1, name="Home", exact=True)).to_be_visible()
+            assert current_hash(page) == "#/home"
         nav = page.get_by_role("navigation", name="Sections", exact=True)
         for gone in ("Equipment", "Players", "Software and screens"):
             expect(nav.get_by_role("link", name=gone, exact=True)).to_have_count(0)

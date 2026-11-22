@@ -1,5 +1,6 @@
-"""Central's error in the console: Needs attention's source row (the room lights Central is in doubt
-of, with what to do and the Frames that use them), House › Lights' "Can't read since …" and "Link
+"""Central's error in the console: Home's source row (the room lights Central is in doubt
+of, with what to do and the Frames that use them; decision 0036 folded Needs attention into Home's
+problems), House › Lights' "Can't read since …" and "Link
 closed since …" lines, and the Frame page's "Central's error" on Overview, apart from Hardware.
 
 The production app serves the console and the Frame (a real Registry); Central's error routes
@@ -7,8 +8,8 @@ The production app serves the console and the Frame (a real Registry); Central's
 with their doubts (GET /v1/operator/house/lights) are the central lanes', so `_serve` answers them
 with the contract's shapes (central/central_errors/views.py, central/room_light/views.py).
 
-Mutation probes: drop `noneInDoubt` from Needs attention's "Nothing needs attention" -> the failed
-read case reads "Nothing needs attention"; `keptWords` says "Can't tell" for every reason -> the
+Mutation probes: draw nothing for a failed read of Central's errors (`sourcesToShow`) -> the failed
+read case finds no problem on Home; `keptWords` says "Can't tell" for every reason -> the
 House › Lights case never reads "Can't read since"; the Frame page shows Central's error on the
 Hardware tab instead of Overview -> the Frame case finds no "Central's error" section.
 """
@@ -18,7 +19,7 @@ import os
 import re
 
 import pytest
-from console_tasks import connect, open_frame, visible_page
+from console_tasks import connect, home_problems, open_frame, visible_page
 from operator_harness import operator_server
 from playwright.sync_api import expect
 from test_console_frame_page_browser import FRAME, _seed
@@ -36,7 +37,7 @@ FAMILY_ROOM_REF = {"source": HOME_ASSISTANT, "address": "light.family_room"}
 WINDOW_REF = {"source": HOME_ASSISTANT, "address": "sensor.window_illuminance"}
 UPDATE_GALLERIA = "Update Galleria in Home Assistant (HACS) to its newest release"
 LINE1 = "Photo Wall can't read Family Room Lights · since 29 Oct 18:05"
-LINE2 = "Its last word: off (26 Oct 15:35) · see Needs attention in Photo Wall"
+LINE2 = "Its last word: off (26 Oct 15:35) · see Home in Photo Wall"
 
 
 # Family Room Lights' colour line, following its bulb (its doubt added by `lights_view`).
@@ -105,14 +106,15 @@ def _serve(page, *, errors=IN_DOUBT, errors_status=200, lights=None, impediment=
 
 
 def _room_lights(page):
-    return visible_page(page).get_by_role("region", name="Room lights", exact=True)
+    """Home's room lights in doubt, among its problems."""
+    return home_problems(page).get_by_role("group", name="Room lights in doubt", exact=True)
 
 
-def test_needs_attention_says_the_source_in_doubt_what_to_do_and_its_frames(page, registry):
+def test_home_says_the_source_in_doubt_what_to_do_and_its_frames(page, registry):
     _seed(registry)
     with operator_server(registry.db, registry.clock) as origin:
         _serve(page)
-        connect(page, origin, "attention")
+        connect(page, origin, "home")
         section = _room_lights(page)
         expect(section).to_contain_text(re.compile(r"Family Room Lights: Can't read since \S+ \d"))
         expect(section).to_contain_text(f"Photo Wall can't read what its source reports. {UPDATE_GALLERIA}.")
@@ -121,15 +123,15 @@ def test_needs_attention_says_the_source_in_doubt_what_to_do_and_its_frames(page
         # The Frame by its name (the Registry's "Frame 1"), to its page.
         expect(section.get_by_role("link", name="Frame 1", exact=True)).to_have_attribute(
             "href", re.compile(rf"^#/wall/frames/{FRAME}/"))
-        expect(visible_page(page)).not_to_contain_text("Nothing needs attention")
 
 
-def test_needs_attention_never_says_nothing_when_central_did_not_answer(page, registry):
+def test_home_never_says_nothing_is_wrong_when_central_did_not_answer(page, registry):
     with operator_server(registry.db, registry.clock) as origin:
         _serve(page, errors={"error": "store_unavailable"}, errors_status=503)
-        connect(page, origin, "attention")
+        connect(page, origin, "home")
+        # A read that failed is itself listed among Home's problems, as Can't tell: never silence.
         expect(_room_lights(page)).to_contain_text("Central did not answer with the room lights it is in doubt of.")
-        expect(visible_page(page)).not_to_contain_text("Nothing needs attention")
+        expect(_room_lights(page).locator("[data-severity]")).to_have_attribute("data-severity", "unknown")
 
 
 def test_house_lights_says_cant_read_and_link_closed_with_the_last_word_kept(page, registry):
@@ -156,8 +158,8 @@ def test_the_frame_page_shows_centrals_error_on_overview_apart_from_hardware(pag
         expect(error).to_contain_text(LINE1)
         expect(error).to_contain_text(LINE2)
         expect(error.get_by_role("link", name="Family Room Lights", exact=True)).to_have_attribute("href", "#/lights")
-        expect(error.get_by_role("link", name="See what to do on Needs attention", exact=True)).to_have_attribute(
-            "href", "#/attention")
+        expect(error.get_by_role("link", name="See what to do on Home", exact=True)).to_have_attribute(
+            "href", "#/home")
         hardware = open_frame(page, FRAME, "hardware")
         expect(hardware.get_by_role("region", name="Central's error", exact=True)).to_have_count(0)
         expect(hardware).not_to_contain_text(LINE1)
