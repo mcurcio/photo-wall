@@ -12,6 +12,10 @@ name: Controller and Player software e2e
 # shared setup is the software-e2e-setup action. The scenario's Players run from the app root
 # (photo-wall-player, decision 0019) of the node component set the pipeline's node-components
 # job built for the same revision.
+#
+# A fourth job needs no Immich and no media image: `keycloak` starts the pinned Keycloak
+# (tests/integration/compose.keycloak.yml) and runs the real-Keycloak sign-in tests against it
+# (`-m keycloak`, tests/conftest.py; decision 0035).
 on:
   workflow_call:
     inputs:
@@ -237,3 +241,64 @@ jobs:
             .venv/bin/python -m scripts.immich_fixture cleanup \
               --state-dir "$RUNNER_TEMP/immich-fixture"
           fi
+
+  # Decision 0035's sign-in against a real Keycloak: one pinned Keycloak with its imported realm
+  # on the runner's loopback, Central under uvicorn on the runner itself (the realm's back-channel
+  # logout address reaches it through host.docker.internal), and the test database.
+  keycloak:
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      KEYCLOAK_COMPOSE: tests/integration/compose.keycloak.yml
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - id: docker-hub-mirror
+        uses: ./.github/actions/docker-hub-mirror
+      - uses: ./.github/actions/python-uv
+      - run: uv sync --frozen
+
+      - name: Start the disposable test database
+        run: docker compose -f tests/integration/compose.test-database.yml up -d --wait
+
+      # One image at a time through the retrying pull (scripts/registry_pull.py); `up` below
+      # then finds the digest-pinned image present and pulls nothing.
+      - name: Pull the pinned Keycloak
+        run: |
+          docker compose -f "$KEYCLOAK_COMPOSE" config --images \
+            | .venv/bin/python -c 'import sys; from scripts.registry_pull import pull_images; pull_images(sys.stdin.read().split())'
+
+      - name: Start the disposable Keycloak and import its realm
+        run: |
+          docker compose -f "$KEYCLOAK_COMPOSE" up -d --wait --wait-timeout 240
+          # The realm, as the runner reaches it through the published port.
+          curl --fail --silent --show-error --retry 10 --retry-delay 2 --retry-all-errors \
+            http://127.0.0.1:18180/realms/photo-wall-test/.well-known/openid-configuration \
+            | python3 -c 'import json, sys; print("issuer:", json.load(sys.stdin)["issuer"])'
+
+      # A failed test prints the browser's steps and every token's claims it read (pytest shows
+      # a failed test its output).
+      - name: Run the real-Keycloak sign-in tests
+        env:
+          PHOTO_WALL_KEYCLOAK: http://127.0.0.1:18180
+          PHOTO_WALL_TEST_REQUIRE_DATABASE: '1'
+        run: |
+          .venv/bin/python scripts/test_local.py -q --tb=short --durations=25 \
+            -m keycloak --ignore=tests/browser
+
+      - name: Show Keycloak's state and the end of its log
+        if: failure()
+        run: |
+          docker compose -f "$KEYCLOAK_COMPOSE" ps --all
+          docker compose -f "$KEYCLOAK_COMPOSE" logs --no-color --timestamps --tail 300 keycloak
+          # Can a container reach the runner where the realm says Central is? (Central has
+          # stopped by now, so "refused" is the healthy answer and a timeout is not.)
+          docker compose -f "$KEYCLOAK_COMPOSE" exec -T keycloak bash -c \
+            'timeout 5 bash -c "exec 3<>/dev/tcp/host.docker.internal/18181"; echo "connect to Central: exit $?"' || true
+
+      - name: Remove the disposable Keycloak
+        if: always()
+        run: docker compose -f "$KEYCLOAK_COMPOSE" down --volumes --timeout 5

@@ -25,6 +25,9 @@ DATABASE_ROOT = "database_provisioner"
 # Likewise a test whose closure holds the real Immich fixture is an `immich` test (it may also be
 # `db`): CI's software-e2e.yml photo-sources job runs them against a published fixture.
 IMMICH_ROOT = "immich_library"
+# And a test whose closure holds the real Keycloak (tests/integration/keycloak_rig.py) is a
+# `keycloak` test: CI's software-e2e.yml keycloak job runs them against a pinned Keycloak.
+KEYCLOAK_ROOT = "keycloak"
 BROWSER_TESTS = Path(__file__).parent / "browser"
 
 # A skip in CI (`CI` set) fails the run unless its reason starts with one of these: each is a
@@ -43,6 +46,7 @@ CI_SKIP_ALLOWLIST = (
     "set PHOTO_WALL_IMAGE_MOUNT_TESTS",  # node-components.yml mounts the images (docker, loop, sudo)
     "set PHOTO_WALL_LOCAL_REPO",  # node-components.yml's debs job proves the repo it builds
     "set PHOTO_WALL_IMMICH_FIXTURE",  # software-e2e.yml photo-sources runs the named Immich tests
+    "set PHOTO_WALL_KEYCLOAK",  # software-e2e.yml keycloak runs the real-Keycloak sign-in tests
 )
 
 
@@ -57,12 +61,15 @@ def pytest_configure(config):
                             "(support/shards.py)")
     config.addinivalue_line("markers", "immich: needs the published Immich fixture (derived from "
                             "its fixtures; software-e2e.yml photo-sources)")
+    config.addinivalue_line("markers", "keycloak: needs the pinned Keycloak (derived from its "
+                            "fixtures; software-e2e.yml keycloak)")
 
 
 @pytest.hookimpl(tryfirst=True)  # before `-m` deselects and xdist reads the groups
 def pytest_collection_modifyitems(config, items):
     """Derive each test's tier: `browser` by path, else `db` by its fixtures, else unit; and
-    `immich` by its fixtures, whatever its tier. Then keep this run's shard (support/shards.py)."""
+    `immich` and `keycloak` by its fixtures, whatever its tier. Then keep this run's shard
+    (support/shards.py)."""
     for item in items:
         immich = IMMICH_ROOT in getattr(item, "fixturenames", ())
         if immich:
@@ -70,6 +77,11 @@ def pytest_collection_modifyitems(config, items):
             # The fixture is one shared library that some tests add photos to and remove them
             # from while others count it: every Immich test runs on one worker, in order.
             item.add_marker(pytest.mark.xdist_group("immich"))
+        if KEYCLOAK_ROOT in getattr(item, "fixturenames", ()):
+            item.add_marker(pytest.mark.keycloak)
+            # One realm, whose roles and sessions the tests change, and one Central port the realm
+            # names: every Keycloak test runs on one worker, in order.
+            item.add_marker(pytest.mark.xdist_group("keycloak"))
         if BROWSER_TESTS in item.path.parents:
             item.add_marker(pytest.mark.browser)
         elif DATABASE_ROOT in getattr(item, "fixturenames", ()):

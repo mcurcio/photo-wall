@@ -1,0 +1,118 @@
+{
+  "realm": "photo-wall-test",
+  "enabled": true,
+  "sslRequired": "none",
+  "accessTokenLifespan": 6,
+  "roles": {
+    "client": {
+      "photo-wall": [
+        {
+          "name": "owner",
+          "description": "May do everything in Photo Wall (decision 0035)"
+        }
+      ]
+    }
+  },
+  "clients": [
+    {
+      "clientId": "photo-wall",
+      "name": "Photo Wall (Central under test)",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "isolated-test-only-central-secret",
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "redirectUris": [
+        "http://127.0.0.1:18181/v1/operator/session/callback"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "post.logout.redirect.uris": "http://127.0.0.1:18181/",
+        "backchannel.logout.url": "http://host.docker.internal:18181/v1/operator/session/backchannel-logout",
+        "backchannel.logout.session.required": "true"
+      }
+    },
+    {
+      "clientId": "photo-wall-agent",
+      "name": "A script that holds the owner role",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "isolated-test-only-agent-secret",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true
+    },
+    {
+      "clientId": "photo-wall-stranger",
+      "name": "A script that holds no role",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "isolated-test-only-stranger-secret",
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true
+    }
+  ],
+  "users": [
+    {
+      "username": "owner-user",
+      "enabled": true,
+      "firstName": "Ada",
+      "lastName": "Owner",
+      "email": "owner-user@photo-wall.test",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "isolated-test-only-owner",
+          "temporary": false
+        }
+      ],
+      "clientRoles": {
+        "photo-wall": [
+          "owner"
+        ]
+      }
+    },
+    {
+      "username": "no-role-user",
+      "enabled": true,
+      "firstName": "Nora",
+      "lastName": "Norole",
+      "email": "no-role-user@photo-wall.test",
+      "emailVerified": true,
+      "credentials": [
+        {
+          "type": "password",
+          "value": "isolated-test-only-no-role",
+          "temporary": false
+        }
+      ]
+    },
+    {
+      "username": "service-account-photo-wall-agent",
+      "enabled": true,
+      "serviceAccountClientId": "photo-wall-agent",
+      "clientRoles": {
+        "photo-wall": [
+          "owner"
+        ]
+      }
+    },
+    {
+      "username": "service-account-photo-wall-stranger",
+      "enabled": true,
+      "serviceAccountClientId": "photo-wall-stranger"
+    }
+  ]
+}
