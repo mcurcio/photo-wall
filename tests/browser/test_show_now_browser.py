@@ -46,10 +46,13 @@ from test_operator_showrunner_browser import (
     _seed,
     _seed_source,
 )
+from test_skip_never_show import Wall
 
+from central.everyday.model import END_LEAD
+from central.everyday.policy import showing_at
 from central.photo_library.model import SourceQuery
 from central.photo_library.ports import CheckFailed
-from central.runtime import Contribution, Scene
+from central.runtime import Contribution, Scene, Transition
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -756,3 +759,62 @@ def test_back_to_normal_on_home_ends_the_takeover_at_once(page, registry):
         registry.clock.advance(answer["until"] - registry.clock.utc() + 1)
         (run,) = _runs_of(page, origin, SCENE_ID)
         assert run["phase"] == "cancelled"
+
+
+def test_back_to_normal_reveals_the_schedules_current_state_at_once(page, registry):
+    """The owner's D2/S3 end to end, on a wall the real Coordinator plans: Show now on the hall
+    alone (the desk left out gets no command), with an end; minutes later, Home's banner's Back to
+    normal ends it at once, mid-photo: the cut is `END_LEAD` and the Scene's fade after the press,
+    not the takeover's end nor its photo's, and what shows from the cut is the schedule's turn of
+    that moment (it kept advancing beneath), not the one the takeover covered. Downward
+    cancellation: the Run reads cancelled. Mutation probe: route Back to normal to `finish`."""
+    fade = 2
+    with operator_server(registry.db, registry.clock) as origin:
+        wall = Wall(registry, {"hall": "wall", "desk": "wall"}, cycle=60)
+        for frame_id in wall.players:
+            registry.rename_frame(frame_id, frame_id.capitalize(), by="console")
+        wall.coordinator.runtime.command("set_scene", Scene(
+            scene_id="holidays", cycle_seconds=600, loop=True, transition=Transition(seconds=fade),
+            contributions=tuple(Contribution(target=f"frame:{frame}", source_refs=("library:1",))
+                                for frame in ("hall", "desk"))), by="console")
+        schedule = showing_at(wall.layers("hall"), registry.clock.utc()).run_id
+        connect(page, origin)
+        form = start_show_now(page, "holidays")
+        frames = form.get_by_role("group", name="Frames", exact=True)
+        frames.get_by_role("checkbox", name="desk", exact=True).uncheck()
+        form.get_by_role("button", name="Continue", exact=True).click()
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/activations")) as info:
+            form.get_by_role("button", name="Activate now", exact=True).click()
+        assert info.value.status == 200, info.value.text()
+        sent = info.value.request.post_data_json
+        assert sent["frame_ids"] == ["hall"] and sent["ends"] == {"kind": "in", "seconds": 3600}
+        takeover = info.value.json()["run_id"]
+        wall.tick(5)
+        covered = showing_at(wall.layers("hall"), registry.clock.utc())
+        assert covered.run_id == takeover
+        assert showing_at(wall.layers("desk"), registry.clock.utc()).run_id == schedule
+        beneath_then = next(layer for layer in wall.layers("hall") if layer.run_id == schedule
+                            and layer.start <= registry.clock.utc() < layer.end)
+        for _ in range(5):                       # minutes pass; the schedule advances beneath
+            wall.tick(30)
+
+        go(page, "home")
+        banner = page.locator("section[data-kind=takeover]").filter(has_text="holidays")
+        expect(banner).to_be_visible(timeout=15_000)
+        pressed = registry.clock.utc()
+        with page.expect_response(lambda r: r.url.endswith("/end") and r.request.method == "POST") as ended:
+            banner.get_by_role("button", name="Back to normal", exact=True).click()
+        assert ended.value.status == 200, ended.value.text()
+        cut = ended.value.json()["until"]
+        assert cut <= pressed + END_LEAD + fade + 1, (pressed, cut)       # at once, mid-photo
+        assert cut < covered.end
+        expect(page.locator("[role=status].fixed")).to_contain_text("Back to normal")
+        wall.tick()
+        wall.tick(cut + 1 - registry.clock.utc())
+        revealed = showing_at(wall.layers("hall"), registry.clock.utc())
+        assert revealed.run_id == schedule, revealed
+        assert revealed.start < cut and revealed.assignment_id != beneath_then.assignment_id
+        assert showing_at(wall.layers("desk"), registry.clock.utc()).run_id == schedule
+        (run,) = [run for run in _runs_of(page, origin, "holidays")]
+        assert run["phase"] == "cancelled"
+        expect(banner).to_have_count(0, timeout=15_000)
