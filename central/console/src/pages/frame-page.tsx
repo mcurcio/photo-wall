@@ -213,7 +213,8 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
       <FramePageHeader name={frame.name ?? frameId} chip={health} wall={walls.size > 1 ? frame.surface_id : null}
         back={back} headingRef={headingRef}
         onRename={(next) => mutate(() => renameFrame(frameId, next)) as Promise<RenameAnswer>}
-        menu={{ label: `More actions for ${frame.name ?? frameId}`, items: [...actions,
+        // Only while Central offers the Frame an everyday action: with none, the header has no menu.
+        menu={actions.length === 0 ? undefined : { label: `More actions for ${frame.name ?? frameId}`, items: [...actions,
           { label: "Why is this playing?", href: formatRoute({ section: "wall", id: frameId, tab: "overview" }) }] }} />
     }>
       <LeaveGuard
