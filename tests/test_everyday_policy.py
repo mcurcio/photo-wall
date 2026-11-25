@@ -6,9 +6,17 @@ import hashlib
 
 import pytest
 
-from central.everyday.model import ACK_LATE_SECONDS, AskState, CoverCause, SkipKind, StayReason
+from central.everyday.model import (
+    ACK_LATE_KEPT_SECONDS,
+    ACK_LATE_SECONDS,
+    AskState,
+    CoverCause,
+    SkipKind,
+    StayReason,
+)
 from central.everyday.policy import (
     asked_state,
+    asked_until,
     cover_for,
     joins,
     photo_of,
@@ -165,6 +173,16 @@ def test_asked_is_requested_then_done_or_late():
     assert asked_state(100, None, 101) is AskState.REQUESTED
     assert asked_state(100, 103, 200) is AskState.DONE
     assert asked_state(100, None, 100 + ACK_LATE_SECONDS + 1) is AskState.LATE
+
+
+def test_an_action_whose_layer_ends_soon_is_still_reported_late():
+    """`asked_until`: a cover that ends before its action could be late (a short turn, or a Skip in
+    a turn's last seconds) is still reported until it has read `late` a while, so its card and
+    Retry are drawn. Mutation probe: `until` the cover's end, or `at + ACK_LATE_SECONDS`."""
+    until = asked_until(100, 110)
+    assert asked_state(100, None, 100 + ACK_LATE_SECONDS + 1) is AskState.LATE
+    assert until > 100 + ACK_LATE_SECONDS + 1 and until == 100 + ACK_LATE_SECONDS + ACK_LATE_KEPT_SECONDS
+    assert asked_until(100, 5000) == 5000
 
 
 # --- Pause (decision 0036, slice 3) ----------------------------------------------------------------

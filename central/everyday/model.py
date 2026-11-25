@@ -20,6 +20,9 @@ from contracts.models import AfterEnd, Instant, Layer, Model
 SKIP_LEAD: Final = 2.0
 END_LEAD: Final = 2.0
 ACK_LATE_SECONDS: Final = 30.0
+# How long a late action stays reported once it is late, its card and Retry with it, however soon
+# its layer ended (central/everyday/policy.py `asked_until`).
+ACK_LATE_KEPT_SECONDS: Final = 30.0
 # How long a pause lasts when the request names no length: one hour (setting #86).
 PAUSE_SECONDS: Final = 3600.0
 # The longest pause a request may ask for: a day.
@@ -208,7 +211,7 @@ class PauseStayed(Model):
     reason: PauseRefusal
 
 
-__all__ = ["ACK_LATE_SECONDS", "END_LEAD", "PAUSE_MAX_SECONDS", "PAUSE_SECONDS", "SKIP_LEAD", "Pause", "PauseRefusal",
+__all__ = ["ACK_LATE_KEPT_SECONDS", "ACK_LATE_SECONDS", "END_LEAD", "PAUSE_MAX_SECONDS", "PAUSE_SECONDS", "SKIP_LEAD", "Pause", "PauseRefusal",
            "PauseStayed", "PausedFrame", "AskState", "Asked", "AskedAction", "Cover",
            "CoverCause", "CoverHow", "EverydayRefusal", "Moved", "SkipKind", "SkipOutcome", "SkipScope", "StayReason",
            "Stayed"]

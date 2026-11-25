@@ -11,6 +11,7 @@ import json
 from collections.abc import Callable, Iterable, Sequence
 
 from central.everyday.model import (
+    ACK_LATE_KEPT_SECONDS,
     ACK_LATE_SECONDS,
     END_LEAD,
     SKIP_LEAD,
@@ -288,6 +289,13 @@ def asked_state(at: float, presented_at: float | None, now: float) -> AskState:
     return AskState.LATE if now > at + ACK_LATE_SECONDS else AskState.REQUESTED
 
 
-__all__ = ["asked_state", "carried_on", "cover_for", "cover_id", "hold_for", "hold_id", "joins", "passed_over",
+def asked_until(at: float, end: float) -> float:
+    """Until when an action asked at `at`, whose layer is drawn until `end`, is reported: while its
+    layer lasts, and never before it has read `late` for `ACK_LATE_KEPT_SECONDS` (`asked_state`),
+    so an action whose layer ends sooner than it can be late still shows as late, with its card."""
+    return max(end, at + ACK_LATE_SECONDS + ACK_LATE_KEPT_SECONDS)
+
+
+__all__ = ["asked_state", "asked_until", "carried_on", "cover_for", "cover_id", "hold_for", "hold_id", "joins", "passed_over",
            "pause_refusal", "pause_run_id", "photo_of", "previous_chain", "previous_step", "showing_at", "stays",
            "the_shared_instant"]

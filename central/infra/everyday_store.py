@@ -9,7 +9,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-from central.everyday.model import ACK_LATE_SECONDS, AskedAction, CoverCause
+from central.everyday.model import AskedAction, CoverCause
+from central.everyday.policy import asked_until
 from central.everyday.ports import AskFact, LayerOrigin, Showing
 from central.infra.never_show_store import PgNeverShow
 from central.infra.pause_store import PgPauses
@@ -69,12 +70,12 @@ def showing_in(conn: Any, now: float, frame_ids: Iterable[str], *, runtime: Runt
         if (found := newest.get(frame)) is not None:
             record, cover = found
             asked = AskFact(action=_ASKED[cover.cause], request_id=record.request_id, at=cover.start,
-                            until=max(cover.end, cover.start + ACK_LATE_SECONDS),
+                            until=asked_until(cover.start, cover.end),
                             presented_at=presented.get(cover.cover_id))
         if (pause := pauses.get(frame)) is not None and (asked is None or pause.started_at >= asked.at):
             # A pause is acknowledged as a cover is: once its hold was reported presented.
             asked = AskFact(action=AskedAction.PAUSE, request_id=pause.pause_id, at=pause.started_at,
-                            until=max(pause.held.drawn_end, pause.started_at + ACK_LATE_SECONDS),
+                            until=asked_until(pause.started_at, pause.held.drawn_end),
                             presented_at=presented.get(pause.held.assignment_id))
         answer[frame] = Showing(
             layers=on_frame, origins={layer.assignment_id: origins[layer.assignment_id]

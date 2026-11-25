@@ -23,7 +23,7 @@ from test_registry import enroll, hello
 from central.content_catalog.catalog import device_id_for_serial
 from central.coordination import Coordinator
 from central.db import DatabaseTransactionClock
-from central.everyday.model import SkipKind, SkipScope, StayReason
+from central.everyday.model import ACK_LATE_SECONDS, SkipKind, SkipScope, StayReason
 from central.everyday.policy import photo_of, showing_at
 from central.frame_status.model import Action
 from central.infra.fit_analysis_store import PgFitAnalysisReader
@@ -320,6 +320,22 @@ def test_a_skip_is_late_when_not_presented_in_time(registry):
     answer = wall.skip(SkipScope.FRAME, "hall")
     wall.tick(answer.at + 31 - registry.clock.utc())
     assert wall.frame_status("hall").asked.state == "late"
+
+
+def test_a_skip_whose_cover_ends_soon_still_reads_late(registry):
+    """A Skip pressed in a turn's last seconds: its cover ends before the Skip could be late, and
+    the Pi never reports it presented. Home still reads it `late` once `ACK_LATE_SECONDS` have
+    passed, so its card and Retry are drawn. Mutation probe: `AskFact.until` the cover's end, or
+    `at + ACK_LATE_SECONDS` (central/everyday/policy.py `asked_until`)."""
+    wall = Wall(registry, {"hall": "wall"}, cycle=30)
+    showing = wall.showing("hall")
+    following = min((layer for layer in wall.layers("hall") if layer.start > showing.start),
+                    key=lambda layer: layer.start)
+    registry.clock.advance(following.start - 2.5 - registry.clock.utc())
+    answer = wall.skip(SkipScope.FRAME, "hall", request_id="late-1")
+    wall.tick(answer.at + ACK_LATE_SECONDS + 1 - registry.clock.utc())
+    asked = wall.frame_status("hall").asked
+    assert asked is not None and (asked.request_id, asked.state) == ("late-1", "late")
 
 
 def test_never_show_skips_it_where_it_shows(registry):

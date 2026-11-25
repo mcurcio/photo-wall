@@ -34,8 +34,8 @@ class ShownPhoto:
 @dataclass(frozen=True)
 class AskFact:
     """The newest action asked of a Frame that moved it, and when its layer (`cover_id`) was
-    reported presented (None: not yet). `until`: when it stops being reported (its cover's end,
-    and never before it can be late)."""
+    reported presented (None: not yet). `until`: when it stops being reported
+    (central/everyday/policy.py `asked_until`)."""
     action: AskedAction
     request_id: str
     at: float
