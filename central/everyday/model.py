@@ -1,0 +1,151 @@
+"""The everyday actions' vocabulary (decision 0036, "Slice 3 design"). Pure.
+
+Central sends codes; every string a person reads is the console's, worded from the generated
+contract (central/console_contract.py). Each vocabulary here is closed. Instants are Central's
+clock (seconds since the epoch).
+"""
+from __future__ import annotations
+
+from enum import StrEnum
+from typing import Final, Literal
+
+from pydantic import Field
+
+from contracts.identifiers import Identifier
+from contracts.models import AfterEnd, Instant, Layer, Model
+
+# Placeholders to tune on the bench (decision 0036): how far ahead of a request its Frames move
+# together (the plan must reach the Pis first), how far ahead a hand-made end is cut, and when an
+# action not yet seen on its Frame is late.
+SKIP_LEAD: Final = 2.0
+END_LEAD: Final = 2.0
+ACK_LATE_SECONDS: Final = 30.0
+
+
+class SkipKind(StrEnum):
+    """What a skip asks: the Frame's next photo, or the one it showed before."""
+    NEXT = "next"
+    PREVIOUS = "previous"
+
+
+class SkipScope(StrEnum):
+    """Where a skip is pressed: on a wall (every Frame of it, the owner's S1) or on one Frame."""
+    WALL = "wall"
+    FRAME = "frame"
+
+
+class CoverCause(StrEnum):
+    """Why a cover was added: a Skip, a Previous, or a photo put on the Never show list."""
+    NEXT = "next"
+    PREVIOUS = "previous"
+    NEVER_SHOW = "never-show"
+
+
+class StayReason(StrEnum):
+    """Why a Frame stays when an action is asked, closed; first match wins (policy.py `stays`)."""
+    NOT_SET_UP = "not-set-up"
+    NOT_ANSWERING = "not-answering"
+    RESTING = "resting"
+    PAUSED = "paused"
+    NOTHING_TO_SKIP = "nothing-to-skip"
+    BLACK = "black"
+    HAND_PLACED = "hand-placed"
+    NO_PREVIOUS = "no-previous"
+
+
+class AskedAction(StrEnum):
+    """An action asked of a Frame whose effect is acknowledged (`Asked`)."""
+    SKIP = "skip"
+    PREVIOUS = "previous"
+    NEVER_SHOW = "never-show"
+    PAUSE = "pause"
+    CARRY_ON = "carry-on"
+    BACK_TO_NORMAL = "back-to-normal"
+
+
+class AskState(StrEnum):
+    """`requested` until the Player reports the action's layer presented, then `done`; `late`
+    when not done by `at + ACK_LATE_SECONDS`."""
+    REQUESTED = "requested"
+    DONE = "done"
+    LATE = "late"
+
+
+class Asked(Model):
+    """The newest action asked of a Frame and where it stands."""
+    action: AskedAction
+    request_id: Identifier
+    at: Instant
+    state: AskState
+
+
+CoverHow = Literal["joins", "pick", "pinned"]
+
+
+class Cover(Model):
+    """One Frame's cover as the command decided it: a layer added above the Frame's layers from
+    `start` (the shared instant) to `end`, never a change to an offered layer.
+
+    - `joins`: the Frame's own next photo, `layer` built whole (it ends where that photo's own
+      layer is fully in, so the show goes on with no seam);
+    - `pick`: a slot the wall plan fills from the covered layer's Scene line, never `left`;
+    - `pinned`: a slot the wall plan fills with `pinned` alone (Previous).
+
+    `covered` is the layer it covers; `joined` the layer a `joins` cover gives way to; `left`
+    the photo it leaves; `cue` the coordination group's
+    root a wall's covers share (they await a grant and start whole before `start` wherever
+    every Pi is ready, decision 0031), None for a Frame's own. `anchor` and `steps` chain a
+    Previous (policy.py `previous_step`)."""
+    cover_id: Identifier
+    frame_id: Identifier
+    cause: CoverCause
+    how: CoverHow
+    covered: Identifier
+    run_id: Identifier
+    output_id: Identifier
+    binding_generation: int = Field(ge=1)
+    priority: int = 0
+    root_order: int = Field(default=0, ge=0)
+    admission_order: int = Field(default=0, ge=0)
+    start: Instant
+    end: Instant
+    fade_in: float = Field(default=0, ge=0)
+    fade_out: float = Field(default=0, ge=0)
+    after_end: AfterEnd = "leave_as_is"
+    cue: Identifier | None = None
+    left: Identifier | None = None
+    layer: Layer | None = None
+    joined: Identifier | None = None
+    pinned: Identifier | None = None
+    anchor: Identifier | None = None
+    steps: int = Field(default=0, ge=0)
+
+    @property
+    def awaits_grant(self) -> bool:
+        return self.cue is not None
+
+
+class Stayed(Model):
+    frame_id: Identifier
+    reason: StayReason
+
+
+class Moved(Model):
+    frame_id: Identifier
+
+
+class SkipOutcome(Model):
+    """What one skip did: the shared instant, each Frame's cover and each that stayed."""
+    at: Instant
+    covers: tuple[Cover, ...] = ()
+    stayed: tuple[Stayed, ...] = ()
+
+    @property
+    def ends_at(self) -> float:
+        """The last cover's end (pruning), or `at` when none moved."""
+        return max((cover.end for cover in self.covers), default=self.at)
+
+
+__all__ = ["ACK_LATE_SECONDS", "END_LEAD", "SKIP_LEAD", "AskState", "Asked", "AskedAction", "Cover",
+           "CoverCause", "CoverHow", "Moved", "SkipKind", "SkipOutcome", "SkipScope", "StayReason",
+           "Stayed"]

@@ -36,9 +36,13 @@ found unmeasured, in the order it met them, then the photos it judged whose key 
 measurement (`Measured.due`, the key-content store's rule: an older analysis version, or a
 provisional measurement past its retry), those it placed first. A due photo is judged and placed
 with its key meanwhile, so a new analysis version re-measures the wall without emptying it.
-Rule 1 never relaxes: a photo whose extent on another Frame overlaps the slot's is never offered,
-including a hand-placed one. A kept still's extent stays open until a later FILLED slot on its
-Frame replaces what the Frame keeps (`contracts.on_screen.replaces_kept_at`).
+Rule 1 never relaxes for a slot the plan fills itself: a photo whose extent on another Frame
+overlaps the slot's is never offered, including a hand-placed one. An everyday action's cover
+(decision 0036, `Slot.action`) is walked first and may overlap (the owner's S4, 2026-11-24: "it's
+acceptable for different frames to occasionally show the same photo"); its extent counts against
+every later placement. A photo on the Never show list (`never`) is taken by no slot. A kept
+still's extent stays open until a later FILLED slot on its Frame replaces what the Frame keeps
+(`contracts.on_screen.replaces_kept_at`).
 """
 from __future__ import annotations
 
@@ -123,6 +127,14 @@ class Slot(Model):
     crop_limit: Fraction
     pool: str = ""                        # key into `pools`; "" for a hand-placed slot
     authored: tuple[Identifier, ...] = ()    # hand-placed photos, in authored order
+    # Decision 0036 (slice 3): an everyday action's cover (central/wall_plan/covers.py), walked
+    # before every other slot (a person asked for it). It may show a photo another Frame shows
+    # (the owner's S4): a Scene-line cover takes the first free photo of its line, else the
+    # line's first it can take; a hand-placed one (Previous) its photo wherever it is. Its own
+    # extent counts against every later placement, so the plan never adds an overlap.
+    action: bool = False
+    excluded: Identifier | None = None      # the photo it leaves: never its choice
+    repeat: bool = True                     # step 5 may place the Frame's previous photo again
 
 
 class FixedShowing(Model):
@@ -205,7 +217,8 @@ def plan_wall(slots: Sequence[Slot], fixed: Sequence[FixedShowing], kept: Sequen
               pools: Mapping[str, frozenset[str]], *, window: PlanWindow,
               max_clock_uncertainty: float, limits: WallLimits = WallLimits(),
               settings: FitSettings, reserved: Sequence[Reservation] = (),
-              frame_uncertainty: Mapping[str, float] | None = None) -> WallPlan:
+              frame_uncertainty: Mapping[str, float] | None = None,
+              never: frozenset[str] = frozenset()) -> WallPlan:
     """The wall assignment over `window` (module docstring). `candidates` are hydrated (variant,
     preparation failure, analysis); `lines` are keyed by scene id and mutated through `pick`;
     `pools` maps each slot's pool key to the asset ids its contribution's Sources hold;
@@ -214,7 +227,8 @@ def plan_wall(slots: Sequence[Slot], fixed: Sequence[FixedShowing], kept: Sequen
     `frame_uncertainty` (decision 0032): each Frame's Player's reported show-clock bound by frame
     id; a showing's hand-over guard on Frame F is 2 x max(`max_clock_uncertainty`, its value),
     capped at `MAX_GUARD_UNCERTAINTY`; a Frame absent from it takes `max_clock_uncertainty`.
-    Deterministic for equal inputs. Never changes a fixed showing. ValueError on a Scene-line
+    `never` (decision 0036): the Never show list's photos, which no slot takes (an empty pool is
+    not relaxed: the slot is unfilled). Deterministic for equal inputs. Never changes a fixed showing. ValueError on a Scene-line
     slot whose scene has no line (a hand-placed slot needs none), or more than
     `limits.max_slots` slots."""
     if len(slots) > limits.max_slots:
@@ -224,7 +238,7 @@ def plan_wall(slots: Sequence[Slot], fixed: Sequence[FixedShowing], kept: Sequen
             raise ValueError(f"slot {slot.slot_id} names scene {slot.scene_id!r}, which has no line")
     return _Walk(candidates, lines, pools, window=window, uncertainty=max_clock_uncertainty,
                  frame_uncertainty=frame_uncertainty or {}, limits=limits,
-                 settings=settings).run(slots, fixed, kept, reserved)
+                 settings=settings, never=never).run(slots, fixed, kept, reserved)
 
 
 def frame_clock_uncertainty(frame_id: str, max_clock_uncertainty: float,
@@ -549,8 +563,9 @@ class _Walk:
     def __init__(self, candidates: Mapping[str, Candidate], lines: Mapping[str, SceneLine],
                  pools: Mapping[str, frozenset[str]], *, window: PlanWindow, uncertainty: float,
                  frame_uncertainty: Mapping[str, float], limits: WallLimits,
-                 settings: FitSettings) -> None:
+                 settings: FitSettings, never: frozenset[str] = frozenset()) -> None:
         self.candidates, self.lines, self.pools = candidates, lines, pools
+        self.never = never
         self.window, self.limits, self.settings = window, limits, settings
         self.wall = _Wall(uncertainty, frame_uncertainty)
         self.placed: dict[str, Placed] = {}
@@ -581,11 +596,14 @@ class _Walk:
         for still in kept:
             self.wall.add_kept(still)
         ordered = sorted(slots, key=lambda slot: (slot.start, slot.slot_id))
-        hand_placed = [slot for slot in ordered if not slot.pool]
+        hand_placed = [slot for slot in ordered if not slot.pool and not slot.action]
         self.reserved = frozenset(asset for slot in hand_placed for asset in slot.authored)
+        for slot in ordered:
+            if slot.action:
+                self._cover(slot)
         for slot in hand_placed:
             self._hand_placed(slot)
-        for _, group in groupby((slot for slot in ordered if slot.pool),
+        for _, group in groupby((slot for slot in ordered if slot.pool and not slot.action),
                                 key=lambda slot: slot.start):
             self._instant(list(group))
         return WallPlan(
@@ -606,6 +624,49 @@ class _Walk:
                   if placed.asset_id in self.due]
         wanted = dict.fromkeys([*self.measure, *placed, *self.due])
         return tuple(wanted)[:self.limits.max_measurements]
+
+    def _cover(self, slot: Slot) -> None:
+        """Decision 0036: an action's cover, before every other slot. A hand-placed one takes the
+        first of its photos it can take, wherever else it shows; a Scene-line one the first photo
+        of its line it can take that is free, else the first it can take (the owner's S4: an
+        action may cause a brief overlap rather than be refused), never the photo it leaves.
+        Inside the preparation window an unprepared photo is asked for and the slot waits
+        (unfilled: the next pass plans it again). Never a repeat."""
+        if not slot.pool:
+            for asset_id in slot.authored:
+                candidate = self.candidates.get(asset_id)
+                if candidate is None or asset_id == slot.excluded:
+                    continue
+                standing, verdict = self._standing(candidate, slot)
+                if standing == "take":
+                    self._place(slot, candidate, verdict, pass_number=None)
+                    return
+                if standing in ("measure", "prepare"):
+                    self._request(standing, asset_id, slot)
+            self.unfilled[slot.slot_id] = Unfilled(
+                slot_id=slot.slot_id, reason="authored_no_eligible_alternative")
+            return
+        taken: list[tuple[str, Fits | None]] = []
+        requested, depth = 0, 1 + self.limits.offer_extra
+        for asset_id, standing, verdict in self._line_offerable(slot):
+            if asset_id == slot.excluded:
+                continue
+            candidate = self.candidates[asset_id]
+            if standing == "take":
+                if self._free(candidate, slot):
+                    self._place(slot, candidate, verdict,
+                                pass_number=self._pick(slot.scene_id, asset_id))
+                    return
+                taken.append((asset_id, verdict))
+            elif standing in ("measure", "prepare") and requested < depth:
+                self._request(standing, asset_id, slot)
+                requested += 1
+        if taken:
+            asset_id, verdict = taken[0]
+            self._place(slot, self.candidates[asset_id], verdict,
+                        pass_number=self._pick(slot.scene_id, asset_id))
+            return
+        self.unfilled[slot.slot_id] = Unfilled(slot_id=slot.slot_id, reason="no_photo_free")
 
     def _hand_placed(self, slot: Slot) -> None:
         """Step 1: the first authored photo that fits and is free."""
@@ -667,7 +728,7 @@ class _Walk:
     def _repeat_or_unfilled(self, slot: Slot, *, possible: bool) -> None:
         """Step 5, content first: the Frame's previous photo again, when it still fits this
         slot, is usable and is free; else a photo whose key content is unknown (`_unjudged`)."""
-        asset_id = self.wall.previous(slot.frame_id, slot.start)
+        asset_id = self.wall.previous(slot.frame_id, slot.start) if slot.repeat else None
         candidate = self.candidates.get(asset_id) if asset_id is not None else None
         if candidate is not None:
             standing, verdict = self._standing(candidate, slot)
@@ -696,6 +757,7 @@ class _Walk:
         for asset_id in self._line_ranked(slot.scene_id):
             candidate = self.candidates.get(asset_id)
             if (asset_id not in pool or asset_id in self.reserved or candidate is None
+                    or asset_id in self.never
                     or candidate.kind != "image" or candidate.preparation_failure
                     or isinstance(candidate.analysis, Measured)
                     or judged_size(candidate) is None
@@ -729,6 +791,8 @@ class _Walk:
         return number
 
     def _standing(self, candidate: Candidate, slot: Slot) -> tuple[_Standing, Fits | None]:
+        if candidate.asset_id in self.never:
+            return "no", None
         key = (candidate.asset_id, self._slot_class(slot))
         standing = self._standings.get(key)
         if standing is None:
