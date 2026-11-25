@@ -1,6 +1,6 @@
 # 0036 — Home: a Frame's status, the house word and the wall's everyday actions
 
-**Date:** 2026-11-22 · **Layer:** system (Central's read of a Frame's live health; four new everyday commands; the console's landing page and phone layout) · **Status:** accepted design (owner, 2026-11-22: "I'll take your recommendations. Proceed"). Slice 2 is built, in [#158](https://github.com/mcurcio/photo-wall/pull/158): where the build differs from this record is [As built](#as-built-slice-2), and what it proved is [Verified, and not](#verified-and-not). Slice 3 is not built. It is slices 2 and 3 of [roadmap 3b-i](../roadmap.md#3b-i-home-and-phone); slice 1 is [0035](0035-operator-sign-in-through-an-identity-provider.md). **Builds on:** the six status words ([design language §6](../design-language.md#6-status-and-severity)), the health verdict (issue #126), the power timetable ([0021](0021-power-timetable-and-repeating-schedules.md)), the wall plan ([Planner](../module-planner.md#the-wall-plan)) and [0032](0032-the-player-continues-centrals-plan.md).
+**Date:** 2026-11-22 · **Layer:** system (Central's read of a Frame's live health; four new everyday commands; the console's landing page and phone layout) · **Status:** accepted design (owner, 2026-11-22: "I'll take your recommendations. Proceed"). Slice 2 is built, in [#158](https://github.com/mcurcio/photo-wall/pull/158): where the build differs from this record is [As built](#as-built-slice-2), and what it proved is [Verified, and not](#verified-and-not). Slice 3 is not built; the owner ruled on it on 2026-11-24 and 2026-11-25 ([his rulings](#the-owners-rulings-for-slice-3-2026-11-24)), which change Skip, Previous, Never show, Pause and Show now as first written here, and its accepted design is [Slice 3 design](#slice-3-design). It is slices 2 and 3 of [roadmap 3b-i](../roadmap.md#3b-i-home-and-phone); slice 1 is [0035](0035-operator-sign-in-through-an-identity-provider.md). **Builds on:** the six status words ([design language §6](../design-language.md#6-status-and-severity)), the health verdict (issue #126), the power timetable ([0021](0021-power-timetable-and-repeating-schedules.md)), the wall plan ([Planner](../module-planner.md#the-wall-plan)) and [0032](0032-the-player-continues-centrals-plan.md).
 
 **Decision owner:** the owner. His words below are his; everything not quoted from him is a design choice, not his ruling.
 
@@ -13,6 +13,7 @@
 | — | "Proceed" (to this design, after the recommendation of 3b-i as the next delivery) | owner, 2026-11-22 (chat) | guidance |
 | — | "No auto-restarts at all" | owner, issue #125 | guidance, bearing on [Restart app](#restart-app) |
 | — | "Amend U1" (intended darkness reads Resting) | owner, 2026-10-12 | a ruling, bearing on [the decision table](#the-decision-table) |
+| S1–S9 | Skip moves the wall, Previous too, an immediate Back to normal, the same photo on two Frames allowed for an action, Never show's last showing, Pause over Show now, Show now's lamps, no Pause on a video | owner, 2026-11-24 and 2026-11-25 (chat) | rulings, recorded in [The owner's rulings for slice 3](#the-owners-rulings-for-slice-3-2026-11-24); where they differ from the sections below, they govern |
 
 ## The problem
 
@@ -59,7 +60,7 @@ HouseStatus
 ```
 
 - **Central sends codes, the console sends words.** Every string a person reads is the console's, from the generated contract, as room lights' refusals are. Central's vocabulary is closed, so an unworded code fails the console's typecheck.
-- **`can` is how "not offered" works.** Skip is absent from `can` on a secured assignment, so the console never draws a button it would have to refuse ([design §12](../operator-console-design.md#12-where-a-power-users-expectation-meets-a-written-requirement)).
+- **`can` is how "not offered" works.** An action is absent from `can` where it cannot act (for Skip: a hand-placed photo, a black Frame, a Pi not answering; [Slice 3 design](#skip-and-previous-who-moves-and-who-stays)), so the console never draws a button it would have to refuse ([design §12](../operator-console-design.md#12-where-a-power-users-expectation-meets-a-written-requirement)). (As first written, Skip was absent "on a secured assignment"; every layer on screen is secured, so that rule would never offer it, and the owner's rulings replace it.)
 - **`Fix` is closed too:** `restart-app`, `reboot-pi`, `resume-schedule`, `carry-on`, `check-now` (a library connection), or `open` with a route to the page that owns the setting. A fix the system cannot perform cannot be expressed.
 
 ### The inputs
@@ -154,25 +155,27 @@ Each is a route under `/v1/operator/`, asks for `operate`, carries a `request_id
 
 | Action | Route | Owner of the state | Way back |
 |---|---|---|---|
-| Skip, Previous | `POST frames/{id}/skips` | Coordination and the Planner | none (Previous) |
+| Skip, Previous | `POST walls/{id}/skips` (the wall, S1), `POST frames/{id}/skips` (one Frame) | Coordination and the Planner | none (Previous) |
 | Never show | `POST never-show`, `DELETE never-show/{photo}` | a new `never_show` list, read by the wall plan | Undo, **Show again** |
 | Pause | `POST pauses`, `DELETE pauses/{id}` | a new pause, beside the power hold | **Carry on** |
-| Show now | `POST activations` (extended) | the Runtime | **Back to normal** |
+| Show now | `POST activations` (extended); Back to normal `POST runs/{id}/end` | the Runtime | **Back to normal** |
 | Restart app | `POST node/devices/{id}/app-restarts` | a job to the Pi's app broker | none |
 
 ### Skip and Previous
 
-- **Skip** ends the Frame's current photo now and starts the next in its Scene's line. **Previous** puts the last photo the Frame reported shown (shown history) next in line.
-- It is refused `secured` when the Frame's current layer is secured; `can` already left it out. On an offered or unsecured layer it acts at once.
-- The command is a fact Coordination records under its lock; the next planning pass ends that Frame's current layer at the command's time and re-plans the Frame. The never-on-two-Frames rule is the plan's and holds unchanged.
-- It is **acknowledged**, not optimistic: the tile shows "requested" until the Player reports the new layer presented.
-- A Frame playing Central's continuation ([0032](0032-the-player-continues-centrals-plan.md)) is out of Central's reach: Skip is absent from `can`.
+Amended by the owner's rulings S1, S2 and S4 (2026-11-24); the design is [Slice 3 design](#skip-and-previous-who-moves-and-who-stays).
+
+- **Skip on Home moves the whole wall** it is pressed on: every Frame of that wall that can move goes to its next photo at the same instant; a Frame that cannot (a hand-placed photo, a deliberately black Frame or an ending, a Pi not answering or playing Central's continuation, nothing to skip) stays, and the answer says which stayed and why. Other walls are not moved. A Frame's own menu keeps a **Skip** for that Frame alone.
+- **Previous** is the same, wall-wide on Home and per Frame in a Frame's menu: it shows the photo the Frame showed before, and each press steps back one more.
+- **Central never changes an offered layer for it.** The layer on screen is always secured, so a skip adds a layer above it (a **cover**), from the shared instant; the covered layer stays as it was. (As first written: "refused `secured` when the Frame's current layer is secured" and "the next planning pass ends that Frame's current layer": neither can hold, [Slice 3 design](#what-the-code-fixes).)
+- **The same photo on two Frames is allowed for a moment** when a skip causes it (S4); the planner still avoids it in everything it places itself.
+- It is **acknowledged**, not optimistic: the tile shows "requested" until the Player reports the new photo presented.
 
 ### Never show
 
 - A wall-only list. Nothing is written to Immich ([design §12](../operator-console-design.md#12-where-a-power-users-expectation-meets-a-written-requirement)).
 - New table `never_show`: the photo (connection and Immich asset id), when, by whom. Pure rules in `central/wall_plan/` beside shown history, behind a port; the wall assignment treats a listed photo as not eligible, and an empty pool does not relax that.
-- Adding a photo that is on a Frame now also skips it there when Skip is allowed. On a secured layer it stays until that Run ends; the toast says so.
+- Adding a photo that is on a Frame now also skips it there when Skip can move that Frame. Where the photo is already downloaded for another Frame (an offered layer), it shows there that one last time and never again, and the toast says so (owner, S5, 2026-11-24). The download lock stays a hard rule. (As first written: "On a secured layer it stays until that Run ends".)
 - Optimistic, with Undo for 10 s. **Scenes › Never show list** shows every listed photo with **Show again**.
 
 ### Pause
@@ -180,17 +183,20 @@ Each is a route under `/v1/operator/`, asks for `operate`, carries a `request_id
 The owner's pick: the Frame holds the photo it shows.
 
 - A pause has the power hold's shape: `Pause{pause_id, frame_ids, source, started_at, ends_at}`. Default length 1 hour (setting #86). The hold and the pause share one `source` type, the 0035 actor, so "Paused by Matt until 22:04" needs no second vocabulary. `HoldSource.kind`'s `console` becomes that actor too.
-- The Planner extends the Frame's current layer to the pause's end. The photo's time on screen grows with it, so no other Frame gets that photo meanwhile.
-- The schedule beneath keeps advancing. **Carry on**, or the pause's end, reveals its current state, like any covered Run.
+- Central adds a **hold** layer of the same photo above the Frame's layers, from the pause's start to its end; it never extends the current layer (its end is its identity, [Slice 3 design](#pause-the-hold)). No new placement gives that photo to another Frame meanwhile; one already downloaded elsewhere may overlap briefly (S4), so a pause is never refused for it.
+- **Not on a video** (S8): Pause is absent from `can` on a video and refused `video` if sent.
+- **A paused Frame stays paused when Show now starts** (S6): Show now plays beneath it and appears at Carry on.
+- The schedule beneath keeps advancing. **Carry on**, or the pause's end, reveals its current state at once, with the usual fade (S3), like any covered Run.
 - Power wins: Night off during a pause turns the display off, and the pause still ends at its time.
 - **Finding F3: a paused Frame is not Resting.** The design language defines Resting as "Dark on purpose: Night off, paused, all off", the console design says "A paused Frame counts as Resting", and U1 lists Pause among intended darkness. All three were written before Pause had a behaviour. A Frame holding a lit photo is not dark, and a Frame that reads Resting while it glows would be the console claiming something false. This design words it **Showing**, with "Paused until 22:04 · **Carry on**" beneath. The three sentences change in the build's pull request; U1's is the owner's to approve.
 
 ### Show now on chosen Frames, with an end
 
 - `ActivationRequest` gains `frame_ids` (explicit; the sheet pre-selects every current Frame) and `ends` (in 1 hour, at tonight's Night off, or until stopped). Today's `expires_at` keeps its one meaning, a queued request's expiry.
-- The Run it starts covers only those Frames and stops at `ends`. **Back to normal** is the existing `runs/{id}/finish`: natural completion, which reveals the schedule's current state.
+- The Run it starts covers only those Frames; the Scene's lamps and other actuators still take part (owner, S7, 2026-11-25): choosing Frames restricts Frames only.
+- **Back to normal returns to the regular show as soon as it is pressed**, mid-photo, with the usual fade; the end time behaves the same, at that time and not at the end of the photo then showing (owner, S3). The only wait is a Frame whose regular photo is not downloaded yet; it changes when the photo arrives. Its lifecycle is downward cancellation at an instant, not natural completion ([Slice 3 design](#back-to-normal-and-a-takeovers-end)). (As first written: "the existing `runs/{id}/finish`: natural completion", which ends at the end of the photo then showing.)
 - Default length and Frames are settings #84 and #85, on the sheet.
-- **Risk:** a Run over a subset of a Scene's Frames is new to the Runtime. Every chosen Frame still participates explicitly; a Frame not chosen receives no implied command. The Runtime's part is designed when slice 3 starts.
+- Every chosen Frame participates explicitly; a Frame not chosen receives no implied command.
 
 ### Restart app
 
@@ -212,7 +218,7 @@ Roadmap G3 asks for "Restart app with progress". Issue #125 removed every automa
 | `central/infra/frame_status_store.py` | The inputs' reads in one transaction; the `frame_status` table |
 | `central/home_routes.py` | `GET /v1/operator/home` |
 | `central/wall_plan/never_show.py`, `infra/never_show_store.py` | The Never show rule and its list |
-| `central/pause/` (pure), `infra/pause_store.py` | The pause, its timetable for the Planner |
+| `central/everyday/` (pure), `infra/skip_store.py`, `infra/pause_store.py` | Who moves and who stays, the cover and hold layers, the pause; slice 3 ([module map](#slice-3s-module-map)) |
 | `appliance/apps/broker.py`, `central/fleet/app_restart.py` | The fourth start cause and its job |
 | `central/console/src/domain/frame-status.ts` | The words for each code, the severity of each word, the chip; components only render |
 
@@ -230,7 +236,7 @@ Roadmap G3 asks for "Restart app with progress". Issue #125 removed every automa
 - The house word and one sentence: "All good · 6 Frames showing, 2 resting".
 - `ProblemCard`s, worst first, each with its one fix button and Details.
 - `OverrideBanner`s: a power hold ("Off — by Matt · **Resume schedule**"), a takeover (countdown · **Back to normal**), a pause ("Paused until 22:04 · **Carry on**").
-- One `WallMap` per Wall, Frames to scale, read-only. Each `WallTile`: the Frame's name, its `StatusChip`, what it is doing in one line ("Evenings · until 23:00"), and an actions `Menu`: Skip, Previous, Pause, Never show this photo, Why is this playing?, Open Frame. A tap on the tile opens the Frame page.
+- One `WallMap` per Wall, Frames to scale, read-only, with **Skip** and **Previous** for the whole wall at its head (S1, S2). Each `WallTile`: the Frame's name, its `StatusChip`, what it is doing in one line ("Evenings · until 23:00"), and an actions `Menu`: Skip this Frame, Previous on this Frame, Pause, Never show this photo, Why is this playing?, Open Frame. A tap on the tile opens the Frame page.
 - The now/next strip per Wall.
 - Quick actions: **Show now**, **All off**, **All on**.
 
@@ -255,9 +261,9 @@ The other homes take a spec each when their slice starts: **F6 phone layout** (`
 - `tests/test_frame_status_policy.py` (unit, pure): one test per row of the decision table, in order, with the row above it also true to prove precedence; the cause table exhaustive over `contracts/node_faults.py` and `FrameBlackCause`; every `Problem` names one of the six parts; the house word, and a house problem replacing the Frame problems it explains.
 - `tests/test_frame_status_store.py` (DB): a tick that changes nothing writes nothing; a changed word writes one row and one event; `since` survives a Central restart.
 - `tests/browser/test_home_browser.py` (the roadmap's name): each of the six words from fixture states; a 390-pixel viewport with no sideways scroll; every fixture fault's problem names its part in plain words (moment 9); Never show in two taps (moment 8).
-- `tests/test_skip_never_show.py` (DB, the roadmap's name): Skip and Never show act on unsecured assignments; on a secured one Skip is absent from `can` and refused if sent, and Never show starts with the next Run; a listed photo is never assigned again, across re-plans (a property test beside the wall assignment's).
-- `tests/test_pause.py` (DB, controllable clock): the photo stays to the pause's end and no other Frame gets it; Carry on and the end both reveal the schedule's current state; Night off wins; a double tap is one pause.
-- `tests/browser/test_show_now_browser.py` extended: Frames and an end time; Back to normal reveals the schedule's current state.
+- `tests/test_skip_never_show.py` (DB, the roadmap's name): a wall's Skip moves every Frame that can move at one instant and names each that stayed and why; a Frame's Skip moves it alone; Never show skips the photo where it shows, lets a downloaded showing elsewhere play once and names it; a listed photo is never assigned again, across re-plans (a property test beside the wall assignment's). As amended for the owner's rulings; every test is listed in [Slice 3 design › Acceptance](#slice-3s-acceptance).
+- `tests/test_pause.py` (DB, controllable clock): the photo stays to the pause's end and no new placement gives it to another Frame; Carry on and the end both reveal the schedule's current state at once; Night off wins; a paused Frame stays paused when Show now starts; not on a video; a double tap is one pause.
+- `tests/browser/test_show_now_browser.py` extended: Frames and an end time; Back to normal reveals the schedule's current state at once.
 - `tests/node/apps/test_app_restart.py`: the fourth cause starts exactly one run; a run that dies again stays down.
 - The console's import scan: nothing in `src/` computes a status word outside `domain/frame-status.ts`.
 
@@ -267,7 +273,7 @@ The other homes take a spec each when their slice starts: **F6 phone layout** (`
 |---|---|---|
 | 1 | Sign-in ([0035](0035-operator-sign-in-through-an-identity-provider.md)) | one pull request |
 | 2 | Frame status in Central; Home, read-only; `AppShell` and the phone layout; Restart app | one pull request |
-| 3 | Skip and Previous, Never show, Pause, Show now on Frames with an end | one pull request, after a design pass on the Runtime's and Planner's part |
+| 3 | Skip and Previous, Never show, Pause, Show now on Frames with an end | one pull request; its design is [Slice 3 design](#slice-3-design) |
 
 Slices 1 and 2 touch disjoint files and can be built in parallel. Slice 3 needs both: its commands ask for `operate` and stamp a person.
 
@@ -283,6 +289,241 @@ The owner took each default on 2026-11-22 (R1), F3's change to U1's sentence inc
 | O1 | Restart app against #125's "no auto-restarts at all" | Build it as a person's request, never repeated |
 | O2 | Is Previous in 3b-i? The roadmap's outcome names only Skip | In, as the same command |
 | O3 | The silence limit of row 4 and the continuation limit of row 11 | Today's console threshold for the first; one hour for the second, to tune |
+
+## The owner's rulings for slice 3 (2026-11-24)
+
+Given in chat on 2026-11-24 and 2026-11-25, after a read-only design pass traced slice 3 through the Planner and Coordination. They govern this record wherever it differs, and the requirement they change is amended in [requirements](../requirements.md#live-media-compatibility-and-preparation). Quoted words are his; the rest of each row is the ruling as he gave it in substance, not his words.
+
+| # | Ruling | His words | Replaces |
+|---|---|---|---|
+| S1 | **Skip moves the wall.** Skip on Home moves every Frame of the wall it is pressed on to its next photo at the same instant. "If possible": a Frame that cannot move (a hand-placed photo, a deliberately black Frame or an ending, a Pi not answering or playing Central's continuation, nothing to skip) simply stays, and the answer says which stayed. A Frame's own menu also keeps a Skip for that Frame alone. Other walls are not moved. | "A 'skip' should progress the whole show together (if possible)." Asked who had asked for a per-Frame Skip: nobody; it came from agent-written documents (roadmap F2 "on a tile", the console design's Frame-page Skip). | A per-Frame Skip on a tile, refused on a secured layer |
+| S2 | **Previous is the same as Skip:** wall-wide on Home, per Frame in a Frame's menu; each further press steps back one more photo. | (in substance) | Previous as one step, per Frame |
+| S3 | **Back to normal is immediate:** the regular show comes back as soon as it is asked, mid-photo, with the usual fade. A takeover's end time behaves the same: it ends at that time, not at the end of the photo then showing. The only wait is a Frame whose regular photo is not yet downloaded; it changes when the photo arrives. | "'Back to normal' should go back to the regular show as soon as the command is entered" | Back to normal as `finish` (natural completion at the end of the current photo) |
+| S4 | **The same photo on two Frames is allowed now and then.** The requirement becomes a strong preference: the planner keeps avoiding duplicates exactly as now, but an everyday action (Skip, Previous, Pause, Back to normal) may cause a brief overlap rather than be refused or delayed. Pause's "photo due elsewhere" refusal and any Previous refusal for a photo queued elsewhere go. | "it's acceptable for different frames to occasionally show the same photo. It's not desirable, but it's ok when it happens." | "Never show the same photo on two frames at the same time" (owner, 2026-10-11) as a hard rule |
+| S5 | **Never show:** a photo already queued (downloaded) on another Frame shows there that one last time, then never again; the toast says so. The download lock stays a hard rule. | The download lock: "once a Pi has downloaded a photo for a slot, that slot does not change" | "On a secured layer it stays until that Run ends" |
+| S6 | **A paused Frame stays paused when Show now starts;** Show now plays beneath it and appears at Carry on. | (in substance) | open (D4 of the design pass) |
+| S7 | **Show now on some of a Scene's Frames:** the Scene's lamps and other actuators still take part; choosing Frames restricts Frames only. | (in substance) | open (D5) |
+| S8 | **Pause is not offered on a video** (refusal code `video`). | (in substance) | open |
+| S9 | Defaults he did not contest: the Frame page's fit counts and the pool counts leave out Never show photos; Pause's default length is 1 hour (setting #86). | — | — |
+
+## Slice 3 design
+
+Written 2026-11-25 from the design pass's reading of the code and the owner's rulings. Accepted as this record's design for slice 3 by the rulings above; every choice below that is not one of S1 to S9 is a design choice, not his ruling. Nothing here is built.
+
+### What the code fixes
+
+Four facts of the code as it stands decide the design (read in `central/coordination.py`, `central/planner.py`, `central/runtime.py`, `player/executor.py`):
+
+1. **Every offered layer is a lock, and the layer on screen is always secured.** `Coordinator._locks` hands the Planner every layer of every unexpired offer; `planner._place` re-emits a lock unchanged except its `REVISABLE` fields (arbitration, `fade_out`, `after_end`). The Player refuses a plan that changes a secured assignment's content (`executor.py` `_content_identity`, "secured assignment content is immutable"), and that identity holds `start` and `end`.
+2. **An assignment's identity is its interval.** Its id hashes the Run, the target, the phase and the turn's interval, so a layer cannot be shortened or lengthened and stay the same assignment.
+3. **A Run has one clock for all its Frames** (`_Run.cycle_start`, `cycle_end`): the Runtime cannot advance one Frame's turn alone, nor one wall's when the Run spans two.
+4. **Finish completes the current turn:** `Runtime.finish` sets `scheduled_finish_at` and the body ends at the turn's end (`_last_turn`); only `cancel` ends at once, and it withdraws the layer on screen with no fade of its own.
+
+So: **Central never changes or withdraws an offered layer for an everyday action. It adds a layer above it** (a **cover** for Skip and Previous, a **hold** for Pause), and it ends a layer early only through one new revisable field, **`cut_at`**, that never touches the layer's content or identity. "Locked layers never change" and "a secured assignment keeps its content" then hold literally, and the download lock (S5) with them.
+
+### Two contract changes
+
+Both in `contracts/models.py`; Central and the Pis ship together, as every contract change since 0032.
+
+- **`Layer.cut_at: Instant | None`**, Central's early end: the layer is drawn until `cut_at`, its fade-out (revised with it to the Scene's Transition seconds, bounded by the layer's span) ending there. It joins `REVISABLE` (`central/planner.py`) and stays out of the Player's `_content_identity`. It may be set once and only ever brought earlier; a revision that removes it or moves it later is refused by the Player (`cut_is_final`) and never sent by Central. Where a layer ends is `drawn_end = min(end, cut_at)`, one function in `contracts/models.py` read by the on-screen extent (`contracts/on_screen.py`), the plan's validity (`planner.py` `result`), `may_still_play` and the Player's draw. A layer whose start is at or after its Run's cut is not offered at all (a withdrawal, as today's cancellation does), and the Planner diagnoses such a lock `lock_cut`, which is not a planning issue.
+- **`Layer.action: bool`** (serialised only when true, as `awaits_grant` is), and `stack_order` gains it before `start`: `(priority, root_order, admission_order, action, start)`. An action layer sits above every regular layer of its own precedence whatever their starts, and of two action layers the later start is on top (a second Skip over the first). A Run of greater precedence stays above both. `action` is content identity, never revised.
+
+**The Player's one wait (S3).** At a cut, the Player reveals what is beneath it. When the layer beneath that should show is not prepared (never downloaded, or its place given up for capacity, [execution contract](../execution-contract.md#a-scenes-transition-when-a-photo-starts-to-show)), the cut layer is drawn on past its cut, as 0032's hold draws a superseded composition, until that layer is prepared, and then fades. A Frame never goes black at a cut. One rule, `player/executor.py`, for Back to normal, a takeover's end and Carry on.
+
+### The everyday package
+
+A new pure package, `central/everyday/`, imports only `contracts` (a new import-linter contract, "Everyday actions are pure": no `central.infra`, database, FastAPI, `nodeapi`, coordination, Planner or Runtime). `central.frame_status` may import it (pure, pointing down; the contract "Frame status is pure" adds it to what it may read).
+
+| Module | Owns |
+|---|---|
+| `model.py` | `SkipKind` (`next`, `previous`); `StayReason` (below); `PauseRefusal`; `Cover`, `Hold`, `Pause`; `Asked` and `AskState` (`requested`, `done`, `late`); the constants `SKIP_LEAD` (2 s), `END_LEAD` (2 s), `ACK_LATE_SECONDS` (30 s), each a placeholder to tune on the bench, exported to the console's contract |
+| `policy.py` | `showing_at(layers, at)`: the Frame's topmost opaque media layer by `stack_order` drawn at `at` (the target of every action; it restates the covered rule of `player/visibility.py`, held equal by a test over shared cases); `stays(facts) -> StayReason \| None` and `pause_refusal(facts)`, **the one home of who can move**, called both for `can` and by the command under the lock; `the_shared_instant(now)` (`now + SKIP_LEAD`); `joins(layers, showing)` (Skip's next photo, below); `previous_step(history, chain)`; `cover_for` and `hold_for`, which build the action layer as a `contracts` `Layer`; `asked(...)` |
+| `ports.py` | `FrameFacts` (what `stays` reads, below) and the stores' protocols |
+
+**`FrameFacts`**, one per Frame, read in one transaction: its binding and setup; its Pi linked and heard, and `continuing_since` from the Player line's Frame report; its display wanted on or off now (`power/timetable.py`); the layers of its Player's newest valid offer on it, with the Runtime Intent behind the showing layer (hand-placed when the Intent has `asset_refs`; an ending when its phase is `outro`); its live pause; its newest skip.
+
+### Skip and Previous: who moves and who stays
+
+**`StayReason`**, closed, first match wins in `stays`:
+
+| Code | When | Words (console) |
+|---|---|---|
+| `not-set-up` | The Frame is in setup | "isn't set up yet" |
+| `not-answering` | Its Pi is not linked or not heard past the silence limit, or its Frame report says it plays Central's continuation | "its Pi isn't answering" |
+| `resting` | Its display is wanted off now (a showing into wanted-off time is never reported, so it could never be acknowledged) | "it's resting" |
+| `paused` | A pause holds it | "it's paused" |
+| `nothing-to-skip` | No media layer is drawn | "nothing is showing" |
+| `black` | The showing layer is a black one, or a Scene's ending | "it's dark on purpose" |
+| `hand-placed` | The showing photo is hand-placed (its Intent names `asset_refs`) | "its photo is hand-placed" |
+| `no-previous` | Previous only: the Frame's shown history has nothing older to step back to | "it has nothing earlier to show" |
+
+A video moves like a photo. A Frame whose own change starts within the lead is not a stay: its cover is simply short.
+
+**State and owner.** Coordination owns it; one table, `skips` (migration 133), one row per request, the aggregate: `request_id` (primary key), `scope` (`wall` or `frame`), `target_id` (the wall's `surface_id` or the Frame's id), `kind` (`next`, `previous`, `never-show`), `at` (the shared instant), `outcome` (JSON: per Frame, its `Cover` or its `StayReason`), `ends_at` (the last cover's drawn end, for pruning), and the audit fields stamped with the 0035 actor. Repository `central/infra/skip_store.py` `PgSkips`, called inside the Coordination lock. A row is written once and never updated; rows past `ends_at` by a day go in the batched retention (`infra/batched_retention.py`).
+
+**Routes** (in a new `central/everyday_routes.py`, each asking `OperatorAuth.operate`):
+
+```
+POST /v1/operator/walls/{surface_id}/skips   {request_id, kind: "next" | "previous"}
+POST /v1/operator/frames/{frame_id}/skips    {request_id, kind: "next" | "previous"}
+
+200 SkipAnswer {request_id, kind, at, duplicate,
+                moved:  [{frame_id}],
+                stayed: [{frame_id, reason: StayReason}]}
+409 SkipRefusal {code: "nothing-moved", stayed: [...]}   # no Frame of the wall could move; for one Frame, its reason
+404 unknown wall or Frame · 422 invalid_operator_skip · 503 lock_busy
+```
+
+Previous is carried in the body's `kind`, not in its own route: one command, one store, one answer. A repeated `request_id` answers the stored row with `duplicate: true` and changes nothing.
+
+**The command,** `Coordinator.skip(scope, target, kind, request_id, by)`, in `Coordinator._transaction`: it reads `FrameFacts` for every Frame of the wall (Frame id order) or the one Frame, takes `at = the_shared_instant(now)` once, and for each Frame either records its stay or builds its cover. The commit wakes the scheduler and the Player sockets (`notify_if_written_in`), so the next planning pass offers the covers within a second.
+
+**The cover, for `next`** (the Frame's own next photo, so the show progresses): `joins` is the Frame's next regular media layer `J` of the showing layer's Run in the newest offer, after the showing one, that is not black, not an ending and not on the Never show list. The cover shows `J`'s photo with `J`'s variant and crop from `at` to `J.start + J.fade_in`, and then `J` itself goes on with the same picture, with no seam (the seam rule, `player/look.py`). So every Frame of a Run steps to its next turn's photo at once and the Run's turns go on as planned. With no such `J` offered (a turn longer than the plan's 5-minute reach, or the next turn is another Run's), the cover is a **pick**: the wall plan fills it with the Scene line's next prepared photo, never the photo left, and it ends at the showing layer's end with that layer's fade-out.
+
+**The cover, for `previous`:** a pick pinned to one photo `P` (`previous_step`): the Frame's shown history (`shown_photos` by `frame_id`, newest `presented_at` first, rows of earlier Previous covers left out) read back from the **anchor**, the photo showing at the first press of the chain. The chain is the Frame's newest skip rows while each is a Previous whose cover is still drawn; a press while it lasts steps one further back (steps + 1), any other photo presented on the Frame ends it. Photos that no longer fit the Frame, are gone from Immich or are on the Never show list are passed over. `P` is placed even when another Frame shows it (S4). Its cover ends where the Frame's next regular layer `N` is fully in (`N.start + N.fade_in`), fading out over `N`'s fade-in. History is kept 400 days (`SHOWN_KEEP_SECONDS`), so the chain ends there at the latest.
+
+**Every cover:** id `identity("cover-", [request_id, frame_id])`; the showing layer's Run, priority, root order and admission order; `action` true; `start = media_origin = at` (a video starts from its beginning); `fade_in` the Scene's Transition seconds; `after_end` that of the layer it joins or leaves. **A wall's covers are one cue:** they carry `awaits_grant` and form one coordination group with its deadline at `at`, so they start whole before the deadline wherever every member's Pi is ready and each joins alone after it ([a cue's two phases](../execution-contract.md#a-cues-two-phases)). That is "at the same instant, if possible" with the machinery 0031 already proves. This extends 0032's rule 3 ("a grant only for a change"): a wall's Skip is such a change (G7, "all pi's together"). A Frame's own Skip carries no grant.
+
+**What the Planner emits.** `Coordinator._plan` reads the live skips and passes `project(covers=...)`. A pure `central/wall_plan/covers.py` turns each into a layer: a `joins` cover is emitted exactly as built; a pick is a slot of the wall plan, walked before every other slot (a person asked for it), with two new `Slot` fields, `excluded` (the photo left) and `repeat=False` (so step 4 never re-places the skipped photo); a Previous pick is a hand-placed slot (`authored=(P,)`), which needs one new read, candidates by asset id, in `PgSceneLines`. Inside the preparation horizon a slot takes only prepared photos: a pick whose photo is not prepared stays unplaced and is re-planned each pass, its start `max(at, the pass's now + SKIP_LEAD)`, so the Frame changes when the photo is ready, as S3's one wait. A cover is never an `UnfilledSpan` (its regular layer stays beneath) and never a continuation candidate (`planner._segments` leaves action layers out). Once offered a cover is a lock like any other; its skip row is its Intent, so it is carried forward while the row is live.
+
+### Duplicates: allowed for an action, still avoided by the plan
+
+S4 turns the two-Frames rule into a strong preference, and the design draws the line once, in `central/wall_plan/assignment.py`:
+
+- **Still forbidden:** every slot the wall plan places itself, a pick cover's choice among free photos included. Step 3 (["never on two Frames at once"](../module-planner.md#the-wall-plan)) is unchanged, and the extents of every action layer count against every placement, so the plan never adds an overlap against an action.
+- **Allowed:** an action layer's own overlap with what is already offered or kept elsewhere: a cover joining `J`'s photo early, Previous's pinned photo, a hold, a pick with no free photo left (it takes the line's next rather than be refused), and what Back to normal reveals. None of these is refused or delayed for a duplicate.
+- **Tests:** the wall assignment's property test (no photo's extents overlap on two Frames) holds over every pair where neither layer is an action layer, and gains a second property: no layer placed in a pass overlaps an action layer of an earlier one.
+
+### Never show: the list and its last showing
+
+**State and owner.** The wall plan owns the list: table `never_show` (migration 134), primary key `(connection_ref, upstream_id)` (the Immich asset as `library_assets` keys it, so an edit's new revision stays listed), `request_id` (unique), `listed_at`, `by`, audit fields. Pure rule `central/wall_plan/never_show.py`; store `central/infra/never_show_store.py`.
+
+**Routes** (`everyday_routes.py`, `operate`): `POST /v1/operator/never-show {request_id, asset_id, frame_id?}`, answering `{asset_id, skipped_on: [frame_id], stayed: [{frame_id, reason}], last_showings: [{frame_id, from, until}]}`; a `frame_id` whose showing photo is no longer `asset_id` answers 409 `changed` (the photo turned over under the thumb). `DELETE /v1/operator/never-show/{asset_id}` is Undo and **Show again**. `GET /v1/operator/never-show` is the list page's read (`admin`).
+
+**Eligibility, one rule in two places.** In SQL, `_LINE_ROWS` (`central/infra/photo_library_store.py`) gains `NOT EXISTS never_show`, so a listed photo is no line member and the deeper-read loop of `_read_line` cannot starve on it; `PoolLines` takes the same set, held equal by `tests/test_order_sql_conformance.py`. In the pure plan, `project(never=...)`: step 4 never re-places a listed previous photo, a hand-placed slot passes over a listed ref, a kept still is never a listed photo's fallback, a cover never joins or picks one, and continuation lists leave them out. An empty pool is not relaxed: the slot is unfilled as today. The Frame page's fit counts and the pools' counts take the same join (S9).
+
+**Where it shows now.** In the same transaction each Frame drawing it gets a cover (a skip row of kind `never-show`) where `stays` lets it move; a paused Frame drawing it has its pause ended there (Carry on), so the reveal shows the schedule beneath.
+
+**Its last showing (S5).** A layer of it already offered to another Frame (downloaded or downloading for that slot) is a lock and plays: once, since nothing places it again. The answer's `last_showings` names each, and the toast says so. A Frame that cannot move (`stays`) shows it to its end, once, and the answer says why.
+
+### Pause: the hold
+
+**State and owner.** Coordination writes it; the pure rules are `central/everyday/`. Table `frame_pauses` (migration 135), one row per Frame as `power_holds` is: `frame_id` (primary key), `pause_id` (the request id; one request may pause several Frames), `source` (the 0035 actor: the one `source` type the power hold takes too), `started_at`, `ends_at`, `ended_at`, `held` (the hold layer as built), audit fields. Store `central/infra/pause_store.py`. A row changes only at its pause, its Carry on and its replacement by a later pause.
+
+**Routes:** `POST /v1/operator/pauses {request_id, frame_ids, seconds?}` (default setting #86, 3600 s), answering `{pause_id, ends_at, paused: [frame_id], stayed: [{frame_id, reason}]}`; `DELETE /v1/operator/pauses/{pause_id}` (Carry on, every Frame of it) and `DELETE /v1/operator/pauses/{pause_id}/frames/{frame_id}` (one Frame).
+
+**`PauseRefusal`**, closed: `not-set-up`, `not-answering`, `resting`, `paused` (already paused: its banner offers Carry on), `nothing-to-hold` (no media layer, or a black one), `video` (S8). No refusal for a photo due on another Frame (S4).
+
+**The hold layer,** built at the command from `showing_at(layers, at)`, `at = the_shared_instant(now)`: id `identity("hold-", [pause_id, frame_id])`, Run `pause-<pause_id>` (never a continuation candidate), a priority above every rank (`PAUSE_RANK`, one constant beside `central/runtime.py` `PRIORITY_RANK`), `action` true; the held layer's variant, crop and media origin; `start = at`, `end = ends_at`; no fade-in (the same picture: no seam); `fade_out` the Scene's Transition seconds, so its end reveals the schedule with the usual fade; `after_end` `leave_as_is`; no grant. The Planner emits each live pause's hold as given (`project(holds=...)`), records a `photo_selections` row with the held layer's Scene and pass so shown history and the acknowledgment work, and counts its extent against every placement.
+
+**Carry on** sets `ended_at` and the hold's `cut_at = now + END_LEAD +` its fade-out; the next pass re-emits the hold with it (a revisable field). Carry on and the pause's own end both reveal the schedule's current state: the Runtime is untouched, so the schedule beneath kept advancing as covered layers, kept prepared for reveal. **Power wins:** display power is outside the plan, so Night off turns the display off during a pause and the pause still ends at its time. **Over Show now (S6):** the hold's rank is above every Run, so a Show now admitted during a pause plays beneath it and appears at Carry on. A paused Frame reads **Showing**, with "Paused until 22:04" (finding F3).
+
+### Back to normal and a takeover's end
+
+**Lifecycle, said plainly: downward cancellation at an instant, with a fade.** The Run and every descendant stop at one instant; no Scene ending plays and no child is waited for; the Run ends `cancelled`. It is not natural completion, which stays as it is (`Runtime.finish`: the current turn runs out, children finish, the Scene's ending plays, the Run ends `completed`) for every Run that ends by itself: a Program's window, a Scene's duration, a Default Scene's change, Save and apply now's predecessor, and the existing `runs/{id}/finish` route. The two remain distinct ([execution contract › failure behavior](../execution-contract.md#failure-behavior)).
+
+- **The Runtime** gains `Runtime.end(run_id, at)`: from `at` the Run's and its descendants' current Intents carry `cut_at = at + ` the Scene's Transition seconds (a new `Intent.cut_at`, copied to the layer), no turn starting at or after `at` is projected, and at `cut_at` the Run and its descendants are `cancelled`. **Back to normal** is a new route, `POST /v1/operator/runs/{run_id}/end {request_id}` (`operate`), with `at = now + END_LEAD`; it answers `{run_id, at, until}`.
+- **A takeover's end** is the same cut, planned from its admission: `_Run.ends_at` is admitted with the Run, so its last turn's Intent carries `cut_at = ends_at` from its first offer and no offered layer is revised for it later; the fade finishes at the end time.
+- **What is revealed is the schedule's current state.** The Runs beneath kept advancing while covered ([covered photos](../execution-contract.md#a-scenes-transition-when-a-photo-starts-to-show)); at the cut the Player draws the layer beneath at its logical position (a video at `now - media_origin`) and replays no hidden turn ([current-state reveal](../execution-contract.md#time-and-current-state-reveal)). The one wait is the Player's (above).
+- **Why not natural completion with a cut turn:** natural completion waits for children and plays the Scene's ending, which would postpone "as soon as the command is entered"; a design choice, open to the owner if he wants a Show now Scene's ending played when it is ended by hand.
+
+### Show now on chosen Frames
+
+- `ActivationRequest` gains `frame_ids: tuple[Identifier, ...] | None` (None: the whole Scene, as a script sends today; the sheet always sends them explicitly) and `ends: {kind: "in", seconds} | {kind: "night-off"} | {kind: "stopped"}`. Central resolves `ends` to an instant (tonight's Night off from the power policy through `house_time`). The route moves to `operate`.
+- `Runtime.activate(..., frame_ids=None, ends_at=None)`. A pure `restricted_to(scene, frames)` in `central/runtime.py` drops the contributions, endings and children's contributions on Frames not chosen and keeps every target that is not a Frame (`actuator:` and the Scene's lamps, S7). `_Run` gains `frames` and `ends_at`, both kept by `_replace` (Save and apply now does not widen the Run back to every Frame, and the successor keeps its end) and by `_Queued`. `RunView` gains them; Home's takeover `Override` reads its Frames and `until` from them.
+- `_matching` matches a Scene id and overlapping Frames, so a second Show now of the same Scene on other Frames is admitted, not ignored. Protection is judged on the restricted participants.
+- Refusals (422): `no-frames`, `frame-not-in-scene`, `no-night-off` (no Night off tonight), `ends-passed`.
+- A Frame not chosen has no contribution, so it gets no layer and no implied command. No Planner change.
+
+### What Home carries
+
+- **`Action`** (`central/frame_status/model.py`) gains `skip`, `previous`, `pause` and `never-show`, each present per `stays` or `pause_refusal` over the Frame's `FrameFacts`, read by `PgFrameStatus` through a new port (`FrameShowing`) over `Coordinator.frame_plans_in`, extended with the showing layer's kind. The command re-checks the same rule under the lock, so `can` and the answer agree on one state; the race between them answers the same closed code.
+- **`WallView.can`** gains `skip` and `previous`, present when any Frame of the wall offers it.
+- **`FrameStatus.asked: Asked | None`**: `{action (skip, previous, never-show, pause, carry-on, back-to-normal), request_id, at, state}`. `requested` until the Player reports the action's layer `presented` (its `shown_photos` row; for Carry on and Back to normal, a layer of the schedule beneath presented at or after the cut), then `done`; `late` when not done by `at + ACK_LATE_SECONDS`. One source of the acknowledgment: shown history, written by `Coordinator._observe`. It moves Home's `change`.
+- **`Override`**: the pause kind is produced (by whom, which Frames, until), and a takeover's `until` and Frames come from the Run.
+- `ACTION_PATHS` (`central/home_routes.py`) names each new route. The decision table does not change.
+
+### The console
+
+Words follow the [design language](../design-language.md#7-content-and-voice); every code is worded in one exhaustive `Record` over the generated contract, in a new `domain/everyday-words.ts`.
+
+- **A wall's Skip and Previous:** each `WallMap` on Home carries **Skip** and **Previous** at its head (a new pattern, `WallActions`; accessible names "Skip every Frame on Living room" and "Previous on every Frame on Living room"), drawn only when `WallView.can` has them. They are acknowledged: each Frame that moved shows `AckBadge` "requested" until done. The answer's toast: "Skipped on 5 Frames." or "Skipped on 4 Frames. Hall stayed: its photo is hand-placed." (one clause per stay, worded per `StayReason`). A Frame still requested at `late` gets an inline `ProblemCard`: "Hall didn't change. Its Pi hasn't reported the new photo." with **Retry**.
+- **A Frame's menu** (each tile's, and the Frame page's): **Skip this Frame**, **Previous on this Frame**, **Pause for 1 hour**, **Never show this photo**, then Restart app, Reboot the Pi, Why is this playing?, Open Frame; each absent when `can` does not have it.
+- **Pause:** acknowledged; the tile's line "Paused until 22:04"; an `OverrideBanner` of kind `pause`: "Paused until 22:04 · Hall, Desk" with **Carry on** (acknowledged).
+- **Never show:** optimistic, with `UndoToast` "Won't show again · Undo"; when the answer names a last showing: "Won't show again. It shows once more on Hall, where it's already downloaded. · Undo". **Scenes › Never show list** (T2, `MediaGrid`, setting #71) with **Show again**.
+- **Show now** (a `QuickActionSheet`): the Scene, **Frames** (`TargetPicker`, every current Frame of the Scene selected explicitly, #85), **Ends**: "In 1 hour" (#84), "At Night off (22:30)", "Until I stop it", then **Show now**. Its banner, kind `takeover`: "Holidays on 3 Frames · until 22:00" with **Back to normal** (acknowledged).
+- Never "Run", "plan", "layer", "cover", "hold" or "Player" outside Details.
+
+### Slice 3's module map
+
+| Path | Owns |
+|---|---|
+| `contracts/models.py` | `Layer.cut_at`, `Layer.action`, `drawn_end`, `stack_order`'s new key |
+| `central/everyday/` | Above: who moves, who stays, the cover and hold layers, the pause, the asked state |
+| `central/wall_plan/covers.py`, `never_show.py` | Covers into the wall plan; the Never show rule |
+| `central/planner.py`, `central/wall_plan/assignment.py` | `project(covers=, holds=, never=)`; `cut_at` in `REVISABLE`; action layers out of continuations; the duplicate line |
+| `central/coordination.py` | The skip, pause and Never show commands under its lock; the live rows into `_plan` |
+| `central/infra/skip_store.py`, `pause_store.py`, `never_show_store.py`; migrations 133–135 | The three tables |
+| `central/runtime.py`, `central/runtime_store.py` | `end`, `frames`, `ends_at`, `restricted_to`, `Intent.cut_at` |
+| `central/everyday_routes.py`, `central/app.py` | The routes; `ActivationRequest` extended; `runs/{id}/end` |
+| `central/frame_status/` and `infra/frame_status_store.py` | `can`, `WallView.can`, `asked`, the pause override |
+| `player/executor.py`, `player/visibility.py`, `player/look.py` | `cut_at`, the one wait, the stacking key |
+| `central/console/src/` | `WallActions`, the menus, the sheet, the banners, the toasts, the list page; `domain/everyday-words.ts` |
+
+### Build order
+
+0. **First, the offer backpressure check** ([below](#open-risks)): `tests/test_coordination.py::test_a_long_layer_never_starves_its_players_offers` against today's code, then the fix if it fails. Nothing of Pause is built before it passes.
+1. The contract (`cut_at`, `action`, `stack_order`) and the Player's draw of it, with the [render bench](../runbook.md#the-render-bench-and-pi-testing-before-merge) step for the seams.
+2. `central/everyday/` and the Planner's covers, holds and Never show (pure).
+3. Coordination's commands, the stores and migrations, the routes.
+4. The Runtime's `end`, Frames and end time.
+5. Frame status and Home's document.
+6. The console.
+7. The documents the build changes: the execution contract's `REVISABLE` sentence and current-state reveal, [Planner › the wall plan](../module-planner.md#the-wall-plan) (covers, holds, the duplicate line), 0032's rule 3 (a wall's covers await a grant), the design language's Home members, the runbook, AGENTS.md's map.
+
+### Slice 3's acceptance
+
+**Step 0, the risk first.** `tests/test_coordination.py::test_a_long_layer_never_starves_its_players_offers` (DB, controllable clock): one Player, one Frame on an hour-long turn beside one on 10 s turns; passes driven for 40 minutes; every pass whose proposal changes offers a new revision and none is left out `offer_backpressure`. Then `tests/test_pause.py::test_a_pause_never_starves_its_players_offers`, the same with an hour's hold.
+
+**Unit (pure):**
+
+- `tests/test_everyday_policy.py`: `test_each_stay_reason_in_order` (each row with the row above also true); `test_showing_at_agrees_with_the_players_covered_rule`; `test_skip_joins_the_frames_next_regular_photo`; `test_previous_steps_back_one_more_each_press`; `test_previous_chain_ends_when_another_photo_is_presented`; `test_pause_refusals` (video among them); `test_asked_is_requested_then_done_or_late`.
+- `tests/test_planner_wall_assignment.py`: `test_a_joining_cover_is_emitted_unchanged_above_its_layer`; `test_a_pick_cover_takes_the_lines_next_never_the_photo_left`; `test_a_previous_cover_places_its_photo_even_where_another_frame_shows_it`; `test_no_placement_overlaps_an_action_layer` (property); the existing property limited to regular layers; `test_a_listed_photo_is_never_assigned_again_across_replans` (property); `test_a_hold_is_emitted_over_every_run`.
+- `tests/test_on_screen_extent.py`, `tests/test_contracts.py`: `test_a_cut_layer_ends_at_its_cut`; `test_cut_at_is_revisable_and_only_earlier`; `test_an_action_layer_stacks_above_its_runs_layers`.
+- `tests/test_player_executor.py`: `test_a_cut_layer_fades_out_at_its_cut`; `test_a_cut_layer_is_drawn_until_the_layer_beneath_is_prepared`; `test_a_revision_moving_a_cut_later_is_refused`; `test_a_cover_joining_its_layer_draws_no_seam`.
+- `tests/test_runtime.py`: `test_show_now_on_chosen_frames_leaves_the_others_untouched`; `test_show_now_on_chosen_frames_keeps_the_scenes_lamps`; `test_back_to_normal_cuts_the_takeover_mid_photo`; `test_back_to_normal_is_downward_cancellation_and_plays_no_ending`; `test_a_takeovers_end_cuts_at_its_time`; `test_save_and_apply_now_keeps_a_takeovers_frames_and_end`; `test_a_second_show_now_of_one_scene_on_other_frames_is_admitted`.
+- `tests/test_frame_status_policy.py`: `test_can_follows_the_stay_rule`; `test_a_walls_can_is_any_of_its_frames`; `test_a_paused_frame_reads_showing_with_its_pause`.
+
+**DB:**
+
+- `tests/test_skip_never_show.py`: `test_a_wall_skip_moves_every_movable_frame_at_one_instant`; `test_a_wall_skip_names_each_frame_that_stayed_and_why`; `test_a_wall_skip_leaves_other_walls_alone`; `test_a_frame_skip_moves_that_frame_alone`; `test_skip_leaves_the_covered_layer_unchanged`; `test_skip_beyond_the_reach_takes_the_scene_lines_next`; `test_previous_shows_the_photo_the_frame_last_reported`; `test_previous_again_steps_back_one_more`; `test_skip_may_show_a_photo_another_frame_shows`; `test_a_double_tap_is_one_skip`; `test_skip_reads_requested_until_the_cover_is_presented`; `test_never_show_skips_it_where_it_shows`; `test_never_show_lets_a_downloaded_showing_elsewhere_play_once_and_names_it`; `test_a_listed_photo_is_never_assigned_again`; `test_an_empty_pool_does_not_bring_a_listed_photo_back`; `test_show_again_returns_it_to_the_line`; `test_fit_and_pool_counts_leave_out_listed_photos`.
+- `tests/test_pause.py`: `test_the_photo_stays_to_the_pauses_end`; `test_no_placement_gives_the_held_photo_to_another_frame`; `test_pause_is_refused_on_a_video`; `test_carry_on_reveals_the_schedules_current_state_at_once`; `test_the_pauses_end_reveals_the_schedules_current_state`; `test_night_off_wins_and_the_pause_still_ends_at_its_time`; `test_a_paused_frame_stays_paused_when_show_now_starts`; `test_a_double_tap_is_one_pause`; `test_a_pause_never_starves_its_players_offers`.
+- `tests/test_everyday_routes.py`: `test_every_everyday_route_asks_for_operate`; `test_a_repeated_request_answers_the_stored_answer`; `test_back_to_normal_ends_the_takeover_at_once`.
+
+**Browser:**
+
+- `tests/browser/test_home_browser.py`: `test_a_walls_skip_moves_the_wall_and_names_who_stayed`; `test_a_frames_menu_skips_and_steps_back_that_frame`; `test_a_late_skip_shows_a_card_with_retry`; `test_pause_shows_its_banner_and_carry_on`; `test_never_show_in_two_taps_with_undo` (moment 8); `test_never_show_names_a_last_showing`; `test_an_action_not_offered_is_absent`.
+- `tests/browser/test_show_now_browser.py`: `test_show_now_on_chosen_frames_with_an_end`; `test_back_to_normal_reveals_the_schedules_current_state_at_once`.
+- `tests/browser/test_never_show_list_browser.py`: `test_show_again_takes_a_photo_off_the_list`.
+
+**Bench** (no automated tier): on the test Pi, a cover's seam into its joined layer, a cut's fade into the layer beneath, a hold's seam, a Previous whose photo must be downloaded, and a wall's Skip timed across two Frames.
+
+### Where the rulings cannot be met exactly
+
+- **"At the same instant" (S1)** holds for the Frames whose Pi holds the new plan and its photo by the instant. A Frame whose Pi gets them later (a slow Central, as on 2026-11-15, or a photo still downloading) changes alone when it can, the cue's second phase. That is "if possible" read as the machinery can keep it.
+- **"That one last time" (S5)** holds for every Pi that hears Central. A Pi cut off from Central keeps the continuation lists it holds ([0032](0032-the-player-continues-centrals-plan.md)) and may cycle a listed photo more than once until it hears Central again; its next offer's lists leave the photo out. The proposal is to accept that; the alternative, a list sent to the Pis, is a new Node fact for a rare case.
+- **"As soon as the command is entered" (S3)** is `END_LEAD` (2 s, for the plan to reach the Pis) plus the Scene's fade, besides the owner's own exception (a photo not downloaded). Ending by hand plays no Scene ending (above).
+- **"One more back each time" (S2)** is bounded by the Frame's shown history (400 days), passes over photos that no longer fit or are listed, and waits for the photo's download when the Pi no longer holds it, so a wall's Previous is less often at one instant than a Skip.
+
+### Open risks
+
+- **Offer backpressure, unverified.** `_propose_one` leaves a Player out (`offer_backpressure`) once it has `max_offers` (64) unexpired offers in its epoch. An offer is valid to its longest layer's end, and a new revision is offered whenever its proposal changes, at most about every 30 s renewal. A one-hour hold (or today any hour-long turn beside short ones) keeps every revision unexpired, so that Pi would be offered nothing new after about 32 minutes, for both its Frames. Step 0 proves or refutes it. **The fix if real:** backpressure counts only the offers past the revision the Player's latest readiness names (what it guards against is a Player that does not read its offers), and `_cleanup` deletes an unexpired offer superseded by an acknowledged later revision when every one of its layers not yet ended is in that revision as the same execution and `_may_hold` is false, so `plan_offers` holds no hour of revisions.
+- **The contract change ships with the Pis:** a Pi on an older release refuses a plan carrying `cut_at` or `action`; deploy Central, then reboot the Pis, as 0032 did.
+- **`stack_order`'s new key** reaches every comparison of layers on both sides; the shared function keeps them one, and the Player's and Central's tests over it must both run.
+- **Seams are unseen:** a cover's join, a cut's fade over a photo the Player re-decodes for its reveal, and a late start inside a fade are bench evidence, not CI.
+- **An hour's hold pins its bytes on the Pi for the hour** (`may_still_play`), one more resident picture per paused Frame.
+- **Shown history counts a joined photo twice** (the cover, then its layer at the seam): it ranks lower sooner, nothing worse.
+- **The skipped photo's layer stays reserved on its Frame** until its original end, so it is not offered to another Frame meanwhile.
 
 ## As built (slice 2)
 
@@ -394,4 +635,4 @@ Added 2026-11-22, rewritten when slice 2 was reviewed and integrated. What ran, 
 - A real hub or a real Pi under Central's status: the hub-unreachable, worker-stopped and linked or unlinked paths are held by the pure policy tests and by browser tests over Central's own stores, never a live hub. An install's restart on the Frame's status is held in the policy tests, and its step's time in the store's own test.
 - A restart that times out (180 s) and a reboot past its 600 s: built, not exercised. Home's 304 is seen against the real Central in the landing test.
 
-**Still open from the design:** slice 3. The Planner's and Runtime's part of Skip, Pause and a Run on chosen Frames is stated as a contract; how each fits the hour-ahead wall plan and its locked layers was not traced through the code, and is slice 3's design pass. The bench debt the roadmap records (1b, 1c and 2a's steps marked NOT RUN) stands: Home reports on power behaviour that has not been seen on a panel.
+**Still open from the design:** slice 3, whose design pass is now [Slice 3 design](#slice-3-design) (2026-11-25). The bench debt the roadmap records (1b, 1c and 2a's steps marked NOT RUN) stands: Home reports on power behaviour that has not been seen on a panel.
