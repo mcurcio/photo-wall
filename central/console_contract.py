@@ -53,6 +53,7 @@ from central.everyday_routes import (
     FRAME_SKIPS,
     NEVER_SHOW,
     PAUSES,
+    RUN_END,
     SHOW_AGAIN,
     WALL_SKIPS,
 )
@@ -70,6 +71,7 @@ from central.home_routes import APP_RESTARTS, FRAME_STATUS, HOME, REBOOTS
 from central.infra.home_assistant import references
 from central.infra.home_assistant.views import HomeAssistantStatesView
 from central.infra.light_sensor_judge import PI_SOURCE
+from central.infra.photo_library_store import THUMBNAIL_PATH
 from central.operator_access.views import AccessView, LoggedOut, SessionView, SignInView
 from central.registry import FrameTurnChange, FrameVideoChange
 from central.room_light.model import (
@@ -164,7 +166,9 @@ CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
     # Pause, Carry on and Back to normal: where each is asked, a pause's default length (setting
     # #86) and how far ahead a hand-made end is cut.
     "PAUSES_PATH": PAUSES, "CARRY_ON_PATH": CARRY_ON, "CARRY_ON_FRAME_PATH": CARRY_ON_FRAME,
-    "PAUSE_SECONDS": PAUSE_SECONDS, "END_LEAD": END_LEAD,
+    "PAUSE_SECONDS": PAUSE_SECONDS, "END_LEAD": END_LEAD, "RUN_END_PATH": RUN_END,
+    # Where a photo's thumbnail is read (the Never show list), its asset id appended.
+    "THUMBNAIL_PATH": THUMBNAIL_PATH,
 }
 CONSOLE_REFUSALS: Final[tuple[type[StrEnum], ...]] = (   # each context's closed refusal enum
     RoomLightRefusal, FrameLightingRefusal, PaperProfileRefusal, ReportRefusal, DrawnReportRefusal, TrialRefusal,

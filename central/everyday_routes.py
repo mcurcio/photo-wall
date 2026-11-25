@@ -57,6 +57,8 @@ SHOW_AGAIN: Final = OPERATOR_PREFIX + "never-show/{asset_id}"
 PAUSES: Final = OPERATOR_PREFIX + "pauses"
 CARRY_ON: Final = OPERATOR_PREFIX + "pauses/{pause_id}"
 CARRY_ON_FRAME: Final = OPERATOR_PREFIX + "pauses/{pause_id}/frames/{frame_id}"
+# Back to normal, the Runtime's route (declared in central/app.py); its address's one home.
+RUN_END: Final = OPERATOR_PREFIX + "runs/{run_id}/end"
 MAX_BODY_BYTES: Final = 4096
 
 
@@ -117,5 +119,5 @@ def mount_everyday_routes(app: FastAPI, *, admin: Any, operate: Any, coordinator
         return await asyncio.to_thread(coordinator.never_show_entries)
 
 
-__all__ = ["CARRY_ON", "CARRY_ON_FRAME", "FRAME_SKIPS", "NEVER_SHOW", "PAUSES", "SHOW_AGAIN", "WALL_SKIPS",
+__all__ = ["CARRY_ON", "CARRY_ON_FRAME", "FRAME_SKIPS", "NEVER_SHOW", "PAUSES", "RUN_END", "SHOW_AGAIN", "WALL_SKIPS",
            "mount_everyday_routes"]

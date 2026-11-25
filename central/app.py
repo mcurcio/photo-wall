@@ -43,7 +43,7 @@ from central.everyday.views import (
     EndsIn,
     ShowNowEnds,
 )
-from central.everyday_routes import mount_everyday_routes
+from central.everyday_routes import RUN_END, mount_everyday_routes
 from central.fleet.leaf_bridge import mount_bus_bridges
 from central.fleet.node_boot import NodeBootConfig
 from central.fleet.node_routes import mount_node_routes
@@ -970,7 +970,7 @@ def create_app(
 
     # Back to normal (decision 0036): the takeover ends at once, mid-photo, with its Scene's fade;
     # downward cancellation, not the natural completion of `finish` below.
-    @app.post("/v1/operator/runs/{run_id}/end", response_model=BackToNormalAnswer)
+    @app.post(RUN_END, response_model=BackToNormalAnswer)
     def back_to_normal(run_id: Identifier, request: BackToNormalRequest,
                        by: Actor = Depends(operator_auth.operate)) -> BackToNormalAnswer:
         ended = coordinator.runtime.command_current("end", run_id, by=by, lead=END_LEAD)
