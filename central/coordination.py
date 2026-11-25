@@ -37,7 +37,9 @@ from central.everyday.model import (
 )
 from central.everyday.policy import (
     carried_on,
+    cover_drawn,
     cover_for,
+    draws,
     hold_for,
     pause_refusal,
     photo_of,
@@ -1379,12 +1381,13 @@ class Coordinator:
             covers, stayed = [], []
             held = {pause.frame_id: pause for pause in self.pauses.live_in(conn, now)
                     if photo_of(pause.held) == asset_id}
-            for each_id, frame in sorted(found.items()):
+            frames = dict(sorted(found.items()))
+            for each_id, frame in frames.items():
                 if each_id in held:
                     # A paused Frame holding it: its pause ends there (Carry on), and what its
                     # hold covered is skipped as any Frame showing it.
                     self._carry_on_in(conn, held[each_id], now=now, by=by)
-                    frame = replace(frame, paused=False, layers=tuple(
+                    frame = frames[each_id] = replace(frame, paused=False, layers=tuple(
                         layer for layer in frame.layers if layer.assignment_id != held[each_id].held.assignment_id))
                 if photo_of(showing_at(frame.layers, at)) != asset_id:
                     continue
@@ -1395,19 +1398,27 @@ class Coordinator:
                     continue
                 covers.append(cover_for(listed, SkipKind.NEXT, CoverCause.NEVER_SHOW, request_id=request_id,
                                         at=at, now=now, cue=None))
-            covered = {cover.covered for cover in covers}
-            last = tuple(LastShowing(frame_id=layer.frame_id, start=layer.start, until=layer.drawn_end)
-                         for _, frame in sorted(found.items()) for layer in frame.layers
-                         if photo_of(layer) == asset_id and layer.drawn_end > at and not layer.action
-                         and layer.assignment_id not in covered
-                         and not any(stay.frame_id == layer.frame_id for stay in stayed))
+            # Its last showings: each regular layer of it the Frame will still draw from the shared
+            # instant, under its covers, this request's among them (`draws`, `showing_at`'s rule);
+            # a Frame that stays is named as one that stayed.
+            stays_put = {stay.frame_id for stay in stayed}
+            last = []
+            for each_id, frame in frames.items():
+                if each_id in stays_put:
+                    continue
+                known = {layer.assignment_id for layer in frame.layers}
+                drawn = (*frame.layers, *(cover_drawn(cover) for cover in (*frame.recent, *covers)
+                                          if cover.frame_id == each_id and cover.cover_id not in known))
+                last.extend(LastShowing(frame_id=layer.frame_id, start=layer.start, until=layer.drawn_end)
+                            for layer in frame.layers
+                            if photo_of(layer) == asset_id and not layer.action and draws(drawn, layer, at))
             if covers or stayed:
                 self.skips.add_in(conn, SkipRecord(
                     request_id=request_id, scope=SkipScope.PHOTO, target_id=asset_id,
                     cause=CoverCause.NEVER_SHOW.value,
                     outcome=SkipOutcome(at=at, covers=tuple(covers), stayed=tuple(stayed)), by=by), now=now)
             return NeverShowAnswer(asset_id=asset_id, skipped_on=tuple(cover.frame_id for cover in covers),
-                                   stayed=tuple(stayed), last_showings=last)
+                                   stayed=tuple(stayed), last_showings=tuple(last))
 
     def pause(self, request_id: str, frame_ids: tuple[str, ...], seconds: float, *, by: Actor,
               facts: FrameFactsReader) -> PauseAnswer:

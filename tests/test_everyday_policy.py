@@ -156,6 +156,22 @@ def test_a_joined_cover_hands_a_video_over_without_replaying_it():
     assert late.start == 20 and late.position(32) == joined.position(32)
 
 
+def test_draws_is_whether_showing_at_names_a_layer_at_any_instant_of_its_span():
+    """`draws`, Never show's test of a last showing: a regular layer wholly beneath an action layer
+    is not drawn, one that shows past its cover's end is, and so is one only partly hidden; a pick's
+    stand-in (`cover_drawn`) hides what it covers as its photo will."""
+    from central.everyday.policy import cover_drawn, draws
+    over_b = layer("cover", 10, 62, asset="photo-x", action=True)
+    assert not draws((*TURNS, over_b), TURNS[1], 10)
+    assert draws((*TURNS, over_b), TURNS[2], 10)
+    assert draws((*TURNS, layer("cover", 10, 45, asset="photo-x", action=True)), TURNS[1], 10)
+    assert not draws(TURNS, TURNS[0], 30)
+    alone = cover_for(facts(layers=TURNS[:1]), SkipKind.NEXT, CoverCause.NEXT, request_id="r", at=10,
+                      now=8, cue=None)
+    pick = alone.model_copy(update={"end": 60})
+    assert pick.how == "pick" and not draws((*TURNS[:2], cover_drawn(pick)), TURNS[1], 10)
+
+
 HISTORY = tuple(ShownPhoto(asset, f"shown-{n}", -10.0 * n)
                 for n, asset in enumerate(["photo-a", "photo-a", "photo-x", "photo-x", "photo-y", "photo-x",
                                            "photo-z"]))

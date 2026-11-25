@@ -44,6 +44,24 @@ def showing_at(layers: Iterable[Layer], at: float) -> Layer | None:
     return next((layer for layer in reversed(drawn) if layer.alpha(at) > 0), None)
 
 
+def _edges(layer: Layer) -> tuple[float, ...]:
+    """Where what `layer` adds to `showing_at` can change: its start, its fades' ends and its end."""
+    return (layer.start, layer.start + layer.fade_in, layer.drawn_end - layer.fade_out, layer.drawn_end)
+
+
+def draws(layers: Sequence[Layer], layer: Layer, after: float) -> bool:
+    """Whether a Frame with `layers` draws `layer` at any instant from `after` on: `showing_at`,
+    the one rule of what a Frame shows, names it at some instant of its span. Judged at every
+    instant any layer's strength can change and between each two, so exactly."""
+    low, high = max(layer.start, after), layer.drawn_end
+    if low >= high:
+        return False
+    edges = sorted({low, *(edge for each in layers for edge in _edges(each) if low < edge < high)})
+    instants = (*edges, *((first + second) / 2 for first, second in zip(edges, (*edges[1:], high))))
+    return any((shown := showing_at(layers, at)) is not None and shown.assignment_id == layer.assignment_id
+               for at in instants)
+
+
 def the_shared_instant(now: float) -> float:
     """When the Frames of one request move together: `SKIP_LEAD` after it is asked."""
     return now + SKIP_LEAD
@@ -218,6 +236,19 @@ def cover_for(facts: FrameFacts, kind: SkipKind, cause: CoverCause, *, request_i
                  joined=joined.assignment_id)
 
 
+def cover_drawn(cover: Cover) -> Layer:
+    """A cover as its Frame will draw it: its layer when built whole (`joins`); a `pick` or a
+    `pinned` one, whose photo the wall plan chooses and is never the photo it leaves, as an opaque
+    stand-in over its span (the photo aside, what `showing_at` needs)."""
+    if cover.layer is not None:
+        return cover.layer
+    return Layer(assignment_id=cover.cover_id, run_id=cover.run_id, output_id=cover.output_id,
+                 frame_id=cover.frame_id, binding_generation=cover.binding_generation, start=cover.start,
+                 end=cover.end, media_origin=cover.start, priority=cover.priority,
+                 root_order=cover.root_order, admission_order=cover.admission_order,
+                 presentation="black", fade_in=cover.fade_in, fade_out=cover.fade_out, action=True)
+
+
 def pause_refusal(facts: FrameFacts, at: float, *, seen_at: float | None = None) -> PauseRefusal | None:
     """Why the Frame is not paused when Pause is asked of it at the shared instant `at`, first
     match wins (decision 0036's `PauseRefusal`); None when it is paused. What it would hold is
@@ -312,6 +343,6 @@ def asked_until(at: float, end: float) -> float:
     return max(end, at + ACK_LATE_SECONDS + ACK_LATE_KEPT_SECONDS)
 
 
-__all__ = ["asked_state", "asked_until", "carried_on", "cover_for", "cover_id", "hold_for", "hold_id", "joins", "passed_over",
+__all__ = ["asked_state", "asked_until", "carried_on", "cover_drawn", "cover_for", "cover_id", "draws", "hold_for", "hold_id", "joins", "passed_over",
            "pause_refusal", "pause_run_id", "photo_of", "previous_chain", "previous_step", "showing_at", "stays",
            "the_shared_instant", "unseen_covers"]

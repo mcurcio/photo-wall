@@ -510,3 +510,29 @@ def test_the_skip_retention_deletes_rows_a_day_past_their_last_cover_in_whole_ba
     assert retention.prune() == {"skips": 5} and retention.prune() == {"skips": 0}
     with registry.db.transaction() as conn:
         assert [row["request_id"] for row in conn.execute("SELECT request_id FROM skips")] == ["kept"]
+
+
+def test_never_show_names_no_showing_an_earlier_skip_already_hides(registry):
+    """Decision 0036 (the independent review): Never show's `last_showings` names only showings
+    the Frame will draw (`draws`, the one rule of what a Frame shows). A Skip's cover shows the
+    next photo early, over that photo's own regular layer; Never show of it then covers it again,
+    so that regular layer is never drawn and is no last showing. Every one named is drawn.
+    Mutation probe: name every regular layer of the photo but the one the new cover covers."""
+    wall = Wall(registry, {"hall": "wall"})
+    answer = wall.skip(SkipScope.FRAME, "hall")
+    wall.tick()
+    (cover,) = covers(wall, "hall")
+    registry.clock.advance(answer.at - registry.clock.utc() + 1)   # the cover now shows
+    wall.tick()
+    shown = photo_of(wall.showing("hall"))
+    assert shown == photo_of(cover)
+    regular = [layer for layer in wall.layers("hall") if photo_of(layer) == shown and not layer.action]
+    assert regular, "the photo's own regular layer is offered beneath the cover"
+    said = wall.never_show(shown, "hall")
+    assert said.skipped_on == ("hall",)
+    wall.tick()
+    now = registry.clock.utc()
+    assert all(last.frame_id != "hall" or any(
+        photo_of(showing_at(wall.layers("hall"), max(last.start + (last.until - last.start) * k / 10, now)))
+        == shown for k in range(10)) for last in said.last_showings)
+    assert [last for last in said.last_showings if last.frame_id == "hall"] == []
