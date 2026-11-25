@@ -365,6 +365,20 @@ def test_offer_bound_applies_backpressure_without_stopping_runtime(registry):
     assert coordinator.runtime.read().export_state()["now"] == registry.clock.utc()
 
 
+def test_backpressure_counts_only_the_offers_its_player_has_not_read_past(registry):
+    """0036 slice 3, build step 0: backpressure guards against a Player that does not read its
+    offers. One that reported readiness on its newest offer is offered the next revision even at
+    the bound. Mutation probe: count every unexpired offer."""
+    player = setup_players(registry, count=1)[0]
+    coordinator = Coordinator(registry.db, registry.clock, CoordinationLimits(max_offers=1))
+    schedule(coordinator, ["frame-0"], starts=1000)
+    original = coordinator.delivery(player["player_id"], 1)["plan"]
+    assert coordinator.readiness(player["player_id"], report(coordinator, player))
+    registry.clock.advance(61)
+    coordinator.advance()
+    assert coordinator.delivery(player["player_id"], 1)["plan"].revision > original.revision
+
+
 def test_missing_ready_blob_refuses_whole_offer_but_persists_current_runtime(registry):
     player = setup_players(registry, count=1)[0]
     publish_fixture_catalog(registry)
@@ -1255,3 +1269,62 @@ def test_an_expired_offer_a_cut_off_player_may_be_cycling_is_kept_until_it_repor
     registry.clock.advance(1)
     coordinator.advance()
     assert revisions() and min(revisions()) >= newest.revision
+
+
+def one_player_two_frames(registry):
+    """One Player whose two Outputs are bound to frame-0 (HDMI-A-1) and frame-1 (HDMI-A-2)."""
+    player, _, _ = enroll(registry)
+    for number in (0, 1):
+        frame(registry, f"frame-{number}")
+        registry.bind(f"frame-{number}", player["player_id"], f"HDMI-A-{number + 1}",
+                      expected_generation=0, by="console")
+        save_position(registry, f"frame-{number}", PORTRAIT_ON_WIDE)
+    return player
+
+
+def drive_offers(registry, coordinator, player, minutes, caplog, *, step=10):
+    """Ticks for `minutes` with the Player reporting readiness on each newest offer, as a live Pi
+    does. Answers the passes whose proposal changed and were not offered, and how many offers the
+    Player's epoch holds at the end."""
+    import logging
+    caplog.set_level(logging.INFO, logger="central.coordination")
+    end = registry.clock.utc() + minutes * 60
+    sequence = itertools.count(1)
+    starved = []
+    while registry.clock.utc() < end:
+        registry.clock.advance(step)
+        caplog.clear()
+        coordinator.advance()
+        if any("offer_backpressure" in record.getMessage() for record in caplog.records):
+            starved.append(registry.clock.utc())
+        coordinator.readiness(player["player_id"], report(coordinator, player,
+                                                          sequence=next(sequence)))
+        now = registry.clock.utc()
+        plan = coordinator.delivery(player["player_id"], 1)["plan"]
+        assert plan is not None and any(layer.frame_id == "frame-1" and layer.start <= now < layer.end
+                                        for layer in plan.layers), f"frame-1 has no layer at {now}"
+    with registry.db.transaction() as conn:
+        held = conn.execute("SELECT count(*) AS n FROM plan_offers WHERE player_id=%s",
+                            (player["player_id"],)).fetchone()["n"]
+    return starved, held
+
+
+def test_a_long_layer_never_starves_its_players_offers(registry, caplog):
+    """0036 slice 3, build step 0 (the offer backpressure risk): one Player, one Frame on an
+    hour-long turn beside one on 10 s turns. Every revision is valid to the hour's end, so before
+    the fix the Player held 64 unexpired offers after about 32 minutes and was offered nothing
+    more (`offer_backpressure`), for both its Frames. Every pass whose proposal changes now offers
+    a new revision for 40 minutes, and the offers the Player has acknowledged past do not pile up.
+    Mutation probes: count every unexpired offer toward backpressure; keep superseded offers."""
+    player = one_player_two_frames(registry)
+    coordinator = Coordinator(registry.db, registry.clock)
+    coordinator.runtime.command("set_scene", Scene(
+        scene_id="long", loop=True, cycle_seconds=3600,
+        contributions=(Contribution(target="frame:frame-0", kind="black"),),
+        children=(Child(scene=Scene(scene_id="short", loop=True, cycle_seconds=10, contributions=(
+            Contribution(target="frame:frame-1", kind="black"),))),)), by="console")
+    coordinator.runtime.command("activate", "long", "calendar", registry.clock.utc(), by="console")
+    coordinator.advance()
+    starved, held = drive_offers(registry, coordinator, player, 40, caplog)
+    assert starved == []
+    assert held < CoordinationLimits().max_offers

@@ -199,6 +199,35 @@ def _may_hold(offer, now: float) -> bool:
     return any(c.until is None or c.until > now for c in plan.continuations)
 
 
+def _acknowledged_revision_in(conn, player_id: str, epoch: int) -> int:
+    """The revision the Player's latest readiness in `epoch` names; 0 when it has reported none."""
+    row = conn.execute(
+        "SELECT (readiness->>'revision')::bigint AS revision FROM player_show_state "
+        "WHERE player_id=%s AND authority_epoch=%s AND readiness IS NOT NULL",
+        (player_id, epoch)).fetchone()
+    return 0 if row is None or row["revision"] is None else row["revision"]
+
+
+def _unacknowledged(offers: list[Plan], acknowledged: int) -> list[Plan]:
+    """The offers past the revision the Player's readiness names: what backpressure counts. It
+    guards against a Player that does not read its offers; an offer it has read past is not one
+    (0036 slice 3, build step 0: an hour-long layer keeps every revision valid for the hour, so
+    counting every unexpired offer starved a reading Player within minutes)."""
+    return [offer for offer in offers if offer.revision > acknowledged]
+
+
+def _superseded(offer: Plan, acknowledged: Plan, now: float) -> bool:
+    """Whether an unexpired offer older than the one the Player acknowledged holds nothing that
+    offer does not: every layer not yet ended is in it as the same execution. Its continuations
+    hold nothing either: the Player read past it (`_may_hold`, decision 0032). Cleanup deletes
+    such an offer (`Coordinator._cleanup`), so `plan_offers` holds no hour of revisions."""
+    if offer.revision >= acknowledged.revision:
+        return False
+    kept = {layer.assignment_id: layer for layer in acknowledged.layers}
+    return all(layer.assignment_id in kept and same_execution(layer, kept[layer.assignment_id])
+               for layer in offer.layers if layer.end > now)
+
+
 def _membership(layers, groups: dict[str, str]) -> dict[str, str]:
     """Each layer's cue group: only a layer that awaits a grant is a cue member (decision 0032),
     so a layer with no group starts at its instant with no Commit."""
@@ -861,7 +890,8 @@ class Coordinator:
             and self._plan_groups(conn, latest) == membership
         ):
             return
-        if len(previous) >= self.limits.max_offers:
+        if len(_unacknowledged(previous, _acknowledged_revision_in(
+                conn, proposal.player_id, config.authority_epoch))) >= self.limits.max_offers:
             _left_out(proposal.player_id, "offer_backpressure", failed=False)
             return
         revision = conn.execute(
@@ -956,6 +986,7 @@ class Coordinator:
                     "AND revision=%s",
                     (*session, offer["revision"]),
                 )
+        self._delete_superseded_in(conn, now, active_sessions)
         conn.execute(
             "DELETE FROM coordination_groups g WHERE valid_until<=%s "
             "AND NOT EXISTS(SELECT 1 FROM execution_commits c WHERE c.group_id=g.id)",
@@ -972,6 +1003,39 @@ class Coordinator:
                     "WHERE player_id=%s AND authority_epoch=%s",
                     (now, *session),
                 )
+
+    @staticmethod
+    def _delete_superseded_in(conn, now: float, active_sessions: set[tuple[str, int]]) -> None:
+        """Every unexpired offer of an active session that the offer its Player acknowledged
+        supersedes (`_superseded`) goes, with its commits: the Player has read past it and holds
+        each of its live layers under the newer revision. One holding a commit of a cue the
+        acknowledged revision holds none of (a cue that ended since) stays until it expires, so a
+        cue's group is kept exactly as long as before (its commits keep it)."""
+        for player_id, epoch in sorted(active_sessions):
+            acknowledged = _acknowledged_revision_in(conn, player_id, epoch)
+            rows = conn.execute(
+                "SELECT revision,manifest FROM plan_offers WHERE player_id=%s AND authority_epoch=%s "
+                "AND revision<=%s AND valid_until>%s ORDER BY revision",
+                (player_id, epoch, acknowledged, now)).fetchall()
+            if not rows or rows[-1]["revision"] != acknowledged:
+                continue
+            try:
+                plans = [Plan.model_validate(row["manifest"]) for row in rows]
+            except ValidationError:
+                continue    # `_offers` names it; an offer that no longer reads is left alone
+            groups: dict[int, set[str]] = {}
+            for commit in conn.execute(
+                    "SELECT revision,group_id FROM execution_commits WHERE player_id=%s "
+                    "AND authority_epoch=%s AND revision<=%s", (player_id, epoch, acknowledged)):
+                groups.setdefault(commit["revision"], set()).add(commit["group_id"])
+            kept_groups = groups.get(acknowledged, set())
+            gone = [plan.revision for plan in plans[:-1] if _superseded(plan, plans[-1], now)
+                    and groups.get(plan.revision, set()) <= kept_groups]
+            if gone:
+                conn.execute("DELETE FROM execution_commits WHERE player_id=%s AND authority_epoch=%s "
+                             "AND revision=ANY(%s)", (player_id, epoch, gone))
+                conn.execute("DELETE FROM plan_offers WHERE player_id=%s AND authority_epoch=%s "
+                             "AND revision=ANY(%s)", (player_id, epoch, gone))
 
     @staticmethod
     def _observed_layer(plan: Plan, observation: Observation) -> tuple[Layer, bool] | None:
@@ -994,16 +1058,20 @@ class Coordinator:
         Only the shown history is written, and the report is still refused as stale."""
         if observation.status != "presented":
             return False
-        row = conn.execute(
+        # Its own revision, else (cleanup deletes an offer its Player acknowledged past,
+        # `_delete_superseded_in`) the first retained later one that holds the same layer.
+        observed = None
+        for row in conn.execute(
             "SELECT manifest FROM plan_offers WHERE player_id=%s AND authority_epoch=%s "
-            "AND revision=%s", (player_id, observation.authority_epoch, observation.revision),
-        ).fetchone()
-        if row is None:
-            return False
-        offered = Plan.model_validate(row["manifest"])
-        if offered.plan_id != observation.plan_id:
-            return False
-        observed = self._observed_layer(offered, observation)
+            "AND revision>=%s ORDER BY revision",
+            (player_id, observation.authority_epoch, observation.revision),
+        ).fetchall():
+            offered = Plan.model_validate(row["manifest"])
+            if offered.plan_id != observation.plan_id:
+                return False
+            observed = self._observed_layer(offered, observation)
+            if observed is not None or offered.revision == observation.revision:
+                break
         if observed is None or not self._authorized(observed[0], config):
             return False
         self.shown.record_presented_in(conn, observed[0].assignment_id, self.clock.utc(), by="node")
