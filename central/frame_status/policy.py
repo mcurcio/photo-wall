@@ -32,6 +32,7 @@ from central.everyday.policy import (
     showing_at,
     stays,
     the_shared_instant,
+    unseen_covers,
 )
 from central.everyday.ports import FrameFacts as EverydayFacts
 from central.everyday.ports import frame_facts
@@ -471,7 +472,8 @@ def everyday_facts(facts: FrameFacts, house: HouseFacts, now: float,
                  and (facts.picture is None or facts.picture.continuing_since is None))
     return frame_facts(
         facts.frame_id, facts.showing, set_up=setup is None, answering=answering,
-        resting=facts.power is not None and facts.power.wanted is Power.OFF, paused=facts.paused)
+        resting=facts.power is not None and facts.power.wanted is Power.OFF, paused=facts.paused,
+        unseen=unseen_covers(facts.showing.recent, facts.showing.presented, now))
 
 
 def _everyday_actions(facts: FrameFacts, house: HouseFacts, now: float,
@@ -486,7 +488,7 @@ def _everyday_actions(facts: FrameFacts, house: HouseFacts, now: float,
     at = the_shared_instant(now)
     offered = [action for action, kind in ((Action.SKIP, SkipKind.NEXT), (Action.PREVIOUS, SkipKind.PREVIOUS))
                if stays(found, kind, at, now=now) is None]
-    if pause_refusal(found, at) is None:
+    if pause_refusal(found, at, seen_at=now) is None:
         offered.append(Action.PAUSE)
     if showing_photo(facts, house, now, setup) is not None:
         offered.append(Action.NEVER_SHOW)

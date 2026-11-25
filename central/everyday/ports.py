@@ -54,6 +54,8 @@ class Showing:
     history: tuple[ShownPhoto, ...] = ()
     listed: frozenset[str] = frozenset()
     asked: AskFact | None = None
+    # When each cover of `recent` was reported presented (by cover id; absent: not yet).
+    presented: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -77,11 +79,17 @@ class FrameFacts:
 
 
 def frame_facts(frame_id: str, showing: Showing, *, set_up: bool, answering: bool, resting: bool,
-                paused: bool) -> FrameFacts:
-    """One Frame's facts from what it shows and its owners' judgements."""
+                paused: bool, unseen: frozenset[str] = frozenset()) -> FrameFacts:
+    """One Frame's facts from what it shows and its owners' judgements. `unseen`: the covers its
+    Pi never showed in time (central/everyday/policy.py `unseen_covers`), which are not what the
+    Frame shows: they are left out of its layers and its covers, so a press after one (Retry)
+    asks the same step again, never one further."""
     return FrameFacts(frame_id=frame_id, set_up=set_up, answering=answering, resting=resting,
-                      paused=paused, layers=showing.layers, origins=showing.origins,
-                      recent=showing.recent, history=showing.history, listed=showing.listed)
+                      paused=paused,
+                      layers=tuple(layer for layer in showing.layers if layer.assignment_id not in unseen),
+                      origins=showing.origins,
+                      recent=tuple(cover for cover in showing.recent if cover.cover_id not in unseen),
+                      history=showing.history, listed=showing.listed)
 
 
 class FrameFactsReader(Protocol):

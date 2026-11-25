@@ -227,6 +227,19 @@ def test_a_hold_holds_the_photo_showing_above_every_run():
     assert showing_at((*TURNS, held), 40) is held
 
 
+def test_a_pause_pressed_in_a_turns_last_seconds_holds_the_photo_seen():
+    """The owner's Q4, "Freeze the photo": Pause pressed at 29, in the last `SKIP_LEAD` of photo a's
+    turn, holds photo a (what the person saw), not photo b which shows at the shared instant 31;
+    it fades back in over b with the Scene's Transition, as b had begun. Pressed earlier, the hold
+    is the picture already shown: no fade-in. Mutation probe: hold what shows at `at`."""
+    held = hold_for(facts(), pause_id="p", at=31, ends_at=3631, priority=1_000_000, seen_at=29)
+    assert photo_of(held) == "photo-a" and (held.fade_in, held.fade_out) == (2, 2)
+    assert pause_refusal(facts(layers=(TURNS[0], TURNS[1].model_copy(update={"variant": Variant(
+        asset_id="film", recipe_id="e" * 64, sha256="f" * 64, size=10, media_type="video/mp4",
+        width=1920, height=1080, duration=30.0)}))), 31, seen_at=29) is None
+    assert hold_for(facts(), pause_id="p", at=12, ends_at=3612, priority=1, seen_at=10).fade_in == 0
+
+
 def test_carry_on_cuts_a_hold_at_once_with_its_fade():
     """Carry on cuts the hold `END_LEAD` and its fade after the press (the owner's S3), only ever
     earlier; before the hold began it is withdrawn. Mutation probe: cut at the hold's own end."""

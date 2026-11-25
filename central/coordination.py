@@ -1433,13 +1433,15 @@ class Coordinator:
             paused, stayed = [], []
             for frame_id in sorted(set(frame_ids)):
                 frame = found.get(frame_id)
-                reason = PauseRefusal.NOT_SET_UP if frame is None else pause_refusal(frame, at)
+                reason = (PauseRefusal.NOT_SET_UP if frame is None
+                          else pause_refusal(frame, at, seen_at=now))
                 if reason is not None:
                     stayed.append(PauseStayed(frame_id=frame_id, reason=reason))
                     continue
-                held = hold_for(frame, pause_id=request_id, at=at, ends_at=ends_at, priority=PAUSE_RANK)
+                held = hold_for(frame, pause_id=request_id, at=at, ends_at=ends_at, priority=PAUSE_RANK,
+                                seen_at=now)
                 paused.append(Pause(pause_id=request_id, frame_id=frame_id, by=by, started_at=at,
-                                    ends_at=ends_at, scene_id=_scene_of(frame, showing_at(frame.layers, at)),
+                                    ends_at=ends_at, scene_id=_scene_of(frame, showing_at(frame.layers, now)),
                                     held=held))
             if not paused:
                 raise RegistryError(EverydayRefusal.NOTHING_PAUSED.value, 409, details={

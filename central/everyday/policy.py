@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 
 from central.everyday.model import (
     ACK_LATE_KEPT_SECONDS,
@@ -215,10 +215,11 @@ def cover_for(facts: FrameFacts, kind: SkipKind, cause: CoverCause, *, request_i
                  joined=joined.assignment_id)
 
 
-def pause_refusal(facts: FrameFacts, at: float) -> PauseRefusal | None:
+def pause_refusal(facts: FrameFacts, at: float, *, seen_at: float | None = None) -> PauseRefusal | None:
     """Why the Frame is not paused when Pause is asked of it at the shared instant `at`, first
-    match wins (decision 0036's `PauseRefusal`); None when it is paused. The one home of who may
-    pause: Frame status calls it for `can` and Coordination's command again under its lock."""
+    match wins (decision 0036's `PauseRefusal`); None when it is paused. What it would hold is
+    the photo it shows at `seen_at`, when Pause was pressed (None: at `at`). The one home of who
+    may pause: Frame status calls it for `can` and Coordination's command again under its lock."""
     if not facts.set_up:
         return PauseRefusal.NOT_SET_UP
     if not facts.answering:
@@ -227,7 +228,7 @@ def pause_refusal(facts: FrameFacts, at: float) -> PauseRefusal | None:
         return PauseRefusal.RESTING
     if facts.paused:
         return PauseRefusal.PAUSED
-    showing = showing_at(facts.layers, at)
+    showing = showing_at(facts.layers, at if seen_at is None else seen_at)
     origin = None if showing is None else _origin(facts, showing)
     if (showing is None or showing.presentation == "black" or showing.variant is None
             or (origin is not None and origin.ending)):
@@ -248,23 +249,27 @@ def pause_run_id(pause_id: str) -> str:
     return "pause-" + hashlib.sha256(pause_id.encode()).hexdigest()[:40]
 
 
-def hold_for(facts: FrameFacts, *, pause_id: str, at: float, ends_at: float, priority: int) -> Layer:
+def hold_for(facts: FrameFacts, *, pause_id: str, at: float, ends_at: float, priority: int,
+             seen_at: float | None = None) -> Layer:
     """The hold a Frame that is paused (`pause_refusal` is None) gets: a layer of the photo it
-    shows at `at` (its variant, crop and media origin), above every Run (`priority`, the caller's
-    rank above every Run's), from `at` to `ends_at`, an action layer with no fade-in (the same
-    picture: no seam) and a fade-out of its Scene's Transition seconds, so its end reveals the
-    schedule beneath with the usual fade. It never changes an offered layer."""
-    showing = showing_at(facts.layers, at)
+    shows at `seen_at`, when Pause was pressed (None: at `at`), the photo the person meant to keep
+    (its variant, crop and media origin), above every Run (`priority`, the caller's rank above
+    every Run's), from `at` to `ends_at`, an action layer with no fade-in where it is the picture
+    the Frame shows at `at` (no seam), else the Scene's Transition (its next photo began within the
+    lead), and a fade-out of its Scene's Transition seconds, so its end reveals the schedule beneath
+    with the usual fade. It never changes an offered layer."""
+    showing = showing_at(facts.layers, at if seen_at is None else seen_at)
     assert showing is not None and showing.variant is not None
     origin = _origin(facts, showing)
     transition = 0.0 if origin is None else origin.transition
+    seam = 0.0 if photo_of(showing_at(facts.layers, at)) == photo_of(showing) else transition
+    fade_in, fade_out = _fades(at, ends_at, seam, transition)
     return Layer(
         assignment_id=hold_id(pause_id, facts.frame_id), run_id=pause_run_id(pause_id),
         output_id=showing.output_id, frame_id=facts.frame_id,
         binding_generation=showing.binding_generation, start=at, end=ends_at,
         media_origin=showing.media_origin, priority=priority, variant=showing.variant,
-        crop=showing.crop, opacity=showing.opacity, fade_in=0.0,
-        fade_out=min(transition, ends_at - at), action=True)
+        crop=showing.crop, opacity=showing.opacity, fade_in=fade_in, fade_out=fade_out, action=True)
 
 
 def carried_on(held: Layer, now: float) -> Layer | None:
@@ -289,6 +294,14 @@ def asked_state(at: float, presented_at: float | None, now: float) -> AskState:
     return AskState.LATE if now > at + ACK_LATE_SECONDS else AskState.REQUESTED
 
 
+def unseen_covers(recent: Iterable[Cover], presented: Mapping[str, float], now: float) -> frozenset[str]:
+    """The covers a Frame's Pi never showed in time: not reported presented and `late`
+    (`asked_state`). Not what the Frame shows, so never stepped from: a Skip or Previous after
+    one asks that step again."""
+    return frozenset(cover.cover_id for cover in recent
+                     if asked_state(cover.start, presented.get(cover.cover_id), now) is AskState.LATE)
+
+
 def asked_until(at: float, end: float) -> float:
     """Until when an action asked at `at`, whose layer is drawn until `end`, is reported: while its
     layer lasts, and never before it has read `late` for `ACK_LATE_KEPT_SECONDS` (`asked_state`),
@@ -298,4 +311,4 @@ def asked_until(at: float, end: float) -> float:
 
 __all__ = ["asked_state", "asked_until", "carried_on", "cover_for", "cover_id", "hold_for", "hold_id", "joins", "passed_over",
            "pause_refusal", "pause_run_id", "photo_of", "previous_chain", "previous_step", "showing_at", "stays",
-           "the_shared_instant"]
+           "the_shared_instant", "unseen_covers"]

@@ -49,9 +49,10 @@ def layer_origins(runtime: Runtime, layers: Iterable[Layer], now: float) -> dict
 def showing_in(conn: Any, now: float, frame_ids: Iterable[str], *, runtime: Runtime,
                layers: Mapping[str, tuple[Layer, ...]], shown: PgShownHistory | None = None,
                skips: PgSkips | None = None) -> dict[str, Showing]:
-    """Each Frame's `Showing` at Central's `now`: its offered layers and what made them, its
-    covers newest first, its shown history, the Never show list, and its newest asked action that
-    moved it with when its cover was reported presented."""
+    """Each Frame's `Showing` at Central's `now`: its offered layers (with each cover built whole
+    that is decided and not offered yet) and what made them, its covers newest first with when
+    each was reported presented, its shown history, the Never show list, and its newest asked
+    action that moved it with when its cover was reported presented."""
     shown, skips = shown or PgShownHistory(), skips or PgSkips()
     frame_ids = sorted(set(frame_ids))
     origins = layer_origins(runtime, [layer for frame in frame_ids for layer in layers.get(frame, ())], now)
@@ -61,11 +62,18 @@ def showing_in(conn: Any, now: float, frame_ids: Iterable[str], *, runtime: Runt
     newest = {frame: next(((record, cover) for record, cover in rows if cover is not None), None)
               for frame, rows in recent.items()}
     pauses = {pause.frame_id: pause for pause in PgPauses.live_in(conn, now, frame_ids)}
-    presented = shown.presented_in(conn, [found[1].cover_id for found in newest.values() if found is not None]
+    covers = {frame: tuple(cover for _, cover in rows if cover is not None) for frame, rows in recent.items()}
+    presented = shown.presented_in(conn, [cover.cover_id for found in covers.values() for cover in found]
                                    + [pause.held.assignment_id for pause in pauses.values()])
     answer = {}
     for frame in frame_ids:
-        on_frame = layers.get(frame, ())
+        offered = layers.get(frame, ())
+        known = {layer.assignment_id for layer in offered}
+        # A cover decided and not offered yet (the next planning pass offers it) that is built
+        # whole is part of what the Frame will show, so a second press steps from it.
+        on_frame = offered + tuple(cover.layer for cover in covers.get(frame, ())
+                                   if cover.layer is not None and cover.cover_id not in known
+                                   and cover.end > now)
         asked = None
         if (found := newest.get(frame)) is not None:
             record, cover = found
@@ -80,8 +88,9 @@ def showing_in(conn: Any, now: float, frame_ids: Iterable[str], *, runtime: Runt
         answer[frame] = Showing(
             layers=on_frame, origins={layer.assignment_id: origins[layer.assignment_id]
                                       for layer in on_frame if layer.assignment_id in origins},
-            recent=tuple(cover for _, cover in recent.get(frame, ()) if cover is not None),
-            history=history.get(frame, ()), listed=listed, asked=asked)
+            recent=covers.get(frame, ()), history=history.get(frame, ()), listed=listed, asked=asked,
+            presented={cover.cover_id: presented[cover.cover_id] for cover in covers.get(frame, ())
+                       if cover.cover_id in presented})
     return answer
 
 

@@ -261,6 +261,60 @@ def test_previous_again_steps_back_one_more(registry):
     assert set(back) == {first, zeroth} and back[zeroth] > back[first]
 
 
+def test_a_retry_after_a_late_previous_asks_the_same_step(registry):
+    """A Previous its Pi never showed in time (`late`): Home's Retry, a new press, asks for the same
+    earlier photo, never one further back. Its cover is not what the Frame shows
+    (central/everyday/policy.py `unseen_covers`). Mutation probe: leave `unseen` out of
+    `frame_facts` (the Retry pinned the photo before it)."""
+    wall = Wall(registry, {"hall": "wall"}, cycle=120)
+    zeroth = photo_of(wall.showing("hall"))
+    wall.presented("hall", wall.showing("hall"))
+    wall.tick(121)
+    first, second = shown_twice(wall, "hall")
+    assert zeroth not in (first, second)
+    wall.skip(SkipScope.FRAME, "hall", SkipKind.PREVIOUS, request_id="back-1")
+    wall.tick()
+    wall.tick(ACK_LATE_SECONDS + 5)
+    assert wall.frame_status("hall").asked.state == "late"
+    wall.skip(SkipScope.FRAME, "hall", SkipKind.PREVIOUS, request_id="retry-1")
+    wall.tick()
+    pinned = [photo_of(layer) for layer in sorted(covers(wall, "hall"), key=lambda layer: layer.start)]
+    assert pinned == [first, first]
+    assert wall.frame_status("hall").asked.state == "requested"
+
+
+def test_a_retry_after_a_late_skip_moves_one_photo(registry):
+    """A Skip its Pi never showed in time: Retry covers what the late cover covered, so the Frame
+    moves to the same next photo, never two ahead. Mutation probe: leave `unseen` out of
+    `frame_facts`."""
+    wall = Wall(registry, {"hall": "wall"}, cycle=120)
+    showing = wall.showing("hall")
+    wall.skip(SkipScope.FRAME, "hall", request_id="next-1")
+    wall.tick()
+    wall.tick(ACK_LATE_SECONDS + 5)
+    assert wall.frame_status("hall").asked.state == "late"
+    wall.skip(SkipScope.FRAME, "hall", request_id="retry-1")
+    wall.tick()
+    late, retried = sorted(covers(wall, "hall"), key=lambda layer: layer.start)
+    assert photo_of(retried) == photo_of(late) != photo_of(showing)
+
+
+def test_a_second_skip_before_the_next_pass_steps_one_more(registry):
+    """S2: two quick presses, the second before the next planning pass offered the first's cover:
+    the second steps from the first's next photo, so each Frame moves two photos. Mutation probe:
+    read the Frame's layers from its offer alone (`showing_in` leaves out a cover not offered yet;
+    both covers took the same photo)."""
+    wall = Wall(registry, {"hall": "wall"}, cycle=120)
+    wall.skip(SkipScope.FRAME, "hall", request_id="s1")
+    registry.clock.advance(0.3)
+    wall.skip(SkipScope.FRAME, "hall", request_id="s2")
+    wall.tick()
+    first, second = sorted(covers(wall, "hall"), key=lambda layer: layer.end)
+    regular = [photo_of(layer) for layer in sorted(wall.layers("hall"), key=lambda layer: layer.start)
+               if not layer.action]
+    assert [photo_of(first), photo_of(second)] == regular[1:3]
+
+
 def test_previous_with_nothing_earlier_stays(registry):
     wall = Wall(registry, {"hall": "wall"})
     with pytest.raises(RegistryError) as refused:
