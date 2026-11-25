@@ -41,10 +41,10 @@ CENTRAL = frozenset({
     "player_show_state", "players", "position_entries", "power_holds", "power_requests", "room_light_facts",
     "runtime_state", "shown_photos", "singletons", "walls", "schema_migrations"})
 # Every table a migration after 128 added, by migration. 131 (decision 0035): who signs in. 132
-# (decision 0036): since when each Frame's status has stood. 133 and 134 (0036 slice 3): the skips
-# and the Never show list.
+# (decision 0036): since when each Frame's status has stood. 133, 134 and 135 (0036 slice 3): the
+# skips, the Never show list and the pauses.
 SINCE = {"131": frozenset({"operators", "operator_sessions"}), "132": frozenset({"frame_status"}),
-         "133": frozenset({"skips"}), "134": frozenset({"never_show"})}
+         "133": frozenset({"skips"}), "134": frozenset({"never_show"}), "135": frozenset({"frame_pauses"})}
 PROCRASTINATE = frozenset({"procrastinate_events", "procrastinate_jobs", "procrastinate_periodic_defers",
                            "procrastinate_workers"})
 
@@ -108,9 +108,9 @@ def test_128_drops_the_old_paths_20_tables_and_leaves_the_decisions_schema(datab
 
 def test_central_runs_on_128s_tables_those_added_since_and_procrastinates(registry):
     """The database Central runs on (its template holds Procrastinate's schema): 128's 41, the
-    two of 131, the one of 132, the one each of 133 and 134, and Procrastinate's four: 50."""
+    two of 131, the one of 132, the one each of 133, 134 and 135, and Procrastinate's four: 51."""
     added = frozenset().union(*SINCE.values())
-    assert added.isdisjoint(CENTRAL | PROCRASTINATE) and len(added) == 5
+    assert added.isdisjoint(CENTRAL | PROCRASTINATE) and len(added) == 6
     with registry.db.transaction() as conn:
         tables = _tables(conn)
-    assert tables == CENTRAL | added | PROCRASTINATE and len(tables) == 50
+    assert tables == CENTRAL | added | PROCRASTINATE and len(tables) == 51

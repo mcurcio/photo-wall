@@ -229,7 +229,7 @@ class Progress(Model):
 
 class OverrideKind(StrEnum):
     POWER_HOLD = "power-hold"
-    PAUSE = "pause"                              # slice 3: carried, never produced yet (finding F3)
+    PAUSE = "pause"                              # slice 3: a Frame holding its photo (finding F3: Showing)
     TAKEOVER = "takeover"
 
 
@@ -255,6 +255,7 @@ class Action(StrEnum):
     SKIP = "skip"
     PREVIOUS = "previous"
     NEVER_SHOW = "never-show"
+    PAUSE = "pause"
 
 
 class FrameStatus(Model):

@@ -25,7 +25,14 @@ from typing import Final
 from central.central_errors.views import FrameImpeded
 from central.displays.model import Readiness
 from central.everyday.model import Asked, SkipKind
-from central.everyday.policy import asked_state, photo_of, showing_at, stays, the_shared_instant
+from central.everyday.policy import (
+    asked_state,
+    pause_refusal,
+    photo_of,
+    showing_at,
+    stays,
+    the_shared_instant,
+)
 from central.everyday.ports import FrameFacts as EverydayFacts
 from central.everyday.ports import frame_facts
 from central.frame_status.model import (
@@ -44,7 +51,6 @@ from central.frame_status.model import (
     HouseWord,
     Open,
     OpenPage,
-    OverrideKind,
     Part,
     Problem,
     ProblemCode,
@@ -465,14 +471,14 @@ def everyday_facts(facts: FrameFacts, house: HouseFacts, now: float,
                  and (facts.picture is None or facts.picture.continuing_since is None))
     return frame_facts(
         facts.frame_id, facts.showing, set_up=setup is None, answering=answering,
-        resting=facts.power is not None and facts.power.wanted is Power.OFF,
-        paused=facts.override is not None and facts.override.kind is OverrideKind.PAUSE)
+        resting=facts.power is not None and facts.power.wanted is Power.OFF, paused=facts.paused)
 
 
 def _everyday_actions(facts: FrameFacts, house: HouseFacts, now: float,
                       setup: SetupStep | None) -> list[Action]:
     """Skip and Previous where the Frame would move (central/everyday/policy.py `stays`, the one
-    home of who moves, at the instant a request now would move it), and Never show while it
+    home of who moves, at the instant a request now would move it), Pause where it would be paused
+    (`pause_refusal`, the one home of who may pause: never on a video), and Never show while it
     shows a photo."""
     found = everyday_facts(facts, house, now, setup)
     if found is None or setup is not None:
@@ -480,6 +486,8 @@ def _everyday_actions(facts: FrameFacts, house: HouseFacts, now: float,
     at = the_shared_instant(now)
     offered = [action for action, kind in ((Action.SKIP, SkipKind.NEXT), (Action.PREVIOUS, SkipKind.PREVIOUS))
                if stays(found, kind, at, now=now) is None]
+    if pause_refusal(found, at) is None:
+        offered.append(Action.PAUSE)
     if photo_of(showing_at(found.layers, now)) is not None:
         offered.append(Action.NEVER_SHOW)
     return offered

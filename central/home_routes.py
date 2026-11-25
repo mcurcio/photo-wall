@@ -20,7 +20,7 @@ from typing import Any, Final, Protocol
 
 from fastapi import Depends, FastAPI, Request, Response
 
-from central.everyday_routes import FRAME_SKIPS, NEVER_SHOW
+from central.everyday_routes import FRAME_SKIPS, NEVER_SHOW, PAUSES
 from central.fleet.app_restart import APP_RESTARTS_PATH
 from central.frame_status.model import Action
 from central.frame_status.views import FrameStatusView, HomeView
@@ -37,7 +37,7 @@ APP_RESTARTS: Final = APP_RESTARTS_PATH        # central/fleet/app_restart.py's,
 # (central/everyday_routes.py).
 ACTION_PATHS: Final[Mapping[Action, str]] = {
     Action.REBOOT_PI: REBOOTS, Action.RESTART_APP: APP_RESTARTS, Action.SKIP: FRAME_SKIPS,
-    Action.PREVIOUS: FRAME_SKIPS, Action.NEVER_SHOW: NEVER_SHOW}
+    Action.PREVIOUS: FRAME_SKIPS, Action.NEVER_SHOW: NEVER_SHOW, Action.PAUSE: PAUSES}
 
 
 class HomeQueries(Protocol):

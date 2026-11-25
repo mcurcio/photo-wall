@@ -467,7 +467,7 @@ def test_a_card_never_offers_what_the_frames_menu_may_not():
 
 
 def test_an_override_rides_on_the_status_and_a_paused_frame_is_showing():
-    """Finding F3: a pause is an override on a Frame that reads Showing; nothing produces one yet."""
+    """Finding F3: a pause is an override on a Frame that reads Showing."""
     pause = Override(kind=OverrideKind.PAUSE, id="p-1", frame_ids=("hall",), until=NOW + 3600)
     found = status(override=pause)
     assert (found.word, found.override) == (StatusWord.SHOWING, pause)
@@ -490,7 +490,8 @@ def test_can_follows_the_stay_rule():
     """Skip and Previous are in `can` exactly where central/everyday/policy.py `stays` lets the
     Frame move, and Never show while it shows a photo; nothing without what it shows (the status
     step's reading). Mutation probe: offer Skip without asking `stays`."""
-    assert status(showing=ON_SCREEN).can == (Action.NEVER_SHOW, Action.REBOOT_PI, Action.RESTART_APP, Action.SKIP)
+    assert status(showing=ON_SCREEN).can == (Action.NEVER_SHOW, Action.PAUSE, Action.REBOOT_PI, Action.RESTART_APP,
+                                             Action.SKIP)
     earlier = Showing(layers=TURNS, origins=ON_SCREEN.origins, history=(
         ShownPhoto("photo-a", "a", NOW - 9), ShownPhoto("photo-z", "z", NOW - 40)))
     assert Action.PREVIOUS in status(showing=earlier).can
@@ -589,3 +590,27 @@ def test_a_failing_scheduler_and_a_planning_issue_naming_no_frame_are_house_prob
         (None, ProblemCode.SCHEDULER_FAILING, Part.CENTRAL, NOW - 40, "planning,status"),
         (None, ProblemCode.PLANNING_ISSUE, Part.CENTRAL, NOW - 20, "intent_refused")]
     assert all(problem.part.value in SIX_PARTS for problem in found.problems)
+
+
+def test_pause_is_in_can_by_the_pause_rule():
+    """Pause is offered where central/everyday/policy.py `pause_refusal` would pause the Frame:
+    never on a video (the owner's S8), nor on a Frame already paused, resting or silent; Skip
+    stays away from a paused Frame. Mutation probe: offer Pause without asking `pause_refusal`."""
+    film = _photo_layer("film", NOW - 10, NOW + 20, "film").model_copy(update={"variant": Variant(
+        asset_id="film", recipe_id="e" * 64, sha256="a" * 64, size=10, media_type="video/mp4",
+        width=1920, height=1080, duration=30.0)})
+    assert Action.PAUSE not in status(showing=Showing(layers=(film,))).can
+    pause = Override(kind=OverrideKind.PAUSE, id="p-1", frame_ids=("hall",), until=NOW + 3600)
+    paused = status(showing=ON_SCREEN, override=pause, paused=True)
+    assert Action.PAUSE not in paused.can and Action.SKIP not in paused.can
+    for changes in (SILENT, RESTING):
+        assert Action.PAUSE not in status(showing=ON_SCREEN, **changes).can, changes
+
+
+def test_a_paused_frame_reads_showing_with_its_pause():
+    """Finding F3: a paused Frame holds a lit photo, so it reads Showing with its pause as its
+    override, not Resting."""
+    pause = Override(kind=OverrideKind.PAUSE, id="p-1", frame_ids=("hall",), by="person:matt",
+                     started_at=NOW - 60, until=NOW + 3540)
+    found = status(showing=ON_SCREEN, override=pause, paused=True)
+    assert (found.word, found.override, found.override.by) == (StatusWord.SHOWING, pause, "person:matt")

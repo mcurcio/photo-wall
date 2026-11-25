@@ -25,18 +25,39 @@ from central.everyday.model import (
     CoverCause,
     EverydayRefusal,
     Moved,
+    Pause,
+    PausedFrame,
+    PauseRefusal,
+    PauseStayed,
     SkipKind,
     SkipOutcome,
     SkipScope,
     Stayed,
     StayReason,
 )
-from central.everyday.policy import cover_for, photo_of, showing_at, stays, the_shared_instant
+from central.everyday.policy import (
+    carried_on,
+    cover_for,
+    hold_for,
+    pause_refusal,
+    photo_of,
+    showing_at,
+    stays,
+    the_shared_instant,
+)
 from central.everyday.ports import FrameFacts, FrameFactsReader, SkipRecord
-from central.everyday.views import LastShowing, NeverShowAnswer, NeverShowListView, SkipAnswer
+from central.everyday.views import (
+    CarryOnAnswer,
+    LastShowing,
+    NeverShowAnswer,
+    NeverShowListView,
+    PauseAnswer,
+    SkipAnswer,
+)
 from central.infra.display_store import frame_outputs_in
 from central.infra.fit_settings_store import PgFitSettings
 from central.infra.never_show_store import PgNeverShow
+from central.infra.pause_store import PgPauses
 from central.infra.planning_outcome_store import PgPlanningOutcome
 from central.infra.player_state_wakes import notify_if_written_in
 from central.infra.shown_history_store import PgShownHistory
@@ -56,7 +77,7 @@ from central.planner import (
 )
 from central.planning_outcome import PlanningOutcomes
 from central.registry import RegistryError
-from central.runtime import Scene
+from central.runtime import PAUSE_RANK, Scene
 from central.runtime_store import RuntimeStore
 from central.scheduler import scheduler_failure
 from central.transaction_locks import COORDINATION_LOCK, holds_runtime_locks_in
@@ -251,6 +272,17 @@ def _skip_answer(record: SkipRecord, *, duplicate: bool) -> SkipAnswer:
                       stayed=record.outcome.stayed)
 
 
+def _scene_of(frame: FrameFacts, showing: Layer | None) -> str:
+    """The Scene a Frame's showing layer is of: its Intent's, else that of another layer of its
+    Run (a cover has no Intent of its own); its Run's id when none is known."""
+    if showing is None:
+        return "unknown"
+    origin = frame.origins.get(showing.assignment_id) or next(
+        (found for layer in frame.layers if layer.run_id == showing.run_id
+         and (found := frame.origins.get(layer.assignment_id)) is not None), None)
+    return showing.run_id if origin is None else origin.scene_id
+
+
 def _membership(layers, groups: dict[str, str]) -> dict[str, str]:
     """Each layer's cue group: only a layer that awaits a grant is a cue member (decision 0032),
     so a layer with no group starts at its instant with no Commit."""
@@ -347,6 +379,7 @@ class Coordinator:
         # Decision 0036 (slice 3): the everyday actions' covers and the Never show list.
         self.skips = PgSkips()
         self.never_show_list = PgNeverShow()
+        self.pauses = PgPauses()
 
     @staticmethod
     def _scene_contributions(scene: Scene):
@@ -796,6 +829,7 @@ class Coordinator:
             self.media.reconcile_source_activity_in(conn, runtime.planning_source_refs())
             lines = self.media.scene_lines_in(conn)
             covers = self.skips.live_in(conn, now)
+            holds = self.pauses.live_in(conn, now)
             never = self.never_show_list.listed_in(conn)
             authored = self.media.authored_in(conn, runtime.authored_asset_ids() | {
                 cover.pinned for cover in covers if cover.pinned is not None})
@@ -836,6 +870,7 @@ class Coordinator:
                 frame_uncertainty=frame_uncertainty,
                 covers=covers,
                 never=never,
+                holds=holds,
             )
             groups = self._groups(conn, projection, now, horizon_end, configurations)
             for proposal in projection.players:
@@ -1340,7 +1375,15 @@ class Coordinator:
                     raise RegistryError(EverydayRefusal.CHANGED.value, 409)
             self.never_show_list.add_in(conn, request_id, asset_id, now=now, by=by)
             covers, stayed = [], []
+            held = {pause.frame_id: pause for pause in self.pauses.live_in(conn, now)
+                    if photo_of(pause.held) == asset_id}
             for each_id, frame in sorted(found.items()):
+                if each_id in held:
+                    # A paused Frame holding it: its pause ends there (Carry on), and what its
+                    # hold covered is skipped as any Frame showing it.
+                    self._carry_on_in(conn, held[each_id], now=now, by=by)
+                    frame = replace(frame, paused=False, layers=tuple(
+                        layer for layer in frame.layers if layer.assignment_id != held[each_id].held.assignment_id))
                 if photo_of(showing_at(frame.layers, at)) != asset_id:
                     continue
                 listed = replace(frame, listed=frame.listed | {asset_id})
@@ -1363,6 +1406,73 @@ class Coordinator:
                     outcome=SkipOutcome(at=at, covers=tuple(covers), stayed=tuple(stayed)), by=by), now=now)
             return NeverShowAnswer(asset_id=asset_id, skipped_on=tuple(cover.frame_id for cover in covers),
                                    stayed=tuple(stayed), last_showings=last)
+
+    def pause(self, request_id: str, frame_ids: tuple[str, ...], seconds: float, *, by: Actor,
+              facts: FrameFactsReader) -> PauseAnswer:
+        """Pause: each Frame holds the photo it shows, under the Coordination lock (decision 0036).
+        Each Frame that may be paused (central/everyday/policy.py `pause_refusal`, judged on the
+        facts Home's `can` reads) gets a hold from the shared instant to its end, a layer above
+        every Run (`PAUSE_RANK`); each that may not stays and is named. One row per Frame in
+        `frame_pauses`; the commit wakes the scheduler and the Players. A repeated `request_id`
+        answers the Frames it paused (`duplicate`) and changes nothing. CoordinationError
+        "unknown_frame" (404); RegistryError "nothing-paused" (409, with `stayed`)."""
+        with self._transaction() as conn:
+            stored = self.pauses.of_in(conn, request_id)
+            if stored:
+                return PauseAnswer(pause_id=request_id, ends_at=stored[0].ends_at, duplicate=True,
+                                   paused=tuple(PausedFrame(frame_id=pause.frame_id) for pause in stored))
+            for frame_id in frame_ids:
+                if conn.execute("SELECT 1 FROM frames WHERE id=%s", (frame_id,)).fetchone() is None:
+                    raise CoordinationError(EverydayRefusal.UNKNOWN_FRAME.value, 404)
+            now = self.clock.utc()
+            at = the_shared_instant(now)
+            ends_at = at + seconds
+            found = facts(conn, now, list(frame_ids))
+            paused, stayed = [], []
+            for frame_id in sorted(set(frame_ids)):
+                frame = found.get(frame_id)
+                reason = PauseRefusal.NOT_SET_UP if frame is None else pause_refusal(frame, at)
+                if reason is not None:
+                    stayed.append(PauseStayed(frame_id=frame_id, reason=reason))
+                    continue
+                held = hold_for(frame, pause_id=request_id, at=at, ends_at=ends_at, priority=PAUSE_RANK)
+                paused.append(Pause(pause_id=request_id, frame_id=frame_id, by=by, started_at=at,
+                                    ends_at=ends_at, scene_id=_scene_of(frame, showing_at(frame.layers, at)),
+                                    held=held))
+            if not paused:
+                raise RegistryError(EverydayRefusal.NOTHING_PAUSED.value, 409, details={
+                    "stayed": [each.model_dump(mode="json") for each in stayed]})
+            for pause in paused:
+                self.pauses.put_in(conn, pause, now=now)
+            return PauseAnswer(pause_id=request_id, ends_at=ends_at,
+                               paused=tuple(PausedFrame(frame_id=pause.frame_id) for pause in paused),
+                               stayed=tuple(stayed))
+
+    def carry_on(self, pause_id: str, frame_id: str | None = None, *, by: Actor) -> CarryOnAnswer:
+        """Carry on: end the pause `pause_id` on every Frame it holds (or `frame_id` alone) at once,
+        under the Coordination lock: each hold is cut `END_LEAD` and its fade-out from now, so the
+        schedule beneath, which kept advancing, shows at its current state with the usual fade
+        (the owner's S3). CoordinationError "unknown_pause" (404) when it holds no such Frame now;
+        a repeat once it ended answers the same Frames with nothing changed."""
+        with self._transaction() as conn:
+            now = self.clock.utc()
+            rows = [pause for pause in self.pauses.of_in(conn, pause_id)
+                    if frame_id is None or pause.frame_id == frame_id]
+            if not rows:
+                raise CoordinationError(EverydayRefusal.UNKNOWN_PAUSE.value, 404)
+            ended = []
+            for pause in rows:
+                if pause.ended_at is None and pause.live(now):
+                    self._carry_on_in(conn, pause, now=now, by=by)
+                ended.append(PausedFrame(frame_id=pause.frame_id))
+            current = self.pauses.of_in(conn, pause_id)
+            until = max((pause.held.drawn_end for pause in current
+                         if frame_id is None or pause.frame_id == frame_id), default=now)
+            return CarryOnAnswer(pause_id=pause_id, ended=tuple(ended), until=max(now, until))
+
+    def _carry_on_in(self, conn, pause: Pause, *, now: float, by: Actor) -> None:
+        held = carried_on(pause.held, now)
+        self.pauses.end_in(conn, pause, pause.held if held is None else held, now=now, by=by)
 
     def show_again(self, asset_id: str) -> bool:
         """Undo and Show again: take the photo off the Never show list (the next planning pass may

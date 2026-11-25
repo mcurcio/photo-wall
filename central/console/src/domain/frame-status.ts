@@ -193,6 +193,7 @@ export const ACTION_WORDS: Record<Action, string> = {
   skip: "Skip this Frame",
   previous: "Previous on this Frame",
   "never-show": "Never show this photo",
+  pause: "Pause for 1 hour",
 };
 
 /** The actions a tile's menu asks of its Pi, in the order it lists them: the lighter one first. */

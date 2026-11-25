@@ -12,6 +12,7 @@ from typing import Any
 from central.everyday.model import ACK_LATE_SECONDS, AskedAction, CoverCause
 from central.everyday.ports import AskFact, LayerOrigin, Showing
 from central.infra.never_show_store import PgNeverShow
+from central.infra.pause_store import PgPauses
 from central.infra.shown_history_store import PgShownHistory
 from central.infra.skip_store import PgSkips
 from central.planner import assignment_id
@@ -24,9 +25,11 @@ _ASKED = {CoverCause.NEXT: AskedAction.SKIP, CoverCause.PREVIOUS: AskedAction.PR
 
 def layer_origins(runtime: Runtime, layers: Iterable[Layer], now: float) -> dict[str, LayerOrigin]:
     """What made each offered layer: the Runtime Intent whose assignment id it is, over the
-    timeline from `now` to the last layer's end (a layer no Intent makes now has none)."""
+    timeline from `now` to the last layer's drawn end (a layer no Intent makes now has none, an
+    action layer among them, so an hour's hold never stretches the timeline read)."""
+    layers = [layer for layer in layers if not layer.action]   # a cover or a hold is no Intent's
     wanted = {layer.assignment_id for layer in layers}
-    ends = [layer.end for layer in layers]
+    ends = [layer.drawn_end for layer in layers]
     if not wanted or max(ends) <= now:
         return {}
     scenes = runtime.export_state()["scenes"]
@@ -56,7 +59,9 @@ def showing_in(conn: Any, now: float, frame_ids: Iterable[str], *, runtime: Runt
     listed = PgNeverShow.listed_in(conn)
     newest = {frame: next(((record, cover) for record, cover in rows if cover is not None), None)
               for frame, rows in recent.items()}
-    presented = shown.presented_in(conn, [found[1].cover_id for found in newest.values() if found is not None])
+    pauses = {pause.frame_id: pause for pause in PgPauses.live_in(conn, now, frame_ids)}
+    presented = shown.presented_in(conn, [found[1].cover_id for found in newest.values() if found is not None]
+                                   + [pause.held.assignment_id for pause in pauses.values()])
     answer = {}
     for frame in frame_ids:
         on_frame = layers.get(frame, ())
@@ -66,6 +71,11 @@ def showing_in(conn: Any, now: float, frame_ids: Iterable[str], *, runtime: Runt
             asked = AskFact(action=_ASKED[cover.cause], request_id=record.request_id, at=cover.start,
                             until=max(cover.end, cover.start + ACK_LATE_SECONDS),
                             presented_at=presented.get(cover.cover_id))
+        if (pause := pauses.get(frame)) is not None and (asked is None or pause.started_at >= asked.at):
+            # A pause is acknowledged as a cover is: once its hold was reported presented.
+            asked = AskFact(action=AskedAction.PAUSE, request_id=pause.pause_id, at=pause.started_at,
+                            until=max(pause.held.drawn_end, pause.started_at + ACK_LATE_SECONDS),
+                            presented_at=presented.get(pause.held.assignment_id))
         answer[frame] = Showing(
             layers=on_frame, origins={layer.assignment_id: origins[layer.assignment_id]
                                       for layer in on_frame if layer.assignment_id in origins},

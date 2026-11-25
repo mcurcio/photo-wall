@@ -8,7 +8,7 @@ export interface AccessView {
   session_cap_days?: number;
 }
 
-export type Action = "restart-app" | "reboot-pi" | "skip" | "previous" | "never-show";
+export type Action = "restart-app" | "reboot-pi" | "skip" | "previous" | "never-show" | "pause";
 
 export interface AppRestartView {
   by: string;
@@ -42,6 +42,17 @@ export interface AtReading {
   lux: LuxOnFrame;
 }
 
+export interface BackToNormalAnswer {
+  at: number;
+  request_id: string;
+  run_id: string;
+  until: number;
+}
+
+export interface BackToNormalRequest {
+  request_id: string;
+}
+
 export interface Because {
   power?: ("night-off" | "hold" | "test" | "on-underneath") | null;
   row: Row;
@@ -61,6 +72,12 @@ export interface Calibration {
 export interface CarryOn {
   kind: "carry-on";
   pause_id: string;
+}
+
+export interface CarryOnAnswer {
+  ended?: PausedFrame[];
+  pause_id: string;
+  until: number;
 }
 
 export interface CentralErrorsView {
@@ -456,6 +473,31 @@ export interface PaperProfilesView {
 }
 
 export type Part = "display" | "pi" | "photo app" | "network" | "central" | "immich";
+
+export interface PauseAnswer {
+  duplicate?: boolean;
+  ends_at: number;
+  pause_id: string;
+  paused?: PausedFrame[];
+  stayed?: PauseStayed[];
+}
+
+export type PauseRefusal = "not-set-up" | "not-answering" | "resting" | "paused" | "nothing-to-hold" | "video";
+
+export interface PauseRequest {
+  frame_ids: string[];
+  request_id: string;
+  seconds?: number;
+}
+
+export interface PauseStayed {
+  frame_id: string;
+  reason: PauseRefusal;
+}
+
+export interface PausedFrame {
+  frame_id: string;
+}
 
 export type PictureEntryKind = "kept-done" | "kept-copied" | "kept-unrecorded" | "sent-draft" | "sent-back" | "sent-kept";
 
@@ -853,6 +895,19 @@ export const LIMITS = {
       maximum: 200000,
     },
   },
+  BackToNormalAnswer: {
+    request_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+    run_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
+  BackToNormalRequest: {
+    request_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
   BulbColour: {
     typed_kelvin: {
       integer: true,
@@ -868,6 +923,11 @@ export const LIMITS = {
     },
   },
   CarryOn: {
+    pause_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
+  CarryOnAnswer: {
     pause_id: {
       pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
     },
@@ -1179,6 +1239,34 @@ export const LIMITS = {
       pattern: "^[a-f0-9]{64}$",
     },
   },
+  PauseAnswer: {
+    pause_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
+  PauseRequest: {
+    frame_ids: {
+      maxItems: 64,
+      minItems: 1,
+    },
+    request_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+    seconds: {
+      exclusiveMinimum: 0,
+      maximum: 86400,
+    },
+  },
+  PauseStayed: {
+    frame_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
+  PausedFrame: {
+    frame_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
   PictureEntryView: {
     number: {
       integer: true,
@@ -1457,10 +1545,13 @@ export const CONSTANTS = {
   APP_RESTARTS_PATH: "/v1/operator/node/devices/{device_id}/app-restarts",
   APP_RESTART_SECONDS: 180,
   BEAM_DEGREES_MAX: 170,
+  CARRY_ON_FRAME_PATH: "/v1/operator/pauses/{pause_id}/frames/{frame_id}",
+  CARRY_ON_PATH: "/v1/operator/pauses/{pause_id}",
   CENTRAL_LINE_MAX: 96,
   CLOSE_REACH_MM: 5000,
   COLOUR_SENSORS_MAX: 32,
   CONTINUATION_LIMIT_SECONDS: 3600,
+  END_LEAD: 2,
   FRAME_LIGHTS_MAX: 4,
   FRAME_SKIPS_PATH: "/v1/operator/frames/{frame_id}/skips",
   FRAME_STATUS_PATH: "/v1/operator/frames/{frame_id}/status",
@@ -1482,6 +1573,8 @@ export const CONSTANTS = {
   NEVER_SHOW_PATH: "/v1/operator/never-show",
   PANEL_BLACK_MAX: 0.05,
   PANEL_BLACK_MIN: 1e-05,
+  PAUSES_PATH: "/v1/operator/pauses",
+  PAUSE_SECONDS: 3600,
   PI_SOURCE: "pi",
   REBOOTS_PATH: "/v1/operator/node/devices/{device_id}/reboots",
   REBOOT_ALLOWED_SECONDS: 600,
@@ -1517,6 +1610,10 @@ export const REFUSALS = {
     "unknown_photo",
     "nothing-moved",
     "changed",
+    "invalid_operator_pause",
+    "unknown_pause",
+    "nothing-paused",
+    "invalid_show_now",
   ],
   FrameLightingRefusal: [
     "unknown_room_light",
@@ -1535,6 +1632,14 @@ export const REFUSALS = {
     "too_large",
     "unknown_paper_profile",
     "named_by_a_frame",
+  ],
+  PauseRefusal: [
+    "not-set-up",
+    "not-answering",
+    "resting",
+    "paused",
+    "nothing-to-hold",
+    "video",
   ],
   PositionRestoreRefusal: [
     "other_frame",

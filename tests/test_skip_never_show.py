@@ -12,6 +12,7 @@ import itertools
 
 import pytest
 from support.devices import seed_device
+from support.frame_media import seed_variant
 from support.frames import frame_create
 from support.measured_photos import measure_all
 from support.photo_pools import library_of, photo, seed_pool
@@ -74,6 +75,10 @@ class Wall:
         seed_pool(registry, "library:1", photos)
         measure_all(registry, photos)
         prepare(registry, photos)
+        for number, item in enumerate(photos):
+            if item.kind == "video":    # a video's prepared copy is an MP4 of its length
+                seed_variant(registry, item.asset_id, f"{number + 1:064x}", width=item.width,
+                             height=item.height, media_type="video/mp4", duration=item.duration)
         self.coordinator = Coordinator(registry.db, registry.clock)
         self.status = status_of(registry)
         self.coordinator.runtime.command("set_scene", Scene(

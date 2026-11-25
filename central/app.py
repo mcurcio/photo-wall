@@ -35,6 +35,14 @@ from central.content_wiring import ContentServices, build_content_services
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database, DatabaseTransactionClock, ProcessTransactionClock, TransactionClock
 from central.display_routes import mount_display_routes, mount_picture_routes
+from central.everyday.model import END_LEAD
+from central.everyday.views import (
+    BackToNormalAnswer,
+    BackToNormalRequest,
+    EndsAtNightOff,
+    EndsIn,
+    ShowNowEnds,
+)
 from central.everyday_routes import mount_everyday_routes
 from central.fleet.leaf_bridge import mount_bus_bridges
 from central.fleet.node_boot import NodeBootConfig
@@ -58,7 +66,7 @@ from central.infra.frame_status_store import PgFrameStatus
 from central.infra.home_assistant import references as home_assistant_references
 from central.infra.home_assistant.advice import HomeAssistantAdvice
 from central.infra.home_assistant.settings import PgHomeAssistantSettings
-from central.infra.house_store import PgHouse, seed_house
+from central.infra.house_store import PgHouse, house_time_in, seed_house
 from central.infra.light_sensor_judge import PI_SOURCE, PiMeterAdvice, is_player
 from central.infra.node_record_retention import NodeRecordRetention
 from central.infra.oidc_provider import OidcProvider
@@ -72,7 +80,7 @@ from central.infra.player_contact_store import (
     player_reports_in,
 )
 from central.infra.player_state_wakes import PlayerStateWakes
-from central.infra.power_store import PgPower
+from central.infra.power_store import PgPower, power_policy_in
 from central.infra.room_light_store import PgRoomLights
 from central.infra.skip_store import SkipRetention
 from central.infra.transaction_seal import AesGcmTransactionSeal
@@ -95,6 +103,7 @@ from central.photo_library.provisioning import apply_setting, read_setting
 from central.photo_library_routes import mount_photo_library_routes, mount_photo_source_routes
 from central.photo_sources import PhotoSources
 from central.player_control_protocol import project_state, state_digest
+from central.power.timetable import night_off_after
 from central.power_routes import mount_power_routes
 from central.program_routes import mount_program_routes
 from central.registry import (
@@ -108,7 +117,15 @@ from central.registry import (
 )
 from central.room_light.model import RoomLightRefusal
 from central.room_light_routes import mount_room_light_routes
-from central.runtime import RuntimeConflict, Scene, SceneInUse, SceneOnWall, SceneWriteRefused
+from central.runtime import (
+    PAUSE_RANK,
+    RuntimeConflict,
+    Scene,
+    SceneInUse,
+    SceneOnWall,
+    SceneWriteRefused,
+    ShowNowRefused,
+)
 from central.runtime_store import RuntimeStore
 from central.scheduler import Scheduler
 from central.scheduler import run_scheduler as run_scheduler_until_cancelled
@@ -150,12 +167,18 @@ class UnbindRequest(Model):
 
 
 class ActivationRequest(Model):
+    """Show now. Decision 0036: `frame_ids` the Frames it plays on (None: the whole Scene, as a
+    script sends; the sheet always names them) and `ends` when it ends (None: until stopped).
+    `expires_at` keeps its one meaning, a queued request's expiry."""
     scene_id: Identifier
     activation_id: Identifier
-    priority: int = Field(default=0, ge=0)   # above the Default Scene (central.runtime DEFAULT_SCENE_RANK)
+    # Above the Default Scene (central.runtime DEFAULT_SCENE_RANK), beneath a pause's hold (PAUSE_RANK).
+    priority: int = Field(default=0, ge=0, lt=PAUSE_RANK)
     repeat: Literal["ignore", "restart", "queue"] = "ignore"
     force: bool = False
     expires_at: float | None = None
+    frame_ids: tuple[Identifier, ...] | None = Field(default=None, max_length=64)
+    ends: ShowNowEnds | None = None
 
 
 class AuthoredCandidatesRequest(Model):
@@ -418,6 +441,10 @@ def create_app(
             detail["scene_ids"] = exc.scene_ids
         detail.update(exc.details)
         return JSONResponse(detail, status_code=exc.status)
+
+    @app.exception_handler(ShowNowRefused)
+    async def show_now_refused(request, exc):
+        return JSONResponse({"error": exc.code}, status_code=422)
 
     @app.exception_handler(RuntimeConflict)
     async def runtime_conflict(request, exc):
@@ -910,8 +937,24 @@ def create_app(
         coordinator.runtime.command("delete_scene", scene_id, expected_revision, by=by)
         return {"status": "deleted"}
 
+    def show_now_ends_at(ends: ShowNowEnds | None) -> float | None:
+        """Decision 0036: a Show now's end as an instant (Central's clock): in so long, at
+        tonight's Night off (ShowNowRefused "no-night-off" when there is none within a day), or
+        None, until stopped."""
+        now = clock.utc()
+        if isinstance(ends, EndsIn):
+            return now + ends.seconds
+        if isinstance(ends, EndsAtNightOff):
+            with db.transaction() as conn:
+                at = night_off_after(power_policy_in(conn, now), house_time_in(conn), now)
+            if at is None:
+                raise ShowNowRefused("no-night-off")
+            return at
+        return None
+
+    # Show now is an everyday action (decision 0036): it asks for `operate` and stamps the person.
     @app.post("/v1/operator/activations")
-    def activate(request: ActivationRequest, by: Actor = Depends(admin)):
+    def activate(request: ActivationRequest, by: Actor = Depends(operator_auth.operate)):
         return coordinator.runtime.command_current(
             "activate",
             request.scene_id,
@@ -921,7 +964,17 @@ def create_app(
             repeat=request.repeat,
             force=request.force,
             expires_at=request.expires_at,
+            frame_ids=request.frame_ids,
+            ends_at=show_now_ends_at(request.ends),
         )
+
+    # Back to normal (decision 0036): the takeover ends at once, mid-photo, with its Scene's fade;
+    # downward cancellation, not the natural completion of `finish` below.
+    @app.post("/v1/operator/runs/{run_id}/end", response_model=BackToNormalAnswer)
+    def back_to_normal(run_id: Identifier, request: BackToNormalRequest,
+                       by: Actor = Depends(operator_auth.operate)) -> BackToNormalAnswer:
+        ended = coordinator.runtime.command_current("end", run_id, by=by, lead=END_LEAD)
+        return BackToNormalAnswer(run_id=run_id, request_id=request.request_id, at=ended.at, until=ended.until)
 
     @app.post("/v1/operator/runs/{run_id}/{operation}")
     def control_run(run_id: Identifier, operation: Literal["finish", "cancel"],

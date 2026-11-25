@@ -129,7 +129,8 @@ def test_every_operator_route_of_the_real_app_requires_the_operator_login():
     """Per method and path, so one route losing its `admin` dependency (a GET beside a guarded
     POST) fails here, whichever slice added it. The everyday actions ask for `operate` instead
     (decision 0036): Restart app, and slice 3's Skip and Previous (a Wall's and a Frame's),
-    Never show and Show again."""
+    Never show and Show again, Pause and Carry on (every Frame of a pause or one), Show now and
+    Back to normal."""
     app = create_app(Database("postgresql://unused@127.0.0.1:1/unused", application_name="photo-wall-test"), ManualClock(0), ADMIN,
                      run_scheduler=False)
     admin, operate = app.state.operator_auth.admin, app.state.operator_auth.operate
@@ -142,7 +143,12 @@ def test_every_operator_route_of_the_real_app_requires_the_operator_login():
                         ("POST", "/v1/operator/walls/{surface_id}/skips"),
                         ("POST", "/v1/operator/frames/{frame_id}/skips"),
                         ("POST", "/v1/operator/never-show"),
-                        ("DELETE", "/v1/operator/never-show/{asset_id}")}
+                        ("DELETE", "/v1/operator/never-show/{asset_id}"),
+                        ("POST", "/v1/operator/pauses"),
+                        ("DELETE", "/v1/operator/pauses/{pause_id}"),
+                        ("DELETE", "/v1/operator/pauses/{pause_id}/frames/{frame_id}"),
+                        ("POST", "/v1/operator/activations"),
+                        ("POST", "/v1/operator/runs/{run_id}/end")}
     assert without_admin - everyday == SESSION_ROUTES
     # Non-vacuous: the Power tab's routes are among the guarded ones.
     guarded = {(method, route.path) for route in app.routes

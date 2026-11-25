@@ -31,6 +31,7 @@ from central.central_errors.compose import impediment
 from central.central_errors.views import FrameImpediment
 from central.db import Database, TransactionClock
 from central.displays.model import Readiness, live_test
+from central.everyday.model import Pause
 from central.everyday.ports import FrameFacts as EverydayFacts
 from central.everyday.ports import Showing
 from central.fleet.node_bus_presence import HUB_REACHABILITY
@@ -89,6 +90,7 @@ from central.infra.display_store import power_facts_of_frames_in
 from central.infra.events import frame_status_in, frame_statuses_in
 from central.infra.everyday_store import showing_in
 from central.infra.frame_report_store import frame_reports_in
+from central.infra.pause_store import PgPauses
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.planning_outcome_store import PgPlanningOutcome
 from central.infra.player_contact_store import player_reports_in
@@ -386,9 +388,10 @@ class PgStatusReading:
 
     def overrides(self) -> tuple[Override, ...]:
         """The power holds in force (central/power/timetable.py `hold_in_force` per Frame), then the
-        takeovers: each Show now Run that wins a Frame (central/why/explain.py's kinds rule). Who
-        set a hold is not in the hold's own shape yet (`HoldSource`), so `by` is None; a Show now
-        Run has no end time yet, so its `until` is None."""
+        pauses (decision 0036: each pause holding a Frame, by whom and until its hold is gone),
+        then the takeovers: each Show now Run that wins a Frame (central/why/explain.py's kinds
+        rule), until its end time or Back to normal's cut (None: until stopped). Who set a hold is
+        not in the hold's own shape yet (`HoldSource`), so its `by` is None."""
         frame_ids = [frame.id for frame in self.inventory.frames]
         holds: dict[tuple, list[str]] = {}
         for frame_id in frame_ids:
@@ -398,14 +401,23 @@ class PgStatusReading:
         found = [Override(kind=OverrideKind.POWER_HOLD, id=hold_id, frame_ids=tuple(sorted(frames)), power=power,
                           started_at=self._central(started_at), until=self._central(ends_at))
                  for (hold_id, power, started_at, ends_at), frames in sorted(holds.items(), key=lambda each: each[0][0])]
+        pauses: dict[str, list[Pause]] = {}
+        for pause in PgPauses.live_in(self._conn, self._now, frame_ids):
+            pauses.setdefault(pause.pause_id, []).append(pause)
+        found.extend(Override(kind=OverrideKind.PAUSE, id=pause_id, frame_ids=tuple(p.frame_id for p in held),
+                              by=held[0].by, started_at=held[0].started_at,
+                              until=max(p.held.drawn_end for p in held))
+                     for pause_id, held in sorted(pauses.items()))
         takeovers: dict[str, list[str]] = {}
         for frame_id in frame_ids:
             winner = self.winners.get(frame_id)
             if winner is not None and winner.kind == "show-now" and winner.run_id is not None:
                 takeovers.setdefault(winner.run_id, []).append(frame_id)
-        started = {run.run_id: run.started_at for run in self.projection.current.runs}
+        runs = {run.run_id: run for run in self.projection.current.runs}
         found.extend(Override(kind=OverrideKind.TAKEOVER, id=run_id, frame_ids=tuple(sorted(frames)),
-                              name=self.winners[frames[0]].name, started_at=started.get(run_id))
+                              name=self.winners[frames[0]].name,
+                              started_at=runs[run_id].started_at if run_id in runs else None,
+                              until=runs[run_id].until if run_id in runs else None)
                      for run_id, frames in sorted(takeovers.items()))
         return tuple(found)
 
