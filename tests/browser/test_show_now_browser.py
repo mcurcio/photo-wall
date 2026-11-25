@@ -38,6 +38,7 @@ from support.console_words import scene_words
 from test_operator_showrunner_browser import (
     INVALID_FRAME,
     SCENE_ID,
+    SOURCE,
     VALID_FRAME,
     _runs_of,
     _runtime,
@@ -696,3 +697,62 @@ def test_a_card_show_now_during_an_activation_in_flight_keeps_its_draft_and_key(
         expect(_outcome(page)).to_have_text(f"Started: Central admitted a Run of {SCENE_ID}.")
         assert len(sent) == 2 and len(set(sent)) == 1, sent
         assert len(_runs_of(page, origin, SCENE_ID)) == 1
+
+
+def _on_both(scene_id):
+    """A live-source Scene on both seeded frames."""
+    return Scene(scene_id=scene_id, loop=True, contributions=tuple(
+        Contribution(target=f"frame:{frame}", source_refs=(SOURCE,)) for frame in (VALID_FRAME, INVALID_FRAME)))
+
+
+def test_show_now_on_chosen_frames_with_an_end(page, registry):
+    """Decision 0036: the sheet ticks every Frame of the Scene explicitly; one left out is not sent,
+    and gets no command (its Run plays on the chosen Frame alone); the end chosen is sent.
+    Mutation probes: send every Scene Frame whatever is ticked; send no `ends`."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _runtime(registry).command("set_scene", _on_both(SCENE_ID), by="console")
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "now")
+        form = start_show_now(page, SCENE_ID)
+        frames = form.get_by_role("group", name="Frames", exact=True)
+        for frame in (VALID_FRAME, INVALID_FRAME):
+            expect(frames.get_by_role("checkbox", name=frame, exact=True)).to_be_checked()
+        frames.get_by_role("checkbox", name=INVALID_FRAME, exact=True).uncheck()
+        ends = form.get_by_role("group", name="Ends", exact=True)
+        expect(ends.get_by_role("radio", name="In 1 hour", exact=True)).to_be_checked()
+        ends.get_by_role("radio", name="Until I stop it", exact=True).check()
+        form.get_by_role("button", name="Continue", exact=True).click()
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/activations")) as info:
+            form.get_by_role("button", name="Activate now", exact=True).click()
+        sent = info.value.request.post_data_json
+        assert sent["frame_ids"] == [VALID_FRAME] and sent["ends"] == {"kind": "stopped"}
+        expect(_outcome(page)).to_have_text(f"Started: Central admitted a Run of {SCENE_ID}.")
+        (run,) = [run for run in _runs_of(page, origin, SCENE_ID) if run["phase"] == "body"]
+        assert run["frames"] == [VALID_FRAME]
+        assert f"frame:{INVALID_FRAME}" not in run["participants"]
+
+
+def test_back_to_normal_on_home_ends_the_takeover_at_once(page, registry):
+    """Decision 0036, the owner's S3: Home's takeover banner says what is shown and until when, and
+    Back to normal ends it now (downward cancellation at an instant: its Run reads cancelled once
+    its cut has passed). Mutation probe: draw no takeover banner."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _scene(SCENE_ID), by="console")
+    runtime.command("activate", SCENE_ID, "takeover-1", registry.clock.utc(), by="console",
+                    ends_at=registry.clock.utc() + 3600)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "home")
+        banner = page.locator("section[data-kind=takeover]")     # the takeover banner (OverrideBanner)
+        expect(banner).to_contain_text(SCENE_ID)
+        expect(banner).to_contain_text(re.compile(r"until \d\d:\d\d"))
+        with page.expect_response(lambda r: r.url.endswith("/end") and r.request.method == "POST") as info:
+            banner.get_by_role("button", name="Back to normal", exact=True).click()
+        assert info.value.status == 200, info.value.text()
+        expect(page.locator("[role=status].fixed")).to_contain_text("Back to normal")
+        answer = info.value.json()
+        registry.clock.advance(answer["until"] - registry.clock.utc() + 1)
+        (run,) = _runs_of(page, origin, SCENE_ID)
+        assert run["phase"] == "cancelled"
