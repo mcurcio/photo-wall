@@ -32,6 +32,7 @@ TABLES = {
     "PositionRestoreRefusal": [("domain/trial-refusals.ts", "POSITION_RESTORE_WORDS")],
     "InstallRefusal": [("domain/releases/model.ts", "INSTALL_REFUSAL_WORDS")],
     "AppRestartRefusal": [("domain/restart-words.ts", "RESTART_REFUSALS")],
+    "EverydayRefusal": [("domain/everyday-words.ts", "EVERYDAY_REFUSAL_WORDS")],
 }
 # Contexts the console never receives: the drawn report is the Player's PUT, answered to its bearer.
 NOT_SHOWN = {"DrawnReportRefusal"}
