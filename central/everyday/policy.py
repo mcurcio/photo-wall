@@ -82,6 +82,16 @@ def _origin(facts: FrameFacts, layer: Layer) -> LayerOrigin | None:
     return facts.origins.get(layer.assignment_id)
 
 
+def origin_shown(layers: Iterable[Layer], origins: Mapping[str, LayerOrigin], shown: Layer) -> LayerOrigin | None:
+    """What made the layer `shown` a Frame shows: its own Intent's, else (a cover, which is no
+    Intent's) that of a layer of its Run; None when none is known."""
+    found = origins.get(shown.assignment_id)
+    if found is not None:
+        return found
+    return next((origin for layer in layers if layer.run_id == shown.run_id
+                 and (origin := origins.get(layer.assignment_id)) is not None), None)
+
+
 def joins(facts: FrameFacts, showing: Layer, at: float) -> Layer | None:
     """Skip's next photo: the Frame's next regular media layer of the showing layer's Run after
     it, not yet fully in at `at`, that is not an ending, not the photo left and not on the Never
@@ -144,11 +154,11 @@ def passed_over(facts: FrameFacts) -> frozenset[str]:
     return frozenset(cover.cover_id for cover in facts.recent if cover.cause is CoverCause.PREVIOUS)
 
 
-def stays(facts: FrameFacts, kind: SkipKind, at: float, *,
-          usable: Callable[[str], bool] | None = None, now: float | None = None) -> StayReason | None:
+def stays(facts: FrameFacts, kind: SkipKind, at: float, *, now: float | None = None) -> StayReason | None:
     """Why the Frame stays when `kind` is asked of it at the shared instant `at`, first match wins
-    (decision 0036's `StayReason` table); None when it moves. `usable`: whether a photo may still
-    be stepped back onto (Previous; None: any photo not on the Never show list)."""
+    (decision 0036's `StayReason` table); None when it moves. Previous steps back only onto a photo
+    not on the Never show list that `facts.usable` takes, the one judge Home's `can` and the
+    command both read."""
     if not facts.set_up:
         return StayReason.NOT_SET_UP
     if not facts.answering:
@@ -165,16 +175,14 @@ def stays(facts: FrameFacts, kind: SkipKind, at: float, *,
         return StayReason.BLACK
     if origin is not None and origin.hand_placed:
         return StayReason.HAND_PLACED
-    if kind is SkipKind.PREVIOUS and _previous_photo(facts, showing, at if now is None else now,
-                                                     usable) is None:
+    if kind is SkipKind.PREVIOUS and _previous_photo(facts, showing, at if now is None else now) is None:
         return StayReason.NO_PREVIOUS
     return None
 
 
-def _previous_photo(facts: FrameFacts, showing: Layer, now: float,
-                    usable: Callable[[str], bool] | None) -> str | None:
+def _previous_photo(facts: FrameFacts, showing: Layer, now: float) -> str | None:
     anchor, steps = previous_chain(facts, showing, now)
-    allowed = usable if usable is not None else (lambda asset_id: True)
+    allowed = facts.usable if facts.usable is not None else (lambda asset_id: True)
     return previous_step(facts.history, anchor, steps,
                          lambda asset_id: asset_id not in facts.listed and allowed(asset_id),
                          passed_over=passed_over(facts))
@@ -188,20 +196,18 @@ def _fades(start: float, end: float, fade_in: float, fade_out: float) -> tuple[f
 
 
 def cover_for(facts: FrameFacts, kind: SkipKind, cause: CoverCause, *, request_id: str, at: float,
-              now: float, cue: str | None, usable: Callable[[str], bool] | None = None) -> Cover | None:
+              now: float, cue: str | None) -> Cover | None:
     """The cover a Frame that moves (`stays` is None) gets: a layer above its layers from `at`.
     Next: its next photo whole (`joins`), with that layer's media origin, so at the hand-over both
     draw the same picture (player/planes.py `drawn_identity`) and a video goes on from where the
     cover played it, never again from its start; else a pick from its Scene line ending with the
     layer it covers. Previous: its photo pinned, ending where the Frame's next regular layer is fully in.
     None when the Frame stays."""
-    if stays(facts, kind, at, usable=usable, now=now) is not None:
+    if stays(facts, kind, at, now=now) is not None:
         return None
     showing = showing_at(facts.layers, at)
     assert showing is not None
-    origin = _origin(facts, showing) or next(
-        (found for layer in facts.layers if layer.run_id == showing.run_id
-         and (found := _origin(facts, layer)) is not None), None)
+    origin = origin_shown(facts.layers, facts.origins, showing)
     transition = 0.0 if origin is None else origin.transition
     common = dict(cover_id=cover_id(request_id, facts.frame_id), frame_id=facts.frame_id, cause=cause,
                   covered=showing.assignment_id, run_id=showing.run_id, output_id=showing.output_id,
@@ -210,7 +216,7 @@ def cover_for(facts: FrameFacts, kind: SkipKind, cause: CoverCause, *, request_i
                   cue=cue, left=photo_of(showing))
     if kind is SkipKind.PREVIOUS:
         anchor, steps = previous_chain(facts, showing, now)
-        pinned = _previous_photo(facts, showing, now, usable)
+        pinned = _previous_photo(facts, showing, now)
         following = _next_regular(facts, showing, at)
         end, fade_out = ((following.start + following.fade_in, following.fade_in)
                          if following is not None else (showing.drawn_end, showing.fade_out))
@@ -343,6 +349,6 @@ def asked_until(at: float, end: float) -> float:
     return max(end, at + ACK_LATE_SECONDS + ACK_LATE_KEPT_SECONDS)
 
 
-__all__ = ["asked_state", "asked_until", "carried_on", "cover_drawn", "cover_for", "cover_id", "draws", "hold_for", "hold_id", "joins", "passed_over",
+__all__ = ["asked_state", "asked_until", "carried_on", "cover_drawn", "cover_for", "cover_id", "draws", "hold_for", "hold_id", "joins", "origin_shown", "passed_over",
            "pause_refusal", "pause_run_id", "photo_of", "previous_chain", "previous_step", "showing_at", "stays",
            "the_shared_instant", "unseen_covers"]

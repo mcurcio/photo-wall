@@ -10,14 +10,15 @@ from collections.abc import Iterable, Mapping
 from typing import Any
 
 from central.everyday.model import AskedAction, CoverCause
-from central.everyday.policy import asked_until
-from central.everyday.ports import AskFact, LayerOrigin, Showing
+from central.everyday.policy import asked_until, origin_shown, showing_at, the_shared_instant
+from central.everyday.ports import AskFact, LayerOrigin, Showing, UsableReader
 from central.infra.never_show_store import PgNeverShow
 from central.infra.pause_store import PgPauses
 from central.infra.shown_history_store import PgShownHistory
 from central.infra.skip_store import PgSkips
 from central.planner import assignment_id
 from central.runtime import Runtime, Scene
+from central.wall_plan.selection import SceneSelection
 from contracts.models import Layer
 
 _ASKED = {CoverCause.NEXT: AskedAction.SKIP, CoverCause.PREVIOUS: AskedAction.PREVIOUS,
@@ -47,12 +48,14 @@ def layer_origins(runtime: Runtime, layers: Iterable[Layer], now: float) -> dict
 
 
 def showing_in(conn: Any, now: float, frame_ids: Iterable[str], *, runtime: Runtime,
-               layers: Mapping[str, tuple[Layer, ...]], shown: PgShownHistory | None = None,
-               skips: PgSkips | None = None) -> dict[str, Showing]:
+               layers: Mapping[str, tuple[Layer, ...]], usable: UsableReader,
+               shown: PgShownHistory | None = None, skips: PgSkips | None = None) -> dict[str, Showing]:
     """Each Frame's `Showing` at Central's `now`: its offered layers (with each cover built whole
     that is decided and not offered yet) and what made them, its covers newest first with when
-    each was reported presented, its shown history, the Never show list, and its newest asked
-    action that moved it with when its cover was reported presented."""
+    each was reported presented, its shown history, the Never show list, its newest asked action
+    that moved it with when its cover was reported presented, and which of its history photos
+    Previous may step back onto (`usable`, judged with the own selection of the Scene the Frame
+    shows at the shared instant, as the Planner judges the photo it pins)."""
     shown, skips = shown or PgShownHistory(), skips or PgSkips()
     frame_ids = sorted(set(frame_ids))
     origins = layer_origins(runtime, [layer for frame in frame_ids for layer in layers.get(frame, ())], now)
@@ -65,6 +68,8 @@ def showing_in(conn: Any, now: float, frame_ids: Iterable[str], *, runtime: Runt
     covers = {frame: tuple(cover for _, cover in rows if cover is not None) for frame, rows in recent.items()}
     presented = shown.presented_in(conn, [cover.cover_id for found in covers.values() for cover in found]
                                    + [pause.held.assignment_id for pause in pauses.values()])
+    selections = runtime.planning_selections()
+    at = the_shared_instant(now)
     answer = {}
     for frame in frame_ids:
         offered = layers.get(frame, ())
@@ -85,9 +90,13 @@ def showing_in(conn: Any, now: float, frame_ids: Iterable[str], *, runtime: Runt
             asked = AskFact(action=AskedAction.PAUSE, request_id=pause.pause_id, at=pause.started_at,
                             until=asked_until(pause.started_at, pause.held.drawn_end),
                             presented_at=presented.get(pause.held.assignment_id))
+        on_origins = {layer.assignment_id: origins[layer.assignment_id]
+                      for layer in on_frame if layer.assignment_id in origins}
+        shown_now = showing_at(on_frame, at)
+        origin = None if shown_now is None else origin_shown(on_frame, on_origins, shown_now)
+        selection = SceneSelection() if origin is None else selections.get(origin.scene_id, SceneSelection())
         answer[frame] = Showing(
-            layers=on_frame, origins={layer.assignment_id: origins[layer.assignment_id]
-                                      for layer in on_frame if layer.assignment_id in origins},
+            layers=on_frame, origins=on_origins, usable=usable(conn, frame, selection),
             recent=covers.get(frame, ()), history=history.get(frame, ()), listed=listed, asked=asked,
             presented={cover.cover_id: presented[cover.cover_id] for cover in covers.get(frame, ())
                        if cover.cover_id in presented})

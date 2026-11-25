@@ -35,6 +35,8 @@ from central.registry import RegistryError
 from central.runtime import Contribution, Scene
 from central.runtime_store import RuntimeStore
 from central.wall_plan.fit_analysis import FitSelection
+from central.wall_plan.fit_settings import FitSettings
+from central.wall_plan.selection import SceneSelection
 from contracts.models import Observation
 
 pytestmark = pytest.mark.db
@@ -42,11 +44,14 @@ pytestmark = pytest.mark.db
 PHOTOS = tuple(photo(f"portrait-{n:02}", taken_at=900 + n, width=2400, height=3600) for n in range(12))
 
 
-def status_of(registry) -> PgFrameStatus:
-    """Frame status as central/app.py wires it, with Coordination's layer read."""
+def status_of(registry, coordinator: Coordinator | None = None) -> PgFrameStatus:
+    """Frame status as central/app.py wires it, with Coordination's layer read and Previous's
+    judge of a Frame's history."""
+    coordinator = coordinator or Coordinator(registry.db, registry.clock)
     return PgFrameStatus(registry.db, registry.clock, times=DatabaseTransactionClock(),
                          inventory=registry.inventory_in, plans=Coordinator.frame_plans_in,
-                         runtime=RuntimeStore.read_in, layers=Coordinator.frame_layers_in)
+                         runtime=RuntimeStore.read_in, layers=Coordinator.frame_layers_in,
+                         usable=coordinator.usable_in)
 
 
 class Wall:
@@ -54,7 +59,7 @@ class Wall:
     from `PHOTOS` (a Frame in `hand_placed` shows one photo by hand)."""
 
     def __init__(self, registry, frames: dict[str, str], *, cycle: float = 60, photos=PHOTOS,
-                 hand_placed=(), silent=()):
+                 hand_placed=(), silent=(), selection: SceneSelection | None = None):
         self.registry = registry
         seed_house(registry.db, DatabaseTransactionClock())
         self.players = {}
@@ -80,9 +85,10 @@ class Wall:
                 seed_variant(registry, item.asset_id, f"{number + 1:064x}", width=item.width,
                              height=item.height, media_type="video/mp4", duration=item.duration)
         self.coordinator = Coordinator(registry.db, registry.clock)
-        self.status = status_of(registry)
+        self.status = status_of(registry, self.coordinator)
         self.coordinator.runtime.command("set_scene", Scene(
-            scene_id="evenings", loop=True, cycle_seconds=cycle, contributions=tuple(
+            scene_id="evenings", loop=True, cycle_seconds=cycle, selection=selection or SceneSelection(),
+            contributions=tuple(
                 Contribution(target=f"frame:{frame_id}", kind="media",
                              **({"asset_refs": (photos[0].asset_id,)} if frame_id in hand_placed
                                 else {"source_refs": ("library:1",)}))
@@ -536,3 +542,39 @@ def test_never_show_names_no_showing_an_earlier_skip_already_hides(registry):
         photo_of(showing_at(wall.layers("hall"), max(last.start + (last.until - last.start) * k / 10, now)))
         == shown for k in range(10)) for last in said.last_showings)
     assert [last for last in said.last_showings if last.frame_id == "hall"] == []
+
+
+def _house_crop_limit(registry, crop_limit: float) -> None:
+    from central.infra.fit_settings_store import PgFitSettings
+    PgFitSettings(registry.db, times=DatabaseTransactionClock()).save_fit_settings(
+        FitSettings(crop_limit=crop_limit), by="console")
+
+
+def test_home_offers_previous_exactly_when_the_command_takes_it(registry):
+    """Decision 0036 (the independent review): Home's `can` and Previous's command read one judge of
+    a Frame's history (`FrameFacts.usable`, Coordination's `usable_in`), and it judges fit with the
+    Scene's own selection. A Scene whose own crop limit takes its photos where the house's would
+    not: Previous is offered and taken. Once the photo before no longer fits the Frame at the crop
+    limit the Scene follows, Previous is neither offered nor taken. Mutation probes: judge with
+    `SceneSelection()` in `showing_in` (the first press is refused nothing-moved while Home offers
+    it); leave `usable` out of `frame_facts` (Home offers Previous the command refuses)."""
+    # Portrait photos (2:3) on a 9:16 Frame lose about 16% of their area.
+    wall = Wall(registry, {"hall": "wall"}, cycle=30, selection=SceneSelection(crop_limit=0.3))
+    _house_crop_limit(registry, 0.1)
+    first, second = shown_twice(wall, "hall")
+    assert Action.PREVIOUS in wall.frame_status("hall").can
+    answer = wall.skip(SkipScope.FRAME, "hall", SkipKind.PREVIOUS)
+    assert [moved.frame_id for moved in answer.moved] == ["hall"]
+
+
+def test_home_does_not_offer_previous_onto_a_photo_that_no_longer_fits(registry):
+    """The same judge, the other way (see the test above): the photo before no longer fits the
+    Frame at the crop limit its Scene follows, so Previous is neither offered on Home nor taken."""
+    wall = Wall(registry, {"hall": "wall"}, cycle=30)
+    shown_twice(wall, "hall")
+    assert Action.PREVIOUS in wall.frame_status("hall").can
+    _house_crop_limit(registry, 0.1)       # the Scene follows the house's, now too tight for them
+    assert Action.PREVIOUS not in wall.frame_status("hall").can
+    with pytest.raises(RegistryError) as refused:
+        wall.skip(SkipScope.FRAME, "hall", SkipKind.PREVIOUS)
+    assert refused.value.details["stayed"] == [{"frame_id": "hall", "reason": "no-previous"}]

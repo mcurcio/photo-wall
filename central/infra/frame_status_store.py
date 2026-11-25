@@ -33,7 +33,7 @@ from central.db import Database, TransactionClock
 from central.displays.model import Readiness, live_test
 from central.everyday.model import Pause
 from central.everyday.ports import FrameFacts as EverydayFacts
-from central.everyday.ports import Showing
+from central.everyday.ports import Showing, UsableReader
 from central.fleet.node_bus_presence import HUB_REACHABILITY
 from central.fleet.node_observations import fleet_hosts_in, host_births_in
 from central.fleet.pi_reboot import newest_reboots_in
@@ -150,13 +150,16 @@ class PgStatusReading:
     def __init__(self, conn: Any, now: float, *, times: TransactionClock, inventory: InventoryReader,
                  plans: PlanReader, runtime: Callable[[Any], Runtime],
                  failing_steps: Callable[[], tuple[FailingStep, ...]],
-                 layers: LayerReader | None = None) -> None:
+                 layers: LayerReader | None = None, usable: UsableReader | None = None) -> None:
         """`layers`: Coordination's `frame_layers_in`, read only when given (Home's and the Frame
-        page's reads, and the everyday commands): without it nothing is offered (`showing`)."""
+        page's reads, and the everyday commands): without it nothing is offered (`showing`);
+        `usable`: Coordination's `usable_in`, given with `layers`."""
+        if layers is not None and usable is None:
+            raise ValueError("what a Frame shows is read with Previous's judge of its history")
         self._conn, self._now, self._times = conn, now, times
         self._inventory_in, self._plans_in, self._runtime_in = inventory, plans, runtime
         self._failing_steps = failing_steps
-        self._layers_in = layers
+        self._layers_in, self._usable_in = layers, usable
 
     @property
     def now(self) -> float:
@@ -427,7 +430,8 @@ class PgStatusReading:
         if self._layers_in is None:
             return None
         return showing_in(self._conn, self._now, [frame.id for frame in self.inventory.frames],
-                          runtime=self.runtime, layers=self._layers_in(self._conn, self._now))
+                          runtime=self.runtime, layers=self._layers_in(self._conn, self._now),
+                          usable=self._usable_in)
 
     def failing_steps(self) -> tuple[FailingStep, ...]:
         return self._failing_steps()
@@ -514,21 +518,24 @@ class PgFrameStatus:
     def __init__(self, db: Database, clock: Clock, *, times: TransactionClock, inventory: InventoryReader,
                  plans: PlanReader, runtime: Callable[[Any], Runtime],
                  failing_steps: Callable[[], tuple[FailingStep, ...]] = lambda: (),
-                 layers: LayerReader | None = None) -> None:
+                 layers: LayerReader | None = None, usable: UsableReader | None = None) -> None:
         """`inventory`: the Registry's `inventory_in`; `plans`: Coordination's `frame_plans_in`;
         `runtime`: the Runtime's `read_in`; `failing_steps`: the scheduler's steps failing now;
-        `layers`: Coordination's `frame_layers_in` (slice 3's everyday actions; None offers none)."""
+        `layers`: Coordination's `frame_layers_in` (slice 3's everyday actions; None offers none),
+        with `usable`, Coordination's `usable_in` (Previous's one judge of a Frame's history)."""
+        if (layers is None) != (usable is None):
+            raise ValueError("the everyday actions read a Frame's layers and Previous's judge together")
         self._db, self._clock = db, clock
         self._log: FrameStatusLog = PgFrameStatusLog(times)
         self._readers = {"times": times, "inventory": inventory, "plans": plans, "runtime": runtime,
                          "failing_steps": failing_steps}
-        self._layers = layers
+        self._layers, self._usable = layers, usable
 
     def everyday_in(self, conn: Any, now: float, frame_ids: Sequence[str] | None = None,
                     ) -> dict[str, EverydayFacts]:
         """central/everyday/ports.py `FrameFactsReader`: each Frame's everyday facts in the caller's
         transaction (Coordination's, under its lock), judged as Home's `can` judges them."""
-        reading = PgStatusReading(conn, now, **self._readers, layers=self._layers)
+        reading = PgStatusReading(conn, now, **self._readers, layers=self._layers, usable=self._usable)
         frames, house = facts_of(reading)
         found = {}
         for frame_id, facts in frames.items():
@@ -545,7 +552,8 @@ class PgFrameStatus:
         """One reading of `conn`, every Frame's status composed against its kept row; `everyday`:
         with what each Frame shows, so its everyday actions are offered (Home, the Frame page)."""
         reading = PgStatusReading(conn, self._clock.utc(), **self._readers,
-                                  layers=self._layers if everyday else None)
+                                  layers=self._layers if everyday else None,
+                                  usable=self._usable if everyday else None)
         frames, house = facts_of(reading)
         kept = self._log.kept_in(PgTransaction(conn))
         statuses = {frame_id: frame_status(facts, house, reading.now, kept.get(frame_id))

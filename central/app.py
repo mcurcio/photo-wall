@@ -1025,7 +1025,7 @@ def create_app(
         failing_steps=lambda: tuple(FailingStep(step, health.since) for step, health
                                     in sorted(app.state.scheduler.health().steps.items())
                                     if health.status == "failing"),
-        layers=lambda conn, now: coordinator.frame_layers_in(conn, now))
+        layers=lambda conn, now: coordinator.frame_layers_in(conn, now), usable=coordinator.usable_in)
     mount_home_routes(app, admin=admin, home=frame_status)
     # Slice 3's everyday actions (decision 0036): Skip, Previous and Never show, judged by the rule
     # Home's `can` reads; rows past their covers go off the tick like every retention.

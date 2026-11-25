@@ -4,7 +4,7 @@ up, answering, resting or paused (central/frame_status/policy.py `everyday_facts
 which layers its Player's newest offer holds and what each shows."""
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -56,6 +56,8 @@ class Showing:
     asked: AskFact | None = None
     # When each cover of `recent` was reported presented (by cover id; absent: not yet).
     presented: Mapping[str, float] = field(default_factory=dict)
+    # Whether a photo of `history` may still be stepped back onto (`FrameFacts.usable`).
+    usable: Callable[[str], bool] | None = None
 
 
 @dataclass(frozen=True)
@@ -65,7 +67,10 @@ class FrameFacts:
     `layers`: the media and black layers of its Player's newest valid offer on it not yet over;
     `origins` what made each (by assignment id; a layer with none is no Intent's now). `recent`:
     its covers of earlier skips, newest first (a Previous chain). `history`: its shown history,
-    newest first. `listed`: the Never show list's photos."""
+    newest first. `listed`: the Never show list's photos. `usable`: whether a photo of its history
+    may still be stepped back onto (still in the library and fitting the Frame as the Scene it
+    shows judges it), judged by its store, the one judge Home's `can` and the command both read
+    (decision 0036, the independent review); None: any photo (a test's facts)."""
     frame_id: str
     set_up: bool = True
     answering: bool = True
@@ -76,6 +81,7 @@ class FrameFacts:
     recent: tuple[Cover, ...] = ()
     history: tuple[ShownPhoto, ...] = ()
     listed: frozenset[str] = frozenset()
+    usable: Callable[[str], bool] | None = None
 
 
 def frame_facts(frame_id: str, showing: Showing, *, set_up: bool, answering: bool, resting: bool,
@@ -89,7 +95,16 @@ def frame_facts(frame_id: str, showing: Showing, *, set_up: bool, answering: boo
                       layers=tuple(layer for layer in showing.layers if layer.assignment_id not in unseen),
                       origins=showing.origins,
                       recent=tuple(cover for cover in showing.recent if cover.cover_id not in unseen),
-                      history=showing.history, listed=showing.listed)
+                      history=showing.history, listed=showing.listed, usable=showing.usable)
+
+
+class UsableReader(Protocol):
+    """Previous's judge of a Frame's history photos, read in the caller's transaction: whether each
+    is still in the library and still fits the Frame `frame_id` as a Scene of `selection` judges it
+    (`Showing.usable`). `selection` is that Scene's own (central.wall_plan.selection's
+    `SceneSelection`, opaque here: the everyday rules never read it)."""
+
+    def __call__(self, conn: Any, frame_id: str, selection: Any) -> Callable[[str], bool]: ...
 
 
 class FrameFactsReader(Protocol):
@@ -131,4 +146,4 @@ class NeverShowList(Protocol):
 
 
 __all__ = ["AskFact", "FrameFacts", "FrameFactsReader", "LayerOrigin", "NeverShowList", "Showing", "ShownPhoto",
-           "SkipRecord", "Skips", "frame_facts"]
+           "SkipRecord", "Skips", "UsableReader", "frame_facts"]

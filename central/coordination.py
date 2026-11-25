@@ -1336,13 +1336,11 @@ class Coordinator:
             covers, stayed = [], []
             for frame_id in frame_ids:
                 frame = found.get(frame_id)
-                usable = self._usable_in(conn, frame) if frame is not None and kind is SkipKind.PREVIOUS else None
-                reason = StayReason.NOT_SET_UP if frame is None else stays(frame, kind, at, usable=usable, now=now)
+                reason = StayReason.NOT_SET_UP if frame is None else stays(frame, kind, at, now=now)
                 if reason is not None:
                     stayed.append(Stayed(frame_id=frame_id, reason=reason))
                     continue
-                covers.append(cover_for(frame, kind, cause, request_id=request_id, at=at, now=now,
-                                        cue=cue, usable=usable))
+                covers.append(cover_for(frame, kind, cause, request_id=request_id, at=at, now=now, cue=cue))
             if not covers:
                 raise RegistryError(EverydayRefusal.NOTHING_MOVED.value, 409, details={
                     "stayed": [each.model_dump(mode="json") for each in stayed]})
@@ -1511,17 +1509,29 @@ class Coordinator:
         return [row["id"] for row in conn.execute(
             "SELECT id FROM frames WHERE surface_id=%s ORDER BY id", (target_id,)).fetchall()]
 
-    def _usable_in(self, conn, frame: FrameFacts) -> Callable[[str], bool]:
-        """Previous's test of a photo in the Frame's history: still in the library and still
-        fitting the Frame at the house's crop limit (the photo fit rule's size-only part, as a
-        hand-placed photo is judged)."""
-        output = next((each for each in frame_outputs_in(conn) if each.frame_id == frame.frame_id), None)
-        target = None if output is None else fit_target(output)
-        candidates = self.media.authored_in(conn, frozenset(entry.asset_id for entry in frame.history))
-        settings = self.fit.fit_settings_in(conn)
-        crop_limit = crop_limit_of(SceneSelection(), settings)
-        return lambda asset_id: (target is not None and asset_id in candidates
-                                 and eligible(candidates[asset_id], target, crop_limit, settings))
+    def usable_in(self, conn, frame_id: str, selection: SceneSelection) -> Callable[[str], bool]:
+        """central/everyday/ports.py `UsableReader`, the one judge of a photo Previous may step back
+        onto that Home's `can` and the command both read: still in the library and still fitting
+        the Frame at the crop limit of the Scene it shows (`selection`, its own, as the Planner
+        judges the photo it pins: the photo fit rule's size-only part, as a hand-placed photo is
+        judged). Lazy, in the caller's transaction: a photo is read once, when first asked, so a
+        read of Home judges only the photos a step reaches."""
+        judged: dict[str, bool] = {}
+        fit: list = []
+
+        def usable(asset_id: str) -> bool:
+            if asset_id not in judged:
+                if not fit:
+                    output = next((each for each in frame_outputs_in(conn) if each.frame_id == frame_id), None)
+                    settings = self.fit.fit_settings_in(conn)
+                    fit.append((None if output is None else fit_target(output),
+                                crop_limit_of(selection, settings), settings))
+                target, crop_limit, settings = fit[0]
+                candidates = {} if target is None else self.media.authored_in(conn, frozenset({asset_id}))
+                judged[asset_id] = (asset_id in candidates
+                                    and eligible(candidates[asset_id], target, crop_limit, settings))
+            return judged[asset_id]
+        return usable
 
     @staticmethod
     def frame_layers_in(conn, now: float) -> dict[str, tuple[Layer, ...]]:
