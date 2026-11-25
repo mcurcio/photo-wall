@@ -357,6 +357,23 @@ def test_never_show_of_a_photo_that_turned_over_is_refused(registry):
     assert refused.value.code == "changed"
 
 
+def test_never_show_of_a_photo_listed_already_is_one_request(registry):
+    """A photo listed by an earlier request still shows on the desk (its last showing), so the
+    desk's menu offers Never show: the press skips it there, and a repeat of that press (a retry,
+    a double tap) answers it as a duplicate, never a second skips row. Mutation probe: know a
+    repeat by the list's row alone (the repeat raised UniqueViolation, a 500)."""
+    wall = Wall(registry, {"hall": "wall", "desk": "wall"}, cycle=30)
+    later = next(layer for layer in wall.layers("desk") if layer.start > registry.clock.utc() + 30)
+    listed = photo_of(later)
+    wall.never_show(listed, request_id="first")
+    wall.tick(later.start + 1 - registry.clock.utc())
+    assert photo_of(wall.showing("desk")) == listed
+    pressed = wall.never_show(listed, "desk", request_id="press")
+    again = wall.never_show(listed, "desk", request_id="press")
+    assert (pressed.duplicate, pressed.skipped_on) == (False, ("desk",))
+    assert (again.duplicate, again.skipped_on, again.stayed) == (True, pressed.skipped_on, pressed.stayed)
+
+
 def test_never_show_lets_a_downloaded_showing_elsewhere_play_once_and_names_it(registry):
     """S5: a photo already offered for another Frame's later slot (downloaded or downloading for
     it) shows there that one last time; the answer names it, and its layer stays offered."""

@@ -1359,8 +1359,10 @@ class Coordinator:
         `frame_id` is the Frame it was seen on: RegistryError "changed" (409) when that Frame
         shows another photo now. A repeated `request_id` answers what it did (`duplicate`)."""
         with self._transaction() as conn:
-            if self.never_show_list.requested_in(conn, request_id) is not None:
-                stored = self.skips.get_in(conn, request_id)
+            # A repeat is known by either row it wrote: the list's (when it listed the photo) or
+            # its skips row (when the photo was listed already, by another request).
+            stored = self.skips.get_in(conn, request_id)
+            if stored is not None or self.never_show_list.requested_in(conn, request_id) is not None:
                 outcome = stored.outcome if stored is not None else SkipOutcome(at=self.clock.utc())
                 return NeverShowAnswer(asset_id=asset_id, duplicate=True,
                                        skipped_on=tuple(cover.frame_id for cover in outcome.covers),
