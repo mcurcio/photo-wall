@@ -137,6 +137,26 @@ def _cut(layer: Layer | None, offered: Layer) -> Layer | None:
     return layer.model_copy(update={"cut_at": offered.cut_at, "fade_out": offered.fade_out}).drawn()
 
 
+CUT_WAIT_STEP = 2.0
+"""Seconds by which the one wait at a cut (`Executor._wait_at_cuts`) moves a cut layer's end past
+`now` and its fade-out each time: the fade begins at most this long after the layer beneath is
+ready. Moved again once less than half of it is left, so a still picture is not redrawn every
+tick, which needs a tick (or a prepare pass) more often than every `CUT_WAIT_STEP / 2`."""
+
+
+def _waited(layer: Layer | None, offered: Layer, cut: float | None) -> Layer | None:
+    """`layer` (the layer as drawn, a grant or an execution of `offered`'s content) ending at
+    `cut` with `offered`'s fade-out instead of where it ended (None: at `offered`'s own end): the
+    one wait (decision 0036, S3) moves a cut later than Central's and never past the layer's end,
+    and never adds authority a layer did not have."""
+    if layer is None:
+        return None
+    whole = layer.model_copy(update={"end": offered.end, "cut_at": None, "fade_out": offered.fade_out})
+    if cut is None or cut >= offered.end:
+        return whole
+    return whole.model_copy(update={"cut_at": cut}).drawn()
+
+
 def _binding_identity(binding: OutputBinding) -> tuple:
     return binding.output_id, binding.frame_id, binding.generation
 
@@ -662,6 +682,46 @@ class Executor:
             return layer.start, layer.end
         return max(layer.start, self._plan.valid_from), min(layer.end, self._plan.valid_until)
 
+    def _ready_beneath(self, cut: _Assignment, now: float) -> bool:
+        """Whether what `cut`'s Frame shows beneath it at `now` can be drawn: the topmost layer
+        below it there in force now (a continuation slot included) is secured, prepared (or ready
+        for its reveal, `deferred`), not failed, and may start or runs. True with nothing beneath:
+        the Frame then takes its after-state, as at any end."""
+        order = stack_order(self._drawn_layer(cut))
+        beneath = [a for key, a in self._assignments.items()
+                   if a is not cut and a.layer.output_id == cut.layer.output_id
+                   and key not in self._superseded and key not in self._invalidated
+                   and self._current_authority(a) and self._assignment_in_force(a, now)
+                   and a.layer.start <= now < a.layer.end and stack_order(self._drawn_layer(a)) < order]
+        if not beneath:
+            return True
+        top = max(beneath, key=lambda a: stack_order(self._drawn_layer(a)))
+        return (top.secured and (top.prepared or top.deferred) and top.failure is None
+                and (self._may_start(top, now) or self._executing(top, now)))
+
+    def _wait_at_cuts(self, now: float) -> None:
+        """Decision 0036 (S3), the Player's one wait: a layer on screen that Central cut (Back to
+        normal, a takeover's end, Carry on) is drawn on past its cut while what shows beneath it
+        is not ready (never downloaded, or its place given up), and then fades, so a Frame never
+        goes black at a cut. Each pass moves its end to `CUT_WAIT_STEP` past `now` and its
+        fade-out, never past the layer's own end; once the layer beneath is ready its end stays,
+        and it fades from there. Central's cut, as offered, is unchanged (`cut_is_final`)."""
+        for assignment in self._assignments.values():
+            offered = assignment.offered
+            if (offered is None or offered.cut_at is None or offered.cut_at >= offered.end
+                    or not assignment.started or now >= offered.end):
+                continue
+            drawn_end = assignment.layer.end
+            if now < drawn_end - offered.fade_out - CUT_WAIT_STEP / 2 or self._ready_beneath(assignment, now):
+                continue
+            cut = now + offered.fade_out + CUT_WAIT_STEP
+            cut = None if cut >= offered.end else cut
+            assignment.layer = _waited(assignment.layer, offered, cut)
+            assignment.granted_layer = _waited(assignment.granted_layer, offered, cut)
+            assignment.execution_layer = _waited(assignment.execution_layer, offered, cut)
+            if assignment.execution_layer is not None:
+                assignment.execution_until = assignment.execution_layer.end
+
     def _imminent(self, now: float) -> list[_Assignment]:
         if not self._plan:
             return []
@@ -777,6 +837,7 @@ class Executor:
         with self._lock:
             now = self._now()
             self._continue(now)
+            self._wait_at_cuts(now)
             self._drain_renderer_releases()
             imminent = self._imminent(now)
             until, horizon = now + self.prepare_lead, self._horizon(now)
@@ -1330,6 +1391,7 @@ class Executor:
             now = timebase + self.clock.monotonic()
             if not self._config:
                 return ()
+            self._wait_at_cuts(now)
             for output_id, binding in tuple(self._retired_outputs.items()):
                 if self._show_fallback(OutputComposition(binding, fallback=True)):
                     del self._retired_outputs[output_id]

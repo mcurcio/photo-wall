@@ -1651,3 +1651,56 @@ def test_a_revision_moving_a_cut_later_is_refused(tmp_path):
     with pytest.raises(AuthorityError, match="cut_is_final"):
         rig.offer(cut.model_copy(update={"cut_at": None, "fade_out": 0.0}), revision=3)
     rig.offer(cut.model_copy(update={"cut_at": 140.0}), revision=4)
+
+
+def _cut_over_beneath(rig, *, beneath_secured: bool):
+    """A Show now's photo ("top") on screen over the schedule's ("below"), then Central's cut at
+    120 with a 2 s fade-out (Back to normal), with the photo beneath secured or not."""
+    top = layer("top", data=b"top", priority=10, awaits_grant=False, fade_out=0)
+    below = layer("below", data=b"below", awaits_grant=False)
+    rig.offer(top, below)
+    rig.secure("top", b"top")
+    if beneath_secured:
+        rig.secure("below", b"below")
+    rig.executor.prepare_imminent()
+    rig.advance(5)
+    rig.executor.tick()
+    rig.offer(top.model_copy(update={"cut_at": 120.0, "fade_out": 2.0}), below, revision=2)
+
+
+def _drawn(rig, output="hdmi1"):
+    return {local.layer.assignment_id: local.alpha for local in rig.renderer.outputs[output].layers}
+
+
+def _run_to(rig, at):
+    while rig.clock.utc() < at:
+        rig.advance(min(.25, at - rig.clock.utc()))
+        rig.executor.prepare_imminent()
+        rig.executor.tick()
+
+
+def test_a_cut_layer_is_drawn_until_the_layer_beneath_is_prepared(tmp_path):
+    """Decision 0036 (S3), the Player's one wait: at Central's cut, a layer beneath that is not
+    downloaded yet keeps the cut layer drawn at full strength past its cut, never black; once the
+    photo beneath arrives and is prepared, the cut layer fades within `CUT_WAIT_STEP` and its
+    fade-out, and the photo beneath shows. Mutation probe: drop `_wait_at_cuts` from `tick` and
+    `prepare_imminent` (the Frame is black after 120)."""
+    from player.executor import CUT_WAIT_STEP
+    rig = Rig(tmp_path)
+    _cut_over_beneath(rig, beneath_secured=False)
+    _run_to(rig, 130)
+    assert _drawn(rig) == {"top": 1.0}
+    rig.secure("below", b"below")
+    _run_to(rig, 130 + CUT_WAIT_STEP + 2.0 + .5)
+    assert _drawn(rig) == {"below": 1.0}
+
+
+def test_a_cut_with_its_layer_beneath_ready_fades_at_the_cut(tmp_path):
+    """The one wait waits only for what is not ready: with the photo beneath prepared, the cut
+    layer fades out to Central's cut exactly. Mutation probe: always wait."""
+    rig = Rig(tmp_path)
+    _cut_over_beneath(rig, beneath_secured=True)
+    _run_to(rig, 119)
+    assert _drawn(rig)["top"] == pytest.approx(0.5)
+    _run_to(rig, 120.5)
+    assert _drawn(rig) == {"below": 1.0}
