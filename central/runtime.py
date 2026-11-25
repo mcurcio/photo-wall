@@ -1316,6 +1316,14 @@ class Runtime:
             raise ShowNowRefused("ends-passed")
         scene = _chosen(self._state.scenes[scene_id], frame_ids)
         matches = self._matching(scene, frame_ids)
+        # Decision 0036 (the independent review): a Show now acts on the Frames it names alone. A
+        # repeat that leaves the earlier Run playing ("ignore") still starts on the named Frames no
+        # Run of its Scene plays yet; it is ignored only when none is left.
+        free = scene_frames(scene).difference(*(scene_frames(run.scene) for run in matches))
+        if matches and repeat == "ignore" and free:
+            frame_ids = tuple(sorted(free))
+            scene = restricted_to(self._state.scenes[scene_id], free)
+            matches = []
         if matches and repeat == "ignore":
             result = Admission(
                 activation_id=activation_id, status="ignored", run_id=matches[-1].run_id
@@ -1345,7 +1353,13 @@ class Runtime:
                 result = _refusal(activation_id, denial)
             else:
                 for run in matches if repeat == "restart" else ():
-                    self._cancel(run, now)
+                    # A restart replaces an earlier Run on the Frames both name alone: it keeps
+                    # playing on its other Frames, and is cancelled only when none is left.
+                    kept = scene_frames(run.scene) - scene_frames(scene)
+                    if kept:
+                        self._restrict(run, kept)
+                    else:
+                        self._cancel(run, now)
                 result = self._admit(scene, activation_id, now, priority, frames=frame_ids,
                                      ends_at=ends_at)
         self._state.admissions[activation_id] = result
@@ -1571,6 +1585,16 @@ class Runtime:
         if parent:
             parent.children.append(run_id)
         return Admission(activation_id=identity, status="admitted", run_id=run_id)
+
+    def _restrict(self, run: _Run, frames: frozenset[str]) -> None:
+        """`run` and every descendant keep playing on the Frames `frames` alone, from now
+        (`restricted_to`: the Scene's lamps and actuators stay): a restart of the same Show now
+        on some of its Frames took the others (decision 0036, the independent review)."""
+        run.scene = restricted_to(run.scene, frames)
+        if run.parent_id is None:
+            run.frames = tuple(sorted(frames))
+        for child_id in run.children:
+            self._restrict(self._state.runs[child_id], frames)
 
     def _request_finish(self, run: _Run, at: float) -> None:
         if run.phase != "body" or run.finish_requested_at is not None:

@@ -1713,6 +1713,70 @@ def test_a_second_show_now_of_one_scene_on_other_frames_is_admitted():
     assert first.run_id != second.run_id
 
 
+def _three_frames_scene():
+    return _takeover_scene(contributions=(media("frame:a"), media("frame:b"), media("frame:c"), lamp()),
+                           outro_contributions=())
+
+
+def _on(view, frame):
+    intent = view.for_target(f"frame:{frame}")
+    return None if intent is None else intent.run_id
+
+
+def test_a_restart_on_chosen_frames_replaces_the_earlier_run_on_the_shared_frames_alone():
+    """Decision 0036 (the independent review): Show now on [a, b], then a restart on [b, c],
+    replaces the first Run on b alone: a, not chosen the second time, keeps its Run (restricted,
+    not cancelled), playing on at its turn; the second Run plays on b and c. Each Run keeps the
+    Scene's lamp (S7), the newer winning it. Mutation probe: cancel every matching Run on a
+    restart in `activate` (the first Run, and so a's show, ends)."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(_three_frames_scene())
+    first = runtime.activate("holidays", "first", 0, frame_ids=("a", "b"))
+    second = runtime.activate("holidays", "second", 20, frame_ids=("b", "c"), repeat="restart")
+    assert second.status == "admitted"
+    view = runtime.project(30)
+    assert (_on(view, "a"), _on(view, "b"), _on(view, "c")) == (first.run_id, second.run_id, second.run_id)
+    earlier = get_run(view, first.run_id)
+    assert (earlier.phase, earlier.frames) == ("body", ("a",))
+    assert _targets(view, first.run_id) == {"frame:a", "actuator:lamp"}
+    # The first Run keeps its own clock on a: its turn is the one it started at 0.
+    assert view.for_target("frame:a").interval_start == 0
+    assert view.for_target("actuator:lamp").run_id == second.run_id
+    # Ending the second Run leaves a's Run, and the lamp, with the first.
+    runtime.end(second.run_id, 40)
+    later = runtime.project(70)
+    assert (_on(later, "a"), _on(later, "b"), _on(later, "c")) == (first.run_id, None, None)
+    assert later.for_target("actuator:lamp").run_id == first.run_id
+
+
+def test_a_restart_naming_every_frame_of_the_earlier_run_replaces_it():
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(_three_frames_scene())
+    first = runtime.activate("holidays", "first", 0, frame_ids=("a",))
+    second = runtime.activate("holidays", "second", 20, frame_ids=("a", "b"), repeat="restart")
+    view = runtime.project(21)
+    assert get_run(view, first.run_id).phase == "cancelled"
+    assert (_on(view, "a"), _on(view, "b"), _on(view, "c")) == (second.run_id, second.run_id, None)
+
+
+def test_a_show_now_left_running_still_starts_on_the_chosen_frames_it_does_not_play():
+    """Decision 0036 (the independent review): Show now on [a, b], then on [b, c] with "Leave it
+    running" (`ignore`), leaves the first Run as it is and starts on c, the chosen Frame no Run of
+    the Scene plays; b keeps the first Run. Mutation probe: ignore the whole request on any
+    shared Frame (c gets nothing)."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(_three_frames_scene())
+    first = runtime.activate("holidays", "first", 0, frame_ids=("a", "b"))
+    second = runtime.activate("holidays", "second", 20, frame_ids=("b", "c"))
+    assert second.status == "admitted" and second.run_id != first.run_id
+    view = runtime.project(30)
+    assert (_on(view, "a"), _on(view, "b"), _on(view, "c")) == (first.run_id, first.run_id, second.run_id)
+    assert get_run(view, second.run_id).frames == ("c",)
+    assert get_run(view, first.run_id).frames == ("a", "b")
+    # The whole Scene asked again, left running: only what no Run plays is left, nothing.
+    assert runtime.activate("holidays", "third", 25).status == "ignored"
+
+
 def test_a_takeovers_frames_and_end_are_stored_only_when_set():
     """Rollback compatibility: a state with no chosen Frames, end or cut reads as before."""
     runtime = Runtime(house=UTC_HOUSE)
