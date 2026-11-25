@@ -275,12 +275,20 @@ class Layer(Model):
     # grant. Authored by Central's Planner alone; the Player reads it and never re-derives it.
     # Serialised only when True, so a plan without a change reads as before.
     awaits_grant: bool = False
+    # Decision 0036 (slice 3): an everyday action's layer (a Skip's or Previous's cover), added
+    # above the Frame's regular layers rather than changing an offered one. It stacks above every
+    # regular layer of its own precedence whatever their starts (`stack_order`), is never a
+    # continuation's candidate, and is content identity, never revised. Serialised only when
+    # True, so a plan without one reads as before.
+    action: bool = False
 
     @model_serializer(mode="wrap")
     def serialize_awaits_grant(self, handler):
         value = handler(self)
         if not self.awaits_grant:
             value.pop("awaits_grant", None)
+        if not self.action:
+            value.pop("action", None)
         return value
 
     @model_validator(mode="after")
@@ -327,12 +335,14 @@ class Layer(Model):
 PREPARE_SECONDS: Final = 5.0
 
 
-def stack_order(layer: Layer) -> tuple[int, int, int, float]:
+def stack_order(layer: Layer) -> tuple[int, int, int, bool, float]:
     """The one stacking order of a Frame's layers, bottom to top: priority, then root order,
-    then admission order, then start, so of two photos of one Run that overlap (a cross-fade)
-    the later one is drawn over the earlier. Central's Planner orders a plan's layers by it and
-    the Player's executor draws by it (player/executor.py `_compositions`)."""
-    return (layer.priority, layer.root_order, layer.admission_order, layer.start)
+    then admission order, then an action layer above a regular one (decision 0036: a Skip's
+    cover sits over the layers of its Run whatever their starts), then start, so of two photos
+    of one Run that overlap (a cross-fade) the later one is drawn over the earlier, and of two
+    action layers the later. Central's Planner orders a plan's layers by it and the Player's
+    executor draws by it (player/executor.py `_compositions`)."""
+    return (layer.priority, layer.root_order, layer.admission_order, layer.action, layer.start)
 
 
 class UnfilledSpan(Model):

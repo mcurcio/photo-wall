@@ -1099,6 +1099,28 @@ def test_a_photo_dissolving_in_is_drawn_over_the_one_it_replaces_whatever_the_pl
     assert drawn[-1].alpha == pytest.approx(.5)
 
 
+def test_a_cover_starting_before_its_runs_next_layer_is_drawn_above_it(tmp_path):
+    """Decision 0036 (slice 3): a Skip's cover (an action layer) is drawn above a regular layer of
+    its Run that starts after it, and an action layer's flag is content identity: a revision that
+    drops it from a secured layer is refused. Mutation probes: leave `action` out of
+    `stack_order`; leave it out of `_content_identity`."""
+    rig = Rig(tmp_path)
+    cover = layer("cover", start=100, end=120, action=True)
+    following = layer("following", data=b"following", start=104, end=140, media_origin=104)
+    rig.offer(following, cover)
+    rig.secure("cover")
+    rig.secure("following", b"following")
+    rig.executor.prepare_imminent()
+    rig.commit("cover", "following")
+    rig.advance(6)
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    drawn = rig.renderer.outputs["hdmi1"].layers
+    assert [local.layer.assignment_id for local in drawn][-1] == "cover"
+    with pytest.raises(AuthorityError, match="immutable"):
+        rig.offer(following, cover.model_copy(update={"action": False}), revision=2)
+
+
 def black(rig):
     return {report.output_id: report.cause for report in rig.executor.frames_black()}
 

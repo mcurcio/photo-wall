@@ -15,6 +15,7 @@ from contracts.models import (
     UnfilledSpan,
     Variant,
     fade_share,
+    stack_order,
 )
 from contracts.photo_crop import CENTRED
 from contracts.time import ManualClock
@@ -319,3 +320,28 @@ def test_a_readiness_refuses_a_repeated_carried_photo():
     assert "carried" not in Readiness(**common).model_dump(mode="json")
     with pytest.raises(ValidationError, match="duplicate carried photo"):
         Readiness(**common, carried=(carried, carried))
+
+
+def _regular(key, *, start, action=False, priority=0):
+    return Layer(assignment_id=key, run_id="run", output_id="hdmi-1", frame_id="f",
+                 binding_generation=1, start=start, end=start + 60, media_origin=start,
+                 priority=priority, presentation="black", action=action)
+
+
+def test_an_action_layer_stacks_above_its_runs_layers():
+    """Decision 0036 (slice 3): a Skip's cover starts before the next regular layer of its Run,
+    yet is drawn above it; of two covers the later is on top; a Run of greater precedence stays
+    above both. Mutation probe: leave `action` out of `stack_order`."""
+    cover = _regular("cover", start=100, action=True)
+    later = _regular("later", start=130)
+    second = _regular("second", start=110, action=True)
+    above = _regular("above", start=0, priority=1)
+    ordered = sorted([above, later, second, cover], key=stack_order)
+    assert [layer.assignment_id for layer in ordered] == ["later", "cover", "second", "above"]
+
+
+def test_an_action_layer_crosses_the_wire_and_a_regular_one_reads_as_before():
+    cover = _regular("cover", start=100, action=True)
+    assert cover.model_dump(mode="json")["action"] is True
+    assert "action" not in _regular("plain", start=100).model_dump(mode="json")
+    assert Layer.model_validate(cover.model_dump(mode="json")) == cover

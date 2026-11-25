@@ -111,6 +111,7 @@ def _content_identity(layer: Layer) -> tuple:
     return (
         layer.run_id, layer.output_id, layer.frame_id, layer.binding_generation,
         layer.variant, layer.presentation, layer.start, layer.end, layer.media_origin,
+        layer.action,
     )
 
 
