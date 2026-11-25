@@ -281,6 +281,13 @@ class Layer(Model):
     # continuation's candidate, and is content identity, never revised. Serialised only when
     # True, so a plan without one reads as before.
     action: bool = False
+    # Decision 0036 (slice 3): Central's early end of an offered layer (Back to normal, a
+    # takeover's end, Carry on). The layer is drawn until `cut_at` (`drawn_end`), its fade-out
+    # ending there; it never changes the layer's content or identity, so it is revisable
+    # (central/planner.py `REVISABLE`), set once and only ever brought earlier (the Player refuses
+    # a revision that removes it or moves it later: player/executor.py `cut_is_final`).
+    # Serialised only when set.
+    cut_at: Instant | None = None
 
     @model_serializer(mode="wrap")
     def serialize_awaits_grant(self, handler):
@@ -289,6 +296,8 @@ class Layer(Model):
             value.pop("awaits_grant", None)
         if not self.action:
             value.pop("action", None)
+        if self.cut_at is None:
+            value.pop("cut_at", None)
         return value
 
     @model_validator(mode="after")
@@ -299,7 +308,12 @@ class Layer(Model):
             raise ValueError("media layer requires an exact variant and its crop")
         if self.presentation == "black" and (self.variant is not None or self.crop is not None):
             raise ValueError("black layer cannot carry media")
-        if self.fade_in + self.fade_out > self.end - self.start:
+        if self.cut_at is None:
+            if self.fade_in + self.fade_out > self.end - self.start:
+                raise ValueError("fades exceed layer interval")
+        elif not self.start < self.cut_at < self.end:
+            raise ValueError("a layer's cut falls inside it")
+        elif self.fade_out > self.cut_at - self.start or self.fade_in > self.end - self.start:
             raise ValueError("fades exceed layer interval")
         if self.after_end == "keep_this_photo" and (
             self.variant is None or self.variant.media_type == "video/mp4" or self.opacity != 1
@@ -317,15 +331,31 @@ class Layer(Model):
             position %= self.variant.duration
         return position
 
+    @property
+    def drawn_end(self) -> float:
+        """Where the layer stops being drawn: its end, or Central's earlier cut (`cut_at`)."""
+        return self.end if self.cut_at is None else min(self.end, self.cut_at)
+
     def alpha(self, now: float) -> float:
-        """Its strength at `now`: its opacity through its fade-in and fade-out."""
-        return self.opacity * fade_share(now, start=self.start, end=self.end,
+        """Its strength at `now`: its opacity through its fade-in and its fade-out to its drawn
+        end."""
+        return self.opacity * fade_share(now, start=self.start, end=self.drawn_end,
                                          fade_in=self.fade_in, fade_out=self.fade_out)
 
     def fades(self) -> tuple[tuple[float, float], tuple[float, float]]:
         """Its fade-in and its fade-out as half-open spans of plan time, either empty when it has
         none: `alpha` changes inside them and nowhere else, so it is its opacity between them."""
-        return (self.start, self.start + self.fade_in), (self.end - self.fade_out, self.end)
+        return (self.start, self.start + self.fade_in), (self.drawn_end - self.fade_out, self.drawn_end)
+
+    def drawn(self) -> Layer:
+        """The layer as it is drawn: with a cut, ending at it (`drawn_end`) and no cut left, its
+        fade-in shortened to what the fade-out leaves of the span; else itself. The one way a
+        Player applies Central's cut (player/executor.py), so every rule it draws by reads one end."""
+        if self.cut_at is None or self.cut_at >= self.end:
+            return self
+        span = self.cut_at - self.start
+        return self.model_copy(update={"end": self.cut_at, "cut_at": None,
+                                       "fade_in": min(self.fade_in, span - self.fade_out)})
 
 
 # How long before a layer starts its Player prepares it (its decoder resident) and Central's cue

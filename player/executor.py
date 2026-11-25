@@ -66,6 +66,8 @@ class AcquisitionStopped(Exception):
 
 @dataclass
 class _Assignment:
+    # The layer as drawn: as offered, with Central's cut applied (`Layer.drawn`), so every rule
+    # reads one end; `offered` keeps it as offered (its content identity and its cut).
     layer: Layer
     owner: str
     secured: bool = False
@@ -97,6 +99,12 @@ class _Assignment:
     # What the latest observation of it said (`_report`): Central hears a change once, never a
     # level state again on every tick.
     reported: tuple | None = None
+    # The layer as Central offered it, its cut included (None: `layer` is as offered).
+    offered: Layer | None = None
+
+    @property
+    def as_offered(self) -> Layer:
+        return self.offered or self.layer
 
 
 @dataclass(frozen=True)
@@ -115,6 +123,20 @@ def _content_identity(layer: Layer) -> tuple:
     )
 
 
+def cut_is_final(before: Layer, after: Layer) -> bool:
+    """Decision 0036: Central's cut (`Layer.cut_at`) is set once and only ever brought earlier;
+    a revision that removes it or moves it later is refused."""
+    return before.cut_at is None or (after.cut_at is not None and after.cut_at <= before.cut_at)
+
+
+def _cut(layer: Layer | None, offered: Layer) -> Layer | None:
+    """`layer` (a grant or an execution of `offered`'s content) under `offered`'s cut: a cut
+    only brings an end earlier, never adds authority."""
+    if layer is None or offered.cut_at is None or offered.cut_at >= layer.end:
+        return layer
+    return layer.model_copy(update={"cut_at": offered.cut_at, "fade_out": offered.fade_out}).drawn()
+
+
 def _binding_identity(binding: OutputBinding) -> tuple:
     return binding.output_id, binding.frame_id, binding.generation
 
@@ -124,7 +146,7 @@ def may_still_play(plan: Plan, layer: Layer, now: float) -> bool:
     own span and the plan's validity, or as the source of a continuation of the plan that has not
     ended. The one test of how long a plan layer's bytes are wanted (the executor's pins, the
     service's downloads)."""
-    if now < min(layer.end, plan.valid_until):
+    if now < min(layer.drawn_end, plan.valid_until):
         return True
     return any(layer.assignment_id in continuation.photos
                and (continuation.until is None or continuation.until > now)
@@ -320,17 +342,25 @@ class Executor:
             for layer in plan.layers:
                 old = self._assignments.get(layer.assignment_id) or self._inactive.get(layer.assignment_id)
                 if old and (old.secured or old.acquiring) and (
-                    _content_identity(layer) != _content_identity(old.layer)
+                    _content_identity(layer) != _content_identity(old.as_offered)
                 ):
                     raise AuthorityError("secured assignment content is immutable")
+                if (old and _content_identity(layer) == _content_identity(old.as_offered)
+                        and not cut_is_final(old.as_offered, layer)):
+                    raise AuthorityError("cut_is_final")
             next_assignments: dict[str, _Assignment] = {}
             for layer in plan.layers:
                 key = layer.assignment_id
                 if key in self._cancelled:
                     continue
                 old = self._assignments.get(key) or self._inactive.pop(key, None)
-                if old and _content_identity(layer) == _content_identity(old.layer):
-                    old.layer = layer
+                if old and _content_identity(layer) == _content_identity(old.as_offered):
+                    old.layer, old.offered = layer.drawn(), layer
+                    # Decision 0036: a cut applies to what already runs, its grant included.
+                    old.granted_layer = _cut(old.granted_layer, layer)
+                    old.execution_layer = _cut(old.execution_layer, layer)
+                    if old.execution_layer is not None:
+                        old.execution_until = min(old.execution_until, old.execution_layer.end)
                     # Revision-specific authorization must be renewed by central. Until it
                     # is, the grant already accepted still starts this content at its time:
                     # the newer revision arrives before its own Commit can.
@@ -340,9 +370,9 @@ class Executor:
                     next_assignments[key] = old
                 else:
                     next_assignments[key] = _Assignment(
-                        layer, f"pwexec:{self.player_id}:{self._last_epoch}:{key}",
+                        layer.drawn(), f"pwexec:{self.player_id}:{self._last_epoch}:{key}",
                         secured=layer.presentation == "black",
-                        offered_until=plan.valid_until,
+                        offered_until=plan.valid_until, offered=layer,
                     )
             drawn = {local.layer.assignment_id for composition in self._current.values()
                      if not composition.fallback for local in composition.layers}

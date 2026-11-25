@@ -1611,3 +1611,43 @@ def test_readiness_is_numbered_again_when_the_clock_bound_central_holds_drifts_o
     assert rig.executor.readiness().sequence == first.sequence
     rig.advance(CLOCK_BOUND_SLACK / DRIFT_RATE)
     assert rig.executor.readiness().sequence > first.sequence
+
+
+@pytest.mark.parametrize("granted", [True, False])
+def test_a_cut_layer_fades_out_at_its_cut(tmp_path, granted):
+    """Decision 0036 (slice 3): a revision bringing Central's cut onto a layer already running
+    (granted, or starting at its own instant) ends it at the cut, its fade-out ending there.
+    Mutation probes: keep the grant uncut in `accept_plan`; store the layer as offered rather
+    than `drawn`."""
+    rig = Rig(tmp_path)
+    shown = layer(fade_out=0, awaits_grant=granted)
+    rig.offer(shown)
+    rig.secure()
+    rig.executor.prepare_imminent()
+    if granted:
+        rig.commit("picture")
+    rig.advance(10)
+    rig.executor.tick()
+    assert rig.renderer.outputs["hdmi1"].layers[0].alpha == 1
+    rig.offer(shown.model_copy(update={"cut_at": 120.0, "fade_out": 4.0}), revision=2)
+    rig.advance(8)       # 118: half-way through the cut's fade
+    rig.executor.prepare_imminent()
+    rig.executor.tick()
+    assert rig.renderer.outputs["hdmi1"].layers[0].alpha == pytest.approx(0.5)
+    rig.advance(3)       # 121: past the cut
+    rig.executor.tick()
+    assert all(local.layer.assignment_id != "picture" for local in rig.renderer.outputs["hdmi1"].layers)
+
+
+def test_a_revision_moving_a_cut_later_is_refused(tmp_path):
+    """Decision 0036: a cut is set once and only ever brought earlier. Mutation probe: drop the
+    `cut_is_final` check."""
+    rig = Rig(tmp_path)
+    cut = layer(cut_at=150.0, fade_out=2.0)
+    rig.offer(cut)
+    rig.secure()
+    with pytest.raises(AuthorityError, match="cut_is_final"):
+        rig.offer(cut.model_copy(update={"cut_at": 160.0}), revision=2)
+    with pytest.raises(AuthorityError, match="cut_is_final"):
+        rig.offer(cut.model_copy(update={"cut_at": None, "fade_out": 0.0}), revision=3)
+    rig.offer(cut.model_copy(update={"cut_at": 140.0}), revision=4)
