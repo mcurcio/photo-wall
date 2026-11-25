@@ -172,8 +172,10 @@ def _fades(start: float, end: float, fade_in: float, fade_out: float) -> tuple[f
 def cover_for(facts: FrameFacts, kind: SkipKind, cause: CoverCause, *, request_id: str, at: float,
               now: float, cue: str | None, usable: Callable[[str], bool] | None = None) -> Cover | None:
     """The cover a Frame that moves (`stays` is None) gets: a layer above its layers from `at`.
-    Next: its next photo whole (`joins`), else a pick from its Scene line ending with the layer it
-    covers. Previous: its photo pinned, ending where the Frame's next regular layer is fully in.
+    Next: its next photo whole (`joins`), with that layer's media origin, so at the hand-over both
+    draw the same picture (player/planes.py `drawn_identity`) and a video goes on from where the
+    cover played it, never again from its start; else a pick from its Scene line ending with the
+    layer it covers. Previous: its photo pinned, ending where the Frame's next regular layer is fully in.
     None when the Frame stays."""
     if stays(facts, kind, at, usable=usable, now=now) is not None:
         return None
@@ -207,7 +209,8 @@ def cover_for(facts: FrameFacts, kind: SkipKind, cause: CoverCause, *, request_i
     layer = joined.model_copy(update=dict(
         assignment_id=common["cover_id"], run_id=showing.run_id, output_id=showing.output_id,
         frame_id=facts.frame_id, binding_generation=showing.binding_generation,
-        start=at, end=end, media_origin=at, priority=showing.priority, root_order=showing.root_order,
+        start=at, end=end, media_origin=joined.media_origin, priority=showing.priority,
+        root_order=showing.root_order,
         admission_order=showing.admission_order, fade_in=fade_in, fade_out=0.0,
         awaits_grant=cue is not None, action=True))
     return Cover(**common, how="joins", end=end, fade_in=fade_in, fade_out=0.0,

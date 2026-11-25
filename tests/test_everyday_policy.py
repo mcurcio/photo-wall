@@ -133,6 +133,29 @@ def test_skip_joins_the_frames_next_regular_photo():
     assert alone.how == "pick" and alone.left == "photo-a" and alone.end == 30
 
 
+def test_a_joined_cover_hands_a_video_over_without_replaying_it():
+    """Decision 0036 (the independent review): a Skip onto a video joins its layer with that layer's
+    media origin, so at the hand-over the cover and the layer it joins are at one position and draw
+    the same picture (the Player's `drawn_identity`: one decode goes on), and the video never jumps
+    back to where the joined layer would have begun. Mutation probe: give the cover `media_origin=at`."""
+    from central.wall_plan.covers import joined_layer
+    from player.planes import drawn_identity
+    film = Variant(asset_id="film", recipe_id="e" * 64, sha256="f" * 64, size=10, media_type="video/mp4",
+                   width=1920, height=1080, duration=100.0)
+    turns = (TURNS[0], layer("b", 30, 60, variant=film, fade_in=2), TURNS[2])
+    cover = cover_for(facts(layers=turns), SkipKind.NEXT, CoverCause.NEXT, request_id="r", at=10, now=8,
+                      cue=None)
+    joined = turns[1]
+    assert cover.how == "joins" and cover.layer.end == joined.start + joined.fade_in == 32
+    for at in (cover.layer.end - 0.5, cover.layer.end):
+        assert cover.layer.position(at) == joined.position(at)
+    assert drawn_identity(cover.layer) == drawn_identity(joined)
+    # Offered late (a pass after its shared instant), it keeps that origin (mutation probe: let
+    # central/wall_plan/covers.py `joined_layer` take the late start's).
+    late = joined_layer(cover, 20)
+    assert late.start == 20 and late.position(32) == joined.position(32)
+
+
 HISTORY = tuple(ShownPhoto(asset, f"shown-{n}", -10.0 * n)
                 for n, asset in enumerate(["photo-a", "photo-a", "photo-x", "photo-x", "photo-y", "photo-x",
                                            "photo-z"]))

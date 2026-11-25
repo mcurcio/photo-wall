@@ -41,14 +41,15 @@ def layer_fields(cover: Cover, frame_id: str, start: float) -> dict:
 
 def joined_layer(cover: Cover, start: float) -> Layer:
     """A `joins` cover's layer from `start`: as the command built it, moved later when it was not
-    offered by its shared instant."""
+    offered by its shared instant, keeping the media origin of the layer it joins (a video hands
+    over at one position, central/everyday/policy.py `cover_for`)."""
     if cover.layer is None:
         raise ValueError("a joining cover carries its layer")
     if start == cover.layer.start:
         return cover.layer
     fields = layer_fields(cover, cover.layer.frame_id, start)
     return Layer.model_validate({**cover.layer.model_dump(), **fields,
-                                 "fade_out": cover.layer.fade_out})
+                                 "fade_out": cover.layer.fade_out, "media_origin": cover.layer.media_origin})
 
 
 __all__ = ["cover_start", "joined_layer", "layer_fields", "still_due"]
