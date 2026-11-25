@@ -29,11 +29,11 @@ from contracts.time import Clock
 
 _RUNTIME_COMMANDS = frozenset({
     "set_scene", "save_scene", "save_scene_and_apply_now", "delete_scene", "create_program", "save_program", "save_program_and_apply_now",
-    "remove_program", "set_default_scene", "activate", "finish", "cancel", "advance",
+    "remove_program", "set_default_scene", "activate", "finish", "cancel", "end", "advance",
 })
 _TIMED_COMMANDS = frozenset({
     "save_scene", "save_scene_and_apply_now", "create_program", "save_program", "save_program_and_apply_now", "remove_program",
-    "set_default_scene", "activate", "finish", "cancel", "advance",
+    "set_default_scene", "activate", "finish", "cancel", "end", "advance",
 })
 
 

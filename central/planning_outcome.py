@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from central.planner import Projection
+from central.planner import NOT_ISSUES, Projection
 from contracts.models import Instant, Model
 
 
@@ -40,10 +40,11 @@ def _order(issue: PlanningIssue) -> tuple:
 def issues_of(projection: Projection) -> tuple[PlanningIssue, ...]:
     """A projection's diagnostics as planning issues: one per (code, Scene, Run, target, Source,
     reason), sorted, so the same trouble on every showing of a Frame is one issue and the set is
-    the same from one pass to the next while nothing changes."""
+    the same from one pass to the next while nothing changes. A diagnostic of `NOT_ISSUES` (a lock
+    Central withdrew on purpose) is none."""
     issues = {PlanningIssue(code=item.code, target=item.target, scene_id=item.scene_id,
                             run_id=item.run_id, source_ref=item.source_ref, reason=item.reason)
-              for item in projection.diagnostics}
+              for item in projection.diagnostics if item.code not in NOT_ISSUES}
     return tuple(sorted(issues, key=_order))
 
 

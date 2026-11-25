@@ -857,3 +857,23 @@ def test_a_lock_offered_before_grants_existed_is_kept_and_takes_the_grant():
     revised = propose(runtime(), now=1, horizon=5, locks={offered.assignment_id: old})
     assert layers(revised)[0] == offered
     assert not [d for d in revised.diagnostics if d.code == "lock_stale_authority"]
+
+
+def test_cut_at_is_revisable_and_only_earlier():
+    """Decision 0036 (slice 3): Back to normal re-emits an offered layer of the ended Run with its
+    cut (a revisable field: the same execution), withdraws one starting after the cut's fade began
+    as `lock_cut`, which is no planning issue, and plans what is beneath. Mutation probes: leave
+    `cut_at` out of `REVISABLE`; diagnose every withdrawn lock as `lock_outside_projection`."""
+    from central.planner import same_execution
+    from central.planning_outcome import issues_of
+    instance = runtime(transition=Transition(seconds=1))
+    first = propose(instance, now=0, horizon=25)
+    locks = {layer.assignment_id: layer for layer in layers(first)}
+    run_id = layers(first)[0].run_id
+    instance.end(run_id, 3, lead=2)          # the fade from 5, the cut at 6
+    cut = propose(instance, now=3, horizon=25, locks=locks)
+    (kept,) = [layer for layer in layers(cut) if layer.assignment_id in locks]
+    assert (kept.cut_at, kept.fade_out, kept.drawn_end) == (6, 1, 6)
+    assert same_execution(kept, locks[kept.assignment_id])
+    assert "lock_cut" in {d.code for d in cut.diagnostics}
+    assert all(issue.code != "lock_cut" for issue in issues_of(cut))

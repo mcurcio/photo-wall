@@ -600,8 +600,14 @@ class Coordinator:
         result = {}
         for assignment, claim in claims.items():
             kept = [layer for player, layer in claim if player not in refused]
-            if kept:
-                result[assignment] = kept[-1]
+            if not kept:
+                continue
+            # Decision 0036: a cut is final, so the earliest offered wins over a copy without it
+            # (a secured lock's row keeps the layer as first secured); a lock cut and over is gone.
+            cut = min((layer.cut_at for layer in kept if layer.cut_at is not None), default=None)
+            lock = kept[-1] if cut is None else next(layer for layer in kept if layer.cut_at == cut)
+            if lock.drawn_end > self.clock.utc():
+                result[assignment] = lock
         return result, refused
 
     def _groups(self, conn, projection: Projection, now, horizon_end,
@@ -1258,7 +1264,7 @@ class Coordinator:
             failed = frozenset(()) if report is None else frozenset(each.assignment_id for each in report.failures)
             frames = {binding.output_id: binding.frame_id for binding in plan.bindings}
             for frame_id in frames.values():
-                layers = [layer for layer in plan.layers if layer.frame_id == frame_id and layer.end > now
+                layers = [layer for layer in plan.layers if layer.frame_id == frame_id and layer.drawn_end > now
                           and layer.presentation == "media"]
                 spans = tuple(span for span in plan.unfilled
                               if frames.get(span.output_id) == frame_id and span.end > now)
@@ -1345,9 +1351,9 @@ class Coordinator:
                 covers.append(cover_for(listed, SkipKind.NEXT, CoverCause.NEVER_SHOW, request_id=request_id,
                                         at=at, now=now, cue=None))
             covered = {cover.covered for cover in covers}
-            last = tuple(LastShowing(frame_id=layer.frame_id, start=layer.start, until=layer.end)
+            last = tuple(LastShowing(frame_id=layer.frame_id, start=layer.start, until=layer.drawn_end)
                          for _, frame in sorted(found.items()) for layer in frame.layers
-                         if photo_of(layer) == asset_id and layer.end > at and not layer.action
+                         if photo_of(layer) == asset_id and layer.drawn_end > at and not layer.action
                          and layer.assignment_id not in covered
                          and not any(stay.frame_id == layer.frame_id for stay in stayed))
             if covers or stayed:
@@ -1411,7 +1417,7 @@ class Coordinator:
                 continue    # `_offers` names it; an offer that no longer reads holds nothing here
             frames = {binding.output_id: binding.frame_id for binding in plan.bindings}
             for layer in plan.layers:
-                if layer.end > now and frames.get(layer.output_id) == layer.frame_id:
+                if layer.drawn_end > now and frames.get(layer.output_id) == layer.frame_id:
                     found.setdefault(layer.frame_id, []).append(layer)
         return {frame_id: tuple(layers) for frame_id, layers in found.items()}
 

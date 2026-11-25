@@ -20,7 +20,7 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import Field
 
@@ -234,9 +234,14 @@ def eligible(candidate: Candidate, target: FitTarget, crop_limit: float,
 # follower revises (`runtime._may_hold_to_the_end`); and the after-state, which is not content
 # (a Run's after-states are fixed by its Scene; migration 071 left in-flight endings'
 # offered layers at "leave_as_is" while their Scene says "keep_nothing"); and whether it awaits a
-# grant (decision 0032: a lock offered before that release has none, and reads False).
+# grant (decision 0032: a lock offered before that release has none, and reads False); and Central's
+# cut (decision 0036: Back to normal, a takeover's end, Carry on), which never touches the layer's
+# content or identity, with the fade-out it ends.
 REVISABLE = frozenset({"priority", "root_order", "admission_order", "fade_out", "after_end",
-                       "awaits_grant"})
+                       "awaits_grant", "cut_at"})
+# Diagnostics that are no planning issue (central/planning_outcome.py `issues_of`): a lock of a Run
+# Central cut (decision 0036), withdrawn because its turn starts at or after the cut.
+NOT_ISSUES: Final = frozenset({"lock_cut"})
 
 
 def same_execution(first: Layer, second: Layer) -> bool:
@@ -258,10 +263,15 @@ def _finite(value: float, name: str) -> float:
     return float(value)
 
 
+def _drawn_end(intent: Intent) -> float:
+    """Where an Intent's layer is drawn to: its turn's end, or its Run's cut (decision 0036)."""
+    return intent.interval_end if intent.cut_at is None else min(intent.interval_end, intent.cut_at)
+
+
 def _in_window(intent: Intent, window: PlanWindow) -> bool:
     """An Intent the plan horizon holds: on a Frame, showing before the plan's end, not over."""
     return (intent.kind != "actuator" and intent.shows_from < window.plan_end
-            and intent.interval_end > window.now)
+            and _drawn_end(intent) > window.now)
 
 
 def _cut_instant(starts: Sequence[float], budget: int) -> float | None:
@@ -345,6 +355,8 @@ class _ProjectionBuilder:
         self.selections: list[AssignmentSelection] = []
         self.seen: set[str] = set()
         self.used_locks: dict[str, Layer] = {}
+        # Decision 0036: the Runs Central cut (Back to normal, a takeover's end), by id.
+        self.cut_runs: set[str] = set()
         self.fixed: list[FixedShowing] = []
         self.pending: list[_Pending] = []
         self.pool_refs: dict[str, tuple[str, ...]] = {}
@@ -441,6 +453,8 @@ class _ProjectionBuilder:
             fade_in=intent.fade_in_seconds, fade_out=intent.fade_out_seconds,
             # Decision 0032: a grant only for a change, the Run's first turn on the wall.
             awaits_grant=intent.cycle_index == 0,
+            # Decision 0036: its Run's cut, when that falls inside the turn.
+            cut_at=intent.cut_at,
         )
 
     def add(self, intent: Intent, window: PlanWindow) -> None:
@@ -470,7 +484,7 @@ class _ProjectionBuilder:
         owner = self.frames.get(intent.target)
         if owner is not None and intent.shows_from < window.preparation_end:
             self.wanted[identity] = (owner[0], UnfilledSpan(
-                output_id=owner[1].output_id, start=intent.shows_from, end=intent.interval_end))
+                output_id=owner[1].output_id, start=intent.shows_from, end=_drawn_end(intent)))
 
     def _unfilled(self, player: str, layers: Sequence[Layer]) -> tuple[UnfilledSpan, ...]:
         """`player`'s wanted showings that have no layer and are not past the cut, one span each."""
@@ -513,7 +527,7 @@ class _ProjectionBuilder:
             after_end = _after_end(intent, still=False)
             showing = FixedShowing(
                 slot_id=identity, frame_id=binding.frame_id, asset_id=None,
-                start=intent.shows_from, end=intent.interval_end,
+                start=intent.shows_from, end=_drawn_end(intent),
                 fade_in=intent.fade_in_seconds, after_end=after_end)
             layer = Layer(**fields, presentation="black", after_end=after_end) if inside else None
             self.fixed.append(showing)
@@ -524,7 +538,7 @@ class _ProjectionBuilder:
         pool = "" if authored else json.dumps(list(intent.source_refs), separators=(",", ":"))
         pending = _Pending(intent=intent, player_id=player, fields=fields, slot=Slot(
             slot_id=identity, frame_id=binding.frame_id, scene_id=intent.scene_id,
-            start=intent.shows_from, end=intent.interval_end,
+            start=intent.shows_from, end=_drawn_end(intent),
             fade_in=intent.fade_in_seconds, after_end=intent.after_end,
             target=self._target(binding.frame_id),
             crop_limit=crop_limit_of(intent.selection, self.settings),
@@ -540,7 +554,13 @@ class _ProjectionBuilder:
         built; a `pick` or `pinned` one is a wall-plan slot walked first (`Slot.action`). A cover
         whose Frame is bound elsewhere now, whose Run has no Intent on its Frame any more, or
         whose span is over is dropped. A wall's covers are one cue (`Cover.cue`): they await a
-        grant and start whole before their instant wherever every Pi is ready."""
+        grant and start whole before their instant wherever every Pi is ready. A cover of a Run
+        Central cut (decision 0036) is cut with it, and one starting at or after the cut is not
+        offered."""
+        cuts: dict[str, tuple[float, float]] = {}
+        for intent in intents:
+            if intent.cut_at is not None and intent.run_id not in cuts:
+                cuts[intent.run_id] = (intent.cut_at, intent.fade_out_seconds)
         for cover in covers:
             owner = self.frames.get(f"frame:{cover.frame_id}")
             if owner is None:
@@ -548,9 +568,11 @@ class _ProjectionBuilder:
             player, binding = owner
             if (binding.output_id, binding.generation) != (cover.output_id, cover.binding_generation):
                 continue
+            cut = cuts.get(cover.run_id)
             locked = self.locks.get(cover.cover_id)
             if locked is not None:
-                if locked.end > window.now:
+                locked = _cut_layer(locked, cut)
+                if locked is not None and locked.drawn_end > window.now:
                     self.used_locks[cover.cover_id] = locked
                     self.layers[player].append(locked)
                     self.selections.append(AssignmentSelection(assignment_id=cover.cover_id,
@@ -561,13 +583,15 @@ class _ProjectionBuilder:
             intent = _run_intent(intents, cover, start)
             if intent is None or not still_due(cover, start):
                 continue
+            if cut is not None and start >= cut[0]:
+                continue
             if cover.how == "joins":
-                layer = joined_layer(cover, start)
+                layer = _cut_layer(joined_layer(cover, start), cut)
                 self.layers[player].append(layer)
                 self.fixed.append(FixedShowing(
                     slot_id=layer.assignment_id, frame_id=cover.frame_id,
                     asset_id=layer.variant.asset_id if layer.variant else None, start=layer.start,
-                    end=layer.end, fade_in=layer.fade_in, after_end=layer.after_end))
+                    end=layer.drawn_end, fade_in=layer.fade_in, after_end=layer.after_end))
                 self.joined.append((layer, intent.scene_id, None))
                 self._cue(cover, start)
                 continue
@@ -575,10 +599,14 @@ class _ProjectionBuilder:
             pool = "" if authored else json.dumps(list(intent.source_refs), separators=(",", ":"))
             if pool:
                 self.pool_refs[pool] = intent.source_refs
+            fields = layer_fields(cover, cover.frame_id, start)
+            if cut is not None and cut[0] < cover.end:
+                fields.update(cut_at=cut[0], fade_out=min(cut[1], cut[0] - start))
             self.pending.append(_Pending(
-                intent=intent, player_id=player, fields=layer_fields(cover, cover.frame_id, start),
+                intent=intent, player_id=player, fields=fields,
                 slot=Slot(slot_id=cover.cover_id, frame_id=cover.frame_id, scene_id=intent.scene_id,
-                          start=start, end=cover.end, fade_in=cover.fade_in,
+                          start=start, end=min(cover.end, fields.get("cut_at") or cover.end),
+                          fade_in=cover.fade_in,
                           after_end=cover.after_end, target=self._target(cover.frame_id),
                           crop_limit=crop_limit_of(intent.selection, self.settings), pool=pool,
                           authored=authored, action=True, excluded=cover.left, repeat=False)))
@@ -769,7 +797,7 @@ class _ProjectionBuilder:
             self.fixed.append(FixedShowing(
                 slot_id=identity, frame_id=layer.frame_id,
                 asset_id=selected.get(identity) if layer.presentation == "media" else None,
-                start=layer.start, end=layer.end, fade_in=layer.fade_in,
+                start=layer.start, end=layer.drawn_end, fade_in=layer.fade_in,
                 after_end=layer.after_end))
         current_pass = {scene_id: line.pass_number for scene_id, line in lines.items()}
         selected_rows = {showing.assignment_id: showing for showing in history.selected}
@@ -807,7 +835,7 @@ class _ProjectionBuilder:
             if layer.presentation == "media":
                 planned.append(PlannedPhoto(
                     assignment_id=identity, frame_id=layer.frame_id, start=layer.start,
-                    end=layer.end, state="locked", asset_id=selected.get(identity),
+                    end=layer.drawn_end, state="locked", asset_id=selected.get(identity),
                     crop=layer.crop))
         planned.sort(key=lambda photo: (photo.start, photo.frame_id, photo.assignment_id))
         acquisitions = [AcquisitionRequest(asset_id=need.asset_id,
@@ -920,9 +948,11 @@ class _ProjectionBuilder:
         for identity, lock in self.locks.items():
             if identity not in self.used_locks:
                 # Absence from this horizon alone is not permission to erase a
-                # secured lock. Coordination owns cancellation/expiry and pins.
+                # secured lock. Coordination owns cancellation/expiry and pins. A lock of a Run
+                # Central cut (decision 0036) is withdrawn on purpose: no planning issue.
                 self.diagnose(
-                    "lock_expired" if lock.end <= now else "lock_outside_projection",
+                    "lock_expired" if lock.drawn_end <= now
+                    else "lock_cut" if lock.run_id in self.cut_runs else "lock_outside_projection",
                     assignment=identity,
                 )
         continuations = self._continuations(intents, known_until, max_clock_uncertainty,
@@ -1034,6 +1064,8 @@ def project(
     if timeline.until < end:
         builder.cut_at(timeline.until, "runtime_events")
     intents = [intent for view in timeline.views for intent in view.contributions]
+    builder.cut_runs = {run.run_id for view in timeline.views for run in view.runs
+                        if run.until is not None}
     # Layers inside the preparation horizon past `max_assignments`: cut at one instant.
     inside = {assignment_id(intent): intent.shows_from for intent in intents
               if _in_window(intent, window) and intent.shows_from < window.preparation_end}
@@ -1055,6 +1087,19 @@ def project(
     return builder.result(window, history, max_clock_uncertainty, intents=showings,
                           known_until=known_until, reserved=reserved,
                           frame_uncertainty=frame_uncertainty)
+
+
+def _cut_layer(layer: Layer, cut: tuple[float, float] | None) -> Layer | None:
+    """`layer` (an action layer) under its Run's cut (decision 0036: the instant and the fade-out
+    that ends there): cut when the cut falls inside it (never later than a cut it carries), None
+    when it starts at or after it, itself otherwise."""
+    if cut is None or cut[0] >= layer.drawn_end:
+        return layer
+    at, fade = cut
+    if at <= layer.start:
+        return None
+    return Layer.model_validate({**layer.model_dump(), "cut_at": at,
+                                 "fade_out": min(fade, at - layer.start)})
 
 
 def _run_intent(intents: Sequence[Intent], cover: Cover, start: float) -> Intent | None:

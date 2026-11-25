@@ -34,7 +34,7 @@ def showing_at(layers: Iterable[Layer], at: float) -> Layer | None:
     """The layer a Frame shows at `at`: of its layers drawn then, the topmost by `stack_order` that
     is opaque at its alpha then (what covers everything beneath it, the Player's covered rule),
     else the topmost with any strength; None when none is drawn. The target of every action."""
-    drawn = sorted((layer for layer in layers if layer.start <= at < layer.end), key=stack_order)
+    drawn = sorted((layer for layer in layers if layer.start <= at < layer.drawn_end), key=stack_order)
     for layer in reversed(drawn):
         if _opaque(layer, layer.alpha(at)):
             return layer
@@ -190,14 +190,14 @@ def cover_for(facts: FrameFacts, kind: SkipKind, cause: CoverCause, *, request_i
         pinned = _previous_photo(facts, showing, now, usable)
         following = _next_regular(facts, showing, at)
         end, fade_out = ((following.start + following.fade_in, following.fade_in)
-                         if following is not None else (showing.end, showing.fade_out))
+                         if following is not None else (showing.drawn_end, showing.fade_out))
         fade_in, fade_out = _fades(at, end, transition, fade_out)
         return Cover(**common, how="pinned", end=end, fade_in=fade_in, fade_out=fade_out,
                      after_end=showing.after_end, pinned=pinned, anchor=anchor, steps=steps)
     joined = joins(facts, showing, at)
     if joined is None:
-        fade_in, fade_out = _fades(at, showing.end, transition, showing.fade_out)
-        return Cover(**common, how="pick", end=showing.end, fade_in=fade_in, fade_out=fade_out,
+        fade_in, fade_out = _fades(at, showing.drawn_end, transition, showing.fade_out)
+        return Cover(**common, how="pick", end=showing.drawn_end, fade_in=fade_in, fade_out=fade_out,
                      after_end=showing.after_end)
     end = joined.start + joined.fade_in
     fade_in, _ = _fades(at, end, transition, 0.0)

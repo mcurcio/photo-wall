@@ -23,6 +23,7 @@ from central.wall_plan.selection import SceneSelection
 from contracts.models import PREPARE_SECONDS, TARGET_ID_PATTERN, AfterEnd, fade_share
 
 Target = Annotated[str, Field(pattern=rf"^(frame|actuator):{TARGET_ID_PATTERN}$")]
+FRAME_TARGET: Final = "frame:"
 Seconds = Annotated[FiniteFloat, Field(ge=0)]
 PositiveSeconds = Annotated[FiniteFloat, Field(gt=0)]
 Identifier = Annotated[str, Field(min_length=1, max_length=160)]
@@ -154,6 +155,32 @@ class Scene(FrozenModel):
 Child.model_rebuild()
 
 
+def restricted_to(scene: Scene, frames: frozenset[str]) -> Scene:
+    """`scene` on the chosen Frames alone (decision 0036, Show now on chosen Frames): every
+    contribution, ending and child's contribution on a Frame not in `frames` (Frame ids) is
+    dropped, and every target that is not a Frame (an actuator, the Scene's lamps) is kept: choosing
+    Frames restricts Frames only (the owner's S7). A Frame not chosen so gets no Intent, no layer
+    and no implied command."""
+    def kept(contributions: tuple[Contribution, ...]) -> tuple[Contribution, ...]:
+        return tuple(c for c in contributions
+                     if not c.target.startswith(FRAME_TARGET) or c.target.removeprefix(FRAME_TARGET) in frames)
+    children = tuple(child.model_copy(update={"scene": restricted_to(child.scene, frames)})
+                     for child in scene.children)
+    return scene.model_copy(update={"contributions": kept(scene.contributions),
+                                    "outro_contributions": kept(scene.outro_contributions),
+                                    "children": children})
+
+
+def scene_frames(scene: Scene) -> frozenset[str]:
+    """The Frame ids `scene` contributes to, at any depth."""
+    return frozenset(t.removeprefix(FRAME_TARGET) for t in scene.participants if t.startswith(FRAME_TARGET))
+
+
+def _chosen(scene: Scene, frames: tuple[str, ...] | None) -> Scene:
+    """`scene` as a Run asked on `frames` plays it (None: the whole Scene)."""
+    return scene if frames is None else restricted_to(scene, frozenset(frames))
+
+
 def _unprotected(scene: Scene) -> Scene:
     """`scene` with no protection at any depth (its own `protect_frames` and every child's)."""
     children = tuple(child.model_copy(update={"scene": _unprotected(child.scene)}) for child in scene.children)
@@ -170,6 +197,9 @@ PRIORITY_RANK: Final[Mapping[str, int]] = MappingProxyType(
 # The Default Scene plays under every Schedule and every operator request (E5): its rank is below
 # any priority `activate` accepts (0 and up), so it never wins a tie.
 DEFAULT_SCENE_RANK: Final = -1
+# Decision 0036: a pause's hold is drawn above every Run (a Show now admitted during a pause plays
+# beneath it, the owner's S6): its rank is above any priority `activate` accepts.
+PAUSE_RANK: Final = 1_000_000
 
 
 class ProgramDraft(FrozenModel):
@@ -266,6 +296,10 @@ class Intent(FrozenModel):
     # Roadmap 5a: the Intent's own Scene's selection (a child Scene's is its own), copied by
     # `timeline` (slice O1); the Planner reads it.
     selection: SceneSelection = SceneSelection()
+    # Decision 0036: where its Run is cut (Back to normal, a takeover's end), when that falls
+    # inside the turn: the layer is drawn until then, fading out over `fade_out_seconds`
+    # (contracts Layer `cut_at`); None when the turn ends first.
+    cut_at: FiniteFloat | None = None
 
     @model_validator(mode="after")
     def shows_by_its_turn(self) -> Self:
@@ -295,6 +329,10 @@ class RunView(FrozenModel):
     # The root Run's activation identity ("program:...", "default:..." or Show now's); None for a
     # child, and for a Run admitted before Power and the week.
     activation_id: str | None = None
+    # Decision 0036: the Frames a Show now was asked on (None: the whole Scene) and when its
+    # picture is gone (its end time or Back to normal's cut; None: until stopped).
+    frames: tuple[str, ...] | None = None
+    until: FiniteFloat | None = None
 
 
 class RuntimeView(FrozenModel):
@@ -397,6 +435,12 @@ class _Run(_MutableModel):
     # When the Scene's duration counts from: the start of the Run this one replaced (Save and
     # apply now, `Runtime._replace`), so a Show now keeps its original start; None: `started_at`.
     duration_from: FiniteFloat | None = None
+    # Decision 0036: the Frames a Show now was asked on (its Scene is restricted to them,
+    # `restricted_to`; None: every Frame of the Scene), its chosen end, and Back to normal's cut.
+    # At the earlier of the two the Run and its descendants are cancelled (`Runtime._cut_of`).
+    frames: tuple[str, ...] | None = None
+    ends_at: FiniteFloat | None = None
+    cut_at: FiniteFloat | None = None
     phase: Literal["body", "outro", "completed", "cancelled"] = "body"
     cycle_index: int = 0
     launched_children: set[int] = Field(default_factory=set)
@@ -508,6 +552,8 @@ class _Queued(_MutableModel):
     priority: int
     force: bool
     expires_at: FiniteFloat
+    frames: tuple[str, ...] | None = None
+    ends_at: FiniteFloat | None = None
 
 
 class _State(_MutableModel):
@@ -575,6 +621,23 @@ def _refusal(activation_id: str, denial: tuple[str, str]) -> Admission:
         activation_id=activation_id, status="rejected", reason=reason,
         blocking_run_id=blocking_run_id,
     )
+
+
+class ShowNowRefused(ValueError):
+    """Decision 0036: a Show now on chosen Frames with an end refused (HTTP 422); nothing changed.
+    `code`: "no-frames", "frame-not-in-scene", "no-night-off" (no Night off tonight), "ends-passed"."""
+
+    def __init__(self, code: Literal["no-frames", "frame-not-in-scene", "no-night-off", "ends-passed"]) -> None:
+        self.code = code
+        super().__init__(code)
+
+
+class RunEnd(FrozenModel):
+    """Back to normal's answer (`Runtime.end`): the Run, when its fade begins (`at`) and when its
+    picture is gone (`until`, the cut)."""
+    run_id: str
+    at: FiniteFloat
+    until: FiniteFloat
 
 
 class RuntimeConflict(Exception):
@@ -669,12 +732,13 @@ class Runtime:
             admission = self._replace(
                 [run], stored, identity, run.priority, replaced,
                 program_id=run.program_id, program_end=run.program_ends_at,
-                duration_from=run.started_at if run.duration_from is None else run.duration_from)
+                duration_from=run.started_at if run.duration_from is None else run.duration_from,
+                frames=run.frames, ends_at=run.ends_at)
             if admission.status == "admitted":
                 self._state.admissions[identity] = admission
                 replaced.add(admission.run_id)
         for item in self._earlier_queued(stored):
-            item.scene = stored
+            item.scene = _chosen(stored, item.frames)
         self.advance(now)
         return self.scene_on_wall(scene.scene_id)
 
@@ -695,6 +759,7 @@ class Runtime:
         Scene's, and not finishing."""
         return sorted((run for run in self._state.runs.values()
                        if run.parent_id is None and run.phase == "body" and run.finish_requested_at is None
+                       and run.cut_at is None
                        and run.scene.scene_id == scene.scene_id and run.scene.revision < scene.revision
                        and not (run.activation_id or "").startswith(DEFAULT_PREFIX)),
                       key=lambda run: run.order)
@@ -705,21 +770,24 @@ class Runtime:
 
     def _replace(self, predecessors: list[_Run], scene: Scene, identity: str, priority: int,
                  excluded: set[str], *, program_id: str | None = None,
-                 program_end: float | None = None, duration_from: float | None = None) -> Admission:
+                 program_end: float | None = None, duration_from: float | None = None,
+                 frames: tuple[str, ...] | None = None, ends_at: float | None = None) -> Admission:
         """The one replace step of Save and apply now, a Scene's and a Schedule's (design rule 3:
         it never stops a Scene): admit `scene` under `identity` at the processed instant, over
         `predecessors`, and only then ask them to finish gracefully beneath it. A protection
         refusal (the Runs in `excluded` left out of the check, as `activate`'s restart leaves out
         the Runs it replaces) leaves them playing. The successor takes its predecessors' place in
         the stacking order (`_place_over`), so a Run admitted after them at the same priority
-        stays on top of it. Answers the admission or the refusal."""
+        stays on top of it. A Show now's successor keeps its Frames and its end (decision 0036).
+        Answers the admission or the refusal."""
         now = self._state.now
+        scene = _chosen(scene, frames)
         denial = self._protected_conflict(scene, priority, False, excluded)
         if denial:
             return _refusal(identity, denial)
         admission = self._admit(scene, identity, now, priority, program_id=program_id,
                                 program_end=program_end,
-                                place=self._place_over(predecessors))
+                                place=self._place_over(predecessors), frames=frames, ends_at=ends_at)
         self._state.runs[admission.run_id].duration_from = duration_from
         for run in predecessors:
             run.scheduled_finish_at = min(run.scheduled_finish_at or now, now)
@@ -1030,13 +1098,19 @@ class Runtime:
         """The persisted form; the only path by which runtime state is stored.
 
         Rollback compatibility: builds before `Admission.blocking_run_id` forbid
-        the key, so it is written only when set. A state holding no protection
+        the key, so it is written only when set (and so are a Run's and a queued
+        activation's `frames`, `ends_at` and `cut_at`, decision 0036). A state holding no protection
         refusal therefore still restores on the previous Central build.
         """
         state = self._state.model_dump(mode="json")
         for admission in state["admissions"].values():
             if admission["blocking_run_id"] is None:
                 del admission["blocking_run_id"]
+        # Decision 0036's fields, likewise written only when set.
+        for item in (*state["runs"].values(), *state["queue"]):
+            for key in ("frames", "ends_at", "cut_at"):
+                if key in item and item[key] is None:
+                    del item[key]
         return state
 
     @classmethod
@@ -1199,7 +1273,13 @@ class Runtime:
         repeat: Literal["ignore", "restart", "queue"] = "ignore",
         force: bool = False,
         expires_at: float | None = None,
+        frame_ids: tuple[str, ...] | None = None,
+        ends_at: float | None = None,
     ) -> Admission:
+        """Show now. Decision 0036: `frame_ids` restricts the Run to the chosen Frames (the Scene's
+        actuators and lamps still take part, `restricted_to`; None: the whole Scene) and `ends_at`
+        ends it at that instant, mid-photo with the Scene's fade (None: until stopped).
+        ShowNowRefused "no-frames", "frame-not-in-scene", "ends-passed"."""
         if repeat not in ("ignore", "restart", "queue"):
             raise ValueError("unknown repeat policy")
         if not activation_id or not isinstance(activation_id, str):
@@ -1208,13 +1288,23 @@ class Runtime:
             raise ValueError("program and Default Scene identities are reserved for scheduled ingress")
         if priority <= DEFAULT_SCENE_RANK:
             raise ValueError("an operator request ranks above the Default Scene (priority 0 and up)")
+        if priority >= PAUSE_RANK:
+            raise ValueError("an operator request ranks beneath a pause's hold")
         self.advance(now)
         if activation_id in self._state.admissions:
             return self._state.admissions[activation_id]
         if scene_id not in self._state.scenes:
             raise ValueError(f"unknown Scene: {scene_id}")
-        scene = self._state.scenes[scene_id]
-        matches = self._matching(scene_id)
+        if frame_ids is not None:
+            if not frame_ids:
+                raise ShowNowRefused("no-frames")
+            if not set(frame_ids) <= scene_frames(self._state.scenes[scene_id]):
+                raise ShowNowRefused("frame-not-in-scene")
+            frame_ids = tuple(sorted(set(frame_ids)))
+        if ends_at is not None and _finite(ends_at) <= now:
+            raise ShowNowRefused("ends-passed")
+        scene = _chosen(self._state.scenes[scene_id], frame_ids)
+        matches = self._matching(scene, frame_ids)
         if matches and repeat == "ignore":
             result = Admission(
                 activation_id=activation_id, status="ignored", run_id=matches[-1].run_id
@@ -1233,7 +1323,7 @@ class Runtime:
                 self._state.queue.append(
                     _Queued(
                         activation_id=activation_id, scene=scene, priority=priority,
-                        force=force, expires_at=expires_at,
+                        force=force, expires_at=expires_at, frames=frame_ids, ends_at=ends_at,
                     )
                 )
                 result = Admission(activation_id=activation_id, status="queued")
@@ -1245,7 +1335,8 @@ class Runtime:
             else:
                 for run in matches if repeat == "restart" else ():
                     self._cancel(run, now)
-                result = self._admit(scene, activation_id, now, priority)
+                result = self._admit(scene, activation_id, now, priority, frames=frame_ids,
+                                     ends_at=ends_at)
         self._state.admissions[activation_id] = result
         self.advance(now)
         return result
@@ -1258,6 +1349,27 @@ class Runtime:
         if run and run.active:
             run.scheduled_finish_at = min(run.scheduled_finish_at or now, now)
         return self.advance(now)
+
+    def end(self, run_id: str, now: float, *, lead: float = 0.0) -> RunEnd:
+        """Back to normal (decision 0036): the root Run `run_id` and every descendant stop at one
+        instant, downward cancellation and not natural completion: from `now + lead` the picture
+        fades out over the Scene's Transition seconds and at its end (the cut) the Run is
+        `cancelled`; no Scene ending plays and no child is waited for. What is beneath shows at
+        once, at its current state. A cut is only ever brought earlier, so a repeat changes
+        nothing. RuntimeConflict "unknown_run" for a Run that is not a root Run Runtime holds."""
+        now = _finite(now)
+        self.advance(now)
+        run = self._state.runs.get(run_id)
+        if run is None or run.parent_id is not None:
+            raise RuntimeConflict("unknown_run")
+        if run.active:
+            cut = now + lead + run.scene.transition.seconds
+            run.cut_at = cut if run.cut_at is None else min(run.cut_at, cut)
+        self.advance(now)
+        until = self._cut_of(run) if run.active else run.ended_at
+        if until is None:
+            until = now
+        return RunEnd(run_id=run_id, at=max(now, until - run.scene.transition.seconds), until=until)
 
     def cancel(self, run_id: str, now: float) -> RuntimeView:
         self.advance(now)
@@ -1382,11 +1494,25 @@ class Runtime:
             return None
         return scene
 
-    def _matching(self, scene_id: str) -> list[_Run]:
+    def _matching(self, scene: Scene, frames: tuple[str, ...] | None = None) -> list[_Run]:
+        """The active root Runs a request of `scene` on `frames` repeats: of its Scene and, when
+        either was asked on chosen Frames, on a Frame both play on (decision 0036: a Show now of
+        one Scene on other Frames is a new Run, not a repeat)."""
         return [
             run for run in self._state.runs.values()
-            if run.parent_id is None and run.active and run.scene.scene_id == scene_id
+            if run.parent_id is None and run.active and run.scene.scene_id == scene.scene_id
+            and ((frames is None and run.frames is None)
+                 or bool(scene_frames(scene) & scene_frames(run.scene)))
         ]
+
+    def _cut_of(self, run: _Run) -> float | None:
+        """Where `run` is cut (decision 0036): the earliest of its own and its ancestors' chosen
+        end and Back to normal's cut; None when none is."""
+        cuts = []
+        while run is not None:
+            cuts.extend(t for t in (run.ends_at, run.cut_at) if t is not None)
+            run = self._state.runs.get(run.parent_id) if run.parent_id else None
+        return min(cuts, default=None)
 
     def _protected_conflict(
         self, scene: Scene, priority: int, force: bool, excluded: set[str] | None = None
@@ -1408,9 +1534,11 @@ class Runtime:
         self, scene: Scene, identity: str, start: float, priority: int,
         *, parent: _Run | None = None, program_end: float | None = None,
         program_id: str | None = None, place: tuple[int, int] | None = None,
+        frames: tuple[str, ...] | None = None, ends_at: float | None = None,
     ) -> Admission:
-        """Admit a Run of `scene`. A root Run's place in the stacking order (root order,
-        admission order) is the next root order unless `place` gives it one (`_place_over`)."""
+        """Admit a Run of `scene` (already restricted to `frames`, `_chosen`). A root Run's place in
+        the stacking order (root order, admission order) is the next root order unless `place`
+        gives it one (`_place_over`)."""
         self._state.sequence += 1
         run_id = _run_id(("child:" if parent else "activation:") + identity)
         local_order = 0 if place is None else place[1]
@@ -1426,7 +1554,7 @@ class Runtime:
                         else self._state.sequence if place is None else place[0]),
             local_order=local_order, descendant_sequence=0 if parent else local_order,
             program_id=program_id, program_ends_at=program_end,
-            activation_id=None if parent else identity,
+            activation_id=None if parent else identity, frames=frames, ends_at=ends_at,
         )
         self._state.runs[run_id] = run
         if parent:
@@ -1466,7 +1594,7 @@ class Runtime:
                 continue
             future_boundaries = [t for t in boundaries if t >= run.cycle_start]
             limit = min([until, *future_boundaries])
-            stop = run.stop_at
+            stop = min((t for t in (run.stop_at, self._cut_of(run)) if t is not None), default=None)
             ending = stop is not None and stop <= limit
             if ending:
                 limit = stop
@@ -1482,6 +1610,8 @@ class Runtime:
             events.append(self._floor())
         events.extend(item.expires_at for item in self._state.queue)
         for run in self._state.runs.values():
+            if run.active and (cut := self._cut_of(run)) is not None:
+                events.append(cut)
             if run.phase == "outro":
                 events.append(run.outro_started_at + run.scene.outro_seconds)
             elif run.phase == "body":
@@ -1500,7 +1630,7 @@ class Runtime:
         # A newly freed matching/protected predecessor can release queued work immediately.
         for item in self._state.queue:
             if (
-                not self._matching(item.scene.scene_id)
+                not self._matching(item.scene, item.frames)
                 and not self._protected_conflict(item.scene, item.priority, item.force)
             ):
                 releases = [r.ended_at for r in self._state.runs.values() if r.ended_at is not None]
@@ -1508,6 +1638,12 @@ class Runtime:
         return min(events, default=None)
 
     def _process(self, at: float, budget: _TransitionBudget) -> None:
+        # Decision 0036: a cut Run (Back to normal, a takeover's end) and its descendants are
+        # cancelled at the cut, before anything else at the same instant.
+        for run in list(self._state.runs.values()):
+            if (run.parent_id is None and run.active and (cut := self._cut_of(run)) is not None
+                    and cut <= at):
+                self._cancel(run, cut)
         # Natural stops precede child/cycle starts at the same instant.
         for run in list(self._state.runs.values()):
             if run.phase != "body":
@@ -1574,9 +1710,10 @@ class Runtime:
         for run in list(self._state.runs.values()):
             if run.phase != "body" or run.finish_requested_at is not None:
                 continue
+            cut = self._cut_of(run)
             for index, child in enumerate(run.scene.children):
                 start = run.cycle_start + child.delay_seconds
-                if index not in run.launched_children and start <= at:
+                if index not in run.launched_children and start <= at and (cut is None or start < cut):
                     budget.consume()
                     run.launched_children.add(index)
                     self._admit(
@@ -1589,15 +1726,17 @@ class Runtime:
                 self._state.admissions[item.activation_id] = Admission(
                     activation_id=item.activation_id, status="expired"
                 )
-            elif self._matching(item.scene.scene_id) or self._protected_conflict(
+            elif self._matching(item.scene, item.frames) or self._protected_conflict(
                 item.scene, item.priority, item.force
             ):
                 continue
             else:
                 budget.consume()
-                self._state.admissions[item.activation_id] = self._admit(
-                    item.scene, item.activation_id, at, item.priority
-                )
+                self._state.admissions[item.activation_id] = (
+                    Admission(activation_id=item.activation_id, status="expired")
+                    if item.ends_at is not None and item.ends_at <= at
+                    else self._admit(item.scene, item.activation_id, at, item.priority,
+                                     frames=item.frames, ends_at=item.ends_at))
             self._state.queue.remove(item)
 
     def _playing_at(self, at: float, budget: _TransitionBudget) -> tuple[Intent, ...]:
@@ -1635,8 +1774,20 @@ class Runtime:
             end = start + (run.scene.outro_seconds if run.phase == "outro" else run.scene.cycle_seconds)
             definitions = run.scene.outro_contributions if run.phase == "outro" else run.scene.contributions
             position = max(0.0, now - start)
+            # Decision 0036: a cut Run's picture fades out over its Scene's Transition seconds to
+            # the cut; a turn that would start to show inside that fade, or after it, is never
+            # projected (so never offered, and an offered one is withdrawn).
+            cut = self._cut_of(run)
+            cut_fade = run.scene.transition.seconds
             for contribution in definitions:
                 shows_from, fade_in, fade_out = _transition_at(run, contribution, start, end)
+                cut_at = None
+                if cut is not None:
+                    if shows_from >= cut - cut_fade:
+                        continue
+                    if end > cut:
+                        cut_at = cut
+                        fade_out = 0.0 if contribution.kind == "actuator" else min(cut_fade, cut - shows_from)
                 after_end = contribution.after_end
                 if budget is not None:
                     if (fade_out and _may_hold_to_the_end(run, contribution)
@@ -1649,7 +1800,8 @@ class Runtime:
                             and contribution.target in others(run, end, beneath=True)):
                         after_end = "leave_as_is"
                 opacity = contribution.opacity * fade_share(
-                    now, start=shows_from, end=end, fade_in=fade_in, fade_out=fade_out)
+                    now, start=shows_from, end=end if cut_at is None else cut_at, fade_in=fade_in,
+                    fade_out=fade_out)
                 fraction = min(1.0, position / (end - start))
                 value = (
                     contribution.ramp_from
@@ -1669,7 +1821,7 @@ class Runtime:
                     fade_in_seconds=fade_in, fade_out_seconds=fade_out,
                     after_end=after_end,
                     actuator_value=value, phase=run.phase,
-                    selection=run.scene.selection,
+                    selection=run.scene.selection, cut_at=cut_at,
                 ))
         winners: dict[str, Intent] = {}
         for intent in intents:
@@ -1683,7 +1835,8 @@ class Runtime:
                 started_at=r.started_at, phase=r.phase, participants=r.scene.participants,
                 children=tuple(r.children), finish_requested_at=r.finish_requested_at,
                 ended_at=r.ended_at, program_id=r.program_id, priority=r.priority,
-                activation_id=r.activation_id,
+                activation_id=r.activation_id, frames=r.frames,
+                until=self._cut_of(r),
             ) for r in runs),
             contributions=tuple(intents), visible=tuple(winners[k] for k in sorted(winners)),
         )
