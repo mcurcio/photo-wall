@@ -461,7 +461,8 @@ def test_players_ignore_operator_cookies(client):
 def test_every_operator_route_but_the_session_routes_depends_on_admin(registry):
     """Or on `operate`, the everyday actions' guard (decision 0036): Restart app, and slice 3's
     Skip and Previous (a Wall's and a Frame's), Never show and Show again, Pause and Carry on (a
-    pause's and one Frame's), Show now (an activation) and Back to normal."""
+    pause's and one Frame's), Show now (an activation; its `force`, restart and a priority above
+    its Frames' ask `configure` as well, inside the route) and Back to normal."""
     app = create_app(registry.db, registry.clock, ADMIN, run_scheduler=False)
     admin, operate = app.state.operator_auth.admin, app.state.operator_auth.operate
     routes = [r for r in app.routes if getattr(r, "path", "").startswith(OPERATOR_PREFIX)]

@@ -124,6 +124,7 @@ from central.runtime import (
     SceneInUse,
     SceneOnWall,
     SceneWriteRefused,
+    ShowNowRefusal,
     ShowNowRefused,
 )
 from central.runtime_store import RuntimeStore
@@ -444,7 +445,9 @@ def create_app(
 
     @app.exception_handler(ShowNowRefused)
     async def show_now_refused(request, exc):
-        return JSONResponse({"error": exc.code}, status_code=422)
+        # An option the caller may not ask is a permission's refusal; every other code the request's.
+        status = 403 if exc.code is ShowNowRefusal.NEEDS_CONFIGURE else 422
+        return JSONResponse({"error": exc.code}, status_code=status)
 
     @app.exception_handler(RuntimeConflict)
     async def runtime_conflict(request, exc):
@@ -953,8 +956,10 @@ def create_app(
         return None
 
     # Show now is an everyday action (decision 0036): it asks for `operate` and stamps the person.
+    # Forcing it past a protection, restarting it and a priority above what covers its Frames ask
+    # for `configure` too (the independent review): refused 403 "needs-configure" without it.
     @app.post("/v1/operator/activations")
-    def activate(request: ActivationRequest, by: Actor = Depends(operator_auth.operate)):
+    def activate(request: ActivationRequest, http: Request, by: Actor = Depends(operator_auth.operate)):
         return coordinator.runtime.command_current(
             "activate",
             request.scene_id,
@@ -966,6 +971,7 @@ def create_app(
             expires_at=request.expires_at,
             frame_ids=request.frame_ids,
             ends_at=show_now_ends_at(request.ends),
+            may_configure=operator_auth.holds(http, "configure"),
         )
 
     # Back to normal (decision 0036): the takeover ends at once, mid-photo, with its Scene's fade;

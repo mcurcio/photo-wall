@@ -1671,6 +1671,7 @@ export const REFUSALS = {
     "frame-not-in-scene",
     "no-night-off",
     "ends-passed",
+    "needs-configure",
   ],
   TrialRefusal: [
     "trial_already_active",

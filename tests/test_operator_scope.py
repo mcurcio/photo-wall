@@ -130,7 +130,9 @@ def test_every_operator_route_of_the_real_app_requires_the_operator_login():
     POST) fails here, whichever slice added it. The everyday actions ask for `operate` instead
     (decision 0036): Restart app, and slice 3's Skip and Previous (a Wall's and a Frame's),
     Never show and Show again, Pause and Carry on (every Frame of a pause or one), Show now and
-    Back to normal."""
+    Back to normal. Show now's `force`, restart and a priority above its Frames' ask `configure`
+    as well, inside the route (tests/test_sign_in.py
+    `test_show_now_asks_configure_for_force_a_restart_and_a_priority_above_its_frames`)."""
     app = create_app(Database("postgresql://unused@127.0.0.1:1/unused", application_name="photo-wall-test"), ManualClock(0), ADMIN,
                      run_scheduler=False)
     admin, operate = app.state.operator_auth.admin, app.state.operator_auth.operate

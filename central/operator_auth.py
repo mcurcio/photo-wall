@@ -519,6 +519,14 @@ class OperatorAuth:
         """As `admin`, asking for `operate`: the everyday actions (decision 0036)."""
         return self._require(request, credentials, "operate")
 
+    @staticmethod
+    def holds(request: Request, permission: Permission) -> bool:
+        """Whether the operator `admin` or `operate` admitted for `request` also holds
+        `permission`: for a route that asks more of some of its options (Show now's `force`,
+        restart and priority ask `configure`, decision 0036). False when neither admitted it."""
+        principal = getattr(request.state, "operator", None)
+        return principal is not None and policy.permits(principal, permission)
+
     def mount(self, app: FastAPI) -> None:
         """Bind the door's routes (the mode's and the shared reads) and the no-store headers
         (with their unhandled-500 handler, `add_prefix_headers`)."""

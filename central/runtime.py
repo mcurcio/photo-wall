@@ -627,11 +627,13 @@ def _refusal(activation_id: str, denial: tuple[str, str]) -> Admission:
 class ShowNowRefusal(StrEnum):
     """Decision 0036: why a Show now on chosen Frames with an end was refused (HTTP 422), the
     closed vocabulary the console words: no Frame chosen, a Frame its Scene does not reach, no
-    Night off tonight, an end already past."""
+    Night off tonight, an end already past; and (HTTP 403) an option asked by a caller who may
+    operate but not configure (`Runtime.activate`'s `may_configure`)."""
     NO_FRAMES = "no-frames"
     FRAME_NOT_IN_SCENE = "frame-not-in-scene"
     NO_NIGHT_OFF = "no-night-off"
     ENDS_PASSED = "ends-passed"
+    NEEDS_CONFIGURE = "needs-configure"
 
 
 class ShowNowRefused(ValueError):
@@ -1286,11 +1288,15 @@ class Runtime:
         expires_at: float | None = None,
         frame_ids: tuple[str, ...] | None = None,
         ends_at: float | None = None,
+        may_configure: bool = True,
     ) -> Admission:
         """Show now. Decision 0036: `frame_ids` restricts the Run to the chosen Frames (the Scene's
         actuators and lamps still take part, `restricted_to`; None: the whole Scene) and `ends_at`
         ends it at that instant, mid-photo with the Scene's fade (None: until stopped).
-        ShowNowRefused "no-frames", "frame-not-in-scene", "ends-passed"."""
+        `may_configure` False: the caller may operate, not configure (decision 0036, the
+        independent review), so `force`, a restart and a priority above `covering_priority` are
+        refused "needs-configure". ShowNowRefused "no-frames", "frame-not-in-scene",
+        "ends-passed", "needs-configure"."""
         if repeat not in ("ignore", "restart", "queue"):
             raise ValueError("unknown repeat policy")
         if not activation_id or not isinstance(activation_id, str):
@@ -1306,6 +1312,9 @@ class Runtime:
             return self._state.admissions[activation_id]
         if scene_id not in self._state.scenes:
             raise ValueError(f"unknown Scene: {scene_id}")
+        if not may_configure and (force or repeat == "restart"
+                                  or priority > self.covering_priority(self._state.scenes[scene_id])):
+            raise ShowNowRefused("needs-configure")
         if frame_ids is not None:
             if not frame_ids:
                 raise ShowNowRefused("no-frames")
@@ -1365,6 +1374,16 @@ class Runtime:
         self._state.admissions[activation_id] = result
         self.advance(now)
         return result
+
+    def covering_priority(self, scene: Scene) -> int:
+        """The priority a Show now of `scene` takes by default, the console's (showState.js
+        `coveringPriority`): the highest of the live root Runs playing on any of the Scene's
+        Frames, 0 when none does (the Default Scene ranks below every request). At equal priority
+        the newer Run is on top, so it shows over them. The highest a caller who may operate and
+        not configure may ask (decision 0036, the independent review)."""
+        frames = {target for target in scene.participants if target.startswith(FRAME_TARGET)}
+        return max([0, *(run.priority for run in self._state.runs.values()
+                         if run.parent_id is None and run.active and frames & run.scene.participants)])
 
     def finish(self, run_id: str, now: float) -> RuntimeView:
         now = _finite(now)

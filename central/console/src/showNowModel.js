@@ -130,8 +130,10 @@ export function activationAnswer(result) {
   if (result.ok || result.status === 409 || result.error === "invalid_command") {
     return { kind: "known" };
   }
-  if (result.status === 422 && Object.hasOwn(SHOW_NOW_REFUSAL_WORDS, result.error ?? "")) {
-    // Refused for the Frames or the end chosen: nothing started, and the form stays to change them.
+  if ((result.status === 422 || result.status === 403) && Object.hasOwn(SHOW_NOW_REFUSAL_WORDS, result.error ?? "")) {
+    // Refused for the Frames or the end chosen (422), or for an option this person may not ask
+    // (403 "needs-configure": a restart, a priority above the default): nothing started, and the
+    // form stays to change them.
     return { kind: "kept", text: `Not started: ${SHOW_NOW_REFUSAL_WORDS[result.error]}` };
   }
   if (result.status === 401) {

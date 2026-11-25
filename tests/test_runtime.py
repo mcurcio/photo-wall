@@ -1777,6 +1777,27 @@ def test_a_show_now_left_running_still_starts_on_the_chosen_frames_it_does_not_p
     assert runtime.activate("holidays", "third", 25).status == "ignored"
 
 
+def test_a_show_now_asked_without_configure_takes_no_force_restart_or_higher_priority():
+    """Decision 0036 (the independent review): a caller who may operate and not configure
+    (`may_configure=False`) starts Show now at up to the priority covering its Scene's Frames (the
+    console's default, `covering_priority`); `force`, a restart and a priority above it are
+    refused "needs-configure" and nothing changes. Mutation probe: drop the check in `activate`."""
+    from central.runtime import ShowNowRefused
+    runtime = Runtime(house=UTC_HOUSE)
+    _regular(runtime)
+    runtime.set_scene(_takeover_scene())
+    runtime.set_scene(Scene(scene_id="loud", loop=True, cycle_seconds=30, contributions=(media("frame:right"),)))
+    runtime.activate("loud", "loud", 1, priority=2)
+    assert runtime.covering_priority(runtime._state.scenes["holidays"]) == 2
+    for kwargs in ({"force": True}, {"repeat": "restart"}, {"priority": 3}):
+        with pytest.raises(ShowNowRefused) as refused:
+            runtime.activate("holidays", f"refused-{sorted(kwargs)[0]}", 10, may_configure=False, **kwargs)
+        assert refused.value.code == "needs-configure"
+    assert {run.scene_id for run in runtime.project(10).runs} == {"regular", "loud"}
+    assert runtime.activate("holidays", "covering", 10, priority=2, may_configure=False).status == "admitted"
+    assert runtime.activate("holidays", "restart", 11, repeat="restart", priority=9).status == "admitted"
+
+
 def test_a_takeovers_frames_and_end_are_stored_only_when_set():
     """Rollback compatibility: a state with no chosen Frames, end or cut reads as before."""
     runtime = Runtime(house=UTC_HOUSE)

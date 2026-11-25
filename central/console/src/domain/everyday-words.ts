@@ -31,6 +31,8 @@ export const SHOW_NOW_REFUSAL_WORDS: Record<ShowNowRefusal, string> = {
   "frame-not-in-scene": "A chosen Frame is not one this Scene shows on.",
   "no-night-off": "There is no Night off tonight to end it at.",
   "ends-passed": "Its end time has already passed.",
+  "needs-configure":
+    "Restarting it, forcing it over a protected show or a priority above the shows on its Frames needs permission to change the setup. Leave it running at the default priority.",
 };
 
 /** Why a Frame was not paused, as the clause after its name ("Hall wasn't paused: …"). */

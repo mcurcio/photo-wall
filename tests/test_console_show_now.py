@@ -183,7 +183,8 @@ out.bodies = [
   model.activationBody({ ...fresh, frameIds: ["lobby"], ends: "night-off" }, 0, scene),
   model.activationBody({ ...fresh, ends: "stopped" }, 0, []),
 ];
-out.showNowRefused = [answer(422, "no-night-off"), answer(422, "frame-not-in-scene")];
+out.showNowRefused = [answer(422, "no-night-off"), answer(422, "frame-not-in-scene"),
+                      answer(403, "needs-configure")];
 out.shown = [
   model.shownPriority({ ...value, priority: null }, 5),
   model.shownPriority(value, 5),
@@ -296,7 +297,7 @@ def test_show_now_on_chosen_frames_with_an_end():
     """Decision 0036: Show now names its Frames explicitly (every one of the Scene's by default),
     keeps a choice in the Scene's order, sends its end, and a refusal of the Frames or the end keeps
     the draft with Central's reason in words. Mutation probes: send `frame_ids` null for a Scene
-    with Frames; forget to reset the Frames on a new Scene; treat a 422 refusal as known."""
+    with Frames; forget to reset the Frames on a new Scene; treat a 422 refusal as known; leave a 403 "needs-configure" unworded."""
     _require_node()
     result = subprocess.run(
         ["node", "--input-type=module", "-e", SCRIPT, "--",
@@ -317,6 +318,10 @@ def test_show_now_on_chosen_frames_with_an_end():
     assert (first["scene_id"], first["priority"], first["repeat"]) == ("evening", 3, "ignore")
     assert second["frame_ids"] == ["lobby"] and second["ends"] == {"kind": "night-off"}
     assert lamps["frame_ids"] is None and lamps["ends"] == {"kind": "stopped"}
-    assert [answer["kind"] for answer in out["showNowRefused"]] == ["kept", "kept"]
+    assert [answer["kind"] for answer in out["showNowRefused"]] == ["kept", "kept", "kept"]
+    # Decision 0036 (the independent review): an option this person may not ask is worded, never
+    # its code (mutation probe: treat a 403 refusal as the generic "kept" with Central's code).
+    assert "permission to change the setup" in out["showNowRefused"][2]["text"]
+    assert "needs-configure" not in out["showNowRefused"][2]["text"]
     assert all(answer["text"].startswith("Not started: ") for answer in out["showNowRefused"])
     assert "night-off" not in out["showNowRefused"][0]["text"]       # Central's code is never shown
