@@ -20,6 +20,10 @@ from contracts.models import AfterEnd, Instant, Layer, Model
 SKIP_LEAD: Final = 2.0
 END_LEAD: Final = 2.0
 ACK_LATE_SECONDS: Final = 30.0
+# How long a pause lasts when the request names no length: one hour (setting #86).
+PAUSE_SECONDS: Final = 3600.0
+# The longest pause a request may ask for: a day.
+PAUSE_MAX_SECONDS: Final = 86400.0
 
 
 class SkipKind(StrEnum):
@@ -55,6 +59,17 @@ class StayReason(StrEnum):
     NO_PREVIOUS = "no-previous"
 
 
+class PauseRefusal(StrEnum):
+    """Why a Frame is not paused when Pause is asked, closed; first match wins (policy.py
+    `pause_refusal`). No refusal for a photo due on another Frame (the owner's S4)."""
+    NOT_SET_UP = "not-set-up"
+    NOT_ANSWERING = "not-answering"
+    RESTING = "resting"
+    PAUSED = "paused"                    # already paused: its banner offers Carry on
+    NOTHING_TO_HOLD = "nothing-to-hold"  # no media layer drawn, or a black one or an ending
+    VIDEO = "video"                      # the owner's S8: no Pause on a video
+
+
 class EverydayRefusal(StrEnum):
     """Why an everyday action is refused, closed (each answered with its HTTP status by
     central/everyday_routes.py)."""
@@ -65,6 +80,10 @@ class EverydayRefusal(StrEnum):
     UNKNOWN_PHOTO = "unknown_photo"             # 404: the library holds no such photo
     NOTHING_MOVED = "nothing-moved"             # 409, with `stayed`: no Frame could move
     CHANGED = "changed"                         # 409: the Frame's photo turned over under the thumb
+    INVALID_PAUSE = "invalid_operator_pause"    # 422
+    UNKNOWN_PAUSE = "unknown_pause"             # 404: no such pause holds that Frame
+    NOTHING_PAUSED = "nothing-paused"           # 409, with `stayed`: no Frame could be paused
+    INVALID_SHOW_NOW = "invalid_show_now"       # 422: Show now's or Back to normal's body
 
 
 class AskedAction(StrEnum):
@@ -160,6 +179,36 @@ class SkipOutcome(Model):
         return max((cover.end for cover in self.covers), default=self.at)
 
 
-__all__ = ["ACK_LATE_SECONDS", "END_LEAD", "SKIP_LEAD", "AskState", "Asked", "AskedAction", "Cover",
+class Pause(Model):
+    """One Frame's pause (decision 0036): the photo it shows held from `started_at` to `ends_at`
+    by `held`, a layer added above every Run (`hold_for`); `ended_at` when Carry on ended it early
+    (`held` then carries the cut). `pause_id` is the request's: one request may pause several
+    Frames. `by`: the 0035 actor. `scene_id`: the held photo's Scene (its shown-history row)."""
+    pause_id: Identifier
+    frame_id: Identifier
+    by: str
+    started_at: Instant
+    ends_at: Instant
+    ended_at: Instant | None = None
+    scene_id: Identifier
+    held: Layer
+
+    def live(self, now: float) -> bool:
+        """Whether its hold is still drawn, or still to be, at `now`: not withdrawn by a Carry on
+        before it began (ended with no cut), and not past its drawn end."""
+        return (self.ended_at is None or self.held.cut_at is not None) and self.held.drawn_end > now
+
+
+class PausedFrame(Model):
+    frame_id: Identifier
+
+
+class PauseStayed(Model):
+    frame_id: Identifier
+    reason: PauseRefusal
+
+
+__all__ = ["ACK_LATE_SECONDS", "END_LEAD", "PAUSE_MAX_SECONDS", "PAUSE_SECONDS", "SKIP_LEAD", "Pause", "PauseRefusal",
+           "PauseStayed", "PausedFrame", "AskState", "Asked", "AskedAction", "Cover",
            "CoverCause", "CoverHow", "EverydayRefusal", "Moved", "SkipKind", "SkipOutcome", "SkipScope", "StayReason",
            "Stayed"]

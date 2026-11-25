@@ -25,7 +25,7 @@ from typing import Final, Literal
 from pydantic import Field
 
 from central.catalog import Candidate
-from central.everyday.model import Cover
+from central.everyday.model import SKIP_LEAD, Cover, Pause
 from central.house_time.calculator import house_date
 from central.house_time.model import HouseTime
 from central.installation_models import FrameOutput
@@ -612,6 +612,48 @@ class _ProjectionBuilder:
                           authored=authored, action=True, excluded=cover.left, repeat=False)))
             self._cue(cover, start)
 
+    def add_holds(self, holds: Sequence[Pause], window: PlanWindow) -> None:
+        """Decision 0036: each live pause's hold, above every Run (a Show now admitted during a
+        pause plays beneath it, the owner's S6), emitted as the command built it: an offered one
+        is a lock re-emitted with Carry on's cut (a revisable field); one not offered yet starts no
+        sooner than `SKIP_LEAD` after this pass. Its extent counts against every placement, so no
+        new placement gives its photo to another Frame meanwhile; one already offered elsewhere
+        may overlap it (the owner's S4). A hold whose Frame is bound elsewhere now, or whose span
+        is over, is dropped."""
+        for pause in holds:
+            owner = self.frames.get(f"frame:{pause.frame_id}")
+            if owner is None:
+                continue
+            player, binding = owner
+            held = pause.held
+            if (binding.output_id, binding.generation) != (held.output_id, held.binding_generation):
+                continue
+            locked = self.locks.get(held.assignment_id)
+            if locked is not None:
+                layer = locked
+                if held.cut_at is not None and held.cut_at < locked.drawn_end and held.cut_at > locked.start:
+                    layer = Layer.model_validate({**locked.model_dump(), "cut_at": held.cut_at,
+                                                  "fade_out": min(held.fade_out, held.cut_at - locked.start)})
+            else:
+                start = max(held.start, window.now + SKIP_LEAD)
+                if start >= held.drawn_end:
+                    continue
+                layer = held if start == held.start else Layer.model_validate({
+                    **held.model_dump(), "start": start,
+                    "fade_out": min(held.fade_out, held.drawn_end - start)})
+            if layer.drawn_end <= window.now:
+                continue
+            self.layers[player].append(layer)
+            self.fixed.append(FixedShowing(
+                slot_id=layer.assignment_id, frame_id=pause.frame_id,
+                asset_id=layer.variant.asset_id if layer.variant else None, start=layer.start,
+                end=layer.drawn_end, fade_in=layer.fade_in, after_end=layer.after_end))
+            if locked is not None:
+                self.used_locks[layer.assignment_id] = layer
+                self.selections.append(AssignmentSelection(assignment_id=layer.assignment_id, locked=True))
+            else:
+                self.joined.append((layer, pause.scene_id, None))
+
     def _cue(self, cover: Cover, start: float) -> None:
         if cover.cue is not None:
             self.cues[cover.cover_id] = CueMember(
@@ -1000,6 +1042,7 @@ def project(
     frame_uncertainty: Mapping[str, float] | None = None,
     covers: Sequence[Cover] = (),
     never: frozenset[str] = frozenset(),
+    holds: Sequence[Pause] = (),
 ) -> Projection:
     """Build complete-cycle proposals without changing any supplied state.
 
@@ -1029,7 +1072,8 @@ def project(
     Decision 0036 (slice 3): `covers` are the everyday actions' live covers, added above their
     Frames' layers (`_ProjectionBuilder.add_covers`); none is ever an unfilled span or a
     continuation's candidate. `never` is the Never show list's photos: no slot takes one, and no
-    continuation lists one. Only inconsistent
+    continuation lists one. `holds` are the live pauses' holds, above every Run
+    (`_ProjectionBuilder.add_holds`); none is a continuation's candidate. Only inconsistent
     caller input (`_validate_inputs`, a non-finite time) raises, and a Runtime that cannot settle
     even `now` within its budget (`RuntimeBudgetExceeded`: an empty plan would withdraw every
     offered layer)."""
@@ -1083,6 +1127,7 @@ def project(
     showings = list({assignment_id(intent): intent for intent in reversed(intents)
                      if intent.kind != "actuator"}.values())
     builder.add_covers(covers, showings, window)
+    builder.add_holds(holds, window)
     known_until = timeline.until if builder.cut is None else min(timeline.until, builder.cut)
     return builder.result(window, history, max_clock_uncertainty, intents=showings,
                           known_until=known_until, reserved=reserved,

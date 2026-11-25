@@ -101,7 +101,7 @@ def plan(instance: Runtime, frames: dict[str, FrameSetup], photos, *, now: float
          horizon: float = 300, plan_seconds: float = 3600, locks=(), authored=(),
          history: WallHistory = WallHistory(), limits: PlannerLimits = PlannerLimits(),
          fit: FitSettings = FitSettings(), reserved=(), frame_uncertainty=None, covers=(),
-         never: frozenset[str] = frozenset()) -> Projection:
+         never: frozenset[str] = frozenset(), holds=()) -> Projection:
     """Each Frame full screen on a Display of its profile's size (its Frame output)."""
     return project(
         instance, now,
@@ -115,7 +115,7 @@ def plan(instance: Runtime, frames: dict[str, FrameSetup], photos, *, now: float
         history=history, horizon_seconds=horizon, plan_seconds=plan_seconds,
         max_clock_uncertainty=UNCERTAINTY, limits=limits, settings=fit,
         reserved=reserved, frame_uncertainty=frame_uncertainty, covers=covers, never=never,
-        frame_outputs=frame_outputs_of({
+        holds=holds, frame_outputs=frame_outputs_of({
             frame: (PROFILES[setup.shape].width_px, PROFILES[setup.shape].height_px)
             for frame, setup in frames.items()}, inches=24))
 
@@ -785,3 +785,33 @@ def test_a_slot_planned_with_a_cover_never_takes_its_photo_on_another_frame():
     assert photo_of(placed) == wanted
     right_now = showing_at([layer for layer in layers(second) if layer.frame_id == "right"], 10)
     assert photo_of(right_now) != wanted
+
+
+def test_a_hold_is_emitted_over_every_run():
+    """Decision 0036: a pause's hold is drawn above every Run, a Show now admitted during the
+    pause included (the owner's S6), and no new placement gives its photo to another Frame while
+    it holds. Mutation probes: drop `add_holds`; leave the hold's extent out of the fixed
+    showings."""
+    from central.everyday.model import Pause
+    from central.everyday.policy import hold_for
+    from central.runtime import PAUSE_RANK
+    frames = {"left": FrameSetup("wide"), "right": FrameSetup("wide")}
+    photos = [photo(f"wide-{n}", "wide", captured=n) for n in range(4)]
+    instance = scene(frames)
+    first = plan(instance, frames, photos, horizon=20)
+    held = hold_for(facts_of(first, "left"), pause_id="pause", at=10, ends_at=250, priority=PAUSE_RANK)
+    pause = Pause(pause_id="pause", frame_id="left", by="person:matt", started_at=10, ends_at=250,
+                  scene_id="scene", held=held)
+    instance.set_scene(Scene(scene_id="takeover", cycle_seconds=600, contributions=(
+        Contribution(target="frame:left", source_refs=(POOL,)),)))
+    instance.activate("takeover", "show-now", 8, priority=3)
+    second = plan(instance, frames, photos, now=8, locks=layers(first), holds=(pause,),
+                  history=WallHistory(selected=offered_history(first)))
+    left = tuple(layer for layer in layers(second) if layer.frame_id == "left")
+    assert held in left
+    for at in (20, 100, 200):
+        assert showing_at(left, at) == held
+    new_right = [layer for layer in layers(second) if layer.frame_id == "right"
+                 and layer.assignment_id not in {lock.assignment_id for lock in layers(first)}]
+    assert len([layer for layer in new_right if layer.start < 250]) >= 5
+    assert all(photo_of(layer) != photo_of(held) for layer in new_right if layer.start < 250)

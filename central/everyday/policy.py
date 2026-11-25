@@ -12,10 +12,12 @@ from collections.abc import Callable, Iterable, Sequence
 
 from central.everyday.model import (
     ACK_LATE_SECONDS,
+    END_LEAD,
     SKIP_LEAD,
     AskState,
     Cover,
     CoverCause,
+    PauseRefusal,
     SkipKind,
     StayReason,
 )
@@ -212,6 +214,72 @@ def cover_for(facts: FrameFacts, kind: SkipKind, cause: CoverCause, *, request_i
                  joined=joined.assignment_id)
 
 
+def pause_refusal(facts: FrameFacts, at: float) -> PauseRefusal | None:
+    """Why the Frame is not paused when Pause is asked of it at the shared instant `at`, first
+    match wins (decision 0036's `PauseRefusal`); None when it is paused. The one home of who may
+    pause: Frame status calls it for `can` and Coordination's command again under its lock."""
+    if not facts.set_up:
+        return PauseRefusal.NOT_SET_UP
+    if not facts.answering:
+        return PauseRefusal.NOT_ANSWERING
+    if facts.resting:
+        return PauseRefusal.RESTING
+    if facts.paused:
+        return PauseRefusal.PAUSED
+    showing = showing_at(facts.layers, at)
+    origin = None if showing is None else _origin(facts, showing)
+    if (showing is None or showing.presentation == "black" or showing.variant is None
+            or (origin is not None and origin.ending)):
+        return PauseRefusal.NOTHING_TO_HOLD
+    if showing.variant.media_type == "video/mp4":
+        return PauseRefusal.VIDEO
+    return None
+
+
+def hold_id(pause_id: str, frame_id: str) -> str:
+    """A hold's assignment id: one per pause and Frame."""
+    encoded = json.dumps([pause_id, frame_id], separators=(",", ":"))
+    return "hold-" + hashlib.sha256(encoded.encode()).hexdigest()[:40]
+
+
+def pause_run_id(pause_id: str) -> str:
+    """The Run a pause's holds name (never a Runtime Run, never a continuation's candidate)."""
+    return "pause-" + hashlib.sha256(pause_id.encode()).hexdigest()[:40]
+
+
+def hold_for(facts: FrameFacts, *, pause_id: str, at: float, ends_at: float, priority: int) -> Layer:
+    """The hold a Frame that is paused (`pause_refusal` is None) gets: a layer of the photo it
+    shows at `at` (its variant, crop and media origin), above every Run (`priority`, the caller's
+    rank above every Run's), from `at` to `ends_at`, an action layer with no fade-in (the same
+    picture: no seam) and a fade-out of its Scene's Transition seconds, so its end reveals the
+    schedule beneath with the usual fade. It never changes an offered layer."""
+    showing = showing_at(facts.layers, at)
+    assert showing is not None and showing.variant is not None
+    origin = _origin(facts, showing)
+    transition = 0.0 if origin is None else origin.transition
+    return Layer(
+        assignment_id=hold_id(pause_id, facts.frame_id), run_id=pause_run_id(pause_id),
+        output_id=showing.output_id, frame_id=facts.frame_id,
+        binding_generation=showing.binding_generation, start=at, end=ends_at,
+        media_origin=showing.media_origin, priority=priority, variant=showing.variant,
+        crop=showing.crop, opacity=showing.opacity, fade_in=0.0,
+        fade_out=min(transition, ends_at - at), action=True)
+
+
+def carried_on(held: Layer, now: float) -> Layer | None:
+    """A hold under Carry on at `now`: cut `END_LEAD` and its fade-out after `now`, so the
+    schedule beneath shows at once with the usual fade; unchanged when it ends sooner by itself or
+    carries an earlier cut (a cut is only ever brought earlier); None when it would not have begun
+    by then (it is withdrawn, never drawn)."""
+    cut = now + END_LEAD + held.fade_out
+    if cut >= held.drawn_end:
+        return held
+    if cut <= held.start:
+        return None
+    return Layer.model_validate({**held.model_dump(), "cut_at": cut,
+                                 "fade_out": min(held.fade_out, cut - held.start)})
+
+
 def asked_state(at: float, presented_at: float | None, now: float) -> AskState:
     """Where an asked action stands: `done` once its layer was reported presented, `late` when
     not by `at + ACK_LATE_SECONDS`, else `requested`."""
@@ -220,5 +288,6 @@ def asked_state(at: float, presented_at: float | None, now: float) -> AskState:
     return AskState.LATE if now > at + ACK_LATE_SECONDS else AskState.REQUESTED
 
 
-__all__ = ["asked_state", "cover_for", "cover_id", "joins", "passed_over", "photo_of", "previous_chain",
-           "previous_step", "showing_at", "stays", "the_shared_instant"]
+__all__ = ["asked_state", "carried_on", "cover_for", "cover_id", "hold_for", "hold_id", "joins", "passed_over",
+           "pause_refusal", "pause_run_id", "photo_of", "previous_chain", "previous_step", "showing_at", "stays",
+           "the_shared_instant"]

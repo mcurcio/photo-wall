@@ -165,3 +165,56 @@ def test_asked_is_requested_then_done_or_late():
     assert asked_state(100, None, 101) is AskState.REQUESTED
     assert asked_state(100, 103, 200) is AskState.DONE
     assert asked_state(100, None, 100 + ACK_LATE_SECONDS + 1) is AskState.LATE
+
+
+# --- Pause (decision 0036, slice 3) ----------------------------------------------------------------
+
+from central.everyday.model import END_LEAD, PauseRefusal  # noqa: E402
+from central.everyday.policy import carried_on, hold_for, pause_refusal  # noqa: E402
+
+PAUSE_ROWS = (
+    (PauseRefusal.NOT_SET_UP, dict(set_up=False)),
+    (PauseRefusal.NOT_ANSWERING, dict(answering=False)),
+    (PauseRefusal.RESTING, dict(resting=True)),
+    (PauseRefusal.PAUSED, dict(paused=True)),
+    (PauseRefusal.NOTHING_TO_HOLD, dict(layers=(layer("dark", 0, 30, black=True),))),
+    (PauseRefusal.VIDEO, dict(layers=(layer("film", 0, 30, variant=Variant(
+        asset_id="film", recipe_id="e" * 64, sha256="f" * 64, size=10, media_type="video/mp4",
+        width=1920, height=1080, duration=30.0)),))),
+)
+
+
+def test_pause_refusals():
+    """Each row of the PauseRefusal table with every row below it also true is refused for that
+    row, video among them (the owner's S8); an ending is nothing to hold; a Frame showing a photo
+    is paused. Mutation probe: drop the video row."""
+    for index, (reason, _) in enumerate(PAUSE_ROWS):
+        fields = {}
+        for _, also in PAUSE_ROWS[index:][::-1]:
+            fields.update(also)
+        assert pause_refusal(facts(**fields), 10) is reason
+    ending = facts(origins={"a": LayerOrigin(scene_id="s", ending=True)})
+    assert pause_refusal(ending, 10) is PauseRefusal.NOTHING_TO_HOLD
+    assert pause_refusal(facts(), 10) is None
+
+
+def test_a_hold_holds_the_photo_showing_above_every_run():
+    """The hold shows the photo the Frame shows at the shared instant, from then to the pause's
+    end, above every Run at the given rank, with no fade-in (no seam) and the Scene's Transition
+    as its fade-out (the reveal's usual fade)."""
+    held = hold_for(facts(), pause_id="p", at=10, ends_at=3610, priority=1_000_000)
+    assert (held.start, held.end, held.fade_in, held.fade_out) == (10, 3610, 0, 2)
+    assert photo_of(held) == "photo-a" and held.media_origin == TURNS[0].media_origin
+    assert held.action and held.priority == 1_000_000 and held.run_id.startswith("pause-")
+    assert showing_at((*TURNS, held), 40) is held
+
+
+def test_carry_on_cuts_a_hold_at_once_with_its_fade():
+    """Carry on cuts the hold `END_LEAD` and its fade after the press (the owner's S3), only ever
+    earlier; before the hold began it is withdrawn. Mutation probe: cut at the hold's own end."""
+    held = hold_for(facts(), pause_id="p", at=10, ends_at=3610, priority=1_000_000)
+    cut = carried_on(held, 100)
+    assert cut.cut_at == 100 + END_LEAD + 2 and cut.drawn_end == 104
+    assert carried_on(cut, 103) == cut
+    assert carried_on(held, 3609) == held
+    assert carried_on(held, 5) is None
