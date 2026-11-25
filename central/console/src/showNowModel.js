@@ -3,7 +3,11 @@
  * its one instance and its route, its seed, and the draft rules for the activation
  * key. Pure: no React; tests/test_console_show_now.py drives it under Node.
  *
- * THE DRAFT is `{sceneId, priority, repeat, activationKey}`. `priority` is null while
+ * THE DRAFT is `{sceneId, frameIds, ends, priority, repeat, activationKey}`. `frameIds` is null
+ * while it follows its default, every Frame the Scene shows on (each sent explicitly: decision
+ * 0036, setting #85), or the Frames the operator chose; `ends` is when it ends (decision 0036,
+ * the owner's S3): "in" an hour (setting #84), at tonight's "night-off", or "stopped" by Back to
+ * normal. `priority` is null while
  * it follows its default (showState.js `coveringPriority` of the Scene's frames, read
  * from the current snapshot), or the operator's own value once changed under Advanced.
  * `repeat` is "ignore" ("Leave it running", the default) or "restart".
@@ -18,14 +22,15 @@
  */
 
 import { newActivationKey } from "./authoring.js";
+import { SHOW_NOW_REFUSAL_WORDS, SHOW_NOW_SECONDS } from "./domain/everyday-words.ts";
 import { sameValue } from "./flow/draftState.js";
 import { flowKeys } from "./flow/instance.js";
 import { ORIGIN_REFUSALS } from "./session.js";
 
 /** @typedef {import("./flow/steps.js").Step} Step */
 /**
- * @typedef {{sceneId: string, priority: string|number|null, repeat: "ignore"|"restart",
- *            activationKey: string}} ShowNowDraft
+ * @typedef {{sceneId: string, frameIds: string[]|null, ends: "in"|"night-off"|"stopped",
+ *            priority: string|number|null, repeat: "ignore"|"restart", activationKey: string}} ShowNowDraft
  */
 
 const SCENE = Object.freeze({ id: "scene", label: "Scene" });
@@ -40,6 +45,8 @@ export const SHOW_STEPS = Object.freeze([SCENE, REVIEW]);
  */
 export const SHOW_FIELD_STEP = Object.freeze({
   scene: SCENE.id,
+  frames: SCENE.id,
+  ends: SCENE.id,
   priority: REVIEW.id,
   repeat: REVIEW.id,
 });
@@ -71,6 +78,8 @@ export const REPEAT_LABELS = Object.freeze({ ignore: "Leave it running", restart
 export function seedShowNow(recentSceneId, definitions, mint = newActivationKey) {
   return () => ({
     sceneId: recentSceneId !== null && definitions[recentSceneId] !== undefined ? recentSceneId : "",
+    frameIds: null,
+    ends: "in",
     priority: null,
     repeat: "ignore",
     activationKey: mint(),
@@ -80,8 +89,8 @@ export function seedShowNow(recentSceneId, definitions, mint = newActivationKey)
 /**
  * The operator's change `changes` as a draft patch (useFlowDraft `patch`): a change to
  * the form mints a new activation key; setting a value to what it already is changes
- * nothing, so the key is kept. A new Scene puts the priority back on its default
- * (the default is the new Scene's frames').
+ * nothing, so the key is kept. A new Scene puts the priority and the Frames back on their
+ * defaults (both are the new Scene's frames').
  *
  * @param {Partial<ShowNowDraft>} changes
  * @param {() => string} [mint]
@@ -93,7 +102,7 @@ export function editActivation(changes, mint = newActivationKey) {
     if (!changed) {
       return null;
     }
-    const scene = "sceneId" in changes && changes.sceneId !== value.sceneId ? { priority: null } : {};
+    const scene = "sceneId" in changes && changes.sceneId !== value.sceneId ? { priority: null, frameIds: null } : {};
     return { ...scene, ...changes, activationKey: mint() };
   };
 }
@@ -121,6 +130,10 @@ export function activationAnswer(result) {
   if (result.ok || result.status === 409 || result.error === "invalid_command") {
     return { kind: "known" };
   }
+  if (result.status === 422 && Object.hasOwn(SHOW_NOW_REFUSAL_WORDS, result.error ?? "")) {
+    // Refused for the Frames or the end chosen: nothing started, and the form stays to change them.
+    return { kind: "kept", text: `Not started: ${SHOW_NOW_REFUSAL_WORDS[result.error]}` };
+  }
   if (result.status === 401) {
     return { kind: "kept", text: "Not started: the session ended. Sign in again, then activate." };
   }
@@ -147,4 +160,66 @@ export function activationAnswer(result) {
  */
 export function shownPriority(value, covering) {
   return value.priority === null ? covering : value.priority;
+}
+
+/**
+ * The Frames Show now plays on: the ones chosen, of the Scene's frames, or every one of them.
+ *
+ * @param {ShowNowDraft} value
+ * @param {string[]} sceneFrames showState.js `sceneFrames` of its Scene
+ * @returns {string[]}
+ */
+export function chosenFrames(value, sceneFrames) {
+  return value.frameIds === null ? [...sceneFrames] : sceneFrames.filter((frame) => value.frameIds.includes(frame));
+}
+
+/**
+ * The draft's Frames with one Frame chosen or left out, in the Scene's order.
+ *
+ * @param {ShowNowDraft} value
+ * @param {string[]} sceneFrames
+ * @param {string} frameId
+ * @returns {string[]}
+ */
+export function toggledFrames(value, sceneFrames, frameId) {
+  const chosen = chosenFrames(value, sceneFrames);
+  return chosen.includes(frameId) ? chosen.filter((frame) => frame !== frameId)
+    : sceneFrames.filter((frame) => frame === frameId || chosen.includes(frame));
+}
+
+/** The labels of Show now's ends (decision 0036, "The console"). */
+export { SHOW_NOW_END_WORDS as END_LABELS } from "./domain/everyday-words.ts";
+
+/**
+ * What the form must have before it is sent beyond activationProblems: a Frame of a Scene that
+ * shows on Frames (a Scene of lamps alone has none, and plays on none).
+ *
+ * @param {ShowNowDraft} value
+ * @param {string[]} sceneFrames
+ * @returns {{field: string, message: string}[]}
+ */
+export function showNowProblems(value, sceneFrames) {
+  return value.sceneId !== "" && sceneFrames.length > 0 && chosenFrames(value, sceneFrames).length === 0
+    ? [{ field: "frames", message: SHOW_NOW_REFUSAL_WORDS["no-frames"] }] : [];
+}
+
+/**
+ * The activation's body (POST /v1/operator/activations, central/app.py `ActivationRequest`):
+ * the Frames named explicitly and its end.
+ *
+ * @param {ShowNowDraft} value
+ * @param {number} priority
+ * @param {string[]} sceneFrames
+ * @returns {object}
+ */
+export function activationBody(value, priority, sceneFrames) {
+  return {
+    scene_id: value.sceneId,
+    activation_id: value.activationKey,
+    priority,
+    repeat: value.repeat,
+    // A Scene of lamps alone shows on no Frame: it is sent whole (Central's None).
+    frame_ids: sceneFrames.length === 0 ? null : chosenFrames(value, sceneFrames),
+    ends: value.ends === "in" ? { kind: "in", seconds: SHOW_NOW_SECONDS } : { kind: value.ends },
+  };
 }

@@ -158,6 +158,32 @@ out.answers = [
   answer(422, "invalid_request"),
   answer(404),
 ];
+// Show now on chosen Frames with an end (decision 0036): the Frames default to every one of the
+// Scene's, each named; a choice is kept in the Scene's order; a new Scene puts them back.
+const scene = ["hall", "lobby", "den"];
+const fresh = { ...value, frameIds: null, ends: "in" };
+out.chosen = [
+  model.chosenFrames(fresh, scene),
+  model.chosenFrames({ ...fresh, frameIds: ["den", "hall", "gone"] }, scene),
+];
+out.toggled = [
+  model.toggledFrames(fresh, scene, "lobby"),
+  model.toggledFrames({ ...fresh, frameIds: ["den"] }, scene, "hall"),
+];
+out.sceneResetsFrames = model.editActivation({ sceneId: "morning" }, mint)({ ...fresh, frameIds: ["den"] });
+out.framesEdit = model.editActivation({ frameIds: ["den"] }, mint)(fresh);
+out.endsEdit = model.editActivation({ ends: "stopped" }, mint)(fresh);
+out.problems = [
+  model.showNowProblems({ ...fresh, frameIds: [] }, scene),
+  model.showNowProblems(fresh, scene),
+  model.showNowProblems({ ...fresh, frameIds: [] }, []),
+];
+out.bodies = [
+  model.activationBody(fresh, 3, scene),
+  model.activationBody({ ...fresh, frameIds: ["lobby"], ends: "night-off" }, 0, scene),
+  model.activationBody({ ...fresh, ends: "stopped" }, 0, []),
+];
+out.showNowRefused = [answer(422, "no-night-off"), answer(422, "frame-not-in-scene")];
 out.shown = [
   model.shownPriority({ ...value, priority: null }, 5),
   model.shownPriority(value, 5),
@@ -240,13 +266,14 @@ def test_covering_priority_and_the_show_now_model():
     # The seed: the recent Scene while it is stored, the priority on its default, "Leave
     # it running" and a fresh key.
     assert out["seedRecent"] == {
-        "sceneId": "evening", "priority": None, "repeat": "ignore", "activationKey": "key-1"}
+        "sceneId": "evening", "frameIds": None, "ends": "in", "priority": None, "repeat": "ignore",
+        "activationKey": "key-1"}
     assert out["seedGone"]["sceneId"] == "" and out["seedNone"]["sceneId"] == ""
     # A change to the form mints a new key; the value it already has changes nothing.
     # A new Scene puts the priority back on its default.
     assert out["same"] is None
     assert out["repeat"] == {"repeat": "restart", "activationKey": "key-4"}
-    assert out["scene"] == {"priority": None, "sceneId": "morning", "activationKey": "key-5"}
+    assert out["scene"] == {"priority": None, "frameIds": None, "sceneId": "morning", "activationKey": "key-5"}
     assert out["priority"] == {"priority": "4", "activationKey": "key-6"}
     assert out["shown"] == [5, 3, ""]
 
@@ -263,3 +290,33 @@ def test_covering_priority_and_the_show_now_model():
         "the address you signed in at, then activate.")
     assert out["answers"][8]["text"] == "Not started: invalid_request. Nothing reached Central's Runtime."
     assert out["answers"][9]["text"] == "Not started: HTTP 404. Nothing reached Central's Runtime."
+
+
+def test_show_now_on_chosen_frames_with_an_end():
+    """Decision 0036: Show now names its Frames explicitly (every one of the Scene's by default),
+    keeps a choice in the Scene's order, sends its end, and a refusal of the Frames or the end keeps
+    the draft with Central's reason in words. Mutation probes: send `frame_ids` null for a Scene
+    with Frames; forget to reset the Frames on a new Scene; treat a 422 refusal as known."""
+    _require_node()
+    result = subprocess.run(
+        ["node", "--input-type=module", "-e", SCRIPT, "--",
+         (SRC / "showState.js").as_uri(), (SRC / "showNowModel.js").as_uri(),
+         (SRC / "useSourceCheck.js").as_uri()],
+        capture_output=True, text=True, timeout=30, check=True)
+    out = json.loads(result.stdout)
+    assert out["chosen"] == [["hall", "lobby", "den"], ["hall", "den"]]
+    assert out["toggled"] == [["hall", "den"], ["hall", "den"]]
+    assert out["sceneResetsFrames"]["frameIds"] is None and out["sceneResetsFrames"]["priority"] is None
+    assert out["framesEdit"]["frameIds"] == ["den"] and out["framesEdit"]["activationKey"] != "kept"
+    assert out["endsEdit"]["ends"] == "stopped" and out["endsEdit"]["activationKey"] != "kept"
+    assert [len(problems) for problems in out["problems"]] == [1, 0, 0]
+    assert out["problems"][0][0]["field"] == "frames"
+    first, second, lamps = out["bodies"]
+    assert first["frame_ids"] == ["hall", "lobby", "den"]
+    assert first["ends"] == {"kind": "in", "seconds": 3600}
+    assert (first["scene_id"], first["priority"], first["repeat"]) == ("evening", 3, "ignore")
+    assert second["frame_ids"] == ["lobby"] and second["ends"] == {"kind": "night-off"}
+    assert lamps["frame_ids"] is None and lamps["ends"] == {"kind": "stopped"}
+    assert [answer["kind"] for answer in out["showNowRefused"]] == ["kept", "kept"]
+    assert all(answer["text"].startswith("Not started: ") for answer in out["showNowRefused"])
+    assert "night-off" not in out["showNowRefused"][0]["text"]       # Central's code is never shown
