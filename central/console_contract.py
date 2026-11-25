@@ -84,6 +84,7 @@ from central.room_light.model import (
     Sensor,
 )
 from central.room_light.views import DrawnView, RefusedReportsView, RoomLightsView
+from central.runtime import ShowNowRefusal
 from contracts.central_api import InstallRefusal, InstallStarted
 from contracts.frame_lighting import (
     BEAM_DEGREES_MAX,
@@ -167,7 +168,7 @@ CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
 }
 CONSOLE_REFUSALS: Final[tuple[type[StrEnum], ...]] = (   # each context's closed refusal enum
     RoomLightRefusal, FrameLightingRefusal, PaperProfileRefusal, ReportRefusal, DrawnReportRefusal, TrialRefusal,
-    PositionRestoreRefusal, InstallRefusal, AppRestartRefusal, EverydayRefusal, PauseRefusal,
+    PositionRestoreRefusal, InstallRefusal, AppRestartRefusal, EverydayRefusal, PauseRefusal, ShowNowRefusal,
 )
 
 

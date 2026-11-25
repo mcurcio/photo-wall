@@ -11,6 +11,7 @@ import math
 import re
 from collections.abc import Mapping
 from datetime import timedelta
+from enum import StrEnum
 from functools import lru_cache
 from types import MappingProxyType
 from typing import Annotated, Final, Literal, Self
@@ -623,13 +624,23 @@ def _refusal(activation_id: str, denial: tuple[str, str]) -> Admission:
     )
 
 
+class ShowNowRefusal(StrEnum):
+    """Decision 0036: why a Show now on chosen Frames with an end was refused (HTTP 422), the
+    closed vocabulary the console words: no Frame chosen, a Frame its Scene does not reach, no
+    Night off tonight, an end already past."""
+    NO_FRAMES = "no-frames"
+    FRAME_NOT_IN_SCENE = "frame-not-in-scene"
+    NO_NIGHT_OFF = "no-night-off"
+    ENDS_PASSED = "ends-passed"
+
+
 class ShowNowRefused(ValueError):
     """Decision 0036: a Show now on chosen Frames with an end refused (HTTP 422); nothing changed.
-    `code`: "no-frames", "frame-not-in-scene", "no-night-off" (no Night off tonight), "ends-passed"."""
+    `code` is its `ShowNowRefusal`."""
 
-    def __init__(self, code: Literal["no-frames", "frame-not-in-scene", "no-night-off", "ends-passed"]) -> None:
-        self.code = code
-        super().__init__(code)
+    def __init__(self, code: ShowNowRefusal | str) -> None:
+        self.code = ShowNowRefusal(code)
+        super().__init__(self.code.value)
 
 
 class RunEnd(FrozenModel):

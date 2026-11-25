@@ -245,6 +245,7 @@ export interface FrameStatus {
   can?: Action[];
   frame_id: string;
   override?: Override | null;
+  photo?: string | null;
   problem?: Problem | null;
   progress?: Progress | null;
   setup: SetupStep | null;
@@ -1662,6 +1663,12 @@ export const REFUSALS = {
     "named_by_a_frame",
     "too_many",
   ],
+  ShowNowRefusal: [
+    "no-frames",
+    "frame-not-in-scene",
+    "no-night-off",
+    "ends-passed",
+  ],
   TrialRefusal: [
     "trial_already_active",
     "trial_baseline_revision_changed",
@@ -1688,4 +1695,5 @@ export type FrameLightingRefusal = (typeof REFUSALS)["FrameLightingRefusal"][num
 export type InstallRefusal = (typeof REFUSALS)["InstallRefusal"][number];
 export type PaperProfileRefusal = (typeof REFUSALS)["PaperProfileRefusal"][number];
 export type RoomLightRefusal = (typeof REFUSALS)["RoomLightRefusal"][number];
+export type ShowNowRefusal = (typeof REFUSALS)["ShowNowRefusal"][number];
 export type TrialRefusal = (typeof REFUSALS)["TrialRefusal"][number];

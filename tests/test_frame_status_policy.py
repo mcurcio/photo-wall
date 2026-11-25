@@ -505,6 +505,15 @@ def test_can_follows_the_stay_rule():
     assert status(showing=ON_SCREEN, readiness=Readiness.POSITION_NEEDED).can == ()
 
 
+def test_a_frame_names_the_photo_it_shows():
+    """`photo` is the photo drawn now, what the console's Never show sends; none in setup, with
+    nothing drawn, or without what it shows. Mutation probe: name the next turn's photo."""
+    assert status(showing=ON_SCREEN).photo == "photo-a"
+    assert status(showing=Showing()).photo is None
+    assert status().photo is None
+    assert status(showing=ON_SCREEN, readiness=Readiness.POSITION_NEEDED).photo is None
+
+
 def test_a_walls_can_is_any_of_its_frames():
     moving = status(showing=ON_SCREEN)
     still = status(showing=Showing())

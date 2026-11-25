@@ -273,6 +273,9 @@ class FrameStatus(Model):
     can: tuple[Action, ...] = ()
     # Slice 3: the newest action asked of it that moved it, and whether its Player has shown it.
     asked: Asked | None = None
+    # Slice 3: the photo it shows now (its Immich asset id), what Never show names; None when it
+    # shows none, or when the reading did not ask what it shows.
+    photo: str | None = None
 
 
 class HouseStatus(Model):

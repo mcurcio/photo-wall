@@ -488,9 +488,19 @@ def _everyday_actions(facts: FrameFacts, house: HouseFacts, now: float,
                if stays(found, kind, at, now=now) is None]
     if pause_refusal(found, at) is None:
         offered.append(Action.PAUSE)
-    if photo_of(showing_at(found.layers, now)) is not None:
+    if showing_photo(facts, house, now, setup) is not None:
         offered.append(Action.NEVER_SHOW)
     return offered
+
+
+def showing_photo(facts: FrameFacts, house: HouseFacts, now: float, setup: SetupStep | None) -> str | None:
+    """The photo the Frame shows now (central/everyday/policy.py `showing_at`, its Immich asset id):
+    what Never show names, and the one test of whether it is offered. None in setup, when it shows
+    none, or when the reading did not ask what it shows."""
+    found = everyday_facts(facts, house, now, setup)
+    if found is None or setup is not None:
+        return None
+    return photo_of(showing_at(found.layers, now))
 
 
 def actions(facts: FrameFacts, house: HouseFacts, setup: SetupStep | None,
@@ -538,7 +548,7 @@ def frame_status(facts: FrameFacts, house: HouseFacts, now: float, kept: KeptSta
                           frame_id=facts.frame_id)
     return FrameStatus(frame_id=facts.frame_id, word=found.word, setup=found.setup, since=since, because=found.because,
                        problem=problem, progress=found.progress, override=facts.override, can=can,
-                       asked=asked(facts, now))
+                       asked=asked(facts, now), photo=showing_photo(facts, house, now, found.setup))
 
 
 # --- The house ----------------------------------------------------------------------------------------
@@ -618,4 +628,4 @@ def house_status(frames: Sequence[FrameStatus], house: HouseFacts, now: float) -
 
 __all__ = ["CAUSES", "CONTINUATION_LIMIT_SECONDS", "DISPLAY_PROBLEMS", "HOUSE_PROBLEM_WORDS", "REBOOT_ALLOWED_SECONDS",
            "ROWS", "SOURCE_PLANNING_CODES", "UNKNOWN_CAUSE", "Cause", "CauseFix", "actions", "frame_status",
-           "house_problems", "house_status", "installing", "preparing", "rebooting"]
+           "house_problems", "house_status", "installing", "preparing", "rebooting", "showing_photo"]
