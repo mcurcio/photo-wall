@@ -585,7 +585,7 @@ export function activationProblems({ sceneId, priority }) {
     // Central's bound (central/app.py `ActivationRequest`): a pause's hold stays above every Show now.
     problems.push({
       field: "priority",
-      message: `Priority must be from 0 to ${(CONSTANTS.PAUSE_RANK - 1).toLocaleString("en-US")}.`,
+      message: `Priority must be from 0 to ${String(CONSTANTS.PAUSE_RANK - 1).replace(/\B(?=(\d{3})+$)/g, ",")}.`,
     });
   }
   return problems;
