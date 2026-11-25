@@ -5,7 +5,8 @@ import { Split } from "../ui/split";
 
 export interface UndoToastProps {
   message: string;
-  onUndo: () => void;
+  /** Undo; none for an answer with no way back (a Skip's), which is the same line without it. */
+  onUndo?: () => void;
   /** The time ran out without Undo: the action is final now. */
   onExpire: () => void;
   /** How long Undo is offered; the count pauses while the toast is hovered or focused. */
@@ -15,7 +16,8 @@ export interface UndoToastProps {
 /**
  * UndoToast (design language §4): a transient line at the bottom of the view with one action,
  * Undo, offered for `seconds` (10 by default). It never takes focus (`role="status"`), and the
- * count pauses while the pointer or the focus is on it. Material's snackbar with an action.
+ * count pauses while the pointer or the focus is on it. Material's snackbar with an action. An
+ * answer with no way back (what a Skip came to) is the same line with no Undo.
  */
 export function UndoToast({ message, onUndo, onExpire, seconds = 10 }: UndoToastProps) {
   const [paused, setPaused] = useState(false);
@@ -38,7 +40,7 @@ export function UndoToast({ message, onUndo, onExpire, seconds = 10 }: UndoToast
         + "rounded-card border border-line bg-surface-raised px-4 py-2 font-sans text-sm text-text shadow-lg shadow-shadow"
       }
     >
-      <Split action={<Button variant="ghost" onClick={onUndo}>Undo</Button>}>{message}</Split>
+      <Split action={onUndo === undefined ? undefined : <Button variant="ghost" onClick={onUndo}>Undo</Button>}>{message}</Split>
     </div>
   );
 }

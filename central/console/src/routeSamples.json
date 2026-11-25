@@ -10,6 +10,7 @@
       "#/scenes/new/review",
       "#/scenes/sample-scene/edit/review"
     ],
+    "never-show": ["#/never-show"],
     "schedule": [
       "#/schedule",
       "#/schedule/new/scene",

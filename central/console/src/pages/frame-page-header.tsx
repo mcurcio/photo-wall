@@ -7,6 +7,7 @@ import { Note } from "../patterns/fact-row";
 import { HealthBadge } from "../patterns/health-badge";
 import { Button } from "../ui/button";
 import { Field, TextInput } from "../ui/field";
+import { Menu, type MenuItem } from "../ui/menu";
 import { Inline } from "../ui/stack";
 
 /** Central's refusal of a Frame name (central/registry.py `rename_frame`), in words. */
@@ -68,15 +69,19 @@ export interface FramePageHeaderProps {
   back: { text: string; href: string };
   headingRef?: React.Ref<HTMLHeadingElement>;
   onRename: (next: string) => Promise<RenameAnswer>;
+  /** The Frame's actions (decision 0036: Skip this Frame, Previous, Pause, Never show, Why); only
+   * what Central offers now, each absent otherwise. */
+  menu?: { label: string; items: readonly MenuItem[] };
 }
 
 /** The Frame page's header: its name (the page's heading), its status chip, Rename and its wall. */
-export function FramePageHeader({ name, chip, wall, back, headingRef, onRename }: FramePageHeaderProps) {
+export function FramePageHeader({ name, chip, wall, back, headingRef, onRename, menu }: FramePageHeaderProps) {
   return (
     <EntityHeader title={name} level={1} headingRef={headingRef} back={back}>
       {chip !== null && <HealthBadge verdict={{ severity: chip.severity, label: chip.label, receipt: null }} />}
       <FrameName key={name} name={name} onRename={onRename} />
       {wall !== null && <Note>{`On the “${wall}” wall`}</Note>}
+      {menu !== undefined && menu.items.length > 0 && <Menu label={menu.label} items={menu.items} />}
     </EntityHeader>
   );
 }

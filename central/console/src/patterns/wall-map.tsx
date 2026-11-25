@@ -24,6 +24,8 @@ export interface WallMapProps {
   loading?: boolean;
   /** Under the map: what plays on this wall now and next. */
   below?: React.ReactNode;
+  /** Beside its name: the actions on the whole wall (`WallActions`). */
+  actions?: React.ReactNode;
 }
 
 // The narrowest and shortest a tile is drawn: its name, its chip, one line and "More" fit.
@@ -100,7 +102,7 @@ function useOwnWidth(): [React.RefObject<HTMLDivElement | null>, number] {
  * is drawn two, three or four across instead and says so; so is one whose smallest Frame would be
  * smaller than its tile's words at this width. Arranging the wall is the layout page's.
  */
-export function WallMap({ name, room, frames, loading = false, below }: WallMapProps) {
+export function WallMap({ name, room, frames, loading = false, below, actions }: WallMapProps) {
   const [box, width] = useOwnWidth();
   const drawn = width >= SCALE_FROM ? scaledBoxes(frames, width) : "narrow";
   const scaled = typeof drawn === "string" ? null : drawn;
@@ -109,10 +111,13 @@ export function WallMap({ name, room, frames, loading = false, below }: WallMapP
     : frames.map((frame) => ({ key: frame.key, tile: loading ? <Skeleton /> : frame.tile }));
   return (
     <section aria-label={name} aria-busy={loading ? true : undefined} className="flex min-w-0 flex-col gap-2">
-      <h2 className="m-0 text-base font-semibold text-text">
-        {name}
-        {room !== undefined && room !== "" && <span className="font-normal text-muted">{` · ${room}`}</span>}
-      </h2>
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <h2 className="m-0 text-base font-semibold text-text">
+          {name}
+          {room !== undefined && room !== "" && <span className="font-normal text-muted">{` · ${room}`}</span>}
+        </h2>
+        {!loading && actions}
+      </div>
       <div ref={box} className="min-w-0">
         {scaled !== null ? (
           <div className="min-w-0">

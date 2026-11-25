@@ -36,7 +36,7 @@ import { FRAME_ID_PATTERN } from "./frameIds.js";
  * `sameRoute(parseRoute(formatRoute(r)), r)` holds, and it throws for a value that is
  * not a Route, so a caller's mistake cannot write an unparseable hash.
  *
- * @typedef {"home"|"now"|"scenes"|"schedule"|"sources"|"wall"|"hardware"|"players"|"releases"|"photo-library"|"photo-fit"|"house"|"lights"|"home-assistant"|"paper-profiles"|"people-and-access"} Section
+ * @typedef {"home"|"now"|"scenes"|"never-show"|"schedule"|"sources"|"wall"|"hardware"|"players"|"releases"|"photo-library"|"photo-fit"|"house"|"lights"|"home-assistant"|"paper-profiles"|"people-and-access"} Section
  * @typedef {"new"|"edit"|"show"|"update"} Flow
  * @typedef {"overview"|"position"|"lighting"|"picture"|"power"|"hardware"} Tab
  * @typedef {"layout"} Mode
@@ -80,6 +80,7 @@ export const SECTIONS = Object.freeze([
   "wall",
   "now",
   "scenes",
+  "never-show",
   "schedule",
   "sources",
   "hardware",

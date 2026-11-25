@@ -185,26 +185,40 @@ const LAYER_WORDS: Record<EvidenceLayer, string> = {
   scheduler: "Central's scheduler",
 };
 
-/** What may be asked of a Frame from its menu (decision 0036's labels; slice 3's everyday
- * actions are worded here and asked once the console's slice 3 wires them). */
+/** What may be asked of a Frame from its menu (decision 0036's labels). Pause's length is
+ * Central's default (setting #86, `PAUSE_SECONDS`). */
 export const ACTION_WORDS: Record<Action, string> = {
   "restart-app": "Restart app",
   "reboot-pi": "Reboot the Pi",
   skip: "Skip this Frame",
   previous: "Previous on this Frame",
   "never-show": "Never show this photo",
-  pause: "Pause for 1 hour",
+  pause: `Pause for ${CONSTANTS.PAUSE_SECONDS === 3600 ? "1 hour" : `${Math.round(CONSTANTS.PAUSE_SECONDS / 60)} minutes`}`,
 };
 
-/** The actions a tile's menu asks of its Pi, in the order it lists them: the lighter one first. */
-export const ACTION_ORDER: readonly PiAction[] = ["restart-app", "reboot-pi"];
+/** The actions a Frame's menu lists, in its order (decision 0036, "The console"): the everyday
+ * ones first, then those asked of its Pi, the lighter one first. */
+export const ACTION_ORDER: readonly Action[] = ["skip", "previous", "pause", "never-show", "restart-app", "reboot-pi"];
+
+/** The actions asked of a Frame's Pi (the others are asked of Central). */
+const PI_ACTIONS: readonly Action[] = ["restart-app", "reboot-pi"];
 
 /** An action asked of a Frame's Pi (the others are asked of Central). */
 export type PiAction = Extract<Action, "restart-app" | "reboot-pi">;
 
+/** An everyday action, asked of Central (decision 0036, slice 3). */
+export type EverydayAction = Exclude<Action, PiAction>;
+
 /** Whether an action is one asked of the Frame's Pi. */
 export function isPiAction(action: Action): action is PiAction {
-  return (ACTION_ORDER as readonly Action[]).includes(action);
+  return PI_ACTIONS.includes(action);
+}
+
+/** The actions a Frame's menu offers now, in its order: only what Central's `can` holds (an
+ * action not offered is absent, never disabled). */
+export function offeredActions(status: FrameStatus | null | undefined): Action[] {
+  const can = status?.can ?? [];
+  return ACTION_ORDER.filter((action) => can.includes(action));
 }
 
 /** Where an `open` fix leads, as its link says it. */
@@ -507,6 +521,16 @@ export function problemView(problem: Problem, status: FrameStatus | null, subjec
 
 // --- Overrides, and now and next.
 
+/** Central's own words for who did something, where the console cannot name them: an audit value
+ * (central/actor.py: "person:op_…", "console", "scheduler", …) is Central's to put a name to, so it
+ * is never shown as it is. */
+const AUDIT_VALUE = /^(?:(?:person|client):op_[a-z2-7]{16}|console|api-token|scheduler|library-check|node|central|home-assistant)$/;
+
+/** Who did something, in words, or null where nothing can be said: an audit value is never shown. */
+export function whoWords(by: string | null | undefined): string | null {
+  return by == null || by === "" || AUDIT_VALUE.test(by) ? null : by;
+}
+
 /**
  * An override as its banner says it: a hold ("Off — by Matt · until 23:00"), a takeover ("Showing
  * “Holiday” until 22:04") or a pause ("Paused until 22:04"), and the Frames it covers by name.
@@ -514,7 +538,8 @@ export function problemView(problem: Problem, status: FrameStatus | null, subjec
 export function overrideView(override: Override, names: Readonly<Record<string, string>>, now: number | null):
 { kind: OverrideKind; label: string; title: string; frames: string; back: string } {
   const until = override.until != null ? instantWords(override.until, now) : null;
-  const by = override.by != null && override.by !== "" ? ` — by ${override.by}` : "";
+  const who = whoWords(override.by);
+  const by = who !== null ? ` — by ${who}` : "";
   const title = override.kind === "power-hold"
     ? `${override.power === "on" ? "On" : "Off"}${by}${until !== null ? ` · until ${until}` : " · until you resume"}`
     : override.kind === "takeover"

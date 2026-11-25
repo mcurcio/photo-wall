@@ -1,3 +1,4 @@
+import { everydayCommands } from "./domain/everyday-api.ts";
 import { rebootRequest, rebootTarget, sendReboot } from "./fleetCommands.js";
 import { checkConnection } from "./libraryApi.js";
 import { hold, resumeSchedule } from "./powerScheduleApi.js";
@@ -9,12 +10,15 @@ import { hold, resumeSchedule } from "./powerScheduleApi.js";
  * All on and Resume schedule are the week page's (powerScheduleApi.js), Check now is Settings ›
  * Photo library's (libraryApi.js), and a reboot goes through the fleet's ONE send path
  * (fleetCommands.js `sendReboot`), its request frozen from the Pi's newest node read as the Pi
- * page's is. Restart app is the Home page's own request (domain/pi-actions.tsx).
+ * page's is. Restart app is the Home page's own request (domain/pi-actions.tsx). The everyday
+ * actions (decision 0036, slice 3: Skip and Previous on a wall or a Frame, Never show and Show
+ * again, Pause and Carry on, Back to normal) are domain/everyday-api.ts's.
  */
 export const homeCommands = Object.freeze({
   hold,
   resumeSchedule,
   checkConnection,
+  ...everydayCommands,
 
   /**
    * Ask a Pi to reboot (domain/pi-actions.tsx `AskReboot`): null when Central recorded the

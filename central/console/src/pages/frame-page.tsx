@@ -3,7 +3,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { BindingFacet } from "../BindingFacet.jsx";
 import { FrameCentralError, useFrameImpediment } from "../domain/room-lights/frame-central-error";
 import { FrameDisplay } from "../domain/frame-display";
-import { frameChip, type HomeHeld, frameStatusIn } from "../domain/frame-status";
+import { useEverydayActions } from "../domain/everyday-actions";
+import { ACTION_WORDS, frameChip, type HomeHeld, frameStatusIn, isPiAction, offeredActions } from "../domain/frame-status";
+import { everydayCommands } from "../domain/everyday-api";
 import { FrameOverview } from "../domain/frame-overview";
 import { FrameLightingTab } from "../domain/frame-lighting/frame-lighting-tab";
 import type { PaperProfileChoice } from "../domain/frame-lighting/model";
@@ -161,6 +163,12 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
   // The shown tab's live session, if it has one: the one a tab change would leave.
   const guarded = session ? adjustment : tab === "picture" ? picture : null;
   const headingRef = useRef<HTMLHeadingElement | null>(null);
+  // The Frame's own everyday actions (decision 0036: Skip this Frame, Previous, Pause, Never show),
+  // offered only as Central's `can` holds them; the next snapshot read says "requested".
+  const status = frameStatusIn(snapshot as HomeHeld | null, frameId);
+  const everyday = useEverydayActions({
+    commands: everydayCommands, names: { [frameId]: frame?.name ?? frameId },
+    now: (snapshot as { readAt?: number } | null)?.readAt ?? null, refresh: async () => {} });
   // A tab change that would leave a live session with changes not kept: asked first.
   const [leaving, setLeaving] = useState<Tab | null>(null);
   const choose = (next: Tab) => {
@@ -196,13 +204,17 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
   const walls = new Set(frames.map((candidate) => candidate.surface_id));
   // The Frame's status is Central's one answer (Home's read, domain/frame-status.ts), Resting
   // included: never worked out here.
-  const health = frameChip(frameStatusIn(snapshot as HomeHeld | null, frameId));
+  const health = frameChip(status);
+  const actions = status === null || everyday.busy ? [] : offeredActions(status).flatMap((action) => (isPiAction(action) ? []
+    : [{ label: ACTION_WORDS[action], onAction: () => everyday.onAction({ frame_id: frameId, status }, action) }]));
   const piHref = isBound(frame) ? playerPageHref(snapshot, frame.player_id as string) : null;
   return (
     <EntityPage header={
       <FramePageHeader name={frame.name ?? frameId} chip={health} wall={walls.size > 1 ? frame.surface_id : null}
         back={back} headingRef={headingRef}
-        onRename={(next) => mutate(() => renameFrame(frameId, next)) as Promise<RenameAnswer>} />
+        onRename={(next) => mutate(() => renameFrame(frameId, next)) as Promise<RenameAnswer>}
+        menu={{ label: `More actions for ${frame.name ?? frameId}`, items: [...actions,
+          { label: "Why is this playing?", href: formatRoute({ section: "wall", id: frameId, tab: "overview" }) }] }} />
     }>
       <LeaveGuard
         open={leaving !== null}
@@ -277,6 +289,7 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
           </>
         )}
       </Tabs>
+      {everyday.toast}
     </EntityPage>
   );
 }

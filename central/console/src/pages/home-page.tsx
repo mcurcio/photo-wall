@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type * as React from "react";
 
+import { type EverydayCommands, useEverydayActions } from "../domain/everyday-actions";
 import { type FixView, framePlaces, type HomeHeld, isPiAction, statusOf } from "../domain/frame-status";
 import { HomeBoard, type HomeState } from "../domain/home-board";
 import { type HostIncident, piFaultView, readinessView } from "../domain/home-reports";
@@ -33,7 +34,7 @@ type Sent = { ok: true } | { ok: false; error: string };
  * Home's writes, handed in by its route (homeCommands.js): each is its owner's own route. The page
  * and its domain components name no write themselves, but Restart app's request (domain/pi-actions.tsx).
  */
-export interface HomeCommands {
+export interface HomeCommands extends EverydayCommands {
   hold: (power: "on" | "off", requestId: string) => Promise<Sent>;
   resumeSchedule: (frameIds: string[]) => Promise<Sent>;
   checkConnection: (connectionRef: string) => Promise<Sent>;
@@ -132,6 +133,7 @@ export function HomePage({
   };
   const onHold = (power: "on" | "off") => void press(() => commands.hold(power, uuid()), `Holding every display ${power}.`);
   const onResume = (override: Override) => void press(() => commands.resumeSchedule([...override.frame_ids]), "Schedule resumed.");
+  const everyday = useEverydayActions({ commands, names, now, refresh });
   const onFix = (fix: NonNullable<FixView["fix"]>) => {
     if (fix.kind === "restart-app" || fix.kind === "reboot-pi") {
       ask(fix.kind, fix.device_id);
@@ -140,10 +142,13 @@ export function HomePage({
       if (held !== undefined) onResume(held);
     } else if (fix.kind === "check-now") {
       void press(() => commands.checkConnection(fix.connection_ref), "Check requested. Its answer shows here when it lands.");
+    } else if (fix.kind === "carry-on") {
+      everyday.carryOn(fix.pause_id);
     }
   };
   const onAction = (place: FramePlace, action: Action) => {
-    if (place.device_id != null && isPiAction(action)) ask(action, place.device_id);
+    if (!isPiAction(action)) everyday.onAction(place, action);
+    else if (place.device_id != null) ask(action, place.device_id);
   };
 
   // Only what Central took and the Pi has not finished: never before a reboot is confirmed, nor
@@ -199,9 +204,13 @@ export function HomePage({
   );
 
   return (
-    <HomeBoard state={state} now={now} pis={pis} requested={requested} busy={busy} said={said}
-      onFix={onFix} onAction={onAction} onHold={onHold} onResume={onResume}
-      onOpenFrame={(frameId, event) => { if (isPlainClick(event)) onVisitFrame(frameId); }}
-      progress={progress} more={more} />
+    <>
+      <HomeBoard state={state} now={now} pis={pis} requested={requested} busy={busy || everyday.busy} said={said}
+        onFix={onFix} onAction={onAction} onHold={onHold} onResume={onResume} onEnd={everyday.onEnd}
+        onWallAction={(wall, kind) => everyday.onWallAction(wall.surface_id, kind)} onRetry={everyday.onRetry}
+        onOpenFrame={(frameId, event) => { if (isPlainClick(event)) onVisitFrame(frameId); }}
+        progress={progress} more={more} />
+      {everyday.toast}
+    </>
   );
 }

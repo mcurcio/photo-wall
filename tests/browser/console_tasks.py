@@ -49,7 +49,7 @@ from support.console_words import SCENE
 
 # The sections of §6, grouped as its route tables group them, and their sidebar labels
 # (each page's <h1> reads the same).
-SHOW_SECTIONS = frozenset({"now", "scenes", "schedule", "sources"})
+SHOW_SECTIONS = frozenset({"now", "scenes", "never-show", "schedule", "sources"})
 WALL_SECTIONS = frozenset({"wall"})
 FLEET_SECTIONS = frozenset({"hardware", "releases"})
 SETTINGS_SECTIONS = frozenset({"photo-library", "photo-fit", "house", "lights", "home-assistant", "paper-profiles",
@@ -57,7 +57,7 @@ SETTINGS_SECTIONS = frozenset({"photo-library", "photo-fit", "house", "lights", 
 SECTIONS = SHOW_SECTIONS | WALL_SECTIONS | FLEET_SECTIONS | SETTINGS_SECTIONS | {"home"}
 LABELS = {
     "home": "Home",
-    "now": "Now", "scenes": "Scenes", "schedule": "Schedule", "sources": "Sources",
+    "now": "Now", "scenes": "Scenes", "never-show": "Never show", "schedule": "Schedule", "sources": "Sources",
     "wall": "Wall", "hardware": "Hardware", "releases": "Releases",
     "photo-library": "Photo library", "photo-fit": "Photo fit", "house": "House", "lights": "House › Lights",
     "home-assistant": "Home Assistant", "paper-profiles": "Paper profiles",

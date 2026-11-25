@@ -119,3 +119,39 @@ export const WONT_SHOW = home({
 
 /** No Frame yet. */
 export const EMPTY: HomeView = { change: 0, house: { word: "all-good", problems: [] }, walls: [], overrides: [], now_next: [] };
+
+const EVERYDAY_CAN: FrameStatus["can"] = ["never-show", "pause", "previous", "reboot-pi", "restart-app", "skip"];
+const movable = (frame: FramePlace, over: Partial<FrameStatus> = {}): FramePlace => ({ ...frame,
+  status: { ...frame.status, can: EVERYDAY_CAN, photo: `photo-${frame.frame_id}`, ...over } });
+const withWallCan = (view: HomeView): HomeView => ({ ...view,
+  walls: view.walls.map((wall) => (wall.surface_id === "living" ? { ...wall, can: ["previous", "skip"] } : wall)) });
+
+/** Slice 3: every living room Frame can move, so the wall offers Skip and Previous and each tile's
+ * menu its everyday actions. */
+export const EVERYDAY = withWallCan(home({ living: LIVING.map((frame) => movable(frame)), hall: HALL }, "all-good"));
+
+/** A wall's Skip just pressed: two Frames wait for their Pi to show the new photo; one is late. */
+export const SKIP_REQUESTED = withWallCan(home({
+  living: [
+    movable(LIVING[0], { asked: { action: "skip", request_id: "r1", at: at(21, 10), state: "requested" } }),
+    movable(LIVING[1], { asked: { action: "skip", request_id: "r1", at: at(21, 10), state: "requested" } }),
+    movable(LIVING[2], { asked: { action: "skip", request_id: "r0", at: at(21, 9), state: "late" } }),
+  ],
+  hall: HALL,
+}, "all-good"));
+
+const TAKEOVER: Override = { kind: "takeover", id: "run-holiday", frame_ids: ["living-left", "window"], name: "Holiday 2024",
+  started_at: at(20, 30), until: at(22, 0) };
+const PAUSE: Override = { kind: "pause", id: "pause-1", frame_ids: ["door"], by: "Matt", started_at: at(21, 4), until: at(22, 4) };
+const HOLIDAY = { kind: "show-now" as const, name: "Holiday 2024", scene_id: "holiday", until: at(22, 0) };
+
+/** Show now on two Frames until 22:00, and a pause on the third: each banner with its way back. */
+export const TAKEOVER_AND_PAUSE = withWallCan(home({
+  living: [
+    { ...movable(LIVING[0], { override: TAKEOVER }), playing: HOLIDAY },
+    { ...movable(LIVING[1], { override: TAKEOVER }), playing: HOLIDAY },
+    movable(LIVING[2], { override: PAUSE, can: ["never-show", "reboot-pi", "restart-app"],
+      asked: { action: "pause", request_id: "pause-1", at: at(21, 4), state: "done" } }),
+  ],
+  hall: HALL,
+}, "all-good", [], [TAKEOVER, PAUSE]));
