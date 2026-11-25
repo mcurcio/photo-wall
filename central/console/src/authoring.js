@@ -581,6 +581,12 @@ export function activationProblems({ sceneId, priority }) {
   }
   if (!isWhole(priority)) {
     problems.push({ field: "priority", message: "Priority must be a whole number." });
+  } else if (Number(priority) < 0 || Number(priority) >= CONSTANTS.PAUSE_RANK) {
+    // Central's bound (central/app.py `ActivationRequest`): a pause's hold stays above every Show now.
+    problems.push({
+      field: "priority",
+      message: `Priority must be from 0 to ${String(CONSTANTS.PAUSE_RANK - 1).replace(/\B(?=(\d{3})+$)/g, ",")}.`,
+    });
   }
   return problems;
 }

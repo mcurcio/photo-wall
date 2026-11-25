@@ -124,6 +124,12 @@ SHARED_WITH_SHOW = {
     "answer.ts",
     # (Power and the week's houseApi.js and weekApi.js are the shell's own: its house clock,
     # houseClock.js, reads Settings › House for every time the console shows.)
+    # The everyday actions (decision 0036, slice 3): Home's tiles and walls and the Frame page's
+    # menu ask Skip, Previous, Pause and Never show through one hook, its requests and its words;
+    # the Never show list reads and writes the list. Central's own routes, no display control.
+    "everyday-actions.tsx",
+    "everyday-api.ts",
+    "everyday-words.ts",
 }
 # The console's write modules: the operator write primitive and every module that wraps a
 # write (framesApi writes, the delete confirmation, refresh-after-write, equipment writes).
@@ -645,7 +651,7 @@ def test_each_route_table_takes_its_sections_and_samples_from_its_own_group(tabl
 def test_every_section_is_in_exactly_one_route_table():
     sections = [section for group in SAMPLES.values() for section in group]
     assert sorted(sections) == sorted(
-        ["now", "scenes", "schedule", "sources", "wall", "hardware", "players", "releases",
+        ["now", "scenes", "never-show", "schedule", "sources", "wall", "hardware", "players", "releases",
          "photo-library", "photo-fit", "house", "lights", "home-assistant", "paper-profiles",
          "people-and-access", "home"])
 
@@ -686,7 +692,7 @@ console.log(JSON.stringify(out));
 
 ROUTES = [
     {"section": section} for section in
-    ("now", "scenes", "schedule", "sources", "wall", "hardware", "releases", "photo-library",
+    ("now", "scenes", "never-show", "schedule", "sources", "wall", "hardware", "releases", "photo-library",
      "photo-fit", "lights", "home-assistant", "paper-profiles", "people-and-access", "home")
 ] + [
     {"section": "hardware", "id": "device-" + "a" * 64},

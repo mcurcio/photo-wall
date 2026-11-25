@@ -15,6 +15,7 @@ from contracts.models import (
     UnfilledSpan,
     Variant,
     fade_share,
+    stack_order,
 )
 from contracts.photo_crop import CENTRED
 from contracts.time import ManualClock
@@ -319,3 +320,61 @@ def test_a_readiness_refuses_a_repeated_carried_photo():
     assert "carried" not in Readiness(**common).model_dump(mode="json")
     with pytest.raises(ValidationError, match="duplicate carried photo"):
         Readiness(**common, carried=(carried, carried))
+
+
+def _regular(key, *, start, action=False, priority=0):
+    return Layer(assignment_id=key, run_id="run", output_id="hdmi-1", frame_id="f",
+                 binding_generation=1, start=start, end=start + 60, media_origin=start,
+                 priority=priority, presentation="black", action=action)
+
+
+def test_an_action_layer_stacks_above_its_runs_layers():
+    """Decision 0036 (slice 3): a Skip's cover starts before the next regular layer of its Run,
+    yet is drawn above it; of two covers the later is on top; a Run of greater precedence stays
+    above both. Mutation probe: leave `action` out of `stack_order`."""
+    cover = _regular("cover", start=100, action=True)
+    later = _regular("later", start=130)
+    second = _regular("second", start=110, action=True)
+    above = _regular("above", start=0, priority=1)
+    ordered = sorted([above, later, second, cover], key=stack_order)
+    assert [layer.assignment_id for layer in ordered] == ["later", "cover", "second", "above"]
+
+
+def test_an_action_layer_crosses_the_wire_and_a_regular_one_reads_as_before():
+    cover = _regular("cover", start=100, action=True)
+    assert cover.model_dump(mode="json")["action"] is True
+    assert "action" not in _regular("plain", start=100).model_dump(mode="json")
+    assert Layer.model_validate(cover.model_dump(mode="json")) == cover
+
+
+def _media(key="cut", *, start=100.0, end=200.0, **kwargs):
+    return Layer(assignment_id=key, run_id="run", output_id="hdmi-1", frame_id="f",
+                 binding_generation=1, start=start, end=end, media_origin=start,
+                 presentation="black", **kwargs)
+
+
+def test_a_cut_layer_ends_at_its_cut():
+    """Decision 0036 (slice 3): a layer with Central's cut is drawn until the cut, its fade-out
+    ending there, and its drawn copy ends at the cut with no cut left. Mutation probes: read
+    `end` for `drawn_end` in `alpha`; drop the cut in `drawn`."""
+    cut = _media(cut_at=150.0, fade_out=2.0, fade_in=1.0)
+    assert cut.drawn_end == 150.0
+    assert cut.alpha(149.0) == pytest.approx(0.5)
+    assert cut.alpha(150.0) == 0.0
+    assert cut.fades()[1] == (148.0, 150.0)
+    drawn = cut.drawn()
+    assert (drawn.end, drawn.cut_at, drawn.fade_out) == (150.0, None, 2.0)
+    assert _media().drawn() == _media()
+    assert "cut_at" not in _media().model_dump(mode="json")
+    assert Layer.model_validate(cut.model_dump(mode="json")) == cut
+
+
+def test_a_cut_falls_inside_its_layer_and_its_fade_fits_before_it():
+    with pytest.raises(ValidationError, match="cut falls inside"):
+        _media(cut_at=100.0)
+    with pytest.raises(ValidationError, match="cut falls inside"):
+        _media(cut_at=200.0)
+    with pytest.raises(ValidationError, match="fades exceed"):
+        _media(cut_at=101.0, fade_out=2.0)
+    # A cut inside the fade-in: the drawn copy's fade-in is what the fade-out leaves.
+    assert _media(fade_in=10.0, cut_at=105.0, fade_out=2.0).drawn().fade_in == 3.0

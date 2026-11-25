@@ -14,7 +14,16 @@ from typing import Literal, Protocol
 
 from central.central_errors.views import FrameImpediment
 from central.displays.model import Readiness
-from central.frame_status.model import Because, Override, ProblemCode, Row, SetupStep, StatusWord
+from central.everyday.ports import Showing
+from central.frame_status.model import (
+    Because,
+    Override,
+    OverrideKind,
+    ProblemCode,
+    Row,
+    SetupStep,
+    StatusWord,
+)
 from central.kernel.transactions import Transaction
 from central.power.model import PowerBecause
 from contracts.node_output import Power, PowerResult
@@ -163,8 +172,12 @@ class FrameFacts:
     sources: tuple[SourceTrouble, ...] = ()
     pi_health: PiHealth | None = None
     override: Override | None = None
+    paused: bool = False                         # a pause holds it (one of its overrides, decision 0036)
     scene_id: str | None = None                  # the Scene playing on it now (a fix's link)
     wanted: bool = False                         # a picture is to play on it now (the Runtime's Intent)
+    # Slice 3 (decision 0036): what it shows and has shown, for the everyday actions; None where
+    # the reading does not ask (the scheduler's status step), so nothing is offered then.
+    showing: Showing | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +306,13 @@ class OverrideFacts(Protocol):
         ...
 
 
+class ShowingFacts(Protocol):
+    def showing(self) -> Mapping[str, Showing] | None:
+        """What each bound Frame shows and has shown (central/everyday/ports.py `Showing`), for its
+        everyday actions; None when this reading does not ask (nothing is then offered)."""
+        ...
+
+
 class SchedulerSteps(Protocol):
     def failing_steps(self) -> tuple[FailingStep, ...]:
         """The scheduler's steps failing now."""
@@ -300,7 +320,8 @@ class SchedulerSteps(Protocol):
 
 
 class StatusReading(SetupFacts, PowerFacts, HearingFacts, ScreenFacts, PictureFacts, ImpedimentFacts, OnTheWayFacts,
-                    PlanningFacts, SourceFacts, PiHealthFacts, OverrideFacts, SchedulerSteps, Protocol):
+                    PlanningFacts, SourceFacts, PiHealthFacts, OverrideFacts, ShowingFacts, SchedulerSteps,
+                    Protocol):
     """Every input, read in one transaction at one instant."""
 
     @property
@@ -316,7 +337,7 @@ def facts_of(reading: StatusReading) -> tuple[dict[str, FrameFacts], HouseFacts]
     pictures, reports_at, impediments = reading.pictures(), reading.reports_at(), reading.impediments()
     on_the_way, preparation, planning = reading.on_the_way(), reading.preparation(), reading.planning()
     unfilled, scenes, sources, pi_health = reading.unfilled(), reading.playing_scenes(), reading.sources(), reading.pi_health()
-    overrides, wanted = reading.overrides(), reading.wanted()
+    overrides, wanted, showing = reading.overrides(), reading.wanted(), reading.showing()
     libraries, library_count = reading.libraries()
     frames = {}
     for frame_id, readiness in reading.readiness().items():
@@ -330,7 +351,9 @@ def facts_of(reading: StatusReading) -> tuple[dict[str, FrameFacts], HouseFacts]
             unfilled=unfilled.get(frame_id, ()), sources=sources.get(frame_id, ()),
             pi_health=None if device_id is None else pi_health.get(device_id),
             override=next((each for each in overrides if frame_id in each.frame_ids), None),
-            scene_id=scenes.get(frame_id), wanted=frame_id in wanted)
+            paused=any(each.kind is OverrideKind.PAUSE and frame_id in each.frame_ids for each in overrides),
+            scene_id=scenes.get(frame_id), wanted=frame_id in wanted,
+            showing=None if showing is None else showing.get(frame_id, Showing()))
     house = HouseFacts(hub=reading.hub(), libraries=libraries, library_count=library_count,
                        failing_steps=reading.failing_steps(), planning=planning.get(None, ()))
     return frames, house

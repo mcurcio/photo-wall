@@ -557,6 +557,54 @@ def test_a_role_without_the_permission_a_route_asks_for_is_403(registry, fake, m
         assert client.get(READ, headers=cookie).status_code == 403
 
 
+def test_show_now_asks_configure_for_force_a_restart_and_a_priority_above_its_frames(registry, fake, monkeypatch):
+    """Decision 0036 (the independent review): a person who may operate and not configure may
+    start Show now on chosen Frames with an end, at the priority that covers its Frames (the
+    console's default), and may end a scheduled Program with Back to normal (S13); forcing it past
+    a protection, a restart and a higher priority are refused 403 "needs-configure", nothing
+    started. With `configure` all three are taken. Mutation probe: pass `may_configure=True`
+    whatever the person holds (each refused option is admitted)."""
+    from test_runtime import program
+
+    from central.coordination import Coordinator
+    from central.runtime import Contribution, Scene
+    runtime = Coordinator(registry.db, registry.clock).runtime
+    runtime.command("set_scene", Scene(scene_id="evening", cycle_seconds=60, loop=True, contributions=(
+        Contribution(target="frame:hall", source_refs=("library:1",)),)), by="console")
+    runtime.command("set_scene", Scene(scene_id="holidays", cycle_seconds=60, loop=True, contributions=tuple(
+        Contribution(target=f"frame:{frame}", source_refs=("library:1",)) for frame in ("hall", "desk"))),
+        by="console")
+    runtime.command_current("create_program", program("evening", "evening", 0, 23 * 60 + 59,
+                                                       priority="special-event"), by="console")
+    app = app_of(registry, fake)
+    with TestClient(app) as client:
+        cookie = {**signed_in(client, fake), **MARK, "Origin": ORIGIN}
+        monkeypatch.setitem(policy.PERMISSIONS, "owner", frozenset({"read", "operate"}))
+
+        def show(activation_id, **body):
+            return client.post("/v1/operator/activations", headers=cookie, json={
+                "scene_id": "holidays", "activation_id": activation_id, "frame_ids": ["hall"],
+                "ends": {"kind": "in", "seconds": 600}, **body})
+
+        for activation_id, body in (("forced", {"force": True}), ("restarted", {"repeat": "restart"}),
+                                    ("above", {"priority": 3})):
+            refused = show(activation_id, **body)
+            assert (refused.status_code, refused.json()) == (403, {"error": "needs-configure"}), activation_id
+        runs = runtime.read().project(registry.clock.utc()).runs
+        assert {run.scene_id for run in runs} == {"evening"}
+        # The console's default, the priority of the Program covering its Frame: taken.
+        started = show("covering", priority=2)
+        assert (started.status_code, started.json()["status"]) == (200, "admitted")
+        # Back to normal on the scheduled Program (S13) is the operator's to ask.
+        program_run = next(run.run_id for run in runs if run.scene_id == "evening")
+        ended = client.post(f"/v1/operator/runs/{program_run}/end", headers=cookie, json={"request_id": "b"})
+        assert ended.status_code == 200
+        monkeypatch.setitem(policy.PERMISSIONS, "owner", frozenset({"read", "operate", "configure"}))
+        for activation_id, body in (("forced-2", {"force": True}), ("above-2", {"priority": 3})):
+            assert show(activation_id, **body).json()["status"] in ("admitted", "ignored"), activation_id
+        assert show("restarted-2", repeat="restart").json()["status"] == "admitted"
+
+
 # ---- no token leaves Central ----
 
 def test_no_token_is_readable_through_any_route_answer_or_log(registry, client, fake, caplog):

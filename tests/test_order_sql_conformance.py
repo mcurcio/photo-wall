@@ -125,3 +125,37 @@ def test_on_this_day_counts_capture_days_on_the_house_calendar_in_both(line, hou
              for name in group | {"before-midnight", "after-midnight"}}
     name_at = {p.taken_at: names.get(p.upstream_id) for p in photos}
     assert {name_at[m.candidate.captured_at] for m in memory[:len(group)]} == group
+
+
+def test_a_listed_photo_is_no_member_of_either_line_and_may_still_be_the_mark(line):
+    """Decision 0036: a photo on the Never show list is no line member in SQL or in Python, at the
+    whole line and at a short limit, while the wrap mark may still name it. Mutation probe: leave
+    `not_listed` out of the store's line."""
+    registry, keys, _, photos = line
+    listed = frozenset({photos[0].asset_id, photos[21].asset_id, photos[-1].asset_id})
+    with registry.db.transaction() as conn:
+        for asset_id in sorted(listed):
+            row = conn.execute("SELECT connection_ref, upstream_id FROM library_assets WHERE asset_id=%s",
+                               (asset_id,)).fetchone()
+            conn.execute("INSERT INTO never_show(connection_ref,upstream_id,request_id,listed_at,created_at,"
+                         "created_by,changed_at,changed_by) VALUES(%s,%s,%s,1,1,'console',1,'console')",
+                         (row["connection_ref"], row["upstream_id"], f"listed-{asset_id}"))
+    with registry.db.transaction() as conn:
+        members = PgPhotoLibrary.pool_members_in(conn, {"family:1", "garden:1"})
+    pools = {}
+    for ref, key in (("family:1", keys[0]), ("garden:1", keys[1])):
+        pools[key] = SourcePool(source_ref=key, ready=True, candidates=tuple(
+            Candidate(asset_id=m.asset_id, kind=m.kind, original_width=m.width,
+                      original_height=m.height, captured_at=m.taken_at)
+            for m in members[ref][0]))
+    python = PoolLines(pools, never=listed)
+    with registry.db.transaction() as conn:
+        for limit in (1000, 5):
+            for after in (None, photos[0].asset_id):
+                query = LineQuery(pool_keys=tuple(sorted(keys)), scene_id="scene", pass_number=1,
+                                  order="newest_first", after=after, now=NOW, shape=ANY_SHAPE, limit=limit)
+                sql = PgPhotoLibrary.ranked_line_in(conn, query)
+                memory = python.line(query)
+                assert [m.asset_id for m in sql.members] == [m.candidate.asset_id for m in memory.members]
+                assert not {m.asset_id for m in sql.members} & listed
+                assert (sql.after and sql.after.asset_id) == (memory.after and memory.after.asset_id)

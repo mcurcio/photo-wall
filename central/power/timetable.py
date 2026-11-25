@@ -99,6 +99,17 @@ def night_off_in_force(policy: PowerPolicy) -> NightOff | None:
     return policy.night_off if policy.zone_confirmed else None
 
 
+def night_off_after(policy: PowerPolicy, house: HouseTime, now: float) -> float | None:
+    """When tonight's Night off starts (decision 0036: a Show now that ends "at Night off"): the
+    first start of Night off in force after `now` and within a day; None when there is none (no
+    Night off in force, none starting within a day, or it cannot be worked out)."""
+    night_off = night_off_in_force(policy)
+    if night_off is None:
+        return None
+    return min((window.start for window in _night_windows(night_off, house, now, now + 86400.0)
+                if now < window.start < now + 86400.0), default=None)
+
+
 def follows_night_off(frame_id: str, night_off: NightOff) -> bool:
     """Whether `frame_id` follows Night off: every Frame under AllFrames, else the chosen ones."""
     return isinstance(night_off.frames, AllFrames) or frame_id in night_off.frames.frame_ids

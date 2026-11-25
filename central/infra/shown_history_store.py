@@ -21,6 +21,7 @@ from collections.abc import Iterable
 from typing import Any, Final
 
 from central.actor import Actor
+from central.everyday.ports import ShownPhoto
 from central.infra.power_store import wanted_off_in
 from central.wall_plan.order import KeptStill, PhotoShowing, WallHistory
 
@@ -123,6 +124,33 @@ class PgShownHistory:
                 for row in kept if row["after_end"] == "keep_this_photo"
             ),
         )
+
+    @staticmethod
+    def frame_history_in(conn: Any, frame_ids: Iterable[str], *, limit: int = 200,
+                         ) -> dict[str, tuple[ShownPhoto, ...]]:
+        """Decision 0036: each Frame's newest `limit` shown rows, newest first (Previous steps
+        back through them; `shown_photos_frame` serves it)."""
+        found: dict[str, list[ShownPhoto]] = {}
+        for row in conn.execute(
+                "SELECT f.frame_id, s.asset_id, s.assignment_id, s.presented_at FROM unnest(%s::text[]) "
+                "AS f(frame_id) CROSS JOIN LATERAL (SELECT asset_id, assignment_id, presented_at "
+                "FROM shown_photos WHERE frame_id=f.frame_id ORDER BY presented_at DESC LIMIT %s) s",
+                (list(frame_ids), limit)).fetchall():
+            found.setdefault(row["frame_id"], []).append(ShownPhoto(
+                asset_id=row["asset_id"], assignment_id=row["assignment_id"],
+                presented_at=row["presented_at"]))
+        return {frame_id: tuple(rows) for frame_id, rows in found.items()}
+
+    @staticmethod
+    def presented_in(conn: Any, assignment_ids: Iterable[str]) -> dict[str, float]:
+        """Decision 0036: when each of these layers was reported presented (an asked action's
+        acknowledgment); one never reported is absent."""
+        ids = list(assignment_ids)
+        if not ids:
+            return {}
+        return {row["assignment_id"]: row["presented_at"] for row in conn.execute(
+            "SELECT assignment_id, presented_at FROM shown_photos WHERE assignment_id=ANY(%s)",
+            (ids,)).fetchall()}
 
     def prune_in(self, conn: Any, *, now: float) -> None:
         conn.execute("DELETE FROM photo_selections WHERE ends_at < %s",

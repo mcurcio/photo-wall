@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 
+import { WallActions } from "./wall-actions";
 import { NowNextStrip, WallMap, type WallMapFrame } from "./wall-map";
 import { WallTile } from "./wall-tile";
 
@@ -44,6 +45,17 @@ export const TwoWalls: Story = {
         ]} />
     </div>
   ),
+};
+/** A wall whose Frames can move: Skip and Previous for the whole wall beside its name. */
+export const WithActions: Story = {
+  args: {
+    actions: (
+      <WallActions wall="Living room wall" actions={[
+        { key: "next", label: "Skip", name: "Skip every Frame on Living room wall", onAction: () => {} },
+        { key: "previous", label: "Previous", name: "Previous on every Frame on Living room wall", onAction: () => {} },
+      ]} />
+    ),
+  },
 };
 /** A wall with no Frame yet: its name, and nothing under it. */
 export const Empty: Story = { args: { frames: [], below: undefined } };

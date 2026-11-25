@@ -11,6 +11,7 @@ from typing import Annotated, Final, Literal
 
 from pydantic import Field
 
+from central.everyday.model import Asked
 from central.power.model import PowerBecause
 from contracts.identifiers import Identifier
 from contracts.models import Instant, Model
@@ -228,7 +229,7 @@ class Progress(Model):
 
 class OverrideKind(StrEnum):
     POWER_HOLD = "power-hold"
-    PAUSE = "pause"                              # slice 3: carried, never produced yet (finding F3)
+    PAUSE = "pause"                              # slice 3: a Frame holding its photo (finding F3: Showing)
     TAKEOVER = "takeover"
 
 
@@ -248,9 +249,13 @@ class Override(Model):
 
 class Action(StrEnum):
     """What may be asked of a Frame now (`FrameStatus.can`); an action not offered is absent,
-    never disabled. Slice 3 adds its everyday actions here."""
+    never disabled. Slice 3's everyday actions are offered per central/everyday/policy.py `stays`."""
     RESTART_APP = "restart-app"
     REBOOT_PI = "reboot-pi"
+    SKIP = "skip"
+    PREVIOUS = "previous"
+    NEVER_SHOW = "never-show"
+    PAUSE = "pause"
 
 
 class FrameStatus(Model):
@@ -266,6 +271,11 @@ class FrameStatus(Model):
     progress: Progress | None = None
     override: Override | None = None
     can: tuple[Action, ...] = ()
+    # Slice 3: the newest action asked of it that moved it, and whether its Player has shown it.
+    asked: Asked | None = None
+    # Slice 3: the photo it shows now (its Immich asset id), what Never show names; None when it
+    # shows none, or when the reading did not ask what it shows.
+    photo: str | None = None
 
 
 class HouseStatus(Model):

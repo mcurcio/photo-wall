@@ -1,12 +1,13 @@
 """Central's one event log over PostgreSQL (decision 0034, migration 119): the one writer of
 `events`, and the home of how long it is kept. Every Pi event record (a `RECORD_*` stream, or any
 stream that is not a KV bucket), every gap Central's link counted, every action Central's link took
-(nodeapi's action log), every refused room-light report and every change of a Frame's status
-(decision 0036) go here, append-only, and are trimmed
+(nodeapi's action log), every refused room-light report, every change of a Frame's status
+(decision 0036) and every everyday action its own row does not tell (a Pause request's answer, a
+Show again: `everyday_in`, migration 136) go here, append-only, and are trimmed
 past a week (`EVENTS_KEPT_SECONDS`, central/infra/node_record_retention.py's `events` rule).
 
 `EventKind` is the vocabulary's code home; the CHECK on `events.kind` (migration 119, widened by
-132) is its other, and
+132 and 136) is its other, and
 tests/test_events.py keeps the two equal. Times are the database's clock (`DatabaseTransactionClock`
 on the caller's connection, or the stamp a caller read from it), never a Pi's.
 """
@@ -21,7 +22,7 @@ from psycopg.types.json import Jsonb
 from central.db import DatabaseTransactionClock
 from contracts.node_link import Pipe
 
-EventKind = Literal["record", "gap", "link-action", "refusal", "frame-status"]
+EventKind = Literal["record", "gap", "link-action", "refusal", "frame-status", "everyday"]
 EVENTS_KEPT_SECONDS: Final = 7 * 86400     # decision 0033's week, its one home for `events`
 
 _CLOCK: Final = DatabaseTransactionClock()
@@ -151,3 +152,25 @@ def frame_statuses_in(conn: Any, frame_id: str, limit: int) -> tuple[FrameStatus
 __all__ = ["EVENTS_KEPT_SECONDS", "EventKind", "FrameStatusEvent", "GapEvent", "RecordEvent", "RefusalEvent",
            "frame_status_in", "frame_statuses_in", "gap_events_in", "link_action_in", "record_events_in", "refusal_in",
            "refusals_in"]
+
+
+def everyday_in(conn: Any, action: str, body: Mapping[str, object], *, by: str,
+                request_id: str | None = None) -> bool:
+    """One everyday action (kind 'everyday', no device), body {"action", "request_id"?, **body},
+    `recorded_by` the person who asked (decision 0036). With `request_id`, one per (action,
+    request): False, and nothing written, when that request is logged already."""
+    found = conn.execute(
+        "INSERT INTO events (kind, body, recorded_at, recorded_by) VALUES ('everyday', %s, %s, %s)"
+        " ON CONFLICT ((body->>'action'), (body->>'request_id'))"
+        " WHERE kind = 'everyday' AND body ? 'request_id' DO NOTHING RETURNING id",
+        (Jsonb({**body, "action": action, **({} if request_id is None else {"request_id": request_id})}),
+         _CLOCK.now_in(conn), by)).fetchone()
+    return found is not None
+
+
+def everyday_of_in(conn: Any, action: str, request_id: str) -> Mapping[str, Any] | None:
+    """The body `everyday_in` logged for `action`'s request `request_id`, None when none is."""
+    row = conn.execute(
+        "SELECT body FROM events WHERE kind = 'everyday' AND body ? 'request_id'"
+        " AND body->>'action' = %s AND body->>'request_id' = %s", (action, request_id)).fetchone()
+    return None if row is None else row["body"]

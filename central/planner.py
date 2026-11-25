@@ -20,11 +20,12 @@ import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Final, Literal
 
 from pydantic import Field
 
 from central.catalog import Candidate
+from central.everyday.model import SKIP_LEAD, Cover, Pause
 from central.house_time.calculator import house_date
 from central.house_time.model import HouseTime
 from central.installation_models import FrameOutput
@@ -51,6 +52,7 @@ from central.wall_plan.continuation import (
     ListedPhoto,
     continuation_lists,
 )
+from central.wall_plan.covers import cover_start, joined_layer, layer_fields, still_due
 from central.wall_plan.fit import FitTarget, fit_target
 from central.wall_plan.fit_settings import FitSettings
 from central.wall_plan.order import (
@@ -232,9 +234,14 @@ def eligible(candidate: Candidate, target: FitTarget, crop_limit: float,
 # follower revises (`runtime._may_hold_to_the_end`); and the after-state, which is not content
 # (a Run's after-states are fixed by its Scene; migration 071 left in-flight endings'
 # offered layers at "leave_as_is" while their Scene says "keep_nothing"); and whether it awaits a
-# grant (decision 0032: a lock offered before that release has none, and reads False).
+# grant (decision 0032: a lock offered before that release has none, and reads False); and Central's
+# cut (decision 0036: Back to normal, a takeover's end, Carry on), which never touches the layer's
+# content or identity, with the fade-out it ends.
 REVISABLE = frozenset({"priority", "root_order", "admission_order", "fade_out", "after_end",
-                       "awaits_grant"})
+                       "awaits_grant", "cut_at"})
+# Diagnostics that are no planning issue (central/planning_outcome.py `issues_of`): a lock of a Run
+# Central cut (decision 0036), withdrawn because its turn starts at or after the cut.
+NOT_ISSUES: Final = frozenset({"lock_cut"})
 
 
 def same_execution(first: Layer, second: Layer) -> bool:
@@ -256,10 +263,15 @@ def _finite(value: float, name: str) -> float:
     return float(value)
 
 
+def _drawn_end(intent: Intent) -> float:
+    """Where an Intent's layer is drawn to: its turn's end, or its Run's cut (decision 0036)."""
+    return intent.interval_end if intent.cut_at is None else min(intent.interval_end, intent.cut_at)
+
+
 def _in_window(intent: Intent, window: PlanWindow) -> bool:
     """An Intent the plan horizon holds: on a Frame, showing before the plan's end, not over."""
     return (intent.kind != "actuator" and intent.shows_from < window.plan_end
-            and intent.interval_end > window.now)
+            and _drawn_end(intent) > window.now)
 
 
 def _cut_instant(starts: Sequence[float], budget: int) -> float | None:
@@ -324,8 +336,13 @@ class _ProjectionBuilder:
         settings: FitSettings,
         frame_outputs: Mapping[str, FrameOutput],
         house: HouseTime,
+        never: frozenset[str] = frozenset(),
     ) -> None:
         self.house = house          # On this day's date (roadmap 2b)
+        # Decision 0036: the Never show list's photos, and the `joins` covers' selections (their
+        # pass is known once the lines are read).
+        self.never = never
+        self.joined: list[tuple[Layer, str, Layer | None]] = []
         self.limits, self.sources, self.lines, self.authored, self.locks = (
             limits, sources, lines, authored, locks)
         self.failure_checks: list[tuple[Intent, str, str]] = []
@@ -338,6 +355,8 @@ class _ProjectionBuilder:
         self.selections: list[AssignmentSelection] = []
         self.seen: set[str] = set()
         self.used_locks: dict[str, Layer] = {}
+        # Decision 0036: the Runs Central cut (Back to normal, a takeover's end), by id.
+        self.cut_runs: set[str] = set()
         self.fixed: list[FixedShowing] = []
         self.pending: list[_Pending] = []
         self.pool_refs: dict[str, tuple[str, ...]] = {}
@@ -434,6 +453,8 @@ class _ProjectionBuilder:
             fade_in=intent.fade_in_seconds, fade_out=intent.fade_out_seconds,
             # Decision 0032: a grant only for a change, the Run's first turn on the wall.
             awaits_grant=intent.cycle_index == 0,
+            # Decision 0036: its Run's cut, when that falls inside the turn.
+            cut_at=intent.cut_at,
         )
 
     def add(self, intent: Intent, window: PlanWindow) -> None:
@@ -463,7 +484,7 @@ class _ProjectionBuilder:
         owner = self.frames.get(intent.target)
         if owner is not None and intent.shows_from < window.preparation_end:
             self.wanted[identity] = (owner[0], UnfilledSpan(
-                output_id=owner[1].output_id, start=intent.shows_from, end=intent.interval_end))
+                output_id=owner[1].output_id, start=intent.shows_from, end=_drawn_end(intent)))
 
     def _unfilled(self, player: str, layers: Sequence[Layer]) -> tuple[UnfilledSpan, ...]:
         """`player`'s wanted showings that have no layer and are not past the cut, one span each."""
@@ -506,7 +527,7 @@ class _ProjectionBuilder:
             after_end = _after_end(intent, still=False)
             showing = FixedShowing(
                 slot_id=identity, frame_id=binding.frame_id, asset_id=None,
-                start=intent.shows_from, end=intent.interval_end,
+                start=intent.shows_from, end=_drawn_end(intent),
                 fade_in=intent.fade_in_seconds, after_end=after_end)
             layer = Layer(**fields, presentation="black", after_end=after_end) if inside else None
             self.fixed.append(showing)
@@ -517,7 +538,7 @@ class _ProjectionBuilder:
         pool = "" if authored else json.dumps(list(intent.source_refs), separators=(",", ":"))
         pending = _Pending(intent=intent, player_id=player, fields=fields, slot=Slot(
             slot_id=identity, frame_id=binding.frame_id, scene_id=intent.scene_id,
-            start=intent.shows_from, end=intent.interval_end,
+            start=intent.shows_from, end=_drawn_end(intent),
             fade_in=intent.fade_in_seconds, after_end=intent.after_end,
             target=self._target(binding.frame_id),
             crop_limit=crop_limit_of(intent.selection, self.settings),
@@ -525,6 +546,119 @@ class _ProjectionBuilder:
         if not authored:
             self.pool_refs[pool] = intent.source_refs
         self.pending.append(pending)
+
+    def add_covers(self, covers: Sequence[Cover], intents: Sequence[Intent],
+                   window: PlanWindow) -> None:
+        """Decision 0036: each live cover of an everyday action, above its Frame's layers. An
+        offered one is a lock, re-emitted unchanged; a `joins` one not offered yet is emitted as
+        built; a `pick` or `pinned` one is a wall-plan slot walked first (`Slot.action`). A cover
+        whose Frame is bound elsewhere now, whose Run has no Intent on its Frame any more, or
+        whose span is over is dropped. A wall's covers are one cue (`Cover.cue`): they await a
+        grant and start whole before their instant wherever every Pi is ready. A cover of a Run
+        Central cut (decision 0036) is cut with it, and one starting at or after the cut is not
+        offered."""
+        cuts: dict[str, tuple[float, float]] = {}
+        for intent in intents:
+            if intent.cut_at is not None and intent.run_id not in cuts:
+                cuts[intent.run_id] = (intent.cut_at, intent.fade_out_seconds)
+        for cover in covers:
+            owner = self.frames.get(f"frame:{cover.frame_id}")
+            if owner is None:
+                continue
+            player, binding = owner
+            if (binding.output_id, binding.generation) != (cover.output_id, cover.binding_generation):
+                continue
+            cut = cuts.get(cover.run_id)
+            locked = self.locks.get(cover.cover_id)
+            if locked is not None:
+                locked = _cut_layer(locked, cut)
+                if locked is not None and locked.drawn_end > window.now:
+                    self.used_locks[cover.cover_id] = locked
+                    self.layers[player].append(locked)
+                    self.selections.append(AssignmentSelection(assignment_id=cover.cover_id,
+                                                               locked=True))
+                    self._cue(cover, locked.start)
+                continue
+            start = cover_start(cover, window.now)
+            intent = _run_intent(intents, cover, start)
+            if intent is None or not still_due(cover, start):
+                continue
+            if cut is not None and start >= cut[0]:
+                continue
+            if cover.how == "joins":
+                layer = _cut_layer(joined_layer(cover, start), cut)
+                self.layers[player].append(layer)
+                self.fixed.append(FixedShowing(
+                    slot_id=layer.assignment_id, frame_id=cover.frame_id,
+                    asset_id=layer.variant.asset_id if layer.variant else None, start=layer.start,
+                    end=layer.drawn_end, fade_in=layer.fade_in, after_end=layer.after_end))
+                self.joined.append((layer, intent.scene_id, None))
+                self._cue(cover, start)
+                continue
+            authored = (cover.pinned,) if cover.how == "pinned" and cover.pinned else ()
+            pool = "" if authored else json.dumps(list(intent.source_refs), separators=(",", ":"))
+            if pool:
+                self.pool_refs[pool] = intent.source_refs
+            fields = layer_fields(cover, cover.frame_id, start)
+            if cut is not None and cut[0] < cover.end:
+                fields.update(cut_at=cut[0], fade_out=min(cut[1], cut[0] - start))
+            self.pending.append(_Pending(
+                intent=intent, player_id=player, fields=fields,
+                slot=Slot(slot_id=cover.cover_id, frame_id=cover.frame_id, scene_id=intent.scene_id,
+                          start=start, end=min(cover.end, fields.get("cut_at") or cover.end),
+                          fade_in=cover.fade_in,
+                          after_end=cover.after_end, target=self._target(cover.frame_id),
+                          crop_limit=crop_limit_of(intent.selection, self.settings), pool=pool,
+                          authored=authored, action=True, excluded=cover.left, repeat=False)))
+            self._cue(cover, start)
+
+    def add_holds(self, holds: Sequence[Pause], window: PlanWindow) -> None:
+        """Decision 0036: each live pause's hold, above every Run (a Show now admitted during a
+        pause plays beneath it, the owner's S6), emitted as the command built it: an offered one
+        is a lock re-emitted with Carry on's cut (a revisable field); one not offered yet starts no
+        sooner than `SKIP_LEAD` after this pass. Its extent counts against every placement, so no
+        new placement gives its photo to another Frame meanwhile; one already offered elsewhere
+        may overlap it (the owner's S4). A hold whose Frame is bound elsewhere now, or whose span
+        is over, is dropped."""
+        for pause in holds:
+            owner = self.frames.get(f"frame:{pause.frame_id}")
+            if owner is None:
+                continue
+            player, binding = owner
+            held = pause.held
+            if (binding.output_id, binding.generation) != (held.output_id, held.binding_generation):
+                continue
+            locked = self.locks.get(held.assignment_id)
+            if locked is not None:
+                layer = locked
+                if held.cut_at is not None and held.cut_at < locked.drawn_end and held.cut_at > locked.start:
+                    layer = Layer.model_validate({**locked.model_dump(), "cut_at": held.cut_at,
+                                                  "fade_out": min(held.fade_out, held.cut_at - locked.start)})
+            else:
+                start = max(held.start, window.now + SKIP_LEAD)
+                if start >= held.drawn_end:
+                    continue
+                layer = held if start == held.start else Layer.model_validate({
+                    **held.model_dump(), "start": start,
+                    "fade_out": min(held.fade_out, held.drawn_end - start)})
+            if layer.drawn_end <= window.now:
+                continue
+            self.layers[player].append(layer)
+            self.fixed.append(FixedShowing(
+                slot_id=layer.assignment_id, frame_id=pause.frame_id,
+                asset_id=layer.variant.asset_id if layer.variant else None, start=layer.start,
+                end=layer.drawn_end, fade_in=layer.fade_in, after_end=layer.after_end))
+            if locked is not None:
+                self.used_locks[layer.assignment_id] = layer
+                self.selections.append(AssignmentSelection(assignment_id=layer.assignment_id, locked=True))
+            else:
+                self.joined.append((layer, pause.scene_id, None))
+
+    def _cue(self, cover: Cover, start: float) -> None:
+        if cover.cue is not None:
+            self.cues[cover.cover_id] = CueMember(
+                assignment_id=cover.cover_id, root_id=cover.cue, target=f"frame:{cover.frame_id}",
+                shows_from=start, interval_end=cover.end)
 
     def _target(self, frame_id: str) -> FitTarget | None:
         """The slot target of a Frame: `fit_target` of its Frame output; None when it has none
@@ -549,7 +683,7 @@ class _ProjectionBuilder:
         may take (the members read, then the authored ones), each slot pool's members read, and
         one line per Scene. Pickable: the members read that could fill one of its slots (the
         hand-placed ones excepted, which no line takes)."""
-        reserved = {ref for item in self.pending for ref in item.slot.authored}
+        reserved = {ref for item in self.pending for ref in item.slot.authored if not item.slot.action}
         passes = scene_passes(history)
         shown_at = last_shown_at(history)
         today = house_date(self.house, now)
@@ -705,14 +839,21 @@ class _ProjectionBuilder:
             self.fixed.append(FixedShowing(
                 slot_id=identity, frame_id=layer.frame_id,
                 asset_id=selected.get(identity) if layer.presentation == "media" else None,
-                start=layer.start, end=layer.end, fade_in=layer.fade_in,
+                start=layer.start, end=layer.drawn_end, fade_in=layer.fade_in,
                 after_end=layer.after_end))
         current_pass = {scene_id: line.pass_number for scene_id, line in lines.items()}
+        selected_rows = {showing.assignment_id: showing for showing in history.selected}
+        for layer, scene_id, _ in self.joined:
+            row = selected_rows.get(layer.assignment_id)
+            self.selections.append(AssignmentSelection(
+                assignment_id=layer.assignment_id, asset_id=layer.variant.asset_id if layer.variant else None,
+                scene_id=scene_id, pass_number=row.pass_number if row is not None
+                else current_pass.get(scene_id, 1)))
         wall = plan_wall(tuple(item.slot for item in self.pending), tuple(self.fixed),
                          history.kept, candidates, lines, pools, window=window,
                          max_clock_uncertainty=max_clock_uncertainty, limits=wall_limits,
                          settings=self.settings, reserved=reserved,
-                         frame_uncertainty=frame_uncertainty)
+                         frame_uncertainty=frame_uncertainty, never=self.never)
         self.on_screen = wall.on_screen
         self.photo_of = {identity: asset_id for identity, asset_id in selected.items()
                          if identity in self.used_locks}
@@ -736,7 +877,7 @@ class _ProjectionBuilder:
             if layer.presentation == "media":
                 planned.append(PlannedPhoto(
                     assignment_id=identity, frame_id=layer.frame_id, start=layer.start,
-                    end=layer.end, state="locked", asset_id=selected.get(identity),
+                    end=layer.drawn_end, state="locked", asset_id=selected.get(identity),
                     crop=layer.crop))
         planned.sort(key=lambda photo: (photo.start, photo.frame_id, photo.assignment_id))
         acquisitions = [AcquisitionRequest(asset_id=need.asset_id,
@@ -758,7 +899,7 @@ class _ProjectionBuilder:
         placement = placed.get(slot.slot_id)
         if placement is None:
             reason = unfilled[slot.slot_id]
-            if inside:
+            if inside and not slot.action:   # a cover waiting for its photo is no planning issue
                 self.diagnose(_UNFILLED_CODES[reason], intent=intent, assignment=slot.slot_id)
             return PlannedPhoto(**entry, state="unfilled", reason=reason), None, None
         candidate = candidates[placement.asset_id]
@@ -798,14 +939,15 @@ class _ProjectionBuilder:
                            default=-math.inf)
             found: list[ContinuationSegment] = []
             for run_id in sorted({layer.run_id for layer in layers
-                                  if layer.presentation == "media"}):
+                                  if layer.presentation == "media" and not layer.action}):
                 candidates = tuple(
                     ListedPhoto(assignment_id=layer.assignment_id,
                                 asset_id=self.photo_of[layer.assignment_id],
                                 kept=layer.after_end == "keep_this_photo")
                     for layer in sorted(layers, key=lambda layer: layer.start)
                     if layer.run_id == run_id and layer.presentation == "media"
-                    and layer.assignment_id in self.photo_of)
+                    and not layer.action and layer.assignment_id in self.photo_of
+                    and self.photo_of[layer.assignment_id] not in self.never)
                 segment = _segment(run_id, on_frame, boundary, known_until)
                 if segment is None or not candidates:
                     continue
@@ -848,9 +990,11 @@ class _ProjectionBuilder:
         for identity, lock in self.locks.items():
             if identity not in self.used_locks:
                 # Absence from this horizon alone is not permission to erase a
-                # secured lock. Coordination owns cancellation/expiry and pins.
+                # secured lock. Coordination owns cancellation/expiry and pins. A lock of a Run
+                # Central cut (decision 0036) is withdrawn on purpose: no planning issue.
                 self.diagnose(
-                    "lock_expired" if lock.end <= now else "lock_outside_projection",
+                    "lock_expired" if lock.drawn_end <= now
+                    else "lock_cut" if lock.run_id in self.cut_runs else "lock_outside_projection",
                     assignment=identity,
                 )
         continuations = self._continuations(intents, known_until, max_clock_uncertainty,
@@ -896,6 +1040,9 @@ def project(
     frame_outputs: Mapping[str, FrameOutput],
     reserved: Sequence[Reservation] = (),
     frame_uncertainty: Mapping[str, float] | None = None,
+    covers: Sequence[Cover] = (),
+    never: frozenset[str] = frozenset(),
+    holds: Sequence[Pause] = (),
 ) -> Projection:
     """Build complete-cycle proposals without changing any supplied state.
 
@@ -920,7 +1067,13 @@ def project(
     (`_read_line`) and each placed slot's layer (`_settle_slot`) is its own unit, and one that
     raises is left out alone, with the diagnostic `intent_refused` naming its Scene and Run. A
     budget shortens the plan at one instant (`cut_at`; `plan_shortened`, its `reason` the
-    budget: "runtime_events", "assignments" or "slots"), never cutting a lock. Only inconsistent
+    budget: "runtime_events", "assignments" or "slots"), never cutting a lock.
+
+    Decision 0036 (slice 3): `covers` are the everyday actions' live covers, added above their
+    Frames' layers (`_ProjectionBuilder.add_covers`); none is ever an unfilled span or a
+    continuation's candidate. `never` is the Never show list's photos: no slot takes one, and no
+    continuation lists one. `holds` are the live pauses' holds, above every Run
+    (`_ProjectionBuilder.add_holds`); none is a continuation's candidate. Only inconsistent
     caller input (`_validate_inputs`, a non-finite time) raises, and a Runtime that cannot settle
     even `now` within its budget (`RuntimeBudgetExceeded`: an empty plan would withdraw every
     offered layer)."""
@@ -941,7 +1094,7 @@ def project(
         bindings_by_player=bindings_by_player,
         sources=lines.sources(runtime.planning_source_refs()), lines=lines,
         authored=authored_candidates, locks=locked_assignments, limits=limits,
-        settings=settings, frame_outputs=frame_outputs, house=runtime.house,
+        settings=settings, frame_outputs=frame_outputs, house=runtime.house, never=never,
     )
     # A turn starting up to the longest cross-fade lead past the plan's end may start to show
     # inside it. Past the transition budget the timeline stops at its last whole boundary: the
@@ -955,6 +1108,8 @@ def project(
     if timeline.until < end:
         builder.cut_at(timeline.until, "runtime_events")
     intents = [intent for view in timeline.views for intent in view.contributions]
+    builder.cut_runs = {run.run_id for view in timeline.views for run in view.runs
+                        if run.until is not None}
     # Layers inside the preparation horizon past `max_assignments`: cut at one instant.
     inside = {assignment_id(intent): intent.shows_from for intent in intents
               if _in_window(intent, window) and intent.shows_from < window.preparation_end}
@@ -971,10 +1126,40 @@ def project(
     # Each showing once (an Intent recurs in every view it spans), for the continuations.
     showings = list({assignment_id(intent): intent for intent in reversed(intents)
                      if intent.kind != "actuator"}.values())
+    builder.add_covers(covers, showings, window)
+    builder.add_holds(holds, window)
     known_until = timeline.until if builder.cut is None else min(timeline.until, builder.cut)
     return builder.result(window, history, max_clock_uncertainty, intents=showings,
                           known_until=known_until, reserved=reserved,
                           frame_uncertainty=frame_uncertainty)
+
+
+def _cut_layer(layer: Layer, cut: tuple[float, float] | None) -> Layer | None:
+    """`layer` (an action layer) under its Run's cut (decision 0036: the instant and the fade-out
+    that ends there): cut when the cut falls inside it (never later than a cut it carries), None
+    when it starts at or after it, itself otherwise."""
+    if cut is None or cut[0] >= layer.drawn_end:
+        return layer
+    at, fade = cut
+    if at <= layer.start:
+        return None
+    return Layer.model_validate({**layer.model_dump(), "cut_at": at,
+                                 "fade_out": min(fade, at - layer.start)})
+
+
+def _run_intent(intents: Sequence[Intent], cover: Cover, start: float) -> Intent | None:
+    """The covered Run's Intent on the cover's Frame at `start` (its pool, Scene and selection
+    are the cover's), else the Run's latest one there before it; None when the Run has none
+    there."""
+    target = f"frame:{cover.frame_id}"
+    mine = sorted((intent for intent in intents if intent.run_id == cover.run_id
+                   and intent.target == target and intent.kind == "media"),
+                  key=lambda intent: intent.interval_start)
+    at = [intent for intent in mine if intent.shows_from <= start < intent.interval_end]
+    if at:
+        return at[-1]
+    before = [intent for intent in mine if intent.shows_from <= start]
+    return before[-1] if before else (mine[0] if mine else None)
 
 
 def _segment(run_id: str, on_frame: Sequence[Intent], boundary: float, known_until: float,

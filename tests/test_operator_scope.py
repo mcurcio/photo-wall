@@ -117,17 +117,22 @@ def test_the_environment_configures_the_provider_and_a_partial_setting_stops_cen
     paths = {route.path for route in app.routes if isinstance(route, APIRoute)}
     assert "/v1/operator/session/callback" in paths
     assert "operator-session-retention" in app.state.scheduler.retentions
-    # Token mode keeps its one retention step: nothing of the provider's is wired.
+    # Token mode keeps its own retention steps (node records; slice 3's skips): nothing of the
+    # provider's is wired.
     for name in ("ISSUER", "CLIENT_ID", "CLIENT_SECRET"):
         monkeypatch.delenv("PHOTO_WALL_OIDC_" + name)
     token_mode = create_app(db, ManualClock(0), ADMIN, run_scheduler=False)
-    assert list(token_mode.state.scheduler.retentions) == ["node-retention"]
+    assert list(token_mode.state.scheduler.retentions) == ["node-retention", "skip-retention"]
 
 
 def test_every_operator_route_of_the_real_app_requires_the_operator_login():
     """Per method and path, so one route losing its `admin` dependency (a GET beside a guarded
     POST) fails here, whichever slice added it. The everyday actions ask for `operate` instead
-    (decision 0036): exactly Restart app so far."""
+    (decision 0036): Restart app, and slice 3's Skip and Previous (a Wall's and a Frame's),
+    Never show and Show again, Pause and Carry on (every Frame of a pause or one), Show now and
+    Back to normal. Show now's `force`, restart and a priority above its Frames' ask `configure`
+    as well, inside the route (tests/test_sign_in.py
+    `test_show_now_asks_configure_for_force_a_restart_and_a_priority_above_its_frames`)."""
     app = create_app(Database("postgresql://unused@127.0.0.1:1/unused", application_name="photo-wall-test"), ManualClock(0), ADMIN,
                      run_scheduler=False)
     admin, operate = app.state.operator_auth.admin, app.state.operator_auth.operate
@@ -136,7 +141,16 @@ def test_every_operator_route_of_the_real_app_requires_the_operator_login():
                      and not _guarded(route.dependant, admin) for method in route.methods}
     everyday = {(method, route.path) for route in app.routes
                 if isinstance(route, APIRoute) and _guarded(route.dependant, operate) for method in route.methods}
-    assert everyday == {("POST", "/v1/operator/node/devices/{device_id}/app-restarts")}
+    assert everyday == {("POST", "/v1/operator/node/devices/{device_id}/app-restarts"),
+                        ("POST", "/v1/operator/walls/{surface_id}/skips"),
+                        ("POST", "/v1/operator/frames/{frame_id}/skips"),
+                        ("POST", "/v1/operator/never-show"),
+                        ("DELETE", "/v1/operator/never-show/{asset_id}"),
+                        ("POST", "/v1/operator/pauses"),
+                        ("DELETE", "/v1/operator/pauses/{pause_id}"),
+                        ("DELETE", "/v1/operator/pauses/{pause_id}/frames/{frame_id}"),
+                        ("POST", "/v1/operator/activations"),
+                        ("POST", "/v1/operator/runs/{run_id}/end")}
     assert without_admin - everyday == SESSION_ROUTES
     # Non-vacuous: the Power tab's routes are among the guarded ones.
     guarded = {(method, route.path) for route in app.routes

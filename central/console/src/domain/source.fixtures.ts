@@ -8,7 +8,7 @@ export const AT = 1791147840;
 const SHAPES: readonly [number, number][] = [[6000, 4000], [4032, 3024], [3840, 2160], [2160, 3840], [3000, 3000], [8000, 2000], [3024, 4032]];
 
 /** A same-document thumbnail at the photo's ratio (one shade and a circle), so a story reaches no server. */
-function swatch(shade: number, width: number, height: number): string {
+export function swatch(shade: number, width: number, height: number): string {
   const grey = 60 + ((shade * 37) % 140);
   const w = Math.round(width / 50);
   const h = Math.round(height / 50);

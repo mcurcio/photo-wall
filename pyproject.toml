@@ -275,6 +275,17 @@ forbidden_modules = ["media", "httpx", "nodeapi", "psycopg", "psycopg_pool", "pr
                      "central.operator_auth"]
 
 [[tool.importlinter.contracts]]
+# Decision 0036 (slice 3): who moves and who stays, the covers and an asked action's state are pure;
+# they read only `contracts`, and Coordination, the Planner and Frame status call them.
+name = "Everyday actions are pure"
+type = "forbidden"
+source_modules = ["central.everyday"]
+forbidden_modules = ["media", "httpx", "nodeapi", "psycopg", "psycopg_pool", "procrastinate", "fastapi",
+                     "starlette", "central.infra", "central.db", "central.registry", "central.app",
+                     "central.coordination", "central.planner", "central.runtime", "central.scheduler",
+                     "central.fleet", "central.frame_status", "central.wall_plan", "player", "appliance"]
+
+[[tool.importlinter.contracts]]
 # Decision 0035: operator access's vocabulary, rules and use cases do no I/O and import no HTTP
 # client, database, FastAPI or JWT library; the provider and the two tables are behind its ports.
 name = "Operator access is pure"

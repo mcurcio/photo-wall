@@ -20,3 +20,18 @@ export const Showing: Story = {};
 export const Resting: Story = { args: { chip: { severity: "ok", label: "Resting" }, wall: "Upstairs" } };
 /** At phone width, Resting. */
 export const RestingPhone: Story = { args: { chip: { severity: "ok", label: "Resting" } }, parameters: { phone: true } };
+/** Slice 3: the Frame's own everyday actions behind More, only those Central offers now. */
+export const WithActions: Story = {
+  args: {
+    menu: {
+      label: "More actions for Living room left",
+      items: [
+        { label: "Skip this Frame", onAction: () => {} },
+        { label: "Previous on this Frame", onAction: () => {} },
+        { label: "Pause for 1 hour", onAction: () => {} },
+        { label: "Never show this photo", onAction: () => {} },
+        { label: "Why is this playing?", href: "#/wall/frames/living-left/overview" },
+      ],
+    },
+  },
+};

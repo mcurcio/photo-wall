@@ -38,6 +38,7 @@ from support.console_words import scene_words
 from test_operator_showrunner_browser import (
     INVALID_FRAME,
     SCENE_ID,
+    SOURCE,
     VALID_FRAME,
     _runs_of,
     _runtime,
@@ -45,10 +46,13 @@ from test_operator_showrunner_browser import (
     _seed,
     _seed_source,
 )
+from test_skip_never_show import Wall
 
+from central.everyday.model import END_LEAD
+from central.everyday.policy import showing_at
 from central.photo_library.model import SourceQuery
 from central.photo_library.ports import CheckFailed
-from central.runtime import Contribution, Scene
+from central.runtime import Contribution, Scene, Transition
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("PHOTO_WALL_BROWSER_TESTS") != "1",
@@ -205,6 +209,27 @@ def test_the_default_priority_is_the_covering_runs_so_the_new_run_shows_on_top(p
         expect(form).to_contain_text("0 (the default: no Run covers its frames)")
         show_advanced(form)
         expect(form.get_by_label("Activation priority", exact=True)).to_have_value("0")
+
+
+def test_a_priority_at_or_above_a_pauses_rank_is_refused_in_the_form(page, registry):
+    """Central takes a Show now priority below a pause's rank (`PAUSE_RANK`, so a pause stays above
+    every Show now). The form says so in words before it sends, never Central's code. Mutation
+    probe: check only that the priority is whole (Central answered `invalid_request`)."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _covered(registry)
+    sent = []
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "now")
+        page.on("request", lambda request: sent.append(request.url)
+                if request.url.endswith("/v1/operator/activations") and request.method == "POST" else None)
+        form = show_now(page, SCENE_ID, submit=False)
+        show_advanced(form)
+        form.get_by_label("Activation priority", exact=True).fill("2000000")
+        form.get_by_role("button", name="Activate now", exact=True).click()
+        expect(form).to_contain_text("Priority must be from 0 to 999,999.")
+        expect(form).not_to_contain_text("invalid_request")
+        assert sent == []
 
 
 def test_unhealthy_scene_frame_opens_its_recovery_tab_and_keeps_show_draft(page, registry):
@@ -696,3 +721,121 @@ def test_a_card_show_now_during_an_activation_in_flight_keeps_its_draft_and_key(
         expect(_outcome(page)).to_have_text(f"Started: Central admitted a Run of {SCENE_ID}.")
         assert len(sent) == 2 and len(set(sent)) == 1, sent
         assert len(_runs_of(page, origin, SCENE_ID)) == 1
+
+
+def _on_both(scene_id):
+    """A live-source Scene on both seeded frames."""
+    return Scene(scene_id=scene_id, loop=True, contributions=tuple(
+        Contribution(target=f"frame:{frame}", source_refs=(SOURCE,)) for frame in (VALID_FRAME, INVALID_FRAME)))
+
+
+def test_show_now_on_chosen_frames_with_an_end(page, registry):
+    """Decision 0036: the sheet ticks every Frame of the Scene explicitly; one left out is not sent,
+    and gets no command (its Run plays on the chosen Frame alone); the end chosen is sent.
+    Mutation probes: send every Scene Frame whatever is ticked; send no `ends`."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _runtime(registry).command("set_scene", _on_both(SCENE_ID), by="console")
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "now")
+        form = start_show_now(page, SCENE_ID)
+        frames = form.get_by_role("group", name="Frames", exact=True)
+        for frame in (VALID_FRAME, INVALID_FRAME):
+            expect(frames.get_by_role("checkbox", name=frame, exact=True)).to_be_checked()
+        frames.get_by_role("checkbox", name=INVALID_FRAME, exact=True).uncheck()
+        ends = form.get_by_role("group", name="Ends", exact=True)
+        expect(ends.get_by_role("radio", name="In 1 hour", exact=True)).to_be_checked()
+        ends.get_by_role("radio", name="Until I stop it", exact=True).check()
+        form.get_by_role("button", name="Continue", exact=True).click()
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/activations")) as info:
+            form.get_by_role("button", name="Activate now", exact=True).click()
+        sent = info.value.request.post_data_json
+        assert sent["frame_ids"] == [VALID_FRAME] and sent["ends"] == {"kind": "stopped"}
+        expect(_outcome(page)).to_have_text(f"Started: Central admitted a Run of {SCENE_ID}.")
+        (run,) = [run for run in _runs_of(page, origin, SCENE_ID) if run["phase"] == "body"]
+        assert run["frames"] == [VALID_FRAME]
+        assert f"frame:{INVALID_FRAME}" not in run["participants"]
+
+
+def test_back_to_normal_on_home_ends_the_takeover_at_once(page, registry):
+    """Decision 0036, the owner's S3: Home's takeover banner says what is shown and until when, and
+    Back to normal ends it now (downward cancellation at an instant: its Run reads cancelled once
+    its cut has passed). Mutation probe: draw no takeover banner."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    runtime = _runtime(registry)
+    runtime.command("set_scene", _scene(SCENE_ID), by="console")
+    runtime.command("activate", SCENE_ID, "takeover-1", registry.clock.utc(), by="console",
+                    ends_at=registry.clock.utc() + 3600)
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "home")
+        banner = page.locator("section[data-kind=takeover]")     # the takeover banner (OverrideBanner)
+        expect(banner).to_contain_text(SCENE_ID)
+        expect(banner).to_contain_text(re.compile(r"until \d\d:\d\d"))
+        with page.expect_response(lambda r: r.url.endswith("/end") and r.request.method == "POST") as info:
+            banner.get_by_role("button", name="Back to normal", exact=True).click()
+        assert info.value.status == 200, info.value.text()
+        expect(page.locator("[role=status].fixed")).to_contain_text("Back to normal")
+        answer = info.value.json()
+        registry.clock.advance(answer["until"] - registry.clock.utc() + 1)
+        (run,) = _runs_of(page, origin, SCENE_ID)
+        assert run["phase"] == "cancelled"
+
+
+def test_back_to_normal_reveals_the_schedules_current_state_at_once(page, registry):
+    """The owner's D2/S3 end to end, on a wall the real Coordinator plans: Show now on the hall
+    alone (the desk left out gets no command), with an end; minutes later, Home's banner's Back to
+    normal ends it at once, mid-photo: the cut is `END_LEAD` and the Scene's fade after the press,
+    not the takeover's end nor its photo's, and what shows from the cut is the schedule's turn of
+    that moment (it kept advancing beneath), not the one the takeover covered. Downward
+    cancellation: the Run reads cancelled. Mutation probe: route Back to normal to `finish`."""
+    fade = 2
+    with operator_server(registry.db, registry.clock) as origin:
+        wall = Wall(registry, {"hall": "wall", "desk": "wall"}, cycle=60)
+        for frame_id in wall.players:
+            registry.rename_frame(frame_id, frame_id.capitalize(), by="console")
+        wall.coordinator.runtime.command("set_scene", Scene(
+            scene_id="holidays", cycle_seconds=600, loop=True, transition=Transition(seconds=fade),
+            contributions=tuple(Contribution(target=f"frame:{frame}", source_refs=("library:1",))
+                                for frame in ("hall", "desk"))), by="console")
+        schedule = showing_at(wall.layers("hall"), registry.clock.utc()).run_id
+        connect(page, origin)
+        form = start_show_now(page, "holidays")
+        frames = form.get_by_role("group", name="Frames", exact=True)
+        frames.get_by_role("checkbox", name="desk", exact=True).uncheck()
+        form.get_by_role("button", name="Continue", exact=True).click()
+        with page.expect_response(lambda r: r.url.endswith("/v1/operator/activations")) as info:
+            form.get_by_role("button", name="Activate now", exact=True).click()
+        assert info.value.status == 200, info.value.text()
+        sent = info.value.request.post_data_json
+        assert sent["frame_ids"] == ["hall"] and sent["ends"] == {"kind": "in", "seconds": 3600}
+        takeover = info.value.json()["run_id"]
+        wall.tick(5)
+        covered = showing_at(wall.layers("hall"), registry.clock.utc())
+        assert covered.run_id == takeover
+        assert showing_at(wall.layers("desk"), registry.clock.utc()).run_id == schedule
+        beneath_then = next(layer for layer in wall.layers("hall") if layer.run_id == schedule
+                            and layer.start <= registry.clock.utc() < layer.end)
+        for _ in range(5):                       # minutes pass; the schedule advances beneath
+            wall.tick(30)
+
+        go(page, "home")
+        banner = page.locator("section[data-kind=takeover]").filter(has_text="holidays")
+        expect(banner).to_be_visible(timeout=15_000)
+        pressed = registry.clock.utc()
+        with page.expect_response(lambda r: r.url.endswith("/end") and r.request.method == "POST") as ended:
+            banner.get_by_role("button", name="Back to normal", exact=True).click()
+        assert ended.value.status == 200, ended.value.text()
+        cut = ended.value.json()["until"]
+        assert cut <= pressed + END_LEAD + fade + 1, (pressed, cut)       # at once, mid-photo
+        assert cut < covered.end
+        expect(page.locator("[role=status].fixed")).to_contain_text("Back to normal")
+        wall.tick()
+        wall.tick(cut + 1 - registry.clock.utc())
+        revealed = showing_at(wall.layers("hall"), registry.clock.utc())
+        assert revealed.run_id == schedule, revealed
+        assert revealed.start < cut and revealed.assignment_id != beneath_then.assignment_id
+        assert showing_at(wall.layers("desk"), registry.clock.utc()).run_id == schedule
+        (run,) = [run for run in _runs_of(page, origin, "holidays")]
+        assert run["phase"] == "cancelled"
+        expect(banner).to_have_count(0, timeout=15_000)

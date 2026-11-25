@@ -10,9 +10,9 @@ import hashlib
 import json
 import logging
 import math
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from psycopg.types.json import Jsonb
@@ -21,11 +21,50 @@ from pydantic import Field, ValidationError
 from central.actor import Actor
 from central.cue_start import CueReadiness, grantable, starts_whole
 from central.db import Database, DatabaseTransactionClock
+from central.everyday.model import (
+    CoverCause,
+    EverydayRefusal,
+    Moved,
+    Pause,
+    PausedFrame,
+    PauseRefusal,
+    PauseStayed,
+    SkipKind,
+    SkipOutcome,
+    SkipScope,
+    Stayed,
+    StayReason,
+)
+from central.everyday.policy import (
+    carried_on,
+    cover_drawn,
+    cover_for,
+    draws,
+    hold_for,
+    pause_refusal,
+    photo_of,
+    showing_at,
+    stays,
+    the_shared_instant,
+)
+from central.everyday.ports import FrameFacts, FrameFactsReader, SkipRecord
+from central.everyday.views import (
+    CarryOnAnswer,
+    LastShowing,
+    NeverShowAnswer,
+    NeverShowListView,
+    PauseAnswer,
+    SkipAnswer,
+)
 from central.infra.display_store import frame_outputs_in
+from central.infra.events import everyday_in, everyday_of_in
 from central.infra.fit_settings_store import PgFitSettings
+from central.infra.never_show_store import PgNeverShow
+from central.infra.pause_store import PgPauses
 from central.infra.planning_outcome_store import PgPlanningOutcome
 from central.infra.player_state_wakes import notify_if_written_in
 from central.infra.shown_history_store import PgShownHistory
+from central.infra.skip_store import PgSkips
 from central.installation_models import OutputInterruption
 from central.installation_ports import InstallationSessions
 from central.installation_repository import PostgresInstallationRepository
@@ -41,7 +80,7 @@ from central.planner import (
 )
 from central.planning_outcome import PlanningOutcomes
 from central.registry import RegistryError
-from central.runtime import Scene
+from central.runtime import PAUSE_RANK, Scene
 from central.runtime_store import RuntimeStore
 from central.scheduler import scheduler_failure
 from central.transaction_locks import COORDINATION_LOCK, holds_runtime_locks_in
@@ -50,7 +89,7 @@ from central.wall_plan.continuation import held_reservations
 from central.wall_plan.fit import FitTarget, fit_target
 from central.wall_plan.order import PhotoShowing
 from central.wall_plan.ports import FitSettingsStore, ShownHistory
-from central.wall_plan.selection import crop_limit_of
+from central.wall_plan.selection import SceneSelection, crop_limit_of
 from contracts.continuation import continuation_source
 from contracts.models import (
     PREPARE_SECONDS,
@@ -199,6 +238,54 @@ def _may_hold(offer, now: float) -> bool:
     return any(c.until is None or c.until > now for c in plan.continuations)
 
 
+def _acknowledged_revision_in(conn, player_id: str, epoch: int) -> int:
+    """The revision the Player's latest readiness in `epoch` names; 0 when it has reported none."""
+    row = conn.execute(
+        "SELECT (readiness->>'revision')::bigint AS revision FROM player_show_state "
+        "WHERE player_id=%s AND authority_epoch=%s AND readiness IS NOT NULL",
+        (player_id, epoch)).fetchone()
+    return 0 if row is None or row["revision"] is None else row["revision"]
+
+
+def _unacknowledged(offers: list[Plan], acknowledged: int) -> list[Plan]:
+    """The offers past the revision the Player's readiness names: what backpressure counts. It
+    guards against a Player that does not read its offers; an offer it has read past is not one
+    (0036 slice 3, build step 0: an hour-long layer keeps every revision valid for the hour, so
+    counting every unexpired offer starved a reading Player within minutes)."""
+    return [offer for offer in offers if offer.revision > acknowledged]
+
+
+def _superseded(offer: Plan, acknowledged: Plan, now: float) -> bool:
+    """Whether an unexpired offer older than the one the Player acknowledged holds nothing that
+    offer does not: every layer not yet ended is in it as the same execution. Its continuations
+    hold nothing either: the Player read past it (`_may_hold`, decision 0032). Cleanup deletes
+    such an offer (`Coordinator._cleanup`), so `plan_offers` holds no hour of revisions."""
+    if offer.revision >= acknowledged.revision:
+        return False
+    kept = {layer.assignment_id: layer for layer in acknowledged.layers}
+    return all(layer.assignment_id in kept and same_execution(layer, kept[layer.assignment_id])
+               for layer in offer.layers if layer.end > now)
+
+
+def _skip_answer(record: SkipRecord, *, duplicate: bool) -> SkipAnswer:
+    return SkipAnswer(request_id=record.request_id,
+                      kind=SkipKind.PREVIOUS if record.cause == CoverCause.PREVIOUS.value else SkipKind.NEXT,
+                      at=record.outcome.at, duplicate=duplicate,
+                      moved=tuple(Moved(frame_id=cover.frame_id) for cover in record.outcome.covers),
+                      stayed=record.outcome.stayed)
+
+
+def _scene_of(frame: FrameFacts, showing: Layer | None) -> str:
+    """The Scene a Frame's showing layer is of: its Intent's, else that of another layer of its
+    Run (a cover has no Intent of its own); its Run's id when none is known."""
+    if showing is None:
+        return "unknown"
+    origin = frame.origins.get(showing.assignment_id) or next(
+        (found for layer in frame.layers if layer.run_id == showing.run_id
+         and (found := frame.origins.get(layer.assignment_id)) is not None), None)
+    return showing.run_id if origin is None else origin.scene_id
+
+
 def _membership(layers, groups: dict[str, str]) -> dict[str, str]:
     """Each layer's cue group: only a layer that awaits a grant is a cue member (decision 0032),
     so a layer with no group starts at its instant with no Commit."""
@@ -292,6 +379,10 @@ class Coordinator:
         self.fit: FitSettingsStore = fit or PgFitSettings(db, times=DatabaseTransactionClock())
         # What the last planning pass could not do, for the operator (central/planning_outcome.py).
         self.planning: PlanningOutcomes = planning or PgPlanningOutcome(DatabaseTransactionClock())
+        # Decision 0036 (slice 3): the everyday actions' covers and the Never show list.
+        self.skips = PgSkips()
+        self.never_show_list = PgNeverShow()
+        self.pauses = PgPauses()
 
     @staticmethod
     def _scene_contributions(scene: Scene):
@@ -545,8 +636,14 @@ class Coordinator:
         result = {}
         for assignment, claim in claims.items():
             kept = [layer for player, layer in claim if player not in refused]
-            if kept:
-                result[assignment] = kept[-1]
+            if not kept:
+                continue
+            # Decision 0036: a cut is final, so the earliest offered wins over a copy without it
+            # (a secured lock's row keeps the layer as first secured); a lock cut and over is gone.
+            cut = min((layer.cut_at for layer in kept if layer.cut_at is not None), default=None)
+            lock = kept[-1] if cut is None else next(layer for layer in kept if layer.cut_at == cut)
+            if lock.drawn_end > self.clock.utc():
+                result[assignment] = lock
         return result, refused
 
     def _groups(self, conn, projection: Projection, now, horizon_end,
@@ -734,7 +831,11 @@ class Coordinator:
             offers = self._offers(conn, configurations)
             self.media.reconcile_source_activity_in(conn, runtime.planning_source_refs())
             lines = self.media.scene_lines_in(conn)
-            authored = self.media.authored_in(conn, runtime.authored_asset_ids())
+            covers = self.skips.live_in(conn, now)
+            holds = self.pauses.live_in(conn, now)
+            never = self.never_show_list.listed_in(conn)
+            authored = self.media.authored_in(conn, runtime.authored_asset_ids() | {
+                cover.pinned for cover in covers if cover.pinned is not None})
             locks, refused = self._locks(conn, configurations, offers)
             for player, code in sorted(refused.items()):
                 _left_out(player, code)
@@ -770,6 +871,9 @@ class Coordinator:
                                           self.limits.horizon_seconds + quantum),
                 reserved=reserved,
                 frame_uncertainty=frame_uncertainty,
+                covers=covers,
+                never=never,
+                holds=holds,
             )
             groups = self._groups(conn, projection, now, horizon_end, configurations)
             for proposal in projection.players:
@@ -861,7 +965,8 @@ class Coordinator:
             and self._plan_groups(conn, latest) == membership
         ):
             return
-        if len(previous) >= self.limits.max_offers:
+        if len(_unacknowledged(previous, _acknowledged_revision_in(
+                conn, proposal.player_id, config.authority_epoch))) >= self.limits.max_offers:
             _left_out(proposal.player_id, "offer_backpressure", failed=False)
             return
         revision = conn.execute(
@@ -956,6 +1061,7 @@ class Coordinator:
                     "AND revision=%s",
                     (*session, offer["revision"]),
                 )
+        self._delete_superseded_in(conn, now, active_sessions)
         conn.execute(
             "DELETE FROM coordination_groups g WHERE valid_until<=%s "
             "AND NOT EXISTS(SELECT 1 FROM execution_commits c WHERE c.group_id=g.id)",
@@ -972,6 +1078,39 @@ class Coordinator:
                     "WHERE player_id=%s AND authority_epoch=%s",
                     (now, *session),
                 )
+
+    @staticmethod
+    def _delete_superseded_in(conn, now: float, active_sessions: set[tuple[str, int]]) -> None:
+        """Every unexpired offer of an active session that the offer its Player acknowledged
+        supersedes (`_superseded`) goes, with its commits: the Player has read past it and holds
+        each of its live layers under the newer revision. One holding a commit of a cue the
+        acknowledged revision holds none of (a cue that ended since) stays until it expires, so a
+        cue's group is kept exactly as long as before (its commits keep it)."""
+        for player_id, epoch in sorted(active_sessions):
+            acknowledged = _acknowledged_revision_in(conn, player_id, epoch)
+            rows = conn.execute(
+                "SELECT revision,manifest FROM plan_offers WHERE player_id=%s AND authority_epoch=%s "
+                "AND revision<=%s AND valid_until>%s ORDER BY revision",
+                (player_id, epoch, acknowledged, now)).fetchall()
+            if not rows or rows[-1]["revision"] != acknowledged:
+                continue
+            try:
+                plans = [Plan.model_validate(row["manifest"]) for row in rows]
+            except ValidationError:
+                continue    # `_offers` names it; an offer that no longer reads is left alone
+            groups: dict[int, set[str]] = {}
+            for commit in conn.execute(
+                    "SELECT revision,group_id FROM execution_commits WHERE player_id=%s "
+                    "AND authority_epoch=%s AND revision<=%s", (player_id, epoch, acknowledged)):
+                groups.setdefault(commit["revision"], set()).add(commit["group_id"])
+            kept_groups = groups.get(acknowledged, set())
+            gone = [plan.revision for plan in plans[:-1] if _superseded(plan, plans[-1], now)
+                    and groups.get(plan.revision, set()) <= kept_groups]
+            if gone:
+                conn.execute("DELETE FROM execution_commits WHERE player_id=%s AND authority_epoch=%s "
+                             "AND revision=ANY(%s)", (player_id, epoch, gone))
+                conn.execute("DELETE FROM plan_offers WHERE player_id=%s AND authority_epoch=%s "
+                             "AND revision=ANY(%s)", (player_id, epoch, gone))
 
     @staticmethod
     def _observed_layer(plan: Plan, observation: Observation) -> tuple[Layer, bool] | None:
@@ -994,16 +1133,20 @@ class Coordinator:
         Only the shown history is written, and the report is still refused as stale."""
         if observation.status != "presented":
             return False
-        row = conn.execute(
+        # Its own revision, else (cleanup deletes an offer its Player acknowledged past,
+        # `_delete_superseded_in`) the first retained later one that holds the same layer.
+        observed = None
+        for row in conn.execute(
             "SELECT manifest FROM plan_offers WHERE player_id=%s AND authority_epoch=%s "
-            "AND revision=%s", (player_id, observation.authority_epoch, observation.revision),
-        ).fetchone()
-        if row is None:
-            return False
-        offered = Plan.model_validate(row["manifest"])
-        if offered.plan_id != observation.plan_id:
-            return False
-        observed = self._observed_layer(offered, observation)
+            "AND revision>=%s ORDER BY revision",
+            (player_id, observation.authority_epoch, observation.revision),
+        ).fetchall():
+            offered = Plan.model_validate(row["manifest"])
+            if offered.plan_id != observation.plan_id:
+                return False
+            observed = self._observed_layer(offered, observation)
+            if observed is not None or offered.revision == observation.revision:
+                break
         if observed is None or not self._authorized(observed[0], config):
             return False
         self.shown.record_presented_in(conn, observed[0].assignment_id, self.clock.utc(), by="node")
@@ -1159,7 +1302,7 @@ class Coordinator:
             failed = frozenset(()) if report is None else frozenset(each.assignment_id for each in report.failures)
             frames = {binding.output_id: binding.frame_id for binding in plan.bindings}
             for frame_id in frames.values():
-                layers = [layer for layer in plan.layers if layer.frame_id == frame_id and layer.end > now
+                layers = [layer for layer in plan.layers if layer.frame_id == frame_id and layer.drawn_end > now
                           and layer.presentation == "media"]
                 spans = tuple(span for span in plan.unfilled
                               if frames.get(span.output_id) == frame_id and span.end > now)
@@ -1169,6 +1312,258 @@ class Coordinator:
                         prepared=sum(layer.assignment_id in prepared for layer in layers),
                         failed=sum(layer.assignment_id in failed for layer in layers))
         return plans
+
+    # --- The everyday actions (decision 0036, slice 3) --------------------------------------------
+
+    def skip(self, scope: SkipScope, target_id: str, kind: SkipKind, request_id: str, *, by: Actor,
+             facts: FrameFactsReader) -> SkipAnswer:
+        """Skip or Previous on a wall (every Frame of it, the owner's S1) or one Frame, under the
+        Coordination lock: each Frame that can move (central/everyday/policy.py `stays`, judged
+        on the same facts as Home's `can`) gets a cover from one shared instant, each that cannot
+        stays and is named. One row in `skips`; its commit wakes the scheduler and the Players, so
+        the next planning pass offers the covers. A repeated `request_id` answers the stored row
+        (`duplicate`) and changes nothing. CoordinationError "unknown_wall"/"unknown_frame" (404);
+        RegistryError "nothing-moved" (409, with `stayed`) when no Frame could move."""
+        with self._transaction() as conn:
+            stored = self.skips.get_in(conn, request_id)
+            if stored is not None:
+                return _skip_answer(stored, duplicate=True)
+            frame_ids = self._skip_frames_in(conn, scope, target_id)
+            now = self.clock.utc()
+            at = the_shared_instant(now)
+            found = facts(conn, now, frame_ids)
+            cause = CoverCause.NEXT if kind is SkipKind.NEXT else CoverCause.PREVIOUS
+            cue = identity("skip-", [request_id]) if scope is SkipScope.WALL else None
+            covers, stayed = [], []
+            for frame_id in frame_ids:
+                frame = found.get(frame_id)
+                reason = StayReason.NOT_SET_UP if frame is None else stays(frame, kind, at, now=now)
+                if reason is not None:
+                    stayed.append(Stayed(frame_id=frame_id, reason=reason))
+                    continue
+                covers.append(cover_for(frame, kind, cause, request_id=request_id, at=at, now=now, cue=cue))
+            if not covers:
+                raise RegistryError(EverydayRefusal.NOTHING_MOVED.value, 409, details={
+                    "stayed": [each.model_dump(mode="json") for each in stayed]})
+            record = SkipRecord(request_id=request_id, scope=scope, target_id=target_id, cause=cause.value,
+                                outcome=SkipOutcome(at=at, covers=tuple(covers), stayed=tuple(stayed)), by=by)
+            self.skips.add_in(conn, record, now=now)
+            return _skip_answer(record, duplicate=False)
+
+    def never_show(self, request_id: str, asset_id: str, frame_id: str | None, *, by: Actor,
+                   facts: FrameFactsReader) -> NeverShowAnswer:
+        """Put a photo on the Never show list, under the Coordination lock. Where a Frame shows it
+        at the shared instant and can move, it is skipped there (a cover, cause never-show); a
+        Frame that cannot move shows it to its end, once. A showing already offered to another
+        Frame (downloaded or downloading for that slot) is a lock and plays that one last time
+        (the owner's S5): the answer names each in `last_showings`. From a Frame's menu,
+        `frame_id` is the Frame it was seen on: RegistryError "changed" (409) when that Frame
+        shows another photo now. A repeated `request_id` answers what it did (`duplicate`)."""
+        with self._transaction() as conn:
+            # A repeat is known by either row it wrote: the list's (when it listed the photo) or
+            # its skips row (when the photo was listed already, by another request).
+            stored = self.skips.get_in(conn, request_id)
+            if stored is not None or self.never_show_list.requested_in(conn, request_id) is not None:
+                outcome = stored.outcome if stored is not None else SkipOutcome(at=self.clock.utc())
+                return NeverShowAnswer(asset_id=asset_id, duplicate=True,
+                                       skipped_on=tuple(cover.frame_id for cover in outcome.covers),
+                                       stayed=outcome.stayed)
+            now = self.clock.utc()
+            at = the_shared_instant(now)
+            found = facts(conn, now, None)
+            if frame_id is not None:
+                if frame_id not in found:
+                    raise CoordinationError(EverydayRefusal.UNKNOWN_FRAME.value, 404)
+                if photo_of(showing_at(found[frame_id].layers, now)) != asset_id:
+                    raise RegistryError(EverydayRefusal.CHANGED.value, 409)
+            self.never_show_list.add_in(conn, request_id, asset_id, now=now, by=by)
+            covers, stayed = [], []
+            held = {pause.frame_id: pause for pause in self.pauses.live_in(conn, now)
+                    if photo_of(pause.held) == asset_id}
+            frames = dict(sorted(found.items()))
+            for each_id, frame in frames.items():
+                if each_id in held:
+                    # A paused Frame holding it: its pause ends there (Carry on), and what its
+                    # hold covered is skipped as any Frame showing it.
+                    self._carry_on_in(conn, held[each_id], now=now, by=by)
+                    frame = frames[each_id] = replace(frame, paused=False, layers=tuple(
+                        layer for layer in frame.layers if layer.assignment_id != held[each_id].held.assignment_id))
+                if photo_of(showing_at(frame.layers, at)) != asset_id:
+                    continue
+                listed = replace(frame, listed=frame.listed | {asset_id})
+                reason = stays(listed, SkipKind.NEXT, at, now=now)
+                if reason is not None:
+                    stayed.append(Stayed(frame_id=each_id, reason=reason))
+                    continue
+                covers.append(cover_for(listed, SkipKind.NEXT, CoverCause.NEVER_SHOW, request_id=request_id,
+                                        at=at, now=now, cue=None))
+            # Its last showings: each regular layer of it the Frame will still draw from the shared
+            # instant, under its covers, this request's among them (`draws`, `showing_at`'s rule);
+            # a Frame that stays is named as one that stayed.
+            stays_put = {stay.frame_id for stay in stayed}
+            last = []
+            for each_id, frame in frames.items():
+                if each_id in stays_put:
+                    continue
+                known = {layer.assignment_id for layer in frame.layers}
+                drawn = (*frame.layers, *(cover_drawn(cover) for cover in (*frame.recent, *covers)
+                                          if cover.frame_id == each_id and cover.cover_id not in known))
+                last.extend(LastShowing(frame_id=layer.frame_id, start=layer.start, until=layer.drawn_end)
+                            for layer in frame.layers
+                            if photo_of(layer) == asset_id and not layer.action and draws(drawn, layer, at))
+            if covers or stayed:
+                self.skips.add_in(conn, SkipRecord(
+                    request_id=request_id, scope=SkipScope.PHOTO, target_id=asset_id,
+                    cause=CoverCause.NEVER_SHOW.value,
+                    outcome=SkipOutcome(at=at, covers=tuple(covers), stayed=tuple(stayed)), by=by), now=now)
+            return NeverShowAnswer(asset_id=asset_id, skipped_on=tuple(cover.frame_id for cover in covers),
+                                   stayed=tuple(stayed), last_showings=tuple(last))
+
+    def pause(self, request_id: str, frame_ids: tuple[str, ...], seconds: float, *, by: Actor,
+              facts: FrameFactsReader) -> PauseAnswer:
+        """Pause: each Frame holds the photo it shows, under the Coordination lock (decision 0036).
+        Each Frame that may be paused (central/everyday/policy.py `pause_refusal`, judged on the
+        facts Home's `can` reads) gets a hold from the shared instant to its end, a layer above
+        every Run (`PAUSE_RANK`); each that may not stays and is named. One row per Frame in
+        `frame_pauses`; the commit wakes the scheduler and the Players. Its answer is logged with
+        who asked (an 'everyday' event, central/infra/events.py `everyday_in`), so a repeated
+        `request_id` answers it (`duplicate`) and changes nothing, even once a later pause
+        replaced its rows. CoordinationError "unknown_frame" (404); RegistryError "nothing-paused"
+        (409, with `stayed`)."""
+        with self._transaction() as conn:
+            stored = everyday_of_in(conn, "pause", request_id)
+            if stored is not None:
+                return PauseAnswer.model_validate({**stored["answer"], "duplicate": True})
+            for frame_id in frame_ids:
+                if conn.execute("SELECT 1 FROM frames WHERE id=%s", (frame_id,)).fetchone() is None:
+                    raise CoordinationError(EverydayRefusal.UNKNOWN_FRAME.value, 404)
+            now = self.clock.utc()
+            at = the_shared_instant(now)
+            ends_at = at + seconds
+            found = facts(conn, now, list(frame_ids))
+            paused, stayed = [], []
+            for frame_id in sorted(set(frame_ids)):
+                frame = found.get(frame_id)
+                reason = (PauseRefusal.NOT_SET_UP if frame is None
+                          else pause_refusal(frame, at, seen_at=now))
+                if reason is not None:
+                    stayed.append(PauseStayed(frame_id=frame_id, reason=reason))
+                    continue
+                held = hold_for(frame, pause_id=request_id, at=at, ends_at=ends_at, priority=PAUSE_RANK,
+                                seen_at=now)
+                paused.append(Pause(pause_id=request_id, frame_id=frame_id, by=by, started_at=at,
+                                    ends_at=ends_at, scene_id=_scene_of(frame, showing_at(frame.layers, now)),
+                                    held=held))
+            if not paused:
+                raise RegistryError(EverydayRefusal.NOTHING_PAUSED.value, 409, details={
+                    "stayed": [each.model_dump(mode="json") for each in stayed]})
+            for pause in paused:
+                self.pauses.put_in(conn, pause, now=now)
+            answer = PauseAnswer(pause_id=request_id, ends_at=ends_at,
+                                 paused=tuple(PausedFrame(frame_id=pause.frame_id) for pause in paused),
+                                 stayed=tuple(stayed))
+            everyday_in(conn, "pause", {"answer": answer.model_dump(mode="json", exclude={"duplicate"})},
+                        by=by, request_id=request_id)
+            return answer
+
+    def carry_on(self, pause_id: str, frame_id: str | None = None, *, by: Actor) -> CarryOnAnswer:
+        """Carry on: end the pause `pause_id` on every Frame it holds (or `frame_id` alone) at once,
+        under the Coordination lock: each hold is cut `END_LEAD` and its fade-out from now, so the
+        schedule beneath, which kept advancing, shows at its current state with the usual fade
+        (the owner's S3). CoordinationError "unknown_pause" (404) when it holds no such Frame now;
+        a repeat once it ended answers the same Frames with nothing changed."""
+        with self._transaction() as conn:
+            now = self.clock.utc()
+            rows = [pause for pause in self.pauses.of_in(conn, pause_id)
+                    if frame_id is None or pause.frame_id == frame_id]
+            if not rows:
+                raise CoordinationError(EverydayRefusal.UNKNOWN_PAUSE.value, 404)
+            ended = []
+            for pause in rows:
+                if pause.ended_at is None and pause.live(now):
+                    self._carry_on_in(conn, pause, now=now, by=by)
+                ended.append(PausedFrame(frame_id=pause.frame_id))
+            current = self.pauses.of_in(conn, pause_id)
+            until = max((pause.held.drawn_end for pause in current
+                         if frame_id is None or pause.frame_id == frame_id), default=now)
+            return CarryOnAnswer(pause_id=pause_id, ended=tuple(ended), until=max(now, until))
+
+    def _carry_on_in(self, conn, pause: Pause, *, now: float, by: Actor) -> None:
+        held = carried_on(pause.held, now)
+        self.pauses.end_in(conn, pause, pause.held if held is None else held, now=now, by=by)
+
+    def show_again(self, asset_id: str, *, by: Actor) -> bool:
+        """Undo and Show again: take the photo off the Never show list (the next planning pass may
+        place it), logged with who asked and when (an 'everyday' event: its list row is gone);
+        False, and nothing logged, when it was not on it."""
+        with self._transaction() as conn:
+            removed = self.never_show_list.remove_in(conn, asset_id)
+            if removed:
+                everyday_in(conn, "show-again", {"asset_id": asset_id}, by=by)
+            return removed
+
+    def never_show_entries(self) -> NeverShowListView:
+        """Scenes › Never show list."""
+        with self.db.transaction() as conn:
+            return NeverShowListView(photos=self.never_show_list.entries_in(conn))
+
+    @staticmethod
+    def _skip_frames_in(conn, scope: SkipScope, target_id: str) -> list[str]:
+        if scope is SkipScope.FRAME:
+            if conn.execute("SELECT 1 FROM frames WHERE id=%s", (target_id,)).fetchone() is None:
+                raise CoordinationError(EverydayRefusal.UNKNOWN_FRAME.value, 404)
+            return [target_id]
+        if conn.execute("SELECT 1 FROM walls WHERE surface_id=%s", (target_id,)).fetchone() is None:
+            raise CoordinationError(EverydayRefusal.UNKNOWN_WALL.value, 404)
+        return [row["id"] for row in conn.execute(
+            "SELECT id FROM frames WHERE surface_id=%s ORDER BY id", (target_id,)).fetchall()]
+
+    def usable_in(self, conn, frame_id: str, selection: SceneSelection) -> Callable[[str], bool]:
+        """central/everyday/ports.py `UsableReader`, the one judge of a photo Previous may step back
+        onto that Home's `can` and the command both read: still in the library and still fitting
+        the Frame at the crop limit of the Scene it shows (`selection`, its own, as the Planner
+        judges the photo it pins: the photo fit rule's size-only part, as a hand-placed photo is
+        judged). Lazy, in the caller's transaction: a photo is read once, when first asked, so a
+        read of Home judges only the photos a step reaches."""
+        judged: dict[str, bool] = {}
+        fit: list = []
+
+        def usable(asset_id: str) -> bool:
+            if asset_id not in judged:
+                if not fit:
+                    output = next((each for each in frame_outputs_in(conn) if each.frame_id == frame_id), None)
+                    settings = self.fit.fit_settings_in(conn)
+                    fit.append((None if output is None else fit_target(output),
+                                crop_limit_of(selection, settings), settings))
+                target, crop_limit, settings = fit[0]
+                candidates = {} if target is None else self.media.authored_in(conn, frozenset({asset_id}))
+                judged[asset_id] = (asset_id in candidates
+                                    and eligible(candidates[asset_id], target, crop_limit, settings))
+            return judged[asset_id]
+        return usable
+
+    @staticmethod
+    def frame_layers_in(conn, now: float) -> dict[str, tuple[Layer, ...]]:
+        """Frame id -> the layers each Player's newest plan offer, still valid at `now`, holds for
+        it that are not over at `now` (decision 0036: what the everyday actions read), from a
+        caller-owned transaction. Read-only; takes no lock."""
+        rows = conn.execute(
+            "SELECT o.manifest FROM players p "
+            "JOIN LATERAL (SELECT manifest,valid_until FROM plan_offers "
+            "WHERE player_id=p.id AND authority_epoch=p.authority_epoch "
+            "ORDER BY revision DESC LIMIT 1) o ON TRUE "
+            "WHERE p.retired_at IS NULL AND o.valid_until > %s", (now,)).fetchall()
+        found: dict[str, list[Layer]] = {}
+        for row in rows:
+            try:
+                plan = Plan.model_validate(row["manifest"])
+            except ValidationError:
+                continue    # `_offers` names it; an offer that no longer reads holds nothing here
+            frames = {binding.output_id: binding.frame_id for binding in plan.bindings}
+            for layer in plan.layers:
+                if layer.drawn_end > now and frames.get(layer.output_id) == layer.frame_id:
+                    found.setdefault(layer.frame_id, []).append(layer)
+        return {frame_id: tuple(layers) for frame_id, layers in found.items()}
 
     def readiness(self, player_id: str, report: Readiness) -> bool:
         """Accept the Player's readiness; False for one already held (its number at or below the

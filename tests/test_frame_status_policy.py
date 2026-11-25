@@ -19,6 +19,8 @@ import pytest
 from central.central_errors.views import FrameClear, FrameImpeded
 from central.displays.model import Readiness
 from central.displays.views import InForceView
+from central.everyday.model import AskedAction, AskState
+from central.everyday.ports import AskFact, LayerOrigin, Showing, ShownPhoto
 from central.frame_status.model import (
     WORST_FIRST,
     Action,
@@ -65,14 +67,16 @@ from central.frame_status.ports import (
     StatusKey,
     UnfilledNow,
 )
-from central.frame_status.views import PlayingKind
+from central.frame_status.views import PlayingKind, wall_can
 from central.why.explain import is_resting
 from central.why.model import ContentKind
 from contracts.liveness import SILENT_AFTER_SECONDS
+from contracts.models import Layer, Variant
 from contracts.node_app_link import FrameBlackCause
 from contracts.node_faults import FAULTS, FRAME_BLACK_CODES
 from contracts.node_impeded import Impeded
 from contracts.node_output import InForceKind, Power, PowerResult
+from contracts.photo_crop import CENTRED
 from contracts.room_light import CentralWords
 
 NOW = 100_000.0
@@ -463,10 +467,68 @@ def test_a_card_never_offers_what_the_frames_menu_may_not():
 
 
 def test_an_override_rides_on_the_status_and_a_paused_frame_is_showing():
-    """Finding F3: a pause is an override on a Frame that reads Showing; nothing produces one yet."""
+    """Finding F3: a pause is an override on a Frame that reads Showing."""
     pause = Override(kind=OverrideKind.PAUSE, id="p-1", frame_ids=("hall",), until=NOW + 3600)
     found = status(override=pause)
     assert (found.word, found.override) == (StatusWord.SHOWING, pause)
+
+
+# --- Slice 3: the everyday actions ----------------------------------------------------------------
+
+def _photo_layer(key: str, start: float, end: float, asset: str) -> Layer:
+    return Layer(assignment_id=key, run_id="run", output_id="HDMI-A-1", frame_id="hall", binding_generation=1,
+                 start=start, end=end, media_origin=start, crop=CENTRED, variant=Variant(
+                     asset_id=asset, recipe_id="e" * 64, sha256="a" * 64, size=10, media_type="image/jpeg",
+                     width=1920, height=1080))
+
+
+TURNS = (_photo_layer("a", NOW - 10, NOW + 20, "photo-a"), _photo_layer("b", NOW + 20, NOW + 50, "photo-b"))
+ON_SCREEN = Showing(layers=TURNS, origins={layer.assignment_id: LayerOrigin(scene_id="s") for layer in TURNS})
+
+
+def test_can_follows_the_stay_rule():
+    """Skip and Previous are in `can` exactly where central/everyday/policy.py `stays` lets the
+    Frame move, and Never show while it shows a photo; nothing without what it shows (the status
+    step's reading). Mutation probe: offer Skip without asking `stays`."""
+    assert status(showing=ON_SCREEN).can == (Action.NEVER_SHOW, Action.PAUSE, Action.REBOOT_PI, Action.RESTART_APP,
+                                             Action.SKIP)
+    earlier = Showing(layers=TURNS, origins=ON_SCREEN.origins, history=(
+        ShownPhoto("photo-a", "a", NOW - 9), ShownPhoto("photo-z", "z", NOW - 40)))
+    assert Action.PREVIOUS in status(showing=earlier).can
+    hand = Showing(layers=TURNS, origins={"a": LayerOrigin(scene_id="s", hand_placed=True)})
+    assert Action.SKIP not in status(showing=hand).can and Action.NEVER_SHOW in status(showing=hand).can
+    for changes in (SILENT, RESTING, {"picture": Picture(showing=True, continuing_since=NOW - 30,
+                                                          reported_at=NOW - 5)}):
+        assert Action.SKIP not in status(showing=ON_SCREEN, **changes).can, changes
+    assert Action.SKIP in status(HUB_DOWN, showing=ON_SCREEN).can      # Skip needs no hub
+    assert status().can == (Action.REBOOT_PI, Action.RESTART_APP)
+    assert status(showing=ON_SCREEN, readiness=Readiness.POSITION_NEEDED).can == ()
+
+
+def test_a_frame_names_the_photo_it_shows():
+    """`photo` is the photo drawn now, what the console's Never show sends; none in setup, with
+    nothing drawn, or without what it shows. Mutation probe: name the next turn's photo."""
+    assert status(showing=ON_SCREEN).photo == "photo-a"
+    assert status(showing=Showing()).photo is None
+    assert status().photo is None
+    assert status(showing=ON_SCREEN, readiness=Readiness.POSITION_NEEDED).photo is None
+
+
+def test_a_walls_can_is_any_of_its_frames():
+    moving = status(showing=ON_SCREEN)
+    still = status(showing=Showing())
+    assert wall_can((moving, still)) == (Action.SKIP,)
+    assert wall_can((still,)) == ()
+
+
+def test_asked_is_reported_while_its_cover_shows():
+    fact = AskFact(action=AskedAction.SKIP, request_id="r", at=NOW - 1, until=NOW + 29)
+    asked = status(showing=Showing(layers=TURNS, asked=fact)).asked
+    assert (asked.action, asked.state) == (AskedAction.SKIP, AskState.REQUESTED)
+    done = AskFact(action=AskedAction.SKIP, request_id="r", at=NOW - 1, until=NOW + 29, presented_at=NOW)
+    assert status(showing=Showing(asked=done)).asked.state is AskState.DONE
+    over = AskFact(action=AskedAction.SKIP, request_id="r", at=NOW - 60, until=NOW - 1)
+    assert status(showing=Showing(asked=over)).asked is None
 
 
 def test_the_playing_kinds_are_whys_content_kinds():
@@ -537,3 +599,27 @@ def test_a_failing_scheduler_and_a_planning_issue_naming_no_frame_are_house_prob
         (None, ProblemCode.SCHEDULER_FAILING, Part.CENTRAL, NOW - 40, "planning,status"),
         (None, ProblemCode.PLANNING_ISSUE, Part.CENTRAL, NOW - 20, "intent_refused")]
     assert all(problem.part.value in SIX_PARTS for problem in found.problems)
+
+
+def test_pause_is_in_can_by_the_pause_rule():
+    """Pause is offered where central/everyday/policy.py `pause_refusal` would pause the Frame:
+    never on a video (the owner's S8), nor on a Frame already paused, resting or silent; Skip
+    stays away from a paused Frame. Mutation probe: offer Pause without asking `pause_refusal`."""
+    film = _photo_layer("film", NOW - 10, NOW + 20, "film").model_copy(update={"variant": Variant(
+        asset_id="film", recipe_id="e" * 64, sha256="a" * 64, size=10, media_type="video/mp4",
+        width=1920, height=1080, duration=30.0)})
+    assert Action.PAUSE not in status(showing=Showing(layers=(film,))).can
+    pause = Override(kind=OverrideKind.PAUSE, id="p-1", frame_ids=("hall",), until=NOW + 3600)
+    paused = status(showing=ON_SCREEN, override=pause, paused=True)
+    assert Action.PAUSE not in paused.can and Action.SKIP not in paused.can
+    for changes in (SILENT, RESTING):
+        assert Action.PAUSE not in status(showing=ON_SCREEN, **changes).can, changes
+
+
+def test_a_paused_frame_reads_showing_with_its_pause():
+    """Finding F3: a paused Frame holds a lit photo, so it reads Showing with its pause as its
+    override, not Resting."""
+    pause = Override(kind=OverrideKind.PAUSE, id="p-1", frame_ids=("hall",), by="person:matt",
+                     started_at=NOW - 60, until=NOW + 3540)
+    found = status(showing=ON_SCREEN, override=pause, paused=True)
+    assert (found.word, found.override, found.override.by) == (StatusWord.SHOWING, pause, "person:matt")

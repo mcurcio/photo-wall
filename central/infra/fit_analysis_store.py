@@ -30,6 +30,7 @@ from central.infra.display_store import (
     frame_outputs_in,
 )
 from central.infra.key_content_store import due_params, due_sql, usable_key
+from central.infra.never_show_store import not_listed
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.installation_models import FrameOutput
 from central.photo_library.rendition import Size, readable_of
@@ -43,8 +44,11 @@ from central.wall_plan.fit_analysis import (
 )
 
 # The selection's in-pool revisions, once each (`%(keys)s`: its pools' keys).
+# A photo on the Never show list is no member (decision 0036, the owner's S9: the Frame page's fit
+# counts leave it out).
 _MEMBERS: Final = ("WITH members AS (SELECT DISTINCT asset_id FROM photo_pool_rows "
-                   "WHERE pool_key = ANY(%(keys)s) AND outcome = 'in_pool' AND asset_id IS NOT NULL) ")
+                   "WHERE pool_key = ANY(%(keys)s) AND outcome = 'in_pool' AND asset_id IS NOT NULL "
+                   "AND " + not_listed("photo_pool_rows.asset_id") + ") ")
 # A measured copy's side on photo `l` (its `copies` document, by copy name).
 def _copy_side(copy: str, side: str) -> str:
     return f"(l.copies->'{copy}'->>'{side}')::int"

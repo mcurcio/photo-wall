@@ -96,6 +96,7 @@ def app_with(fake_db, fake_coordinator, clock, monkeypatch, *, enabled):
         lambda *_args, **_kwargs: fake_coordinator.media,
     )
     monkeypatch.setattr(central_app, "NodeRecordRetention", lambda *_args, **_kwargs: NoRetention())
+    monkeypatch.setattr(central_app, "SkipRetention", lambda *_args, **_kwargs: NoRetention())
     monkeypatch.setattr(central_app, "PgFrameStatus", lambda *_args, **_kwargs: fake_coordinator.status)
     return central_app.create_app(fake_db, clock, ADMIN, run_scheduler=enabled)
 
@@ -194,13 +195,13 @@ def test_measurement_request_failure_is_its_own_facet_and_clears(monkeypatch):
         # too, or the tick's failure can be read before the retention step has run.
         failed = wait_for(client, lambda response:
                           response.json()["scheduler"]["status"] == "degraded"
-                          and "node-retention" in response.json()["scheduler"]["steps"])
+                          and {"node-retention", "skip-retention"} <= response.json()["scheduler"]["steps"].keys())
         assert failed.status_code == 200
         steps = failed.json()["scheduler"]["steps"]
         assert steps["measurement"]["status"] == "failing"
         assert {name: step["status"] for name, step in steps.items() if name != "measurement"} == {
             "planning": "ok", "runtime": "ok", "settle": "ok", "status": "ok",
-            "node-retention": "ok"}
+            "node-retention": "ok", "skip-retention": "ok"}
         coordinator.media.fail = False
         assert wait_for(client, lambda response: response.json()["status"] == "ok").status_code == 200
 

@@ -1,12 +1,13 @@
 import type * as React from "react";
 
-import type { Action, FramePlace, HomeView, Override, WallView } from "../generated/contract";
+import type { Action, Asked, FramePlace, HomeView, Override, SkipKind, WallView } from "../generated/contract";
 import { WideOnly } from "../patterns/app-shell";
 import { EmptyState } from "../patterns/entity-page";
 import { Note } from "../patterns/fact-row";
 import { HealthBadge } from "../patterns/health-badge";
 import { OverrideBanner } from "../patterns/override-banner";
 import { ProblemCard } from "../patterns/problem-card";
+import { WallActions } from "../patterns/wall-actions";
 import { NowNextStrip, WallMap } from "../patterns/wall-map";
 import { WallTile } from "../patterns/wall-tile";
 import { POWER } from "../powerWords.js";
@@ -16,9 +17,10 @@ import { Link } from "../ui/link";
 import type { MenuItem } from "../ui/menu";
 import { Skeleton } from "../ui/skeleton";
 import { Inline, Stack } from "../ui/stack";
+import { ASKED_WORDS, lateWords, WALL_ACTION_WORDS } from "./everyday-words";
 import {
-  ACTION_ORDER, ACTION_WORDS, type FixView, frameChip, frameHref, framePlaces, houseCounts, houseVerdict, instantWords, nowNextWords,
-  overrideView, type ProblemView, problemView, statusOf, tileLine,
+  ACTION_WORDS, type FixView, frameChip, frameHref, framePlaces, houseCounts, houseVerdict, instantWords, nowNextWords,
+  offeredActions, overrideView, type ProblemView, problemView, statusOf, statusVerdict, tileLine,
 } from "./frame-status";
 
 /** What Home has of its read: none yet, none at all, or a document (with since when it is not current). */
@@ -49,6 +51,12 @@ export interface HomeBoardProps {
   onHold: (power: "on" | "off") => void;
   /** Resume schedule on a hold's Frames. */
   onResume: (override: Override) => void;
+  /** A takeover's **Back to normal** or a pause's **Carry on**: its way back. */
+  onEnd?: (override: Override) => void;
+  /** Skip or Previous on every Frame of a wall. */
+  onWallAction?: (wall: WallView, kind: SkipKind) => void;
+  /** Retry an action Central asked and its Frame has not shown by its deadline. */
+  onRetry?: (place: FramePlace, asked: Asked) => void;
   /** A tile was tapped: its Frame's page takes focus. */
   onOpenFrame?: (frameId: string, event: React.MouseEvent<HTMLAnchorElement>) => void;
   /** The requests in progress, each a `StepProgress`. */
@@ -72,12 +80,15 @@ function wallFrames(wall: WallView, props: HomeBoardProps, stale: string | undef
   const { now, pis, requested, onAction, onOpenFrame, menuAs } = props;
   return wall.frames.map((place) => {
     const { status } = place;
-    const asked = place.device_id != null ? requested[place.device_id] : undefined;
-    // An action is offered only when Central's `can` holds it, never while one is on its way, and
-    // never from a document that is not current: what may be asked now is then not known.
-    const actions: MenuItem[] = asked !== undefined || stale !== undefined ? []
-      : ACTION_ORDER.filter((action) => (status.can ?? []).includes(action))
-        .map((action) => ({ label: ACTION_WORDS[action], onAction: () => onAction(place, action) }));
+    const piAsked = place.device_id != null ? requested[place.device_id] : undefined;
+    // What Central says was asked of the Frame and its Pi has not shown yet (`asked`, read from
+    // Central: acknowledged, never optimistic); a request to its Pi says so first.
+    const asked = piAsked ?? (status.asked?.state === "requested" ? ASKED_WORDS[status.asked.action] : undefined);
+    // An action is offered only when Central's `can` holds it, never while a request to its Pi is
+    // on its way, and never from a document that is not current: what may be asked now is then
+    // not known. A second Skip or Previous while the first is requested is a further step.
+    const actions: MenuItem[] = piAsked !== undefined || stale !== undefined ? []
+      : offeredActions(status).map((action) => ({ label: ACTION_WORDS[action], onAction: () => onAction(place, action) }));
     const items: MenuItem[] = [...actions,
       { label: "Why is this playing?", href: overview(place.frame_id) },
       { label: "Open Frame", href: frameHref(place.frame_id, status) }];
@@ -104,10 +115,10 @@ function Problem({ view, busy, stale, requested, onFix }: {
   view: ProblemView; busy: boolean; stale: boolean; requested: Readonly<Record<string, string>>; onFix: HomeBoardProps["onFix"];
 }) {
   const { fix } = view;
-  // A fix asked of a Pi is not offered again while that Pi has a request on its way; Carry on has
-  // nothing to carry on from until pauses exist. From a document that is not current only a link
-  // is offered: a fix the system performs is asked of what Central says now.
-  const offered = fix === null || fix.fix?.kind === "carry-on" || (stale && fix.fix !== undefined) ? null
+  // A fix asked of a Pi is not offered again while that Pi has a request on its way. From a
+  // document that is not current only a link is offered: a fix the system performs is asked of
+  // what Central says now.
+  const offered = fix === null || (stale && fix.fix !== undefined) ? null
     : fix.fix !== undefined && "device_id" in fix.fix && requested[fix.fix.device_id] !== undefined ? null : fix;
   return (
     <ProblemCard scope="live" subject={view.subject} since={view.since} verdict={view.verdict} what={view.what}
@@ -131,7 +142,9 @@ function Problem({ view, busy, stale, requested, onFix }: {
  * judges nothing: every word and severity is domain/frame-status.ts's reading of Central's codes.
  */
 export function HomeBoard(props: HomeBoardProps) {
-  const { state, now, pis, requested, busy, said, onFix, onHold, onResume, progress, more, showNowIn = "auto" } = props;
+  const {
+    state, now, pis, requested, busy, said, onFix, onHold, onResume, onEnd, onWallAction, onRetry, progress, more, showNowIn = "auto",
+  } = props;
   if (state.kind === "loading") {
     return (
       <Stack>
@@ -159,27 +172,31 @@ export function HomeBoard(props: HomeBoardProps) {
       place?.name ?? problem.frame_id ?? null,
       { pi: place?.device_id != null ? pis[place.device_id] ?? null : null, now });
   });
-  // What exists today: display power holds. A takeover and a pause have their banner kinds, and
-  // nothing draws them here until their way back exists (slice 3).
-  const holds = home.overrides.filter((override) => override.kind === "power-hold");
+  // What a person put over the schedule: display power holds, takeovers (Show now) and pauses, each
+  // with its way back. A takeover's and a pause's need their callback: without it the banner says
+  // what is in force and offers nothing.
+  const late = staleSince !== null ? [] : places.filter((place) => place.status.asked?.state === "late");
   return (
     <Stack>
       <Stack label="House">
         <HealthBadge verdict={{ ...houseVerdict(staleSince === null ? home.house : null), receipt: houseCounts(home) }} />
       </Stack>
-      {(staleSince !== null || problems.length > 0 || more != null) && (
+      {(staleSince !== null || problems.length > 0 || late.length > 0 || more != null) && (
         <Stack label="Problems">
           {staleSince !== null && <CentralDidNotAnswer since={instantWords(staleSince, now)} />}
           {problems.map((view) => <Problem key={view.key} view={view} busy={busy} stale={staleSince !== null} requested={requested} onFix={onFix} />)}
+          {late.map((place) => <LateAction key={place.frame_id} place={place} busy={busy} onRetry={onRetry} />)}
           {more}
         </Stack>
       )}
       {progress}
-      {holds.map((override) => {
+      {home.overrides.map((override) => {
         const view = overrideView(override, names, now);
+        const back = override.kind === "power-hold" ? () => onResume(override)
+          : onEnd === undefined || staleSince !== null ? null : () => onEnd(override);
         return (
-          <OverrideBanner key={override.id} kind={view.kind} label={view.label} title={view.title}
-            action={{ label: view.back, onAction: () => onResume(override), busy }}>
+          <OverrideBanner key={`${override.kind}:${override.id}`} kind={view.kind} label={view.label} title={view.title}
+            action={back === null ? undefined : { label: view.back, onAction: back, busy }}>
             <Note>{view.frames}</Note>
           </OverrideBanner>
         );
@@ -193,6 +210,12 @@ export function HomeBoard(props: HomeBoardProps) {
         const strip = nowNextWords(home.now_next.find((entry) => entry.surface_id === wall.surface_id), now);
         return (
           <WallMap key={wall.surface_id} name={wall.name} room={wall.room} frames={wallFrames(wall, props, stale)}
+            actions={onWallAction === undefined || stale !== undefined ? undefined : (
+              <WallActions wall={wall.name} busy={busy} actions={wallKinds(wall).map((kind) => ({
+                key: kind, label: WALL_ACTION_WORDS[kind].label, name: WALL_ACTION_WORDS[kind].name(wall.name),
+                onAction: () => onWallAction(wall, kind),
+              }))} />
+            )}
             below={<NowNextStrip now={strip.now} next={strip.next} />} />
         );
       })}
@@ -207,6 +230,29 @@ export function HomeBoard(props: HomeBoardProps) {
         {said !== null && <Note live>{said}</Note>}
       </Inline>
     </Stack>
+  );
+}
+
+/** The wall-wide actions Central offers on a wall now, Skip first. */
+function wallKinds(wall: WallView): SkipKind[] {
+  const can = wall.can ?? [];
+  return (["next", "previous"] as const).filter((kind) => can.includes(kind === "next" ? "skip" : "previous"));
+}
+
+/** An action asked of a Frame that its Pi has not shown by its deadline (`asked` is `late`): a card
+ * saying what did not happen, with **Retry** (a new request, which Central takes as that step again)
+ * where the action is one a Frame's menu asks again and Central's `can` offers it now; else a link
+ * to the Frame (a late Pause, whose pause still stands, or a Pi that stopped answering). */
+function LateAction({ place, busy, onRetry }: { place: FramePlace; busy: boolean; onRetry: HomeBoardProps["onRetry"] }) {
+  const asked = place.status.asked;
+  if (asked == null) return null;
+  const again = onRetry !== undefined && (asked.action === "skip" || asked.action === "previous" || asked.action === "pause")
+    && (place.status.can ?? []).includes(asked.action);
+  return (
+    <ProblemCard scope="action" subject={place.name} verdict={statusVerdict(place.status)}
+      what={lateWords(asked.action, place.name)} doing={null}
+      action={again ? { label: "Retry", onAction: () => { if (!busy) onRetry(place, asked); } }
+        : { label: "Open the Frame", href: overview(place.frame_id) }} />
   );
 }
 

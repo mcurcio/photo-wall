@@ -27,6 +27,36 @@ from pydantic import BaseModel, TypeAdapter
 from central.central_errors.views import CentralErrorsView, FrameImpedimentView
 from central.content_catalog.views import ReleasesView, VersionChoice
 from central.displays.views import LightView, PictureHistoryView
+from central.everyday.model import (
+    ACK_LATE_SECONDS,
+    END_LEAD,
+    PAUSE_SECONDS,
+    SKIP_LEAD,
+    EverydayRefusal,
+    PauseRefusal,
+)
+from central.everyday.views import (
+    BackToNormalAnswer,
+    BackToNormalRequest,
+    CarryOnAnswer,
+    NeverShowAnswer,
+    NeverShowListView,
+    NeverShowRequest,
+    PauseAnswer,
+    PauseRequest,
+    SkipAnswer,
+    SkipRequest,
+)
+from central.everyday_routes import (
+    CARRY_ON,
+    CARRY_ON_FRAME,
+    FRAME_SKIPS,
+    NEVER_SHOW,
+    PAUSES,
+    RUN_END,
+    SHOW_AGAIN,
+    WALL_SKIPS,
+)
 from central.fleet.app_restart import APP_RESTART_SECONDS, AppRestartRefusal, AppRestartsView
 from central.fleet.models import TrialRefusal
 from central.fleet.node_calibration import TrialBegin, TrialEdit, TrialStep
@@ -41,6 +71,7 @@ from central.home_routes import APP_RESTARTS, FRAME_STATUS, HOME, REBOOTS
 from central.infra.home_assistant import references
 from central.infra.home_assistant.views import HomeAssistantStatesView
 from central.infra.light_sensor_judge import PI_SOURCE
+from central.infra.photo_library_store import THUMBNAIL_PATH
 from central.operator_access.views import AccessView, LoggedOut, SessionView, SignInView
 from central.registry import FrameTurnChange, FrameVideoChange
 from central.room_light.model import (
@@ -55,6 +86,7 @@ from central.room_light.model import (
     Sensor,
 )
 from central.room_light.views import DrawnView, RefusedReportsView, RoomLightsView
+from central.runtime import PAUSE_RANK, ShowNowRefusal
 from contracts.central_api import InstallRefusal, InstallStarted
 from contracts.frame_lighting import (
     BEAM_DEGREES_MAX,
@@ -96,12 +128,12 @@ from contracts.room_light import (
 
 CONSOLE_BODIES: Final[tuple[type[BaseModel], ...]] = (   # bodies the console sends (and RoomLight, a union)
     Sensor, ColourSensor, TrialBegin, TrialEdit, TrialStep, FrameLighting, PositionRestore, VersionChoice, FrameTurnChange,
-    FrameVideoChange)
+    FrameVideoChange, SkipRequest, NeverShowRequest, PauseRequest, BackToNormalRequest)
 CONSOLE_VIEWS: Final[tuple[type[BaseModel], ...]] = (    # answers the console reads
     RoomLightsView, DrawnView, RefusedReportsView, PaperProfileView, PaperProfilesView,
     PositionHistoryView, PictureHistoryView, LightView, HomeAssistantStatesView, ReleasesView, InstallStarted,
     CentralErrorsView, FrameImpedimentView, SignInView, SessionView, LoggedOut, AccessView, HomeView, FrameStatusView,
-    AppRestartsView)
+    AppRestartsView, SkipAnswer, NeverShowAnswer, NeverShowListView, PauseAnswer, CarryOnAnswer, BackToNormalAnswer)
 CONSOLE_ALIASES: Final[Mapping[str, object]] = {     # named types a view's fields take, by their name
     "Lux": Lux, "LightColour": LightColour, "Reading": Reading}
 # The seconds of each photo a Transition must leave free: the Player's preparation time
@@ -127,10 +159,23 @@ CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
     # How long a reboot counts as on its way (row 3), and after how long a Restart app that is not
     # showing reads timed out: the console's progress waits by the same numbers.
     "REBOOT_ALLOWED_SECONDS": REBOOT_ALLOWED_SECONDS, "APP_RESTART_SECONDS": APP_RESTART_SECONDS,
+    # Slice 3's everyday actions: where Skip, Previous and Never show are asked, how far ahead a
+    # request's Frames move together, and when one not yet seen on its Frame is late.
+    "WALL_SKIPS_PATH": WALL_SKIPS, "FRAME_SKIPS_PATH": FRAME_SKIPS, "NEVER_SHOW_PATH": NEVER_SHOW,
+    "SHOW_AGAIN_PATH": SHOW_AGAIN, "SKIP_LEAD": SKIP_LEAD, "ACK_LATE_SECONDS": ACK_LATE_SECONDS,
+    # Pause, Carry on and Back to normal: where each is asked, a pause's default length (setting
+    # #86) and how far ahead a hand-made end is cut.
+    "PAUSES_PATH": PAUSES, "CARRY_ON_PATH": CARRY_ON, "CARRY_ON_FRAME_PATH": CARRY_ON_FRAME,
+    "PAUSE_SECONDS": PAUSE_SECONDS, "END_LEAD": END_LEAD, "RUN_END_PATH": RUN_END,
+    # The rank of a pause's hold: a Show now's priority is below it (central/app.py
+    # `ActivationRequest`), so Show now › Advanced checks it before it sends.
+    "PAUSE_RANK": PAUSE_RANK,
+    # Where a photo's thumbnail is read (the Never show list), its asset id appended.
+    "THUMBNAIL_PATH": THUMBNAIL_PATH,
 }
 CONSOLE_REFUSALS: Final[tuple[type[StrEnum], ...]] = (   # each context's closed refusal enum
     RoomLightRefusal, FrameLightingRefusal, PaperProfileRefusal, ReportRefusal, DrawnReportRefusal, TrialRefusal,
-    PositionRestoreRefusal, InstallRefusal, AppRestartRefusal,
+    PositionRestoreRefusal, InstallRefusal, AppRestartRefusal, EverydayRefusal, PauseRefusal, ShowNowRefusal,
 )
 
 

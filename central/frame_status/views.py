@@ -7,11 +7,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Annotated, Literal
+from collections.abc import Iterable
+from typing import Annotated, Final, Literal
 
 from pydantic import Field
 
 from central.frame_status.model import (
+    Action,
     FrameStatus,
     HouseStatus,
     Override,
@@ -70,11 +72,22 @@ class FramePlace(Model):
 
 
 class WallView(Model):
-    """One Wall and its Frames, in Frame id order."""
+    """One Wall and its Frames, in Frame id order. `can`: the wall-wide everyday actions (Skip and
+    Previous on every Frame of it, the owner's S1), present when any of its Frames offers it."""
     surface_id: Identifier
     name: str
     room: str
     frames: tuple[FramePlace, ...]
+    can: tuple[Action, ...] = ()
+
+
+# The actions a Wall offers when any of its Frames does.
+WALL_ACTIONS: Final = frozenset({Action.SKIP, Action.PREVIOUS})
+
+
+def wall_can(statuses: Iterable[FrameStatus]) -> tuple[Action, ...]:
+    """A Wall's `can`: each wall-wide action any of its Frames offers, sorted."""
+    return tuple(sorted({action for status in statuses for action in status.can if action in WALL_ACTIONS}))
 
 
 class HomeView(Model):
@@ -116,5 +129,5 @@ class FrameStatusView(Model):
     recent: tuple[StatusChangeView, ...]
 
 
-__all__ = ["FramePlace", "FrameStatusView", "HomeView", "NowNext", "Playing", "PlayingKind", "StatusChangeView", "Upcoming",
-           "WallView", "home_view"]
+__all__ = ["WALL_ACTIONS", "FramePlace", "FrameStatusView", "HomeView", "NowNext", "Playing", "PlayingKind", "StatusChangeView", "Upcoming",
+           "WallView", "home_view", "wall_can"]

@@ -66,6 +66,8 @@ class AcquisitionStopped(Exception):
 
 @dataclass
 class _Assignment:
+    # The layer as drawn: as offered, with Central's cut applied (`Layer.drawn`), so every rule
+    # reads one end; `offered` keeps it as offered (its content identity and its cut).
     layer: Layer
     owner: str
     secured: bool = False
@@ -97,6 +99,12 @@ class _Assignment:
     # What the latest observation of it said (`_report`): Central hears a change once, never a
     # level state again on every tick.
     reported: tuple | None = None
+    # The layer as Central offered it, its cut included (None: `layer` is as offered).
+    offered: Layer | None = None
+
+    @property
+    def as_offered(self) -> Layer:
+        return self.offered or self.layer
 
 
 @dataclass(frozen=True)
@@ -111,7 +119,42 @@ def _content_identity(layer: Layer) -> tuple:
     return (
         layer.run_id, layer.output_id, layer.frame_id, layer.binding_generation,
         layer.variant, layer.presentation, layer.start, layer.end, layer.media_origin,
+        layer.action,
     )
+
+
+def cut_is_final(before: Layer, after: Layer) -> bool:
+    """Decision 0036: Central's cut (`Layer.cut_at`) is set once and only ever brought earlier;
+    a revision that removes it or moves it later is refused."""
+    return before.cut_at is None or (after.cut_at is not None and after.cut_at <= before.cut_at)
+
+
+def _cut(layer: Layer | None, offered: Layer) -> Layer | None:
+    """`layer` (a grant or an execution of `offered`'s content) under `offered`'s cut: a cut
+    only brings an end earlier, never adds authority."""
+    if layer is None or offered.cut_at is None or offered.cut_at >= layer.end:
+        return layer
+    return layer.model_copy(update={"cut_at": offered.cut_at, "fade_out": offered.fade_out}).drawn()
+
+
+CUT_WAIT_STEP = 2.0
+"""Seconds by which the one wait at a cut (`Executor._wait_at_cuts`) moves a cut layer's end past
+`now` and its fade-out each time: the fade begins at most this long after the layer beneath is
+ready. Moved again once less than half of it is left, so a still picture is not redrawn every
+tick, which needs a tick (or a prepare pass) more often than every `CUT_WAIT_STEP / 2`."""
+
+
+def _waited(layer: Layer | None, offered: Layer, cut: float | None) -> Layer | None:
+    """`layer` (the layer as drawn, a grant or an execution of `offered`'s content) ending at
+    `cut` with `offered`'s fade-out instead of where it ended (None: at `offered`'s own end): the
+    one wait (decision 0036, S3) moves a cut later than Central's and never past the layer's end,
+    and never adds authority a layer did not have."""
+    if layer is None:
+        return None
+    whole = layer.model_copy(update={"end": offered.end, "cut_at": None, "fade_out": offered.fade_out})
+    if cut is None or cut >= offered.end:
+        return whole
+    return whole.model_copy(update={"cut_at": cut}).drawn()
 
 
 def _binding_identity(binding: OutputBinding) -> tuple:
@@ -123,7 +166,7 @@ def may_still_play(plan: Plan, layer: Layer, now: float) -> bool:
     own span and the plan's validity, or as the source of a continuation of the plan that has not
     ended. The one test of how long a plan layer's bytes are wanted (the executor's pins, the
     service's downloads)."""
-    if now < min(layer.end, plan.valid_until):
+    if now < min(layer.drawn_end, plan.valid_until):
         return True
     return any(layer.assignment_id in continuation.photos
                and (continuation.until is None or continuation.until > now)
@@ -319,17 +362,25 @@ class Executor:
             for layer in plan.layers:
                 old = self._assignments.get(layer.assignment_id) or self._inactive.get(layer.assignment_id)
                 if old and (old.secured or old.acquiring) and (
-                    _content_identity(layer) != _content_identity(old.layer)
+                    _content_identity(layer) != _content_identity(old.as_offered)
                 ):
                     raise AuthorityError("secured assignment content is immutable")
+                if (old and _content_identity(layer) == _content_identity(old.as_offered)
+                        and not cut_is_final(old.as_offered, layer)):
+                    raise AuthorityError("cut_is_final")
             next_assignments: dict[str, _Assignment] = {}
             for layer in plan.layers:
                 key = layer.assignment_id
                 if key in self._cancelled:
                     continue
                 old = self._assignments.get(key) or self._inactive.pop(key, None)
-                if old and _content_identity(layer) == _content_identity(old.layer):
-                    old.layer = layer
+                if old and _content_identity(layer) == _content_identity(old.as_offered):
+                    old.layer, old.offered = layer.drawn(), layer
+                    # Decision 0036: a cut applies to what already runs, its grant included.
+                    old.granted_layer = _cut(old.granted_layer, layer)
+                    old.execution_layer = _cut(old.execution_layer, layer)
+                    if old.execution_layer is not None:
+                        old.execution_until = min(old.execution_until, old.execution_layer.end)
                     # Revision-specific authorization must be renewed by central. Until it
                     # is, the grant already accepted still starts this content at its time:
                     # the newer revision arrives before its own Commit can.
@@ -339,9 +390,9 @@ class Executor:
                     next_assignments[key] = old
                 else:
                     next_assignments[key] = _Assignment(
-                        layer, f"pwexec:{self.player_id}:{self._last_epoch}:{key}",
+                        layer.drawn(), f"pwexec:{self.player_id}:{self._last_epoch}:{key}",
                         secured=layer.presentation == "black",
-                        offered_until=plan.valid_until,
+                        offered_until=plan.valid_until, offered=layer,
                     )
             drawn = {local.layer.assignment_id for composition in self._current.values()
                      if not composition.fallback for local in composition.layers}
@@ -631,6 +682,46 @@ class Executor:
             return layer.start, layer.end
         return max(layer.start, self._plan.valid_from), min(layer.end, self._plan.valid_until)
 
+    def _ready_beneath(self, cut: _Assignment, now: float) -> bool:
+        """Whether what `cut`'s Frame shows beneath it at `now` can be drawn: the topmost layer
+        below it there in force now (a continuation slot included) is secured, prepared (or ready
+        for its reveal, `deferred`), not failed, and may start or runs. True with nothing beneath:
+        the Frame then takes its after-state, as at any end."""
+        order = stack_order(self._drawn_layer(cut))
+        beneath = [a for key, a in self._assignments.items()
+                   if a is not cut and a.layer.output_id == cut.layer.output_id
+                   and key not in self._superseded and key not in self._invalidated
+                   and self._current_authority(a) and self._assignment_in_force(a, now)
+                   and a.layer.start <= now < a.layer.end and stack_order(self._drawn_layer(a)) < order]
+        if not beneath:
+            return True
+        top = max(beneath, key=lambda a: stack_order(self._drawn_layer(a)))
+        return (top.secured and (top.prepared or top.deferred) and top.failure is None
+                and (self._may_start(top, now) or self._executing(top, now)))
+
+    def _wait_at_cuts(self, now: float) -> None:
+        """Decision 0036 (S3), the Player's one wait: a layer on screen that Central cut (Back to
+        normal, a takeover's end, Carry on) is drawn on past its cut while what shows beneath it
+        is not ready (never downloaded, or its place given up), and then fades, so a Frame never
+        goes black at a cut. Each pass moves its end to `CUT_WAIT_STEP` past `now` and its
+        fade-out, never past the layer's own end; once the layer beneath is ready its end stays,
+        and it fades from there. Central's cut, as offered, is unchanged (`cut_is_final`)."""
+        for assignment in self._assignments.values():
+            offered = assignment.offered
+            if (offered is None or offered.cut_at is None or offered.cut_at >= offered.end
+                    or not assignment.started or now >= offered.end):
+                continue
+            drawn_end = assignment.layer.end
+            if now < drawn_end - offered.fade_out - CUT_WAIT_STEP / 2 or self._ready_beneath(assignment, now):
+                continue
+            cut = now + offered.fade_out + CUT_WAIT_STEP
+            cut = None if cut >= offered.end else cut
+            assignment.layer = _waited(assignment.layer, offered, cut)
+            assignment.granted_layer = _waited(assignment.granted_layer, offered, cut)
+            assignment.execution_layer = _waited(assignment.execution_layer, offered, cut)
+            if assignment.execution_layer is not None:
+                assignment.execution_until = assignment.execution_layer.end
+
     def _imminent(self, now: float) -> list[_Assignment]:
         if not self._plan:
             return []
@@ -746,6 +837,7 @@ class Executor:
         with self._lock:
             now = self._now()
             self._continue(now)
+            self._wait_at_cuts(now)
             self._drain_renderer_releases()
             imminent = self._imminent(now)
             until, horizon = now + self.prepare_lead, self._horizon(now)
@@ -1299,6 +1391,7 @@ class Executor:
             now = timebase + self.clock.monotonic()
             if not self._config:
                 return ()
+            self._wait_at_cuts(now)
             for output_id, binding in tuple(self._retired_outputs.items()):
                 if self._show_fallback(OutputComposition(binding, fallback=True)):
                     del self._retired_outputs[output_id]

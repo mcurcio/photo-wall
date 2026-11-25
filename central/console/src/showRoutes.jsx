@@ -2,6 +2,7 @@ import React from "react";
 
 import { FrameHealthBadges } from "./FrameHealthBadges.jsx";
 import { MediaPipeline } from "./MediaPipeline.jsx";
+import { NeverShowPage } from "./pages/never-show-page.tsx";
 import { WeekPage } from "./pages/week-page.tsx";
 import { ProgramsRegion } from "./ProgramsRegion.jsx";
 import SAMPLES from "./routeSamples.json";
@@ -63,6 +64,14 @@ export const showRoutes = Object.freeze(
         </section>
       ),
       samplePaths: SAMPLES.show.scenes,
+    },
+    {
+      section: "never-show",
+      label: "Never show",
+      // Scenes › Never show list (decision 0036, F3): every photo hidden from the wall, with Show
+      // again. Mounted like every Show section, it reads only while it is current.
+      render: ({ route }) => <NeverShowPage current={route?.section === "never-show"} />,
+      samplePaths: SAMPLES.show["never-show"],
     },
     {
       section: "schedule",

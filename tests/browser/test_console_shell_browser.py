@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 from console_tasks import (
     LABELS,
+    SHOW_SECTIONS,
     add_source,
     author_scene,
     bottom_tabs,
@@ -191,7 +192,7 @@ def test_the_sidebar_groups_home_frames_show_fleet_and_settings_in_a_fixed_order
         expect(nav.get_by_role("list")).to_have_count(5)
         for group, labels in (("Home", ["Home"]),
                               ("Frames", ["Wall"]),
-                              ("Show", [LABELS[s] for s in ("now", "scenes", "schedule", "sources")]),
+                              ("Show", [LABELS[s] for s in ("now", "scenes", "never-show", "schedule", "sources")]),
                               ("Fleet", ["Hardware", "Releases"]),
                               ("Settings", ["Photo library", "Photo fit", "House", "House › Lights", "Home Assistant", "Paper profiles",
                                             "People and access"])):
@@ -384,7 +385,7 @@ def test_hidden_show_pages_announce_no_status(page, registry):
         expect(page.get_by_role("status").filter(has_text=saved)).to_have_count(0)
         assert saved not in page.locator("body").aria_snapshot()
         # Every Show page but none of the others is in the DOM while the Wall is shown.
-        assert page.locator("main > section").count() == 5
+        assert page.locator("main > section").count() == len(SHOW_SECTIONS) + 1
         expect(page.locator("main > section:not([hidden])")).to_have_count(1)
 
 

@@ -20,7 +20,10 @@ import { FitBoardFor } from "./domain/photo-fit-board.tsx";
 import { ScenePicker } from "./ScenePicker.jsx";
 import {
   activationAnswer,
+  activationBody,
+  chosenFrames,
   editActivation,
+  END_LABELS,
   REPEAT_LABELS,
   seedShowNow,
   shownPriority,
@@ -28,6 +31,8 @@ import {
   SHOW_FIELD_STEP,
   SHOW_KEYS,
   SHOW_STEPS,
+  showNowProblems,
+  toggledFrames,
 } from "./showNowModel.js";
 import {
   coveringPriority,
@@ -113,11 +118,11 @@ export function ShowNowFlow({ snapshot, route, navigate, recentScene, markDraft 
   const problemList = useMemo(
     () =>
       inStepOrder(
-        activationProblems({ sceneId: value.sceneId, priority }),
+        [...activationProblems({ sceneId: value.sceneId, priority }), ...showNowProblems(value, frames)],
         SHOW_FIELD_STEP,
         SHOW_STEPS,
       ),
-    [value.sceneId, priority],
+    [value, priority, frames],
   );
   const problems = useProblems(problemList);
   // One confirmation for this flow: discarding its draft (its `after` runs once done).
@@ -170,12 +175,7 @@ export function ShowNowFlow({ snapshot, route, navigate, recentScene, markDraft 
   const activate = () =>
     write.send(flow, async (sent) => {
       const asked = { sceneId: value.sceneId, priority: Number(priority) };
-      const body = {
-        scene_id: asked.sceneId,
-        activation_id: value.activationKey,
-        priority: asked.priority,
-        repeat: value.repeat,
-      };
+      const body = activationBody(value, asked.priority, frames);
       setOutcome(null);
       const result = await sent.request(() =>
         apiWrite("/v1/operator/activations", { method: "POST", body }),
@@ -272,6 +272,46 @@ function SceneFramesValue({ snapshot, frames }) {
 }
 
 /**
+ * Which of the Scene's Frames it plays on (decision 0036, setting #85): every one ticked by
+ * default, each named explicitly; a Frame left out gets no command at all. The Scene's lamps and
+ * other devices take part whichever Frames are chosen (the owner's S7).
+ */
+function FramesChoice({ value, problems, edit, snapshot, frames }) {
+  const chosen = chosenFrames(value, frames);
+  return (
+    <fieldset id={problems.idFor("frames")} className="run-control__repeat" aria-label="Frames">
+      <legend>Frames</legend>
+      {frames.map((frameId) => (
+        <label key={frameId} className="run-control__repeat-option">
+          <input type="checkbox" checked={chosen.includes(frameId)}
+            onChange={() => edit({ frameIds: toggledFrames(value, frames, frameId) }, "frames")} />
+          {frameId}
+        </label>
+      ))}
+      <FrameChips snapshot={snapshot} frameIds={chosen} recoveryLinks />
+      {problems.reasonFor("frames") !== null && <p className="field__reason">{problems.reasonFor("frames")}</p>}
+    </fieldset>
+  );
+}
+
+/** When it ends (decision 0036, the owner's S3: at that time, mid-photo): in an hour, at tonight's
+ * Night off, or when Back to normal is pressed. */
+function EndsChoice({ value, problems, edit }) {
+  const name = useId();
+  return (
+    <fieldset id={problems.idFor("ends")} className="run-control__repeat" aria-label="Ends">
+      <legend>Ends</legend>
+      {Object.entries(END_LABELS).map(([ends, label]) => (
+        <label key={ends} className="run-control__repeat-option">
+          <input type="radio" name={name} checked={value.ends === ends} onChange={() => edit({ ends }, "ends")} />
+          {label}
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
+/**
  * Step 1, Scene: the one Scene picker (slice 3 §3), then the frames it reaches. `offered`
  * is a Scene handed over while the draft keeps its own: a button offers it instead.
  */
@@ -295,12 +335,17 @@ function SceneStep({ value, problems, edit, snapshot, frames, sourceRefs, author
       />
       {value.sceneId !== "" && (
         <>
-          <dl className="record record--even">
-            <dt>Frames</dt>
-            <dd>
-              <SceneFramesValue snapshot={snapshot} frames={frames} />
-            </dd>
-          </dl>
+          {frames.length > 0 ? (
+            <FramesChoice value={value} problems={problems} edit={edit} snapshot={snapshot} frames={frames} />
+          ) : (
+            <dl className="record record--even">
+              <dt>Frames</dt>
+              <dd>
+                <SceneFramesValue snapshot={snapshot} frames={frames} />
+              </dd>
+            </dl>
+          )}
+          <EndsChoice value={value} problems={problems} edit={edit} />
           <SceneSources snapshot={snapshot} refs={sourceRefs} authoredMedia={authoredMedia} />
           {sourceRefs.length > 0 && frames.length > 0 && (
             <SceneFit sceneId={value.sceneId} scene={definitions[value.sceneId]} sourceRefs={sourceRefs} frames={frames} />
@@ -387,7 +432,8 @@ function ReviewStep({
         onChange={onChange}
         rows={[
           { label: "Scene", field: "scene", value: value.sceneId === "" ? <NotChosen /> : value.sceneId },
-          { label: "Frames", value: <SceneFramesValue snapshot={snapshot} frames={frames} /> },
+          { label: "Frames", field: "frames", value: <SceneFramesValue snapshot={snapshot} frames={chosenFrames(value, frames)} /> },
+          { label: "Ends", field: "ends", value: END_LABELS[value.ends] },
           {
             label: "Priority",
             field: "priority",

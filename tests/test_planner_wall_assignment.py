@@ -23,6 +23,9 @@ from support.key_content_builders import face, measured
 from support.position import LIGHTING
 
 from central.catalog import Candidate, SourcePool
+from central.everyday.model import CoverCause, SkipKind
+from central.everyday.policy import cover_for, photo_of, showing_at
+from central.everyday.ports import FrameFacts, LayerOrigin, ShownPhoto
 from central.planner import PlannerLimits, Projection, project
 from central.runtime import Contribution, Runtime, Scene, Transition
 from central.wall_plan.assignment import (
@@ -97,7 +100,8 @@ def scene(frames: dict[str, FrameSetup], *, cycle: float = 30, order="newest_fir
 def plan(instance: Runtime, frames: dict[str, FrameSetup], photos, *, now: float = 0,
          horizon: float = 300, plan_seconds: float = 3600, locks=(), authored=(),
          history: WallHistory = WallHistory(), limits: PlannerLimits = PlannerLimits(),
-         fit: FitSettings = FitSettings(), reserved=(), frame_uncertainty=None) -> Projection:
+         fit: FitSettings = FitSettings(), reserved=(), frame_uncertainty=None, covers=(),
+         never: frozenset[str] = frozenset(), holds=()) -> Projection:
     """Each Frame full screen on a Display of its profile's size (its Frame output)."""
     return project(
         instance, now,
@@ -110,8 +114,8 @@ def plan(instance: Runtime, frames: dict[str, FrameSetup], photos, *, now: float
         locked_assignments={layer.assignment_id: layer for layer in locks},
         history=history, horizon_seconds=horizon, plan_seconds=plan_seconds,
         max_clock_uncertainty=UNCERTAINTY, limits=limits, settings=fit,
-        reserved=reserved, frame_uncertainty=frame_uncertainty,
-        frame_outputs=frame_outputs_of({
+        reserved=reserved, frame_uncertainty=frame_uncertainty, covers=covers, never=never,
+        holds=holds, frame_outputs=frame_outputs_of({
             frame: (PROFILES[setup.shape].width_px, PROFILES[setup.shape].height_px)
             for frame, setup in frames.items()}, inches=24))
 
@@ -597,3 +601,217 @@ def test_each_frames_hand_over_guard_is_its_own_players_reported_bound():
     assert extents["silent"] == Extent(start=100 - 2 * UNCERTAINTY, end=130 + 2 * UNCERTAINTY)
     cap = 2 * MAX_GUARD_UNCERTAINTY
     assert extents["lost"] == Extent(start=100 - cap, end=130 + cap)
+
+
+# --- Decision 0036 (slice 3): an everyday action's covers ------------------------------------------
+
+
+def facts_of(projection: Projection, frame: str, *, history=(), listed=frozenset()) -> FrameFacts:
+    """A Frame as the everyday rules read it from a projection's offered layers."""
+    on_frame = tuple(layer for layer in layers(projection) if layer.frame_id == frame)
+    return FrameFacts(frame_id=frame, layers=on_frame, history=history, listed=listed,
+                      origins={layer.assignment_id: LayerOrigin(scene_id="scene")
+                               for layer in on_frame if not layer.action})
+
+
+def covered_plan(frames, photos, *, kind=SkipKind.NEXT, cycle=30, at=10, cue=None, history=(),
+                 frame="left", authored=(), never=frozenset()):
+    """A plan, then the cover a skip asked at `at - 2` adds on `frame`, then the re-plan at
+    `at - 2` with the first plan's layers locked."""
+    instance = scene(frames, cycle=cycle)
+    first = plan(instance, frames, photos, authored=authored)
+    cover = cover_for(facts_of(first, frame, history=history), kind,
+                      CoverCause.NEXT if kind is SkipKind.NEXT else CoverCause.PREVIOUS,
+                      request_id="request", at=at, now=at - 2, cue=cue)
+    assert cover is not None
+    second = plan(instance, frames, photos, now=at - 2, locks=layers(first),
+                  history=WallHistory(selected=offered_history(first)), covers=(cover,),
+                  authored=authored, never=never)
+    return first, cover, second
+
+
+def test_a_joining_cover_is_emitted_unchanged_above_its_layer():
+    """A Skip on a Frame whose next turn is offered: its cover shows that turn's photo from the
+    shared instant until that turn's layer is fully in, above it, and every offered layer stays as
+    it was. Mutation probe: drop `joins` covers in `add_covers`."""
+    frames = {"left": FrameSetup("wide"), "right": FrameSetup("wide")}
+    photos = [photo(f"wide-{n}", "wide", captured=n) for n in range(8)]
+    first, cover, second = covered_plan(frames, photos)
+    assert cover.how == "joins"
+    replanned = {layer.assignment_id: layer for layer in layers(second)}
+    assert replanned[cover.cover_id] == cover.layer
+    assert replanned[cover.cover_id].action and replanned[cover.cover_id].start == 10
+    for lock in layers(first):
+        assert replanned[lock.assignment_id] == lock
+    joined = replanned[cover.joined]
+    assert photo_of(replanned[cover.cover_id]) == photo_of(joined)
+    assert showing_at(tuple(layer for layer in layers(second) if layer.frame_id == "left"),
+                      15).assignment_id == cover.cover_id
+
+
+def test_a_pick_cover_takes_the_lines_next_never_the_photo_left():
+    """A Skip on a Frame whose turn outlasts the offer (a 10-minute turn): the cover is a slot of
+    the wall plan, filled from the Scene's line, never with the photo left, and never a repeat.
+    Mutation probe: let a pick take `excluded`."""
+    frames = {"left": FrameSetup("wide")}
+    photos = [photo(f"wide-{n}", "wide", captured=n) for n in range(3)]
+    first, cover, second = covered_plan(frames, photos, cycle=600)
+    assert cover.how == "pick"
+    placed = next(layer for layer in layers(second) if layer.assignment_id == cover.cover_id)
+    assert placed.action and placed.start == 10 and placed.end == cover.end
+    assert photo_of(placed) != cover.left and photo_of(placed) in {p.asset_id for p in photos}
+    assert not any(span for span in second.for_player("player").unfilled
+                   if span.start == 10), "a cover is never an unfilled span"
+
+
+def test_a_pick_cover_with_no_photo_but_the_one_left_waits_unfilled():
+    """A pick with nothing else to take is not a repeat: it stays unplaced (the next pass plans it
+    again), and the Frame keeps its layer."""
+    frames = {"left": FrameSetup("wide")}
+    _, cover, second = covered_plan(frames, [photo("only", "wide")], cycle=600)
+    assert cover.how == "pick"
+    assert cover.cover_id not in {layer.assignment_id for layer in layers(second)}
+
+
+def test_a_previous_cover_places_its_photo_even_where_another_frame_shows_it():
+    """The owner's S4: Previous shows the photo the Frame showed before even when another Frame
+    shows it now; the plan never adds an overlap itself. Mutation probe: ask whether a
+    hand-placed cover's photo is free."""
+    frames = {"left": FrameSetup("wide"), "right": FrameSetup("wide")}
+    photos = [photo(f"wide-{n}", "wide", captured=n) for n in range(8)]
+    first = plan(scene(frames), frames, photos)
+    on_right = photo_of(showing_at([layer for layer in layers(first) if layer.frame_id == "right"], 10))
+    on_left = photo_of(showing_at([layer for layer in layers(first) if layer.frame_id == "left"], 10))
+    history = (ShownPhoto(asset_id=on_left, assignment_id="a-now", presented_at=5),
+               ShownPhoto(asset_id=on_right, assignment_id="a-before", presented_at=-30))
+    _, cover, second = covered_plan(frames, photos, kind=SkipKind.PREVIOUS, history=history,
+                                    authored=photos)
+    assert cover.how == "pinned" and cover.pinned == on_right
+    placed = next(layer for layer in layers(second) if layer.assignment_id == cover.cover_id)
+    assert photo_of(placed) == on_right and placed.action
+
+
+def test_a_wall_cover_is_a_cue_member_and_a_frames_own_is_not():
+    frames = {"left": FrameSetup("wide")}
+    photos = [photo(f"wide-{n}", "wide", captured=n) for n in range(4)]
+    _, cover, second = covered_plan(frames, photos, cue="skip-request")
+    assert cover.cover_id in {cue.assignment_id for cue in second.cues}
+    _, own, alone = covered_plan(frames, photos)
+    assert own.cover_id not in {cue.assignment_id for cue in alone.cues}
+
+
+@settings(max_examples=40, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+@given(walls(), st.integers(0, 3), st.booleans())
+def test_no_placement_overlaps_an_action_layer(case, which, previous):
+    """Property: a random wall, a Skip or Previous asked on one Frame, the wall re-planned with
+    the cover: every photo the re-plan placed itself (not a lock, not the cover) is off every
+    other Frame while the cover shows it. Walking covers after the other slots is caught by the
+    deterministic `test_a_slot_planned_with_a_cover_never_takes_its_photo_on_another_frame`, not
+    reliably here (random examples seldom give a fresh slot the cover's photo)."""
+    frames, photos, _, kept, cycle, order, _, transition = case
+    instance = scene(frames, cycle=cycle, order=order, transition=transition)
+    first = plan(instance, frames, photos, horizon=60, plan_seconds=600, authored=photos,
+                 history=WallHistory(kept=kept))
+    frame = sorted(frames)[which % len(frames)]
+    history = tuple(ShownPhoto(asset_id=c.asset_id, assignment_id=f"h{n}", presented_at=-10 * n)
+                    for n, c in enumerate(photos))
+    kind = SkipKind.PREVIOUS if previous else SkipKind.NEXT
+    facts = facts_of(first, frame, history=history)
+    cover = cover_for(facts, kind, CoverCause.NEXT, request_id="r", at=12, now=10, cue=None)
+    if cover is None:
+        return
+    second = plan(instance, frames, photos, now=10, horizon=60, plan_seconds=600,
+                  locks=layers(first), history=WallHistory(selected=offered_history(first), kept=kept),
+                  authored=photos, covers=(cover,))
+    placed = next((layer for layer in layers(second) if layer.assignment_id == cover.cover_id), None)
+    if placed is None or photo_of(placed) is None:
+        return
+    guard = 2 * UNCERTAINTY
+    locked = {layer.assignment_id for layer in layers(first)}
+    for entry in second.plan:
+        if (entry.frame_id != frame and entry.asset_id == photo_of(placed)
+                and entry.assignment_id not in locked):
+            assert entry.end + guard <= placed.start - guard or entry.start - guard >= placed.end + guard, (
+                entry, placed)
+
+
+@settings(max_examples=40, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+@given(walls(), st.data())
+def test_a_listed_photo_is_never_assigned_again_across_replans(case, data):
+    """Property: with some photos on the Never show list, no slot of either plan takes one (an
+    empty pool is not relaxed: the slot is unfilled), a hand-placed one included, and no
+    continuation lists one; only a layer offered before it was listed (a lock) still shows it.
+    Mutation probe: leave `never` out of `_Walk._standing`."""
+    frames, photos, refreshed, kept, cycle, order, later, transition = case
+    listed = frozenset(data.draw(st.sets(st.sampled_from([c.asset_id for c in photos]))))
+    instance = scene(frames, cycle=cycle, order=order, transition=transition)
+    first = plan(instance, frames, photos, horizon=60, plan_seconds=600, authored=photos,
+                 history=WallHistory(kept=kept), never=listed)
+    assert not {entry.asset_id for entry in first.plan} & listed
+    locks = layers(first)
+    second = plan(instance, frames, refreshed, now=later, horizon=60, plan_seconds=600,
+                  locks=locks, history=WallHistory(selected=offered_history(first), kept=kept),
+                  authored=photos, never=listed)
+    locked = {layer.assignment_id for layer in locks}
+    assert not {entry.asset_id for entry in second.plan if entry.assignment_id not in locked} & listed
+    offered = {layer.assignment_id: photo_of(layer) for layer in layers(second)}
+    for continuation in second.for_player("player").continuations:
+        assert not {offered[photo] for photo in continuation.photos} & listed
+
+
+def test_a_slot_planned_with_a_cover_never_takes_its_photo_on_another_frame():
+    """The duplicate line: a Previous pins Q on the left while the right's turn, not offered yet,
+    would take Q from the line; the plan gives the right another photo, as the cover is walked
+    first and its extent counts. Mutation probe: walk covers after the other slots."""
+    frames = {"left": FrameSetup("wide"), "right": FrameSetup("wide")}
+    photos = [photo(f"wide-{n}", "wide", captured=n) for n in range(8)]
+    instance = scene(frames)
+    first = plan(instance, frames, photos)
+    left_only = tuple(layer for layer in layers(first) if layer.frame_id == "left")
+    history = WallHistory(selected=tuple(row for row in offered_history(first) if row.frame_id == "left"))
+    alone = plan(instance, frames, photos, now=8, locks=left_only, history=history)
+    wanted = photo_of(showing_at([layer for layer in layers(alone) if layer.frame_id == "right"], 10))
+    on_left = photo_of(showing_at(left_only, 10))
+    assert wanted != on_left
+    facts = FrameFacts(frame_id="left", layers=left_only,
+                       origins={layer.assignment_id: LayerOrigin(scene_id="scene") for layer in left_only},
+                       history=(ShownPhoto(asset_id=on_left, assignment_id="a-now", presented_at=5),
+                                ShownPhoto(asset_id=wanted, assignment_id="a-before", presented_at=-30)))
+    cover = cover_for(facts, SkipKind.PREVIOUS, CoverCause.PREVIOUS, request_id="r", at=10, now=8, cue=None)
+    assert cover is not None and cover.pinned == wanted
+    second = plan(instance, frames, photos, now=8, locks=left_only, history=history, covers=(cover,),
+                  authored=photos)
+    placed = next(layer for layer in layers(second) if layer.assignment_id == cover.cover_id)
+    assert photo_of(placed) == wanted
+    right_now = showing_at([layer for layer in layers(second) if layer.frame_id == "right"], 10)
+    assert photo_of(right_now) != wanted
+
+
+def test_a_hold_is_emitted_over_every_run():
+    """Decision 0036: a pause's hold is drawn above every Run, a Show now admitted during the
+    pause included (the owner's S6), and no new placement gives its photo to another Frame while
+    it holds. Mutation probes: drop `add_holds`; leave the hold's extent out of the fixed
+    showings."""
+    from central.everyday.model import Pause
+    from central.everyday.policy import hold_for
+    from central.runtime import PAUSE_RANK
+    frames = {"left": FrameSetup("wide"), "right": FrameSetup("wide")}
+    photos = [photo(f"wide-{n}", "wide", captured=n) for n in range(4)]
+    instance = scene(frames)
+    first = plan(instance, frames, photos, horizon=20)
+    held = hold_for(facts_of(first, "left"), pause_id="pause", at=10, ends_at=250, priority=PAUSE_RANK)
+    pause = Pause(pause_id="pause", frame_id="left", by="person:matt", started_at=10, ends_at=250,
+                  scene_id="scene", held=held)
+    instance.set_scene(Scene(scene_id="takeover", cycle_seconds=600, contributions=(
+        Contribution(target="frame:left", source_refs=(POOL,)),)))
+    instance.activate("takeover", "show-now", 8, priority=3)
+    second = plan(instance, frames, photos, now=8, locks=layers(first), holds=(pause,),
+                  history=WallHistory(selected=offered_history(first)))
+    left = tuple(layer for layer in layers(second) if layer.frame_id == "left")
+    assert held in left
+    for at in (20, 100, 200):
+        assert showing_at(left, at) == held
+    new_right = [layer for layer in layers(second) if layer.frame_id == "right"
+                 and layer.assignment_id not in {lock.assignment_id for lock in layers(first)}]
+    assert len([layer for layer in new_right if layer.start < 250]) >= 5
+    assert all(photo_of(layer) != photo_of(held) for layer in new_right if layer.start < 250)

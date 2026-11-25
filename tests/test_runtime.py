@@ -1565,3 +1565,260 @@ def test_centrals_opacity_is_the_players_layer_alpha(playing):
                       opacity=intent.base_opacity, fade_in=intent.fade_in_seconds,
                       fade_out=intent.fade_out_seconds)
         assert intent.opacity == pytest.approx(layer.alpha(now)), now
+
+
+# --- Decision 0036 (slice 3): Show now on chosen Frames with an end, and Back to normal ----------
+
+def _takeover_scene(**kwargs):
+    fields = dict(scene_id="holidays", loop=True, cycle_seconds=60,
+                  contributions=(media("frame:left"), media("frame:right"), lamp()),
+                  outro_seconds=10, outro_contributions=(media("frame:left", source="ending:v1"),),
+                  transition=Transition(seconds=2))
+    fields.update(kwargs)
+    return Scene(**fields)
+
+
+def _regular(runtime):
+    runtime.set_scene(Scene(scene_id="regular", loop=True, cycle_seconds=30,
+                            contributions=(media("frame:left", "regular:v1"), media("frame:right", "regular:v1"))))
+    runtime.activate("regular", "regular", 0)
+
+
+def _targets(view, run_id):
+    return {intent.target for intent in view.contributions if intent.run_id == run_id}
+
+
+def test_show_now_on_chosen_frames_leaves_the_others_untouched():
+    """Every chosen Frame participates explicitly; a Frame not chosen gets no Intent, so no layer
+    and no implied command. Mutation probe: drop `_chosen` in `activate`."""
+    runtime = Runtime(house=UTC_HOUSE)
+    _regular(runtime)
+    runtime.set_scene(_takeover_scene())
+    admission = runtime.activate("holidays", "show-now", 10, frame_ids=("left",))
+    view = runtime.project(11)
+    assert _targets(view, admission.run_id) == {"frame:left", "actuator:lamp"}
+    assert view.for_target("frame:right").scene_id == "regular"
+    assert view.for_target("frame:left").scene_id == "holidays"
+    assert get_run(view, admission.run_id).frames == ("left",)
+
+
+def test_show_now_on_chosen_frames_keeps_the_scenes_lamps():
+    """The owner's S7: choosing Frames restricts Frames only; the Scene's lamps take part, and so
+    does a child Scene's actuator, while its Frames are restricted too."""
+    runtime = Runtime(house=UTC_HOUSE)
+    child = Scene(scene_id="child", cycle_seconds=10,
+                  contributions=(media("frame:right"), Contribution(target="actuator:fan", kind="actuator")))
+    runtime.set_scene(_takeover_scene(children=(Child(scene=child),)))
+    admission = runtime.activate("holidays", "show-now", 0, frame_ids=("left",))
+    view = runtime.project(1)
+    targets = {intent.target for intent in view.contributions}
+    assert {"actuator:lamp", "actuator:fan", "frame:left"} <= targets
+    assert "frame:right" not in targets
+    assert admission.status == "admitted"
+
+
+def test_show_now_refuses_no_frames_a_frame_not_in_the_scene_and_a_passed_end():
+    from central.runtime import ShowNowRefused
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(_takeover_scene())
+    for kwargs, code in (({"frame_ids": ()}, "no-frames"),
+                         ({"frame_ids": ("hall",)}, "frame-not-in-scene"),
+                         ({"ends_at": 5}, "ends-passed")):
+        with pytest.raises(ShowNowRefused) as refused:
+            runtime.activate("holidays", f"show-{code}", 10, **kwargs)
+        assert refused.value.code == code
+    assert runtime.project(10).runs == ()
+
+
+def test_back_to_normal_cuts_the_takeover_mid_photo():
+    """The owner's S3: Back to normal ends the takeover at once, mid-photo: its current photo is
+    cut `lead` + its Transition after the press, fading out over the Transition, and what is
+    beneath (kept advancing while covered) is the Frame's winner from the cut. Mutation probe:
+    leave `cut_at` off the Intent in `_view`."""
+    runtime = Runtime(house=UTC_HOUSE)
+    _regular(runtime)
+    runtime.set_scene(_takeover_scene())
+    run_id = runtime.activate("holidays", "show-now", 100).run_id
+    ended = runtime.end(run_id, 130, lead=2)
+    assert (ended.at, ended.until) == (132, 134)
+    view = runtime.project(131)
+    current = next(i for i in view.contributions if i.run_id == run_id and i.target == "frame:left")
+    assert (current.cut_at, current.fade_out_seconds, current.interval_end) == (134, 2, 160)
+    after = runtime.project(134)
+    assert after.for_target("frame:left").scene_id == "regular"
+    assert after.for_target("frame:left").cycle_index == 4    # the regular show advanced while covered
+    assert get_run(after, run_id).phase == "cancelled"
+
+
+def test_back_to_normal_is_downward_cancellation_and_plays_no_ending():
+    """Back to normal is downward cancellation at an instant, not natural completion: no ending
+    plays, no child is waited for (its photo is cut with its parent's), the Run and its
+    descendants end `cancelled` at the cut, and no turn starting to show at or after the fade's
+    start is projected. Mutation probe: request a finish instead of cancelling at the cut in
+    `_process`."""
+    runtime = Runtime(house=UTC_HOUSE)
+    child = Scene(scene_id="child", cycle_seconds=58, contributions=(media("frame:right", "child:v1"),))
+    runtime.set_scene(_takeover_scene(children=(Child(scene=child, delay_seconds=1),)))
+    run_id = runtime.activate("holidays", "show-now", 0).run_id
+    runtime.advance(5)
+    runtime.end(run_id, 50, lead=2)     # the fade from 52, the cut at 54
+    views = runtime.timeline(50, 200).views
+    assert all(intent.phase != "outro" for view in views for intent in view.contributions)
+    # The next turn would start to show at 58 (a 2 s cross-fade), after the fade began: never.
+    assert all(intent.cycle_index == 0 for view in views for intent in view.contributions)
+    cut = {intent.scene_id: intent.cut_at for intent in views[0].contributions
+           if intent.kind != "actuator"}
+    assert cut == {"holidays": 54, "child": 54}
+    final = runtime.project(54)
+    assert get_run(final, run_id).phase == "cancelled" and get_run(final, run_id).ended_at == 54
+    assert final.contributions == ()
+
+
+def test_a_takeovers_end_cuts_at_its_time():
+    """A takeover's end is the same cut, planned from its admission: its fade finishes at the end
+    time, mid-photo, and the Run is cancelled then. Mutation probe: leave `ends_at` out of
+    `_cut_of`."""
+    runtime = Runtime(house=UTC_HOUSE)
+    _regular(runtime)
+    runtime.set_scene(_takeover_scene())
+    run_id = runtime.activate("holidays", "show-now", 0, ends_at=90).run_id
+    view = runtime.project(70)
+    current = next(i for i in view.contributions if i.run_id == run_id and i.target == "frame:left")
+    assert (current.cut_at, current.fade_out_seconds) == (90, 2)
+    assert get_run(view, run_id).until == 90
+    assert get_run(runtime.project(90), run_id).phase == "cancelled"
+    assert runtime.project(90).for_target("frame:left").scene_id == "regular"
+
+
+def test_save_and_apply_now_keeps_a_takeovers_frames_and_end():
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(_takeover_scene())
+    runtime.activate("holidays", "show-now", 0, frame_ids=("left",), ends_at=500)
+    runtime.save_scene_and_apply_now(_takeover_scene(revision=2, cycle_seconds=40), 10)
+    view = runtime.project(11)
+    successor = next(run for run in view.runs if run.scene_revision == 2)
+    assert (successor.frames, successor.until) == (("left",), 500)
+    assert "frame:right" not in _targets(view, successor.run_id)
+
+
+def test_a_second_show_now_of_one_scene_on_other_frames_is_admitted():
+    """Two Show nows of one Scene on Frames apart are two Runs; on a Frame they share, the second
+    repeats the first (`ignore`). Mutation probe: match by Scene alone in `_matching`."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(_takeover_scene())
+    first = runtime.activate("holidays", "on-left", 0, frame_ids=("left",))
+    second = runtime.activate("holidays", "on-right", 1, frame_ids=("right",))
+    third = runtime.activate("holidays", "on-both", 2, frame_ids=("left", "right"))
+    assert (first.status, second.status, third.status) == ("admitted", "admitted", "ignored")
+    assert first.run_id != second.run_id
+
+
+def _three_frames_scene():
+    return _takeover_scene(contributions=(media("frame:a"), media("frame:b"), media("frame:c"), lamp()),
+                           outro_contributions=())
+
+
+def _on(view, frame):
+    intent = view.for_target(f"frame:{frame}")
+    return None if intent is None else intent.run_id
+
+
+def test_a_restart_on_chosen_frames_replaces_the_earlier_run_on_the_shared_frames_alone():
+    """Decision 0036 (the independent review): Show now on [a, b], then a restart on [b, c],
+    replaces the first Run on b alone: a, not chosen the second time, keeps its Run (restricted,
+    not cancelled), playing on at its turn; the second Run plays on b and c. Each Run keeps the
+    Scene's lamp (S7), the newer winning it. Mutation probe: cancel every matching Run on a
+    restart in `activate` (the first Run, and so a's show, ends)."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(_three_frames_scene())
+    first = runtime.activate("holidays", "first", 0, frame_ids=("a", "b"))
+    second = runtime.activate("holidays", "second", 20, frame_ids=("b", "c"), repeat="restart")
+    assert second.status == "admitted"
+    view = runtime.project(30)
+    assert (_on(view, "a"), _on(view, "b"), _on(view, "c")) == (first.run_id, second.run_id, second.run_id)
+    earlier = get_run(view, first.run_id)
+    assert (earlier.phase, earlier.frames) == ("body", ("a",))
+    assert _targets(view, first.run_id) == {"frame:a", "actuator:lamp"}
+    # The first Run keeps its own clock on a: its turn is the one it started at 0.
+    assert view.for_target("frame:a").interval_start == 0
+    assert view.for_target("actuator:lamp").run_id == second.run_id
+    # Ending the second Run leaves a's Run, and the lamp, with the first.
+    runtime.end(second.run_id, 40)
+    later = runtime.project(70)
+    assert (_on(later, "a"), _on(later, "b"), _on(later, "c")) == (first.run_id, None, None)
+    assert later.for_target("actuator:lamp").run_id == first.run_id
+
+
+def test_a_restart_naming_every_frame_of_the_earlier_run_replaces_it():
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(_three_frames_scene())
+    first = runtime.activate("holidays", "first", 0, frame_ids=("a",))
+    second = runtime.activate("holidays", "second", 20, frame_ids=("a", "b"), repeat="restart")
+    view = runtime.project(21)
+    assert get_run(view, first.run_id).phase == "cancelled"
+    assert (_on(view, "a"), _on(view, "b"), _on(view, "c")) == (second.run_id, second.run_id, None)
+
+
+def test_a_show_now_left_running_still_starts_on_the_chosen_frames_it_does_not_play():
+    """Decision 0036 (the independent review): Show now on [a, b], then on [b, c] with "Leave it
+    running" (`ignore`), leaves the first Run as it is and starts on c, the chosen Frame no Run of
+    the Scene plays; b keeps the first Run. Mutation probe: ignore the whole request on any
+    shared Frame (c gets nothing)."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(_three_frames_scene())
+    first = runtime.activate("holidays", "first", 0, frame_ids=("a", "b"))
+    second = runtime.activate("holidays", "second", 20, frame_ids=("b", "c"))
+    assert second.status == "admitted" and second.run_id != first.run_id
+    view = runtime.project(30)
+    assert (_on(view, "a"), _on(view, "b"), _on(view, "c")) == (first.run_id, first.run_id, second.run_id)
+    assert get_run(view, second.run_id).frames == ("c",)
+    assert get_run(view, first.run_id).frames == ("a", "b")
+    # The whole Scene asked again, left running: only what no Run plays is left, nothing.
+    assert runtime.activate("holidays", "third", 25).status == "ignored"
+
+
+def test_a_show_now_asked_without_configure_takes_no_force_restart_or_higher_priority():
+    """Decision 0036 (the independent review): a caller who may operate and not configure
+    (`may_configure=False`) starts Show now at up to the priority covering its Scene's Frames (the
+    console's default, `covering_priority`); `force`, a restart and a priority above it are
+    refused "needs-configure" and nothing changes. Mutation probe: drop the check in `activate`."""
+    from central.runtime import ShowNowRefused
+    runtime = Runtime(house=UTC_HOUSE)
+    _regular(runtime)
+    runtime.set_scene(_takeover_scene())
+    runtime.set_scene(Scene(scene_id="loud", loop=True, cycle_seconds=30, contributions=(media("frame:right"),)))
+    runtime.activate("loud", "loud", 1, priority=2)
+    assert runtime.covering_priority(runtime._state.scenes["holidays"]) == 2
+    for kwargs in ({"force": True}, {"repeat": "restart"}, {"priority": 3}):
+        with pytest.raises(ShowNowRefused) as refused:
+            runtime.activate("holidays", f"refused-{sorted(kwargs)[0]}", 10, may_configure=False, **kwargs)
+        assert refused.value.code == "needs-configure"
+    assert {run.scene_id for run in runtime.project(10).runs} == {"regular", "loud"}
+    assert runtime.activate("holidays", "covering", 10, priority=2, may_configure=False).status == "admitted"
+    assert runtime.activate("holidays", "restart", 11, repeat="restart", priority=9).status == "admitted"
+
+
+def test_back_to_normal_on_a_programs_run_keeps_it_off_until_its_next_window():
+    """The owner's S13 (2026-11-25, "Operators too"): Back to normal may end a scheduled Program's
+    Run; it stays off for the rest of that window, and the Program's next window plays as usual."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="scene", cycle_seconds=600, loop=True, contributions=(media(),)))
+    schedule(runtime, "evening", "scene", 0, 120, now=0)
+    (root,) = runtime.advance(60).runs
+    runtime.end(root.run_id, 100, lead=2)
+    assert get_run(runtime.project(3600), root.run_id).phase == "cancelled"
+    assert runtime.project(3600).for_target("frame:left") is None     # 01:00, still in its window
+    tomorrow = runtime.project(86400 + 60)
+    assert tomorrow.for_target("frame:left").run_id != root.run_id
+
+
+def test_a_takeovers_frames_and_end_are_stored_only_when_set():
+    """Rollback compatibility: a state with no chosen Frames, end or cut reads as before."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(_takeover_scene())
+    runtime.activate("holidays", "whole", 0)
+    state = runtime.export_state()
+    assert all(key not in run for run in state["runs"].values() for key in ("frames", "ends_at", "cut_at"))
+    runtime.activate("holidays", "chosen", 1, frame_ids=("left",), ends_at=50, repeat="restart")
+    restored = Runtime.restore(json.loads(json.dumps(runtime.export_state())), house=UTC_HOUSE)
+    assert restored.export_state() == runtime.export_state()
