@@ -86,7 +86,7 @@ from central.room_light.model import (
     Sensor,
 )
 from central.room_light.views import DrawnView, RefusedReportsView, RoomLightsView
-from central.runtime import ShowNowRefusal
+from central.runtime import PAUSE_RANK, ShowNowRefusal
 from contracts.central_api import InstallRefusal, InstallStarted
 from contracts.frame_lighting import (
     BEAM_DEGREES_MAX,
@@ -167,6 +167,9 @@ CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
     # #86) and how far ahead a hand-made end is cut.
     "PAUSES_PATH": PAUSES, "CARRY_ON_PATH": CARRY_ON, "CARRY_ON_FRAME_PATH": CARRY_ON_FRAME,
     "PAUSE_SECONDS": PAUSE_SECONDS, "END_LEAD": END_LEAD, "RUN_END_PATH": RUN_END,
+    # The rank of a pause's hold: a Show now's priority is below it (central/app.py
+    # `ActivationRequest`), so Show now › Advanced checks it before it sends.
+    "PAUSE_RANK": PAUSE_RANK,
     # Where a photo's thumbnail is read (the Never show list), its asset id appended.
     "THUMBNAIL_PATH": THUMBNAIL_PATH,
 }

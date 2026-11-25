@@ -1575,6 +1575,7 @@ export const CONSTANTS = {
   PANEL_BLACK_MAX: 0.05,
   PANEL_BLACK_MIN: 1e-05,
   PAUSES_PATH: "/v1/operator/pauses",
+  PAUSE_RANK: 1000000,
   PAUSE_SECONDS: 3600,
   PI_SOURCE: "pi",
   REBOOTS_PATH: "/v1/operator/node/devices/{device_id}/reboots",

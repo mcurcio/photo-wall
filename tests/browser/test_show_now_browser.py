@@ -211,6 +211,27 @@ def test_the_default_priority_is_the_covering_runs_so_the_new_run_shows_on_top(p
         expect(form.get_by_label("Activation priority", exact=True)).to_have_value("0")
 
 
+def test_a_priority_at_or_above_a_pauses_rank_is_refused_in_the_form(page, registry):
+    """Central takes a Show now priority below a pause's rank (`PAUSE_RANK`, so a pause stays above
+    every Show now). The form says so in words before it sends, never Central's code. Mutation
+    probe: check only that the priority is whole (Central answered `invalid_request`)."""
+    _seed(registry)
+    queue = _seed_source(registry)
+    _covered(registry)
+    sent = []
+    with operator_server(registry.db, registry.clock, media_queue=queue) as origin:
+        connect(page, origin, "now")
+        page.on("request", lambda request: sent.append(request.url)
+                if request.url.endswith("/v1/operator/activations") and request.method == "POST" else None)
+        form = show_now(page, SCENE_ID, submit=False)
+        show_advanced(form)
+        form.get_by_label("Activation priority", exact=True).fill("2000000")
+        form.get_by_role("button", name="Activate now", exact=True).click()
+        expect(form).to_contain_text("Priority must be from 0 to 999,999.")
+        expect(form).not_to_contain_text("invalid_request")
+        assert sent == []
+
+
 def test_unhealthy_scene_frame_opens_its_recovery_tab_and_keeps_show_draft(page, registry):
     """Show-now frame health offers the existing Wall recovery route, while an
     informational healthy chip stays plain text and the mounted activation draft/key

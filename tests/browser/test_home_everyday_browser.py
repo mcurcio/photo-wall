@@ -32,14 +32,14 @@ import os
 import re
 
 import pytest
-from console_tasks import go
+from console_tasks import go, open_frame
 from operator_harness import assert_fits_width, operator_server, sign_in
 from playwright.sync_api import expect
 from support.photo_pools import photo
 from test_registry import ADMIN
 from test_skip_never_show import PHOTOS, Wall, covers, shown_twice
 
-from central.everyday.model import SkipKind
+from central.everyday.model import ACK_LATE_SECONDS, SkipKind
 from central.everyday.policy import photo_of
 from central.home_routes import HOME
 
@@ -273,6 +273,41 @@ def test_a_late_skip_shows_a_card_with_retry(page, registry):
         assert sent["request_id"] != info.value.request.post_data_json["request_id"]
         expect(_toast(page)).to_contain_text("Skipped on Hall.")
         expect(card).to_have_count(0, timeout=SOON)
+
+
+def test_a_late_pause_offers_no_retry_central_would_refuse(page, registry):
+    """A Pause its Pi has not shown by its deadline: its card says so, and offers no Retry, as
+    Central's `can` holds no Pause while the pause stands (a Retry would be refused `paused`); it
+    links to the Frame instead. Mutation probe: draw Retry whatever `can` holds."""
+    with operator_server(registry.db, registry.clock) as origin:
+        wall = Wall(registry, {"hall": "wall"})
+        _plans(wall)
+        _open_home(page, origin)
+        with _post(page, "/pauses") as info:
+            _menu(page, "Hall").get_by_role("menuitem", name="Pause for 1 hour").click()
+        assert info.value.status == 200, info.value.text()
+        wall.tick(ACK_LATE_SECONDS + 5)                     # past its deadline, never presented
+        problems = page.get_by_role("main").get_by_role("group", name="Problems", exact=True)
+        card = problems.get_by_text("Hall isn't confirmed paused. Its Pi hasn't reported holding its photo.")
+        expect(card).to_be_visible(timeout=SOON)
+        expect(problems.get_by_role("button", name="Retry", exact=True)).to_have_count(0)
+        expect(problems.get_by_role("link", name="Open the Frame", exact=True)).to_be_visible()
+
+
+def test_a_frame_page_offers_no_action_from_a_home_read_that_failed(page, registry):
+    """Decision 0036: an action is never offered from a document that is not current. While
+    Central answers Home, the Frame page's header offers the Frame's everyday actions; once Home's
+    read fails, the page keeps the last read and offers none, as Home does. Mutation probe: read
+    the stale document's `can` (the menu stays)."""
+    with operator_server(registry.db, registry.clock) as origin:
+        wall = Wall(registry, {"hall": "wall"})
+        _plans(wall)
+        _open_home(page, origin)
+        open_frame(page, "hall", "overview")
+        more = page.get_by_role("button", name="More actions for Hall", exact=True)
+        expect(more).to_be_visible(timeout=SOON)
+        page.route("**" + HOME, lambda route: route.fulfill(status=503, body="{}"))
+        expect(more).to_have_count(0, timeout=SOON)
 
 
 def test_never_show_names_a_last_showing(page, registry):

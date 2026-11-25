@@ -240,12 +240,14 @@ function wallKinds(wall: WallView): SkipKind[] {
 }
 
 /** An action asked of a Frame that its Pi has not shown by its deadline (`asked` is `late`): a card
- * saying what did not happen, with **Retry** (a new request) where the action is one a Frame's
- * menu asks again. */
+ * saying what did not happen, with **Retry** (a new request, which Central takes as that step again)
+ * where the action is one a Frame's menu asks again and Central's `can` offers it now; else a link
+ * to the Frame (a late Pause, whose pause still stands, or a Pi that stopped answering). */
 function LateAction({ place, busy, onRetry }: { place: FramePlace; busy: boolean; onRetry: HomeBoardProps["onRetry"] }) {
   const asked = place.status.asked;
   if (asked == null) return null;
-  const again = onRetry !== undefined && (asked.action === "skip" || asked.action === "previous" || asked.action === "pause");
+  const again = onRetry !== undefined && (asked.action === "skip" || asked.action === "previous" || asked.action === "pause")
+    && (place.status.can ?? []).includes(asked.action);
   return (
     <ProblemCard scope="action" subject={place.name} verdict={statusVerdict(place.status)}
       what={lateWords(asked.action, place.name)} doing={null}

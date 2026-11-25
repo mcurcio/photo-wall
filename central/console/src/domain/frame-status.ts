@@ -304,6 +304,8 @@ export function houseVerdict(house: HouseStatus | null | undefined): StatusVerdi
 /** What the console's snapshot holds of Home's read (useSnapshot.js): the last document read. */
 export interface HomeHeld {
   home?: HomeView | null;
+  /** The newest read of Home's document failed: `home` is the last good read, not current. */
+  homeFailed?: boolean;
 }
 
 /** Every Frame's place on its wall, across the walls. */
@@ -319,6 +321,16 @@ export function statusOf(home: HomeView | null | undefined, frameId: string): Fr
 /** One Frame's served status from the console's snapshot (the legacy modules' way in). */
 export function frameStatusIn(snapshot: HomeHeld | null | undefined, frameId: string): FrameStatus | null {
   return statusOf(snapshot?.home, frameId);
+}
+
+/**
+ * What may be asked of the Frame from the snapshot: its status's `can` while Home's document is
+ * current, none from one that is not (decision 0036: an action is never offered from a document
+ * that is not current, as Home offers none from a stale read).
+ */
+export function offeredIn(snapshot: HomeHeld | null | undefined, frameId: string): Action[] {
+  const status = frameStatusIn(snapshot, frameId);
+  return status === null || snapshot?.homeFailed === true ? [] : offeredActions(status);
 }
 
 /**

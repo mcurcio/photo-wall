@@ -130,7 +130,8 @@ export function useEverydayActions({ commands, names, now, refresh }: {
     },
     /** Carry on from a problem's fix. */
     carryOn,
-    /** A late action asked again, as a new request: the same press on the same Frame. */
+    /** A late action asked again, as a new request: the same press on the same Frame, which Central
+     * takes as the step that was late (a cover its Pi never showed is not stepped from). */
     onRetry: (frame: ActedOn, asked: Asked) => {
       if (asked.action === "skip" || asked.action === "previous" || asked.action === "pause") onAction(frame, asked.action);
     },

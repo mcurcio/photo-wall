@@ -4,7 +4,7 @@ import { BindingFacet } from "../BindingFacet.jsx";
 import { FrameCentralError, useFrameImpediment } from "../domain/room-lights/frame-central-error";
 import { FrameDisplay } from "../domain/frame-display";
 import { useEverydayActions } from "../domain/everyday-actions";
-import { ACTION_WORDS, frameChip, type HomeHeld, frameStatusIn, isPiAction, offeredActions } from "../domain/frame-status";
+import { ACTION_WORDS, frameChip, type HomeHeld, frameStatusIn, isPiAction, offeredIn } from "../domain/frame-status";
 import { everydayCommands } from "../domain/everyday-api";
 import { FrameOverview } from "../domain/frame-overview";
 import { FrameLightingTab } from "../domain/frame-lighting/frame-lighting-tab";
@@ -205,8 +205,9 @@ export function FramePage({ snapshot, bootFacts, hosts, frameId, tab, onTab, foc
   // The Frame's status is Central's one answer (Home's read, domain/frame-status.ts), Resting
   // included: never worked out here.
   const health = frameChip(status);
-  const actions = status === null || everyday.busy ? [] : offeredActions(status).flatMap((action) => (isPiAction(action) ? []
-    : [{ label: ACTION_WORDS[action], onAction: () => everyday.onAction({ frame_id: frameId, status }, action) }]));
+  const actions = status === null || everyday.busy ? [] : offeredIn(snapshot as HomeHeld | null, frameId).flatMap(
+    (action) => (isPiAction(action) ? []
+      : [{ label: ACTION_WORDS[action], onAction: () => everyday.onAction({ frame_id: frameId, status }, action) }]));
   const piHref = isBound(frame) ? playerPageHref(snapshot, frame.player_id as string) : null;
   return (
     <EntityPage header={
