@@ -57,6 +57,7 @@ from central.everyday.views import (
     SkipAnswer,
 )
 from central.infra.display_store import frame_outputs_in
+from central.infra.events import everyday_in, everyday_of_in
 from central.infra.fit_settings_store import PgFitSettings
 from central.infra.never_show_store import PgNeverShow
 from central.infra.pause_store import PgPauses
@@ -1424,14 +1425,15 @@ class Coordinator:
         Each Frame that may be paused (central/everyday/policy.py `pause_refusal`, judged on the
         facts Home's `can` reads) gets a hold from the shared instant to its end, a layer above
         every Run (`PAUSE_RANK`); each that may not stays and is named. One row per Frame in
-        `frame_pauses`; the commit wakes the scheduler and the Players. A repeated `request_id`
-        answers the Frames it paused (`duplicate`) and changes nothing. CoordinationError
-        "unknown_frame" (404); RegistryError "nothing-paused" (409, with `stayed`)."""
+        `frame_pauses`; the commit wakes the scheduler and the Players. Its answer is logged with
+        who asked (an 'everyday' event, central/infra/events.py `everyday_in`), so a repeated
+        `request_id` answers it (`duplicate`) and changes nothing, even once a later pause
+        replaced its rows. CoordinationError "unknown_frame" (404); RegistryError "nothing-paused"
+        (409, with `stayed`)."""
         with self._transaction() as conn:
-            stored = self.pauses.of_in(conn, request_id)
-            if stored:
-                return PauseAnswer(pause_id=request_id, ends_at=stored[0].ends_at, duplicate=True,
-                                   paused=tuple(PausedFrame(frame_id=pause.frame_id) for pause in stored))
+            stored = everyday_of_in(conn, "pause", request_id)
+            if stored is not None:
+                return PauseAnswer.model_validate({**stored["answer"], "duplicate": True})
             for frame_id in frame_ids:
                 if conn.execute("SELECT 1 FROM frames WHERE id=%s", (frame_id,)).fetchone() is None:
                     raise CoordinationError(EverydayRefusal.UNKNOWN_FRAME.value, 404)
@@ -1457,9 +1459,12 @@ class Coordinator:
                     "stayed": [each.model_dump(mode="json") for each in stayed]})
             for pause in paused:
                 self.pauses.put_in(conn, pause, now=now)
-            return PauseAnswer(pause_id=request_id, ends_at=ends_at,
-                               paused=tuple(PausedFrame(frame_id=pause.frame_id) for pause in paused),
-                               stayed=tuple(stayed))
+            answer = PauseAnswer(pause_id=request_id, ends_at=ends_at,
+                                 paused=tuple(PausedFrame(frame_id=pause.frame_id) for pause in paused),
+                                 stayed=tuple(stayed))
+            everyday_in(conn, "pause", {"answer": answer.model_dump(mode="json", exclude={"duplicate"})},
+                        by=by, request_id=request_id)
+            return answer
 
     def carry_on(self, pause_id: str, frame_id: str | None = None, *, by: Actor) -> CarryOnAnswer:
         """Carry on: end the pause `pause_id` on every Frame it holds (or `frame_id` alone) at once,
@@ -1487,11 +1492,15 @@ class Coordinator:
         held = carried_on(pause.held, now)
         self.pauses.end_in(conn, pause, pause.held if held is None else held, now=now, by=by)
 
-    def show_again(self, asset_id: str) -> bool:
+    def show_again(self, asset_id: str, *, by: Actor) -> bool:
         """Undo and Show again: take the photo off the Never show list (the next planning pass may
-        place it); False when it was not on it."""
+        place it), logged with who asked and when (an 'everyday' event: its list row is gone);
+        False, and nothing logged, when it was not on it."""
         with self._transaction() as conn:
-            return self.never_show_list.remove_in(conn, asset_id)
+            removed = self.never_show_list.remove_in(conn, asset_id)
+            if removed:
+                everyday_in(conn, "show-again", {"asset_id": asset_id}, by=by)
+            return removed
 
     def never_show_entries(self) -> NeverShowListView:
         """Scenes › Never show list."""

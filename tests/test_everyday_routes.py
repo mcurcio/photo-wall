@@ -69,6 +69,11 @@ def test_a_repeated_request_answers_the_stored_answer(registry):
         undo = client.delete(SHOW_AGAIN.format(asset_id=listed), headers=HEADERS)
         assert undo.json() == {"asset_id": listed, "was_listed": True}
         assert client.get(NEVER_SHOW, headers=HEADERS).json()["photos"] == []
+    # Show again is stamped with who asked, as every everyday action (mutation probe: drop `by`).
+    with registry.db.transaction() as conn:
+        (logged,) = conn.execute("SELECT body->>'asset_id' AS asset_id, recorded_by FROM events "
+                                 "WHERE kind='everyday' AND body->>'action'='show-again'").fetchall()
+    assert (logged["asset_id"], logged["recorded_by"]) == (listed, "api-token")
 
 
 def test_the_refusals_are_closed_codes(registry):

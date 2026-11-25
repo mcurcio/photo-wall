@@ -476,7 +476,15 @@ def test_show_again_returns_it_to_the_line(registry):
     listed = photo_of(wall.showing("hall"))
     wall.never_show(listed)
     assert listed in {entry.asset_id for entry in wall.coordinator.never_show_entries().photos}
-    assert wall.coordinator.show_again(listed) and not wall.coordinator.show_again(listed)
+    assert wall.coordinator.show_again(listed, by="person:matt")
+    assert not wall.coordinator.show_again(listed, by="person:matt")
+    # Decision 0036 (the independent review): who took it off the list, and when, is logged (its
+    # row is gone); the second, which changed nothing, is not. Mutation probe: log nothing.
+    with registry.db.transaction() as conn:
+        logged = conn.execute("SELECT body, recorded_by, recorded_at FROM events WHERE kind='everyday' "
+                              "AND body->>'action'='show-again'").fetchall()
+    assert [(each["body"]["asset_id"], each["recorded_by"]) for each in logged] == [(listed, "person:matt")]
+    assert logged[0]["recorded_at"] > 0
     seen = set()
     for _ in range(12):
         wall.tick(30)

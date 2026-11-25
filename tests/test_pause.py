@@ -168,6 +168,32 @@ def test_a_double_tap_is_one_pause(registry):
     assert refused.value.details["stayed"] == [{"frame_id": "hall", "reason": "paused"}]
 
 
+def test_a_retried_pause_is_known_after_a_later_pause_replaced_its_row(registry):
+    """Decision 0036 (the independent review): a Pause request's answer is logged with who asked
+    (an 'everyday' event), so its retry answers it unchanged (`duplicate`) after Carry on and a
+    later pause replaced the Frame's `frame_pauses` row, and pauses nothing again. Mutation probe:
+    know a repeat by its `frame_pauses` rows alone (the retry pauses the Frame again)."""
+    wall = Wall(registry, {"hall": "wall"})
+    first = pause(wall, "hall")
+    wall.tick()
+    wall.coordinator.carry_on(first.pause_id, by="person:matt")
+    wall.tick(60)
+    second = pause(wall, "hall", request_id="pause-2")
+    assert [each.frame_id for each in second.paused] == ["hall"]
+    registry.clock.advance(1)
+    wall.coordinator.carry_on(second.pause_id, by="person:matt")
+    wall.tick(60)
+    retried = pause(wall, "hall")
+    assert retried.duplicate and (retried.ends_at, retried.paused) == (first.ends_at, first.paused)
+    with registry.db.transaction() as conn:
+        row = conn.execute("SELECT pause_id, ended_at FROM frame_pauses WHERE frame_id='hall'").fetchone()
+        logged = conn.execute("SELECT body->>'request_id' AS request_id, recorded_by FROM events "
+                              "WHERE kind='everyday' AND body->>'action'='pause' ORDER BY id").fetchall()
+    assert row["pause_id"] == "pause-2" and row["ended_at"] is not None
+    assert [(each["request_id"], each["recorded_by"]) for each in logged] == [
+        ("pause-1", "person:matt"), ("pause-2", "person:matt")]
+
+
 def test_a_pause_never_starves_its_players_offers(registry, caplog):
     """0036 build step 0's check with an hour's hold: a Frame paused for an hour on 10 s turns is
     offered every pass whose proposal changes for 40 minutes, and the turns beneath keep coming

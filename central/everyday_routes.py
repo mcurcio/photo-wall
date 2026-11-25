@@ -97,7 +97,7 @@ def mount_everyday_routes(app: FastAPI, *, admin: Any, operate: Any, coordinator
 
     @app.delete(SHOW_AGAIN)
     async def show_again(asset_id: Identifier, by: Actor = Depends(operate)) -> dict:
-        return {"asset_id": asset_id, "was_listed": await asyncio.to_thread(coordinator.show_again, asset_id)}
+        return {"asset_id": asset_id, "was_listed": await asyncio.to_thread(coordinator.show_again, asset_id, by=by)}
 
     @app.post(PAUSES, response_model=PauseAnswer)
     async def pause(request: Request, by: Actor = Depends(operate)) -> PauseAnswer:
