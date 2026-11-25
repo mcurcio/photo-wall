@@ -1798,6 +1798,20 @@ def test_a_show_now_asked_without_configure_takes_no_force_restart_or_higher_pri
     assert runtime.activate("holidays", "restart", 11, repeat="restart", priority=9).status == "admitted"
 
 
+def test_back_to_normal_on_a_programs_run_keeps_it_off_until_its_next_window():
+    """The owner's S13 (2026-11-25, "Operators too"): Back to normal may end a scheduled Program's
+    Run; it stays off for the rest of that window, and the Program's next window plays as usual."""
+    runtime = Runtime(house=UTC_HOUSE)
+    runtime.set_scene(Scene(scene_id="scene", cycle_seconds=600, loop=True, contributions=(media(),)))
+    schedule(runtime, "evening", "scene", 0, 120, now=0)
+    (root,) = runtime.advance(60).runs
+    runtime.end(root.run_id, 100, lead=2)
+    assert get_run(runtime.project(3600), root.run_id).phase == "cancelled"
+    assert runtime.project(3600).for_target("frame:left") is None     # 01:00, still in its window
+    tomorrow = runtime.project(86400 + 60)
+    assert tomorrow.for_target("frame:left").run_id != root.run_id
+
+
 def test_a_takeovers_frames_and_end_are_stored_only_when_set():
     """Rollback compatibility: a state with no chosen Frames, end or cut reads as before."""
     runtime = Runtime(house=UTC_HOUSE)
