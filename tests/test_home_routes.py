@@ -69,5 +69,12 @@ def test_the_change_number_is_of_the_document_alone():
 
 
 def test_every_action_a_frame_can_offer_has_the_path_it_is_asked_at():
+    """Each action has its path under /v1/operator/, naming what it is asked of: the Pi for a
+    reboot and a restart, the Frame for Skip and Previous (slice 3), the photo in the body for
+    Never show."""
     assert set(ACTION_PATHS) == set(Action)
-    assert all("{device_id}" in path and path.startswith("/v1/operator/") for path in ACTION_PATHS.values())
+    assert all(path.startswith("/v1/operator/") for path in ACTION_PATHS.values())
+    named = {Action.REBOOT_PI: "{device_id}", Action.RESTART_APP: "{device_id}",
+             Action.SKIP: "{frame_id}", Action.PREVIOUS: "{frame_id}"}
+    assert all(placeholder in ACTION_PATHS[action] for action, placeholder in named.items())
+    assert ACTION_PATHS[Action.NEVER_SHOW] == "/v1/operator/never-show"

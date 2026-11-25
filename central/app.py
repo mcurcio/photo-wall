@@ -35,6 +35,7 @@ from central.content_wiring import ContentServices, build_content_services
 from central.coordination import CoordinationLimits, Coordinator
 from central.db import Database, DatabaseTransactionClock, ProcessTransactionClock, TransactionClock
 from central.display_routes import mount_display_routes, mount_picture_routes
+from central.everyday_routes import mount_everyday_routes
 from central.fleet.leaf_bridge import mount_bus_bridges
 from central.fleet.node_boot import NodeBootConfig
 from central.fleet.node_routes import mount_node_routes
@@ -73,6 +74,7 @@ from central.infra.player_contact_store import (
 from central.infra.player_state_wakes import PlayerStateWakes
 from central.infra.power_store import PgPower
 from central.infra.room_light_store import PgRoomLights
+from central.infra.skip_store import SkipRetention
 from central.infra.transaction_seal import AesGcmTransactionSeal
 from central.infra.tuning_history_store import PgTuningHistory
 from central.infra.why_store import PgWhy
@@ -963,8 +965,14 @@ def create_app(
         plans=lambda conn, now: coordinator.frame_plans_in(conn, now), runtime=RuntimeStore.read_in,
         failing_steps=lambda: tuple(FailingStep(step, health.since) for step, health
                                     in sorted(app.state.scheduler.health().steps.items())
-                                    if health.status == "failing"))
+                                    if health.status == "failing"),
+        layers=lambda conn, now: coordinator.frame_layers_in(conn, now))
     mount_home_routes(app, admin=admin, home=frame_status)
+    # Slice 3's everyday actions (decision 0036): Skip, Previous and Never show, judged by the rule
+    # Home's `can` reads; rows past their covers go off the tick like every retention.
+    mount_everyday_routes(app, admin=admin, operate=operator_auth.operate, coordinator=coordinator,
+                          facts=lambda conn, now, frame_ids=None: frame_status.everyday_in(conn, now, frame_ids))
+    retentions["skip-retention"] = SkipRetention(db.transaction, clock).prune
     app.state.scheduler = Scheduler(coordinator, media_application.request_measurements, clock,
                                     status=frame_status.record, retentions=retentions)
     # A Node's leaf and Home Assistant's door arrive at Central's origin (erratum E-E3D-CUT-4): relayed to the hub.

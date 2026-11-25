@@ -351,8 +351,11 @@ class PoolLines:
     """`SceneLines` over hydrated in-memory pools keyed by source ref (each ref its own pool
     key): the Python interpreter of `LineQuery`, for tests and the SQL conformance test."""
 
-    def __init__(self, pools: Mapping[str, SourcePool]) -> None:
+    def __init__(self, pools: Mapping[str, SourcePool], *, never: frozenset[str] = frozenset()) -> None:
+        """`never`: the Never show list's photos (decision 0036), no line's members, as the
+        store's SQL leaves them out; a listed photo may still be the wrap mark."""
         self._pools = dict(pools)
+        self._never = never
 
     def sources(self, source_refs: set[str]) -> dict[str, SourceLine]:
         return {ref: SourceLine(source_ref=pool.source_ref, pool_key=ref, ready=pool.ready,
@@ -371,8 +374,9 @@ class PoolLines:
         mark = (after.captured_at, after.asset_id) if after is not None else None
         order = order_key(query.order, scene_id=query.scene_id, pass_number=query.pass_number,
                           mark=mark, today=query.today, house=query.house)
-        admitted = [candidate for candidate in members.values() if query.shape.admits(
-            candidate.kind, candidate.original_width, candidate.original_height)]
+        admitted = [candidate for candidate in members.values() if candidate.asset_id not in self._never
+                    and query.shape.admits(candidate.kind, candidate.original_width,
+                                           candidate.original_height)]
         admitted.sort(key=lambda c: (tier_of(c.asset_id, query.picked, query.recent), order(c)))
         return LineAnswer(members=tuple(
             LineMember(candidate=candidate, pools=frozenset(pools[candidate.asset_id]))

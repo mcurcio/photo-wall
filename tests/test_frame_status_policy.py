@@ -19,6 +19,8 @@ import pytest
 from central.central_errors.views import FrameClear, FrameImpeded
 from central.displays.model import Readiness
 from central.displays.views import InForceView
+from central.everyday.model import AskedAction, AskState
+from central.everyday.ports import AskFact, LayerOrigin, Showing, ShownPhoto
 from central.frame_status.model import (
     WORST_FIRST,
     Action,
@@ -65,14 +67,16 @@ from central.frame_status.ports import (
     StatusKey,
     UnfilledNow,
 )
-from central.frame_status.views import PlayingKind
+from central.frame_status.views import PlayingKind, wall_can
 from central.why.explain import is_resting
 from central.why.model import ContentKind
 from contracts.liveness import SILENT_AFTER_SECONDS
+from contracts.models import Layer, Variant
 from contracts.node_app_link import FrameBlackCause
 from contracts.node_faults import FAULTS, FRAME_BLACK_CODES
 from contracts.node_impeded import Impeded
 from contracts.node_output import InForceKind, Power, PowerResult
+from contracts.photo_crop import CENTRED
 from contracts.room_light import CentralWords
 
 NOW = 100_000.0
@@ -467,6 +471,54 @@ def test_an_override_rides_on_the_status_and_a_paused_frame_is_showing():
     pause = Override(kind=OverrideKind.PAUSE, id="p-1", frame_ids=("hall",), until=NOW + 3600)
     found = status(override=pause)
     assert (found.word, found.override) == (StatusWord.SHOWING, pause)
+
+
+# --- Slice 3: the everyday actions ----------------------------------------------------------------
+
+def _photo_layer(key: str, start: float, end: float, asset: str) -> Layer:
+    return Layer(assignment_id=key, run_id="run", output_id="HDMI-A-1", frame_id="hall", binding_generation=1,
+                 start=start, end=end, media_origin=start, crop=CENTRED, variant=Variant(
+                     asset_id=asset, recipe_id="e" * 64, sha256="a" * 64, size=10, media_type="image/jpeg",
+                     width=1920, height=1080))
+
+
+TURNS = (_photo_layer("a", NOW - 10, NOW + 20, "photo-a"), _photo_layer("b", NOW + 20, NOW + 50, "photo-b"))
+ON_SCREEN = Showing(layers=TURNS, origins={layer.assignment_id: LayerOrigin(scene_id="s") for layer in TURNS})
+
+
+def test_can_follows_the_stay_rule():
+    """Skip and Previous are in `can` exactly where central/everyday/policy.py `stays` lets the
+    Frame move, and Never show while it shows a photo; nothing without what it shows (the status
+    step's reading). Mutation probe: offer Skip without asking `stays`."""
+    assert status(showing=ON_SCREEN).can == (Action.NEVER_SHOW, Action.REBOOT_PI, Action.RESTART_APP, Action.SKIP)
+    earlier = Showing(layers=TURNS, origins=ON_SCREEN.origins, history=(
+        ShownPhoto("photo-a", "a", NOW - 9), ShownPhoto("photo-z", "z", NOW - 40)))
+    assert Action.PREVIOUS in status(showing=earlier).can
+    hand = Showing(layers=TURNS, origins={"a": LayerOrigin(scene_id="s", hand_placed=True)})
+    assert Action.SKIP not in status(showing=hand).can and Action.NEVER_SHOW in status(showing=hand).can
+    for changes in (SILENT, RESTING, {"picture": Picture(showing=True, continuing_since=NOW - 30,
+                                                          reported_at=NOW - 5)}):
+        assert Action.SKIP not in status(showing=ON_SCREEN, **changes).can, changes
+    assert Action.SKIP in status(HUB_DOWN, showing=ON_SCREEN).can      # Skip needs no hub
+    assert status().can == (Action.REBOOT_PI, Action.RESTART_APP)
+    assert status(showing=ON_SCREEN, readiness=Readiness.POSITION_NEEDED).can == ()
+
+
+def test_a_walls_can_is_any_of_its_frames():
+    moving = status(showing=ON_SCREEN)
+    still = status(showing=Showing())
+    assert wall_can((moving, still)) == (Action.SKIP,)
+    assert wall_can((still,)) == ()
+
+
+def test_asked_is_reported_while_its_cover_shows():
+    fact = AskFact(action=AskedAction.SKIP, request_id="r", at=NOW - 1, until=NOW + 29)
+    asked = status(showing=Showing(layers=TURNS, asked=fact)).asked
+    assert (asked.action, asked.state) == (AskedAction.SKIP, AskState.REQUESTED)
+    done = AskFact(action=AskedAction.SKIP, request_id="r", at=NOW - 1, until=NOW + 29, presented_at=NOW)
+    assert status(showing=Showing(asked=done)).asked.state is AskState.DONE
+    over = AskFact(action=AskedAction.SKIP, request_id="r", at=NOW - 60, until=NOW - 1)
+    assert status(showing=Showing(asked=over)).asked is None
 
 
 def test_the_playing_kinds_are_whys_content_kinds():

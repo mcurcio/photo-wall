@@ -22,7 +22,7 @@ times are the database's.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from functools import cached_property
 from typing import Any, Final, Protocol
 
@@ -31,6 +31,8 @@ from central.central_errors.compose import impediment
 from central.central_errors.views import FrameImpediment
 from central.db import Database, TransactionClock
 from central.displays.model import Readiness, live_test
+from central.everyday.ports import FrameFacts as EverydayFacts
+from central.everyday.ports import Showing
 from central.fleet.node_bus_presence import HUB_REACHABILITY
 from central.fleet.node_observations import fleet_hosts_in, host_births_in
 from central.fleet.pi_reboot import newest_reboots_in
@@ -43,7 +45,12 @@ from central.frame_status.model import (
     SetupStep,
     StatusWord,
 )
-from central.frame_status.policy import REBOOT_ALLOWED_SECONDS, frame_status, house_status
+from central.frame_status.policy import (
+    REBOOT_ALLOWED_SECONDS,
+    everyday_facts,
+    frame_status,
+    house_status,
+)
 from central.frame_status.ports import (
     Dark,
     DisplayPower,
@@ -75,10 +82,12 @@ from central.frame_status.views import (
     Upcoming,
     WallView,
     home_view,
+    wall_can,
 )
 from central.infra.central_errors_store import impeded_reports_in
 from central.infra.display_store import power_facts_of_frames_in
 from central.infra.events import frame_status_in, frame_statuses_in
+from central.infra.everyday_store import showing_in
 from central.infra.frame_report_store import frame_reports_in
 from central.infra.photo_library_store import PgPhotoLibrary
 from central.infra.planning_outcome_store import PgPlanningOutcome
@@ -94,6 +103,7 @@ from central.power.timetable import frame_timetable, hold_in_force
 from central.runtime import OperatorProjection, Program, Runtime, Scene
 from central.why.explain import content_why, power_why
 from central.why.model import ContentRequest
+from contracts.models import Layer
 from contracts.node_observation import HOST_METRIC_BANDS
 from contracts.node_output import Power
 from contracts.time import Clock
@@ -125,15 +135,26 @@ class PlanReader(Protocol):
     def __call__(self, conn: Any, now: float) -> Mapping[str, Any]: ...
 
 
+class LayerReader(Protocol):
+    """Coordination's read of each Frame's offered layers (central/coordination.py
+    `Coordinator.frame_layers_in`)."""
+
+    def __call__(self, conn: Any, now: float) -> Mapping[str, tuple[Layer, ...]]: ...
+
+
 class PgStatusReading:
     """`StatusReading` over `conn` at `now`. Each owner's read runs once, when first asked."""
 
     def __init__(self, conn: Any, now: float, *, times: TransactionClock, inventory: InventoryReader,
                  plans: PlanReader, runtime: Callable[[Any], Runtime],
-                 failing_steps: Callable[[], tuple[FailingStep, ...]]) -> None:
+                 failing_steps: Callable[[], tuple[FailingStep, ...]],
+                 layers: LayerReader | None = None) -> None:
+        """`layers`: Coordination's `frame_layers_in`, read only when given (Home's and the Frame
+        page's reads, and the everyday commands): without it nothing is offered (`showing`)."""
         self._conn, self._now, self._times = conn, now, times
         self._inventory_in, self._plans_in, self._runtime_in = inventory, plans, runtime
         self._failing_steps = failing_steps
+        self._layers_in = layers
 
     @property
     def now(self) -> float:
@@ -388,6 +409,14 @@ class PgStatusReading:
                      for run_id, frames in sorted(takeovers.items()))
         return tuple(found)
 
+    def showing(self) -> Mapping[str, Showing] | None:
+        """Decision 0036 (slice 3): what each Frame shows and has shown (central/infra/
+        everyday_store.py `showing_in`); None without Coordination's layer read."""
+        if self._layers_in is None:
+            return None
+        return showing_in(self._conn, self._now, [frame.id for frame in self.inventory.frames],
+                          runtime=self.runtime, layers=self._layers_in(self._conn, self._now))
+
     def failing_steps(self) -> tuple[FailingStep, ...]:
         return self._failing_steps()
 
@@ -472,17 +501,39 @@ class PgFrameStatus:
 
     def __init__(self, db: Database, clock: Clock, *, times: TransactionClock, inventory: InventoryReader,
                  plans: PlanReader, runtime: Callable[[Any], Runtime],
-                 failing_steps: Callable[[], tuple[FailingStep, ...]] = lambda: ()) -> None:
+                 failing_steps: Callable[[], tuple[FailingStep, ...]] = lambda: (),
+                 layers: LayerReader | None = None) -> None:
         """`inventory`: the Registry's `inventory_in`; `plans`: Coordination's `frame_plans_in`;
-        `runtime`: the Runtime's `read_in`; `failing_steps`: the scheduler's steps failing now."""
+        `runtime`: the Runtime's `read_in`; `failing_steps`: the scheduler's steps failing now;
+        `layers`: Coordination's `frame_layers_in` (slice 3's everyday actions; None offers none)."""
         self._db, self._clock = db, clock
         self._log: FrameStatusLog = PgFrameStatusLog(times)
         self._readers = {"times": times, "inventory": inventory, "plans": plans, "runtime": runtime,
                          "failing_steps": failing_steps}
+        self._layers = layers
 
-    def _composed(self, conn: Any) -> tuple[PgStatusReading, dict[str, FrameStatus], Mapping[str, KeptStatus], Any]:
-        """One reading of `conn`, every Frame's status composed against its kept row."""
-        reading = PgStatusReading(conn, self._clock.utc(), **self._readers)
+    def everyday_in(self, conn: Any, now: float, frame_ids: Sequence[str] | None = None,
+                    ) -> dict[str, EverydayFacts]:
+        """central/everyday/ports.py `FrameFactsReader`: each Frame's everyday facts in the caller's
+        transaction (Coordination's, under its lock), judged as Home's `can` judges them."""
+        reading = PgStatusReading(conn, now, **self._readers, layers=self._layers)
+        frames, house = facts_of(reading)
+        found = {}
+        for frame_id, facts in frames.items():
+            if frame_ids is not None and frame_id not in frame_ids:
+                continue
+            status = frame_status(facts, house, now)
+            everyday = everyday_facts(facts, house, now, status.setup)
+            if everyday is not None:
+                found[frame_id] = everyday
+        return found
+
+    def _composed(self, conn: Any, *, everyday: bool = False,
+                  ) -> tuple[PgStatusReading, dict[str, FrameStatus], Mapping[str, KeptStatus], Any]:
+        """One reading of `conn`, every Frame's status composed against its kept row; `everyday`:
+        with what each Frame shows, so its everyday actions are offered (Home, the Frame page)."""
+        reading = PgStatusReading(conn, self._clock.utc(), **self._readers,
+                                  layers=self._layers if everyday else None)
         frames, house = facts_of(reading)
         kept = self._log.kept_in(PgTransaction(conn))
         statuses = {frame_id: frame_status(facts, house, reading.now, kept.get(frame_id))
@@ -509,7 +560,7 @@ class PgFrameStatus:
     def home(self) -> HomeView:
         """Home's document, from one read-only snapshot."""
         with self._db.read_snapshot() as conn:
-            reading, statuses, _, house = self._composed(conn)
+            reading, statuses, _, house = self._composed(conn, everyday=True)
             devices = reading.pis()
             walls, now_next = [], []
             for wall in reading.inventory.walls:
@@ -517,7 +568,8 @@ class PgFrameStatus:
                     frame_id=frame.id, name=frame.name, x_mm=frame.x_mm, y_mm=frame.y_mm, size_mm=frame.size_mm,
                     player_id=frame.player_id, device_id=devices.get(frame.id), playing=reading.playing(frame.id),
                     status=statuses[frame.id]) for frame in reading.inventory.frames if frame.surface_id == wall.surface_id)
-                walls.append(WallView(surface_id=wall.surface_id, name=wall.name, room=wall.room, frames=frames))
+                walls.append(WallView(surface_id=wall.surface_id, name=wall.name, room=wall.room, frames=frames,
+                                      can=wall_can(frame.status for frame in frames)))
                 now_next.append(reading.now_next(wall.surface_id, tuple(frame.frame_id for frame in frames)))
             return home_view(house=house_status(tuple(statuses.values()), house, reading.now), walls=tuple(walls),
                              overrides=reading.overrides(), now_next=tuple(now_next))
@@ -526,7 +578,7 @@ class PgFrameStatus:
         """The Frame page's status: the Frame's status now and its recent changes. UnknownFrame for
         no such Frame."""
         with self._db.read_snapshot() as conn:
-            _, statuses, _, _ = self._composed(conn)
+            _, statuses, _, _ = self._composed(conn, everyday=True)
             if frame_id not in statuses:
                 raise UnknownFrame(frame_id)
             recent = self._log.recent_in(PgTransaction(conn), frame_id, RECENT_CHANGES)

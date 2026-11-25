@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from central.everyday.model import Cover, SkipOutcome, SkipScope
+from central.everyday.model import AskedAction, Cover, SkipOutcome, SkipScope
 from contracts.models import Layer
 
 
@@ -32,6 +32,31 @@ class ShownPhoto:
 
 
 @dataclass(frozen=True)
+class AskFact:
+    """The newest action asked of a Frame that moved it, and when its layer (`cover_id`) was
+    reported presented (None: not yet). `until`: when it stops being reported (its cover's end,
+    and never before it can be late)."""
+    action: AskedAction
+    request_id: str
+    at: float
+    until: float
+    presented_at: float | None = None
+
+
+@dataclass(frozen=True)
+class Showing:
+    """What a Frame shows and has shown, as Coordination and shown history hold it (each field as
+    `FrameFacts` says); Frame status adds its own judgements (central/frame_status/policy.py
+    `everyday_facts`)."""
+    layers: tuple[Layer, ...] = ()
+    origins: Mapping[str, LayerOrigin] = field(default_factory=dict)
+    recent: tuple[Cover, ...] = ()
+    history: tuple[ShownPhoto, ...] = ()
+    listed: frozenset[str] = frozenset()
+    asked: AskFact | None = None
+
+
+@dataclass(frozen=True)
 class FrameFacts:
     """One Frame as the everyday rules read it, in one transaction.
 
@@ -49,6 +74,14 @@ class FrameFacts:
     recent: tuple[Cover, ...] = ()
     history: tuple[ShownPhoto, ...] = ()
     listed: frozenset[str] = frozenset()
+
+
+def frame_facts(frame_id: str, showing: Showing, *, set_up: bool, answering: bool, resting: bool,
+                paused: bool) -> FrameFacts:
+    """One Frame's facts from what it shows and its owners' judgements."""
+    return FrameFacts(frame_id=frame_id, set_up=set_up, answering=answering, resting=resting,
+                      paused=paused, layers=showing.layers, origins=showing.origins,
+                      recent=showing.recent, history=showing.history, listed=showing.listed)
 
 
 class FrameFactsReader(Protocol):
@@ -89,5 +122,5 @@ class NeverShowList(Protocol):
     def listed_in(self, conn: Any) -> frozenset[str]: ...
 
 
-__all__ = ["FrameFacts", "FrameFactsReader", "LayerOrigin", "NeverShowList", "ShownPhoto", "SkipRecord",
-           "Skips"]
+__all__ = ["AskFact", "FrameFacts", "FrameFactsReader", "LayerOrigin", "NeverShowList", "Showing", "ShownPhoto",
+           "SkipRecord", "Skips", "frame_facts"]

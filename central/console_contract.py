@@ -27,6 +27,15 @@ from pydantic import BaseModel, TypeAdapter
 from central.central_errors.views import CentralErrorsView, FrameImpedimentView
 from central.content_catalog.views import ReleasesView, VersionChoice
 from central.displays.views import LightView, PictureHistoryView
+from central.everyday.model import ACK_LATE_SECONDS, SKIP_LEAD, EverydayRefusal
+from central.everyday.views import (
+    NeverShowAnswer,
+    NeverShowListView,
+    NeverShowRequest,
+    SkipAnswer,
+    SkipRequest,
+)
+from central.everyday_routes import FRAME_SKIPS, NEVER_SHOW, SHOW_AGAIN, WALL_SKIPS
 from central.fleet.app_restart import APP_RESTART_SECONDS, AppRestartRefusal, AppRestartsView
 from central.fleet.models import TrialRefusal
 from central.fleet.node_calibration import TrialBegin, TrialEdit, TrialStep
@@ -96,12 +105,12 @@ from contracts.room_light import (
 
 CONSOLE_BODIES: Final[tuple[type[BaseModel], ...]] = (   # bodies the console sends (and RoomLight, a union)
     Sensor, ColourSensor, TrialBegin, TrialEdit, TrialStep, FrameLighting, PositionRestore, VersionChoice, FrameTurnChange,
-    FrameVideoChange)
+    FrameVideoChange, SkipRequest, NeverShowRequest)
 CONSOLE_VIEWS: Final[tuple[type[BaseModel], ...]] = (    # answers the console reads
     RoomLightsView, DrawnView, RefusedReportsView, PaperProfileView, PaperProfilesView,
     PositionHistoryView, PictureHistoryView, LightView, HomeAssistantStatesView, ReleasesView, InstallStarted,
     CentralErrorsView, FrameImpedimentView, SignInView, SessionView, LoggedOut, AccessView, HomeView, FrameStatusView,
-    AppRestartsView)
+    AppRestartsView, SkipAnswer, NeverShowAnswer, NeverShowListView)
 CONSOLE_ALIASES: Final[Mapping[str, object]] = {     # named types a view's fields take, by their name
     "Lux": Lux, "LightColour": LightColour, "Reading": Reading}
 # The seconds of each photo a Transition must leave free: the Player's preparation time
@@ -127,10 +136,14 @@ CONSOLE_CONSTANTS: Final[Mapping[str, float | int | str]] = {
     # How long a reboot counts as on its way (row 3), and after how long a Restart app that is not
     # showing reads timed out: the console's progress waits by the same numbers.
     "REBOOT_ALLOWED_SECONDS": REBOOT_ALLOWED_SECONDS, "APP_RESTART_SECONDS": APP_RESTART_SECONDS,
+    # Slice 3's everyday actions: where Skip, Previous and Never show are asked, how far ahead a
+    # request's Frames move together, and when one not yet seen on its Frame is late.
+    "WALL_SKIPS_PATH": WALL_SKIPS, "FRAME_SKIPS_PATH": FRAME_SKIPS, "NEVER_SHOW_PATH": NEVER_SHOW,
+    "SHOW_AGAIN_PATH": SHOW_AGAIN, "SKIP_LEAD": SKIP_LEAD, "ACK_LATE_SECONDS": ACK_LATE_SECONDS,
 }
 CONSOLE_REFUSALS: Final[tuple[type[StrEnum], ...]] = (   # each context's closed refusal enum
     RoomLightRefusal, FrameLightingRefusal, PaperProfileRefusal, ReportRefusal, DrawnReportRefusal, TrialRefusal,
-    PositionRestoreRefusal, InstallRefusal, AppRestartRefusal,
+    PositionRestoreRefusal, InstallRefusal, AppRestartRefusal, EverydayRefusal,
 )
 
 

@@ -139,6 +139,8 @@ def test_previous_steps_back_one_more_each_press():
     assert previous_step(HISTORY, "photo-a", 3, lambda _: True) == "photo-x"
     assert previous_step(HISTORY, "photo-a", 2, lambda asset: asset != "photo-y") == "photo-x"
     assert previous_step(HISTORY, "photo-a", 9, lambda _: True) is None
+    # From the anchor's newest showing, wherever it is in the history.
+    assert previous_step(HISTORY, "photo-y", 1, lambda _: True) == "photo-x"
     first = cover_for(facts(history=HISTORY), SkipKind.PREVIOUS, CoverCause.PREVIOUS, request_id="one",
                       at=10, now=8, cue=None)
     assert (first.pinned, first.anchor, first.steps) == ("photo-x", "photo-a", 1)

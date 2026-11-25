@@ -8,7 +8,7 @@ export interface AccessView {
   session_cap_days?: number;
 }
 
-export type Action = "restart-app" | "reboot-pi";
+export type Action = "restart-app" | "reboot-pi" | "skip" | "previous" | "never-show";
 
 export interface AppRestartView {
   by: string;
@@ -21,6 +21,17 @@ export interface AppRestartView {
 export interface AppRestartsView {
   restart: AppRestartView | null;
 }
+
+export type AskState = "requested" | "done" | "late";
+
+export interface Asked {
+  action: AskedAction;
+  at: number;
+  request_id: string;
+  state: AskState;
+}
+
+export type AskedAction = "skip" | "previous" | "never-show" | "pause" | "carry-on" | "back-to-normal";
 
 export interface AtFull {
   kind: "at-full";
@@ -212,6 +223,7 @@ export interface FrameRefView {
 }
 
 export interface FrameStatus {
+  asked?: Asked | null;
   because: Because;
   can?: Action[];
   frame_id: string;
@@ -313,6 +325,12 @@ export interface KelvinColour {
   kind: "kelvin";
 }
 
+export interface LastShowing {
+  frame_id: string;
+  start: number;
+  until: number;
+}
+
 export type LightColour = KelvinColour | RgbColour;
 
 export interface LightView {
@@ -355,6 +373,35 @@ export interface MeasuredLight {
   kind: "measured";
   name: string;
   sensor: SensorId;
+}
+
+export interface Moved {
+  frame_id: string;
+}
+
+export interface NeverShowAnswer {
+  asset_id: string;
+  duplicate?: boolean;
+  last_showings?: LastShowing[];
+  skipped_on?: string[];
+  stayed?: Stayed[];
+}
+
+export interface NeverShowEntry {
+  asset_id: string;
+  by: string;
+  kind: "image" | "video";
+  listed_at: number;
+}
+
+export interface NeverShowListView {
+  photos?: NeverShowEntry[];
+}
+
+export interface NeverShowRequest {
+  asset_id: string;
+  frame_id?: string | null;
+  request_id: string;
 }
 
 export interface NotReported {
@@ -687,6 +734,22 @@ export interface SignInView {
 
 export type SignalRange = "auto" | "full" | "limited";
 
+export interface SkipAnswer {
+  at: number;
+  duplicate?: boolean;
+  kind: SkipKind;
+  moved?: Moved[];
+  request_id: string;
+  stayed?: Stayed[];
+}
+
+export type SkipKind = "next" | "previous";
+
+export interface SkipRequest {
+  kind?: SkipKind;
+  request_id: string;
+}
+
 export interface SoftwarePictureView {
   colour_temperature_kelvin: number;
   contrast_percent: number;
@@ -714,6 +777,13 @@ export interface StatusChangeView {
 }
 
 export type StatusWord = "not-showing" | "cant-tell" | "needs-a-look" | "getting-ready" | "showing" | "resting";
+
+export type StayReason = "not-set-up" | "not-answering" | "resting" | "paused" | "nothing-to-skip" | "black" | "hand-placed" | "no-previous";
+
+export interface Stayed {
+  frame_id: string;
+  reason: StayReason;
+}
 
 export type TestPattern = "white" | "grey-ramp" | "black-level" | "target-pre-software" | "target-post-software";
 
@@ -757,6 +827,7 @@ export interface VersionChoice {
 }
 
 export interface WallView {
+  can?: Action[];
   frames: FramePlace[];
   name: string;
   room: string;
@@ -771,6 +842,11 @@ export interface WashLight {
 }
 
 export const LIMITS = {
+  Asked: {
+    request_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
   AtReading: {
     lux: {
       exclusiveMinimum: 0,
@@ -1008,6 +1084,11 @@ export const LIMITS = {
       minimum: 1000,
     },
   },
+  LastShowing: {
+    frame_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
   LightView: {
     black: {
       maximum: 0.05,
@@ -1043,6 +1124,29 @@ export const LIMITS = {
     },
     sensor: {
       pattern: "^[a-z0-9][a-z0-9-]{0,31}$",
+    },
+  },
+  Moved: {
+    frame_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
+  NeverShowAnswer: {
+    asset_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
+  NeverShowEntry: {
+    asset_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
+  NeverShowRequest: {
+    asset_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+    request_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
     },
   },
   NowNext: {
@@ -1233,6 +1337,16 @@ export const LIMITS = {
       pattern: "^[a-z0-9][a-z0-9-]{0,31}$",
     },
   },
+  SkipAnswer: {
+    request_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
+  SkipRequest: {
+    request_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    },
+  },
   SoftwarePictureView: {
     colour_temperature_kelvin: {
       integer: true,
@@ -1263,6 +1377,11 @@ export const LIMITS = {
     value: {
       maximum: 40000,
       minimum: 1000,
+    },
+  },
+  Stayed: {
+    frame_id: {
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
     },
   },
   TrialEdit: {
@@ -1334,6 +1453,7 @@ export const PATTERNS = {
 } as const;
 
 export const CONSTANTS = {
+  ACK_LATE_SECONDS: 30,
   APP_RESTARTS_PATH: "/v1/operator/node/devices/{device_id}/app-restarts",
   APP_RESTART_SECONDS: 180,
   BEAM_DEGREES_MAX: 170,
@@ -1342,6 +1462,7 @@ export const CONSTANTS = {
   COLOUR_SENSORS_MAX: 32,
   CONTINUATION_LIMIT_SECONDS: 3600,
   FRAME_LIGHTS_MAX: 4,
+  FRAME_SKIPS_PATH: "/v1/operator/frames/{frame_id}/skips",
   FRAME_STATUS_PATH: "/v1/operator/frames/{frame_id}/status",
   GLOSS_INK: 2.3,
   HOME_ASSISTANT_SOURCE: "home-assistant",
@@ -1358,6 +1479,7 @@ export const CONSTANTS = {
   MATCHED_LUX_MIN: 10,
   MATTE_INK: 1.6,
   MAT_DEPTH_MM_MAX: 20,
+  NEVER_SHOW_PATH: "/v1/operator/never-show",
   PANEL_BLACK_MAX: 0.05,
   PANEL_BLACK_MIN: 1e-05,
   PI_SOURCE: "pi",
@@ -1368,8 +1490,11 @@ export const CONSTANTS = {
   ROOM_LIGHT_NAME_MAX: 64,
   SENSORS_MAX: 32,
   SHEET_WHITENESS: 0.9,
+  SHOW_AGAIN_PATH: "/v1/operator/never-show/{asset_id}",
   SILENT_AFTER_SECONDS: 51,
+  SKIP_LEAD: 2,
   TRANSITION_FREE_SECONDS: 5,
+  WALL_SKIPS_PATH: "/v1/operator/walls/{surface_id}/skips",
   WHITENESS_MIN: 0.5,
 } as const;
 
@@ -1383,6 +1508,15 @@ export const REFUSALS = {
   DrawnReportRefusal: [
     "room_lights_drawn_too_large",
     "room_lights_drawn_invalid",
+  ],
+  EverydayRefusal: [
+    "invalid_operator_skip",
+    "invalid_never_show",
+    "unknown_wall",
+    "unknown_frame",
+    "unknown_photo",
+    "nothing-moved",
+    "changed",
   ],
   FrameLightingRefusal: [
     "unknown_room_light",
@@ -1444,6 +1578,7 @@ export const REFUSALS = {
 } as const;
 export type AppRestartRefusal = (typeof REFUSALS)["AppRestartRefusal"][number];
 export type DrawnReportRefusal = (typeof REFUSALS)["DrawnReportRefusal"][number];
+export type EverydayRefusal = (typeof REFUSALS)["EverydayRefusal"][number];
 export type FrameLightingRefusal = (typeof REFUSALS)["FrameLightingRefusal"][number];
 export type InstallRefusal = (typeof REFUSALS)["InstallRefusal"][number];
 export type PaperProfileRefusal = (typeof REFUSALS)["PaperProfileRefusal"][number];

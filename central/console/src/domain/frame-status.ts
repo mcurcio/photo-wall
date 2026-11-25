@@ -185,14 +185,26 @@ const LAYER_WORDS: Record<EvidenceLayer, string> = {
   scheduler: "Central's scheduler",
 };
 
-/** What may be asked of a Frame's Pi from its tile. */
+/** What may be asked of a Frame from its menu (decision 0036's labels; slice 3's everyday
+ * actions are worded here and asked once the console's slice 3 wires them). */
 export const ACTION_WORDS: Record<Action, string> = {
   "restart-app": "Restart app",
   "reboot-pi": "Reboot the Pi",
+  skip: "Skip this Frame",
+  previous: "Previous on this Frame",
+  "never-show": "Never show this photo",
 };
 
-/** The order a menu lists them in: the lighter one first. */
-export const ACTION_ORDER = Object.keys(ACTION_WORDS) as Action[];
+/** The actions a tile's menu asks of its Pi, in the order it lists them: the lighter one first. */
+export const ACTION_ORDER: readonly PiAction[] = ["restart-app", "reboot-pi"];
+
+/** An action asked of a Frame's Pi (the others are asked of Central). */
+export type PiAction = Extract<Action, "restart-app" | "reboot-pi">;
+
+/** Whether an action is one asked of the Frame's Pi. */
+export function isPiAction(action: Action): action is PiAction {
+  return (ACTION_ORDER as readonly Action[]).includes(action);
+}
 
 /** Where an `open` fix leads, as its link says it. */
 const OPEN_WORDS: Record<OpenPage, string> = {

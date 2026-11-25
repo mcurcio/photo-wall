@@ -51,6 +51,7 @@ from central.actor import Actor
 from central.db import Database, TransactionClock
 from central.infra.display_store import frame_outputs_in
 from central.infra.house_store import house_time_in
+from central.infra.never_show_store import not_listed
 from central.installation_models import FrameOutput
 from central.media_queue import MediaTaskQueue
 from central.photo_library import policy
@@ -176,6 +177,10 @@ _MEMBER_COLUMNS = "r.asset_id,l.revision,l.kind,l.taken_at,l.width,l.height"
 _LINE_ROWS = ("SELECT l.asset_id,l.revision,l.kind,l.taken_at,l.width,l.height FROM "
               "(SELECT DISTINCT asset_id FROM photo_pool_rows WHERE pool_key=ANY(%(pools)s) "
               "AND outcome='in_pool') AS r JOIN library_assets l USING (asset_id)")
+# Its members: every row but a photo on the Never show list (decision 0036), which is no line
+# member, so the deeper reads of `_read_line` never starve on it. The wrap mark is read from every
+# row, a listed one included.
+_LINE_MEMBERS = _LINE_ROWS + " WHERE " + not_listed("l.asset_id")
 # On this day on the house calendar (roadmap 2b): `order.py` `on_day` reads the same zone.
 _ON_THIS_DAY = "to_char(to_timestamp(m.taken_at) AT TIME ZONE %(zone)s,'MM-DD')=%(today)s"
 _SHUFFLE_TEXT = {"scene_id": "%(scene)s::text", "pass_number": "%(pass)s::text",
@@ -843,7 +848,7 @@ class PgPhotoLibrary:
         params["mark_id"] = None if mark is None else mark["asset_id"]
         shape = _shape_sql(q.shape, params)
         rows = conn.execute(
-            f"SELECT * FROM ({_LINE_ROWS}) AS m WHERE {shape} "
+            f"SELECT * FROM ({_LINE_MEMBERS}) AS m WHERE {shape} "
             f"ORDER BY {_line_order_sql(q.order)} LIMIT %(limit)s", params).fetchall()
         ids = [row["asset_id"] for row in rows] + ([] if mark is None else [mark["asset_id"]])
         pool_keys = {row["asset_id"]: row["keys"] for row in conn.execute(
@@ -1011,11 +1016,12 @@ class PgPhotoLibrary:
         counts = [] if pool is None else conn.execute(
             "SELECT r.outcome,r.reason,l.kind,count(*) AS n FROM photo_pool_rows r "
             "LEFT JOIN library_assets l ON l.connection_ref=%s AND l.upstream_id=r.upstream_id "
-            "WHERE r.pool_key=%s GROUP BY r.outcome,r.reason,l.kind",
+            f"WHERE r.pool_key=%s AND {not_listed('r.asset_id')} GROUP BY r.outcome,r.reason,l.kind",
             (pool["connection_ref"], pool_key)).fetchall()
         rows = [] if pool is None else conn.execute(
             f"SELECT {_MEMBER_COLUMNS} FROM photo_pool_rows r {_REVISION_JOIN} "
-            "WHERE r.pool_key=%s AND r.outcome='in_pool' AND (%s::double precision IS NULL OR "
+            f"WHERE r.pool_key=%s AND r.outcome='in_pool' AND {not_listed('r.asset_id')} "
+            "AND (%s::double precision IS NULL OR "
             "(l.taken_at,r.asset_id) < (%s::double precision,%s::text)) "
             "ORDER BY l.taken_at DESC,r.asset_id DESC LIMIT %s",
             (pool_key, None if after is None else after.taken_at,

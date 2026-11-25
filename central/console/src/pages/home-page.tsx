@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type * as React from "react";
 
-import { type FixView, framePlaces, type HomeHeld, statusOf } from "../domain/frame-status";
+import { type FixView, framePlaces, type HomeHeld, isPiAction, statusOf } from "../domain/frame-status";
 import { HomeBoard, type HomeState } from "../domain/home-board";
 import { type HostIncident, piFaultView, readinessView } from "../domain/home-reports";
 import { LibraryHealthCard } from "../domain/library-health-card";
@@ -143,7 +143,7 @@ export function HomePage({
     }
   };
   const onAction = (place: FramePlace, action: Action) => {
-    if (place.device_id != null) ask(action, place.device_id);
+    if (place.device_id != null && isPiAction(action)) ask(action, place.device_id);
   };
 
   // Only what Central took and the Pi has not finished: never before a reboot is confirmed, nor

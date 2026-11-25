@@ -29,9 +29,11 @@ class SkipKind(StrEnum):
 
 
 class SkipScope(StrEnum):
-    """Where a skip is pressed: on a wall (every Frame of it, the owner's S1) or on one Frame."""
+    """Where a skip is pressed: on a wall (every Frame of it, the owner's S1) or on one Frame; a
+    photo for Never show's skip of every Frame showing it."""
     WALL = "wall"
     FRAME = "frame"
+    PHOTO = "photo"
 
 
 class CoverCause(StrEnum):
@@ -51,6 +53,18 @@ class StayReason(StrEnum):
     BLACK = "black"
     HAND_PLACED = "hand-placed"
     NO_PREVIOUS = "no-previous"
+
+
+class EverydayRefusal(StrEnum):
+    """Why an everyday action is refused, closed (each answered with its HTTP status by
+    central/everyday_routes.py)."""
+    INVALID_SKIP = "invalid_operator_skip"      # 422: the body does not read
+    INVALID_NEVER_SHOW = "invalid_never_show"   # 422
+    UNKNOWN_WALL = "unknown_wall"               # 404
+    UNKNOWN_FRAME = "unknown_frame"             # 404
+    UNKNOWN_PHOTO = "unknown_photo"             # 404: the library holds no such photo
+    NOTHING_MOVED = "nothing-moved"             # 409, with `stayed`: no Frame could move
+    CHANGED = "changed"                         # 409: the Frame's photo turned over under the thumb
 
 
 class AskedAction(StrEnum):
@@ -147,5 +161,5 @@ class SkipOutcome(Model):
 
 
 __all__ = ["ACK_LATE_SECONDS", "END_LEAD", "SKIP_LEAD", "AskState", "Asked", "AskedAction", "Cover",
-           "CoverCause", "CoverHow", "Moved", "SkipKind", "SkipOutcome", "SkipScope", "StayReason",
+           "CoverCause", "CoverHow", "EverydayRefusal", "Moved", "SkipKind", "SkipOutcome", "SkipScope", "StayReason",
            "Stayed"]

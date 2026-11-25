@@ -24,6 +24,10 @@ from typing import Final
 
 from central.central_errors.views import FrameImpeded
 from central.displays.model import Readiness
+from central.everyday.model import Asked, SkipKind
+from central.everyday.policy import asked_state, photo_of, showing_at, stays, the_shared_instant
+from central.everyday.ports import FrameFacts as EverydayFacts
+from central.everyday.ports import frame_facts
 from central.frame_status.model import (
     ALL_GOOD,
     GOOD,
@@ -40,6 +44,7 @@ from central.frame_status.model import (
     HouseWord,
     Open,
     OpenPage,
+    OverrideKind,
     Part,
     Problem,
     ProblemCode,
@@ -445,14 +450,62 @@ ROWS: Final[tuple[tuple[Row, _RowRule], ...]] = (
 )
 
 
-def actions(facts: FrameFacts, house: HouseFacts, setup: SetupStep | None) -> tuple[Action, ...]:
-    """What may be asked of the Frame now, sorted: nothing while it is in setup; its Pi's reboot
-    and its app's restart while Central's hub holds its Pi's link (each is a call over that link)."""
+def everyday_facts(facts: FrameFacts, house: HouseFacts, now: float,
+                   setup: SetupStep | None) -> EverydayFacts | None:
+    """The Frame as the everyday rules read it (central/everyday/ports.py `FrameFacts`), each
+    judgement Frame status's own: set up (no setup step), answering (its Pi heard within the
+    silence limit, its link not known lost, and its Frame report not saying it plays Central's
+    continuation), resting (its display wanted off now) and paused (a pause is its override).
+    None when the reading did not ask what it shows."""
+    if facts.showing is None:
+        return None
     hearing = facts.hearing
-    if (setup is not None or facts.device_id is None or house.hub.state != "reachable"
+    answering = (facts.device_id is not None and hearing is not None and hearing.linked is not False
+                 and hearing.heard_at is not None and now - hearing.heard_at <= SILENT_AFTER_SECONDS
+                 and (facts.picture is None or facts.picture.continuing_since is None))
+    return frame_facts(
+        facts.frame_id, facts.showing, set_up=setup is None, answering=answering,
+        resting=facts.power is not None and facts.power.wanted is Power.OFF,
+        paused=facts.override is not None and facts.override.kind is OverrideKind.PAUSE)
+
+
+def _everyday_actions(facts: FrameFacts, house: HouseFacts, now: float,
+                      setup: SetupStep | None) -> list[Action]:
+    """Skip and Previous where the Frame would move (central/everyday/policy.py `stays`, the one
+    home of who moves, at the instant a request now would move it), and Never show while it
+    shows a photo."""
+    found = everyday_facts(facts, house, now, setup)
+    if found is None or setup is not None:
+        return []
+    at = the_shared_instant(now)
+    offered = [action for action, kind in ((Action.SKIP, SkipKind.NEXT), (Action.PREVIOUS, SkipKind.PREVIOUS))
+               if stays(found, kind, at, now=now) is None]
+    if photo_of(showing_at(found.layers, now)) is not None:
+        offered.append(Action.NEVER_SHOW)
+    return offered
+
+
+def actions(facts: FrameFacts, house: HouseFacts, setup: SetupStep | None,
+            now: float = 0.0) -> tuple[Action, ...]:
+    """What may be asked of the Frame now, sorted: nothing while it is in setup; its Pi's reboot
+    and its app's restart while Central's hub holds its Pi's link (each is a call over that link);
+    the everyday actions where they would act (`_everyday_actions`)."""
+    offered = _everyday_actions(facts, house, now, setup)
+    hearing = facts.hearing
+    if not (setup is not None or facts.device_id is None or house.hub.state != "reachable"
             or hearing is None or hearing.linked is not True):
-        return ()
-    return tuple(sorted((Action.REBOOT_PI, Action.RESTART_APP)))
+        offered += [Action.REBOOT_PI, Action.RESTART_APP]
+    return tuple(sorted(offered))
+
+
+def asked(facts: FrameFacts, now: float) -> Asked | None:
+    """The newest action asked of the Frame that moved it, while it is reported (`AskFact.until`),
+    and where it stands (central/everyday/policy.py `asked_state`)."""
+    fact = None if facts.showing is None else facts.showing.asked
+    if fact is None or now >= fact.until:
+        return None
+    return Asked(action=fact.action, request_id=fact.request_id, at=fact.at,
+                 state=asked_state(fact.at, fact.presented_at, now))
 
 
 def frame_status(facts: FrameFacts, house: HouseFacts, now: float, kept: KeptStatus | None = None) -> FrameStatus:
@@ -463,7 +516,7 @@ def frame_status(facts: FrameFacts, house: HouseFacts, now: float, kept: KeptSta
     code = None if found.trouble is None else found.trouble.code
     key = key_of(found.word, found.setup, found.because, code)
     since = kept.since if kept is not None and kept.key == key else found.began if found.began is not None else now
-    can = actions(facts, house, found.setup)
+    can = actions(facts, house, found.setup, now)
     problem = None
     if found.trouble is not None:
         trouble = found.trouble
@@ -476,7 +529,8 @@ def frame_status(facts: FrameFacts, house: HouseFacts, now: float, kept: KeptSta
                           since=since if trouble.since is None else trouble.since, evidence=trouble.evidence,
                           frame_id=facts.frame_id)
     return FrameStatus(frame_id=facts.frame_id, word=found.word, setup=found.setup, since=since, because=found.because,
-                       problem=problem, progress=found.progress, override=facts.override, can=can)
+                       problem=problem, progress=found.progress, override=facts.override, can=can,
+                       asked=asked(facts, now))
 
 
 # --- The house ----------------------------------------------------------------------------------------
