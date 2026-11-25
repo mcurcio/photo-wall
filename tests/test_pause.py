@@ -21,10 +21,10 @@ from central.db import DatabaseTransactionClock
 from central.everyday.model import END_LEAD, PAUSE_SECONDS, PauseRefusal
 from central.everyday.policy import photo_of, showing_at
 from central.frame_status.model import Action, OverrideKind
-from contracts.node_output import Power
 from central.infra.power_store import PgPower
 from central.registry import RegistryError
 from central.runtime import PAUSE_RANK, Contribution, Scene
+from contracts.node_output import Power
 
 pytestmark = pytest.mark.db
 
