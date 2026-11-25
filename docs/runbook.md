@@ -383,7 +383,7 @@ The console opens on **Home** (`#/home`). It answers two questions: is the wall 
 
 **What Home shows, top to bottom.** The house word and its counts ("All good", "6 Frames showing, 2 resting"); **Problems**, worst first, each a card with one button or link and **Details**; **Holds** in force, each with **Resume schedule**; one map per Wall, a tile per Frame, with what plays **Now** and **Next** under it; **Show now**, **All off** and **All on**. A tile opens the Frame's page. Its **More** menu holds **Restart app** and **Reboot the Pi** when Central offers them, then **Why is this playing?** and **Open Frame**. The house word is also in the top bar of every page, as a link to Home.
 
-**What a word is based on.** Central's own records: whether it hears the Pi, the Pi's health verdict, the photo app's Frame report, the display's power report, the plan and the photo library checks. It is never a camera: **Showing** means the Pi reports it presents what Central planned, and a display someone switched off with the remote still reads Showing. Skip, Previous, Pause and Never show are not built yet (slice 3).
+**What a word is based on.** Central's own records: whether it hears the Pi, the Pi's health verdict, the photo app's Frame report, the display's power report, the plan and the photo library checks. It is never a camera: **Showing** means the Pi reports it presents what Central planned, and a display someone switched off with the remote still reads Showing. The everyday actions (Skip, Previous, Never show, Pause, Show now on chosen Frames) are [below](#the-everyday-actions-skip-previous-never-show-pause-and-show-now).
 
 | Word | What it means | What to do |
 |---|---|---|
@@ -435,6 +435,17 @@ A wall with no hub configured at all is not this problem; its Frames read Can't 
 **The silence limit is 51 s** (`contracts/liveness.py` `SILENT_AFTER_SECONDS`, served to the console): a Pi's photo app reads live while its session with Central is open and for 51 s after it closes, which allows one reconnection. Past it the Frame reads Can't tell.
 
 **Who last changed the Runtime**, and when, is on `runtime_state`: `created_by` and `changed_by` with their times, the actor `console`, `api-token`, or `scheduler` for a tick that changed it (decision 0034 dropped the per-change log).
+
+### The everyday actions: Skip, Previous, Never show, Pause and Show now
+
+Each is asked of Central, which answers who moved and who stayed and why; the console only words the answer ([0036](decisions/0036-home-frame-status-and-wall-actions.md#slice-3-design), the owner's rulings S1 to S9). An action is offered only where Central's `can` says it would act, and never from a Home read that failed. Each needs the `operate` permission ([sign-in](#signing-in-through-keycloak)).
+
+- **Skip** and **Previous** at the head of a wall's map move every Frame of that wall together, two seconds after the press; other walls are not moved. A Frame that cannot move (a hand-placed photo, a black Frame or an ending, a Pi not answering or playing Central's continuation, nothing to skip, a pause) stays, and the toast names it and why. A Frame's own menu (its tile's **More**, or its page's header) has **Skip this Frame** and **Previous on this Frame**. Each further press steps one more photo.
+- **Never show this photo** (a Frame's menu) lists the photo at once, with **Undo**, and skips it where it shows. Where it is already downloaded for another Frame's later turn it shows there that one last time, and the toast says so. **Scenes › Never show** (`#/never-show`) lists every hidden photo with **Show again**.
+- **Pause for 1 hour** (a Frame's menu) holds the photo the Frame shows when pressed, not on a video. Home shows a **Paused** banner with **Carry on**, which returns to the schedule at once with the usual fade.
+- **Show now** can play a Scene on some of its Frames (its lamps still take part) and end **In 1 hour**, **At tonight's Night off** or **Until I stop it**. A paused Frame stays paused and shows the Scene at Carry on. Home's banner for it has **Back to normal**, which returns to the regular show at once, mid-photo, with the usual fade: the Run is cancelled at that instant (not finished at the end of its photo), and the schedule beneath shows where it is now. A Frame whose regular photo is not downloaded keeps the Show now photo until it arrives, then fades.
+- **Requested, and late.** A tile says "Skip requested — waiting for the Pi" until the Pi reports the new photo. Not reported within 30 s, the action is a card in Problems ("Hall didn't change. Its Pi hasn't reported the new photo.") with **Retry**, which asks the same step again, while Central still offers it; a late Pause links to its Frame instead (its pause still stands; **Carry on** ends it).
+- **Not proven on a Pi** (bench steps NOT RUN): how a Skip's seam, a cut's fade and a hold's seam look on a panel, a Previous that must download, and a wall's Skip timed across two Frames.
 
 ### Restart app
 
