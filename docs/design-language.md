@@ -502,6 +502,22 @@ Built for [0036](decisions/0036-home-frame-status-and-wall-actions.md). Each tak
 
 Not built in slice 2, and why: the tile actions Skip, Previous, Pause and Never show (slice 3: Central has no such command yet, so `can` never offers them); the takeover and pause banners from live data (slice 3); a button for a fix of "open Central" (the console has no page for Central's own health, so those cards carry no action); a Home template under `patterns/templates/` (Home is `HomeBoard`, a domain component).
 
+### Members for Home (3b-i, slice 3)
+
+Built for [0036's slice 3](decisions/0036-home-frame-status-and-wall-actions.md#as-built-slice-3-the-console): the everyday actions. Every action drawn is one Central's `can` holds; every answer is Central's, worded in `domain/everyday-words.ts`.
+
+| Member | Layer | Purpose and props | Stories |
+|---|---|---|---|
+| `WallActions` | patterns | The actions on a whole wall at the head of its `WallMap` (`actions` slot): `wall` (the group's name), `actions` (each a `label`, its accessible `name`, "Skip every Frame on Living room wall", and `onAction`), `busy?`. Only what is offered is drawn; with nothing offered the group is absent | Default, SkipOnly, Busy, Phone; WallMap/WithActions |
+| `PhotoLine` | patterns | A photo as a list row's lead: `src` (Central's thumbnail), `alt?`, its words beside it; the thumbnail whole in a fixed 64 px box, never cropped | Default, Portrait |
+| `UndoToast` (changed) | patterns | `onUndo` is optional: an answer with no way back (what a Skip came to) is the same line without Undo | Default, NeverShow, NoUndo |
+| `useEverydayActions` | domain (`domain/everyday-actions.tsx`; requests `domain/everyday-api.ts`) | Skip, Previous, Pause, Never show (optimistic, with Undo), Carry on and Back to normal as a page asks them, through one port (`EverydayCommands`): each answer said in the toast, then the page's read again, so a tile says "requested" from Central's `asked` | none (a hook): Pages/Home's Everyday, SkipRequested, TakeoverAndPause |
+| `NeverShowList` | domain | Scenes › Never show list: each listed photo (`PhotoLine`), when it was listed and **Show again** | Default, Empty, Busy, Phone |
+| `HomeBoard` (changed) | domain | `onWallAction`, `onEnd` (a takeover's Back to normal, a pause's Carry on) and `onRetry` (a late action asked again); a tile's `requested` is also Central's `asked`; every override is drawn | Pages/Home: Everyday, SkipRequested, TakeoverAndPause, EverydayPhone |
+| `FramePageHeader` (changed) | pages | `menu?`: the Frame's own everyday actions behind **More** | WithActions |
+
+Not built in slice 3, and why: `QuickActionSheet` (Show now stays the two-step flow, now with Frames and an end); who did something by name (Central serves audit values, which the console never shows).
+
 ### Later patterns (props written when their delivery starts)
 
 | Pattern | Purpose | Delivery |
