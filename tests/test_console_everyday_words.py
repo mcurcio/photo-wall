@@ -35,6 +35,8 @@ out.neverShow = [
   words.neverShowSaid({ asset_id: "a" }, names),
   words.neverShowSaid({ asset_id: "a", skipped_on: ["left"], last_showings: [{ frame_id: "hall", start: 1, until: 2 }],
     stayed: [{ frame_id: "door", reason: "hand-placed" }] }, names),
+  words.neverShowSaid({ asset_id: "a", last_showings: [{ frame_id: "left", start: 1, until: 2 },
+    { frame_id: "hall", start: 3, until: 4 }, { frame_id: "hall", start: 5, until: 6 }] }, names),
 ];
 out.pause = [
   words.pauseSaid({ pause_id: "p", ends_at: at(22, 4), paused: [{ frame_id: "hall" }] }, names, at(21, 4)),
@@ -97,6 +99,8 @@ def test_never_show_says_where_it_shows_once_more_and_who_keeps_it():
     assert out["neverShow"][1] == (
         "Won't show again. It shows once more on Hall, where it's already downloaded. "
         "It stays on By the door to the end of its turn: its photo is hand-placed.")
+    # A Frame with several of its turns named is named once (found in a browser, 2026-11-25).
+    assert out["neverShow"][2] == "Won't show again. It shows once more on Living room left, Hall, where it's already downloaded."
 
 
 def test_a_pause_says_until_when_and_each_frame_not_paused():

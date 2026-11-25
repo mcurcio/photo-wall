@@ -123,10 +123,11 @@ export function nothingMovedSaid(stayed: readonly Stayed[], names: Names): strin
 /** The toast as Never show is pressed, before Central answers. */
 export const NEVER_SHOW_SAID = "Won't show again.";
 
-/** Where a photo listed just now shows one last time: "It shows once more on Hall, where it's already downloaded." */
+/** Where a photo listed just now shows one last time: "It shows once more on Hall, where it's already downloaded."
+ * Each Frame is named once, however many of its turns Central names. */
 function lastShowingWords(last: readonly LastShowing[], names: Names): string[] {
   if (last.length === 0) return [];
-  const where = last.map((showing) => named(names, showing.frame_id)).join(", ");
+  const where = [...new Set(last.map((showing) => showing.frame_id))].map((frameId) => named(names, frameId)).join(", ");
   return [`It shows once more on ${where}, where it's already downloaded.`];
 }
 
